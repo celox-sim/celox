@@ -56,13 +56,18 @@ fn coupled_rewrites_verify_once_across_many_source_blocks() {
         let counts = count_uses(&eu);
         let mut next_block = COUNT;
         let mut next_register = 5 + COUNT * 4;
-        COUPLED_BATCH_VERIFICATIONS.with(|count| count.set(0));
+        let mut verifications = 0;
+        let verify = |eu: &ExecutionUnit<RegionedAbsoluteAddr>| {
+            verifications += 1;
+            super::super::coupled::verify_coupled_rewrites(eu);
+        };
         let applied = if priority_chain {
             super::super::coupled::branchify_coupled_priority_chains(
                 &mut eu,
                 &counts,
                 &mut next_block,
                 &mut next_register,
+                verify,
             )
         } else {
             super::super::coupled::branchify_coupled_state_updates(
@@ -70,10 +75,11 @@ fn coupled_rewrites_verify_once_across_many_source_blocks() {
                 &counts,
                 &mut next_block,
                 &mut next_register,
+                verify,
             )
         };
         assert_eq!(applied, COUNT * if priority_chain { 1 } else { 2 });
-        assert_eq!(COUPLED_BATCH_VERIFICATIONS.with(|count| count.get()), 1);
+        assert_eq!(verifications, 1);
         eu.verify_result().unwrap();
         assert!(!eu.blocks.values().any(|block| {
             block

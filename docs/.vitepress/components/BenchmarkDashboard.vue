@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onBeforeUnmount, onMounted } from "vue";
 import { Line } from "vue-chartjs";
+import { withBase } from "vitepress";
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -24,7 +25,15 @@ ChartJS.register(
 
 // --- Types ---
 
+interface RtlmeterStatus {
+  case: string;
+  run: string;
+  versions: Record<string, string>;
+  results: { engine: string; stateModel: string; status: string; reason?: string; experimental: boolean }[];
+}
+
 interface BenchEntry {
+  rtlmeter?: RtlmeterStatus;
   commit: { id: string; message: string; timestamp: string; url: string };
   date: number;
   cpu?: string;
@@ -56,6 +65,11 @@ interface Series {
     | "collection-celox-veryl-native"
     | "collection-celox-tiered"
     | "collection-veryl-tiered"
+    | "rtlmeter-celox"
+    | "rtlmeter-verilator"
+    | "rtlmeter-xezim"
+    | "taxi-celox"
+    | "taxi-verilator"
     | "rust"
     | "rust-dse"
     | "native-tb"
@@ -190,17 +204,27 @@ const microbenchmarkTabs: TabDef[] = [
   { key: "stdlib", label: "Std Library", match: (n) => /linear_sec|countones|std_counter|fifo|onehot/.test(n), sections: stdlibSections },
 ];
 
+function rtlmeterSections(cards: ChartCard[]): TabSection[] {
+  return ["two-state", "four-state"].map(state => ({
+    label: state === "two-state" ? "2-state" : "4-state",
+    cards: cards.filter(card => card.benchName.includes(`_${state}_`)),
+  })).filter(section => section.cards.length > 0);
+}
+
 const overviewTabs: TabDef[] = [
+  { key: "rtlmeter", label: "RTLMeter", match: n => n.startsWith("rtlmeter_"), sections: rtlmeterSections },
+  { key: "taxi", label: "Taxi / cocotb", match: (n) => n.startsWith("taxi_"), sections: singleSection },
   {
     key: "heliodor",
     label: "Heliodor Linux",
     match: (n) => n.startsWith("heliodor_linux_boot_") || n.startsWith("heliodor_suite_"),
     sections: heliodorSections,
   },
+  { key: "rica", label: "rica", match: (n) => n.startsWith("collection_rica_"), sections: singleSection },
   {
     key: "circuits",
     label: "Representative Circuits",
-    match: (n) => n.startsWith("collection_"),
+    match: (n) => n.startsWith("collection_") && !n.startsWith("collection_rica_"),
     sections: singleSection,
   },
 ];
@@ -257,6 +281,11 @@ function classifySeries(benchName: string): string {
 // --- Color palette ---
 
 const RUNTIME_COLORS: Record<string, string> = {
+  "rtlmeter-celox": "#2563eb",
+  "rtlmeter-verilator": "#f97316",
+  "rtlmeter-xezim": "#16a34a",
+  "taxi-celox": "#2563eb",
+  "taxi-verilator": "#f97316",
   "collection-celox-veryl-native": "#2563eb",
   "collection-celox-tiered": "#2563eb",
   "collection-veryl-tiered": "#e87924",
@@ -279,6 +308,11 @@ const RUNTIME_COLORS: Record<string, string> = {
 };
 
 const RUNTIME_LABELS: Record<string, string> = {
+  "rtlmeter-celox": "Celox native O2",
+  "rtlmeter-verilator": "Verilator (4-state experimental)",
+  "rtlmeter-xezim": "xezim release VM",
+  "taxi-celox": "Celox native O1 · SV / cocotb",
+  "taxi-verilator": "Verilator · SV / cocotb",
   "collection-celox-veryl-native": "Celox native · Veryl frontend / Veryl TB",
   "collection-celox-tiered": "Celox tiered · Veryl TB",
   "collection-veryl-tiered": "Veryl simulator tiered · Veryl TB",
@@ -311,7 +345,7 @@ const activeTab = ref("heliodor");
 
 function stripPrefix(name: string): string {
   return name.replace(
-    /^(collection-celox-tiered|collection-veryl-tiered|collection-celox-veryl-native|rust-dse|rust|ts|verilator|heliodor-celox-jit|heliodor-celox-total|heliodor-celox-compile|heliodor-celox-tiered|heliodor-celox-tiered-aarch64|heliodor-veryl-tiered-x86_64|heliodor-veryl-tiered-aarch64|heliodor-veryl|heliodor-veryl-compile|heliodor-native-x86_64|heliodor-native-parallel-x86_64|heliodor-veryl-cc-x86_64|heliodor-native-aarch64|heliodor-native-parallel-aarch64|heliodor-veryl-cc-aarch64)\//,
+    /^(rtlmeter-celox|rtlmeter-verilator|rtlmeter-xezim|taxi-celox|taxi-verilator|collection-celox-tiered|collection-veryl-tiered|collection-celox-veryl-native|rust-dse|rust|ts|verilator|heliodor-celox-jit|heliodor-celox-total|heliodor-celox-compile|heliodor-celox-tiered|heliodor-celox-tiered-aarch64|heliodor-veryl-tiered-x86_64|heliodor-veryl-tiered-aarch64|heliodor-veryl|heliodor-veryl-compile|heliodor-native-x86_64|heliodor-native-parallel-x86_64|heliodor-veryl-cc-x86_64|heliodor-native-aarch64|heliodor-native-parallel-aarch64|heliodor-veryl-cc-aarch64)\//,
     "",
   );
 }
@@ -344,6 +378,11 @@ function normalizeBenchName(benchName: string): string {
 }
 
 function runtime(name: string): Series["runtime"] | null {
+  if (name.startsWith("rtlmeter-celox/")) return "rtlmeter-celox";
+  if (name.startsWith("rtlmeter-verilator/")) return "rtlmeter-verilator";
+  if (name.startsWith("rtlmeter-xezim/")) return "rtlmeter-xezim";
+  if (name.startsWith("taxi-celox/")) return "taxi-celox";
+  if (name.startsWith("taxi-verilator/")) return "taxi-verilator";
   if (name.startsWith("collection-celox-tiered/")) return "collection-celox-tiered";
   if (name.startsWith("collection-veryl-tiered/")) return "collection-veryl-tiered";
   if (name.startsWith("collection-celox-veryl-native/")) return "collection-celox-veryl-native";
@@ -389,9 +428,25 @@ function shortDate(epoch: number): string {
   return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
+function rtlmeterDesignName(name: string): string {
+  return name === "e203" ? "HummingbirdV2-E203" : `XuanTie-${name.toUpperCase()}`;
+}
+
 /** Format chart title from benchName */
 function formatChartTitle(benchName: string): string {
+  const rtlmeter = benchName.match(/^rtlmeter_(e902|e906|e203)_hello_v1_x64_(two-state|four-state)_total$/);
+  if (rtlmeter) return `${rtlmeterDesignName(rtlmeter[1])} hello · cold source-to-finish`;
   let s = benchName;
+  const rica = s.match(/^collection_rica_(kernel-[a-z-]+)_([a-f0-9]+)_(x64|arm64)_total$/);
+  if (rica) return `rica ${rica[1]} · total · ${rica[3]} · workload ${rica[2]}`;
+  const taxi = s.match(/^taxi_(lfsr64|phy64|rx16|rx8|rx32)_v1_x64_(body|process|compilation)$/);
+  if (taxi) {
+    const phases: Record<string, string> = {
+      body: "test body (median of 3)", process: "whole process (median of 3)",
+      compilation: "HDL compilation (single cold build)",
+    };
+    return `Taxi ${taxi[1]} · ${phases[taxi[2]]} · x86-64 · v1`;
+  }
 
   // Strip module identifiers for stdlib
   s = s.replace(/^linear_sec_p6_/, "");
@@ -559,7 +614,9 @@ function isPrimaryBench(benchName: string): boolean {
     || PRIMARY_STDLIB_BENCHES.has(benchName)
     || benchName.startsWith("heliodor_linux_boot_")
     || benchName.startsWith("heliodor_suite_")
-    || benchName.startsWith("collection_");
+    || benchName.startsWith("collection_")
+    || benchName.startsWith("taxi_")
+    || benchName.startsWith("rtlmeter_");
 }
 
 // --- Computed: tabs with chart cards ---
@@ -618,11 +675,23 @@ const tabData = computed(() => {
   return result;
 });
 
+const rtlmeterStatuses = computed(() => {
+  const latest = new Map<string, BenchEntry>();
+  for (const entries of Object.values(rawData.value?.entries ?? {})) {
+    for (const entry of entries) {
+      if (entry.rtlmeter && (!latest.has(entry.rtlmeter.case) || latest.get(entry.rtlmeter.case)!.date < entry.date)) {
+        latest.set(entry.rtlmeter.case, entry);
+      }
+    }
+  }
+  return [...latest.values()].sort((a, b) => a.rtlmeter!.case.localeCompare(b.rtlmeter!.case));
+});
+
 /** Which tabs actually have data */
 const availableTabs = computed(() =>
   tabs.value.filter((t) => {
     const sections = tabData.value.get(t.key);
-    return sections && sections.some((s) => s.cards.length > 0);
+    return (t.key === "rtlmeter" && rtlmeterStatuses.value.length > 0) || (sections && sections.some((s) => s.cards.length > 0));
   }),
 );
 
@@ -827,7 +896,41 @@ onBeforeUnmount(() => {
         Execution time includes the testbench for both simulators.
       </p>
 
-      <p v-if="activeTab === 'circuits'" class="bench-methodology">
+      <template v-if="activeTab === 'rtlmeter'">
+        <p class="bench-methodology">
+          Unmodified pinned E902/E906 hello programs. Median of three cold processes
+          on one VM and logical CPU, including HDL compilation and execution.
+          Verilator also includes C++ compilation with a fresh build directory.
+          2-state and 4-state results have separate charts. xezim has no global
+          2-state mode. Verilator 4-state is experimental and must pass an X/Z probe.
+          <a :href="withBase('/benchmarks/rtlmeter.html')">Measurement details</a>.
+        </p>
+        <div v-for="entry in rtlmeterStatuses" :key="entry.rtlmeter!.case" class="bench-methodology">
+          <h3>{{ rtlmeterDesignName(entry.rtlmeter!.case) }} · latest qualification</h3>
+          <p><a :href="entry.rtlmeter!.run">Raw logs and versions</a> · {{ entry.cpu }} · {{ new Date(entry.date).toLocaleDateString() }}</p>
+          <table>
+            <thead><tr><th>Simulator</th><th>State</th><th>Status</th><th>Details</th></tr></thead>
+            <tbody>
+              <tr v-for="row in entry.rtlmeter!.results" :key="row.engine + row.stateModel">
+                <td>{{ entry.rtlmeter!.versions[row.engine]?.split('\n')[0] ?? row.engine }}{{ row.experimental ? ' (experimental)' : '' }}</td>
+                <td>{{ row.stateModel }}</td><td>{{ row.status }}</td><td>{{ row.reason ?? 'Success output and clock count verified' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </template>
+
+      <p v-if="activeTab === 'taxi'" class="bench-methodology">
+        Unmodified pinned Taxi tests, paired on one VM and CPU with the same seed.
+        Each runtime point is the median of three fresh processes in alternating
+        simulator order. Test body includes Python stimulus and assertions; whole
+        process includes startup. HDL compilation is a separate single cold build.
+        Celox uses native O1, two-state; Verilator uses the standard cocotb VPI
+        adapter and default C++ -Os. Failed, skipped or incomplete tests are excluded
+        from publication. <a :href="withBase('/benchmarks/taxi.html')">Measurement details</a>.
+      </p>
+
+      <p v-if="activeTab === 'circuits' || activeTab === 'rica'" class="bench-methodology">
         Fixed self-checking workloads, compared by total process time including
         compilation, resets, stimulus and assertions. Each point is the median
         of three fresh processes. Different workload

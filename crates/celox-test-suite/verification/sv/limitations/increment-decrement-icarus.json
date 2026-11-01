@@ -1,0 +1,22 @@
+{
+  "tool": "icarus",
+  "version": "Icarus Verilog 13.0",
+  "source": "src/sv/cases/increment_decrement.vtest",
+  "method": "Each unchanged shared case fails in a verify-sv-icarus run with --include-ignored. The reduced source below, run with iverilog -g2012 -s Top, reproduces the vector failure without the adapter; with the vector lines removed, ivl aborts on the class property operand (\"ivl: eval_vec4.c:1183: draw_unary_inc_dec: Assertion `0' failed.\").",
+  "reduced_source": "module Top;\n    class Table;\n        int id = 1;\n        function int next();\n            return ++id;\n        endfunction\n    endclass\n    Table t;\n    bit [3:0] nibble;\n    int s;\n    initial begin\n        t = new;\n        $display(\"next %0d\", t.next());\n        nibble = 4'hf;\n        s = nibble++;\n        $display(\"wrap %0d %0d\", s, nibble);\n    end\nendmodule\n",
+  "reduced_stderr": "repro.sv:15: sorry: ++ operation is not yet supported on vector slice.\n1 error(s) during elaboration.\n",
+  "cases": [
+    {
+      "case": "increment_decrement::increment_decrement_class_members",
+      "status": "compile_error",
+      "phase": "compile",
+      "stderr": "<case>/source_0.sv:12: error: Type names are not valid expressions here.\n<case>/source_0.sv:12: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:12:               : Expression is: <type>\n<case>/source_0.sv:12:               : Expression type: 10PETypename\n<case>/source_0.sv:12: error: Dimensions must be constant.\n<case>/source_0.sv:12       : This size expression violates the rule: <type>\n<case>/source_0.sv:6: error: Type names are not valid expressions here.\n<case>/source_0.sv:6: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:6:               : Expression is: <type>\n<case>/source_0.sv:6:               : Expression type: 10PETypename\n<case>/source_0.sv:6: error: Dimensions must be constant.\n<case>/source_0.sv:6       : This size expression violates the rule: <type>\n<case>/source_0.sv:5: sorry: Queues inside classes are not yet supported.\n<case>/source_0.sv:17: error: Can't find task push_back in class Table\n<case>/source_0.sv:17: error: Enable of unknown task ``t.q.push_back''.\n<case>/source_0.sv:19: error: inappropriate use of ++ operator.\n<case>/source_0.sv:20: error: The expression ''sd1' cannot be implicitly cast to the target type.\n<case>/source_0.sv:23: warning: ignoring out of bounds l-value array access m[3].\n<case>/source_0.sv:24: warning: ignoring out of bounds l-value array access m[3].\n<case>/source_0.sv:25: warning: returning 'bx for out of bounds array access m[3].\n<case>/source_0.sv:25: error: inappropriate use of -- operator.\n<case>/source_0.sv:25: warning: returning 'bx for out of bounds array access m[3].\n12 error(s) during elaboration.\n"
+    },
+    {
+      "case": "increment_decrement::increment_decrement_vectors",
+      "status": "compile_error",
+      "phase": "compile",
+      "stderr": "<case>/source_0.sv:10: sorry: ++ operation is not yet supported on vector slice.\n1 error(s) during elaboration.\n"
+    }
+  ]
+}

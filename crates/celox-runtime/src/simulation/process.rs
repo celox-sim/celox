@@ -5,10 +5,10 @@ use std::collections::BTreeSet;
 
 use celox_design::{HostRequestKind, ProcessStatus};
 
-use super::SimulationState;
 use super::host::SimulationExecutor;
 use super::round::Round;
 use super::wait::wake_in_region;
+use super::{RESUMED_PROCESSES, SimulationState};
 use crate::{
     SimulatorErrorCode,
     backend::SimBackend,
@@ -127,6 +127,10 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
+        if self.slot_resumed.len() == RESUMED_PROCESSES {
+            self.slot_resumed.pop_front();
+        }
+        self.slot_resumed.push_back(process);
         let kernel = self.restore_activation(executor.backend_mut(), process);
         if let Some(activation) = self.process_state.activations.get_mut(process) {
             activation.control.level_wait = false;
@@ -281,6 +285,12 @@ impl<B: SimBackend> SimulationState<B> {
                     wake_in_region(&self.model.processes, ready, reactive, process);
                     return Err(Halt::Stop);
                 }
+                Some(ProcessStatus::DeferActive) => {
+                    *returns += 1;
+                    self.charge(*returns, Some(process))?;
+                    self.process_state.deferred_ready.insert(process);
+                    return Ok(false);
+                }
                 Some(ProcessStatus::Yield) => {
                     *returns += 1;
                     self.charge(*returns, Some(process))?;
@@ -384,6 +394,23 @@ impl<B: SimBackend> SimulationState<B> {
         }
     }
 
+    /// Choose these runnable Active/Reactive continuations after the ordinary
+    /// ready work, while still preceding the Inactive and NBA regions (4.7).
+    fn promote_deferred_ready(&mut self, reactive: bool) -> bool {
+        let continuations: Vec<_> = self
+            .process_state
+            .deferred_ready
+            .iter()
+            .copied()
+            .filter(|&index| self.model.processes[index].program.is_some() == reactive)
+            .collect();
+        for &index in &continuations {
+            self.process_state.deferred_ready.remove(&index);
+            self.region_ready(reactive).insert(index);
+        }
+        !continuations.is_empty()
+    }
+
     /// `$exit` of program kernel `process` (IEEE 1800-2023 24.7): every
     /// kernel of its program instance ends, as if it had run to its end.
     fn exit_program(&mut self, backend: &mut B, process: usize) -> Result<(), Halt> {
@@ -405,6 +432,7 @@ impl<B: SimBackend> SimulationState<B> {
                 activation.control.suspended = None;
                 activation.control.awaiting = None;
                 activation.control.observes.clear();
+                activation.control.observed_events.clear();
                 activation.control.level_wait = false;
                 activation.pending.clear();
                 activation.join = None;
@@ -412,6 +440,7 @@ impl<B: SimBackend> SimulationState<B> {
             let state = &mut self.process_state;
             state.waiters.remove(index);
             state.ready.remove(&index);
+            state.deferred_ready.remove(&index);
             state.reactive.remove(&index);
             state.re_inactive.remove(&index);
         }
@@ -511,6 +540,9 @@ impl<B: SimBackend> SimulationState<B> {
                 if !self.process_state.reactive.is_empty() {
                     continue;
                 }
+                if self.promote_deferred_ready(true) {
+                    continue;
+                }
                 if !self.process_state.re_inactive.is_empty() {
                     let inactive = std::mem::take(&mut self.process_state.re_inactive);
                     self.process_state.reactive.extend(inactive);
@@ -524,6 +556,9 @@ impl<B: SimBackend> SimulationState<B> {
                 return Ok(());
             }
             if !self.process_state.ready.is_empty() {
+                continue;
+            }
+            if self.promote_deferred_ready(false) {
                 continue;
             }
             if self.process_state.inactive.is_empty() {

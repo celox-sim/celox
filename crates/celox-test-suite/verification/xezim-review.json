@@ -814,6 +814,146 @@
     "sv_pattern_handles_and_literals": {
       "title": "%p prints null class handles in a queue as 0 and a string literal as a number",
       "standard": "IEEE 1800-2023 21.2.1.6"
+    },
+    "sv_container_typedef_output": {
+      "title": "an output formal of a container typedef declared in an instantiated module is not copied back",
+      "standard": "IEEE 1800-2023 13.5.1"
+    },
+    "sv_container_element_input": {
+      "title": "an element of an associative array of queues passed to an input queue formal is a one-element queue and truncates the element",
+      "standard": "IEEE 1800-2023 13.5.1"
+    },
+    "sv_array_locator_operand": {
+      "title": "An array locator call used as an operand, such as q.find with (...).size() or an equality with the result, evaluates to an empty queue",
+      "standard": "IEEE 1800-2023 7.12, 7.12.1"
+    },
+    "sv_array_locator_associative": {
+      "title": "Array locator methods of an associative array return an empty queue",
+      "standard": "IEEE 1800-2023 7.12.1, 7.8.4"
+    },
+    "sv_array_locator_fixed_indices": {
+      "title": "Array locator methods of a fixed-size array use element positions instead of the declared indices",
+      "standard": "IEEE 1800-2023 7.12.1, 7.12.4"
+    },
+    "sv_array_locator_iterator_enum_method": {
+      "title": "An enumerated type method of a locator iterator is called as a method of a null class handle",
+      "standard": "IEEE 1800-2023 7.12, 6.19.5"
+    },
+    "sv_array_locator_index_argument": {
+      "title": "A locator method with an index argument finds no element",
+      "standard": "IEEE 1800-2023 7.12, 7.12.4"
+    },
+    "sv_array_locator_struct_equality": {
+      "title": "A locator with expression comparing the iterator with an unpacked structure value finds no element",
+      "standard": "IEEE 1800-2023 7.12.1, 11.2.2"
+    },
+    "sv_array_locator_unique_four_state": {
+      "title": "unique treats four-state values that differ only in X versus Z bits as one value",
+      "standard": "IEEE 1800-2023 7.12.1, 6.3.1"
+    },
+    "sv_typename": {
+      "title": "`$typename` drops the constants of enumerations, the members of structs and unions, signings, queue bounds and packed dimensions, and writes logic as reg",
+      "standard": "IEEE 1800-2023 20.6.1"
+    },
+    "sv_implication_short_circuit": {
+      "title": "The right operand of -> is evaluated when the left operand is false",
+      "standard": "IEEE 1800-2023 11.4.7"
+    },
+    "sv_repeat_count_evaluated_twice": {
+      "title": "A repeat loop evaluates the side effects of its count expression twice",
+      "standard": "IEEE 1800-2023 12.7.2"
+    },
+    "sv_vif-X1": {
+      "title": "Virtual interface assignments between incompatible types are accepted",
+      "standard": "IEEE 1800-2023 25.9"
+    },
+    "sv_vif-X3": {
+      "title": "A virtual interface returned by a function compares unequal to one denoting the same instance",
+      "standard": "IEEE 1800-2023 25.9, 11.4.5"
+    },
+    "sv_vif-X4": {
+      "title": "A write through an element of a multidimensional array of virtual interfaces is lost",
+      "standard": "IEEE 1800-2023 25.9"
+    },
+    "sv_vif-X2": {
+      "title": "Retargeting a virtual interface variable does not trigger an event control on its member",
+      "standard": "IEEE 1800-2023 9.4.2"
+    },
+    "sv_vif-X5": {
+      "title": "An edge-sensitive always on a member through a virtual interface is dropped",
+      "standard": "IEEE 1800-2023 9.4.2, 25.9"
+    },
+    "sv_streaming_unpack_order": {
+      "title": "Unpacking into a streaming concatenation target distributes the source bits in the wrong order: an unpacked array source is unpacked from its right index, and a << target whose last block is partial gets the re-ordering of the pack instead of its reverse",
+      "standard": "IEEE 1800-2023 11.4.14.2, 11.4.14.3"
+    },
+    "sv_streaming_with_range": {
+      "title": "A with range in a streaming concatenation is ignored: a pack streams the whole fixed-size or dynamic array instead of the specified items and nonexistent entries, and an unpack into a dynamic array with a range leaves it empty",
+      "standard": "IEEE 1800-2023 11.4.14.4"
+    },
+    "sv_streaming_subarray_target": {
+      "title": "A streaming concatenation assigned to an unpacked subarray, such as sub[0] of a two-dimensional array, leaves the subarray unwritten",
+      "standard": "IEEE 1800-2023 11.4.14, 6.24.3"
+    },
+    "sv_streaming_dynamic_unpack": {
+      "title": "Unpacking a stream into a target list with a dynamic array sizes the array one element short and misplaces the fixed-size items after it",
+      "standard": "IEEE 1800-2023 11.4.14.4, 6.24.3"
+    },
+    "sv_streaming_dynamic_destination_size": {
+      "title": "A streaming concatenation assigned or cast to a dynamically sized type gets the wrong size: a string target, also a function result, is padded with NUL characters to 128 characters, and in an instantiated module a cast to a queue typedef of that module gives a one-element queue",
+      "standard": "IEEE 1800-2023 11.4.14, 6.24.3"
+    },
+    "sv_streaming_nonblocking_target": {
+      "title": "A nonblocking assignment to a streaming concatenation target never writes the target variables",
+      "standard": "IEEE 1800-2023 10.4.2, 11.4.14.3"
+    },
+    "sv_static_task_implicit_local": {
+      "title": "A local declared without a lifetime in a static task gets a copy per call instead of being shared by all calls",
+      "standard": "IEEE 1800-2023 6.21, 13.3.1"
+    },
+    "sv_handle_array_property_writes": {
+      "title": "In an instantiated module, a write of a class property through an element of an array of class handles (`hs[0].p = v`, `hs[i].p[3:0] = v`) changes nothing",
+      "standard": "IEEE 1800-2023 8.4, 7.4, 11.5.1"
+    },
+    "sv_compound_assignment_index": {
+      "title": "An assignment operator such as `+=` evaluates a left-hand index expression again after its value: `v[i] += f()` where f() changes i reads one bit and writes another",
+      "standard": "IEEE 1800-2023 11.4.1"
+    },
+    "sv_class_typedef_specialization_values": {
+      "title": "Specializations of a package class that class-scoped typedefs of different classes name share the value parameters of one of them: `Registry #(UnitComp, \"unit\")` reports Tname \"pkg\" of `Registry #(PkgComp, \"pkg\")`",
+      "standard": "IEEE 1800-2023 8.25"
+    },
+    "sv_class_parameter_passed_by_name": {
+      "title": "A class that names a specialization with one of its own string parameters, `Name #(S)`, gets the default of Name's parameter instead of the value of S",
+      "standard": "IEEE 1800-2023 8.25"
+    },
+    "sv_class_scoped_typedef_static_properties": {
+      "title": "A static property read through a class-scoped typedef of a class specialization, `Obj::type_id::count` or `Impl #(byte)::type_id::count`, gives x or 0 instead of the property of the specialization the typedef names, which `Registry #(Obj)::count` reads correctly",
+      "standard": "IEEE 1800-2023 8.23, 8.25.1"
+    },
+    "sv_conditional_unpacked_arrays": {
+      "title": "A conditional operator whose operands are unpacked arrays yields an array of zeros instead of the selected operand: `h = s ? c : d` with s = 1 leaves h = '{0, 0}",
+      "standard": "IEEE 1800-2023 11.4.11"
+    },
+    "sv_wide_associative_keys": {
+      "title": "Associative arrays with integral indices wider than 64 bits do not order their indices numerically: bit [64:0] indices 'h0_ffff_ffff_ffff_ffff and 'h1_ffff_ffff_ffff_ffff come before 5, and a signed bit [127:0] index of -1 orders as 2^128-1 between 0 and 5",
+      "standard": "IEEE 1800-2023 7.8.4"
+    },
+    "sv_pattern_structure_item_strings": {
+      "title": "An unpacked structure value with string members used as an item of a structure assignment pattern stores both members' text, padded, in each string member: '{a, \"first\"} with a = '{\"*\", \"agent\"} gives name and regex \"*<spaces>agent\"",
+      "standard": "IEEE 1800-2023 10.9.2"
+    },
+    "sv_pattern_enum_values": {
+      "title": "%p prints enum constants, casts, method results, conditionals and associative array keys as their values instead of their names, and a string returned by $sformatf as its packed value",
+      "standard": "IEEE 1800-2023 21.2.1.6"
+    },
+    "sv_pattern_structure_members": {
+      "title": "%p of an unpacked structure prints bit-vector members in hexadecimal ('hff), null class handle members as 0, and a structure member of an associative array element (m[5].n) as 0",
+      "standard": "IEEE 1800-2023 21.2.1.6"
+    },
+    "sv_nested_container_foreach": {
+      "title": "A foreach over a container of containers with a loop variable per dimension leaves the inner variable x and iterates the outer dimension only: foreach (all[k, j]) over int all[int][$] prints j as x once per key, and foreach (d[i, j]) over int d[$][] runs no iteration",
+      "standard": "IEEE 1800-2023 12.7.3"
     }
   },
   "cases": [
@@ -4699,6 +4839,38 @@
     },
     {
       "suite": "sv",
+      "name": "containers::multidimensional_foreach_break",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_nested_container_foreach",
+      "note": "foreach (q[i, j]) over int q[$][$] runs no iteration, so n and c print 0; the fixed-size array a[2][3] breaks out of both dimensions as expected (m is 2)."
+    },
+    {
+      "suite": "sv",
+      "name": "containers::nested_container_foreach",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_nested_container_foreach",
+      "note": "foreach (all[k, j]) prints j as x once for each key (including the empty all[7]), and foreach (d[i, j]) runs no iteration, so sum is 0; the single-variable loops and the string-keyed case print as expected."
+    },
+    {
+      "suite": "sv",
+      "name": "containers::wide_associative_keys",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_wide_associative_keys",
+      "note": "foreach visits the bit [64:0] indices as 'h0_ffff_ffff_ffff_ffff, 'h1_ffff_ffff_ffff_ffff, 5, 'h1_0000_0000_0000_0000, first/next stop after one index whose digits are wrong, and first of the packed structure index returns a value that names no element. Reproduced by verification/repros/sv_wide_associative_keys.json."
+    },
+    {
+      "suite": "sv",
+      "name": "containers::wide_signed_associative_keys",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_wide_associative_keys",
+      "note": "The signed bit [127:0] indices print and order as unsigned (-1 as 340282366920938463463374607431768211455, after 0), and first and last return wrong indices. Reproduced by verification/repros/sv_wide_associative_keys.json."
+    },
+    {
+      "suite": "sv",
       "name": "unpacked_structs::reference_formals_across_time",
       "status": "mismatch",
       "classification": "xezim_bug",
@@ -4720,6 +4892,422 @@
       "classification": "xezim_bug",
       "bug": "sv_pattern_handles_and_literals",
       "note": "xezim 0.11.3 prints '{0, 0} for a queue of two null class handles 7104884 for the string literal \"lit\", and the packed bytes of a string-valued conditional (7566450 for \"str\"); 21.2.1.6 prints a null handle as null and a string literal in quotes. It also prints the bit [7:0] elements of an associative array as 'h41 and 'h0, where unformatted $display prints decimal. See verification/sv/limitations/pattern-format.json."
+    },
+    {
+      "suite": "sv",
+      "name": "string_format::pattern_format_structure_containers",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_pattern_structure_item_strings",
+      "note": "by_name[\"b\"] = '{a, \"first\"} stores \"*\" and \"agent\" padded together in both name and regex, so %p of by_name prints them in each; the other patterns print as expected."
+    },
+    {
+      "suite": "sv",
+      "name": "string_format::pattern_format_enums",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_pattern_enum_values",
+      "note": "%p of ON, sw.next(), switch_e'(0) and i > 0 ? ON : OFF prints 0, the enum keys of m print as 0, 1 and 2, and the string resource.convert2string() returns prints as a number; enum variables and members and elements of structures and containers print by name. See verification/sv/limitations/pattern-format.json."
+    },
+    {
+      "suite": "sv",
+      "name": "string_format::pattern_format_structure_values",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_pattern_structure_members",
+      "note": "%p prints the bit [7:0] members in hexadecimal ('hff, 'h0), the null handle members of the associative array elements as 0, and m[5].n as 0 instead of '{a:1, b:2}."
+    },
+    {
+      "suite": "sv",
+      "name": "container_formals::container_formals_of_class_methods",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_container_typedef_output",
+      "note": "b.list(n) and d.list(n) with `output names_t out`, names_t a typedef of string[$] in the instantiated suite module, leave n empty (names = 0, expected 1). Reproduced by verification/repros/sv_xezim_container_typedef_output.sv, which prints \"method 0 function 0\" under -s top and \"method 1 function 1\" with Top as the root or with `output string out[$]` formals."
+    },
+    {
+      "suite": "sv",
+      "name": "container_formals::container_formals_forwarded_and_read_from_properties",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_container_element_input",
+      "note": "total(m[\"a\"]) with m[\"a\"] = '{5} returns 105 instead of 1105: the input formal starts as one element 0 and its push_back is lost, and the call truncates m[\"a\"] (read = 0xb7944d, expected 0xb7bb5d). Reproduced by verification/repros/sv_xezim_container_element_input.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "array_locators::array_locator_associative",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_array_locator_associative",
+      "note": "With int by_key[int] holding 10:1, -5:2 and 3:2, by_key.find_index with (item == 2) and by_key.max with (item.index) return empty queues in xezim 0.11.3, and so do the locators of the string-indexed array; 7.12.1 returns the matching indices -5 and 3 and the element at 10. See verification/repros/sv_array_locator_associative_order.json."
+    },
+    {
+      "suite": "sv",
+      "name": "array_locators::array_locator_class_predicates",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_array_locator_operand",
+      "note": "xezim 0.11.3 evaluates aliases.find with (item.id > i).size() in a while condition as 0, so the loop ends at i == 0 instead of 2, and the nested aliases.find(x) with (...).size() in a with expression as 0, so find_index returns no index; 7.12 lets a locator call be an operand and a method follow its with clause. See verification/repros/sv_array_locator_operands_xezim.json."
+    },
+    {
+      "suite": "sv",
+      "name": "array_locators::array_locator_find",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_array_locator_operand",
+      "note": "xezim 0.11.3 gives r.min() == lowest as 0 although r.min() assigned to a queue equals lowest, and d.find with (item == 3).size() as 0 instead of 2; 7.12 lets a locator call be an operand and a method follow its with clause. See verification/repros/sv_array_locator_operands_xezim.json."
+    },
+    {
+      "suite": "sv",
+      "name": "array_locators::array_locator_fixed",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_array_locator_fixed_indices",
+      "note": "For int down[3:0], xezim 0.11.3 gives down.find_first_index with (item == 5) as 1 instead of 2, the element closest to the left index; for byte bytes[2:5] = '{1, -2, 3, -4} it returns 3 and 0 instead of the indices 3 and 5, min returns -2 instead of -4 and item.index never equals 4; arrays at the bounds of int find no element or the wrong one. 7.12.1 and 7.12.4 use the declared indices. See verification/repros/sv_array_locator_fixed_indices.json."
+    },
+    {
+      "suite": "sv",
+      "name": "array_locators::array_locator_fixed_struct_enum",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_array_locator_iterator_enum_method",
+      "note": "colors.find_first with (item.next() == BLUE) reports in xezim 0.11.3 that method next is called on a null class handle and returns an empty queue; item is an element of the enumerated type, whose next() 6.19.5 defines, so the result is GREEN. See verification/repros/sv_array_locator_operands_xezim.json."
+    },
+    {
+      "suite": "sv",
+      "name": "array_locators::array_locator_index_argument",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_array_locator_index_argument",
+      "note": "q.find(e, pos) with (e.pos > 3 && e.pos() < 6) and q.find_index(, at) with (item.at == item) return empty queues in xezim 0.11.3; 7.12 (Syntax 7-5) names the index method through the index argument (7.12.4), giving {9, 2} and {1, 6}. See verification/repros/sv_array_locator_index_argument.json."
+    },
+    {
+      "suite": "sv",
+      "name": "array_locators::array_locator_min_max_unique",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_array_locator_operand",
+      "note": "xezim 0.11.3 gives q.min() == lowest and q.max(v) with (v % 7) == q.find with (item == 6) as 0 although the assigned results are equal, and names.min returns \"bob\" instead of \"alice\" (7.12.1, 6.16 lexicographic order). See verification/repros/sv_array_locator_operands_xezim.json."
+    },
+    {
+      "suite": "sv",
+      "name": "array_locators::array_locator_struct_elements",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_array_locator_struct_equality",
+      "note": "With a queue of unpacked structures and second = aliases[1], aliases.find_index with (item == second) returns an empty queue in xezim 0.11.3; 11.2.2 compares the structures by equality, so the result is {1}. The member predicates of the UVM factory shape pass. See verification/repros/sv_array_locator_struct_equality.json."
+    },
+    {
+      "suite": "sv",
+      "name": "array_locators::array_locator_four_state",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_array_locator_unique_four_state",
+      "note": "For logic [3:0] q[$] = '{4'b1x00, 4'd3, 4'b1x00, 4'bzzzz, 4'd3, 4'bzzzz, 4'b1z00}, q.unique and q.unique_index return three entries in xezim 0.11.3, merging 4'b1x00 with 4'b1z00; 7.12.1 keeps one entry for each of the four values. The case also reads r.find with (...).size() as an operand (sv_array_locator_operand). See verification/repros/sv_array_locator_unique_four_state.json."
+    },
+    {
+      "suite": "sv",
+      "name": "system_functions::typename_aggregates",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_typename",
+      "note": "Expected enum logic[1:0]{R=2'd0,G=2'd2}typename_pkg::color_t and struct packed{bit a;bit b;}Top.ab_t$[0:9]; xezim 0.11.3 prints enum reg[1:0] typename_pkg::color_t, enum int typename_pkg::abc_t and struct packed celox_suite_tb.dut.ab_t$[0:9]: no named constants and values (20.6.1 e), no members, no signed of a signed packed struct, no packed dimensions of signed_t [1:0], and the instance path where 20.6.1 f names the declaring scope. See verification/repros/sv_typename_aggregates.json."
+    },
+    {
+      "suite": "sv",
+      "name": "system_functions::typename_class_parameters",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_typename",
+      "note": "Expected int|resource_pkg::item|bit[3:0]|logic[4:0]; xezim 0.11.3 prints logic|class resource_pkg::item|logic|logic: a variable whose type is a type parameter T = int or T = bit [3:0] is spelled logic, and resource#(switch_t)::type_name gives resource#(logic), where 20.6.1 returns the resolved type, the actual of T (8.25). See verification/repros/sv_typename_classes.json."
+    },
+    {
+      "suite": "sv",
+      "name": "system_functions::typename_elaboration_constant",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_typename",
+      "note": "Both generate conditions on $typename(T) are false in xezim 0.11.3 (flags 0, expected 9): $typename(T) == \"int\" fails for the default T = int and NAME == \"logic[1:0]\" for T = logic [1:0]. A standalone run prints an empty string for the constant $typename(byte unsigned), which 20.6.1 b spells byte unsigned. See verification/repros/sv_typename_constant.json."
+    },
+    {
+      "suite": "sv",
+      "name": "system_functions::typename_vectors_and_arrays",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_typename",
+      "note": "Expected bit[2:0]|int|logic[3:0]|logic signed[0:7]|bit[3:0][1:0]|logic; xezim 0.11.3 prints bit|int|reg|reg signed[0:7]|bit[1:0][3:0]|reg: it drops the packed dimensions of node [2:0] (a typedef resolved by 20.6.1 a) and logic [W-1:0], writes logic as reg, reverses packed dimensions, writes integer unsigned as integer, int$[] for the queues q[$] and q[$:5], and logic for the data types bit [3:0] and int unsigned. See verification/repros/sv_typename_vectors.json."
+    },
+    {
+      "suite": "sv",
+      "name": "system_functions::typename_scopes_and_string_operands",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_typename",
+      "note": "local_int is 0 in xezim 0.11.3 (expected 1): the generate-local $typename(v) of int v is not \"int\". A standalone run prints an empty string for $typename(Holder::T), a byte typedef of a class (8.23), and 0 for $typename(integer) < $typename(logic), which compares the strings \"integer\" and \"logic\" (11.4.4, 6.16). See verification/repros/sv_typename_scopes.json."
+    },
+    {
+      "suite": "sv",
+      "name": "increment_decrement::increment_decrement_implication",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_implication_short_circuit",
+      "note": "With i == 1, xezim 0.11.3 increments j in (i == 0) -> (j++ > 0); 11.4.7 skips the second operand of -> when the first one is false, so j stays 0 and the later j-- gives -1. Icarus 13.0 shares the error. See verification/repros/sv_increment_decrement_conditional_operands.json."
+    },
+    {
+      "suite": "sv",
+      "name": "increment_decrement::increment_decrement_repeat_count",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_repeat_count_evaluated_twice",
+      "note": "With i == 1, xezim 0.11.3 runs repeat (i++ + 2) four times and leaves i at 3: the count expression and its increment run twice. 12.7.2 evaluates the expression once, so the loop runs 3 times and i is 2, as Verilator 5.052 and Icarus 13.0 report. See verification/repros/sv_increment_decrement_repeat_count.json."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::rejects_another_interface",
+      "status": "unexpected_accept",
+      "classification": "xezim_bug",
+      "bug": "sv_vif-X1",
+      "note": "25.9 allows assigning a virtual interface only from one of the same interface, and one without a modport to one with it, not the reverse. xezim 0.11.3 elaborates the assignment without a diagnostic ([standalone probe](verification/repros/sv_virtual_interface_assignment_xezim.json)); Verilator 5.052 and Celox reject it."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::rejects_modport_to_full_interface",
+      "status": "unexpected_accept",
+      "classification": "xezim_bug",
+      "bug": "sv_vif-X1",
+      "note": "25.9 allows assigning a virtual interface only from one of the same interface, and one without a modport to one with it, not the reverse. xezim 0.11.3 elaborates the assignment without a diagnostic ([standalone probe](verification/repros/sv_virtual_interface_assignment_xezim.json)); Verilator 5.052 and Celox reject it."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::rejects_call_results_of_other_types",
+      "status": "unexpected_accept",
+      "classification": "xezim_bug",
+      "bug": "sv_vif-X1",
+      "note": "25.9 allows assigning a virtual interface only from one of the same interface; an `int` function result is not one. xezim 0.11.3 elaborates `v = number()` without a diagnostic; Verilator 5.052 and Celox reject it."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::function_results",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_vif-X3",
+      "note": "The function returns `second`, and the write through `v` reaches second.data, but xezim 0.11.3 prints `v == pick(1)` as 0 ([standalone probe](verification/repros/sv_virtual_interface_function_xezim.json)). Verilator 5.052 and Celox print 66 1 0."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::rejects_modport_ports_to_full_interface",
+      "status": "unexpected_accept",
+      "classification": "xezim_bug",
+      "bug": "sv_vif-X1",
+      "note": "25.9 allows assigning a virtual interface with a modport, here a port declared `bus_if.mon`, only to one with the same modport. xezim 0.11.3 elaborates `v = p` without a diagnostic; Verilator 5.052 and Celox reject it."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::rejects_integers_in_arrays_of_virtual_interfaces",
+      "status": "unexpected_accept",
+      "classification": "xezim_bug",
+      "bug": "sv_vif-X1",
+      "note": "25.9 allows assigning a virtual interface only from one of the same interface; an integer is not one. xezim 0.11.3 elaborates `handles[0] = 1` without a diagnostic; Verilator 5.052 and Celox reject it."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::rejects_integers_in_conditional_array_elements",
+      "status": "unexpected_accept",
+      "classification": "xezim_bug",
+      "bug": "sv_vif-X1",
+      "note": "An integer and `null` are not equivalent conditional operands (11.4.11), and an integer is not assignment compatible with a virtual interface (25.9). xezim 0.11.3 elaborates `handles[0] = flag ? 1 : null` without a diagnostic; Verilator 5.052 and Celox reject it."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::multidimensional_and_package_arrays",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_vif-X4",
+      "note": "`grid[0][1]` and `grid[1][0]` of a two-dimensional array of virtual interfaces denote a and b, so the writes through them reach a.data and b.data (25.9). xezim 0.11.3 prints a.data as xx and the reads through the elements as 0 ([standalone probe](verification/repros/sv_virtual_interface_array_xezim.json)). Verilator 5.052 and Celox print 12 35 12 35."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::rejects_integers_as_class_call_arguments",
+      "status": "unexpected_accept",
+      "classification": "xezim_bug",
+      "bug": "sv_vif-X1",
+      "note": "25.9 allows passing to a virtual interface formal only a virtual interface of the same interface; an integer is not one. xezim 0.11.3 elaborates the method call `d.set(1)` without a diagnostic; Verilator 5.052 and Celox reject it."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::rejects_integers_as_constructor_arguments",
+      "status": "unexpected_accept",
+      "classification": "xezim_bug",
+      "bug": "sv_vif-X1",
+      "note": "25.9 allows passing to a virtual interface formal only a virtual interface of the same interface; an integer is not one. xezim 0.11.3 elaborates the constructor call `new(1)` without a diagnostic; Verilator 5.052 and Celox reject it."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::class_call_arguments_and_package_results",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_vif-X3",
+      "note": "`handles_pkg::get()` returns the virtual interface `shared`, which denotes `a` as `v` does, but xezim 0.11.3 prints `v == handles_pkg::get()` as 0 (sv_vif-X3, [standalone probe](verification/repros/sv_virtual_interface_function_xezim.json)). The other values agree; Verilator 5.052 and Celox print 12 22 1 1."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::rejects_virtual_interfaces_as_integral_references",
+      "status": "unexpected_accept",
+      "classification": "xezim_bug",
+      "bug": "sv_vif-X1",
+      "note": "A ref formal requires an actual of an equivalent type (13.5.2, 6.22.2), and `bit [31:0]` is not equivalent to a virtual interface (25.9). xezim 0.11.3 elaborates `forge(v)` without a diagnostic; Verilator 5.052 and Celox reject it."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::waits_on_member_edges",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_vif-X2",
+      "note": "`@(posedge moved.clk)` must fire when `moved` is retargeted from an instance whose clock is 0 to one whose clock is 1, since the variable is an operand of the event expression (9.4.2). xezim 0.11.3 ignores the retarget, so the forked wait never completes and `moved 2` and the final line are missing ([standalone probe](verification/repros/sv_virtual_interface_retarget_xezim.json)); the other lines match. Celox prints the expected output."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::mixed_event_controls",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rest-X29",
+      "note": "xezim 0.11.3 prints the real, out and timing lines but not `pulse 1` and `iff 2`: it does not resume `@(posedge vif.clk or posedge pulse)` on the pulse `pulse = 1; pulse = 0;` of one activation (sv_rest-X29), and it judges the `iff en` of `@(posedge clk iff en ...)` after `en = 0` instead of at the write of `clk` (sv_iff_order). Celox prints all four lines."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::retargets_with_ordinary_events",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_vif-X2",
+      "note": "xezim 0.11.3 prints `pulse 2` but not `retarget 3`: retargeting `vif` from instance a, whose clock fell at 2, to b, whose clock is high, changes the selection from 0 to 1, a positive edge (9.4.2), which xezim ignores ([standalone probe](verification/repros/sv_virtual_interface_retarget_xezim.json)). Celox prints both lines."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::always_on_member_edges",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_vif-X5",
+      "note": "`always @(posedge vif.clk)` and `always @(negedge vif.clk or posedge vif.clk)` wait on the clock of the instance `vif` denotes (9.4.2, 25.9). xezim 0.11.3 drops both blocks as having unresolvable sensitivity terms and prints 0 0 ([standalone probe](verification/repros/sv_virtual_interface_always_xezim.json)). Verilator 5.052 and Celox print 2 3."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::member_pulses_within_one_activation",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rest-X29",
+      "note": "`a.pulse = 1; a.pulse = 0;` in one activation is a positive edge of the member `vif` selects (9.4.2), but xezim 0.11.3 does not resume the wait on a pulse of one activation (sv_rest-X29); it prints nothing, also for `@(posedge a.pulse)` without the virtual interface. Celox prints pulse 2."
+    },
+    {
+      "suite": "sv",
+      "name": "streaming::streaming_arrays",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_streaming_with_range",
+      "note": "xezim 0.11.3 ignores with ranges and streams the whole array: with byte up [0:3] and byte down [3:0] both '{8'h11, 8'h22, 8'h33, 8'h44}, it assigns 32'h11223344 to bit [31:0] v for {>>{up with [1 +: 2]}}, {>>{down with [4]}} and {>>{down with [4:2]}}. 11.4.14.4 packs only the specified items, and the nonexistent-entry value of Table 7-1 (0 for byte) for an index outside the array, and 11.4.14 pads the stream with zero bits on the right, giving 32'h22330000, 0 and 32'h00112200. Verilator 5.052 rejects the with range (sv_verilator_streaming_with_range). See verification/repros/sv_streaming_with_range.json."
+    },
+    {
+      "suite": "sv",
+      "name": "streaming::streaming_unpack",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_streaming_unpack_order",
+      "note": "xezim 0.11.3 unpacks the LRM example {>>{p1, p2, p3, p4}} = up, with logic [10:0] up [3:0] and up[i] = i, into p1 = 0, p2 = 1, p3 = 2, p4 = 3; 11.4.14.3 gives p1 = up[3], p2 = up[2], p3 = up[1] and p4 = up[0], as Verilator 5.052 does (verification/repros/sv_streaming_unpack_array_order_xezim.json). It also unpacks {<< 3 {x, z}} = 8'b1101_0011 into x = 4'b0110 and z = 4'b1011, which pack back to 8'b0111_0101 instead of the source: 11.4.14.3 reverses the pack of 11.4.14.2, giving x = 4'b1110 and z = 4'b0110. Verilator 5.052 shares this partial-block error (sv_verilator_streaming_partial_block_unpack; verification/repros/sv_streaming_partial_block_unpack.json)."
+    },
+    {
+      "suite": "sv",
+      "name": "streaming::streaming_operand_types",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_streaming_subarray_target",
+      "note": "With bit [7:0] sub [0:1][0:1], xezim 0.11.3 leaves sub[0][0] and sub[0][1] at 0 after sub[0] = {>>{16'h1122}}; 11.4.14 casts the stream to the type of the target and 6.24.3 fills the unpacked array in element order, giving 8'h11 and 8'h22, as Verilator 5.052 does. The self-determined operand {>>{a >>> 1}} passes. See verification/repros/sv_streaming_subarray_target_xezim.json."
+    },
+    {
+      "suite": "sv",
+      "name": "streaming::streaming_dynamic_pack",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_streaming_dynamic_destination_size",
+      "note": "xezim 0.11.3 assigns {>>{sq}} of string sq[$] = '{\"ab\", \"c\", \"def\"} to a string, and returns it from a function, as \"abcdef\" followed by 122 NUL characters (len() is 128); 11.4.14 resizes a dynamically sized target to hold the stream, and 6.24.3 treats a string as a dynamic array of bytes, so the result is \"abcdef\" (verification/repros/sv_streaming_string_target_xezim.json). Flags 3 and 4 fail for the same reason: in the instantiated Top, bit_q_t'({<< {p}}) with the module's typedef bit bit_q_t[$] is a one-element queue, so b has 1 element instead of 16 and back differs from p; the same code passes as the top-level module (verification/repros/sv_streaming_module_queue_typedef_xezim.json)."
+    },
+    {
+      "suite": "sv",
+      "name": "streaming::streaming_dynamic_unpack",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_streaming_dynamic_unpack",
+      "note": "xezim 0.11.3 unpacks the 17-byte packet {<< 8 {o_header, o_len, o_data, o_crc}} = pkt into o_data of 4 zero bytes and o_crc = 83886080; 11.4.14.4 gives the dynamic array the 5 bytes left after the fixed-size items, so o_data = '{1, 2, 3, 4, 5} and o_crc = 42. The later {>> {o_data}} = {<< byte {o_data}} fails only because o_data is wrong; it passes standalone. See verification/repros/sv_streaming_dynamic_unpack_xezim.json."
+    },
+    {
+      "suite": "sv",
+      "name": "streaming::streaming_dynamic_with",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_streaming_with_range",
+      "note": "xezim 0.11.3 packs {<< 8 {i_header, i_len, i_data with [1 +: 3], i_crc}} with all five items of i_data (17 bytes instead of 15), and unpacking {<< 8 {o_header, o_len, o_data with [0 +: o_len], o_crc}} leaves o_data empty and o_crc = 33818120. 11.4.14.4 streams only the specified items and resizes o_data to the o_len = 5 items, giving o_crc = 42. Verilator 5.052 rejects the ranges (sv_verilator_streaming_with_range). See verification/repros/sv_streaming_dynamic_with.json."
+    },
+    {
+      "suite": "sv",
+      "name": "streaming::streaming_contexts",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_streaming_nonblocking_target",
+      "note": "After a = 8'h01 and a rising clk edge, always_ff @(posedge clk) {<< 4 {hi, lo}} <= a leaves hi and lo at X in xezim 0.11.3, so the two-state run reads hi with unknown bits; the blocking {<< 4 {x, z}} = ... unpacks correctly. 10.4.2 permits a streaming concatenation as the nonblocking target and 11.4.14.3 unpacks into it, giving hi = 4'h1 and lo = 4'h0, as Verilator 5.052 does. See verification/repros/sv_streaming_nonblocking_target_xezim.json."
+    },
+    {
+      "suite": "sv",
+      "name": "timing::timed_task_static_locals_are_shared",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_static_task_implicit_local",
+      "note": "In the static task count, `int seen;` is static (6.21) and shared by all calls (13.3.1), so the call from time 0 reads at 2 ns the value 2 that the overlapping call at 1 ns wrote, giving a = 2 as Verilator 5.052, Icarus 13.0 and Celox do. xezim 0.11.3 keeps a copy per call and gives a = 1, while the same local declared `static` is shared. See verification/repros/sv_static_task_implicit_local_xezim.json."
+    },
+    {
+      "suite": "sv",
+      "name": "property_selects::property_selects_evaluate_the_object_and_value_once",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_handle_array_property_writes",
+      "note": "hs[0] and hs[1] hold the handles a and b, and next() returns 0 the first time, so hs[next()].p[7:4] = 4'h9 calls next() once and writes a.p, giving a.p = 8'h94 (8.4, 11.5.1). xezim 0.11.3 leaves a.p at 8'h34 under the suite's testbench; the same source as the top module prints 94. Without the adapter, writes through hs[0] and hs[i] are lost as Wrapped and work as Top. See verification/repros/sv_handle_array_property_writes_xezim.{sv,json}; Verilator 5.052 passes the shared case."
+    },
+    {
+      "suite": "sv",
+      "name": "property_selects::property_selects_compound_indices_evaluate_once",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_compound_assignment_index",
+      "note": "With a.p = 8'h01 and i = 0, a.p[i] += move_index(), where move_index() sets i = 1 and returns 0, must read and write bit 0 and leave a.p at 8'h01; 11.4.1 evaluates a left-hand index expression only once. xezim 0.11.3 prints 03: it reads bit 0 and writes the sum into bit 1, and does the same for a.p[a.i] += a.move_i() with a property index. The adapter-free source shows the same for a module variable, as Top and as Wrapped. See verification/repros/sv_compound_assignment_index_xezim.{sv,json}; Verilator 5.052 passes the shared case."
+    },
+    {
+      "suite": "sv",
+      "name": "class::scoped_typedef_handles",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class_typedef_specialization_values",
+      "note": "Each `type_id` typedef names its own specialization of Registry (8.25), so get_type_name() returns \"unit\", \"pkg\" and \"local\" for the three handles and names is 15. xezim 0.11.3 returns \"pkg\" for all three, giving 10. The adapter-free source prints [pkg] for `UnitComp::type_id` once the package declares `typedef Registry #(PkgComp, \"pkg\") type_id;`. See verification/repros/sv_class_typedef_specialization_values_xezim.json; Verilator 5.052 passes the shared case."
+    },
+    {
+      "suite": "sv",
+      "name": "class::specialized_scope_typedef_properties",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class_scoped_typedef_static_properties",
+      "note": "Each create() through a class-scoped typedef increments the static count of the Registry specialization that the typedef names (8.23, 8.25.1), so the counts of Impl #(byte), p::Obj and Impl #(shortint) are 1 each and count is 111. xezim 0.11.3 reads them with unknown bits. The adapter-free source prints [x x 0 1] for Obj::type_id::count, p::Obj::type_id::count, Impl #(byte)::type_id::count and Registry #(Obj)::count, as Top. See verification/repros/sv_class_scoped_typedef_static_properties_xezim.json; Verilator 5.052 passes the shared case."
+    },
+    {
+      "suite": "sv",
+      "name": "class::parameter_literals_hide_module_constants",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class_parameter_passed_by_name",
+      "note": "In Shadow #(\"a_name_longer_than_sixteen\"), `Name #(S)` names the specialization whose S is Shadow's value (8.25), which also hides the module's localparam S, so ok is 1. xezim 0.11.3 gives Name the default \"x\"; the adapter-free source prints x instead of inner. See verification/repros/sv_class_parameter_passed_by_name_xezim.json; Verilator 5.052 passes the shared case."
+    },
+    {
+      "suite": "sv",
+      "name": "types::unpacked_array_assignments_through_selects_and_calls",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_conditional_unpacked_arrays",
+      "note": "h = s ? c : d with s = 1 and c = '{4, 3} must copy c (11.4.11), so h[0] = 4 and the sum is 18324313; the pinned xezim leaves h = '{0, 0} and returns 18330343. The other assignments of the case (slices, results, defaults, enum arrays, hierarchical names) agree; see verification/repros/sv_conditional_unpacked_arrays_xezim.sv. Verilator 5.052 and Celox print h='{4, 3}."
     }
   ]
 }

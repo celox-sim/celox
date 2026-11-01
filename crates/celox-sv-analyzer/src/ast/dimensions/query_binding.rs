@@ -56,6 +56,7 @@ fn literal_operand(root: ExprId, native: &celox_sv_syntax::Declarations) -> bool
 pub(in crate::ast) fn query_context_for_operand(
     root: ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     context: &PackedDimensions,
 ) -> Converted<PackedDimensions> {
     // Aggregate port defaults commonly repeat literal arithmetic. Rediscovering
@@ -64,7 +65,7 @@ pub(in crate::ast) fn query_context_for_operand(
         return Ok(query_context(context));
     }
     Ok(query_context(&query_operand_dimensions_id(
-        root, tree, context,
+        root, tree, session, context,
     )?))
 }
 
@@ -80,6 +81,7 @@ pub(in crate::ast) fn validate_data_operand(
 pub(in crate::ast) fn query_value(
     root: ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     context: &PackedDimensions,
 ) -> Converted<Option<Expr>> {
     let native = tree.declarations();
@@ -120,7 +122,7 @@ pub(in crate::ast) fn query_value(
         return Err(unsupported(format!("arguments of `{}`", name.spelling)));
     }
     let argument = arguments[0].value.unwrap();
-    let context = query_context_for_operand(argument, tree, context)?;
+    let context = query_context_for_operand(argument, tree, session, context)?;
     reject_unbounded(argument, function, tree, &context)?;
     if function == SystemFunction::Size
         && let Some(value) = interface_array_size(
@@ -128,24 +130,48 @@ pub(in crate::ast) fn query_value(
             argument,
             arguments.get(1).and_then(|a| a.value),
             tree,
+            session,
             &context,
         )?
     {
         return Ok(Some(value));
     }
-    let shape = shape(argument, tree, &context)?;
+    let mut shape = shape(argument, tree, session, &context)?;
+    // A value whose shape is rebuilt from its bits, such as a conditional
+    // choosing between chandles, is still a chandle.
+    if let Some(shape) = &mut shape
+        && !shape.chandle
+        && shape.unpacked.is_empty()
+        && expression_binding::native_chandle(tree, argument, native, &context, session)
+    {
+        shape.chandle = true;
+    }
+    // The 64 bits of a chandle are its storage, which `$bits` counts; they
+    // are no packed dimension the array queries see (IEEE 1800-2023 6.14,
+    // 20.7).
+    let bits = shape.clone();
+    if let Some(shape) = &mut shape
+        && shape.chandle
+    {
+        shape.packed.clear();
+    }
     let dimension = if let Some(argument) = arguments.get(1) {
+        // The dimension number is evaluated, unlike the queried operand, so
+        // it is bound as a value (IEEE 1800-2023 20.7).
+        let mut evaluated = context.clone();
+        evaluated.type_query = false;
         Some(expression_binding::bind(
             argument.value.unwrap(),
             tree,
-            &context,
+            session,
+            &evaluated,
         )?)
     } else {
         None
     };
     let value = match function {
         SystemFunction::Bits => {
-            let width = if let Some(shape) = &shape {
+            let width = if let Some(shape) = &bits {
                 shape
                     .unpacked
                     .iter()
@@ -154,7 +180,7 @@ pub(in crate::ast) fn query_value(
                     .try_fold(1usize, |value, width| {
                         value.checked_mul(
                             usize::try_from(eval_ast_const_expr(
-                                &tree.state,
+                                &tree.functions,
                                 width,
                                 &context.const_env,
                             )?)
@@ -162,7 +188,7 @@ pub(in crate::ast) fn query_value(
                         )
                     })
             } else {
-                type_binding::expression_type(argument, tree, &context)?.map(|ty| ty.width)
+                type_binding::expression_type(argument, tree, session, &context)?.map(|ty| ty.width)
             };
             width.map(|width| integer(width as i128))
         }
@@ -189,9 +215,9 @@ pub(in crate::ast) fn query_value(
         }
         SystemFunction::Size => {
             let index = dimension
-                .map(|value| expr_to_const(&tree.state, value))
+                .map(|value| expr_to_const(session, value))
                 .unwrap_or_else(|| Some(ConstExpr::Literal("1".into())))
-                .and_then(|value| eval_ast_const_expr(&tree.state, &value, &context.const_env));
+                .and_then(|value| eval_ast_const_expr(&tree.functions, &value, &context.const_env));
             let width = if let (Some(shape), Some(index)) = (&shape, index) {
                 let index = usize::try_from(index).ok().and_then(|i| i.checked_sub(1));
                 if index == Some(0)
@@ -209,12 +235,16 @@ pub(in crate::ast) fn query_value(
                                 .nth(index)
                         })
                         .and_then(|width| {
-                            eval_ast_const_expr(&tree.state, width, &context.const_env)
+                            eval_ast_const_expr(&tree.functions, width, &context.const_env)
                         })
                 }
                 .or_else(|| {
-                    (shape.unpacked.is_empty() && shape.packed.is_empty() && index == Some(0))
-                        .then_some(1)
+                    // A scalar has one element; a chandle has no dimension.
+                    (shape.unpacked.is_empty()
+                        && shape.packed.is_empty()
+                        && !shape.chandle
+                        && index == Some(0))
+                    .then_some(1)
                 })
             } else {
                 None
@@ -233,7 +263,7 @@ pub(in crate::ast) fn query_value(
                         .chain(shape.packed.iter().map(|d| &d.width))
                         .next()
                         .and_then(|width| {
-                            eval_ast_const_expr(&tree.state, width, &context.const_env)
+                            eval_ast_const_expr(&tree.functions, width, &context.const_env)
                         })?;
                     return Some(vec![(width - 1, 0)]);
                 }
@@ -244,14 +274,14 @@ pub(in crate::ast) fn query_value(
                     .chain(shape.packed.iter().map(|d| (&d.left, &d.right)))
                     .map(|(l, r)| {
                         Some((
-                            eval_ast_const_expr(&tree.state, l, &context.const_env)?,
-                            eval_ast_const_expr(&tree.state, r, &context.const_env)?,
+                            eval_ast_const_expr(&tree.functions, l, &context.const_env)?,
+                            eval_ast_const_expr(&tree.functions, r, &context.const_env)?,
                         ))
                     })
                     .collect::<Option<Vec<_>>>()
             });
             bounds.and_then(|bounds| {
-                super::queries::bound_query(&tree.state, query, &bounds, dimension, &context)
+                super::queries::bound_query(tree, session, query, &bounds, dimension, &context)
             })
         }
         _ => unreachable!(),
@@ -268,6 +298,7 @@ fn interface_array_size(
     mut argument: ExprId,
     dimension: Option<ExprId>,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     context: &PackedDimensions,
 ) -> Converted<Option<Expr>> {
     let native = tree.declarations();
@@ -291,6 +322,7 @@ fn interface_array_size(
     let Ok(handle) = interface_binding::actual_handle_key(
         argument,
         tree,
+        session,
         &context.const_env,
         &context.type_aliases,
     ) else {
@@ -303,7 +335,7 @@ fn interface_array_size(
     {
         return Ok(None);
     }
-    let imported = scope::imported(&tree.state);
+    let imported = scope::imported(tree);
     let Some(array) = imported.interface_arrays.get(&handle) else {
         return Ok(None);
     };
@@ -315,11 +347,11 @@ fn interface_array_size(
         return Ok(None);
     };
     for index in selected {
-        validate_index(index, tree, context)?;
+        validate_index(index, tree, session, context)?;
     }
     let dimension = match dimension {
-        Some(id) => constant_binding::bind(id, tree, context)?
-            .and_then(|value| eval_ast_const_expr(&tree.state, &value, &context.const_env))
+        Some(id) => constant_binding::bind(id, tree, session, context)?
+            .and_then(|value| eval_ast_const_expr(&tree.functions, &value, &context.const_env))
             .ok_or_else(|| unsupported("nonconstant interface array query dimension"))?,
         None => 1,
     };
@@ -330,7 +362,7 @@ fn interface_array_size(
         .map(|size| integer(*size as i128))
         .unwrap_or_else(|| Expr::Literal("32'sbx".into()));
     warnings::append(
-        &mut tree.state.diagnostics.borrow_mut(),
+        &mut session.diagnostics,
         [warnings::AnalyzerWarning::InterfaceArrayQuery {
             site: procedural::source_span(native.expression(call).tokens, tree),
         }],
@@ -382,7 +414,9 @@ fn function_first_width(
     }
     context
         .function_return_types
-        .get(&name)?
+        .get(&name)
+        // A chandle result has no packed dimension (IEEE 1800-2023 6.14).
+        .filter(|metadata| !metadata.chandle)?
         .first_packed_dimension_width
 }
 
@@ -514,23 +548,24 @@ fn dimension_jobs(dimension: &DimensionKind, jobs: &mut Vec<ExprId>) {
 fn validate_index(
     root: ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     context: &PackedDimensions,
 ) -> Converted<()> {
     let native = tree.declarations();
-    let value = expression_binding::bind(root, tree, context)?;
-    if expr_static_width(&tree.state, &value, context).is_none() {
+    let value = expression_binding::bind(root, tree, session, context)?;
+    if expr_static_width(tree, &value, context).is_none() {
         return Err(unsupported("query index type"));
     }
     let mut jobs = vec![root];
     while let Some(id) = jobs.pop() {
         match &native.expression(id).kind {
             ExprKind::Name(_) | ExprKind::Literal(_) => {
-                if type_binding::expression_type(id, tree, context)?.is_none() {
+                if type_binding::expression_type(id, tree, session, context)?.is_none() {
                     return Err(unsupported("query index type"));
                 }
             }
             ExprKind::Member { .. } | ExprKind::Select { .. } => {
-                if type_binding::expression_type(id, tree, context)?.is_none() {
+                if type_binding::expression_type(id, tree, session, context)?.is_none() {
                     return Err(unsupported("query index type"));
                 }
                 let mut base = id;
@@ -565,10 +600,10 @@ fn validate_index(
                 expression,
                 arguments,
             } => {
-                if expression_binding::native_name(&tree.state, *expression, native)
+                if expression_binding::native_name(tree, *expression, native)
                     .as_deref()
                     .and_then(SystemFunction::from_name)
-                    .is_some_and(SystemFunction::is_data_query)
+                    .is_some_and(SystemFunction::has_unevaluated_operand)
                 {
                     continue;
                 }
@@ -701,6 +736,7 @@ fn scalar(width: usize, signed: bool, packed: bool) -> VariableDimensions {
 pub(in crate::ast) fn shape(
     root: ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     context: &PackedDimensions,
 ) -> Converted<Option<VariableDimensions>> {
     enum Job {
@@ -715,7 +751,9 @@ pub(in crate::ast) fn shape(
     while let Some(job) = jobs.pop() {
         match job {
             Job::Enter(id) => {
-                if let Some((_, shape)) = array_reductions::bind(id, native, tree, context)? {
+                if let Some((_, shape)) =
+                    array_reductions::bind(id, native, tree, session, context)?
+                {
                     values.push(shape);
                     continue;
                 }
@@ -727,16 +765,16 @@ pub(in crate::ast) fn shape(
                     expression, name, ..
                 } = &native.expression(callee).kind
                     && let Some(container) =
-                        containers::native_type(*expression, native, tree, context)?
+                        containers::native_type(*expression, native, tree, session, context)?
                 {
                     // Validate the call without executing it. Pop returns the
                     // declared element type, including packed dimensions and
                     // authored bounds, rather than a flattened bit vector.
-                    let value = expression_binding::bind(id, tree, context)?;
+                    let value = expression_binding::bind(id, tree, session, context)?;
                     let shape = if matches!(name.spelling.as_str(), "pop_front" | "pop_back") {
                         procedural::dimensions_from_type(&container.element)
                     } else {
-                        let ty = bound_bits_type(&tree.state, &value, context)
+                        let ty = bound_bits_type(tree, &value, context)
                             .ok_or_else(|| unsupported("container method result type"))?;
                         scalar(ty.width, ty.signed, ty.width > 1)
                     };
@@ -746,7 +784,7 @@ pub(in crate::ast) fn shape(
                 if let Some((name, dimensions)) = type_binding::argument_alias(id, native)
                     && dimensions.is_empty()
                 {
-                    let imported = scope::imported(&tree.state);
+                    let imported = scope::imported(tree);
                     let receiver = name.split('.').next().unwrap_or(&name);
                     let local_receiver = context.get(receiver).is_some()
                         || context.const_env.contains_key(receiver)
@@ -817,7 +855,7 @@ pub(in crate::ast) fn shape(
                 match &native.expression(id).kind {
                     ExprKind::Group(inner) => jobs.push(Job::Enter(*inner)),
                     ExprKind::Type(ty) => {
-                        let Some(ty) = type_binding::bind(*ty, tree, context)? else {
+                        let Some(ty) = type_binding::bind(*ty, tree, session, context)? else {
                             return Ok(None);
                         };
                         values.push(procedural::dimensions_from_type(&ty));
@@ -858,13 +896,13 @@ pub(in crate::ast) fn shape(
                         left,
                         right,
                     } if matches!(operator.as_str(), "<<" | ">>" | "<<<" | ">>>") => {
-                        expression_binding::bind(*right, tree, context)?;
+                        expression_binding::bind(*right, tree, session, context)?;
                         jobs.push(Job::Enter(*left));
                     }
                     ExprKind::Cast { target, .. } => {
-                        expression_binding::bind(id, tree, context)?;
+                        expression_binding::bind(id, tree, session, context)?;
                         let ty = match native.expression(*target).kind {
-                            ExprKind::Type(ty) => type_binding::bind(ty, tree, context)?,
+                            ExprKind::Type(ty) => type_binding::bind(ty, tree, session, context)?,
                             _ => type_binding::argument_alias(*target, native)
                                 .filter(|(_, dimensions)| dimensions.is_empty())
                                 .and_then(|(name, _)| context.type_aliases.get(&name).cloned()),
@@ -872,8 +910,8 @@ pub(in crate::ast) fn shape(
                         if let Some(ty) = ty {
                             values.push(procedural::dimensions_from_type(&ty));
                         } else {
-                            let value = expression_binding::bind(id, tree, context)?;
-                            let Some(ty) = bound_bits_type(&tree.state, &value, context) else {
+                            let value = expression_binding::bind(id, tree, session, context)?;
+                            let Some(ty) = bound_bits_type(tree, &value, context) else {
                                 return Ok(None);
                             };
                             values.push(scalar(ty.width, ty.signed, true));
@@ -883,8 +921,8 @@ pub(in crate::ast) fn shape(
                         if special_dimension_count(id, tree, SystemFunction::Dimensions).is_some() {
                             return Ok(None);
                         }
-                        let value = expression_binding::bind(id, tree, context)?;
-                        let Some(ty) = bound_bits_type(&tree.state, &value, context) else {
+                        let value = expression_binding::bind(id, tree, session, context)?;
+                        let Some(ty) = bound_bits_type(tree, &value, context) else {
                             return Ok(None);
                         };
                         let mut shape = scalar(
@@ -906,7 +944,11 @@ pub(in crate::ast) fn shape(
                             && let Some(metadata) = context.function_return_types.get(name)
                             && let Some(count) = metadata.dimensions
                         {
-                            if count == 0 {
+                            // The bits of a chandle are its storage, not a
+                            // packed dimension (IEEE 1800-2023 6.14).
+                            if metadata.chandle {
+                                shape.chandle = true;
+                            } else if count == 0 {
                                 shape.packed.clear();
                             }
                         }
@@ -915,7 +957,7 @@ pub(in crate::ast) fn shape(
                 }
             }
             Job::Index(index) => {
-                validate_index(index, tree, context)?;
+                validate_index(index, tree, session, context)?;
                 let shape = values
                     .last_mut()
                     .ok_or_else(|| unsupported("query shape"))?;
@@ -932,17 +974,17 @@ pub(in crate::ast) fn shape(
             }
             Job::Range(left, right, indexed) => {
                 let left = if indexed {
-                    validate_index(left, tree, context)?;
+                    validate_index(left, tree, session, context)?;
                     None
                 } else {
-                    constant_binding::bind(left, tree, context)?
+                    constant_binding::bind(left, tree, session, context)?
                 };
-                let right = constant_binding::bind(right, tree, context)?
-                    .and_then(|v| eval_ast_const_expr(&tree.state, &v, &context.const_env));
+                let right = constant_binding::bind(right, tree, session, context)?
+                    .and_then(|v| eval_ast_const_expr(&tree.functions, &v, &context.const_env));
                 let width = if indexed {
                     right
                 } else {
-                    left.and_then(|v| eval_ast_const_expr(&tree.state, &v, &context.const_env))
+                    left.and_then(|v| eval_ast_const_expr(&tree.functions, &v, &context.const_env))
                         .zip(right)
                         .and_then(|(l, r)| i128::try_from(l.abs_diff(r)).ok()?.checked_add(1))
                 };
@@ -994,6 +1036,7 @@ mod tests {
     use super::*;
     #[test]
     fn native_queries_preserve_declared_shape_without_running_operands() {
+        let session = &mut Session::default();
         let source = "module M; logic[1:0][3:0] a; logic[7:0] memory[2:5]; int counter;function automatic logic[1:0][3:0] f();counter++;return '0;endfunction assign y=$bits(a)+$size(a)+$dimensions(a)+$left(a)+$right(a)+$low(a)+$high(a)+$increment(a)+$bits(memory)+$size(memory)+$dimensions(memory)+$unpacked_dimensions(memory)+$bits(memory[2])+$size(memory[2])+$dimensions(memory[2])+$unpacked_dimensions(memory[2])+$dimensions(1'b1)+$dimensions(1.25)+$unpacked_dimensions(memory[2+:1])+$bits(a[1:0])+$dimensions(a[1:0])+$size(a[1:0])+$bits(f())+$size(f())+$dimensions(f())+$bits(type(logic[3:0]))+$bits(type(int'(0)));endmodule";
         let tree = crate::source_tree::parse_source(
             source,
@@ -1015,23 +1058,32 @@ mod tests {
                 signed: false,
                 is_2state: false,
                 string: false,
+                chandle: false,
                 pattern_type: None,
                 enum_domain: None,
+                class: None,
+                virtual_interface: None,
             },
         );
         for declaration in &tree.declarations().data_declarations {
             let celox_sv_syntax::DataDeclaration::Variables(declaration) = declaration else {
                 continue;
             };
-            let base = type_binding::bind(declaration.data_type, &tree, &context)
+            let base = type_binding::bind(declaration.data_type, &tree, session, &context)
                 .unwrap()
                 .unwrap();
             for variable in &declaration.variables {
                 let ty = types::type_with_unpacked_ranges(
                     base.clone(),
-                    constant_binding::bind_unpacked_ranges(&variable.dimensions, &tree, &context)
-                        .unwrap(),
-                );
+                    constant_binding::bind_unpacked_ranges(
+                        &variable.dimensions,
+                        &tree,
+                        session,
+                        &context,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
                 context.insert(
                     instances::normalize_identifier(&variable.name.spelling),
                     procedural::dimensions_from_type(&ty),
@@ -1060,9 +1112,13 @@ mod tests {
         let actual = calls
             .into_iter()
             .map(|(root, _)| {
-                let value = query_value(root, &tree, &context).unwrap().unwrap();
-                expr_to_const(&tree.state, value)
-                    .and_then(|value| eval_ast_const_expr(&tree.state, &value, &context.const_env))
+                let value = query_value(root, &tree, session, &context)
+                    .unwrap()
+                    .unwrap();
+                expr_to_const(session, value)
+                    .and_then(|value| {
+                        eval_ast_const_expr(&tree.functions, &value, &context.const_env)
+                    })
                     .unwrap()
             })
             .collect::<Vec<_>>();

@@ -130,13 +130,29 @@ pub(super) fn optimize_unit_groups_cached(
                 .expect("equivalence-class alias must exist") = Vec::new();
         }
     }
-    for class in classes {
-        {
-            let units = groups
+    // Units are optimized independently, so the representatives of all
+    // classes share one work queue: a design whose events each fuse the
+    // complete combinational body optimizes those copies concurrently.
+    let mut units = Vec::new();
+    let mut counts = Vec::with_capacity(classes.len());
+    for class in &classes {
+        let group = std::mem::take(
+            groups
                 .get_mut(&class.representative)
-                .expect("equivalence-class representative must exist");
-            passes.run_parallel(units, options);
-        }
+                .expect("equivalence-class representative must exist"),
+        );
+        counts.push(group.len());
+        units.extend(group);
+    }
+    passes.run_parallel(&mut units, options);
+    let mut optimized = units.into_iter();
+    for (class, count) in classes.iter().zip(counts) {
+        *groups
+            .get_mut(&class.representative)
+            .expect("equivalence-class representative must exist") =
+            optimized.by_ref().take(count).collect();
+    }
+    for class in classes {
         if class.aliases.is_empty() {
             continue;
         }

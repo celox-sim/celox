@@ -28,7 +28,7 @@ fn deep_common_nodes_preserve_cached_and_scoped_values() {
         .unwrap();
     for (root, expected) in [(root, 0x5au8), (projected, 0xau8)] {
         for scoped in [false, true] {
-            let lowerer = SLTToSIRLowerer::new(true);
+            let mut lowerer = SLTToSIRLowerer::new(true);
             let mut builder = SIRBuilder::new();
             let mut cache = crate::HashMap::default();
             let result = if scoped {
@@ -179,7 +179,7 @@ fn floating_worklist_preserves_register_types_and_full_width_before_projection()
                 (unsigned, 8, false),
                 (comparison, 1, false),
             ] {
-                let lowerer = SLTToSIRLowerer::new(four_state);
+                let mut lowerer = SLTToSIRLowerer::new(four_state);
                 let mut builder = SIRBuilder::new();
                 let mut cache = crate::HashMap::default();
                 let result = if scoped {
@@ -207,7 +207,7 @@ fn floating_worklist_preserves_register_types_and_full_width_before_projection()
                 finish_lowering(builder);
             }
         }
-        let lowerer = SLTToSIRLowerer::new(four_state);
+        let mut lowerer = SLTToSIRLowerer::new(four_state);
         let mut builder = SIRBuilder::new();
         let mut cache = crate::HashMap::default();
         let result = lowerer.lower(&mut builder, projection, &arena, &mut cache);

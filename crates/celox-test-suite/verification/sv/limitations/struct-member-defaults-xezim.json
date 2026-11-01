@@ -1,0 +1,89 @@
+{
+  "schema_version": 3,
+  "tool": "xezim",
+  "version": "xezim version 0.11.4",
+  "suite": "sv",
+  "suite_version": "0.12.0",
+  "include_ignored": false,
+  "exclude_stronger_than_sv": false,
+  "scope": "Focused unpacked-structure member-initializer failures retained before exclusions; passes and four-state unsupported cases omitted.",
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "unpacked_structs::member_initial_values at 21:27: assert_eq same: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::member_initial_values",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "unpacked_structs::member_initial_values_assignment_context at 101:27: assert_eq same: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::member_initial_values_assignment_context",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "unpacked_structs::member_initial_values_declaration_scope at 65:27: assert_eq captured_value: expected 0xb, got 0x0",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::member_initial_values_declaration_scope",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "unpacked_structs::member_initial_values_four_state at 114:40: assert_eq same: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::member_initial_values_four_state",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "unpacked_structs::member_initial_values_local_lifetimes at 47:55: assert_eq static_sum: expected 0x9, got 0x8",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::member_initial_values_local_lifetimes",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "unpacked_structs::member_initial_values_specialized_functions at 84:27: assert_eq same: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::member_initial_values_specialized_functions",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "counts": {
+    "compile_error": 0,
+    "emission_error": 0,
+    "ignored": 0,
+    "mismatch": 6,
+    "passed": 0,
+    "rejected": 0,
+    "runtime_error": 0,
+    "unexpected_accept": 0,
+    "unsupported": 0
+  }
+}

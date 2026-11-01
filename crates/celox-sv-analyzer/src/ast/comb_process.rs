@@ -4,32 +4,40 @@ use super::*;
 
 pub(super) fn comb_processes_from_scope(
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
     parameter_literals: &HashMap<String, Expr>,
     state: &mut procedural::BodyState<'_>,
 ) -> Result<Vec<CombProcess>, AnalyzerError> {
     let mut processes = Vec::new();
-    let active = generate::items(syntax_tree, const_env, &packed_dimensions.type_aliases)?;
+    let active = generate::items(
+        syntax_tree,
+        session,
+        const_env,
+        &packed_dimensions.type_aliases,
+    )?;
     let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
     for (creation_order, item) in active.iter().enumerate() {
-        let _interface_scope = item.interface_scope();
+        let syntax_tree = &item.scoped(syntax_tree);
         if !matches!(
             &syntax_tree.declarations().body_item(item.id).kind,
             celox_sv_syntax::BodyItemKind::Assign(_)
+                | celox_sv_syntax::BodyItemKind::LogicGate(_)
                 | celox_sv_syntax::BodyItemKind::Procedure(_)
                 | celox_sv_syntax::BodyItemKind::Net(_)
                 | celox_sv_syntax::BodyItemKind::Unconverted { .. }
         ) {
             continue;
         }
-        let _constant_functions = item.enter();
+        let syntax_tree = &item.enter(syntax_tree);
         let start = processes.len();
         let (dimensions, literals) = views.get(item);
         comb_processes_from_item(
             item,
             None,
             syntax_tree,
+            session,
             &item.env,
             dimensions,
             literals,
@@ -56,6 +64,7 @@ fn comb_processes_from_item(
     item: &generate::Item,
     condition: Option<ConstExpr>,
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     const_env: &SharedMap<i128>,
     packed_dimensions: &PackedDimensions,
     parameter_literals: &SharedMap<Expr>,
@@ -67,11 +76,26 @@ fn comb_processes_from_item(
             for mut process in continuous_assignments(
                 syntax_tree.declarations().assign_statement(*id),
                 syntax_tree,
+                session,
                 packed_dimensions,
             )? {
                 process.condition = condition.clone();
                 processes.push(substitute_process_constants_with_parameter_literals(
-                    &syntax_tree.state,
+                    syntax_tree,
+                    session,
+                    process,
+                    const_env,
+                    parameter_literals,
+                ));
+            }
+        }
+        celox_sv_syntax::BodyItemKind::LogicGate(gate) => {
+            for mut process in logic_gate_processes(gate, syntax_tree, session, packed_dimensions)?
+            {
+                process.condition = condition.clone();
+                processes.push(substitute_process_constants_with_parameter_literals(
+                    syntax_tree,
+                    session,
                     process,
                     const_env,
                     parameter_literals,
@@ -86,12 +110,14 @@ fn comb_processes_from_item(
                 procedure,
                 condition,
                 syntax_tree,
+                session,
                 &local_packed_dimensions,
                 parameter_literals,
                 state,
             )? {
                 processes.push(substitute_process_constants(
-                    &syntax_tree.state,
+                    syntax_tree,
+                    session,
                     process,
                     const_env,
                 ));
@@ -102,10 +128,12 @@ fn comb_processes_from_item(
             for assignment in net_declaration_assignments(
                 syntax_tree.declarations().net_declaration(*id),
                 syntax_tree,
+                session,
                 packed_dimensions,
             )? {
                 let assignment = substitute_assignment_constants_with_parameter_literals(
-                    &syntax_tree.state,
+                    syntax_tree,
+                    session,
                     assignment,
                     const_env,
                     parameter_literals,
@@ -129,6 +157,88 @@ fn comb_processes_from_item(
     Ok(())
 }
 
+/// Scalar n-input truth tables: a one-input gate must also turn Z into X.
+fn logic_gate_processes(
+    gate: &celox_sv_syntax::LogicGate,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> Converted<Vec<CombProcess>> {
+    if gate.strength.is_some()
+        || gate.delay.is_some()
+        || gate
+            .instances
+            .iter()
+            .any(|instance| !instance.dimensions.is_empty())
+    {
+        return Err(unsupported("gate primitive instantiation"));
+    }
+    let (op, identity, invert) = match gate.kind.as_str() {
+        "and" => (BinaryOp::BitAnd, "1'b1", false),
+        "nand" => (BinaryOp::BitAnd, "1'b1", true),
+        "or" => (BinaryOp::BitOr, "1'b0", false),
+        "nor" => (BinaryOp::BitOr, "1'b0", true),
+        "xor" => (BinaryOp::BitXor, "1'b0", false),
+        "xnor" => (BinaryOp::BitXor, "1'b0", true),
+        _ => return Err(unsupported("gate primitive instantiation")),
+    };
+    let mut processes = Vec::new();
+    for instance in &gate.instances {
+        // A scalar net lvalue can be wrapped in arbitrarily nested singleton
+        // concatenations. Multi-part outputs remain outside the scalar subset.
+        let mut output = instance.terminals[0];
+        while let celox_sv_syntax::ExprKind::Concatenation(parts) =
+            &tree.declarations().expression(output).kind
+        {
+            if parts.len() != 1 {
+                return Err(unsupported("non-scalar gate terminal"));
+            }
+            output = parts[0];
+        }
+        let lhs =
+            expression_binding::net_lvalue(output, tree.declarations(), tree, session, dimensions)?;
+        if !lvalue_expr_type(&tree.functions, &lhs, dimensions).is_some_and(|ty| ty.width == 1) {
+            return Err(unsupported("non-scalar gate terminal"));
+        }
+        let mut rhs = Expr::Literal(identity.into());
+        for &input in &instance.terminals[1..] {
+            let input =
+                expression_binding::value(input, tree.declarations(), tree, session, dimensions)?;
+            if expr_static_width(tree, &input, dimensions) != Some(1) {
+                return Err(unsupported("non-scalar gate terminal"));
+            }
+            rhs = Expr::Binary {
+                left: Box::new(rhs),
+                op,
+                right: Box::new(input),
+            };
+        }
+        if invert {
+            rhs = Expr::Unary {
+                op: UnaryOp::BitNot,
+                expr: Box::new(rhs),
+            };
+        }
+        let rhs = if matches!(
+            lhs,
+            LValue::Select {
+                is_2state: true,
+                ..
+            }
+        ) {
+            coerce_procedural_assignment_rhs(tree, rhs, &lhs, dimensions)
+        } else {
+            rhs
+        };
+        processes.push(CombProcess::new(
+            CombProcessKind::ContinuousAssign,
+            None,
+            vec![Assignment::new(lhs, rhs)],
+        ));
+    }
+    Ok(processes)
+}
+
 fn always_dimensions(
     dimensions: &PackedDimensions,
     const_env: &SharedMap<i128>,
@@ -145,6 +255,7 @@ fn always_dimensions(
 fn net_declaration_assignments(
     native: &celox_sv_syntax::NetDeclaration,
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     packed_dimensions: &PackedDimensions,
 ) -> Result<Vec<Assignment>, AnalyzerError> {
     let mut assignments = Vec::new();
@@ -155,9 +266,9 @@ fn net_declaration_assignments(
         let name = instances::normalize_identifier(&variable.name.spelling);
         if let Some(target) = packed_dimensions.get(&name) {
             array_compatibility::check_native_unpacked_assignment(
-                &syntax_tree.state,
+                syntax_tree,
+                session,
                 value,
-                syntax_tree.declarations(),
                 target,
                 || "net declaration assignment".to_string(),
                 packed_dimensions,
@@ -169,6 +280,7 @@ fn net_declaration_assignments(
             syntax_tree.declarations(),
             &lhs,
             syntax_tree,
+            session,
             packed_dimensions,
         )?;
         assignments.push(Assignment::new(lhs, rhs));
@@ -180,6 +292,7 @@ fn net_declaration_assignments(
 fn continuous_assignments(
     native: &celox_sv_syntax::AssignSyntax,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<Vec<CombProcess>> {
     if native.assignments.is_empty() {
@@ -224,12 +337,18 @@ fn continuous_assignments(
                             id,
                             native_tree,
                             tree,
+                            session,
                             dimensions,
                         )?);
                     }
                 }
-                let rhs =
-                    expression_binding::value(assignment.right, native_tree, tree, dimensions)?;
+                let rhs = expression_binding::value(
+                    assignment.right,
+                    native_tree,
+                    tree,
+                    session,
+                    dimensions,
+                )?;
                 return Ok(CombProcess::procedural(
                     CombProcessKind::ContinuousAssign,
                     None,
@@ -242,13 +361,14 @@ fn continuous_assignments(
             }
             if let Some(shape) = array_compatibility::native_unpacked_shape(
                 assignment.left,
-                tree.declarations(),
+                tree,
+                session,
                 dimensions,
             ) {
                 array_compatibility::check_native_unpacked_assignment(
-                    &tree.state,
+                    tree,
+                    session,
                     assignment.right,
-                    tree.declarations(),
                     &shape,
                     || "continuous assignment".into(),
                     dimensions,
@@ -258,20 +378,51 @@ fn continuous_assignments(
                 assignment.left,
                 tree.declarations(),
                 tree,
+                session,
                 dimensions,
             )?;
-            let rhs = expression_binding::expression(
+            let rhs = match expression_binding::selected_pattern(
+                assignment.left,
                 assignment.right,
-                tree.declarations(),
                 &lhs,
                 tree,
+                session,
                 dimensions,
-            )?;
+            )? {
+                Some(rhs) => rhs,
+                None => expression_binding::expression(
+                    assignment.right,
+                    tree.declarations(),
+                    &lhs,
+                    tree,
+                    session,
+                    dimensions,
+                )?,
+            };
+            // A selected string-array element receives text as a heap handle,
+            // just as an identifier does; the flattened lvalue has no scalar shape.
+            let rhs = if expression_binding::native_string(
+                tree,
+                session,
+                assignment.left,
+                native_tree,
+                dimensions,
+            ) {
+                expression_binding::string_operand(rhs, dimensions)
+            } else {
+                rhs
+            };
             // A variable of unpacked structure type: drive its leaves.
             if let LValue::Ident(name) = &lhs
                 && let Some(parts) = unpacked_structs::targets(name, dimensions)
             {
-                unpacked_structs::check_assignment(name, assignment.right, tree, dimensions)?;
+                unpacked_structs::check_assignment(
+                    name,
+                    assignment.right,
+                    tree,
+                    session,
+                    dimensions,
+                )?;
                 return Ok(CombProcess::procedural(
                     CombProcessKind::ContinuousAssign,
                     None,
@@ -289,7 +440,7 @@ fn continuous_assignments(
                     ..
                 }
             ) {
-                coerce_procedural_assignment_rhs(&tree.state, rhs, &lhs, dimensions)
+                coerce_procedural_assignment_rhs(tree, rhs, &lhs, dimensions)
             } else {
                 rhs
             };
@@ -306,6 +457,7 @@ fn comb_process_from_procedure(
     procedure: &celox_sv_syntax::Procedure,
     condition: Option<ConstExpr>,
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     packed_dimensions: &PackedDimensions,
     parameter_literals: &HashMap<String, Expr>,
     state: &mut procedural::BodyState<'_>,
@@ -321,6 +473,7 @@ fn comb_process_from_procedure(
     };
     let mut builder = procedural::BodyBuilder::new(
         syntax_tree,
+        session,
         packed_dimensions,
         state,
         system_functions::Body::Always,
@@ -328,7 +481,8 @@ fn comb_process_from_procedure(
     let mut body = builder.native_body(&[body], &procedure.authored_statements)?;
     for stmt in &mut body {
         procedural::substitute_stmt_constants(
-            &syntax_tree.state,
+            syntax_tree,
+            builder.session,
             stmt,
             &HashMap::default(),
             parameter_literals,

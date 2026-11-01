@@ -1,0 +1,29 @@
+{
+  "case": "streaming::streaming_contexts",
+  "source": "src/sv/cases/streaming.vtest",
+  "standard": "IEEE 1800-2023 10.4.2 (Syntax 10-3): the target of a nonblocking assignment is a variable_lvalue, which includes a streaming_concatenation; 11.4.14.3: a streaming concatenation target unpacks the value, so {<< 4 {hi, lo}} <= 8'h01 updates hi to 4'h1 and lo to 4'h0 in the NBA region.",
+  "method": "The shared case runs unchanged in verify-sv-verilator, verify-sv-icarus and verify-sv-xezim; the reduced source below runs without the adapters (verilator --binary, iverilog -g2012 -s Top, xezim). The blocking assignment to the same kind of target is the control.",
+  "reduced_source": "`timescale 1ns/1ns\nmodule Top;\n    logic clk = 0;\n    logic [7:0] a = 8'h01;\n    logic [3:0] hi, lo, bhi, blo;\n    always_ff @(posedge clk) {<< 4 {hi, lo}} <= a;\n    always @(posedge clk) {<< 4 {bhi, blo}} = a;\n    initial begin\n        #1 clk = 1;\n        #1 $display(\"nonblocking hi=%h lo=%h blocking hi=%h lo=%h\", hi, lo, bhi, blo);\n        $finish;\n    end\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "stdout": "nonblocking hi=1 lo=0 blocking hi=1 lo=0\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "status": "compile_error",
+      "stderr": "repro.sv:6: syntax error\nrepro.sv:6: Syntax in assignment statement l-value.\nrepro.sv:7: syntax error\nrepro.sv:7: Syntax in assignment statement l-value.\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "nonblocking hi=x lo=x blocking hi=1 lo=0\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "nonblocking hi=1 lo=0 blocking hi=1 lo=0\n"
+    }
+  ]
+}

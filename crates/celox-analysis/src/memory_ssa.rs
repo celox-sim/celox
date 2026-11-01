@@ -146,14 +146,14 @@ impl<D> MemoryAccessGraph<D> {
 /// Alias policy supplied by a client.  The definition identity is the graph
 /// payload; effects and query representation remain outside MemorySSA.
 pub trait AliasOracle<D, Q> {
-    fn may_alias(&self, definition: &D, query: &Q) -> bool;
+    fn may_alias(&mut self, definition: &D, query: &Q) -> bool;
 }
 
 impl<D, Q, F> AliasOracle<D, Q> for F
 where
-    F: Fn(&D, &Q) -> bool,
+    F: FnMut(&D, &Q) -> bool,
 {
-    fn may_alias(&self, definition: &D, query: &Q) -> bool {
+    fn may_alias(&mut self, definition: &D, query: &Q) -> bool {
         self(definition, query)
     }
 }
@@ -206,7 +206,7 @@ impl ClobberWalker {
         graph: &MemoryAccessGraph<D>,
         start: MemoryAccessId,
         query: &Q,
-        alias_oracle: &impl AliasOracle<D, Q>,
+        alias_oracle: &mut impl AliasOracle<D, Q>,
     ) -> Option<MemoryClobber> {
         self.query(graph, query, alias_oracle).clobber(start)
     }
@@ -218,7 +218,7 @@ impl ClobberWalker {
         &'a mut self,
         graph: &'a MemoryAccessGraph<D>,
         query: &'a Q,
-        alias_oracle: &'a A,
+        alias_oracle: &'a mut A,
     ) -> ClobberQuery<'a, D, Q, A>
     where
         A: AliasOracle<D, Q>,
@@ -244,7 +244,7 @@ impl ClobberWalker {
         nodes: &[MemoryAccessNode<D>],
         start: usize,
         query: &Q,
-        alias_oracle: &impl AliasOracle<D, Q>,
+        alias_oracle: &mut impl AliasOracle<D, Q>,
     ) -> MemoryClobber {
         let current_epoch = self.epoch;
         self.frames.clear();
@@ -366,7 +366,7 @@ pub struct ClobberQuery<'a, D, Q, A> {
     walker: &'a mut ClobberWalker,
     graph: &'a MemoryAccessGraph<D>,
     query: &'a Q,
-    alias_oracle: &'a A,
+    alias_oracle: &'a mut A,
 }
 
 impl<D, Q, A> ClobberQuery<'_, D, Q, A>
@@ -375,8 +375,12 @@ where
 {
     pub fn clobber(&mut self, start: MemoryAccessId) -> Option<MemoryClobber> {
         (start.0 < self.graph.nodes.len()).then(|| {
-            self.walker
-                .find_clobber(&self.graph.nodes, start.0, self.query, self.alias_oracle)
+            self.walker.find_clobber(
+                &self.graph.nodes,
+                start.0,
+                self.query,
+                &mut *self.alias_oracle,
+            )
         })
     }
 }
@@ -699,14 +703,17 @@ mod tests {
     impl Analysis {
         fn clobber(&self, instruction: Instruction, query: MemoryEffect<Object>) -> TestClobber {
             let start = self.points.event(instruction).unwrap().before;
-            let oracle = |definition: &Instruction, query: &MemoryEffect<Object>| {
+            let mut oracle = |definition: &Instruction, query: &MemoryEffect<Object>| {
                 self.writes[definition]
                     .iter()
                     .copied()
                     .any(|write| effects_may_alias(write, *query))
             };
             let mut walker = ClobberWalker::new();
-            match walker.clobber(&self.graph, start, &query, &oracle).unwrap() {
+            match walker
+                .clobber(&self.graph, start, &query, &mut oracle)
+                .unwrap()
+            {
                 MemoryClobber::Indeterminate => TestClobber::Indeterminate,
                 MemoryClobber::Access(access) => match self.graph.access(access).unwrap() {
                     MemoryAccess::LiveOnEntry => TestClobber::LiveOnEntry,
@@ -799,7 +806,7 @@ mod tests {
             analysis.clobber((0, 0), exact(1, 8, 8)),
             TestClobber::LiveOnEntry
         );
-        let oracle = |definition: &Instruction, query: &MemoryEffect<Object>| {
+        let mut oracle = |definition: &Instruction, query: &MemoryEffect<Object>| {
             analysis.writes[definition]
                 .iter()
                 .copied()
@@ -807,7 +814,7 @@ mod tests {
         };
         let mut walker = ClobberWalker::new();
         let after = walker
-            .clobber(&analysis.graph, event.after, &exact(1, 8, 8), &oracle)
+            .clobber(&analysis.graph, event.after, &exact(1, 8, 8), &mut oracle)
             .unwrap();
         let MemoryClobber::Access(after) = after else {
             panic!("a store's post-state has a concrete clobber")
@@ -888,29 +895,29 @@ mod tests {
                 vec![event((3, 0), vec![exact(1, 8, 8)], vec![])],
             ],
         );
-        let calls = std::cell::Cell::new(0usize);
-        let oracle = |definition: &Instruction, query: &MemoryEffect<Object>| {
-            calls.set(calls.get() + 1);
-            analysis.writes[definition]
-                .iter()
-                .copied()
-                .any(|write| effects_may_alias(write, *query))
-        };
         let query = exact(1, 8, 8);
-        let mut walker = ClobberWalker::new();
-        let mut session = walker.query(&analysis.graph, &query, &oracle);
+        let oracle_calls = |starts: &[MemoryAccessId]| {
+            let mut calls = 0usize;
+            let mut oracle = |definition: &Instruction, query: &MemoryEffect<Object>| {
+                calls += 1;
+                analysis.writes[definition]
+                    .iter()
+                    .copied()
+                    .any(|write| effects_may_alias(write, *query))
+            };
+            let mut walker = ClobberWalker::new();
+            let mut session = walker.query(&analysis.graph, &query, &mut oracle);
+            for &start in starts {
+                assert!(matches!(
+                    session.clobber(start),
+                    Some(MemoryClobber::Access(_))
+                ));
+            }
+            calls
+        };
         let join = analysis.points.event((3, 0)).unwrap().before;
-        assert!(matches!(
-            session.clobber(join),
-            Some(MemoryClobber::Access(_))
-        ));
-        let calls_after_join = calls.get();
         let left_exit = analysis.points.block_exit(1).unwrap();
-        assert!(matches!(
-            session.clobber(left_exit),
-            Some(MemoryClobber::Access(_))
-        ));
-        assert_eq!(calls.get(), calls_after_join);
+        assert_eq!(oracle_calls(&[join, left_exit]), oracle_calls(&[join]));
     }
 
     #[test]
@@ -962,7 +969,7 @@ mod tests {
 
         let exit = analysis.points.block_exit(1).unwrap();
         let entry = analysis.points.block_entry(1).unwrap();
-        let oracle = |definition: &Instruction, query: &MemoryEffect<Object>| {
+        let mut oracle = |definition: &Instruction, query: &MemoryEffect<Object>| {
             analysis.writes[definition]
                 .iter()
                 .copied()
@@ -980,7 +987,7 @@ mod tests {
         assert_eq!(
             classify(
                 walker
-                    .clobber(&analysis.graph, exit, &exact(1, 8, 8), &oracle)
+                    .clobber(&analysis.graph, exit, &exact(1, 8, 8), &mut oracle)
                     .unwrap()
             ),
             TestClobber::Definition((1, 0))
@@ -988,7 +995,7 @@ mod tests {
         assert_eq!(
             classify(
                 walker
-                    .clobber(&analysis.graph, entry, &exact(1, 8, 8), &oracle)
+                    .clobber(&analysis.graph, entry, &exact(1, 8, 8), &mut oracle)
                     .unwrap()
             ),
             TestClobber::Phi(1)
@@ -1028,10 +1035,10 @@ mod tests {
             ]],
         )
         .unwrap();
-        let oracle = |definition: &u8, query: &u8| definition % 10 == *query;
+        let mut oracle = |definition: &u8, query: &u8| definition % 10 == *query;
         let mut walker = ClobberWalker::new();
         let clobber = walker
-            .clobber(&graph, points.event(1).unwrap().before, &0, &oracle)
+            .clobber(&graph, points.event(1).unwrap().before, &0, &mut oracle)
             .unwrap();
         let MemoryClobber::Access(access) = clobber else {
             panic!("the custom oracle finds one definition")

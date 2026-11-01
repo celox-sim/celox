@@ -228,19 +228,24 @@ fn emit_prepared_eu_inner(
     }
     let regalloc_start = timing.then(crate::timing::now);
     let mut regalloc_trace = trace.as_ref().map(|_| regalloc::RegallocTrace::default());
-    // Unique first-tier spill slots avoid global stack liveness/coloring.
-    // Bound their frame below half the tiered image's reserved headroom;
-    // larger frames fall back to exact slot reuse, including on tiny designs.
-    let baseline_spill_budget = options
-        .baseline
-        .then_some((layout.merged_total_size / 8).max(4096));
+    // The baseline image uses the linear allocator. If it has to fall back
+    // to the optimizing allocator, unique spill slots avoid global stack
+    // liveness/coloring; their frame stays below half the tiered image's
+    // reserved headroom, and larger frames use exact slot reuse.
+    let strategy = if options.baseline {
+        regalloc::RegallocStrategy::Baseline {
+            spill_budget: (layout.merged_total_size / 8).max(4096),
+        }
+    } else {
+        regalloc::RegallocStrategy::Optimizing
+    };
     let ra = regalloc::run_regalloc_for_codegen(
         &mut mfunc,
         label,
         regalloc_trace.as_mut(),
         diagnostics,
         options.native_tick_loop,
-        baseline_spill_budget,
+        strategy,
         is_cancelled,
     )
     .map_err(|error| {

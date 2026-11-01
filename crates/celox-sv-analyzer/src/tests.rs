@@ -1409,6 +1409,7 @@ fn resolves_imported_constant_parameter_part_selects() {
             &[],
             &ModuleInterfaces::default(),
             &packages,
+            &mut packages.design(),
         )
         .unwrap();
     assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(11));
@@ -2938,20 +2939,80 @@ fn rejects_unpacked_arrays_of_nonequivalent_element_types() {
     "#;
     let error = analyze_source(source, Path::new("nonequivalent_unpacked.sv"))
         .expect_err("a signed row is not equivalent to an unsigned one");
-    let row = |signed| typecheck::UnpackedArrayType {
-        dims: vec![2],
-        element_width: 8,
-        signed,
-        four_state: true,
-    };
     assert_eq!(
         error,
         AnalyzerError::IncompatibleUnpackedArray {
             context: "assignment pattern item".to_string(),
-            actual: row(true),
-            target: row(false),
+            actual: "logic signed [7:0] [2]".to_string(),
+            target: "logic [7:0] [2]".to_string(),
         }
     );
+}
+
+#[test]
+fn rejects_unpacked_arrays_of_nonequivalent_named_elements_in_every_assignment() {
+    // A named element type is equivalent only to itself (IEEE 1800-2023
+    // 6.22.2), and every way an array value is assigned checks it (7.6):
+    // slices on either side, the operands of `?:`, results and defaults.
+    for (items, context) in [
+        (
+            "typedef enum {A, B} e_t; e_t a[2]; int b[2]; initial a = b;",
+            "assignment",
+        ),
+        (
+            "typedef enum {A, B} e_t; e_t a[2]; int b[2]; initial b = a;",
+            "assignment",
+        ),
+        (
+            "typedef enum {A, B} e_t; typedef enum {C, D} f_t; e_t a[2]; f_t b[2]; initial a = b;",
+            "assignment",
+        ),
+        (
+            "class X; endclass class Y; endclass X a[2]; Y b[2]; initial a = b;",
+            "assignment",
+        ),
+        (
+            "int a[4]; byte b[4]; initial a[0:1] = b[2:3];",
+            "assignment",
+        ),
+        ("int a[4]; byte b[2]; initial a[1+:2] = b;", "assignment"),
+        (
+            "int a[2]; byte b[2], c[2]; bit s; initial a = s ? b : c;",
+            "assignment",
+        ),
+        (
+            "byte d[2]; typedef int ia_t[2]; function ia_t f(); return d; endfunction",
+            "return value",
+        ),
+        (
+            "byte d[2]; function void f(int p[2] = d); endfunction initial f();",
+            "default of `p`",
+        ),
+    ] {
+        let source = format!("module Top; {items} endmodule");
+        let error = analyze_source(&source, Path::new("nonequivalent_named.sv")).expect_err(items);
+        assert!(
+            matches!(&error, AnalyzerError::IncompatibleUnpackedArray { context: c, .. } if c == context)
+                || matches!(&error, AnalyzerError::IncompatibleClassHandle { .. }),
+            "{items}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn accepts_unpacked_arrays_of_the_same_named_element_in_every_assignment() {
+    // Operands that name the same element type stay equivalent when they are
+    // passed, returned, defaulted or selected (IEEE 1800-2023 6.22.2, 7.6).
+    for items in [
+        "e_t a[2]; function void f(e_t p[2]); endfunction initial f(a);",
+        "e_t d[2]; typedef e_t ea_t[2]; function ea_t g(); return d; endfunction",
+        "e_t d[2]; function void h(e_t p[2] = d); endfunction initial h();",
+        "e_t m[2][2]; e_t r[2]; initial r = m[1];",
+        "e_t m[2][2]; function void f(e_t p[2]); endfunction initial f(m[0]);",
+    ] {
+        let source = format!("module Top; typedef enum {{A, B}} e_t; {items} endmodule");
+        analyze_source(&source, Path::new("same_named.sv")).expect(items);
+    }
 }
 
 #[test]
@@ -3494,16 +3555,13 @@ fn rejects_unlowered_constructs() {
 #[test]
 fn rejects_unimplemented_timing_constructs() {
     for (body, construct) in [
-        // The `event` data type is rejected by name before its uses.
-        ("event e; initial @e;", "named event"),
-        ("event e; initial ->e;", "named event"),
         (
-            "logic a, b; initial a = #1 b;",
-            "intra-assignment timing control",
+            "event e; initial ->> @(e) e;",
+            "delayed nonblocking event trigger",
         ),
         (
-            "logic a, b; initial a <= #1 b;",
-            "intra-assignment timing control",
+            "event e; logic c; initial @(e or posedge c);",
+            "event control mixing named events with other events",
         ),
         ("initial begin : b disable b; end", "disable statement"),
         (
@@ -3769,6 +3827,7 @@ fn native_interface_module(source: &str, name: &str) -> ir::Module {
             &[],
             &ModuleInterfaces::default(),
             &packages,
+            &mut packages.design(),
         )
         .unwrap()
         .modules()[0]
@@ -3816,6 +3875,7 @@ fn native_interface_sources(sources: &[(&str, &Path)]) -> Result<Vec<ir::Module>
                 &[],
                 &ModuleInterfaces::default(),
                 &packages,
+                &mut packages.design(),
             )?;
             modules.extend(ir.modules().iter().cloned());
         }
@@ -5183,7 +5243,8 @@ fn named_constant_calls_retain_parameter_dependencies() {
             .unwrap();
     let source = ast::Source::from_syntax(&syntax).unwrap();
     let module = &source.modules()[0];
-    let state = module.constant_function_state();
+    let empty = crate::source_tree::SourceTree::empty();
+    let evaluation = module.constant_context(&empty);
     let expression: ir::ConstExpr = module
         .parameters()
         .iter()
@@ -5199,7 +5260,7 @@ fn named_constant_calls_retain_parameter_dependencies() {
             &expression,
             &ast::const_functions::Environment {
                 constants: &values,
-                functions: &state.const_functions
+                functions: &evaluation.functions
             }
         ),
         Some(17)
@@ -5272,6 +5333,7 @@ fn native_interface_array_ports_reject_incompatible_shapes() {
             &[],
             &ModuleInterfaces::default(),
             &packages,
+            &mut packages.design(),
         )
         .unwrap_err();
     assert_eq!(
@@ -5308,6 +5370,7 @@ fn rejects_mismatched_interface_array_connection_widths_and_shapes() {
                 &[],
                 &ModuleInterfaces::default(),
                 &packages,
+                &mut packages.design(),
             )
             .unwrap_err();
         assert!(
@@ -6092,18 +6155,23 @@ fn timed_task_calls_require_a_suspendable_context() {
 }
 
 #[test]
-fn timed_tasks_reject_static_locals_instead_of_reinitializing_them() {
+fn timed_tasks_keep_static_locals_as_module_variables() {
+    // Overlapping calls share the locals (IEEE 1800-2023 6.21, 13.3.1), so
+    // no declaration reinitializes them on entry.
     for declaration in [
         "task t; int saved = 1; #1; saved = 2; endtask",
         "task automatic t; static int saved = 1; #1; saved = 2; endtask",
     ] {
         let source = format!("module Top; {declaration} initial t(); endmodule");
-        let error = analyze_source(&source, Path::new("timed_static.sv"))
-            .expect_err("static local storage across timed calls is not lowered yet");
-        assert!(
-            error.to_string().contains("static local in a timed task"),
-            "{error}"
-        );
+        let ir = analyze_source(&source, Path::new("timed_static.sv")).unwrap();
+        let module = &ir.modules()[0];
+        let task = &module.subroutines()[0];
+        assert_eq!(task.persistent_locals.len(), 1, "{declaration}");
+        let mut declared = false;
+        for stmt in &task.body {
+            stmt.walk(&mut |stmt| declared |= matches!(stmt, ir::Stmt::Local { .. }));
+        }
+        assert!(!declared, "{declaration}");
     }
 }
 
@@ -6777,7 +6845,11 @@ fn tagged_constant_checks_preserve_guard_width_and_sign() {
         ("1'bz", "8'd4", 8, false, None),
     ] {
         let expr = ConstExpr::Function {
-            callee: Callee::Checked { width, signed },
+            callee: Callee::Checked {
+                width,
+                signed,
+                check: crate::system_functions::AccessCheck::TaggedMember,
+            },
             args: vec![
                 ConstExpr::Literal(guard.into()),
                 ConstExpr::Literal(payload.into()),
@@ -6935,6 +7007,7 @@ fn imported_class_member_types_keep_declaration_dimensions() {
         "Top",
         &HashMap::default(),
         &packages,
+        &mut packages.design(),
     )
     .expect("imported class typedefs must retain their declaration's dimensions");
     let top = ir
@@ -7842,4 +7915,340 @@ fn long_handle_chains_resolve_in_linear_time() {
         "{:?}",
         started.elapsed()
     );
+}
+
+#[test]
+fn container_formals_copy_only_what_container_assignment_represents() {
+    // IEEE 1800-2023 13.5.1: a container formal that is not a reference
+    // holds a copy, which an input receives as a container value and an
+    // output or inout returns to a container its value fits.
+    for formal in [
+        "int q[$]",
+        "output int q[$]",
+        "inout int q[$]",
+        "q_t q",
+        "output q_t q",
+        "int q[]",
+        "int q[string]",
+        "output int q[string]",
+    ] {
+        let source = format!(
+            "module Top; typedef int q_t[$]; int a[$]; int d[]; int m[string]; \
+             function automatic void f({formal}); endfunction \
+             initial f({}); endmodule",
+            if formal.contains("[string]") {
+                "m"
+            } else if formal.contains("[]") {
+                "d"
+            } else {
+                "a"
+            }
+        );
+        analyze_source(&source, Path::new("container_formal.sv"))
+            .unwrap_or_else(|error| panic!("{formal}: {error}"));
+    }
+    for (formal, actual, detail) in [
+        ("output int q[$]", "b", "another queue bound"),
+        ("inout int q[$:3]", "a", "another queue bound"),
+        ("output int q[$]", "x", "compatible container"),
+        ("inout int q[$]", "m", "incompatible dynamic container"),
+        ("int q[$]", "m", "incompatible dynamic container"),
+        ("int q[$]", "make()", "compatible container"),
+    ] {
+        let source = format!(
+            "module Top; typedef int q_t[$]; int a[$]; int b[$:3]; int x; int m[string]; \
+             function automatic q_t make(); return a; endfunction \
+             function automatic void f({formal}); endfunction \
+             initial f({actual}); endmodule"
+        );
+        let error = analyze_source(&source, Path::new("container_formal.sv"))
+            .expect_err("an actual the copy cannot represent must be rejected");
+        assert!(
+            matches!(error, AnalyzerError::Unsupported(_)) && error.to_string().contains(detail),
+            "{formal} <- {actual}: {error}"
+        );
+    }
+    // `new[]` is no expression (IEEE 1800-2023 7.5.1, A.6.2).
+    for call in ["f(new[2])", "f((new[2](d)))", "g()"] {
+        let source = format!(
+            "module Top; int d[]; \
+             function automatic void f(int q[]); endfunction \
+             function automatic void g(int q[] = new[2]); endfunction \
+             initial {call}; endmodule"
+        );
+        let error = analyze_source(&source, Path::new("container_formal.sv"))
+            .expect_err("`new[]` must not be an argument");
+        assert!(matches!(error, AnalyzerError::Parse(_)), "{call}: {error}");
+    }
+}
+
+#[test]
+fn streaming_concatenations_follow_the_lrm_constraints() {
+    // IEEE 1800-2023 11.4.14: a stream is an assignment source or target, a
+    // bit-stream cast operand or a stream operand; it is never wider than a
+    // fixed-size target, an unpack source has enough bits, and a slice size
+    // is positive.
+    for (body, expected) in [
+        (
+            "initial i = {<<{a, b, c}};",
+            "96-bit stream is wider than its 32-bit target",
+        ),
+        ("initial if ({<<{a}}) i = 0;", "shall first be cast"),
+        ("initial i = {<<{a}} + 1;", "shall first be cast"),
+        ("initial i = {<< 0 {a}};", "slice size 0 is not positive"),
+        (
+            "initial {>>{a, b, c}} = 23'b1;",
+            "23-bit source has fewer bits than the 96-bit stream",
+        ),
+        (
+            "initial i = {>>{a with [0]}};",
+            "with applies to a one-dimensional unpacked array",
+        ),
+        (
+            "initial i = {>>{r}};",
+            "real value is not of bit-stream type",
+        ),
+        ("initial i = {>>{x}};", "string"),
+        ("initial {>>{x}} = 32'd0;", "string"),
+    ] {
+        let source = format!(
+            "module Top; typedef struct {{ string s; }} S; S x; int a, b, c, i; real r; {body} endmodule"
+        );
+        let error = analyze_source(&source, Path::new("streams.sv"))
+            .expect_err(body)
+            .to_string();
+        assert!(error.contains(expected), "{body}: {error}");
+    }
+}
+
+#[test]
+fn constant_streams_evaluate_like_the_lrm_examples() {
+    use crate::system_functions::{Stream, StreamArg};
+    let pack = |slice, widths: &[usize], width| Stream {
+        args: widths
+            .iter()
+            .map(|&width| StreamArg::packed(width))
+            .collect(),
+        slice,
+        unpack: false,
+        targets: vec![StreamArg::packed(width)],
+    };
+    // 11.4.14.2
+    assert_eq!(
+        pack(Some(8), &[32], 32).evaluate(&[0x41424344]),
+        Some(0x44434241)
+    );
+    assert_eq!(
+        pack(Some(16), &[32], 32).evaluate(&[0x41424344]),
+        Some(0x43444142)
+    );
+    assert_eq!(
+        pack(Some(4), &[6], 6).evaluate(&[0b11_0101]),
+        Some(0b01_0111)
+    );
+    assert_eq!(pack(None, &[6], 6).evaluate(&[0b11_0101]), Some(0b11_0101));
+    // 11.4.14.3: a narrower stream is aligned to the left.
+    assert_eq!(pack(None, &[4, 4], 12).evaluate(&[1, 2]), Some(0x120));
+    let unpack = Stream {
+        args: vec![StreamArg::packed(8)],
+        slice: Some(3),
+        unpack: true,
+        targets: vec![StreamArg::packed(4), StreamArg::packed(4)],
+    };
+    let unpacked = unpack.evaluate(&[0b1101_0011]).unwrap();
+    assert_eq!(
+        pack(Some(3), &[8], 8).evaluate(&[unpacked]),
+        Some(0b1101_0011)
+    );
+    // An array argument streams its first element, in its least significant
+    // bits, first.
+    let array = Stream {
+        args: vec![StreamArg {
+            width: 16,
+            bits: None,
+            element: Some(8),
+        }],
+        slice: None,
+        unpack: false,
+        targets: vec![StreamArg::packed(16)],
+    };
+    assert_eq!(array.evaluate(&[0x2211]), Some(0x1122));
+}
+
+#[test]
+fn dynamically_sized_streams_follow_the_lrm_constraints() {
+    // IEEE 1800-2023 6.24.3: an associative array is illegal as the
+    // destination of a bit-stream conversion; a stream that fills
+    // dynamically sized variables unpacks in a procedural body.
+    for (body, expected) in [
+        (
+            "initial m = {>>{q}};",
+            "associative array cannot receive a stream",
+        ),
+        (
+            "initial {>>{m}} = 32'd0;",
+            "associative array cannot receive a stream",
+        ),
+        (
+            "initial {>>{q}} <= 32'd0;",
+            "nonblocking assignment to a streaming concatenation",
+        ),
+        ("initial i = {>>{q with [0]}} + 1;", "shall first be cast"),
+        ("initial i = {>>{h}};", "class handle"),
+        ("initial sq = {>>{32'h61626364}};", "container of strings"),
+    ] {
+        let source = format!(
+            "module Top; class C; endclass byte q[$]; int m[int]; int i; C h; string sq[$]; {body} endmodule"
+        );
+        let error = analyze_source(&source, Path::new("dynamic_streams.sv"))
+            .expect_err(body)
+            .to_string();
+        assert!(error.contains(expected), "{body}: {error}");
+    }
+}
+
+#[test]
+fn property_select_reads_require_a_zero_based_range() {
+    // A read replaces the property's template by its value, a `[N-1:0]`
+    // vector; a write goes through a local of the property's type.
+    for (declaration, statement, accepted) in [
+        ("logic [15:0] p", "r = c.p[3:0];", true),
+        ("logic [8:1] p", "c.p[8:5] = 4'h0;", true),
+        ("logic [0:7] p", "c.p[0:1] = 2'b11;", true),
+        ("logic [8:1] p", "r = c.p[8:5];", false),
+        ("logic [0:7] p", "r = c.p[1:3];", false),
+    ] {
+        let source = format!(
+            "module Top; class C; {declaration}; endclass C c; logic [15:0] r; \
+             initial begin c = new; {statement} end endmodule"
+        );
+        let result = analyze_source(&source, Path::new("property_select.sv"));
+        match result {
+            Ok(_) => assert!(accepted, "{declaration}: {statement} was accepted"),
+            Err(error) => assert!(
+                !accepted
+                    && matches!(error, AnalyzerError::Unsupported(_))
+                    && error.to_string().contains("not declared [N-1:0]"),
+                "{declaration}: {statement}: {error}"
+            ),
+        }
+    }
+}
+
+#[test]
+fn wide_associative_indices_reject_index_locators() {
+    // Integral indices of any width key an associative array (IEEE
+    // 1800-2023 7.8.4); a queue of the indices wider than 64 bits is not
+    // built.
+    let source = "module Top; int a[bit [99:0]]; int f[$]; bit [99:0] k; \
+         initial begin a[k] = 1; f = a.find() with (item.index > 3); end endmodule";
+    analyze_source(source, Path::new("wide_keys.sv")).expect("wide indices are accepted");
+    let source = "module Top; int a[bit [99:0]]; bit [99:0] ix[$]; \
+         initial ix = a.find_index() with (item > 0); endmodule";
+    let error = analyze_source(source, Path::new("wide_keys.sv"))
+        .expect_err("the index locator must be rejected");
+    assert!(
+        matches!(error, AnalyzerError::Unsupported(_))
+            && error.to_string().contains("indices wider than 64 bits"),
+        "{error}"
+    );
+}
+
+#[test]
+fn package_scoped_container_receivers_are_not_interface_handles() {
+    // `p::q.push_back(v)` calls a method of package variable `p::q`; a
+    // package holds no interface instance (IEEE 1800-2023 26.2), so the
+    // receiver is not looked up as an interface handle.
+    let source = "package p; int q[$]; class C; function void f(); p::q.push_back(1); endfunction \
+         endclass endpackage module Top; initial begin p::q.push_back(2); p::q.delete(); end endmodule";
+    analyze_source(source, Path::new("package_queues.sv")).expect("the calls bind");
+}
+
+#[test]
+fn container_foreach_rejects_indices_beyond_its_dimensions() {
+    // A foreach over a queue of `int` has one dimension (IEEE 1800-2023
+    // 12.7.3).
+    let source = "module Top; int q[$]; initial foreach (q[i, j]) $display(i); endmodule";
+    let error = analyze_source(source, Path::new("foreach_dims.sv"))
+        .expect_err("the second index must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("beyond the container dimensions"),
+        "{error}"
+    );
+}
+
+#[test]
+fn wide_container_elements_reject_whole_container_operations() {
+    // Elements wider than 64 bits are held in records, which these
+    // operations would compare or combine as handles.
+    for (statement, detail) in [
+        ("q.sort();", "sorting elements wider than 64 bits"),
+        (
+            "r = q.sum();",
+            "array reduction of elements wider than 64 bits",
+        ),
+        ("b = q == p;", "elements wider than 64 bits"),
+        (
+            "$display(\"%p\", q);",
+            "%p of a container of elements wider than 64 bits",
+        ),
+        (
+            "p = q.min();",
+            "elements wider than 64 bits requires a with",
+        ),
+        (
+            "p = q.unique();",
+            "elements wider than 64 bits requires a with",
+        ),
+        (
+            "ix = q.unique_index();",
+            "elements wider than 64 bits requires a with",
+        ),
+        ("b = q[0][99];", "container element wider than 64 bits"),
+        ("r = q[0][7:0];", "container element wider than 64 bits"),
+        ("ix[0] = $bits(q[0][99]);", "query selection"),
+        ("q[0][3] = 1'b1;", "requires a compatible container"),
+    ] {
+        let source = format!(
+            "module Top; logic [99:0] q[$], p[$]; logic [99:0] r; bit b; int ix[$]; \
+             initial begin {statement} end endmodule"
+        );
+        let error = analyze_source(&source, Path::new("wide_elements.sv"))
+            .expect_err("the operation must be rejected");
+        assert!(
+            matches!(error, AnalyzerError::Unsupported(_)) && error.to_string().contains(detail),
+            "{statement}: {error}"
+        );
+    }
+}
+
+#[test]
+fn scalar_logic_gates_keep_unsupported_modifiers_explicit() {
+    for gate in [
+        "and #1 (y,a,b);",
+        "and (strong1,weak0) (y,a,b);",
+        "and g[1:0](y,a,b);",
+        "tran (y,a);",
+    ] {
+        let source = format!("module Top(input logic a,b,output wire y); {gate} endmodule");
+        let error = analyze_source(&source, Path::new("gates.sv")).unwrap_err();
+        assert!(
+            error.to_string().contains("gate primitive instantiation"),
+            "{error}"
+        );
+    }
+    for source in [
+        "module Top(input logic [1:0] a,b,output wire y); and (y,a,b); endmodule",
+        "module Top(input a,b,output wire [1:0] y); and ({y},a,b); endmodule",
+        "module Top(input a,b,output wire [1:0] y); and ({y[0],y[1]},a,b); endmodule",
+    ] {
+        assert!(
+            analyze_source(source, Path::new("wide_gate.sv"))
+                .unwrap_err()
+                .to_string()
+                .contains("non-scalar gate terminal")
+        );
+    }
 }

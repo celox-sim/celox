@@ -259,6 +259,7 @@ impl StateSchema {
             objects,
             schedule: None,
             strings,
+            next_object: heap.event_watermark().map(u64::from),
         })
     }
 
@@ -318,6 +319,12 @@ impl StateSchema {
         }
         if !mismatch.is_empty() {
             return Err(mismatch);
+        }
+        // Later named events must not get the handles of loaded ones.
+        if let Some(next) = file.next_object {
+            backend.heap_mut().reserve_objects(
+                celox_heap::Handle::try_from(next).unwrap_or(celox_heap::Handle::MAX),
+            );
         }
         for (named, object) in seeds.into_iter().chain(writes) {
             let signal = named.signal;
@@ -549,6 +556,23 @@ impl<B: SimBackend> Simulator<B> {
         };
         let statuses = self.process_statuses();
         let state = &parts.process_state;
+        // Named events stay out of state files: refuse a save that a load
+        // could not resume, with a process waiting for an event, a pending
+        // `->>`, or a trigger that `triggered` still sees.
+        if !state.nba_events.is_empty()
+            || state
+                .events
+                .values()
+                .any(|event| event.triggered == Some(parts.time))
+            || state.activations.iter().any(|activation| {
+                let control = &activation.control;
+                activation.live
+                    && (!control.events.is_empty()
+                        || (control.level_wait && !control.observed_events.is_empty()))
+            })
+        {
+            return Err(StateError::Objects("named events".into()));
+        }
         let process = |index: usize| {
             if state.activations.is_empty() {
                 ProcessRef::Kernel(path(statuses[index]))
@@ -640,7 +664,34 @@ impl<B: SimBackend> Simulator<B> {
                 })
                 .collect(),
             ready: state.ready.iter().map(|&index| process(index)).collect(),
+            deferred_ready: state
+                .deferred_ready
+                .iter()
+                .map(|&index| process(index))
+                .collect(),
             inactive: state.inactive.iter().map(|&index| process(index)).collect(),
+            delayed_nba: state
+                .delayed_nba
+                .iter()
+                .flat_map(|(&time, updates)| {
+                    updates
+                        .iter()
+                        .map(|(program, update)| {
+                            (
+                                time,
+                                *program,
+                                NbaRecord {
+                                    target: path(update.target),
+                                    lsb: update.lsb as u64,
+                                    width: update.width as u64,
+                                    value: update.value.0.to_bytes_le(),
+                                    mask: update.value.1.to_bytes_le(),
+                                },
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect(),
             nba_queue: state
                 .nba_queue
                 .iter()
@@ -776,6 +827,7 @@ impl<B: SimBackend> Simulator<B> {
             .filter_map(|(name, time)| Some((process(name)?, *time)))
             .collect();
         let ready = record.ready.iter().filter_map(process).collect();
+        let deferred_ready = record.deferred_ready.iter().filter_map(process).collect();
         let inactive = record.inactive.iter().filter_map(process).collect();
         let reactive = record.reactive.iter().filter_map(process).collect();
         let observed = record.observed.iter().filter_map(process).collect();
@@ -903,7 +955,12 @@ impl<B: SimBackend> Simulator<B> {
             );
         }
         let mut nba_queue = Vec::new();
-        for update in record.nba_queue.iter().chain(&record.re_nba_queue) {
+        for update in record
+            .nba_queue
+            .iter()
+            .chain(&record.re_nba_queue)
+            .chain(record.delayed_nba.iter().map(|(_, _, update)| update))
+        {
             match signals.get(&update.target) {
                 // A queued assignment covers a nonempty range of its target.
                 Some(&target)
@@ -930,7 +987,18 @@ impl<B: SimBackend> Simulator<B> {
                 None => unknown.push(update.target.clone()),
             }
         }
-        let re_nba_queue = nba_queue.split_off(record.nba_queue.len().min(nba_queue.len()));
+        let mut re_nba_queue = nba_queue.split_off(record.nba_queue.len().min(nba_queue.len()));
+        let delayed = re_nba_queue.split_off(record.re_nba_queue.len().min(re_nba_queue.len()));
+        let mut delayed_nba = BTreeMap::<_, Vec<_>>::new();
+        for ((time, program, _), update) in record.delayed_nba.iter().zip(delayed) {
+            if *time <= file.schedule.as_ref().map_or(0, |schedule| schedule.time) {
+                unknown.push("nonblocking assignment is not in the future".into());
+            }
+            delayed_nba
+                .entry(*time)
+                .or_default()
+                .push((*program, update));
+        }
         let counted = self.counted_signals();
         let mut domain_counters = vec![[0; 3]; counted.len()];
         for (name, counters) in &record.domain_counters {
@@ -1001,13 +1069,23 @@ impl<B: SimBackend> Simulator<B> {
                 cells,
                 waiters,
                 ready,
+                deferred_ready,
                 inactive,
                 nba_queue,
+                delayed_nba,
                 reactive,
                 observed,
                 re_inactive,
                 re_nba_queue,
                 domain_counters,
+                // Like process control, named events stay out of state files.
+                events: Default::default(),
+                nba_events: Vec::new(),
+                event_time: 0,
+                semaphores: Default::default(),
+                semaphore_limit: 0,
+                mailboxes: Default::default(),
+                mailbox_limit: 0,
             },
         ))
     }

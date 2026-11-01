@@ -26,6 +26,8 @@ pub(in crate::ast) struct UnpackedStruct {
 pub(in crate::ast) struct Member {
     pub(in crate::ast) name: String,
     pub(in crate::ast) r#type: Type,
+    /// A constant initial value captured in the declaration scope (7.2.2).
+    pub(in crate::ast) default: Option<Expr>,
     /// Bits of the member in a flat value.
     pub(in crate::ast) width: usize,
 }
@@ -36,6 +38,7 @@ pub(in crate::ast) struct Leaf {
     /// Member names from the structure down to the leaf.
     pub(in crate::ast) path: Vec<String>,
     pub(in crate::ast) r#type: Type,
+    pub(in crate::ast) default: Option<Expr>,
     /// Least significant bit in a flat value.
     pub(in crate::ast) offset: usize,
     pub(in crate::ast) width: usize,
@@ -59,6 +62,11 @@ pub(in crate::ast) fn leaf_name(base: &str, path: &[String]) -> String {
 }
 
 impl UnpackedStruct {
+    /// The nominal identity of the type: its declaration.
+    pub(in crate::ast) fn identity(&self) -> &str {
+        &self.owner
+    }
+
     pub(in crate::ast) fn same_type(&self, other: &Self) -> bool {
         self.owner == other.owner
     }
@@ -103,6 +111,7 @@ impl UnpackedStruct {
             leaves.push(Leaf {
                 path,
                 r#type: member.r#type.clone(),
+                default: member.default.clone(),
                 offset,
                 width: member.width,
             });
@@ -111,34 +120,107 @@ impl UnpackedStruct {
     }
 }
 
+/// Capture an integral member's constant initializer at the declared width.
+/// A later use of a typedef must not resolve its names in the use-site scope.
+pub(in crate::ast) fn member_default(
+    root: ExprId,
+    ty: &Type,
+    native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<Option<Expr>> {
+    if ty.is_enum
+        || ty.unpacked_struct().is_some()
+        || ty.class().is_some()
+        || ty.chandle
+        || !matches!(
+            ty.kind(),
+            TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
+        )
+    {
+        return Err(unsupported(
+            "unsupported unpacked structure member initial value type",
+        ));
+    }
+    let shape = procedural::dimensions_from_type(ty);
+    let value = expression_binding::bind_value(root, native, tree, session, dims, Some(&shape))?;
+    let value = constants::substitute_expr_constants_with_parameter_literals(
+        tree,
+        session,
+        value,
+        &dims.const_env,
+        &dims.parameter_values,
+    );
+    let shape = casts::expr_type_from_type(&tree.functions, ty, &dims.const_env)
+        .ok_or_else(|| unsupported("unpacked structure member initial value type"))?;
+    let types = parameter_types_from_const_env(&dims.const_env)
+        .into_iter()
+        .map(|(name, ty)| (name, (ty.width, ty.signed)))
+        .collect();
+    let Some(constant) = constant_folding::constant_with_folded_selections(
+        tree,
+        session,
+        &value,
+        &dims.const_env,
+        &types,
+    ) else {
+        return Ok(None);
+    };
+    let Some(literal) = typecheck::eval_const_assignment_in_env(
+        &constant.into(),
+        &*dims.const_env,
+        &|name| {
+            dimensions::parameter_type_from_const_env(&dims.const_env, name)
+                .map(|ty| (ty.width, ty.signed))
+        },
+        shape.width,
+    ) else {
+        return Ok(None);
+    };
+    Ok(Some(Expr::Literal(resize_integral_literal_for_cast(
+        literal,
+        shape.width,
+        shape.signed,
+    ))))
+}
+
 /// The type of an unpacked structure with `fields`, or `None` when a member
 /// type has no supported unpacked-structure representation.
 pub(in crate::ast) fn native_type(
-    state: &AnalysisState,
+    functions: &const_functions::ConstantFunctions,
     owner: Arc<str>,
-    fields: Vec<(String, Type)>,
+    fields: Vec<(String, Type, Option<Expr>)>,
     env: &HashMap<String, i128>,
 ) -> Option<Type> {
     let members = fields
         .into_iter()
-        .map(|(name, ty)| {
+        .map(|(name, ty, default)| {
+            // A chandle is no packed array element (IEEE 1800-2023 6.14).
             if !ty.unpacked_ranges.is_empty()
                 || ty.container.is_some()
-                || matches!(ty.kind, TypeKind::Real | TypeKind::Shortreal)
+                || (ty.chandle && ty.packed_ranges.len() > 1)
+                // Each event member would need its own synchronization
+                // object (IEEE 1800-2023 15.5).
+                || matches!(
+                    ty.kind,
+                    TypeKind::Real | TypeKind::Shortreal | TypeKind::Event
+                )
             {
                 return None;
             }
             let ty = match ty.unpacked_struct() {
                 Some(_) => ty,
-                None => packed_structs::capture_member_type(state, ty, env)?,
+                None => packed_structs::capture_member_type(functions, ty, env)?,
             };
             let width = match ty.unpacked_struct() {
                 Some(inner) => inner.width(),
-                None => casts::expr_type_from_type(state, &ty, env)?.width,
+                None => casts::expr_type_from_type(functions, &ty, env)?.width,
             };
             Some(Member {
                 name,
                 r#type: ty,
+                default,
                 width,
             })
         })
@@ -235,9 +317,13 @@ pub(in crate::ast) fn native_struct(
     id: ExprId,
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Option<Arc<UnpackedStruct>>> {
     let id = expression_binding::ungroup(id, native);
+    if let Some((container, _)) = locators::record_iterator(id, native, dims) {
+        return Ok(container.element.unpacked_struct().cloned());
+    }
     Ok(match &native.expression(id).kind {
         ExprKind::Name(_) | ExprKind::Member { .. } => match member_path(id, native)
             .map(|mut parts| {
@@ -248,20 +334,27 @@ pub(in crate::ast) fn native_struct(
             .and_then(|parts| dims.get(&parts[0])?.unpacked_struct.clone())
         {
             Some(aggregate) => Some(aggregate),
-            None if let Some((ty, _)) = containers::element_member(id, native, tree, dims)? => {
+            None if let Some((ty, _)) =
+                containers::element_member(id, native, tree, session, dims)? =>
+            {
                 ty.unpacked_struct().cloned()
             }
             // A class property of unpacked structure type.
-            None => expression_binding::object_aggregate_property(tree, id, native, dims)?
-                .and_then(|(aggregate, _, _)| aggregate.r#type.unpacked_struct().cloned()),
+            None if let Some((aggregate, _, _)) =
+                expression_binding::object_aggregate_property(tree, session, id, native, dims)? =>
+            {
+                aggregate.r#type.unpacked_struct().cloned()
+            }
+            // An element popped by `q.pop_front` without parentheses.
+            None => containers::native_struct_element(id, native, tree, session, dims)?,
         },
         ExprKind::Conditional {
             then_expression,
             else_expression,
             ..
         } => {
-            let then_type = native_struct(*then_expression, native, tree, dims)?;
-            let else_type = native_struct(*else_expression, native, tree, dims)?;
+            let then_type = native_struct(*then_expression, native, tree, session, dims)?;
+            let else_type = native_struct(*else_expression, native, tree, session, dims)?;
             then_type.filter(|then_type| {
                 else_type
                     .as_ref()
@@ -274,15 +367,21 @@ pub(in crate::ast) fn native_struct(
         } if std::ptr::eq(native, tree.declarations()) => {
             patterns::typed_shape(id, tree, dims)?.and_then(|shape| shape.unpacked_struct)
         }
-        _ if containers::native_struct_element(id, native, tree, dims)?.is_some() => {
-            containers::native_struct_element(id, native, tree, dims)?
+        _ if containers::native_struct_element(id, native, tree, session, dims)?.is_some() => {
+            containers::native_struct_element(id, native, tree, session, dims)?
         }
         // A method of the scope class hides a module function of its name,
         // as call binding resolves it.
         ExprKind::Call { expression, .. } => {
-            match expression_binding::object_method_result(tree, *expression, native, dims)? {
+            match expression_binding::object_method_result(
+                tree,
+                session,
+                *expression,
+                native,
+                dims,
+            )? {
                 Some(ty) => ty.unpacked_struct().cloned(),
-                None => expression_binding::callable_name(&tree.state, *expression, native)
+                None => expression_binding::callable_name(tree, *expression, native)
                     .and_then(|name| dims.functions.get(&name))
                     .and_then(|function| function.return_type.as_ref())
                     .and_then(|ty| ty.unpacked_struct().cloned()),
@@ -339,13 +438,14 @@ pub(in crate::ast) fn check_assignment(
     name: &str,
     right: ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<()> {
     let target = dims
         .get(name)
         .and_then(|shape| shape.unpacked_struct.clone())
         .ok_or_else(|| unsupported("unpacked structure target"))?;
-    check_value(&target, right, tree.declarations(), tree, dims)
+    check_value(&target, right, tree.declarations(), tree, session, dims)
 }
 
 /// Check that `value` is an assignment pattern or a value of type `target`.
@@ -354,6 +454,7 @@ pub(in crate::ast) fn check_value(
     value: ExprId,
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<()> {
     let value = expression_binding::ungroup(value, native);
@@ -371,10 +472,10 @@ pub(in crate::ast) fn check_value(
         ..
     } = &native.expression(value).kind
     {
-        check_value(target, *then_expression, native, tree, dims)?;
-        return check_value(target, *else_expression, native, tree, dims);
+        check_value(target, *then_expression, native, tree, session, dims)?;
+        return check_value(target, *else_expression, native, tree, session, dims);
     }
-    match native_struct(value, native, tree, dims)? {
+    match native_struct(value, native, tree, session, dims)? {
         Some(actual) if actual.same_type(target) => Ok(()),
         _ => Err(unsupported(
             "assignment to an unpacked structure of a value that is not of its type",
@@ -389,6 +490,7 @@ pub(in crate::ast) fn check_operands(
     id: ExprId,
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<()> {
     let operands: Vec<ExprId> = match &native.expression(id).kind {
@@ -399,8 +501,8 @@ pub(in crate::ast) fn check_operands(
             right,
         } => {
             if matches!(operator.as_str(), "==" | "!=" | "===" | "!==") {
-                let left_type = native_struct(*left, native, tree, dims)?;
-                let right_type = native_struct(*right, native, tree, dims)?;
+                let left_type = native_struct(*left, native, tree, session, dims)?;
+                let right_type = native_struct(*right, native, tree, session, dims)?;
                 return match (left_type, right_type) {
                     (None, None) => Ok(()),
                     (Some(left), Some(right)) if left.same_type(&right) => Ok(()),
@@ -418,7 +520,7 @@ pub(in crate::ast) fn check_operands(
         _ => return Ok(()),
     };
     for operand in operands {
-        if native_struct(operand, native, tree, dims)?.is_some() {
+        if native_struct(operand, native, tree, session, dims)?.is_some() {
             return Err(unsupported(
                 "operator, select or cast applied to an unpacked structure",
             ));
@@ -460,10 +562,15 @@ pub(in crate::ast) fn leaf_parts(aggregate: &UnpackedStruct, value: &Expr) -> Op
 /// handle member and members that are all 2-state or all 4-state, so the
 /// container's default element is the structure's default.
 pub(in crate::ast) fn record(
-    state: &AnalysisState,
+    functions: &const_functions::ConstantFunctions,
     aggregate: &UnpackedStruct,
     env: &HashMap<String, i128>,
 ) -> Converted<Option<crate::system_functions::Record>> {
+    if aggregate.leaves().iter().any(|leaf| leaf.default.is_some()) {
+        return Err(unsupported(
+            "dynamic container of an unpacked structure with member initial values",
+        ));
+    }
     let leaves = aggregate.leaves();
     let two_state = |leaf: &Leaf| {
         matches!(
@@ -481,7 +588,7 @@ pub(in crate::ast) fn record(
     let mut size = 0;
     let mut fields = Vec::new();
     for leaf in &leaves {
-        let mut field = classes::field(state, &leaf.r#type, env, size)?;
+        let mut field = classes::field(functions, &leaf.r#type, env, size)?;
         field.nullable = true;
         size = field.offset + field.storage();
         fields.push(field);

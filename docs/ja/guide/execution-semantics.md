@@ -115,24 +115,37 @@ SystemVerilog のコードで、その遅延はテストベンチの時間です
 
 ### `$tb::clock_gen`
 
-`inst clk: $tb::clock_gen #(period: P);` は、待つプロセスがあるかどうかに
-かかわらず時刻 0 から動くクロック生成器です。`P` の既定値は 2 で、最小値も
-2 です。`H = ceil(P / 2)`、`L = floor(P / 2)` として:
+`inst clk: $tb::clock_gen #(period: P);` は、イネーブル付きの発振器です。
+いずれかのプロセスが `clk.next` か、このクロックのリセット生成器の
+`rst.assert` で待っている間だけ動きます。`P` の既定値は 2 で、最小値も 2
+です。`H = ceil(P / 2)`、`L = floor(P / 2)` として:
 
 ```systemverilog
 bit clk = 1'b0;
+int unsigned clk_waiters = 0; // clk.next / clk の rst.assert 中のプロセス数
+
 initial forever begin
-  clk <= 1'b1; #H;
-  clk <= 1'b0; #L;
+  wait (clk_waiters != 0);
+  clk <= 1'b1;
+  #H clk <= 1'b0;
+  #L;
 end
 ```
+
+- 生成器はイネーブルを再び見る前に必ず 1 周期を終えるので、立ち上がり
+  エッジは、プロセスが待ち始めた時刻と、直前の立ち上がりエッジに `P` を
+  足した時刻の遅いほうになります。続けて呼んだ `next` は途切れず、しばらく
+  待たれなかったクロックは、次にプロセスが待ち始めた瞬間に再開します。
+- 誰も待っていないクロックにはエッジがなく、そのドメインは実行されません。
 
 ### `clk.next(n)`
 
 ```systemverilog
 task automatic clk_next(int unsigned n);
   if (n != 0) begin
+    clk_waiters++;
     repeat (n) @(posedge clk);
+    clk_waiters--;
     #P;
   end
 endtask
@@ -146,9 +159,12 @@ endtask
 - クロックはノンブロッキング代入で立ち上がり、同じ時刻に再開した
   プロセスの実行後に立ち上がります。そのため、2 つの `next` の間で
   プロセスが書き込んだ値は、競合なく次の立ち上がりエッジでサンプルされます。
-- 複数の initial プロセスや周期の異なる複数のクロックに、追加の規則は
-  ありません。これらは並行する SystemVerilog のプロセスです。誰も待って
-  いないクロックも動き続け、そのドメインを駆動します。
+  周期の終わりに再開したプロセスがすぐに `next` を呼べばクロックは
+  止まりません。プロセスと生成器のどちらが先に動いても、立ち上がりは
+  同じスロットです。
+- 同じクロックを待つプロセスは同じエッジを数えます。同じ時刻に立ち上がる
+  周期の異なるクロックは 1 つのノンブロッキング代入領域で更新されるので、
+  それらのドメインはエッジ前の値を読みます。
 
 ### `$tb::reset_gen`
 
@@ -167,7 +183,9 @@ bit rst = I;
 task automatic rst_assert(int unsigned n);
   if (n == 0) n = 1;
   rst = A;
+  clk_waiters++;
   repeat (n) @(posedge clk);
+  clk_waiters--;
   #P;
   rst = I;
 endtask

@@ -1,10 +1,8 @@
 use crate::HashMap;
 use num_bigint::BigUint;
 use std::{
-    cell::RefCell,
     hash::Hash,
     ops::{Deref, DerefMut},
-    rc::Rc,
 };
 use veryl_analyzer::ir::VarId;
 
@@ -12,7 +10,7 @@ use veryl_analyzer::ir::VarId;
 /// Only the node arena crosses the frontend boundary.
 pub(crate) struct SLTNodeArena<A: Hash + Eq + Clone> {
     nodes: celox_slt::SLTNodeArena<A>,
-    pub(super) loop_ranges: Rc<RefCell<HashMap<VarId, BigUint>>>,
+    pub(super) loop_ranges: HashMap<VarId, BigUint>,
     pub(crate) file_dependencies: crate::file_dependencies::FileDependencyCollector,
     pub(crate) reset_type: veryl_metadata::ResetType,
 }
@@ -29,7 +27,7 @@ impl<A: Hash + Eq + Clone> SLTNodeArena<A> {
     pub(crate) fn with_context_from<B: Hash + Eq + Clone>(source: &SLTNodeArena<B>) -> Self {
         Self {
             nodes: Default::default(),
-            loop_ranges: Rc::new(RefCell::new(source.loop_ranges.borrow().clone())),
+            loop_ranges: source.loop_ranges.clone(),
             file_dependencies: source.file_dependencies.clone(),
             reset_type: source.reset_type,
         }
@@ -52,7 +50,7 @@ impl<A: Hash + Eq + Clone> Clone for SLTNodeArena<A> {
     fn clone(&self) -> Self {
         Self {
             nodes: self.nodes.clone(),
-            loop_ranges: Rc::new(RefCell::new(self.loop_ranges.borrow().clone())),
+            loop_ranges: self.loop_ranges.clone(),
             file_dependencies: self.file_dependencies.clone(),
             reset_type: self.reset_type,
         }
@@ -77,20 +75,21 @@ mod tests {
 
     #[test]
     fn loop_bounds_are_arena_owned_and_restore_after_unwind() {
-        let arena = SLTNodeArena::<VarId>::new();
+        let mut arena = SLTNodeArena::<VarId>::new();
         let independent = SLTNodeArena::<VarId>::new();
         let variable = VarId::default();
-        let _outer = LoopRangeScope::with_max(&arena, variable, 7);
-        assert!(independent.loop_ranges.borrow().is_empty());
+        let mut outer = LoopRangeScope::with_max(&mut arena, variable, 7);
+        let arena = &mut *outer;
+        assert!(independent.loop_ranges.is_empty());
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _inner = LoopRangeScope::with_max(&arena, variable, 3);
-            assert_eq!(arena.loop_ranges.borrow()[&variable], BigUint::from(3u8));
+            let inner = LoopRangeScope::with_max(arena, variable, 3);
+            assert_eq!(inner.loop_ranges[&variable], BigUint::from(3u8));
             panic!("failed lowering");
         }));
         assert!(result.is_err());
-        assert_eq!(arena.loop_ranges.borrow()[&variable], BigUint::from(7u8));
-        let fork = SLTNodeArena::<VarId>::with_context_from(&arena);
-        let _fork = LoopRangeScope::with_max(&fork, variable, 1);
-        assert_eq!(arena.loop_ranges.borrow()[&variable], BigUint::from(7u8));
+        assert_eq!(arena.loop_ranges[&variable], BigUint::from(7u8));
+        let mut fork = SLTNodeArena::<VarId>::with_context_from(arena);
+        let _fork = LoopRangeScope::with_max(&mut fork, variable, 1);
+        assert_eq!(arena.loop_ranges[&variable], BigUint::from(7u8));
     }
 }

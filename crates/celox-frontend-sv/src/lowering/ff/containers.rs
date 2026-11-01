@@ -14,9 +14,14 @@ impl Ff<'_, '_> {
                 string,
                 object,
                 ..
-            } => (2, 0, signed, string, object),
+            } => (2, 0, signed, string || wide_key(layout).is_some(), object),
         };
-        heap::parameter(
+        let wide = if wide_key(layout).is_some() {
+            heap::WIDE_KEY
+        } else {
+            0
+        };
+        wide | heap::parameter(
             layout.width,
             layout.two_state || !self.m.four_state,
             match layout.handle {
@@ -29,6 +34,60 @@ impl Ff<'_, '_> {
             signed_key,
             string_key,
             object_key,
+        )
+    }
+
+    /// Clamp arbitrary integral bounds before the signed 64-bit heap ABI.
+    /// Negative bounds need only retain their sign; positive overflow is past
+    /// every possible queue element. Unknown bounds make the range empty.
+    fn queue_slice_bound(
+        &mut self,
+        expr: &sv::ir::Expr,
+        lower: bool,
+    ) -> Result<RegisterId, sv::AnalyzerError> {
+        use sv::ir::{BinaryOp as B, Expr as E, UnaryOp as U};
+        let value = self.heap_operand(expr, None, None)?;
+        let literal = |text: &str| E::Literal(text.into());
+        let binary = |left: E, op, right: E| E::Binary {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        };
+        let mux = |condition: E, then_expr: E, else_expr: E| E::Mux {
+            condition: Box::new(condition),
+            then_expr: Box::new(then_expr),
+            else_expr: Box::new(else_expr),
+        };
+        let max = literal("64'sh7fffffffffffffff");
+        let negative = literal("64'shffffffffffffffff");
+        let mut normalized = mux(
+            binary(value.clone(), B::Gt, max.clone()),
+            max.clone(),
+            E::Resize {
+                expr: Box::new(value.clone()),
+                width: 64,
+                signed: self.expr_signed(&value),
+            },
+        );
+        if self.expr_signed(&value) {
+            normalized = mux(
+                binary(value.clone(), B::Lt, literal("64'sd0")),
+                negative.clone(),
+                normalized,
+            );
+        }
+        let unknown = binary(
+            E::Unary {
+                op: U::RedXor,
+                expr: Box::new(value),
+            },
+            B::EqCase,
+            literal("1'bx"),
+        );
+        self.integer_of_width(
+            &mux(unknown, if lower { max } else { negative }, normalized),
+            64,
+            true,
         )
     }
 
@@ -57,7 +116,10 @@ impl Ff<'_, '_> {
             .get(1)
             .and_then(|key| self.m.comparison_width(key, key));
         if op.reduction().is_none() && args.iter().any(|arg| self.m.calls(arg)) {
-            let value_receiver = matches!(op, New | Literal | Convert | Equal | CaseEqual);
+            let value_receiver = matches!(
+                op,
+                New | Literal | Convert | Concat | Slice | Equal | CaseEqual
+            );
             if !value_receiver {
                 // Preserve the receiver's location, not an old immutable copy
                 // of its contents: arguments may mutate this same container.
@@ -105,6 +167,8 @@ impl Ff<'_, '_> {
                     )
                 } else if op == New && index == 0 {
                     (Some((64, true)), None)
+                } else if op == Slice && index != 0 {
+                    (None, None)
                 } else if value_receiver {
                     (Some((32, false)), Some(celox_design::ValueKind::ObjRef))
                 } else {
@@ -126,6 +190,7 @@ impl Ff<'_, '_> {
             ContainerKind::Associative { signed, string, .. } => (signed, string),
             ContainerKind::Dynamic | ContainerKind::Queue { .. } => (false, false),
         };
+        let wide = wide_key(layout);
         let parameter = self.container_parameter(layout);
         let code = |opcode| encode(opcode, parameter);
         if op.reduction().is_some() {
@@ -133,12 +198,14 @@ impl Ff<'_, '_> {
         }
         // Evaluate the owning object once, before argument side effects. Read
         // its current container after the arguments, so a nested pop is kept.
-        let property = if !matches!(op, New | Literal | Convert | Equal | CaseEqual)
-            && let sv::ir::Expr::Call {
-                callee: sv::ir::Callee::Object(object),
-                args,
-                ..
-            } = &args[0]
+        let property = if !matches!(
+            op,
+            New | Literal | Convert | Concat | Slice | Equal | CaseEqual
+        ) && let sv::ir::Expr::Call {
+            callee: sv::ir::Callee::Object(object),
+            args,
+            ..
+        } = &args[0]
             && let sv::ir::ObjectOp::Load(field) = **object
         {
             let owner = args[0]
@@ -153,7 +220,7 @@ impl Ff<'_, '_> {
         let element_result = matches!(op, Get | PopFront | PopBack);
         let four_state = (element_result || op == Equal) && !layout.two_state && self.m.four_state;
         let (temp, name) = self.m.temp("container", width, signed, four_state);
-        if matches!(op, New | Literal | Convert)
+        if matches!(op, New | Literal | Convert | Concat | Slice)
             || element_result && layout.handle == Some(HandleProperty::Object)
         {
             self.m.variables.get_mut(&temp).unwrap().value_kind = celox_design::ValueKind::ObjRef;
@@ -188,6 +255,17 @@ impl Ff<'_, '_> {
             Convert if matches!(layout.kind, ContainerKind::Associative { .. }) => {
                 self.handle(&args[0])?
             }
+            Slice => {
+                let source = self.handle(&args[0])?;
+                let lo = self.queue_slice_bound(&args[1], true)?;
+                let hi = self.queue_slice_bound(&args[2], false)?;
+                self.heap_call(code(heap::SLICE), &[source, lo, hi])
+            }
+            Concat => {
+                let first = self.handle(&args[0])?;
+                let second = self.handle(&args[1])?;
+                self.heap_call(code(heap::CONCAT), &[first, second])
+            }
             Convert => {
                 let source = self.handle(&args[0])?;
                 let size = self.heap_call(code(heap::LEN), &[source]);
@@ -210,6 +288,11 @@ impl Ff<'_, '_> {
                     Size | Clear | PushFront | PopFront | PushBack | PopBack | Reverse => zero,
                     Sort | Rsort => self.constant64(u64::from(layout.signed)),
                     _ if string_key => self.handle(&args[1])?,
+                    _ if let Some((width, signed)) = wide => {
+                        let (key, mask) = self.wide_key(&args[1], width, signed)?;
+                        index_mask = mask;
+                        key
+                    }
                     _ => {
                         let (width, signed) = match layout.kind {
                             ContainerKind::Associative {
@@ -301,9 +384,12 @@ impl Ff<'_, '_> {
                     };
                     let target = args[1].clone();
                     self.when(exists, |this| {
-                        let key = this.heap_call(code(traversal), &[handle, index]);
+                        let mut key = this.heap_call(code(traversal), &[handle, index]);
                         let key_width = if string_key {
                             celox_design::HANDLE_WIDTH
+                        } else if let Some((width, signed)) = wide {
+                            key = this.wide_key_value(key, width, signed);
+                            width
                         } else {
                             64
                         };
@@ -617,6 +703,97 @@ impl Ff<'_, '_> {
         Ok(sv::ir::Expr::Ident(name))
     }
 
+    /// The [`heap::WIDE_KEY`] key of index `expr` of a `width`-bit index
+    /// type, and whether it has unknown bits, which make it invalid (IEEE
+    /// 1800-2023 7.8.4).
+    fn wide_key(
+        &mut self,
+        expr: &sv::ir::Expr,
+        width: usize,
+        signed: bool,
+    ) -> Result<(RegisterId, RegisterId), sv::AnalyzerError> {
+        let expr = self.hoist(expr)?;
+        let reg = self.eval(&expr, Some((width, signed)))?;
+        let logic = matches!(self.b.register(&reg), celox_sir::RegisterType::Logic { .. });
+        let index = if logic {
+            self.b.alloc_logic(width)
+        } else {
+            self.b.alloc_bit(width, signed)
+        };
+        self.b.emit(SIRInstruction::Slice(index, reg, 0, width));
+        let (bits, unknown) = if logic {
+            let bits = self.b.alloc_bit(width, signed);
+            self.b
+                .emit(SIRInstruction::Unary(bits, UnaryOp::ToTwoState, index));
+            let known = self.b.alloc_bit(1, false);
+            self.b
+                .emit(SIRInstruction::Binary(known, index, BinaryOp::EqCase, bits));
+            let unknown = self.b.alloc_bit(1, false);
+            self.b
+                .emit(SIRInstruction::Unary(unknown, UnaryOp::LogicNot, known));
+            let wide = self.b.alloc_bit(64, false);
+            self.b
+                .emit(SIRInstruction::Unary(wide, UnaryOp::Ident, unknown));
+            (bits, wide)
+        } else {
+            (index, self.constant64(0))
+        };
+        let mut buffer = self.heap_call(celox_heap::ops::NEW, &[]);
+        for (low, high, bytes) in wide_key_chunks(width) {
+            let part = self.b.alloc_bit(high - low, signed && high == width);
+            self.b
+                .emit(SIRInstruction::Slice(part, bits, low, high - low));
+            let mut word = self.b.alloc_bit(64, false);
+            self.b
+                .emit(SIRInstruction::Unary(word, UnaryOp::Ident, part));
+            if signed && high == width {
+                if high - low < 64 {
+                    let shift = self.constant64((64 - (high - low)) as u64);
+                    let shifted = self.b.alloc_bit(64, false);
+                    self.b
+                        .emit(SIRInstruction::Binary(shifted, word, BinaryOp::Shl, shift));
+                    word = self.b.alloc_bit(64, false);
+                    self.b
+                        .emit(SIRInstruction::Binary(word, shifted, BinaryOp::Sar, shift));
+                }
+                let top = self.constant64(1 << (bytes * 8 - 1));
+                let flipped = self.b.alloc_bit(64, false);
+                self.b
+                    .emit(SIRInstruction::Binary(flipped, word, BinaryOp::Xor, top));
+                word = flipped;
+            }
+            let count = self.constant64(bytes as u64);
+            buffer = self.heap_call(celox_heap::ops::APPEND_BYTES, &[buffer, word, count]);
+        }
+        Ok((self.heap_call(celox_heap::ops::KEY, &[buffer]), unknown))
+    }
+
+    /// The `width`-bit index that [`heap::WIDE_KEY`] key `key` holds.
+    fn wide_key_value(&mut self, key: RegisterId, width: usize, signed: bool) -> RegisterId {
+        let mut offset = 0;
+        let mut parts = Vec::new();
+        for (low, high, bytes) in wide_key_chunks(width) {
+            let start = self.constant64(offset);
+            let count = self.constant64(bytes as u64);
+            offset += bytes as u64;
+            let mut word = self.heap_call(celox_heap::ops::KEY_BYTES, &[key, start, count]);
+            if signed && high == width {
+                let top = self.constant64(1 << (bytes * 8 - 1));
+                let unflipped = self.b.alloc_bit(64, false);
+                self.b
+                    .emit(SIRInstruction::Binary(unflipped, word, BinaryOp::Xor, top));
+                word = unflipped;
+            }
+            let part = self.b.alloc_bit(high - low, false);
+            self.b
+                .emit(SIRInstruction::Slice(part, word, 0, high - low));
+            parts.push(part);
+        }
+        let value = self.b.alloc_bit(width, signed);
+        self.b.emit(SIRInstruction::Concat(value, parts));
+        value
+    }
+
     fn container_element(
         &mut self,
         expr: &sv::ir::Expr,
@@ -730,4 +907,36 @@ impl Ff<'_, '_> {
         self.b.emit(SIRInstruction::Concat(result, bits));
         result
     }
+}
+
+/// The index type of an associative array of `layout` that is integral and
+/// wider than 64 bits: its width and signedness.
+fn wide_key(layout: ContainerLayout) -> Option<(usize, bool)> {
+    match layout.kind {
+        ContainerKind::Associative {
+            key_width,
+            signed,
+            string: false,
+            object: false,
+        } if key_width > 64 => Some((key_width as usize, signed)),
+        _ => None,
+    }
+}
+
+/// The parts of a `width`-bit index in the bytes of its [`heap::WIDE_KEY`]
+/// key, most significant first: the bits `low..high` of the index that each
+/// part holds in its `bytes` bytes. The first part holds the bytes that the
+/// index does not fill, so it extends the index to whole bytes.
+fn wide_key_chunks(width: usize) -> Vec<(usize, usize, usize)> {
+    let bytes = width.div_ceil(8);
+    let mut chunks = Vec::new();
+    let mut high = bytes * 8;
+    let mut count = bytes - (bytes - 1) / 8 * 8;
+    while high > 0 {
+        let low = high - count * 8;
+        chunks.push((low, high.min(width), count));
+        high = low;
+        count = 8;
+    }
+    chunks
 }

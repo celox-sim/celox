@@ -988,6 +988,36 @@ sv_backends! {
             }]);
         }
     }
+    /// The file name is a `string` parameter passed down the hierarchy,
+    /// which holds the characters of the name (IEEE 1800-2023 21.4).
+    fn readmem_file_name_from_string_parameter(sim) {
+        @setup {
+            let dir = tempfile::tempdir().unwrap();
+            let hex = dir.path().join("words.hex");
+            std::fs::write(&hex, "12 34 56 78").unwrap();
+            let source = format!(r#"
+                module Memory #(parameter string PATH = "") (input logic [1:0] address, output logic [7:0] word);
+                    logic [7:0] mem [4];
+                    initial if (PATH != "") $readmemh(PATH, mem);
+                    assign word = mem[address];
+                endmodule
+                module Top #(parameter string FILE = "") (input logic [1:0] address, output logic [7:0] word);
+                    Memory #(.PATH(FILE)) memory (.address(address), .word(word));
+                endmodule
+                module Bench(input logic [1:0] address, output logic [7:0] word);
+                    Top #(.FILE("{}")) top (.address(address), .word(word));
+                endmodule
+            "#, hex.display());
+        }
+        @build Simulator::from_sv_sources(vec![(&source, Path::new("readmem_parameter.sv"))], "Bench");
+        let address = sim.signal("address");
+        let word = sim.signal("word");
+        for (index, expected) in [0x12u8, 0x34, 0x56, 0x78].into_iter().enumerate() {
+            sim.set(address, index as u8);
+            assert_eq!(sim.get(word), expected.into());
+        }
+    }
+
     fn readmem_descending_ranges_and_absolute_addresses(sim) {
         @setup {
             let dir = tempfile::tempdir().unwrap();
@@ -1202,6 +1232,60 @@ fn rejects_bit_vector_functions_with_missing_or_extra_arguments() {
             .build_cranelift();
             assert!(result.is_err(), "invalid call should be rejected: {call}");
         }
+    }
+}
+
+/// `$typename` rejects the types it cannot spell as IEEE 1800-2023 20.6.1
+/// does, rather than returning another string for them.
+#[test]
+fn typename_rejects_types_without_an_exact_spelling() {
+    for (declarations, operand, construct) in [
+        (
+            "enum {A, B} v;",
+            "v",
+            "`$typename` of an anonymous enumerated type",
+        ),
+        (
+            "struct packed {bit x;} v;",
+            "v",
+            "`$typename` of an anonymous struct or union type",
+        ),
+        (
+            "typedef logic signed [3:0] s4; s4 [1:0] v;",
+            "v",
+            "`$typename` of a packed array of a signed type",
+        ),
+        (
+            "typedef enum bit {A, B} e_t; e_t [1:0] v;",
+            "v",
+            "`$typename` of a packed array of an enumerated type",
+        ),
+        (
+            "int a;",
+            "a + 1",
+            "`$typename` of an expression other than a variable, property or data type",
+        ),
+        (
+            "class K #(string S = \"x\"); endclass K k;",
+            "k",
+            "with a parameter value that is not integral",
+        ),
+        // The unadorned name of a parameterized class as a scope (8.25.1).
+        (
+            "class C #(int N = 3); typedef bit T; endclass",
+            "C::T",
+            "`C::` outside class `C`",
+        ),
+    ] {
+        let source = format!(
+            "module Top; {declarations} initial $display(\"%s\", $typename({operand})); endmodule"
+        );
+        let error = Simulator::from_sv_sources(vec![(&source, Path::new("typename.sv"))], "Top")
+            .build_cranelift()
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(construct), "{source}: {error}");
     }
 }
 
@@ -3238,6 +3322,11 @@ fn time_format_rejects_string_operands() {
 sv_backends! {
     fn scope_randomize_enum_values(sim) { @case "system_functions::scope_randomize_enum_values"; }
     fn scope_randomize_enum_order(sim) { @case "system_functions::scope_randomize_enum_order"; }
+    fn typename_vectors_and_arrays(sim) { @case "system_functions::typename_vectors_and_arrays"; }
+    fn typename_aggregates(sim) { @case "system_functions::typename_aggregates"; }
+    fn typename_class_parameters(sim) { @case "system_functions::typename_class_parameters"; }
+    fn typename_elaboration_constant(sim) { @case "system_functions::typename_elaboration_constant"; }
+    fn typename_scopes_and_string_operands(sim) { @case "system_functions::typename_scopes_and_string_operands"; }
 }
 
 sv_backends! {

@@ -16,11 +16,17 @@ RTL 設計の性能を予測するものではありません。
 メイン画面にはHeliodorと、SHA-256・FFT・LZ77の代表回路を掲載します。
 代表回路は Celox と Veryl simulator の tiered 同士を比較し、主指標は
 空のコンパイルキャッシュでのプロセス起動から終了までの時間です。
-ricaの既存ランナー、tarunesの検証状況、固定リビジョン、合格条件、次フェーズの
+**rica** タブは5種類の自己検証付き RISC-V カーネルを Celox tiered / Veryl simulator tiered で比較します。
+毎日 04:47 UTC（13:47 JST）に計測し、コンパイルを含むプロセス総時間の3回の中央値を公開します。
+rica の計測条件、tarunesの検証状況、固定リビジョン、合格条件、次フェーズの
 SV frontend比較方針は[回路コレクション](../../benchmarks/collection.md)にまとめています。
 
 [API・カウンタ・標準ライブラリの測定](./diagnostics.md)は診断用として残しています。
 コンパイル時間と実行時間は分けて表示します。
+
+[Taxi / cocotb 比較](../../benchmarks/taxi.md)は毎日 03:17 UTC（12:17 JST）に
+5構成・合計472テストを Celox と Verilator で実行します。専用タブでテスト本体、
+起動込み、HDLコンパイル時間を分けて公開します。
 
 ## 結果の読み方
 
@@ -87,3 +93,7 @@ Issue には実行へのリンクと、性能低下の場合は比較結果と�
 
 ローカル計測は、同じマシン上で 2 つのリビジョンを比較する場合に最も有効です。
 CI 履歴は、単発の小さな差より長期的な傾向の確認に向いています。
+
+[RTLMeter 比較](./rtlmeter.md)では XuanTie-E902/E906 と HummingbirdV2-E203 の hello を用い、
+2-state / 4-state を分けて Verilator・Nix 固定の安定版 xezim と比較します。
+コンパイルから実行完了までを測り、未対応や失敗も表に表示します。

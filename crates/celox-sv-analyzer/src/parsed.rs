@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use fxhash::FxHashMap as HashMap;
 
-use crate::{AnalyzerError, Ir, ModuleInterfaces, Packages, analyze, ast, ir, source_tree};
+use crate::{AnalyzerError, Design, Ir, ModuleInterfaces, Packages, analyze, ast, ir, source_tree};
 
 /// A parsed source that can analyze many modules or parameter specializations.
 ///
@@ -52,6 +52,20 @@ impl ParsedSource {
     /// retain token ranges and are checked by semantic support boundaries.
     pub fn declarations(&self) -> &celox_sv_syntax::Declarations {
         self.tree.declarations()
+    }
+
+    /// The interfaces that virtual interface types of the source name (IEEE
+    /// 1800-2023 25.9).
+    pub fn virtual_interface_names(&self) -> fxhash::FxHashSet<String> {
+        self.declarations()
+            .type_nodes()
+            .filter_map(|(_, data)| match &data.kind {
+                celox_sv_syntax::DataTypeKind::VirtualInterface { name, .. } => {
+                    Some(ast::instances::normalize_identifier(&name.spelling))
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// Module and interface declarations share the SV design-element namespace.
@@ -209,6 +223,7 @@ impl ParsedSource {
         pattern_overrides: &[(String, ast::BoundPattern)],
         interfaces: &ModuleInterfaces,
         packages: &Packages,
+        design: &mut Design,
     ) -> Result<Ir, AnalyzerError> {
         self.analyze_module_with_packages(
             module_name,
@@ -218,6 +233,7 @@ impl ParsedSource {
             interfaces,
             packages,
             ModuleAnalysis::Full(&[]),
+            design,
         )
     }
 
@@ -232,6 +248,7 @@ impl ParsedSource {
         pattern_overrides: &[(String, ast::BoundPattern)],
         interfaces: &ModuleInterfaces,
         packages: &Packages,
+        design: &mut Design,
         hierarchical: &[ast::HierarchicalSignal],
     ) -> Result<Ir, AnalyzerError> {
         self.analyze_module_with_packages(
@@ -242,6 +259,7 @@ impl ParsedSource {
             interfaces,
             packages,
             ModuleAnalysis::Full(hierarchical),
+            design,
         )
     }
 
@@ -256,6 +274,7 @@ impl ParsedSource {
         pattern_overrides: &[(String, ast::BoundPattern)],
         interfaces: &ModuleInterfaces,
         packages: &Packages,
+        design: &mut Design,
     ) -> Result<Ir, AnalyzerError> {
         self.analyze_module_with_packages(
             module_name,
@@ -265,6 +284,7 @@ impl ParsedSource {
             interfaces,
             packages,
             ModuleAnalysis::DeclarationsOnly,
+            design,
         )
     }
 
@@ -344,12 +364,14 @@ impl ParsedSource {
         module_name: &str,
         overrides: &HashMap<String, ir::ConstExpr>,
         packages: &Packages,
+        design: &mut Design,
     ) -> Result<Ir, AnalyzerError> {
         self.analyze_module_declarations_with_interfaces(
             module_name,
             overrides,
             &ModuleInterfaces::default(),
             packages,
+            design,
         )
     }
 
@@ -361,6 +383,7 @@ impl ParsedSource {
         overrides: &HashMap<String, ir::ConstExpr>,
         interfaces: &ModuleInterfaces,
         packages: &Packages,
+        design: &mut Design,
     ) -> Result<Ir, AnalyzerError> {
         self.validate_module_namespace(module_name, packages)?;
         let overrides = overrides
@@ -381,6 +404,7 @@ impl ParsedSource {
             },
             interfaces,
             packages,
+            design,
         )?;
         analyze::analyze_source(source)
     }
@@ -402,6 +426,7 @@ impl ParsedSource {
             interfaces,
             &packages,
             ModuleAnalysis::Full(&[]),
+            &mut packages.design(),
         )
     }
 
@@ -435,12 +460,14 @@ impl ParsedSource {
         interfaces: &ModuleInterfaces,
         packages: &Packages,
         analysis: ModuleAnalysis<'_>,
+        design: &mut Design,
     ) -> Result<Ir, AnalyzerError> {
         let overrides = overrides
             .iter()
             .map(|(name, value)| (name.clone(), value.clone().into()))
             .collect();
-        let original = packages.authored_module_name(module_name);
+        let original = packages.authored_module_name(module_name).to_owned();
+        let original = original.as_str();
         let warnings = self.warnings.get(original).cloned().unwrap_or_default();
         let ir = (|| {
             self.validate_module_namespace(original, packages)?;
@@ -461,6 +488,7 @@ impl ParsedSource {
                 },
                 interfaces,
                 packages,
+                design,
             )?;
             analyze::analyze_source(source)
         })();
@@ -614,6 +642,7 @@ mod tests {
                 &[],
                 &ModuleInterfaces::default(),
                 &packages,
+                &mut packages.design(),
             )
             .unwrap();
         let typed = code.replace("logic [3:0]", "logic [7:0]");
@@ -660,6 +689,7 @@ mod tests {
                     &[],
                     &ModuleInterfaces::default(),
                     &packages,
+                    &mut packages.design(),
                 )
                 .unwrap();
             let module = &ir.modules()[0];
@@ -692,6 +722,7 @@ mod tests {
                 &[],
                 &ModuleInterfaces::default(),
                 &packages,
+                &mut packages.design(),
             )
             .unwrap();
         assert_eq!(
@@ -726,7 +757,8 @@ mod tests {
                         &bindings,
                         &[],
                         &ModuleInterfaces::default(),
-                        &packages
+                        &packages,
+                        &mut packages.design()
                     )
                     .is_err()
             );
@@ -739,6 +771,7 @@ mod tests {
                 &[],
                 &ModuleInterfaces::default(),
                 &packages,
+                &mut packages.design(),
             )
             .unwrap();
         assert_eq!(
@@ -849,6 +882,7 @@ mod pattern_override_tests {
                 &[("Q".into(), bound)],
                 &ModuleInterfaces::default(),
                 &packages,
+                &mut packages.design(),
             )
             .unwrap();
         assert_eq!(ir.modules()[0].initial_processes().len(), 1);
@@ -893,6 +927,7 @@ mod pattern_override_tests {
                     &[("Q".into(), pattern.clone())],
                     &ModuleInterfaces::default(),
                     &packages,
+                    &mut packages.design(),
                 )
                 .unwrap();
         }
@@ -1114,6 +1149,7 @@ mod native_interface_tests {
                 &[],
                 &ModuleInterfaces::default(),
                 &packages,
+                &mut packages.design(),
             )
             .unwrap();
         let instance = &ir.modules()[0].instances()[0];
@@ -1136,6 +1172,7 @@ mod native_interface_tests {
                 &[],
                 &ModuleInterfaces::default(),
                 &packages,
+                &mut packages.design(),
             )
             .unwrap();
         assert_eq!(child.modules()[0].name(), instance.module_name());
@@ -1214,6 +1251,7 @@ mod native_interface_tests {
                 &[],
                 &ModuleInterfaces::default(),
                 &packages,
+                &mut packages.design(),
             )
             .unwrap();
         let module = &ir.modules()[0];
@@ -1354,12 +1392,13 @@ mod declaration_tests {
                     &[],
                     &[],
                     &ModuleInterfaces::default(),
-                    &packages
+                    &packages,
+                    &mut packages.design()
                 )
                 .is_ok()
         );
         let ir = source
-            .analyze_module_declarations("Top", &overrides, &packages)
+            .analyze_module_declarations("Top", &overrides, &packages, &mut packages.design())
             .unwrap();
         let module = &ir.modules()[0];
         assert_eq!(module.ports()[0].r#type().resolved_width(), Some(18));
@@ -1397,7 +1436,12 @@ mod declaration_tests {
         .unwrap();
         let packages = ParsedSource::analyze_packages(&[&source]).unwrap();
         let ir = source
-            .analyze_module_declarations("Top", &HashMap::default(), &packages)
+            .analyze_module_declarations(
+                "Top",
+                &HashMap::default(),
+                &packages,
+                &mut packages.design(),
+            )
             .unwrap();
         let module = &ir.modules()[0];
         assert_eq!(module.ports()[0].r#type().resolved_width(), Some(8));
@@ -1478,12 +1522,13 @@ mod shared_namespace_tests {
                     "I",
                     &HashMap::default(),
                     &packages,
+                    &mut packages.design(),
                 )
                 .unwrap_err();
                 assert!(matches!(error, AnalyzerError::DuplicateModule { name } if name == "I"));
                 let parsed = ParsedSource::parse(module, Path::new("module.sv")).unwrap();
                 assert!(
-                    matches!(parsed.analyze_module_declarations("I", &HashMap::default(), &packages),
+                    matches!(parsed.analyze_module_declarations("I", &HashMap::default(), &packages, &mut packages.design()),
                 Err(AnalyzerError::DuplicateModule { name }) if name == "I")
                 );
             }
@@ -1494,6 +1539,7 @@ mod shared_namespace_tests {
                 "Top",
                 &HashMap::default(),
                 &packages,
+                &mut packages.design(),
             )
             .unwrap();
         }
@@ -1514,6 +1560,7 @@ mod shared_namespace_tests {
                 &[],
                 &ModuleInterfaces::default(),
                 &packages,
+                &mut packages.design(),
             )
             .unwrap();
     }

@@ -1,6 +1,6 @@
 {
   "source": "src/sv/cases/string_format.vtest",
-  "method": "The shared cases pattern_format and pattern_format_keys_and_handles run in verify-sv-verilator, verify-sv-icarus and verify-sv-xezim. The reduced sources run standalone with verilator --binary, iverilog -g2012 -s Top / vvp -n, and xezim -s Top.",
+  "method": "The shared cases pattern_format, pattern_format_keys_and_handles and pattern_format_enums run in verify-sv-verilator, verify-sv-icarus and verify-sv-xezim. The reduced sources run standalone with verilator --binary, iverilog -g2012 -s Top / vvp -n, and xezim -s Top.",
   "observations": [
     {
       "tool": "verilator",
@@ -52,6 +52,18 @@
       "version": "xezim 0.11.3",
       "source": "class Item; int id; endclass\nmodule Top;\n    Item item, items[$];\n    initial begin\n        items.push_back(null);\n        items.push_back(null);\n        $display(\"%p|%p|%p\", items, item, \"lit\");\n    end\nendmodule\n",
       "stdout": "'{0, 0}|null|7104884\n"
+    },
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "source": "module Top;\n    typedef enum {ON, OFF} switch_e;\n    typedef enum bit [1:0] {A = 1, B = 2} small_e;\n    typedef struct {switch_e sw; string s;} pair_t;\n    pair_t va[int];\n    small_e q[$];\n    int m[small_e];\n    initial begin\n        va[10] = '{OFF, \"switch10\"};\n        q.push_back(A);\n        q.push_back(small_e'(3));\n        m[B] = 7;\n        $display(\"%p %p %p %p\", va, q, m, q[0]);\n    end\nendmodule\n",
+      "stdout": "'{'ha:'{sw:'h1, s:\"switch10\"}} '{'h1, 'h3} '{'h2:'h7} A\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "source": "module Top;\n    typedef enum {ON, OFF} switch_e;\n    typedef enum bit [1:0] {A = 1, B = 2} small_e;\n    switch_e sw;\n    int m[small_e];\n    int i;\n    initial begin\n        sw = OFF; i = 1; m[B] = 7;\n        $display(\"%p %p %p %p %p\", ON, sw.next(), switch_e'(0), i > 0 ? ON : OFF, m);\n        $display(\"%p\", $sformatf(\"%p\", sw));\n    end\nendmodule\n",
+      "stdout": "0 0 0 0 '{2:7}\n5195334\n"
     }
   ]
 }

@@ -17,6 +17,19 @@ pub struct ProcessControl {
     pub awaiting: Option<usize>,
     pub observes: Vec<usize>,
     pub level_wait: bool,
+    /// The named events the process is blocked on.
+    #[serde(default)]
+    pub events: Vec<u32>,
+    /// The named events whose `triggered` state the predicate of its level
+    /// wait read: a trigger of one checks the predicate again.
+    #[serde(default)]
+    pub observed_events: Vec<u32>,
+    /// The semaphore whose keys the process is blocked on.
+    #[serde(default)]
+    pub semaphore: Option<u32>,
+    /// The mailbox the process waits to put into or take from.
+    #[serde(default)]
+    pub mailbox: Option<u32>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SuspendedProcess {
@@ -272,6 +285,7 @@ impl<B: SimBackend> SimulationState<B> {
                 activation.join = None;
                 state.waiters.remove(id);
                 state.ready.remove(&id);
+                state.deferred_ready.remove(&id);
                 state.reactive.remove(&id);
                 state.observed.remove(&id);
                 state.inactive.remove(&id);
@@ -324,6 +338,15 @@ impl<B: SimBackend> SimulationState<B> {
     }
 
     pub(super) fn retire_activation(&mut self, process: usize) {
+        if self
+            .process_state
+            .activations
+            .get(process)
+            .is_some_and(|activation| !activation.live)
+        {
+            self.cancel_semaphore_wait(process);
+            self.cancel_mailbox_wait(process);
+        }
         let mut next = Some(process);
         while let Some(id) = next {
             let has_children = self

@@ -3,9 +3,8 @@
 //! slots.
 #![cfg(feature = "systemverilog")]
 
-use std::cell::RefCell;
 use std::path::Path;
-use std::rc::Rc;
+use std::sync::mpsc;
 
 use celox::{SignalRef, SimBackend, Simulation, SlotIo, SlotObserver};
 
@@ -34,7 +33,7 @@ struct Edges {
     watched: SignalRef,
     write: Option<SignalRef>,
     level: u8,
-    seen: Rc<RefCell<Vec<(u64, u64)>>>,
+    seen: mpsc::Sender<(u64, u64)>,
 }
 
 impl<B: SimBackend> SlotObserver<B> for Edges {
@@ -42,7 +41,8 @@ impl<B: SimBackend> SlotObserver<B> for Edges {
         let level = u8::try_from(io.get(self.clk)).unwrap();
         if level == 1 && self.level == 0 {
             let value = u64::try_from(io.get(self.watched)).unwrap();
-            self.seen.borrow_mut().push((time, value));
+            // A test that does not check what is seen drops the receiver.
+            let _ = self.seen.send((time, value));
             if let Some(write) = self.write {
                 io.set(write, time as u8);
             }
@@ -56,19 +56,22 @@ impl<B: SimBackend> SlotObserver<B> for Edges {
 #[test]
 fn an_observed_edge_is_seen_before_the_domains_commit() {
     let mut sim = simulation(COUNTER);
-    let seen = Rc::new(RefCell::new(Vec::new()));
+    let (seen, received) = mpsc::channel();
     let clk = sim.signal("clk");
     let observer = Edges {
         clk,
         watched: sim.signal("q"),
         write: None,
         level: 0,
-        seen: Rc::clone(&seen),
+        seen,
     };
     sim.observe_slots(Box::new(observer), &[clk]);
     sim.run_until(40).unwrap();
     // The rises at 5, 15, 25 and 35 see the count before their update.
-    assert_eq!(*seen.borrow(), vec![(5, 0), (15, 1), (25, 2), (35, 3)]);
+    assert_eq!(
+        received.try_iter().collect::<Vec<_>>(),
+        vec![(5, 0), (15, 1), (25, 2), (35, 3)]
+    );
     assert_eq!(sim.get(sim.signal("q")), 4u8.into());
 }
 
@@ -86,7 +89,7 @@ fn only_the_kernels_that_write_an_observed_event_leave_compiled_slots() {
         watched: sim.signal("q"),
         write: None,
         level: 0,
-        seen: Rc::default(),
+        seen: mpsc::channel().0,
     };
     sim.observe_slots(Box::new(observer), &[clk]);
     sim.run_until(200).unwrap();
@@ -123,7 +126,7 @@ endmodule
         watched: d,
         write: Some(d),
         level: 0,
-        seen: Rc::default(),
+        seen: mpsc::channel().0,
     };
     sim.observe_slots(Box::new(observer), &[clk]);
     sim.run_until(16).unwrap();
@@ -138,7 +141,7 @@ struct Settled {
     flag: SignalRef,
     at: u64,
     last: u64,
-    seen: Rc<RefCell<Vec<(u64, u64)>>>,
+    seen: mpsc::Sender<(u64, u64)>,
 }
 
 impl<B: SimBackend> SlotObserver<B> for Settled {
@@ -147,7 +150,8 @@ impl<B: SimBackend> SlotObserver<B> for Settled {
     fn end_of_slot(&mut self, io: &mut SlotIo<'_, B>, time: u64) {
         let value = u64::try_from(io.get(self.watched)).unwrap();
         if value != self.last {
-            self.seen.borrow_mut().push((time, value));
+            // A test that does not check what is seen drops the receiver.
+            let _ = self.seen.send((time, value));
             if value == self.at {
                 io.set(self.flag, 1u8);
             }
@@ -172,19 +176,22 @@ module Top;
 endmodule
 "#;
     let mut sim = simulation(source);
-    let seen = Rc::new(RefCell::new(Vec::new()));
+    let (seen, received) = mpsc::channel();
     let watched = sim.signal("q");
     let observer = Settled {
         watched,
         flag: sim.signal("flag"),
         at: 2,
         last: 0,
-        seen: Rc::clone(&seen),
+        seen,
     };
     sim.observe_slots(Box::new(observer), &[watched]);
     sim.run_until(40).unwrap();
     // Every slot of the compiled clock is seen, one per run.
-    assert_eq!(*seen.borrow(), vec![(5, 1), (15, 2), (25, 3), (35, 4)]);
+    assert_eq!(
+        received.try_iter().collect::<Vec<_>>(),
+        vec![(5, 1), (15, 2), (25, 3), (35, 4)]
+    );
     assert!(sim.scheduler_stats().compiled_slots > 0);
     // The flag written at the end of slot 15 wakes the process at 15.
     assert_eq!(
@@ -207,7 +214,7 @@ fn a_differential_simulation_stops_checking_an_observed_simulation() {
         flag: sim.signal("d"),
         at: u64::MAX,
         last: 0,
-        seen: Rc::default(),
+        seen: mpsc::channel().0,
     };
     sim.observe_slots(Box::new(observer), &[watched]);
     sim.run_until(40).unwrap();

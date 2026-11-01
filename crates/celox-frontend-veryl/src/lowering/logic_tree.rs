@@ -3,7 +3,9 @@ mod arena;
 mod effect;
 mod expr;
 mod recover_unrolled;
-pub(crate) use recover_unrolled::{proves_binary_combinational, proves_combinational};
+pub(crate) use recover_unrolled::{
+    complete_binary_cases, proves_binary_combinational, proves_combinational,
+};
 pub(crate) mod sensitivity;
 mod state;
 
@@ -2208,7 +2210,8 @@ fn eval_for_with_effects(
         symbolic_store.insert(id, loop_store);
     }
     symbolic_store.insert(for_stmt.var_id, RangeStore::new(None, loop_width));
-    let _loop_range = LoopRangeScope::enter(arena, for_stmt);
+    let mut loop_range = LoopRangeScope::enter(arena, for_stmt);
+    let arena = &mut *loop_range;
     let iter_store_before = symbolic_store.fork();
 
     let loop_state = for_stmt.body.iter().try_fold(
@@ -3066,15 +3069,15 @@ fn and_slt_condition(
 
 /// Records the value range of a loop variable while its body is lowered, so
 /// an index such as `values[i * 8 +: 8]` in `for i in 0..16` needs no range
-/// check.
-pub(super) struct LoopRangeScope {
-    ranges: std::rc::Rc<std::cell::RefCell<HashMap<VarId, BigUint>>>,
+/// check. The body lowers through the scope, which derefs to the arena.
+pub(super) struct LoopRangeScope<'a> {
+    arena: &'a mut SLTNodeArena<VarId>,
     variable: VarId,
     previous: Option<Option<BigUint>>,
 }
 
-impl LoopRangeScope {
-    pub(super) fn enter(arena: &SLTNodeArena<VarId>, for_stmt: &ForStatement) -> Self {
+impl<'a> LoopRangeScope<'a> {
+    pub(super) fn enter(arena: &'a mut SLTNodeArena<VarId>, for_stmt: &ForStatement) -> Self {
         let (start, end, inclusive) = match &for_stmt.range {
             ForRange::Forward {
                 start,
@@ -3110,7 +3113,7 @@ impl LoopRangeScope {
         match max {
             Some(max) => Self::with_bound(arena, for_stmt.var_id, max),
             None => Self {
-                ranges: arena.loop_ranges.clone(),
+                arena,
                 variable: for_stmt.var_id,
                 previous: None,
             },
@@ -3118,32 +3121,47 @@ impl LoopRangeScope {
     }
 
     /// Record that `variable` takes only values in `0..=max`.
-    pub(super) fn with_max(arena: &SLTNodeArena<VarId>, variable: VarId, max: usize) -> Self {
+    pub(super) fn with_max(
+        arena: &'a mut SLTNodeArena<VarId>,
+        variable: VarId,
+        max: usize,
+    ) -> Self {
         Self::with_bound(arena, variable, BigUint::from(max))
     }
 
-    fn with_bound(arena: &SLTNodeArena<VarId>, variable: VarId, max: BigUint) -> Self {
-        let previous = arena.loop_ranges.borrow_mut().insert(variable, max);
+    fn with_bound(arena: &'a mut SLTNodeArena<VarId>, variable: VarId, max: BigUint) -> Self {
+        let previous = arena.loop_ranges.insert(variable, max);
         Self {
-            ranges: arena.loop_ranges.clone(),
+            arena,
             variable,
             previous: Some(previous),
         }
     }
 }
 
-impl Drop for LoopRangeScope {
+impl std::ops::Deref for LoopRangeScope<'_> {
+    type Target = SLTNodeArena<VarId>;
+    fn deref(&self) -> &Self::Target {
+        self.arena
+    }
+}
+
+impl std::ops::DerefMut for LoopRangeScope<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.arena
+    }
+}
+
+impl Drop for LoopRangeScope<'_> {
     fn drop(&mut self) {
         let Some(previous) = self.previous.take() else {
             return;
         };
-        {
-            let mut ranges = self.ranges.borrow_mut();
-            match previous {
-                Some(previous) => ranges.insert(self.variable, previous),
-                None => ranges.remove(&self.variable),
-            };
-        }
+        let ranges = &mut self.arena.loop_ranges;
+        match previous {
+            Some(previous) => ranges.insert(self.variable, previous),
+            None => ranges.remove(&self.variable),
+        };
     }
 }
 
@@ -3166,7 +3184,6 @@ fn slt_max_value(arena: &SLTNodeArena<VarId>, node: NodeId) -> BigUint {
             ..
         } if index.is_empty() && access.lsb == 0 => arena
             .loop_ranges
-            .borrow()
             .get(variable)
             .cloned()
             .unwrap_or_else(|| all_ones.clone()),

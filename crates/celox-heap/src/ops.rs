@@ -24,6 +24,10 @@ pub const GETC: u64 = 3;
 /// `atoi(a)`: the leading digits of string `a` in the radix of the
 /// parameter, as a 32-bit integer.
 pub const ATOI: u64 = 4;
+/// `key_bytes(a, i, count)`: the `count` bytes from byte `i` of the bytes
+/// that [`KEY`] string `a` holds, most significant first, where bytes past the
+/// end read as 0. `count` is at most 8.
+pub const KEY_BYTES: u64 = 5;
 /// `new()`: an empty buffer.
 pub const NEW: u64 = 16;
 /// `copy(a)`: a buffer holding string `a`.
@@ -33,6 +37,12 @@ pub const APPEND: u64 = 18;
 /// `append_bytes(buffer, value, count)`: `buffer` extended by the low `count`
 /// bytes of `value`, most significant first. `count` is at most 8.
 pub const APPEND_BYTES: u64 = 19;
+/// `key(buffer)`: the string that holds the bytes of `buffer` as a key of a
+/// [`crate::containers::WIDE_KEY`] array; the buffer is consumed. Strings
+/// hold no zero bytes, so the key is the bytes in 7-bit groups, most
+/// significant first, each with its top bit set: keys of one length order as
+/// the bytes they hold.
+pub const KEY: u64 = 26;
 /// `putc(buffer, i, c)`: `buffer` with byte `i` replaced by `c`, unless `i`
 /// is out of range or `c` is 0. `i` is signed.
 pub const PUTC: u64 = 20;
@@ -52,6 +62,9 @@ pub const FREEZE: u64 = 32;
 /// `new_object(size)`: a new object of the class in the parameter, with
 /// `size` zeroed bytes.
 pub const OBJECT_NEW: u64 = 48;
+/// `new_event()`: the handle of a new named event (IEEE 1800-2023 15.5). The
+/// scheduler keeps the event's state; the heap only names it.
+pub const EVENT_NEW: u64 = 47;
 /// `declare_handle(object, offset, kind)`: the property at byte `offset`
 /// holds a handle; `kind` is 0 for a string and 1 for an object.
 pub const OBJECT_HANDLE: u64 = 49;
@@ -113,13 +126,47 @@ pub const fn radix_parameter(radix: u32, width: u32, signed: bool) -> u64 {
 /// instead of exhausting memory.
 const MAX_REPLICATE_BYTES: usize = 1 << 30;
 
+/// UVM DPI-C functions (see `uvm_dpi`): `uvm_re_comp(re, deglob)`.
+pub const UVM_RE_COMP: u64 = 128;
+/// `uvm_re_exec(rexp, str)`.
+pub const UVM_RE_EXEC: u64 = 129;
+/// `uvm_re_free(rexp)`.
+pub const UVM_RE_FREE: u64 = 130;
+/// `uvm_re_compexec(re, str, deglob)`; [`UVM_RE_LAST_EXEC`] gives `exec_ret`.
+pub const UVM_RE_COMPEXEC: u64 = 131;
+/// `uvm_re_compexecfree(re, str, deglob)`; [`UVM_RE_LAST_EXEC`] gives
+/// `exec_ret`.
+pub const UVM_RE_COMPEXECFREE: u64 = 132;
+/// The `exec_ret` of the last compile-and-execute operation.
+pub const UVM_RE_LAST_EXEC: u64 = 133;
+/// `uvm_re_buffer()`.
+pub const UVM_RE_BUFFER: u64 = 134;
+/// `uvm_re_deglobbed(glob, with_brackets)`.
+pub const UVM_RE_DEGLOBBED: u64 = 135;
+/// `uvm_dpi_get_next_arg_c(init)`.
+pub const UVM_NEXT_ARG: u64 = 136;
+/// `uvm_dpi_get_tool_name_c()`.
+pub const UVM_TOOL_NAME: u64 = 137;
+/// `uvm_dpi_get_tool_version_c()`.
+pub const UVM_TOOL_VERSION: u64 = 138;
+// `call` dispatches the low opcode byte by range, so the UVM range shares no
+// operation with the container and stream ranges.
+const _: () = assert!(
+    crate::containers::RSORT < UVM_RE_COMP
+        && crate::streams::TRUNCATE < UVM_RE_COMP
+        && UVM_TOOL_VERSION <= 0xff
+);
+
 impl Heap {
     /// Perform the operation selected by `code` on `a`, `b` and `c`.
     pub fn call(&mut self, code: u64, a: u64, b: u64, c: u64) -> u64 {
         let parameter = code >> 8;
         match code & 0xff {
-            op @ crate::containers::NEW..=crate::containers::RSORT => {
-                self.container_call(op, parameter, a, b, c)
+            op @ (crate::containers::NEW..=crate::containers::RSORT
+            | crate::containers::CONCAT
+            | crate::containers::SLICE) => self.container_call(op, parameter, a, b, c),
+            op @ crate::streams::NEW..=crate::streams::TRUNCATE => {
+                self.stream_call(op, parameter, a, b, c)
             }
             crate::containers::PATTERN => {
                 let bytes = self.container_pattern(a as Handle, parameter);
@@ -128,6 +175,7 @@ impl Heap {
             crate::containers::HANDLE_PATTERN => {
                 self.new_buffer(crate::containers::handle_pattern(a as u32 as u64))
             }
+            op @ UVM_RE_COMP..=UVM_TOOL_VERSION => self.uvm_call(op, a, b, c),
             COMPARE => ordering(self.string(a as Handle).cmp(self.string(b as Handle))),
             ICOMPARE => {
                 let lower = |handle| {
@@ -142,6 +190,18 @@ impl Heap {
                 .ok()
                 .and_then(|index| self.string(a as Handle).get(index))
                 .map_or(0, |&byte| byte.into()),
+            KEY_BYTES => {
+                let string = crate::containers::key_bytes(self.string(a as Handle));
+                (0..(c as usize).min(8)).fold(0, |word, k| {
+                    let byte = usize::try_from(b)
+                        .ok()
+                        .and_then(|i| i.checked_add(k))
+                        .and_then(|i| string.get(i))
+                        .copied()
+                        .unwrap_or(0);
+                    word << 8 | u64::from(byte)
+                })
+            }
             ATOI => atoi(self.string(a as Handle), parameter as u32 & 0xff),
             NEW => self.new_buffer(Vec::new()),
             COPY => self.new_buffer(self.string(a as Handle).to_vec()),
@@ -194,10 +254,15 @@ impl Heap {
                 (parameter >> 8) as u32 & 0xff,
                 parameter >> 16 & 1 != 0,
             )),
+            KEY => {
+                let bytes = self.take_buffer(a);
+                self.intern(&crate::containers::key_string(&bytes)).into()
+            }
             FREEZE => {
                 let bytes = self.take_buffer(a);
                 self.intern(&bytes).into()
             }
+            EVENT_NEW => self.new_event().into(),
             OBJECT_NEW => self.new_object(parameter as u32, a as usize).into(),
             OBJECT_HANDLE => {
                 let kind = if c == 0 {

@@ -29,6 +29,21 @@ macro_rules! on_every_backend {
         ))]
         run($builder.build_native().unwrap());
     }};
+    // `$body` also sees `$name`, which every run is passed as `$arg`.
+    ($builder:expr, $arg:expr, |$sim:ident, $name:ident: $ty:ty| $body:block) => {{
+        fn run<B: SimBackend>(mut $sim: Simulation<B>, $name: $ty) $body
+        run($builder.build_interpreter().unwrap(), $arg);
+        #[cfg(feature = "cranelift")]
+        run($builder.build_cranelift().unwrap(), $arg);
+        #[cfg(feature = "wasm-runtime")]
+        run($builder.build_wasm().unwrap(), $arg);
+        run($builder.build_tiered().unwrap(), $arg);
+        #[cfg(any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        ))]
+        run($builder.build_native().unwrap(), $arg);
+    }};
 }
 
 /// A flat SDK module under construction.
@@ -625,28 +640,25 @@ fn state_files_carry_waiting_processes_across_backends() {
     let mut bytes = Vec::new();
     file.write_to(&mut bytes).unwrap();
     let file = celox_runtime::StateFile::read_from(bytes.as_slice()).unwrap();
-    STATE.with(|state| *state.borrow_mut() = Some(file));
-    on_every_backend!(builder(&artifact, true), |sim| {
-        let file = STATE.with(|state| state.borrow().clone().unwrap());
-        sim.load_state(&file).unwrap();
-        assert_eq!(sim.time(), 3);
-        assert_eq!(value(&mut sim, "wakes"), 1);
-        sim.run_until(4).unwrap();
-        assert_eq!(value(&mut sim, "wakes"), 1);
-        let go = sim.signal("go");
-        sim.modify(|io| io.set(go, 1u8)).unwrap();
-        sim.run_until(5).unwrap();
-        assert_eq!(
-            value(&mut sim, "wakes"),
-            2,
-            "the loaded process still waits"
-        );
-    });
-}
-
-thread_local! {
-    static STATE: std::cell::RefCell<Option<celox_runtime::StateFile>> =
-        const { std::cell::RefCell::new(None) };
+    on_every_backend!(
+        builder(&artifact, true),
+        &file,
+        |sim, file: &celox_runtime::StateFile| {
+            sim.load_state(file).unwrap();
+            assert_eq!(sim.time(), 3);
+            assert_eq!(value(&mut sim, "wakes"), 1);
+            sim.run_until(4).unwrap();
+            assert_eq!(value(&mut sim, "wakes"), 1);
+            let go = sim.signal("go");
+            sim.modify(|io| io.set(go, 1u8)).unwrap();
+            sim.run_until(5).unwrap();
+            assert_eq!(
+                value(&mut sim, "wakes"),
+                2,
+                "the loaded process still waits"
+            );
+        }
+    );
 }
 
 /// IEEE 1800-2023 4.5: a process woken by `@(posedge clk)` runs in the

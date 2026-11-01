@@ -22,19 +22,45 @@ pub(super) fn ordinary_variable(
     !variable.value.is_some_and(|id|matches!(&native.expression(id).kind,celox_sv_syntax::ExprKind::Name(name) if name.spelling=="new")) || names_class(data_type, native)
 }
 
-/// Whether `data_type` names a class declared in the source.
-fn names_class(data_type: celox_sv_syntax::TypeId, native: &celox_sv_syntax::Declarations) -> bool {
+/// Whether `data_type` may name a class rather than a covergroup: a class,
+/// typedef or type parameter of the name declared in the source, a built-in
+/// class constructed with `new` (IEEE 1800-2023 15.3), or a scoped name such
+/// as `C::T` or `p::C`. A covergroup that shares its name with a typedef or
+/// type parameter is taken for a class.
+pub(super) fn names_class(
+    data_type: celox_sv_syntax::TypeId,
+    native: &celox_sv_syntax::Declarations,
+) -> bool {
     let celox_sv_syntax::DataTypeKind::Named(segments) = &native.data_type(data_type).kind else {
         return false;
     };
     let [segment] = segments.as_slice() else {
-        return false;
+        return segments.len() > 1;
     };
     let name = normalize_identifier(&segment.name.spelling);
-    native
-        .classes
-        .iter()
-        .any(|class| normalize_identifier(&class.name.spelling) == name)
+    let named = |spelling: &str| normalize_identifier(spelling) == name;
+    matches!(name.as_str(), "semaphore" | "mailbox")
+        || native
+            .classes
+            .iter()
+            .any(|class| named(&class.name.spelling))
+        || native
+            .type_aliases
+            .iter()
+            .any(|alias| named(&alias.name.spelling))
+        || native
+            .parameter_declarations
+            .iter()
+            .flat_map(|declaration| &declaration.parameters)
+            .chain(
+                native
+                    .all_units()
+                    .flat_map(|unit| unit.parameters.iter().flatten()),
+            )
+            .any(|parameter| {
+                matches!(parameter.kind, celox_sv_syntax::ParameterKind::Type { .. })
+                    && named(&parameter.name.spelling)
+            })
 }
 
 pub(super) fn port_direction(direction: celox_sv_syntax::Direction) -> PortDirection {
@@ -49,6 +75,7 @@ pub(super) fn port_direction(direction: celox_sv_syntax::Direction) -> PortDirec
 pub(super) fn port_type(
     port: &celox_sv_syntax::Port,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Converted<Option<Type>> {
@@ -56,43 +83,68 @@ pub(super) fn port_type(
     let Some(id) = port.data_type else {
         return Ok(None);
     };
-    let ty = bind(id, tree, &context)?;
-    if ty.as_ref().is_some_and(|ty| ty.unpacked_struct().is_some()) {
-        return Err(unsupported("port of unpacked structure type"));
-    }
-    Ok(ty)
+    bind(id, tree, session, &context)
+}
+
+/// Whether the range of the port declaration of a non-ANSI port, which its
+/// net or variable declaration repeats in other words, has the bounds of the
+/// port's type (IEEE 1800-2023 23.2.2.1).
+pub(super) fn declared_port_range_matches(
+    port: &celox_sv_syntax::Port,
+    ty: &Type,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &HashMap<String, i128>,
+    aliases: &HashMap<String, Type>,
+) -> Converted<bool> {
+    let Some(id) = port.declared_type else {
+        return Ok(true);
+    };
+    let context = PackedDimensions::new(HashMap::default(), env, aliases);
+    let data = tree.declarations().data_type(id);
+    let declared = binding::packed_ranges(&data.packed_dimensions, tree, session, &context)?;
+    let bounds = |range: &PackedRange| {
+        constants::eval_ast_const_expr(&tree.functions, range.left(), env).zip(
+            constants::eval_ast_const_expr(&tree.functions, range.right(), env),
+        )
+    };
+    Ok(declared.len() == ty.packed_ranges.len()
+        && declared
+            .iter()
+            .zip(&ty.packed_ranges)
+            .all(
+                |(declared, range)| match (bounds(declared), bounds(range)) {
+                    (Some(declared), Some(range)) => declared == range,
+                    _ => declared == range,
+                },
+            ))
 }
 
 /// Formal/return implicit types use scalar logic rather than an unsized local.
 pub(super) fn implicit_subroutine_type(
     id: TypeId,
     tree: &AnalysisContext<'_>,
-    env: &HashMap<String, i128>,
-    aliases: &HashMap<String, Type>,
+    session: &mut Session,
+    env: impl ToShared<i128>,
+    aliases: impl ToShared<Type>,
 ) -> Converted<Type> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
     let data = tree.declarations().data_type(id);
     let mut ty = Type::new(TypeKind::Logic);
     ty.is_signed = data.signed.unwrap_or(false);
-    ty.packed_ranges = binding::packed_ranges(&data.packed_dimensions, tree, &context)?;
+    ty.packed_ranges = binding::packed_ranges(&data.packed_dimensions, tree, session, &context)?;
     Ok(ty)
 }
 pub(super) fn local_signals(
     declaration: &celox_sv_syntax::VariableDeclaration,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
     selected_name: Option<&str>,
 ) -> Converted<Vec<Signal>> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
-    let Some(base) = bind(declaration.data_type, tree, &context)? else {
-        // A named event (IEEE 1800-2023 6.17) is a data type of its own.
-        if matches!(
-            &tree.declarations().data_type(declaration.data_type).kind,
-            celox_sv_syntax::DataTypeKind::Builtin(name) if name == "event"
-        ) {
-            return Err(unsupported("named event"));
-        }
+    let Some(base) = bind(declaration.data_type, tree, session, &context)? else {
         return Err(unsupported("unsupported internal data type"));
     };
     let mut signals = Vec::new();
@@ -104,7 +156,13 @@ pub(super) fn local_signals(
         if selected_name.is_some_and(|selected| selected != name) {
             continue;
         }
-        let ty = containers::with_dimensions(base.clone(), &variable.dimensions, tree, &context)?;
+        let ty = containers::with_dimensions(
+            base.clone(),
+            &variable.dimensions,
+            tree,
+            session,
+            &context,
+        )?;
         if declaration.constant && ty.container.is_some() {
             return Err(unsupported("const dynamic container"));
         }
@@ -120,6 +178,7 @@ pub(super) fn local_signals(
 pub(super) fn net_signals(
     declaration: &celox_sv_syntax::NetDeclaration,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
     selected_name: Option<&str>,
@@ -134,7 +193,7 @@ pub(super) fn net_signals(
         return Err(unsupported("unsupported net data type"));
     }
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
-    let Some(base) = bind(declaration.data_type, tree, &context)? else {
+    let Some(base) = bind(declaration.data_type, tree, session, &context)? else {
         return Err(unsupported("unsupported net data type"));
     };
     let mut signals = Vec::new();
@@ -143,7 +202,13 @@ pub(super) fn net_signals(
         if selected_name.is_some_and(|selected| selected != name) {
             continue;
         }
-        let ty = containers::with_dimensions(base.clone(), &variable.dimensions, tree, &context)?;
+        let ty = containers::with_dimensions(
+            base.clone(),
+            &variable.dimensions,
+            tree,
+            session,
+            &context,
+        )?;
         if ty.container.is_some() {
             return Err(unsupported("dynamic container net"));
         }
@@ -158,12 +223,13 @@ pub(super) fn net_signals(
 pub(super) fn argument_type(
     root: celox_sv_syntax::ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Converted<Option<Type>> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
     if let celox_sv_syntax::ExprKind::Type(id) = tree.declarations().expression(root).kind {
-        return bind(id, tree, &context);
+        return bind(id, tree, session, &context);
     }
     let Some((name, dimensions)) = argument_alias(root, tree.declarations()) else {
         return Ok(None);
@@ -171,7 +237,11 @@ pub(super) fn argument_type(
     let Some(base) = aliases.get(&name) else {
         return Ok(None);
     };
-    let ranges = binding::packed_ranges(&dimensions, tree, &context)?;
+    let ranges = binding::packed_ranges(&dimensions, tree, session, &context)?;
+    // A chandle is no packed array element (IEEE 1800-2023 6.14).
+    if base.chandle && !ranges.is_empty() {
+        return types::packed_chandles();
+    }
     Ok(Some(types::enclose_aliased_packed_type(
         base.clone(),
         ranges,
@@ -220,30 +290,33 @@ pub(super) fn procedural_type(
     id: TypeId,
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
-    env: &HashMap<String, i128>,
-    aliases: &HashMap<String, Type>,
+    session: &mut Session,
+    env: impl ToShared<i128>,
+    aliases: impl ToShared<Type>,
 ) -> Converted<Option<Type>> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
-    binding::bind_in(id, native, tree, &context)
+    binding::bind_in(id, native, tree, session, &context)
 }
 
 /// Enum constant bases use the declared native type and bound handles.
 pub(super) fn enum_constant_base(
     id: TypeId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Converted<Option<Type>> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
-    bind(id, tree, &context)
+    bind(id, tree, session, &context)
 }
 
 pub(super) fn alias_base_type(
     id: TypeId,
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
-    env: &HashMap<String, i128>,
-    aliases: &HashMap<String, Type>,
+    session: &mut Session,
+    env: impl ToShared<i128>,
+    aliases: impl ToShared<Type>,
     defer_class_defaults: bool,
 ) -> Converted<Option<Type>> {
     // Typedef type-reference inference is outside the supported alias path.
@@ -251,7 +324,7 @@ pub(super) fn alias_base_type(
         return Ok(None);
     }
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
-    binding::bind_alias_in(id, native, tree, &context, defer_class_defaults)
+    binding::bind_alias_in(id, native, tree, session, &context, defer_class_defaults)
 }
 
 /// Builtin integral identity/width without syntax or aggregate layout.
@@ -270,10 +343,26 @@ pub(super) fn builtin_type(name: &str, signing: Option<bool>) -> Option<Type> {
         "longint" => (TypeKind::Bit, Some(64), true),
         "integer" => (TypeKind::Logic, Some(32), true),
         "time" => (TypeKind::Logic, Some(64), false),
+        "chandle" => (TypeKind::Bit, Some(64), false),
+        // A named event is a handle (IEEE 1800-2023 15.5).
+        "event" => return Some(super::classes::handle(super::events::CLASS)),
         _ => return None,
     };
     let mut ty = Type::new(kind);
+    ty.chandle = name == "chandle";
     ty.is_signed = signing.unwrap_or(signed);
+    let keyword = match name {
+        "byte" => Some("byte"),
+        "shortint" => Some("shortint"),
+        "int" => Some("int"),
+        "longint" => Some("longint"),
+        "integer" => Some("integer"),
+        "time" => Some("time"),
+        _ => None,
+    };
+    if let Some(keyword) = keyword {
+        ty.spelling = type_names::Spelling::keyword(keyword);
+    }
     if let Some(width) = width {
         ty.packed_ranges.push(PackedRange::new(
             ConstExpr::Literal((width - 1).to_string()),
@@ -288,12 +377,13 @@ pub(super) fn builtin_type(name: &str, signing: Option<bool>) -> Option<Type> {
 pub(super) fn alias_signals(
     declaration: &celox_sv_syntax::VariableDeclaration,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
     selected_name: Option<&str>,
 ) -> Converted<Vec<Signal>> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
-    let Some(base) = bind(declaration.data_type, tree, &context)? else {
+    let Some(base) = bind(declaration.data_type, tree, session, &context)? else {
         return Ok(Vec::new());
     };
     let mut signals = Vec::new();
@@ -302,7 +392,13 @@ pub(super) fn alias_signals(
         if selected_name.is_some_and(|selected| selected != name) {
             continue;
         }
-        let ty = containers::with_dimensions(base.clone(), &variable.dimensions, tree, &context)?;
+        let ty = containers::with_dimensions(
+            base.clone(),
+            &variable.dimensions,
+            tree,
+            session,
+            &context,
+        )?;
         signals.push(Signal::new(name, ty));
     }
     Ok(signals)

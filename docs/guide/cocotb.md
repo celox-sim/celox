@@ -32,7 +32,9 @@ target/release/celox run src/types.sv src/Dut.sv test/Top.sv --top Top
 target/release/celox run test/Top.veryl --top Top
 ```
 
-For SystemVerilog, pass `.sv` or `.v` sources in compilation order. The command
+For SystemVerilog, pass `.sv` or `.v` sources in compilation order.
+The list can also contain `.svh`, `.vh` or `.h` headers, including a header
+before the first module source. The command
 uses two-state simulation by default and runs until `$finish` or no scheduled
 events remain. Use `--four-state` or `four_state = true` in `celox.toml` to retain
 X/Z values. For Veryl, pass one project entry file: Celox discovers `Veryl.toml`
@@ -238,8 +240,18 @@ Targets inherit the root settings. Sources are collected in this order: root
 sources and `-f` expansions in command-line order. Each list retains its source order. Include
 directories accumulate in the same layer order. Macro definitions are global
 to the invocation; later definitions win, with CLI `-D` definitions applied last.
-TOML macro values are strings. Configured macros apply to each source; macros
-defined in HDL files retain the frontend's per-file compilation-unit scope. `--top` overrides the selected top; `run`'s `-O`
+TOML macro values are strings. By default the ordered sources form one compilation
+unit. Source and header macros, `undef directives, compiler directives and
+compilation-unit declarations carry forward to later files. Use `--separate-units`
+or `single_unit = false` at the root or in a target to isolate each source;
+configured macros then apply afresh to each file. `--single-unit` overrides that
+project setting. This selection applies to both `run` and `vpi build`.
+For example, `celox run -f rtlmeter.f --top tb --four-state` accepts RTLmeter
+source lists whose first file defines macros used by later files.
+These two compilation models follow IEEE 1800-2023 3.12.1; the standard does
+not specify a default. The Rust source-list APIs retain their per-file scope;
+`celox_sv_analyzer::syntax::preprocess_sources` explicitly preprocesses one unit.
+`--top` overrides the selected top; `run`'s `-O`
 and `--max-steps` override the target/root run settings. VPI builds retain the
 existing force-compatible compilation settings.
 
@@ -386,10 +398,17 @@ supported for existing automation: `PYGPI_PYTHON_BIN`, `LIBPYTHON_LOC`,
 
 ## Current compatibility
 
-The compatibility layer covers cocotb 2.0 paths for module and signal
-discovery, immediate/deposit/force/release writes, scalar and vector values,
-simulation time, and the Start, ReadWrite, ReadOnly, NextTimeStep, Timer,
-ValueChange, and End callback regions.
+The compatibility layer covers cocotb 2.0 and 2.1 paths for module and signal
+discovery, including escaped signal names, scalar/vector values, packed bit
+handles, unpacked array elements, real values and string bytes.
+Immediate deposits and zero-delay inertial updates are supported. Packed
+variables support whole-vector force/release and deposits through their bit
+handles while forced; string force/release and delayed VPI writes are not
+supported. Callbacks cover Start, ReadWrite, ReadOnly, NextTimeStep, Timer,
+ValueChange, and End regions.
 
-Packed bit handles, delayed VPI writes, unpacked-array indexing, and
-derived/cascaded clock scheduling are not yet supported.
+The [upstream regression runner](https://github.com/celox-sim/celox/tree/master/conformance/cocotb) runs pinned,
+unmodified cocotb tests against the generated executable. Its default 23
+configurations pass 534 tests with 5 upstream skips, including bridge-thread
+clock reads, force/release and both inertial-write modes. An inventory records
+the remaining upstream groups and their unresolved requirements.

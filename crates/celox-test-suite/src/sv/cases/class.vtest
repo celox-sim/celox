@@ -3331,3 +3331,370 @@ module Top(output int sum);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq sum 703282))
+(case members_of_call_results
+  (source "package.sv" #"
+package p;
+    class Base;
+        int n;
+        virtual function Base report_object();
+            return this;
+        endfunction
+        function int v();
+            return n;
+        endfunction
+    endclass
+    class Derived extends Base;
+        virtual function Base report_object();
+            return this;
+        endfunction
+        function int probe();
+            return report_object().v() + 10 * report_object().report_object().n;
+        endfunction
+    endclass
+    class R;
+        int n = 3;
+        static R inst;
+        function R get();
+            return this;
+        endfunction
+        function int v();
+            return n;
+        endfunction
+        static function R instance_of();
+            if (inst == null) inst = new();
+            return inst;
+        endfunction
+    endclass
+    function R get();
+        return R::instance_of();
+    endfunction
+endpackage
+"#)
+  (source "top.sv" #"
+module Top(output int sum);
+    import p::*;
+    initial begin
+        automatic Derived d = new();
+        automatic R r;
+        d.n = 2;
+        r = get().get();
+        r.n = 5;
+        sum = d.probe() + 100 * get().v() + 1000 * get().get().n
+            + 10000 * R::instance_of().get().v();
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 55522))
+
+; Handles declared with a class-scoped typedef of a registry specialization,
+; as `uvm_object_utils` declares `type_id`, call its methods: static
+; `C::type_id::create()`, virtual ones through a base handle, and a method
+; whose local has the registry's own class-scoped typedef (8.23, 8.25.1).
+(case scoped_typedef_handles
+ (source "scoped_typedef_handles.sv" #"
+package p;
+ virtual class Wrapper;
+  pure virtual function string get_type_name();
+ endclass
+ typedef class Common;
+ class Registry #(type T = int, string Tname = "<unknown>") extends Wrapper;
+  typedef Registry #(T, Tname) this_type;
+  typedef Common #(this_type, T, Tname) common_type;
+  static this_type me;
+  static function this_type get();
+   if (me == null) me = new;
+   return me;
+  endfunction
+  static function T create();
+   T object = new;
+   return object;
+  endfunction
+  virtual function string get_type_name();
+   common_type common = common_type::get();
+   return common.name();
+  endfunction
+ endclass
+ class Common #(type Reg = int, type T = int, string Tname = "<unknown>");
+  static Common #(Reg, T, Tname) inst;
+  static function Common #(Reg, T, Tname) get();
+   if (inst == null) inst = new;
+   return inst;
+  endfunction
+  function string name();
+   return Tname;
+  endfunction
+ endclass
+ class PkgComp;
+  int value = 3;
+  typedef Registry #(PkgComp, "pkg") type_id;
+ endclass
+endpackage
+import p::*;
+class UnitComp;
+ int value = 5;
+ typedef Registry #(UnitComp, "unit") type_id;
+endclass
+module Top(output int sum, output int names);
+ class LocalRegistry #(type T = int, string Tname = "<unknown>");
+  typedef LocalRegistry #(T, Tname) this_type;
+  static function T create();
+   T object = new;
+   return object;
+  endfunction
+  virtual function string get_type_name();
+   this_type self = this;
+   return Tname;
+  endfunction
+ endclass
+ class LocalComp;
+  int value = 7;
+  typedef LocalRegistry #(LocalComp, "local") type_id;
+ endclass
+ initial begin
+  automatic UnitComp::type_id u = new;
+  automatic PkgComp::type_id k = new;
+  automatic LocalComp::type_id l = new;
+  automatic Wrapper w = k;
+  automatic UnitComp uc = UnitComp::type_id::create();
+  automatic PkgComp pc = PkgComp::type_id::create();
+  automatic LocalComp lc = LocalComp::type_id::create();
+  sum = uc.value + 10 * pc.value + 100 * lc.value;
+  names = (u.get_type_name() == "unit") + 2 * (w.get_type_name() == "pkg")
+   + 4 * (l.get_type_name() == "local")
+   + 8 * (UnitComp::type_id::get() == UnitComp::type_id::get());
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq sum 735) (assert_eq names 15))
+
+; The class scope of a typedef may itself be specialized or qualified,
+; `C#(byte)::type_id` and `p::C::type_id` as the `uvm_resource_db` of UVM
+; names its default implementation, also inside a specialization by the
+; class parameter of the caller (8.23, 8.25.1).
+(case specialized_scope_typedef_calls
+ (source "specialized_scope_typedef_calls.sv" #"
+package p;
+ class Registry #(type T = int);
+  static int count;
+  static function T create();
+   T object = new;
+   count++;
+   return object;
+  endfunction
+ endclass
+ virtual class Base #(type T = int);
+  pure virtual function int width();
+ endclass
+ class Impl #(type T = int) extends Base #(T);
+  typedef Registry #(Impl #(T)) type_id;
+  virtual function int width();
+   return $bits(T);
+  endfunction
+ endclass
+ class Db #(type T = int);
+  static Base #(T) imp;
+  static function void set_imp(Base #(T) i = null);
+   if (i == null) i = Impl #(T)::type_id::create();
+   imp = i;
+  endfunction
+ endclass
+ class Obj;
+  int value = 3;
+  typedef Registry #(Obj) type_id;
+ endclass
+endpackage
+module Top(output int sum);
+ import p::*;
+ initial begin
+  automatic Impl #(byte) b = Impl #(byte)::type_id::create();
+  automatic Base #(int) i = p::Impl #(int)::type_id::create();
+  automatic Obj o = p::Obj::type_id::create();
+  Db #(shortint)::set_imp();
+  sum = b.width() + 100 * i.width() + 10000 * o.value
+   + 100000 * Db #(shortint)::imp.width();
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq sum 1633208))
+
+; Static properties are reached through the same scopes, each specialization
+; with its own storage (8.25.1).
+(case specialized_scope_typedef_properties
+ (source "specialized_scope_typedef_properties.sv" #"
+package p;
+ class Registry #(type T = int);
+  static int count;
+  static function T create();
+   T object = new;
+   count++;
+   return object;
+  endfunction
+ endclass
+ virtual class Base #(type T = int);
+  pure virtual function int width();
+ endclass
+ class Impl #(type T = int) extends Base #(T);
+  typedef Registry #(Impl #(T)) type_id;
+  virtual function int width();
+   return $bits(T);
+  endfunction
+ endclass
+ class Db #(type T = int);
+  static Base #(T) imp;
+  static function void set_imp(Base #(T) i = null);
+   if (i == null) i = Impl #(T)::type_id::create();
+   imp = i;
+  endfunction
+ endclass
+ class Obj;
+  int value = 3;
+  typedef Registry #(Obj) type_id;
+ endclass
+endpackage
+module Top(output int count);
+ import p::*;
+ initial begin
+  automatic Impl #(byte) b = Impl #(byte)::type_id::create();
+  automatic Obj o = p::Obj::type_id::create();
+  Db #(shortint)::set_imp();
+  count = Impl #(byte)::type_id::count + 10 * p::Obj::type_id::count
+   + 100 * Impl #(shortint)::type_id::count + 1000 * Impl #(int)::type_id::count;
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq count 111))
+
+; A string class parameter wider than 128 bits is passed on by name to the
+; specializations its typedefs, property, return and local types name (8.25).
+(case parameter_strings_wider_than_a_constant
+ (source "parameter_strings_wider_than_a_constant.sv" #"
+package p;
+ class Named #(string S = "x");
+  typedef Named #(S) this_type;
+  static Named #(S) inst;
+  static function Named #(S) get();
+   if (inst == null) inst = new;
+   return inst;
+  endfunction
+  function string name();
+   this_type self = this;
+   Named #(S) again = self;
+   return S;
+  endfunction
+ endclass
+ class Holder #(string S = "x");
+  typedef Named #(S) named_t;
+  function string name();
+   named_t named = named_t::get();
+   return named.name();
+  endfunction
+ endclass
+endpackage
+module Top(output int ok, output int len);
+ import p::*;
+ Holder #("a_name_longer_than_sixteen") holder = new;
+ initial begin
+  ok = holder.name() == "a_name_longer_than_sixteen";
+  len = holder.name().len();
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq ok 1) (assert_eq len 26))
+
+; `new` initializes subroutine locals whose class a package scope or a typedef
+; names (8.7).
+(case new_initializers_of_scoped_and_alias_types
+ (source "new_initializers_of_scoped_and_alias_types.sv" #"
+package items;
+ class Item;
+  int value = 4;
+ endclass
+ typedef Item item_t;
+endpackage
+typedef items::Item unit_item_t;
+module Top(output int sum);
+ function automatic int total();
+  items::Item a = new;
+  items::item_t b = new;
+  unit_item_t c = new;
+  a.value += 1;
+  b.value += 2;
+  return a.value + 10 * b.value + 100 * c.value;
+ endfunction
+ initial sum = total();
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq sum 465))
+
+; A class parameter without an integral value hides the module's constant of
+; its name, and the class passes its value on by name (8.25).
+(case parameter_literals_hide_module_constants
+ (source "parameter_literals_hide_module_constants.sv" #"
+module Top(output int ok);
+ localparam string S = "module";
+ class Name #(string S = "x"); function string s(); return S; endfunction endclass
+ class Shadow #(string S = "x");
+  function string s();
+   Name #(S) name = new;
+   return name.s();
+  endfunction
+ endclass
+ Shadow #("a_name_longer_than_sixteen") shadow = new;
+ initial ok = shadow.s() == "a_name_longer_than_sixteen";
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq ok 1))
+
+; A static variable's initializer runs once, before any procedure starts,
+; and may call constructors and functions (6.8, 6.21): static locals of
+; functions, methods and tasks, static properties and package variables.
+; Their order is not specified, so no initializer reads another's variable.
+(case static_initializers_run_once_before_time_zero
+ (source "static_initializers_run_once_before_time_zero.sv" #"
+package q;
+ class Counter;
+  int v;
+  function new(int v = 0); this.v = v; endfunction
+ endclass
+ class Pool;
+  static Counter shared = new(5);
+  static function Counter printer();
+   static Counter p = new();
+   p.v++;
+   return p;
+  endfunction
+ endclass
+ function automatic int seed(); Counter c = new(5); return c.v + 1; endfunction
+ int seeded = seed();
+endpackage
+module Top(output int a, output int b, output int c, output int d, output int e);
+ int m = 20;
+ function int f();
+  static int k = m;
+  k++;
+  return k;
+ endfunction
+ class Item;
+  function int bump();
+   static q::Counter c = new(30);
+   c.v++;
+   return c.v;
+  endfunction
+ endclass
+ task t(output int r);
+  static q::Counter c = new(40);
+  #1 c.v++;
+  r = c.v;
+ endtask
+ initial begin
+  automatic Item x = new;
+  automatic Item y = new;
+  q::Counter h;
+  int r;
+  h = q::Pool::printer();
+  h = q::Pool::printer();
+  a = h.v + 10 * q::Pool::shared.v;
+  b = q::seeded;
+  void'(f());
+  c = f();
+  void'(x.bump());
+  d = y.bump();
+  t(r);
+  t(e);
+ end
+endmodule"#)
+ (top Top) (run_until 3) (assert_eq a 52) (assert_eq b 6) (assert_eq c 22) (assert_eq d 32) (assert_eq e 42))

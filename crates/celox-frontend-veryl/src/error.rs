@@ -59,8 +59,9 @@ pub enum FrontendDiagnostic {
     #[error("latch inference inside always_comb: assignments retain their previous values")]
     InferredLatch {
         source_location: SourceLocation,
-        /// Candidate retention is unreachable for binary selectors. Keep this
-        /// evidence until duplicate upstream coverage warnings are removed.
+        /// Two-state lowering completed the process's binary cases, so it
+        /// retains nothing. Only absorbs duplicate upstream coverage warnings
+        /// and is dropped afterwards; a retaining process never sets it.
         proven_binary_combinational: bool,
     },
 

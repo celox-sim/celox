@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "contract": "rtlmeter-cold-process-v1",
+  "repository": "https://github.com/verilator/rtlmeter.git",
+  "revision": "4fdd6c3fd154e9b99d3a9d713cf3f4977e284f94",
+  "samples": 3,
+  "verilatorVersion": "5.052",
+  "cases": {
+    "e902": {
+      "design": "XuanTie-E902",
+      "test": "hello",
+      "payload": "Hello Friend!",
+      "maxCycles": 16384
+    },
+    "e906": {
+      "design": "XuanTie-E906",
+      "test": "hello",
+      "payload": "Hello Friend!",
+      "maxCycles": 32768
+    },
+    "e203": {
+      "design": "HummingbirdV2-E203",
+      "test": "hello",
+      "payload": "Hello World from HummingbirdV2 E203",
+      "maxCycles": 16384,
+      "configuration": "default",
+      "successMarker": "TEST_PASSED",
+      "inputFiles": [
+        "tests/hello/program.hex"
+      ]
+    }
+  }
+}

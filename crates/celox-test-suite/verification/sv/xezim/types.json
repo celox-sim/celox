@@ -4,6 +4,17 @@
       "category": "Types",
       "detail": "",
       "expectation": "Simulation",
+      "name": "types::chandles_hold_null_and_copies",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
       "name": "types::constant_functions_in_unpacked_dimensions",
       "phase": "execute",
       "status": "passed",
@@ -172,6 +183,17 @@
       "name": "types::simulates_systemverilog_parameterized_port_widths",
       "phase": "execute",
       "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "types::unpacked_array_assignments_through_selects_and_calls at 564:27: assert_eq sum: expected 0x1179b59, got 0x117b2e7",
+      "expectation": "Simulation",
+      "name": "types::unpacked_array_assignments_through_selects_and_calls",
+      "phase": "execute",
+      "status": "mismatch",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []

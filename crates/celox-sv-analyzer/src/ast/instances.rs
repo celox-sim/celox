@@ -5,29 +5,30 @@ mod connections;
 
 pub(super) fn instances_from_scope(
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
     interfaces: &InterfaceLookup<'_>,
 ) -> Result<Vec<Instance>, AnalyzerError> {
-    let type_aliases = type_aliases_from_scope(syntax_tree)?;
-    let active = generate::items(syntax_tree, const_env, &type_aliases)?;
+    let type_aliases = type_aliases_from_scope(syntax_tree, session)?;
+    let active = generate::items(syntax_tree, session, const_env, &type_aliases)?;
     let mut instances = Vec::new();
     let mut views = generate::ScopeViews::new(packed_dimensions);
     for item in &active {
-        let _interface_scope = item.interface_scope();
+        let syntax_tree = &item.scoped(syntax_tree);
         let celox_sv_syntax::BodyItemKind::Instance(native) =
             syntax_tree.declarations().body_item(item.id).kind
         else {
             continue;
         };
-        if scope::imported(&syntax_tree.state)
+        if scope::imported(syntax_tree)
             .interface_declarations
             .contains(&item.id)
         {
             continue;
         }
         let native = syntax_tree.declarations().instantiation(native);
-        let _constant_functions = item.enter();
+        let syntax_tree = &item.enter(syntax_tree);
         let start = instances.len();
         let dimensions = views.dimensions(item);
         instances_from_native_declaration(
@@ -35,6 +36,7 @@ pub(super) fn instances_from_scope(
             native,
             None,
             syntax_tree,
+            session,
             &item.env,
             dimensions,
             interfaces,
@@ -45,7 +47,8 @@ pub(super) fn instances_from_scope(
             for connection in &mut instance.port_connections {
                 connection.map_expressions(|expr| {
                     let mut expr = substitute_expr_constants_with_parameter_literals(
-                        &syntax_tree.state,
+                        syntax_tree,
+                        session,
                         expr,
                         &item.env,
                         &item.literals,
@@ -65,6 +68,7 @@ fn instances_from_native_declaration(
     native: &celox_sv_syntax::Instantiation,
     condition: Option<ConstExpr>,
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
     interfaces: &InterfaceLookup<'_>,
@@ -76,6 +80,7 @@ fn instances_from_native_declaration(
     let mut parameter_overrides = parameter_overrides(
         native.parameters.as_deref(),
         syntax_tree,
+        session,
         interface,
         packed_dimensions,
         false,
@@ -88,7 +93,8 @@ fn instances_from_native_declaration(
                 &parameter_types_from_const_env(const_env),
             );
             let value = expr_to_index_const(
-                &syntax_tree.state,
+                syntax_tree,
+                session,
                 substitute_expr_idents(
                     const_expr_to_expr(value),
                     &packed_dimensions.parameter_values,
@@ -118,13 +124,15 @@ fn instances_from_native_declaration(
             (id, index),
             authored,
             syntax_tree,
+            session,
             packed_dimensions,
             interface,
         )?;
         for connection in &mut port_connections {
             connection.map_expressions(|expr| {
                 substitute_expr_constants_with_parameter_literals(
-                    &syntax_tree.state,
+                    syntax_tree,
+                    session,
                     expr,
                     const_env,
                     &HashMap::default(),
@@ -146,6 +154,7 @@ fn instances_from_native_declaration(
             let ranges = instance_ranges(
                 authored,
                 syntax_tree,
+                session,
                 const_env,
                 &packed_dimensions.type_aliases,
             )?;
@@ -154,8 +163,8 @@ fn instances_from_native_declaration(
                     "multidimensional module instance array".to_string(),
                 ));
             };
-            let left = eval_ast_const_expr(&syntax_tree.state, range.left(), const_env);
-            let right = eval_ast_const_expr(&syntax_tree.state, range.right(), const_env);
+            let left = eval_ast_const_expr(&syntax_tree.functions, range.left(), const_env);
+            let right = eval_ast_const_expr(&syntax_tree.functions, range.right(), const_env);
             let bounds = left
                 .zip(right)
                 .filter(|(left, right)| left.abs_diff(*right) < 4096)
@@ -164,7 +173,7 @@ fn instances_from_native_declaration(
                 })?;
             Some(bounds)
         };
-        let imported = scope::imported(&syntax_tree.state);
+        let imported = scope::imported(syntax_tree);
         let binding = imported.interface_instances.get(&(id, index));
         let mut parameter_names = parameter_names.clone();
         let mut parameter_overrides = parameter_overrides.clone();
@@ -194,6 +203,7 @@ fn instances_from_native_declaration(
 pub(super) fn parameter_overrides(
     native: Option<&[celox_sv_syntax::Argument]>,
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     interface: Option<&ModuleInterface>,
     packed_dimensions: &PackedDimensions,
     bind_values: bool,
@@ -240,6 +250,7 @@ pub(super) fn parameter_overrides(
             name,
             value,
             syntax_tree,
+            session,
             packed_dimensions,
             bind_values,
         )?);
@@ -251,10 +262,18 @@ pub(super) fn port_connections(
     key: interface_binding::InstanceKey,
     native: &celox_sv_syntax::InstanceDeclarator,
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     packed_dimensions: &PackedDimensions,
     interface: Option<&ModuleInterface>,
 ) -> Result<Vec<PortConnection>, AnalyzerError> {
-    connections::connections(key, native, syntax_tree, packed_dimensions, interface)
+    connections::connections(
+        key,
+        native,
+        syntax_tree,
+        session,
+        packed_dimensions,
+        interface,
+    )
 }
 
 pub(super) fn declaration_from_item<'a>(
@@ -292,10 +311,11 @@ fn validate_native_instances(native: &celox_sv_syntax::Instantiation) -> Convert
 pub(super) fn instance_ranges(
     native: &celox_sv_syntax::InstanceDeclarator,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Result<Vec<UnpackedRange>, AnalyzerError> {
-    constant_binding::unpacked_ranges(&native.dimensions, tree, env, aliases)
+    constant_binding::unpacked_ranges(&native.dimensions, tree, session, env, aliases)
 }
 
 pub(super) fn expr_ident_name(expr: &Expr) -> Option<String> {
@@ -328,6 +348,7 @@ pub(crate) fn normalize_identifier(text: &str) -> String {
 fn array_argument_shape(
     root: celox_sv_syntax::ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Option<VariableDimensions> {
     use celox_sv_syntax::{ExprId, ExprKind};
@@ -353,16 +374,17 @@ fn array_argument_shape(
                     jobs.push(Job::Enter(then_expression));
                 } else {
                     values.push(array_compatibility::native_unpacked_shape(
-                        id, native, dims,
+                        id, tree, session, dims,
                     )?);
                 }
             }
             Job::Conditional => {
                 let right = values.pop()?;
                 let left = values.pop()?;
-                let left_type = array_compatibility::unpacked_array_type(&tree.state, &left, dims)?;
+                let left_type =
+                    array_compatibility::unpacked_array_type(&tree.functions, &left, dims)?;
                 let right_type =
-                    array_compatibility::unpacked_array_type(&tree.state, &right, dims)?;
+                    array_compatibility::unpacked_array_type(&tree.functions, &right, dims)?;
                 if left_type != right_type
                     || left.packed != right.packed
                     || left.members != right.members
@@ -382,6 +404,7 @@ fn parameter_override(
     name: String,
     native: celox_sv_syntax::ExprId,
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     packed_dimensions: &PackedDimensions,
     bind_values: bool,
 ) -> Result<ParameterOverride, AnalyzerError> {
@@ -392,11 +415,12 @@ fn parameter_override(
         let ty = type_binding::argument_type(
             native,
             syntax_tree,
+            session,
             &packed_dimensions.const_env,
             &packed_dimensions.type_aliases,
         )?
         .and_then(|ty| {
-            type_parameters::resolve(&syntax_tree.state, ty, &packed_dimensions.const_env)
+            type_parameters::resolve(&syntax_tree.functions, ty, &packed_dimensions.const_env)
         })
         .ok_or_else(|| unsupported(format!("parameter type override `{name}`")))?;
         return Ok(ParameterOverride::type_override(name, ty));
@@ -408,14 +432,15 @@ fn parameter_override(
             continue;
         }
         if matches!(declarations.expression(id).kind, ExprKind::Pattern { .. }) {
-            let pattern = bound_patterns::from_param(native, syntax_tree, packed_dimensions)?;
+            let pattern =
+                bound_patterns::from_param(native, syntax_tree, session, packed_dimensions)?;
             let mut bound = ParameterOverride::new(name, None);
             bound.bound_pattern = Some(pattern);
             return Ok(bound);
         }
         pending.extend(parameters::skipped::children(id, declarations));
     }
-    if let Some(shape) = array_argument_shape(native, syntax_tree, packed_dimensions) {
+    if let Some(shape) = array_argument_shape(native, syntax_tree, session, packed_dimensions) {
         // Aggregate conditional expressions require equivalent branch types
         // (11.4.11). A known condition selects a whole array before element
         // binding; treating it as a packed mux would use the wrong X merge rule.
@@ -426,13 +451,20 @@ fn parameter_override(
             else_expression,
         } = declarations.expression(selected).kind
         {
-            let condition = constant_binding::bind(condition, syntax_tree, packed_dimensions)?
-                .and_then(|value| {
-                    eval_ast_const_expr(&syntax_tree.state, &value, &packed_dimensions.const_env)
-                })
-                .ok_or_else(|| {
-                    unsupported("nonconstant or ambiguous condition in array parameter argument")
-                })?;
+            let condition =
+                constant_binding::bind(condition, syntax_tree, session, packed_dimensions)?
+                    .and_then(|value| {
+                        eval_ast_const_expr(
+                            &syntax_tree.functions,
+                            &value,
+                            &packed_dimensions.const_env,
+                        )
+                    })
+                    .ok_or_else(|| {
+                        unsupported(
+                            "nonconstant or ambiguous condition in array parameter argument",
+                        )
+                    })?;
             selected = expression_binding::ungroup(
                 if condition != 0 {
                     then_expression
@@ -442,8 +474,13 @@ fn parameter_override(
                 declarations,
             );
         }
-        let pattern =
-            bound_patterns::from_array_parameter(selected, syntax_tree, packed_dimensions, &shape)?;
+        let pattern = bound_patterns::from_array_parameter(
+            selected,
+            syntax_tree,
+            session,
+            packed_dimensions,
+            &shape,
+        )?;
         let mut bound = ParameterOverride::new(name, None);
         bound.bound_pattern = Some(pattern);
         return Ok(bound);
@@ -461,11 +498,12 @@ fn parameter_override(
         let ty = type_binding::argument_type(
             native,
             syntax_tree,
+            session,
             &packed_dimensions.const_env,
             &packed_dimensions.type_aliases,
         )?
         .and_then(|ty| {
-            type_parameters::resolve(&syntax_tree.state, ty, &packed_dimensions.const_env)
+            type_parameters::resolve(&syntax_tree.functions, ty, &packed_dimensions.const_env)
         })
         .ok_or_else(|| unsupported("type parameter packed bounds"))?;
         return Ok(ParameterOverride::type_override(name, ty));
@@ -485,21 +523,31 @@ fn parameter_override(
             && let Some(ty) = packed_dimensions.type_aliases.get(&type_name)
         {
             let ty = type_parameters::resolve(
-                &syntax_tree.state,
+                &syntax_tree.functions,
                 ty.clone(),
                 &packed_dimensions.const_env,
             )
             .ok_or_else(|| unsupported(format!("parameter type override `{name}`")))?;
             return Ok(ParameterOverride::type_override(name, ty));
         }
-        expr_to_const(
-            &syntax_tree.state,
-            expression_binding::value(native, declarations, syntax_tree, packed_dimensions)?,
-        )
-        .ok_or_else(|| unsupported("constant interface parameter override"))?
+        let value = expression_binding::value(
+            native,
+            declarations,
+            syntax_tree,
+            session,
+            packed_dimensions,
+        )?;
+        expr_to_const(session, value)
+            .ok_or_else(|| unsupported("constant interface parameter override"))?
     } else {
-        constant_binding::value_expression(native, declarations, syntax_tree, packed_dimensions)?
-            .ok_or_else(|| unsupported("parameter override expression"))?
+        constant_binding::value_expression(
+            native,
+            declarations,
+            syntax_tree,
+            session,
+            packed_dimensions,
+        )?
+        .ok_or_else(|| unsupported("parameter override expression"))?
     };
     // A bare name that denotes a type (a typedef, or the instantiating
     // module's own `parameter type`) is passed on as that type.
@@ -507,7 +555,7 @@ fn parameter_override(
         && let Some(r#type) = packed_dimensions.type_aliases.get(type_name)
     {
         let ty = type_parameters::resolve(
-            &syntax_tree.state,
+            &syntax_tree.functions,
             r#type.clone(),
             &packed_dimensions.const_env,
         )

@@ -2,6 +2,17 @@
   "cases": [
     {
       "category": "Types",
+      "detail": "native testbench failed: exit status: 1; see runtime.log and protocol.log\nnative testbench exited without reaching $finish\n",
+      "expectation": "Simulation",
+      "name": "string_format::formatted_strings_into_integral_outputs",
+      "phase": "execute",
+      "status": "runtime_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus 13.0 compiles %p of queues and dynamic arrays, but vvp stops with \"$display does not support argument type (116).\" IEEE 1800-2023 21.2.1.6 prints them as assignment patterns.",
       "expectation": "Simulation",
       "known_issue": {
@@ -25,6 +36,17 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 7; see <case>/build.log\n<case>/source_0.sv:5: sorry: Unpacked structs not supported.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Invalid module item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Invalid module instantiation\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:10: error: Invalid module item.\n",
+      "expectation": "Simulation",
+      "name": "string_format::pattern_format_enums",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus 13.0 rejects associative arrays declared with int and string indices (\"Type names are not valid expressions here\") and queues of class handles (\"Queue of type class ... is not yet supported\", \"Class/null r-value not allowed in this context\"), which IEEE 1800-2023 7.8 and 7.10 define.",
       "expectation": "Simulation",
       "known_issue": {
@@ -42,6 +64,28 @@
       "name": "string_format::pattern_format_keys_and_handles",
       "phase": "skip",
       "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 16; see <case>/build.log\n<case>/source_0.sv:3: sorry: Unpacked structs not supported.\n<case>/source_0.sv:4: sorry: Unpacked structs not supported.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:5: error: Invalid module item.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Invalid module item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:1: error: Error in task/function port item after port name T.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Syntax error defining function.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Invalid module item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Invalid module item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:10: error: Invalid module item.\n",
+      "expectation": "Simulation",
+      "name": "string_format::pattern_format_structure_containers",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:4: sorry: Unpacked structs not supported.\n<case>/source_0.sv:5: sorry: Unpacked structs not supported.\n",
+      "expectation": "Simulation",
+      "name": "string_format::pattern_format_structure_values",
+      "phase": "compile",
+      "status": "compile_error",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []

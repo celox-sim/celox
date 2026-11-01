@@ -8,8 +8,10 @@ pub use crate::procedural::{
     SystemTaskArg,
 };
 pub use crate::system_functions::{
-    ArrayQuery, Callee, ContainerKind, ContainerLayout, ContainerOp, HandleProperty, MemoryFormat,
-    ObjectField, ObjectOp, Radix, Record, Severity, StringOp, SystemFunction, SystemTask, VcdTask,
+    AccessCheck, AggregatePattern, ArrayQuery, Callee, ContainerConcat, ContainerKind,
+    ContainerLayout, ContainerOp, HandleProperty, Locator, LocatorKey, LocatorMethod,
+    LocatorSource, MemoryFormat, ObjectField, ObjectOp, Radix, Record, Severity, Stream, StreamArg,
+    StreamItem, StreamOp, StreamPack, StreamRange, StringOp, SystemFunction, SystemTask, VcdTask,
 };
 
 /// A procedural statement of the analyzed IR.
@@ -73,7 +75,21 @@ pub struct Module {
     dpi_imports: Vec<DpiImport>,
     imported_parameters: Vec<Parameter>,
     interface_scope_names: Vec<String>,
+    interface_handles: Vec<InterfaceHandle>,
     program: bool,
+}
+
+/// An interface instance or interface port of a module that a virtual
+/// interface may denote (IEEE 1800-2023 25.9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceHandle {
+    /// The instance or port, as the module's flattened names spell it.
+    pub handle: String,
+    pub interface: String,
+    /// A port of the module, which denotes the instance connected to it.
+    pub port: bool,
+    /// The signal or port of the module that holds each member.
+    pub members: Vec<(String, String)>,
 }
 
 impl Module {
@@ -138,6 +154,95 @@ impl Module {
         self
     }
 
+    /// Run selected `always @*` processes, by index among
+    /// [`Self::comb_processes`], as ordinary processes that wait on their
+    /// implicit event expression (IEEE 1800-2023 9.4.2.2) before each run of
+    /// their statement.
+    pub fn run_comb_processes_as_processes(
+        self,
+        mut select: impl FnMut(usize, &CombProcess) -> bool,
+    ) -> Self {
+        self.run_comb_processes_with_deferred_rearm(|index, process| {
+            select(index, process).then_some(false)
+        })
+    }
+
+    /// Like `run_comb_processes_as_processes`: `None` keeps a combinational
+    /// process, `Some(false)` converts it, and `Some(true)` additionally lets
+    /// other Active work run between its body and its next implicit wait (4.7).
+    pub fn run_comb_processes_with_deferred_rearm(
+        mut self,
+        mut select: impl FnMut(usize, &CombProcess) -> Option<bool>,
+    ) -> Self {
+        let mut retained = Vec::new();
+        for (index, process) in std::mem::take(&mut self.comb_processes)
+            .into_iter()
+            .enumerate()
+        {
+            let selection = (process.kind == CombProcessKind::AlwaysStar)
+                .then(|| select(index, &process))
+                .flatten();
+            let Some(defer_rearm) = selection else {
+                retained.push(process);
+                continue;
+            };
+            // The reads of branches that constant folding removed count too.
+            let reads = process
+                .body
+                .iter()
+                .chain(&process.sensitivity_body)
+                .cloned()
+                .collect();
+            let mut body = vec![Stmt::WaitImplicit(reads)];
+            body.extend(process.body);
+            if defer_rearm {
+                body.push(Stmt::DeferActive);
+            }
+            self.initial_processes.push(InitialProcess {
+                creation_order: process.creation_order,
+                site: process.process_site,
+                scheduled_edge: false,
+                condition: process.condition,
+                body: vec![Stmt::Loop {
+                    kind: LoopKind::Forever,
+                    init: Vec::new(),
+                    condition: None,
+                    step: Vec::new(),
+                    body,
+                }],
+                kind: celox_design::ProcessKind::Regular,
+                synthetic: false,
+                repeats: true,
+            });
+        }
+        self.comb_processes = retained;
+        self.initial_processes
+            .sort_by_key(|process| (!process.is_initializer(), process.creation_order));
+        self
+    }
+
+    /// Rewrite the statements of the combinational processes, by index
+    /// among [`Self::comb_processes`]: their bodies, and the statements that
+    /// only describe their implicit sensitivity (`true`; see
+    /// [`CombProcess::sensitivity_body`]).
+    pub fn map_comb_process_bodies(
+        mut self,
+        mut rewrite: impl FnMut(usize, Vec<Stmt>, bool) -> Vec<Stmt>,
+    ) -> Self {
+        for (index, process) in self.comb_processes.iter_mut().enumerate() {
+            process.body = rewrite(index, std::mem::take(&mut process.body), false);
+            process.sensitivity_body =
+                rewrite(index, std::mem::take(&mut process.sensitivity_body), true);
+        }
+        self
+    }
+
+    /// Declare a variable local to a procedural block (see [`Self::locals`]).
+    pub fn add_local(mut self, local: LocalVariable) -> Self {
+        self.locals.push(local);
+        self
+    }
+
     /// Represent selected [`InitialProcess::level_sensitive`] processes as
     /// `always @*`. The caller selects a process only when its list is the
     /// implicit event expression of its statement (IEEE 1800-2023 9.4.2.2).
@@ -199,6 +304,7 @@ impl Module {
             imported_parameters: Vec::new(),
             program: false,
             interface_scope_names: Vec::new(),
+            interface_handles: Vec::new(),
         }
     }
 
@@ -209,6 +315,16 @@ impl Module {
 
     pub(crate) fn with_interface_scope_names(mut self, names: Vec<String>) -> Self {
         self.interface_scope_names = names;
+        self
+    }
+
+    /// The interface instances and ports a virtual interface may denote.
+    pub fn interface_handles(&self) -> &[InterfaceHandle] {
+        &self.interface_handles
+    }
+
+    pub(crate) fn with_interface_handles(mut self, handles: Vec<InterfaceHandle>) -> Self {
+        self.interface_handles = handles;
         self
     }
 
@@ -496,6 +612,17 @@ impl Port {
         self
     }
 
+    /// Bind an aggregate pattern as independently typed values for the leaf ports.
+    pub fn bind_structure_pattern(
+        &self,
+        pattern: &crate::ast::BoundPattern,
+    ) -> Result<Vec<Expr>, crate::AnalyzerError> {
+        let target = self.pattern_target.as_ref().ok_or_else(|| {
+            crate::AnalyzerError::Unsupported("unpacked structure port pattern type".into())
+        })?;
+        pattern.bind_structure_port(target)
+    }
+
     /// Bind caller-owned pattern values in this specialized port's type.
     pub fn bind_pattern(
         &self,
@@ -726,6 +853,7 @@ impl From<ast::PortDirection> for PortDirection {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Type {
+    structure: Option<std::sync::Arc<StructureType>>,
     tagged_identity: Option<String>,
     kind: TypeKind,
     is_signed: bool,
@@ -734,9 +862,39 @@ pub struct Type {
     resolved_width: Option<usize>,
     signed_element_depth: Option<usize>,
     class: Option<String>,
+    /// A `chandle`, held as 64 bits (IEEE 1800-2023 6.14).
+    chandle: bool,
+}
+
+/// Shared metadata, allocated only for unpacked structure types. Ordinary
+/// scalar types and cloning their declarations do not copy a member layout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StructureType {
+    identity: String,
+    leaves: Vec<(String, Type)>,
 }
 
 impl Type {
+    /// Nominal identity of a non-storage unpacked structure declaration.
+    pub fn structure_identity(&self) -> Option<&str> {
+        self.structure
+            .as_ref()
+            .map(|structure| structure.identity.as_str())
+    }
+
+    /// Leaf member paths and types in declaration order. Each leaf has its own storage.
+    pub fn structure_leaves(&self) -> &[(String, Type)] {
+        self.structure
+            .as_ref()
+            .map_or(&[], |structure| structure.leaves.as_slice())
+    }
+
+    /// Whether the type is a `chandle`, which other analyses of names of
+    /// this signal must keep (see [`crate::ast::Type::with_chandle`]).
+    pub fn is_chandle(&self) -> bool {
+        self.chandle
+    }
+
     /// How many leading packed dimensions select an element of a signed
     /// named type (IEEE 1800-2023 7.4.1).
     pub fn signed_element_depth(&self) -> Option<usize> {
@@ -791,7 +949,7 @@ impl Type {
 
     pub(crate) fn has_symbolic_ranges(
         &self,
-        functions: &crate::ast::const_functions::State,
+        functions: &crate::ast::const_functions::ConstantFunctions,
     ) -> bool {
         let values = fxhash::FxHashMap::default();
         let constants = crate::ast::const_functions::Environment {
@@ -818,6 +976,9 @@ pub enum TypeKind {
     Object,
     /// A scheduler-owned process reference (9.7), independent of the heap.
     Process,
+    /// A handle of the synchronization object of a named event (15.5), or
+    /// `null`.
+    Event,
     Bit,
     Logic,
     Reg,
@@ -829,13 +990,25 @@ impl Type {
         r#type: ast::Type,
         constants: &dyn typecheck::ConstantEnvironment,
     ) -> Self {
+        let structure = r#type.structure_identity().map(|identity| {
+            std::sync::Arc::new(StructureType {
+                identity: identity.to_owned(),
+                leaves: r#type
+                    .structure_leaves()
+                    .into_iter()
+                    .map(|(name, ty)| (name, Self::from_ast(ty, constants)))
+                    .collect(),
+            })
+        });
         let tagged_identity = r#type.tagged_identity().map(str::to_owned);
         let kind = r#type.kind().into();
         let is_signed = r#type.is_signed();
         let class = r#type.class().map(str::to_owned);
         let signed_element_depth = r#type.signed_element_depth();
+        let chandle = r#type.is_chandle();
         let (packed_ranges, unpacked_ranges, resolved_width) = convert_type(r#type, constants);
         Self {
+            structure,
             tagged_identity,
             kind,
             is_signed,
@@ -844,6 +1017,7 @@ impl Type {
             resolved_width,
             signed_element_depth,
             class,
+            chandle,
         }
     }
 }
@@ -890,6 +1064,7 @@ impl From<ast::TypeKind> for TypeKind {
             ast::TypeKind::String => TypeKind::String,
             ast::TypeKind::Object => TypeKind::Object,
             ast::TypeKind::Process => TypeKind::Process,
+            ast::TypeKind::Event => TypeKind::Event,
             ast::TypeKind::Bit => TypeKind::Bit,
             ast::TypeKind::Logic => TypeKind::Logic,
             ast::TypeKind::Reg => TypeKind::Reg,
@@ -1076,6 +1251,9 @@ impl LValue {
 pub struct CombProcess {
     creation_order: usize,
     site: Option<SourceSpan>,
+    /// Where an `always` procedure is written, for diagnostics about it as
+    /// a process.
+    process_site: Option<ProcessSite>,
     kind: CombProcessKind,
     condition: Option<ConstExpr>,
     assignments: Vec<Assignment>,
@@ -1086,6 +1264,11 @@ pub struct CombProcess {
 impl CombProcess {
     pub fn site(&self) -> Option<&SourceSpan> {
         self.site.as_ref()
+    }
+
+    /// Where an `always` procedure is written, as a process.
+    pub fn process_site(&self) -> Option<&ProcessSite> {
+        self.process_site.as_ref()
     }
 
     /// Reads removed from executable branches still affect implicit sensitivity.
@@ -1107,6 +1290,7 @@ impl CombProcess {
         Self {
             creation_order: 0,
             site: None,
+            process_site: None,
             sensitivity_body: Vec::new(),
             kind,
             condition,
@@ -1609,6 +1793,7 @@ impl From<ast::CombProcess> for CombProcess {
         );
         result.creation_order = process.creation_order();
         result.site = process.site().cloned();
+        result.process_site = process.process_site().cloned();
         result.sensitivity_body = process
             .sensitivity_body()
             .iter()
@@ -1916,6 +2101,10 @@ pub enum DpiType {
     /// `byte`, `shortint`, `int` or `longint`, passed as the C integer of
     /// that width.
     Integer { width: usize, signed: bool },
+    /// `string`, only for a [`DpiBuiltin`]: a heap handle.
+    String,
+    /// `chandle`, passed as a C pointer (IEEE 1800-2023 6.14).
+    Chandle,
 }
 
 impl DpiType {
@@ -1923,6 +2112,8 @@ impl DpiType {
         match self {
             DpiType::Bit | DpiType::Logic => 1,
             DpiType::Integer { width, .. } => *width,
+            DpiType::String => celox_design::HANDLE_WIDTH,
+            DpiType::Chandle => 64,
         }
     }
 
@@ -1935,16 +2126,55 @@ impl DpiType {
     }
 }
 
-/// An argument of a DPI-C import. Only `input` arguments are supported.
+/// A UVM DPI-C function that Celox provides itself, so UVM runs without
+/// its C library (UVM `src/dpi`). It binds by C name and UVM's prototype.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DpiBuiltin {
+    ReComp,
+    ReExec,
+    ReFree,
+    ReCompExec,
+    ReCompExecFree,
+    ReBuffer,
+    ReDeglobbed,
+    NextArg,
+    ToolName,
+    ToolVersion,
+    /// A function of UVM's C library that Celox does not provide yet: it
+    /// returns 0 (`null`, failure) and writes no output, so UVM reports the
+    /// facility as unavailable.
+    Unavailable,
+}
+
+/// An argument of a DPI-C import. Only `input` arguments are supported,
+/// except by a [`DpiBuiltin`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DpiArgument {
     name: String,
     r#type: DpiType,
+    output: bool,
 }
 
 impl DpiArgument {
     pub(crate) fn new(name: String, r#type: DpiType) -> Self {
-        Self { name, r#type }
+        Self {
+            name,
+            r#type,
+            output: false,
+        }
+    }
+
+    pub(crate) fn output(name: String, r#type: DpiType) -> Self {
+        Self {
+            name,
+            r#type,
+            output: true,
+        }
+    }
+
+    /// Whether the argument is an `output` (or `inout`), of a builtin.
+    pub fn is_output(&self) -> bool {
+        self.output
     }
 
     pub fn name(&self) -> &str {
@@ -1964,6 +2194,7 @@ pub struct DpiImport {
     pure: bool,
     return_type: Option<DpiType>,
     arguments: Vec<DpiArgument>,
+    builtin: Option<DpiBuiltin>,
 }
 
 impl DpiImport {
@@ -1988,7 +2219,19 @@ impl DpiImport {
             pure,
             return_type,
             arguments,
+            builtin: None,
         }
+    }
+
+    /// This import bound to a function Celox provides.
+    pub(crate) fn with_builtin(mut self, builtin: DpiBuiltin) -> Self {
+        self.builtin = Some(builtin);
+        self
+    }
+
+    /// The function Celox provides for this import, if any.
+    pub fn builtin(&self) -> Option<DpiBuiltin> {
+        self.builtin
     }
 
     /// The name SystemVerilog calls the function by.

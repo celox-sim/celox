@@ -13,7 +13,6 @@ mod runtime;
 pub use runtime::RuntimeConstantFunctions;
 
 use num_bigint::BigUint;
-use std::cell::{Cell, RefCell};
 
 use super::*;
 use crate::procedural::{CaseKind, CaseLabel, LoopKind};
@@ -45,45 +44,41 @@ pub(super) struct FunctionErrors {
     by_name: HashMap<String, AnalyzerError>,
 }
 
-/// Constant evaluator state owned by one explicit analysis session.
+/// What one constant evaluation has spent and may still spend, owned by the
+/// evaluation and lent to each frame it opens.
 #[derive(Default)]
-pub(crate) struct State {
-    functions: RefCell<ConstantFunctions>,
-    revision: generate::Revision,
-    depth: Cell<usize>,
-    runtime_fuel: Cell<Option<usize>>,
-    runtime_two_state: Cell<Option<bool>>,
-    argument_names: RefCell<(
-        Arc<ConstantFunctionTable>,
-        Arc<HashMap<String, Vec<String>>>,
-    )>,
+pub(crate) struct Budget {
+    /// How many calls the frame being evaluated is nested in.
+    depth: usize,
+    /// How many statements and loop iterations a runtime evaluation may
+    /// still run; `None` outside one.
+    fuel: Option<usize>,
+    /// Whether a runtime evaluation runs a two-state build; `None` outside
+    /// one.
+    two_state: Option<bool>,
 }
 
-pub(super) struct Installed {
-    previous: ConstantFunctions,
-    revision: u64,
-    state: std::rc::Rc<AnalysisState>,
-}
-
-impl Drop for Installed {
-    fn drop(&mut self) {
-        let functions = &self.state.const_functions;
-        replace(functions, std::mem::take(&mut self.previous));
-        functions.revision.restore(self.revision);
+impl Budget {
+    /// Spend one step of a runtime evaluation's fuel.
+    fn charge(&mut self) -> Option<()> {
+        if let Some(fuel) = &mut self.fuel {
+            *fuel = fuel.checked_sub(1)?;
+        }
+        Some(())
     }
 }
 
 /// A numeric environment together with the functions visible at its call site.
 pub(crate) struct Environment<'a> {
     pub(crate) constants: &'a dyn ConstantEnvironment,
-    pub(crate) functions: &'a State,
+    pub(crate) functions: &'a ConstantFunctions,
 }
 
 impl ConstantEnvironment for Environment<'_> {
     fn get(&self, name: &str) -> Option<&i128> {
         self.constants.get(name)
     }
-    fn function_state(&self) -> Option<&State> {
+    fn functions(&self) -> Option<&ConstantFunctions> {
         Some(self.functions)
     }
     fn literal(&self, name: &str) -> Option<&typecheck::IntegralLiteral> {
@@ -93,7 +88,7 @@ impl ConstantEnvironment for Environment<'_> {
 
 /// The functions of a module and the types of their locals.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct ConstantFunctions {
+pub(crate) struct ConstantFunctions {
     functions: Arc<ConstantFunctionTable>,
     locals: Arc<HashMap<String, crate::ir::Type>>,
     /// Why the module's functions, or one of them by name, could not be
@@ -101,37 +96,9 @@ pub(super) struct ConstantFunctions {
     errors: Arc<FunctionErrors>,
 }
 
-/// Make `functions` the constant functions until the guard is dropped.
-pub(super) fn install(
-    state: &std::rc::Rc<AnalysisState>,
-    functions: ConstantFunctions,
-) -> Installed {
-    let previous = installed(&state.const_functions);
-    let revision = state.const_functions.revision.get();
-    replace(&state.const_functions, functions);
-    Installed {
-        previous,
-        revision,
-        state: state.clone(),
-    }
-}
-
-pub(super) fn replace(state: &State, functions: ConstantFunctions) {
-    *state.functions.borrow_mut() = functions;
-    state.revision.change();
-}
-
-pub(super) fn revision(state: &State) -> &generate::Revision {
-    &state.revision
-}
-
-/// Why an installed function could not be converted for constant evaluation.
-pub(super) fn installed(state: &State) -> ConstantFunctions {
-    state.functions.borrow().clone()
-}
-
-pub(super) fn conversion_error(state: &State, name: &str) -> Option<AnalyzerError> {
-    let functions = state.functions.borrow();
+/// Why function `name` of `functions` could not be converted for constant
+/// evaluation.
+pub(super) fn conversion_error(functions: &ConstantFunctions, name: &str) -> Option<AnalyzerError> {
     functions
         .errors
         .by_name
@@ -140,21 +107,26 @@ pub(super) fn conversion_error(state: &State, name: &str) -> Option<AnalyzerErro
         .cloned()
 }
 
-pub(super) fn argument_names(state: &State) -> Arc<HashMap<String, Vec<String>>> {
-    let functions = state.functions.borrow().functions.clone();
-    let mut cached = state.argument_names.borrow_mut();
-    if !Arc::ptr_eq(&cached.0, &functions) {
-        let names = functions
-            .iter()
-            .map(|(name, function)| (name.clone(), function.argument_names.clone()))
-            .collect();
-        *cached = (functions, Arc::new(names));
-    }
-    cached.1.clone()
+/// The names of the formal arguments of each function of `functions`.
+pub(super) fn argument_names(functions: &ConstantFunctions) -> HashMap<String, Vec<String>> {
+    functions
+        .functions
+        .iter()
+        .map(|(name, function)| (name.clone(), function.argument_names.clone()))
+        .collect()
 }
 
-pub(super) fn is_constant_function(state: &State, name: &str) -> bool {
-    state.functions.borrow().functions.contains_key(name)
+impl ConstantFunctions {
+    /// Whether `other` is these functions, not only equal ones.
+    pub(super) fn same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.functions, &other.functions)
+            && Arc::ptr_eq(&self.locals, &other.locals)
+            && Arc::ptr_eq(&self.errors, &other.errors)
+    }
+}
+
+pub(super) fn is_constant_function(functions: &ConstantFunctions, name: &str) -> bool {
+    functions.functions.contains_key(name)
 }
 
 /// The module-scope functions of a module, for constant evaluation. When
@@ -404,12 +376,14 @@ fn scope_flags(tree: &AnalysisContext<'_>) -> (bool, bool) {
 
 pub(super) fn module_constant_functions(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     parameter_literals: &HashMap<String, Expr>,
 ) -> ConstantFunctions {
     symbolic_module_constant_functions(
         tree,
+        session,
         const_env,
         type_aliases,
         parameter_literals,
@@ -419,6 +393,7 @@ pub(super) fn module_constant_functions(
 
 pub(super) fn symbolic_module_constant_functions(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     parameter_literals: &HashMap<String, Expr>,
@@ -428,29 +403,36 @@ pub(super) fn symbolic_module_constant_functions(
     if !has_functions {
         return ConstantFunctions::default();
     }
-    let needs_bootstrap = !generate::root_subroutines_only(&tree.state) && has_controls;
+    let needs_bootstrap = !tree.root_subroutines && has_controls;
     if !needs_bootstrap {
         return collect_module_constant_functions(
             tree,
+            session,
             const_env,
             type_aliases,
             parameter_literals,
             symbolic_parameters,
         );
     }
-    let mut roots = generate::with_root_subroutines(&tree.state, || {
-        collect_module_constant_functions(
-            tree,
-            const_env,
-            type_aliases,
-            parameter_literals,
-            symbolic_parameters,
-        )
-    });
-    roots.extend_missing(&scope::imported(&tree.state).constant_functions);
-    let _installed = install(&tree.state, roots);
+    // Seed the module's functions before conditions need to call them:
+    // generate scopes still select their items, but their subroutines are
+    // left for the full pass.
+    let mut roots = collect_module_constant_functions(
+        &AnalysisContext {
+            root_subroutines: true,
+            ..tree.clone()
+        },
+        session,
+        const_env,
+        type_aliases,
+        parameter_literals,
+        symbolic_parameters,
+    );
+    roots.extend_missing(&scope::imported(tree).constant_functions);
+    let tree = &tree.with_functions(roots);
     collect_module_constant_functions(
         tree,
+        session,
         const_env,
         type_aliases,
         parameter_literals,
@@ -460,6 +442,7 @@ pub(super) fn symbolic_module_constant_functions(
 
 fn collect_module_constant_functions(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     parameter_literals: &HashMap<String, Expr>,
@@ -480,14 +463,19 @@ fn collect_module_constant_functions(
             .filter(|(name, _)| !symbolic_parameters.contains(*name))
             .map(|(name, value)| (name.clone(), *value))
             .collect();
-        symbolic_aliases = match type_aliases_from_scope_with_env(tree, &constants) {
+        symbolic_aliases = match type_aliases_from_scope_with_env(tree, session, &constants) {
             Ok(aliases) => aliases,
             Err(error) => return ConstantFunctions::unconverted(error),
         };
         &symbolic_aliases
     };
     let (subroutine_params, subroutine_shapes, subroutine_directions) =
-        match procedural::subroutine_argument_names(tree, const_env, type_aliases) {
+        match procedural::subroutine_argument_names(
+            tree,
+            session,
+            const_env,
+            &type_aliases.clone().into(),
+        ) {
             Ok(names) => names,
             Err(error) => return ConstantFunctions::unconverted(error),
         };
@@ -511,6 +499,7 @@ fn collect_module_constant_functions(
     let mut rejected = HashMap::default();
     let subroutines = match procedural::subroutines_with_symbolic_parameters(
         tree,
+        session,
         const_env,
         &dimensions,
         parameter_literals,
@@ -640,6 +629,7 @@ fn simulation_state_readers(functions: &[Subroutine]) -> HashMap<String, Analyze
                 | Callee::String(_)
                 | Callee::Object(_)
                 | Callee::Checked { .. }
+                | Callee::Stream(_)
                 | Callee::Lookup { .. } => {}
                 Callee::Subroutine(callee) => calls.push(callee.as_str()),
             }
@@ -785,11 +775,11 @@ pub(in crate::ast) fn visit_const_calls<'a>(
 
 /// Fill defaults in the declaration's bound scope; runtime IR keeps its holes.
 pub(super) fn resolved_arguments(
-    state: &State,
+    functions: &ConstantFunctions,
     callee: &Callee,
     args: &[Option<Expr>],
 ) -> Option<Vec<Expr>> {
-    let functions = state.functions.borrow().functions.clone();
+    let functions = &functions.functions;
     let Some(function) = callee.subroutine().and_then(|name| functions.get(name)) else {
         return args.iter().cloned().collect();
     };
@@ -808,12 +798,11 @@ pub(super) fn resolved_arguments(
 
 /// Check arity and defaults without evaluating any actual argument.
 pub(super) fn validate_argument_bindings(
-    state: &State,
+    functions: &ConstantFunctions,
     name: &str,
     present: &[bool],
 ) -> Converted<()> {
     {
-        let functions = state.functions.borrow();
         let functions = &functions.functions;
         let Some(function) = functions.get(name) else {
             // The raw syntax validator reports functions that cannot be used
@@ -837,7 +826,7 @@ pub(super) fn validate_argument_bindings(
 
 /// A named constant call can be folded only when its body and actuals evaluate.
 pub(super) fn eval_expression_literal(
-    state: &State,
+    functions: &ConstantFunctions,
     expr: &Expr,
     constants: &HashMap<String, i128>,
 ) -> Option<typecheck::IntegralLiteral> {
@@ -850,25 +839,44 @@ pub(super) fn eval_expression_literal(
     };
     let env = Environment {
         constants,
-        functions: state,
+        functions,
     };
     let constants: &dyn ConstantEnvironment = &env;
-    Frame::new(constants).eval(expr).map(Value::into_literal)
+    Frame::new(constants, &mut Budget::default())
+        .eval(expr)
+        .map(Value::into_literal)
 }
 
 /// The value of a call of an installed constant function.
-pub(crate) fn eval_call(
+#[cfg(test)]
+fn eval_call(
     name: &str,
     args: &[crate::ir::ConstExpr],
     constants: &dyn ConstantEnvironment,
 ) -> Option<i128> {
-    eval_ir_call(name, args, constants)?.number().copied()
+    eval_ir_call(name, args, constants, &mut Budget::default())?
+        .number()
+        .copied()
+}
+
+/// The value of a call of a constant function inside an evaluation that
+/// spends `budget`.
+pub(crate) fn eval_call_budgeted(
+    name: &str,
+    args: &[crate::ir::ConstExpr],
+    constants: &dyn ConstantEnvironment,
+    budget: &mut Budget,
+) -> Option<i128> {
+    eval_ir_call(name, args, constants, budget)?
+        .number()
+        .copied()
 }
 
 fn eval_ir_call(
     name: &str,
     args: &[crate::ir::ConstExpr],
     constants: &dyn ConstantEnvironment,
+    budget: &mut Budget,
 ) -> Option<Value> {
     let expr = Expr::Call {
         callee: Callee::Subroutine(name.into()),
@@ -879,41 +887,40 @@ fn eval_ir_call(
             .collect(),
         arg_order: Vec::new(),
     };
-    Frame::new(constants).eval(&expr)
+    Frame::new(constants, budget).eval(&expr)
 }
 
 /// Preserve the declared result type when freezing a caller's function value.
 pub(super) fn eval_call_literal(
-    state: &State,
+    functions: &ConstantFunctions,
     name: &str,
     args: &[crate::ir::ConstExpr],
     constants: &HashMap<String, i128>,
 ) -> Option<typecheck::IntegralLiteral> {
     let env = Environment {
         constants,
-        functions: state,
+        functions,
     };
-    eval_ir_call(name, args, &env).map(Value::into_literal)
+    eval_ir_call(name, args, &env, &mut Budget::default()).map(Value::into_literal)
 }
 
-fn call_value(name: &str, args: &[Value], constants: &dyn ConstantEnvironment) -> Option<Value> {
-    let state = constants.function_state()?;
-    runtime::charge(state)?;
-    let functions = state.functions.borrow().functions.clone();
-    let function = functions.get(name)?;
-    let depth = state.depth.get();
-    if depth >= MAX_DEPTH {
+/// The value of a call of function `name` of `constants`, whose frame sees
+/// the constants of the caller's scope but not the caller's locals.
+fn call_value(
+    name: &str,
+    args: &[Value],
+    constants: &dyn ConstantEnvironment,
+    budget: &mut Budget,
+) -> Option<Value> {
+    budget.charge()?;
+    let function = constants.functions()?.functions.get(name)?;
+    if budget.depth >= MAX_DEPTH {
         return None;
     }
-    struct DepthGuard<'a>(&'a Cell<usize>, usize);
-    impl Drop for DepthGuard<'_> {
-        fn drop(&mut self) {
-            self.0.set(self.1);
-        }
-    }
-    state.depth.set(depth + 1);
-    let _depth = DepthGuard(&state.depth, depth);
-    call_in_frame(function, args, Frame::new(constants))
+    budget.depth += 1;
+    let value = call_in_frame(function, args, Frame::new(constants, budget));
+    budget.depth -= 1;
+    value
 }
 
 #[cfg(test)]
@@ -923,9 +930,13 @@ fn call(
     constants: &dyn ConstantEnvironment,
 ) -> Option<i128> {
     let args = args.iter().copied().map(Value::integer).collect::<Vec<_>>();
-    call_in_frame(function, &args, Frame::new(constants))?
-        .number()
-        .copied()
+    call_in_frame(
+        function,
+        &args,
+        Frame::new(constants, &mut Budget::default()),
+    )?
+    .number()
+    .copied()
 }
 
 fn call_in_frame(
@@ -961,7 +972,7 @@ fn call_in_frame(
         Flow::Next | Flow::Return(None) => {}
         Flow::Break | Flow::Continue => return None,
     }
-    frame.values.remove(return_name)
+    frame.scope.values.remove(return_name)
 }
 
 enum Flow {
@@ -975,13 +986,31 @@ enum Flow {
 /// variable, and typed temporaries are owned here. Nested calls borrow this
 /// overlay, preserving the former copied environment's lookup precedence.
 struct Frame<'a> {
+    scope: Locals<'a>,
+    budget: &'a mut Budget,
+    return_width: Option<usize>,
+    temporaries: usize,
+    iterations: usize,
+}
+
+/// What names in a frame denote: its own values over those of the
+/// environment it was called in.
+struct Locals<'a> {
     constants: &'a dyn ConstantEnvironment,
     values: HashMap<String, Value>,
     types: HashMap<String, (usize, bool)>,
     two_state: HashSet<String>,
-    return_width: Option<usize>,
-    temporaries: usize,
-    iterations: usize,
+}
+
+impl Locals<'_> {
+    fn type_of(&self, name: &str) -> Option<(usize, bool)> {
+        self.types.get(name).copied().or_else(|| {
+            dimensions::parameter_type_from_lookup(name, &|marker| {
+                self.constants.get(marker).copied()
+            })
+            .map(|ty| (ty.width, ty.signed))
+        })
+    }
 }
 
 /// `value` as a `width`-bit value of the given signedness.
@@ -998,9 +1027,9 @@ fn fit(value: i128, width: usize, signed: bool) -> i128 {
     }
 }
 
-impl ConstantEnvironment for Frame<'_> {
-    fn function_state(&self) -> Option<&State> {
-        self.constants.function_state()
+impl ConstantEnvironment for Locals<'_> {
+    fn functions(&self) -> Option<&ConstantFunctions> {
+        self.constants.functions()
     }
     fn get(&self, name: &str) -> Option<&i128> {
         match self.values.get(name) {
@@ -1017,12 +1046,15 @@ impl ConstantEnvironment for Frame<'_> {
 }
 
 impl<'a> Frame<'a> {
-    fn new(constants: &'a dyn ConstantEnvironment) -> Self {
+    fn new(constants: &'a dyn ConstantEnvironment, budget: &'a mut Budget) -> Self {
         Self {
-            constants,
-            values: HashMap::default(),
-            types: HashMap::default(),
-            two_state: HashSet::default(),
+            scope: Locals {
+                constants,
+                values: HashMap::default(),
+                types: HashMap::default(),
+                two_state: HashSet::default(),
+            },
+            budget,
             return_width: None,
             temporaries: 0,
             iterations: 0,
@@ -1030,23 +1062,22 @@ impl<'a> Frame<'a> {
     }
 
     fn type_of(&self, name: &str) -> Option<(usize, bool)> {
-        self.types.get(name).copied().or_else(|| {
-            dimensions::parameter_type_from_lookup(name, &|marker| {
-                self.constants.get(marker).copied()
-            })
-            .map(|ty| (ty.width, ty.signed))
-        })
+        self.scope.type_of(name)
     }
 
-    fn eval_lowered(&self, expr: &crate::ir::ConstExpr) -> Option<i128> {
-        crate::typecheck::eval_const_expr_with_types_in_env(expr, self, &|name| self.type_of(name))
+    /// The value of `expr`, whose calls spend this frame's budget.
+    fn eval_lowered(&mut self, expr: &crate::ir::ConstExpr) -> Option<i128> {
+        let scope = &self.scope;
+        crate::typecheck::eval_const_expr_with_types_in_env_budgeted(
+            expr,
+            scope,
+            &|name| scope.type_of(name),
+            self.budget,
+        )
     }
 
     fn declare(&mut self, name: &str, r#type: &crate::ir::Type) -> Option<()> {
-        if self
-            .constants
-            .function_state()
-            .is_some_and(|state| state.runtime_two_state.get().is_some())
+        if self.budget.two_state.is_some()
             && matches!(
                 r#type.kind(),
                 crate::ir::TypeKind::Real
@@ -1057,23 +1088,21 @@ impl<'a> Frame<'a> {
         {
             return None;
         }
-        if !r#type.unpacked_ranges().is_empty()
-            && self
-                .constants
-                .function_state()?
-                .runtime_two_state
-                .get()
-                .is_none()
-        {
-            return None;
+        if !r#type.unpacked_ranges().is_empty() {
+            self.scope.constants.functions()?;
+            self.budget.two_state?;
         }
         // Resolved runtime types already include unpacked dimensions.
         // Elaboration types still need their dimensions evaluated here.
         let width = if let Some(width) = r#type.resolved_width() {
             width.max(1)
         } else {
-            let mut width =
-                crate::typecheck::resolve_packed_width_in_env(r#type.packed_ranges(), self)?.max(1);
+            let mut width = crate::typecheck::resolve_packed_width_in_env_budgeted(
+                r#type.packed_ranges(),
+                &self.scope,
+                self.budget,
+            )?
+            .max(1);
             for range in r#type.unpacked_ranges() {
                 let (left, right) = range.resolved_bounds().or_else(|| {
                     Some((
@@ -1090,19 +1119,17 @@ impl<'a> Frame<'a> {
             return None;
         }
         if r#type.kind() == crate::ir::TypeKind::Bit {
-            self.two_state.insert(name.to_string());
+            self.scope.two_state.insert(name.to_string());
         }
-        self.types
+        self.scope
+            .types
             .insert(name.to_string(), (width, r#type.is_signed()));
         Some(())
     }
 
     fn initial_value(&self, name: &str) -> Option<Value> {
-        let runtime = self
-            .constants
-            .function_state()
-            .and_then(|state| state.runtime_two_state.get());
-        if runtime == Some(true) || self.two_state.contains(name) {
+        let runtime = self.budget.two_state;
+        if runtime == Some(true) || self.scope.two_state.contains(name) {
             return Some(Value::integer(0));
         }
         let (width, _) = self.type_of(name)?;
@@ -1114,24 +1141,17 @@ impl<'a> Frame<'a> {
             Some((width, signed)) => value.resize(width, signed)?,
             None => value,
         };
-        let value = if self.two_state.contains(name)
-            || self
-                .constants
-                .function_state()
-                .is_some_and(|state| state.runtime_two_state.get() == Some(true))
-        {
+        let value = if self.scope.two_state.contains(name) || self.budget.two_state == Some(true) {
             value.into_two_state()
         } else {
             value
         };
-        self.values.insert(name.to_string(), value);
+        self.scope.values.insert(name.to_string(), value);
         Some(())
     }
 
     fn tick(&mut self) -> Option<()> {
-        if let Some(state) = self.constants.function_state() {
-            runtime::charge(state)?;
-        }
+        self.budget.charge()?;
         self.iterations += 1;
         (self.iterations <= MAX_ITERATIONS).then_some(())
     }
@@ -1139,7 +1159,7 @@ impl<'a> Frame<'a> {
     fn eval(&mut self, expr: &Expr) -> Option<Value> {
         let lowered: crate::ir::ConstExpr = self.lower(expr)?.into();
         if let Some(literal) =
-            typecheck::eval_const_integral_literal_in_env(&lowered, self, &|name| {
+            typecheck::eval_const_integral_literal_in_env(&lowered, &self.scope, &|name| {
                 self.type_of(name)
             })
         {
@@ -1161,7 +1181,7 @@ impl<'a> Frame<'a> {
         let lowered: crate::ir::ConstExpr = self.lower(expr)?.into();
         if let Some(literal) = typecheck::eval_const_assignment_in_env(
             &lowered,
-            self,
+            &self.scope,
             &|name| self.type_of(name),
             width,
         ) {
@@ -1177,7 +1197,7 @@ impl<'a> Frame<'a> {
         let lowered = self.lower(expr)?.into();
         typecheck::eval_case_operand_in_env(
             &lowered,
-            self,
+            &self.scope,
             &|name| self.type_of(name),
             context.width,
             context.signed,
@@ -1186,7 +1206,7 @@ impl<'a> Frame<'a> {
     }
 
     /// Type queries must not execute a case label or select a conditional arm.
-    fn expression_type(&self, expr: &Expr) -> Option<ExprType> {
+    fn expression_type(&mut self, expr: &Expr) -> Option<ExprType> {
         let ty = |(width, signed)| ExprType { width, signed };
         let placeholder = |ty: ExprType| ConstExpr::Resize {
             expr: Box::new(ConstExpr::Literal("0".into())),
@@ -1196,7 +1216,8 @@ impl<'a> Frame<'a> {
         let expression = match expr {
             Expr::Ident(name) => {
                 return self.type_of(name).map(ty).or_else(|| {
-                    self.constants
+                    self.scope
+                        .constants
                         .literal(name)
                         .map(|value| ty((value.width, value.signed)))
                 });
@@ -1246,10 +1267,14 @@ impl<'a> Frame<'a> {
                 callee: Callee::Subroutine(name),
                 ..
             } => {
-                let functions = self.constants.function_state()?.functions.borrow();
+                let functions = self.scope.constants.functions()?;
                 let (_, result) = functions.functions.get(name)?.return_var.as_ref()?;
                 let width = result.resolved_width().or_else(|| {
-                    typecheck::resolve_packed_width_in_env(result.packed_ranges(), self)
+                    typecheck::resolve_packed_width_in_env_budgeted(
+                        result.packed_ranges(),
+                        &self.scope,
+                        self.budget,
+                    )
                 })?;
                 return Some(ty((width, result.is_signed())));
             }
@@ -1292,7 +1317,9 @@ impl<'a> Frame<'a> {
         let (width, signed) = value.r#type();
         let name = format!("\0constant_function_temporary{}", self.temporaries);
         self.temporaries += 1;
-        self.types.insert(name.clone(), (width.max(1), signed));
+        self.scope
+            .types
+            .insert(name.clone(), (width.max(1), signed));
         self.set(&name, value)?;
         Some(ConstExpr::Ident(name))
     }
@@ -1323,35 +1350,33 @@ impl<'a> Frame<'a> {
                 args,
                 ..
             } => {
-                let functions = self
-                    .constants
-                    .function_state()?
-                    .functions
-                    .borrow()
-                    .functions
-                    .clone();
+                let functions = self.scope.constants.functions()?.functions.clone();
                 let function = functions.get(name)?;
                 let actuals = resolved_arguments(
-                    self.constants.function_state()?,
+                    self.scope.constants.functions()?,
                     &Callee::Subroutine(name.clone()),
                     args,
                 )?;
                 let mut values = Vec::with_capacity(actuals.len());
                 for (arg, (_, ty)) in actuals.iter().zip(&function.params) {
                     let width = ty.resolved_width().or_else(|| {
-                        typecheck::resolve_packed_width_in_env(ty.packed_ranges(), self)
+                        typecheck::resolve_packed_width_in_env_budgeted(
+                            ty.packed_ranges(),
+                            &self.scope,
+                            self.budget,
+                        )
                     })?;
                     values.push(self.assignment_value(arg, width)?);
                 }
                 if actuals.len() > function.params.len() {
                     return None;
                 }
-                let value = call_value(name, &values, self)?;
+                let value = call_value(name, &values, self.scope.constants, self.budget)?;
                 self.temporary(value)?
             }
             Expr::Call { callee, args, .. } => ConstExpr::Function {
                 callee: callee.clone(),
-                args: resolved_arguments(self.constants.function_state()?, callee, args)?
+                args: resolved_arguments(self.scope.constants.functions()?, callee, args)?
                     .iter()
                     .map(|arg| self.lower(arg))
                     .collect::<Option<_>>()?,
@@ -1395,14 +1420,10 @@ impl<'a> Frame<'a> {
         // This interpreter uses four-state expression rules. Only reuse a
         // result when every intermediate is known; otherwise runtime lowering
         // supplies the state-mode semantics (including out-of-range selects).
-        if self
-            .constants
-            .function_state()
-            .is_some_and(|state| state.runtime_two_state.get() == Some(true))
-        {
+        if self.budget.two_state == Some(true) {
             let literal = typecheck::eval_const_integral_literal_in_env(
                 &lowered.clone().into(),
-                self,
+                &self.scope,
                 &|name| self.type_of(name),
             )?;
             if literal.mask != BigUint::default() {
@@ -1412,7 +1433,7 @@ impl<'a> Frame<'a> {
         Some(lowered)
     }
 
-    fn type_placeholder(&self, expr: &Expr) -> Option<ConstExpr> {
+    fn type_placeholder(&mut self, expr: &Expr) -> Option<ConstExpr> {
         let ty = self.expression_type(expr)?;
         if ty.width > constant_folding::MAX_CONSTANT_CONCAT_BITS {
             return None;
@@ -1482,10 +1503,11 @@ impl<'a> Frame<'a> {
                     }),
                 },
             };
-            let comparison =
-                typecheck::eval_const_integral_literal_in_env(&comparison.into(), self, &|name| {
-                    self.type_of(name)
-                })?;
+            let comparison = typecheck::eval_const_integral_literal_in_env(
+                &comparison.into(),
+                &self.scope,
+                &|name| self.type_of(name),
+            )?;
             result = match (result, typecheck::integral_literal_truth(&comparison)) {
                 (Some(true), _) | (_, Some(true)) => Some(true),
                 (Some(false), Some(false)) => Some(false),
@@ -1516,7 +1538,7 @@ impl<'a> Frame<'a> {
                 let lowered: crate::ir::ConstExpr = self.lower(expr)?.into();
                 return crate::typecheck::eval_const_integral_literal_in_env(
                     &lowered,
-                    self,
+                    &self.scope,
                     &|name| self.type_of(name),
                 );
             }
@@ -1567,10 +1589,9 @@ impl<'a> Frame<'a> {
             LValue::Ident(name) => {
                 if self.type_of(name).is_none() {
                     let ty = self
+                        .scope
                         .constants
-                        .function_state()?
-                        .functions
-                        .borrow()
+                        .functions()?
                         .locals
                         .get(name)
                         .cloned()?;
@@ -1593,7 +1614,7 @@ impl<'a> Frame<'a> {
                 }
                 let msb = self.eval_lowered(&msb.clone().into())?;
                 let lsb = self.eval_lowered(&lsb.clone().into())?;
-                let old = self.values.get(name)?.clone();
+                let old = self.scope.values.get(name)?.clone();
                 let value = old.write(msb.max(lsb), msb.min(lsb), value)?;
                 self.set(name, value)?;
             }
@@ -1674,9 +1695,7 @@ impl<'a> Frame<'a> {
     }
 
     fn stmt(&mut self, stmt: &Stmt) -> Option<Flow> {
-        if let Some(state) = self.constants.function_state() {
-            runtime::charge(state)?;
-        }
+        self.budget.charge()?;
         match stmt {
             Stmt::Assign { lhs, rhs, .. } => {
                 let width = match lhs {
@@ -1693,10 +1712,9 @@ impl<'a> Frame<'a> {
             }
             Stmt::Local { name, init } => {
                 let r#type = self
+                    .scope
                     .constants
-                    .function_state()?
-                    .functions
-                    .borrow()
+                    .functions()?
                     .locals
                     .get(name)
                     .cloned()?;
@@ -1790,10 +1808,15 @@ impl<'a> Frame<'a> {
             // diagnostic belongs to the declaration, not to evaluation.
             Stmt::SystemTask { .. } => {}
             // A function has no timing controls (IEEE 1800-2023 13.4).
-            Stmt::Delay { .. } | Stmt::WaitEvent(_) | Stmt::WaitImplicit(_) | Stmt::Wait(_) => {
+            Stmt::DelayedNonblocking { .. }
+            | Stmt::Delay { .. }
+            | Stmt::WaitEvent(_)
+            | Stmt::WaitImplicit(_)
+            | Stmt::Wait(_) => {
                 return None;
             }
             Stmt::Fork { .. }
+            | Stmt::DeferActive
             | Stmt::AssertionRegion { .. }
             | Stmt::WaitFork
             | Stmt::DisableFork
@@ -1804,6 +1827,8 @@ impl<'a> Frame<'a> {
     }
 }
 
+#[cfg(test)]
+use std::cell::Cell;
 #[cfg(test)]
 thread_local! {
     static FUNCTION_CALLS: Cell<usize> = const { Cell::new(0) };

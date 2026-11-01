@@ -78,7 +78,7 @@ fn constant_mask_analysis_uses_heap_and_bounds_shift_before_allocation() {
         root = arena.alloc(SLTNode::Unary(UnaryOp::Ident, root)).unwrap();
     }
     root = arena.alloc(SLTNode::Unary(UnaryOp::BitNot, root)).unwrap();
-    let lowerer = SLTToSIRLowerer::new(true);
+    let mut lowerer = SLTToSIRLowerer::new(true);
     assert_eq!(
         lowerer.projected_mask_constant(root, BitAccess::new(0, 7), &arena),
         Some((254u16.into(), 0u8.into()))
@@ -193,7 +193,7 @@ fn constant_projection_preserves_signed_conversion_and_mixed_width_lowering() {
             access: BitAccess::new(0, 7),
         })
         .unwrap();
-    let lowerer = SLTToSIRLowerer::new(false);
+    let mut lowerer = SLTToSIRLowerer::new(false);
     assert_eq!(
         lowerer.projected_mask_constant(converted, BitAccess::new(0, 3), &arena),
         None

@@ -74,6 +74,8 @@ pub enum SystemFunction {
     Fell,
     Stable,
     Changed,
+    /// `$typename` (20.6.1).
+    Typename,
     /// `$bits` (20.6.2).
     Bits,
     /// `$isunbounded` (20.6.3).
@@ -244,6 +246,23 @@ impl SystemFunction {
                 celox_design::ProcessOp::GetRandstate => "process.get_randstate",
                 celox_design::ProcessOp::SetRandstate => "process.set_randstate",
                 celox_design::ProcessOp::Observe => "process observation",
+                celox_design::ProcessOp::Trigger => "->",
+                celox_design::ProcessOp::TriggerNonblocking => "->>",
+                celox_design::ProcessOp::WaitEvent => "event control",
+                celox_design::ProcessOp::Triggered => "event.triggered",
+                celox_design::ProcessOp::WaitTriggered => "wait(event.triggered)",
+                celox_design::ProcessOp::SemaphoreNew => "semaphore::new",
+                celox_design::ProcessOp::SemaphorePut => "semaphore.put",
+                celox_design::ProcessOp::SemaphoreGet => "semaphore.get",
+                celox_design::ProcessOp::SemaphoreTryGet => "semaphore.try_get",
+                celox_design::ProcessOp::MailboxNew => "mailbox::new",
+                celox_design::ProcessOp::MailboxNum => "mailbox.num",
+                celox_design::ProcessOp::MailboxPut => "mailbox.put",
+                celox_design::ProcessOp::MailboxTryPut => "mailbox.try_put",
+                celox_design::ProcessOp::MailboxGet => "mailbox.get",
+                celox_design::ProcessOp::MailboxTryGet => "mailbox.try_get",
+                celox_design::ProcessOp::MailboxPeek => "mailbox.peek",
+                celox_design::ProcessOp::MailboxTryPeek => "mailbox.try_peek",
             },
             Self::Ln => "$ln",
             Self::Log10 => "$log10",
@@ -286,6 +305,7 @@ impl SystemFunction {
             Self::Fell => "$fell",
             Self::Stable => "$stable",
             Self::Changed => "$changed",
+            Self::Typename => "$typename",
             Self::Bits => "$bits",
             Self::Isunbounded => "$isunbounded",
             Self::Dimensions => "$dimensions",
@@ -349,6 +369,12 @@ impl SystemFunction {
                 | Self::UnpackedDimensions
                 | Self::ArrayQuery(_)
         )
+    }
+
+    /// The functions whose first argument is a data object or type that is
+    /// not evaluated: the data queries and `$typename` (20.6.1).
+    pub fn has_unevaluated_operand(self) -> bool {
+        self.is_data_query() || self == Self::Typename
     }
 
     /// Whether each call has an effect, so that copies of one call made by
@@ -431,6 +457,15 @@ impl SystemFunction {
             || (self == Self::ValuePlusargs && position == 1)
             || (self == Self::Fread && position == 0)
             || (matches!(self, Self::Sscanf | Self::Fscanf) && position >= 2)
+            || (matches!(
+                self,
+                Self::Process(
+                    celox_design::ProcessOp::MailboxGet
+                        | celox_design::ProcessOp::MailboxTryGet
+                        | celox_design::ProcessOp::MailboxPeek
+                        | celox_design::ProcessOp::MailboxTryPeek
+                )
+            ) && position == 1)
     }
 
     /// The width and signedness of a call that is lowered as an integral
@@ -440,6 +475,14 @@ impl SystemFunction {
     pub fn result_type(self) -> Option<(usize, bool)> {
         match self {
             Self::Process(celox_design::ProcessOp::Status) => Some((32, true)),
+            Self::Process(celox_design::ProcessOp::Triggered) => Some((1, false)),
+            Self::Process(
+                celox_design::ProcessOp::SemaphoreTryGet
+                | celox_design::ProcessOp::MailboxNum
+                | celox_design::ProcessOp::MailboxTryPut
+                | celox_design::ProcessOp::MailboxTryGet
+                | celox_design::ProcessOp::MailboxTryPeek,
+            ) => Some((32, true)),
             Self::Process(_) => Some((32, false)),
             Self::Ln
             | Self::Log10
@@ -506,6 +549,7 @@ impl SystemFunction {
             | Self::Unsigned
             | Self::Sampled
             | Self::Past
+            | Self::Typename
             | Self::Bits
             | Self::Dimensions
             | Self::UnpackedDimensions
@@ -743,6 +787,9 @@ pub enum StringOp {
     /// The text `%p` prints for a class handle, or with a layout for a
     /// container (21.2.1.6).
     Pattern(Option<ContainerLayout>),
+    /// Interpret the bits of a selected fixed string-array element as its
+    /// existing heap handle, without converting or allocating string bytes.
+    FromHandle,
 }
 
 impl StringOp {
@@ -751,6 +798,7 @@ impl StringOp {
         matches!(
             self,
             Self::FromBits
+                | Self::FromHandle
                 | Self::Concat
                 | Self::Replicate
                 | Self::Putc
@@ -808,6 +856,7 @@ impl fmt::Display for StringOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
             Self::FromBits => "string cast",
+            Self::FromHandle => "string array element",
             Self::Concat => "string concatenation",
             Self::Replicate => "string replication",
             Self::Compare => "compare",
@@ -910,6 +959,97 @@ pub enum ContainerKind {
         object: bool,
     },
 }
+/// An unpacked array concatenation whose items include arrays (IEEE
+/// 1800-2023 10.10): a new container of layout `result` holding, in order,
+/// each item that is an element and every element of each item that is an
+/// array. The arguments are the items; `parts` gives, for each, the layout of
+/// an array item or `None` for an element.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ContainerConcat {
+    pub result: ContainerLayout,
+    pub parts: Vec<Option<ContainerLayout>>,
+}
+/// An array locator method (IEEE 1800-2023 7.12.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LocatorMethod {
+    Find,
+    FindIndex,
+    FindFirst,
+    FindFirstIndex,
+    FindLast,
+    FindLastIndex,
+    Min,
+    Max,
+    Unique,
+    UniqueIndex,
+}
+impl LocatorMethod {
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "find" => Self::Find,
+            "find_index" => Self::FindIndex,
+            "find_first" => Self::FindFirst,
+            "find_first_index" => Self::FindFirstIndex,
+            "find_last" => Self::FindLast,
+            "find_last_index" => Self::FindLastIndex,
+            "min" => Self::Min,
+            "max" => Self::Max,
+            "unique" => Self::Unique,
+            "unique_index" => Self::UniqueIndex,
+            _ => return None,
+        })
+    }
+    /// Whether the result holds indices rather than elements.
+    pub fn returns_index(self) -> bool {
+        matches!(
+            self,
+            Self::FindIndex | Self::FindFirstIndex | Self::FindLastIndex | Self::UniqueIndex
+        )
+    }
+    /// Whether the method selects by a Boolean `with` expression, which is
+    /// then mandatory, rather than by comparing its values.
+    pub fn finds(self) -> bool {
+        !matches!(
+            self,
+            Self::Min | Self::Max | Self::Unique | Self::UniqueIndex
+        )
+    }
+    /// Whether the search stops at the first match from the left.
+    pub fn first(self) -> bool {
+        matches!(self, Self::FindFirst | Self::FindFirstIndex)
+    }
+    /// Whether the search goes from the right and stops at the first match.
+    pub fn last(self) -> bool {
+        matches!(self, Self::FindLast | Self::FindLastIndex)
+    }
+}
+/// The array a locator method searches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LocatorSource {
+    /// A dynamic array, queue or associative array, in the first argument.
+    Container(ContainerLayout),
+    /// A fixed-size unpacked array, from its left to its right bound; the
+    /// first argument reads the element at the index local.
+    Fixed { left: i64, right: i64 },
+}
+/// How `min`, `max` and `unique` compare the values of the `with` expression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LocatorKey {
+    Integral { width: u32, signed: bool },
+    String,
+}
+/// An array locator method call (IEEE 1800-2023 7.12.1). The arguments are
+/// the array (see [`LocatorSource`]), the `with` expression, and the locals
+/// through which it reads the element and its index (7.12.4). The result is
+/// a queue with the `result` layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Locator {
+    pub method: LocatorMethod,
+    pub source: LocatorSource,
+    pub result: ContainerLayout,
+    /// The type of the compared values; `None` for the find methods.
+    pub key: Option<LocatorKey>,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ContainerOp {
     Reverse,
@@ -927,6 +1067,11 @@ pub enum ContainerOp {
     New,
     Literal,
     Convert,
+    /// A new sequence of the elements of the sequence in the first argument
+    /// and then those of the one in the second.
+    Concat,
+    /// A new queue containing the inclusive range of its source queue.
+    Slice,
     Size,
     Get,
     Set,
@@ -1044,6 +1189,130 @@ pub enum ObjectOp {
     /// The flat structure value of the record in the argument; `null` is
     /// the default value.
     Unbox(Record),
+    /// An array locator method, see [`Locator`].
+    Locator(Locator),
+    /// An unpacked array concatenation with a container item, see
+    /// [`ContainerConcat`].
+    Concat(Box<ContainerConcat>),
+    /// A new synchronization object of a named event (15.5).
+    NewEvent,
+    /// A streaming concatenation of dynamically sized data, see [`StreamOp`].
+    Stream(StreamOp),
+    /// The `%p` text of a container of unpacked structures, see
+    /// [`AggregatePattern`].
+    Pattern(AggregatePattern),
+}
+
+/// The `%p` text of a container whose elements are unpacked structures
+/// (IEEE 1800-2023 21.2.1.6): `'{` and `}` around the text of each element,
+/// visited in order as an array locator method visits them. The arguments
+/// are the array, the element and index locals, the string local that
+/// collects the text, and the string expressions that start it, append the
+/// first element, append each later one, and finish it, which read those
+/// locals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AggregatePattern {
+    pub source: LocatorSource,
+}
+
+/// An operation on the heap stream of a streaming concatenation that holds
+/// dynamically sized data (IEEE 1800-2023 11.4.14). A stream is a handle that
+/// lives until the operation that converts it last, or [`StreamOp::Free`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum StreamOp {
+    /// A new stream of the items in the arguments, see [`StreamPack`].
+    Pack(Box<StreamPack>),
+    /// The stream in the argument as `width` bits, aligned to the left and
+    /// filled with zeros; a stream wider than `width` bits, or for a
+    /// bit-stream cast (`exact`) of another width, is a fault. The stream is
+    /// freed.
+    ToBits { width: usize, exact: bool },
+    /// The stream in the argument as a new container, in as few elements as
+    /// hold it; the stream is freed.
+    ToContainer(ContainerLayout),
+    /// The stream in the argument as a new string; the stream is freed.
+    ToString,
+    /// `width` unread bits of the stream in the first argument after the
+    /// number in the second, which are not read.
+    Peek(usize),
+    /// Read `count` more bits of the stream in the argument: a fault past
+    /// its end.
+    Skip(usize),
+    /// A new container with the unread bits of the stream in the argument
+    /// but the last `reserve`, which are read.
+    TakeRest {
+        layout: ContainerLayout,
+        reserve: usize,
+    },
+    /// A copy of the container in the second argument whose elements from
+    /// the third argument, as many as the fourth, are read from the stream
+    /// in the first.
+    TakeRange(ContainerLayout, StreamRange),
+    /// A new string with the unread bits of the stream in the argument but
+    /// the last `reserve`, which are read.
+    TakeString { reserve: usize },
+    /// Free the stream in the argument.
+    Free,
+}
+
+/// The items of a new heap stream, one or three arguments each, first
+/// streamed first; the stream is then re-ordered by `slice` as a
+/// [`Stream`] does, or for `unorder` put back in the order that re-ordering
+/// would undo, after keeping the first `limit` bits.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StreamPack {
+    pub items: Vec<StreamItem>,
+    pub slice: Option<usize>,
+    pub unorder: bool,
+    pub limit: Option<usize>,
+}
+
+/// The form of a `with [first ... second]` range of a queue or dynamic array
+/// (IEEE 1800-2023 11.4.14.4), whose operands are evaluated once each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StreamRange {
+    /// `[first +: second]`, and `[first]` with a second operand of 1.
+    Up,
+    /// `[first : second]`.
+    Bounds,
+    /// `[first -: second]`.
+    Down,
+}
+
+/// An item of a [`StreamPack`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StreamItem {
+    /// A fixed-size value.
+    Bits(StreamArg),
+    /// The bytes of a string.
+    String,
+    /// The elements of a container, or with `range` those that the second
+    /// and third arguments select.
+    Container {
+        layout: ContainerLayout,
+        range: Option<StreamRange>,
+    },
+    /// The unread bits of another stream, which is freed.
+    Stream,
+}
+
+impl StreamItem {
+    /// The number of arguments of the item.
+    pub fn arguments(self) -> usize {
+        match self {
+            Self::Container { range: Some(_), .. } => 3,
+            _ => 1,
+        }
+    }
+}
+
+impl StreamOp {
+    pub fn result_type(&self) -> (usize, bool) {
+        match self {
+            Self::ToBits { width, .. } | Self::Peek(width) => (*width, false),
+            _ => (32, false),
+        }
+    }
 }
 
 impl ObjectOp {
@@ -1076,9 +1345,16 @@ impl ObjectOp {
             Self::ModeGet(..) | Self::ConstraintModeGet(_) => (32, true),
             Self::Load(field) => (field.width as usize, field.signed),
             Self::Unbox(record) => (record.width(), false),
-            Self::New { .. } | Self::ClassOf | Self::Store(_) | Self::Copy | Self::Box(_) => {
-                (32, false)
-            }
+            Self::Stream(op) => op.result_type(),
+            Self::New { .. }
+            | Self::ClassOf
+            | Self::Store(_)
+            | Self::Copy
+            | Self::Box(_)
+            | Self::Locator(_)
+            | Self::Concat(_)
+            | Self::Pattern(_)
+            | Self::NewEvent => (32, false),
         }
     }
 }
@@ -1087,6 +1363,10 @@ impl fmt::Display for ObjectOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Container { .. } => "container operation",
+            Self::Locator(_) => "array locator method",
+            Self::Pattern(_) => "assignment pattern text",
+            Self::Concat(_) => "unpacked array concatenation",
+            Self::Stream(_) => "streaming concatenation",
             Self::New { .. } => "new",
             Self::Load(_) => "property read",
             Self::Store(_) => "property write",
@@ -1107,7 +1387,27 @@ impl fmt::Display for ObjectOp {
             Self::Copy => "shallow copy",
             Self::Box(_) => "structure record",
             Self::Unbox(_) => "structure record read",
+            Self::NewEvent => "new event",
         })
+    }
+}
+
+/// What a [`Callee::Checked`] access checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AccessCheck {
+    /// A tagged union member is the active one (IEEE 1800-2023 11.9).
+    TaggedMember,
+    /// A virtual interface is not `null` (IEEE 1800-2023 25.9).
+    VirtualInterface,
+}
+
+impl AccessCheck {
+    /// The error a failed check reports.
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::TaggedMember => "tagged union member does not match the active tag",
+            Self::VirtualInterface => "null virtual interface accessed",
+        }
     }
 }
 
@@ -1115,10 +1415,10 @@ impl fmt::Display for ObjectOp {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Callee {
     /// Check the first argument at runtime before evaluating/returning the second.
-    /// Used for tagged union member access (IEEE 1800-2023 11.9).
     Checked {
         width: usize,
         signed: bool,
+        check: AccessCheck,
     },
     /// A table lookup with the arguments `selector, key, value, ...,
     /// default`: the value of the first key the selector matches with case
@@ -1137,6 +1437,149 @@ pub enum Callee {
     /// A class object operation, see [`ObjectOp`].
     /// Boxed to keep call expressions small.
     Object(Box<ObjectOp>),
+    /// A streaming concatenation of fixed-size data, see [`Stream`].
+    Stream(Box<Stream>),
+}
+
+/// A streaming concatenation of fixed-size data (IEEE 1800-2023 11.4.14),
+/// as a permutation of the bits of its arguments. Each argument is
+/// evaluated once.
+///
+/// A pack concatenates the arguments into the stream, re-orders it, and
+/// aligns it to the left of the result, filling the rest with zeros
+/// (11.4.14.1-2). An unpack (11.4.14.3) has one argument, the source, whose
+/// most significant bits it puts back in the order that packing them would
+/// undo. Either way the result is laid out as `targets`, first target in
+/// the most significant bits.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Stream {
+    /// The arguments, first streamed first.
+    pub args: Vec<StreamArg>,
+    /// The block size of `<<`, which reverses the order of the blocks
+    /// sliced from the right (11.4.14.2); `None` for `>>`, which keeps the
+    /// order.
+    pub slice: Option<usize>,
+    pub unpack: bool,
+    /// The variables that receive the result, first in the most significant
+    /// bits. Their `bits` are unused.
+    pub targets: Vec<StreamArg>,
+}
+
+/// An argument or target of a [`Stream`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StreamArg {
+    /// The width the argument is evaluated at, or the target's width.
+    pub width: usize,
+    /// The bits `(lsb, width)` of the argument that the stream holds, or all
+    /// of them.
+    pub bits: Option<(usize, usize)>,
+    /// For a fixed-size unpacked array, the width of its elements: the value
+    /// is in the array's layout, the first element in the least significant
+    /// bits, and the stream holds the first element first.
+    pub element: Option<usize>,
+}
+
+impl StreamArg {
+    /// A packed value of `width` bits.
+    pub fn packed(width: usize) -> Self {
+        Self {
+            width,
+            bits: None,
+            element: None,
+        }
+    }
+
+    /// The bits the stream holds.
+    pub fn stream_width(&self) -> usize {
+        self.bits.map_or(self.width, |(_, width)| width)
+    }
+
+    /// The ranges `(lsb, width)` of a `size`-bit part of this value that
+    /// reverse the order of its elements, most significant first; the
+    /// whole part when it is not an array.
+    pub fn elements(&self, size: usize) -> Vec<(usize, usize)> {
+        match self.element {
+            Some(element) if element < size => (0..size / element)
+                .map(|index| (index * element, element))
+                .collect(),
+            _ => vec![(0, size)],
+        }
+    }
+}
+
+impl Stream {
+    /// The width of the result.
+    pub fn width(&self) -> usize {
+        self.targets.iter().map(|target| target.width).sum()
+    }
+
+    /// The width of the stream.
+    pub fn stream_width(&self) -> usize {
+        if self.unpack {
+            self.width()
+        } else {
+            self.args.iter().map(StreamArg::stream_width).sum()
+        }
+    }
+
+    /// The bit ranges `(lsb, width)` of the stream that the re-ordered
+    /// stream holds, most significant first, for a stream of `width` bits.
+    pub fn blocks(&self, width: usize) -> Vec<(usize, usize)> {
+        match self.slice {
+            Some(size) if size < width => (0..width.div_ceil(size))
+                .map(|block| {
+                    let lsb = block * size;
+                    (lsb, size.min(width - lsb))
+                })
+                .collect(),
+            _ => vec![(0, width)],
+        }
+    }
+
+    /// The result for constant arguments, when it fits a constant.
+    pub fn evaluate(&self, args: &[i128]) -> Option<i128> {
+        let (width, stream_width) = (self.width(), self.stream_width());
+        if width >= 128
+            || stream_width > width
+            || self.args.iter().any(|arg| arg.width >= 128)
+            || args.len() != self.args.len()
+        {
+            return None;
+        }
+        let bits = |value: u128, lsb: usize, width: usize| (value >> lsb) & ((1u128 << width) - 1);
+        let reorder = |value: u128, ranges: Vec<(usize, usize)>| {
+            ranges
+                .into_iter()
+                .fold(0, |out, (lsb, size)| (out << size) | bits(value, lsb, size))
+        };
+        let mut stream = 0u128;
+        for (&value, arg) in args.iter().zip(&self.args) {
+            let (lsb, size) = arg.bits.unwrap_or((0, arg.width));
+            let value = bits(value as u128, lsb, size);
+            stream = (stream << size) | reorder(value, arg.elements(size));
+        }
+        let ordered = if self.unpack {
+            let stream = stream >> self.args[0].width.checked_sub(stream_width)?;
+            // The re-ordered stream holds the blocks most significant first.
+            let mut lsb = stream_width;
+            let mut result = 0u128;
+            for (block, size) in self.blocks(stream_width) {
+                lsb -= size;
+                result |= bits(stream, lsb, size) << block;
+            }
+            result
+        } else {
+            reorder(stream, self.blocks(stream_width)) << (width - stream_width)
+        };
+        let mut result = 0u128;
+        let mut lsb = width;
+        for target in &self.targets {
+            lsb -= target.width;
+            let value = bits(ordered, lsb, target.width);
+            result = (result << target.width) | reorder(value, target.elements(target.width));
+        }
+        Some(result as i128)
+    }
 }
 
 impl Callee {
@@ -1147,6 +1590,7 @@ impl Callee {
             Self::System(_)
             | Self::String(_)
             | Self::Object(_)
+            | Self::Stream(_)
             | Self::Checked { .. }
             | Self::Lookup { .. } => None,
         }
@@ -1158,6 +1602,7 @@ impl Callee {
             Self::Subroutine(_)
             | Self::String(_)
             | Self::Object(_)
+            | Self::Stream(_)
             | Self::Checked { .. }
             | Self::Lookup { .. } => None,
             Self::System(function) => Some(*function),
@@ -1168,11 +1613,12 @@ impl Callee {
     /// lowered as an integral operation; see [`SystemFunction::result_type`].
     pub fn result_type(&self) -> Option<(usize, bool)> {
         match self {
-            Self::Checked { width, signed } | Self::Lookup { width, signed } => {
+            Self::Checked { width, signed, .. } | Self::Lookup { width, signed } => {
                 Some((*width, *signed))
             }
             Self::String(op) => Some(op.result_type()),
             Self::Object(op) => Some(op.result_type()),
+            Self::Stream(stream) => Some((stream.width(), false)),
             _ => self.system()?.result_type(),
         }
     }
@@ -1180,7 +1626,7 @@ impl Callee {
     /// Rename a user subroutine with `rename`.
     pub fn map_subroutine(self, rename: impl FnOnce(String) -> String) -> Self {
         match self {
-            Self::Checked { .. } | Self::Lookup { .. } => self,
+            Self::Checked { .. } | Self::Lookup { .. } | Self::Stream(_) => self,
             Self::Subroutine(name) => Self::Subroutine(rename(name)),
             Self::System(function) => Self::System(function),
             Self::String(op) => Self::String(op),
@@ -1192,7 +1638,7 @@ impl Callee {
     /// the analyzer must not run it twice: user subroutines may have side
     /// effects, as do the random number functions.
     pub fn is_effectful(&self) -> bool {
-        !matches!(self, Self::Lookup { .. })
+        !matches!(self, Self::Lookup { .. } | Self::Stream(_))
             && self.system().is_none_or(SystemFunction::is_effectful)
     }
 }
@@ -1206,6 +1652,7 @@ impl fmt::Display for Callee {
             Self::System(function) => f.write_str(function.name()),
             Self::String(op) => op.fmt(f),
             Self::Object(op) => op.fmt(f),
+            Self::Stream(_) => f.write_str("streaming concatenation"),
         }
     }
 }
@@ -1339,7 +1786,7 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     // 6.24.2 Dynamic casting
     unsupported("$cast", TaskOrFunction),
     // 20.6 Data query functions
-    unsupported("$typename", Function),
+    function(SystemFunction::Typename, 1, Some(1)),
     function(SystemFunction::Bits, 1, Some(1)),
     function(SystemFunction::Isunbounded, 1, Some(1)),
     // 20.7 Array query functions

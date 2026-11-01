@@ -287,7 +287,7 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
             if let Some(progress) = progress {
                 saves.restore_progress(&simulation, &arguments.design.top, progress)?;
             }
-            simulate_sv(simulation, max_steps, saves, &mut std::io::stdout().lock())
+            simulate_sv(simulation, max_steps, saves, &mut std::io::stdout())
         }};
     }
     match arguments.execution.backend() {
@@ -306,7 +306,7 @@ fn simulate_sv<B: celox::SimBackend>(
     mut simulation: celox::Simulation<B>,
     max_steps: u64,
     mut saves: StateSaves,
-    output: &mut impl Write,
+    output: &mut (impl Write + Send),
 ) -> Result<(), String> {
     let initial = simulation.eval_comb();
     drain_sv_output(&mut simulation, output, &mut saves.failed)?;
@@ -319,6 +319,14 @@ fn simulate_sv<B: celox::SimBackend>(
     {
         if steps == max_steps {
             return Err(format!("simulation exceeded --max-steps {}", max_steps));
+        }
+        // Without state files to save at time steps, slots run in the
+        // compiled scheduler where it can.
+        if !saves.saves_at_steps()
+            && let Some(run) = run_sv_slots(&mut simulation, max_steps - steps, &mut saves, output)?
+        {
+            steps += run;
+            continue;
         }
         saves.before(&mut simulation, next)?;
         let step = simulation.step();
@@ -456,6 +464,12 @@ impl StateSaves {
             times: descending(&arguments.save_state_at_time),
             directory,
         })
+    }
+
+    /// Whether a state file is still to be saved at a time or a cycle,
+    /// which takes a step at a time.
+    fn saves_at_steps(&self) -> bool {
+        !self.times.is_empty() || !self.cycles.is_empty()
     }
 
     fn level<B: celox::SimBackend>(
@@ -640,59 +654,153 @@ fn drain_sv_output<B: celox::SimBackend>(
     output: &mut impl Write,
     failed: &mut bool,
 ) -> Result<(), String> {
-    let mut fatal = false;
-    let mut stopped = false;
-    let mut missed = 0;
-    for event in simulation.drain_runtime_events() {
-        let (message, newline) = match event {
-            celox::RuntimeEvent::Display { message } => (message, true),
-            celox::RuntimeEvent::Write { message } => (message, false),
-            // Only errors fail the run (IEEE 1800-2023 20.10).
-            celox::RuntimeEvent::Report(report) => {
-                match report.severity {
-                    celox::Severity::Fatal => fatal = true,
-                    celox::Severity::Error => *failed = true,
-                    celox::Severity::Warning | celox::Severity::Info => {}
+    let mut drained = SvOutput::default();
+    drained.write(simulation.drain_runtime_events(), output)?;
+    *failed |= drained.failed;
+    drained.check(simulation)
+}
+
+/// What the runtime events written so far reported.
+#[cfg(feature = "systemverilog")]
+#[derive(Default)]
+struct SvOutput {
+    failed: bool,
+    fatal: bool,
+    stopped: bool,
+    missed: u64,
+}
+
+#[cfg(feature = "systemverilog")]
+impl SvOutput {
+    /// Write the messages of `events` to `output`.
+    fn write(
+        &mut self,
+        events: Vec<celox::RuntimeEvent>,
+        output: &mut impl Write,
+    ) -> Result<(), String> {
+        for event in events {
+            let (message, newline) = match event {
+                celox::RuntimeEvent::Display { message } => (message, true),
+                celox::RuntimeEvent::Write { message } => (message, false),
+                // Only errors fail the run (IEEE 1800-2023 20.10).
+                celox::RuntimeEvent::Report(report) => {
+                    match report.severity {
+                        celox::Severity::Fatal => self.fatal = true,
+                        celox::Severity::Error => self.failed = true,
+                        celox::Severity::Warning | celox::Severity::Info => {}
+                    }
+                    (report.render(), true)
                 }
-                (report.render(), true)
-            }
-            celox::RuntimeEvent::Finish => continue,
-            celox::RuntimeEvent::Stop => {
-                stopped = true;
-                continue;
-            }
-            celox::RuntimeEvent::Missed { count } => {
-                missed += count;
-                continue;
-            }
-        };
+                celox::RuntimeEvent::Finish => continue,
+                celox::RuntimeEvent::Stop => {
+                    self.stopped = true;
+                    continue;
+                }
+                celox::RuntimeEvent::Missed { count } => {
+                    self.missed += count;
+                    continue;
+                }
+            };
+            output
+                .write_all(&message)
+                .and_then(|()| {
+                    if newline {
+                        output.write_all(b"\n")
+                    } else {
+                        Ok(())
+                    }
+                })
+                .map_err(|error| format!("failed to write simulation output: {error}"))?;
+        }
         output
-            .write_all(&message)
-            .and_then(|()| {
-                if newline {
-                    output.write_all(b"\n")
-                } else {
-                    Ok(())
+            .flush()
+            .map_err(|error| format!("failed to flush simulation output: {error}"))
+    }
+
+    /// The run's error for what the events reported, if any.
+    fn check<B: celox::SimBackend>(&self, simulation: &celox::Simulation<B>) -> Result<(), String> {
+        if self.missed != 0 {
+            return Err(format!("{} runtime events were lost", self.missed));
+        }
+        if self.fatal {
+            return Err("SystemVerilog testbench reported $fatal".to_string());
+        }
+        if self.stopped || simulation.is_stopped() {
+            return Err(
+                "SystemVerilog testbench requested $stop; interactive simulation is unavailable"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Run up to `max_steps` steps of `simulation` with its runtime events
+/// written to `output` by another thread as they are recorded, until it
+/// finishes, nothing is due or a SIGUSR1 request needs a step boundary.
+/// Returns the steps run, or `None` when the backend has no ring buffer to
+/// drain concurrently.
+#[cfg(feature = "systemverilog")]
+fn run_sv_slots<B: celox::SimBackend>(
+    simulation: &mut celox::Simulation<B>,
+    max_steps: u64,
+    saves: &mut StateSaves,
+    output: &mut (impl Write + Send),
+) -> Result<Option<u64>, String> {
+    let Some(mut drain) = simulation.runtime_event_drain() else {
+        return Ok(None);
+    };
+    // The simulation waits for this thread instead of overwriting events
+    // it has not taken.
+    drain.set_backpressure(true);
+    let done = std::sync::atomic::AtomicBool::new(false);
+    // A failed write ends the run at the next step boundary.
+    let broken = std::sync::atomic::AtomicBool::new(false);
+    let signal = saves.signal.as_ref();
+    let (run, drained) = std::thread::scope(|scope| {
+        let writer = scope.spawn(|| {
+            let mut drained = SvOutput::default();
+            let mut written = Ok(());
+            loop {
+                let finished = done.load(std::sync::atomic::Ordering::Acquire);
+                let events = drain.drain();
+                let idle = events.is_empty();
+                if written.is_ok() {
+                    written = drained.write(events, output);
+                    if written.is_err() {
+                        broken.store(true, std::sync::atomic::Ordering::Release);
+                    }
                 }
-            })
-            .map_err(|error| format!("failed to write simulation output: {error}"))?;
-    }
-    output
-        .flush()
-        .map_err(|error| format!("failed to flush simulation output: {error}"))?;
-    if missed != 0 {
-        return Err(format!("{missed} runtime events were lost"));
-    }
-    if fatal {
-        return Err("SystemVerilog testbench reported $fatal".to_string());
-    }
-    if stopped || simulation.is_stopped() {
-        return Err(
-            "SystemVerilog testbench requested $stop; interactive simulation is unavailable"
-                .to_string(),
-        );
-    }
-    Ok(())
+                if finished {
+                    break;
+                }
+                // Sleep until the simulation waits for room, and look for
+                // events of long runs now and then.
+                if idle {
+                    drain.wait(std::time::Duration::from_millis(10));
+                }
+            }
+            drop(drain);
+            written.map(|()| drained)
+        });
+        // A thread that cannot write keeps draining, so that the
+        // simulation it paces reaches the interrupt.
+        let run = simulation.run_slots(max_steps, || {
+            broken.load(std::sync::atomic::Ordering::Acquire)
+                || signal.is_some_and(|signal| signal.pending())
+        });
+        done.store(true, std::sync::atomic::Ordering::Release);
+        writer.thread().unpark();
+        (run, writer.join())
+    });
+    let drained = drained.map_err(|_| "the simulation output thread panicked".to_string())??;
+    saves.failed |= drained.failed;
+    // The events of the end of the run, after those the thread wrote.
+    drain_sv_output(simulation, output, &mut saves.failed)?;
+    let steps = run.map_err(|error| error.to_string())?;
+    drained.check(simulation)?;
+    saves.service_signal(simulation);
+    Ok(Some(steps))
 }
 
 #[derive(Args)]
@@ -1382,6 +1490,32 @@ mod tests {
         }
     }
 
+    /// Output that fails to write ends a run that would go on forever.
+    #[cfg(feature = "systemverilog")]
+    #[test]
+    fn sv_runs_end_when_output_fails() {
+        struct Closed;
+        impl Write for Closed {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let source = "`timescale 1ns/1ns\nmodule Top; bit clk; always #1 clk = ~clk; initial forever @(posedge clk) $display(\"tick\"); endmodule";
+        let simulation =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top")
+                .build()
+                .unwrap();
+        let error =
+            simulate_sv(simulation, u64::MAX, StateSaves::default(), &mut Closed).unwrap_err();
+        assert!(
+            error.contains("failed to write simulation output"),
+            "{error}"
+        );
+    }
+
     /// Only `$error` and `$fatal` fail a run; every report is printed with
     /// its severity and location (IEEE 1800-2023 20.10).
     #[cfg(feature = "systemverilog")]
@@ -1428,6 +1562,7 @@ mod tests {
             ],
             schedule: None,
             strings: Vec::new(),
+            next_object: None,
         }
     }
 

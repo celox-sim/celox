@@ -34,6 +34,14 @@ impl<V> From<HashMap<String, V>> for ScopedMap<V> {
 }
 
 impl<V> ScopedMap<V> {
+    /// Identity of an immutable snapshot, valid while a borrower retains it.
+    pub fn identity(&self) -> (usize, usize) {
+        (
+            Arc::as_ptr(&self.base) as usize,
+            Arc::as_ptr(&self.overlay) as usize,
+        )
+    }
+
     pub fn get(&self, name: &str) -> Option<&V> {
         match self.overlay.get(name) {
             Some(value) => value.as_ref(),
@@ -102,6 +110,10 @@ impl<V: Clone> Extend<(String, V)> for ScopedMap<V> {
 
 impl<V: PartialEq> PartialEq for ScopedMap<V> {
     fn eq(&self, other: &Self) -> bool {
+        // A clone shares both tables.
+        if self.identity() == other.identity() {
+            return true;
+        }
         self.iter()
             .all(|(name, value)| other.get(name) == Some(value))
             && self.iter().count() == other.iter().count()

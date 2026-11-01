@@ -80,11 +80,45 @@ impl Preprocessed {
 
     /// A compatibility view for text-based consumers. Syntax consumers should
     /// use tokens and their original origins instead of parsing this text again.
+    /// Separators at expansion boundaries prevent adjacent tokens from merging.
     pub fn text(&self) -> String {
-        self.tokens
-            .iter()
-            .map(|token| token.text.as_str())
-            .collect()
+        let mut text = String::new();
+        let mut previous: Option<&Token> = None;
+        for token in &self.tokens {
+            if let Some(left) = previous {
+                // Authored adjacent tokens already have the right lexical
+                // boundaries. Expansion/argument boundaries need a separator:
+                // for example, a macro's `-` followed by `-1` must not become
+                // a decrement. Explicit token pastes remain a single token.
+                let authored_adjacent = left.origin.expansion == token.origin.expansion
+                    && left.origin.spelling.file == token.origin.spelling.file
+                    && left.origin.spelling.end == token.origin.spelling.start
+                    && left.contributors.is_empty()
+                    && token.contributors.is_empty();
+                // Retained compiler directives require the name immediately
+                // after the backtick, even when a macro supplied that name.
+                let directive_name = left.text == "`" && token.identifier().is_some();
+                // Comments are not terminating whitespace for escaped
+                // identifiers (IEEE 1800-2023 5.6.1), and a preceding slash
+                // can also join their opening delimiter. Only actual white
+                // space safely separates every token kind.
+                let whitespace = matches!(token.kind, TokenKind::Whitespace | TokenKind::Newline);
+                if left.kind == TokenKind::Comment
+                    && left.text.starts_with("//")
+                    && token.kind != TokenKind::Newline
+                {
+                    // An included file may end in a line comment without a
+                    // newline; terminate it before rendering its caller.
+                    text.push('\n');
+                } else if !left.is_trivia() && !whitespace && !authored_adjacent && !directive_name
+                {
+                    text.push(' ');
+                }
+            }
+            text.push_str(&token.text);
+            previous = Some(token);
+        }
+        text
     }
 }
 
@@ -1498,7 +1532,13 @@ mod tests {
             ..Options::default()
         });
         let output = pp.preprocess(code, directory.join("top.sv")).unwrap();
-        assert!(output.text().contains("wire included = 19;"));
+        assert!(
+            output
+                .text()
+                .split_whitespace()
+                .collect::<String>()
+                .contains("wireincluded=19;")
+        );
         assert_eq!(output.tokens.iter().filter(|t| t.text == "19").count(), 2);
         let wire = output.tokens.iter().find(|t| t.text == "wire").unwrap();
         assert_eq!(
@@ -1564,6 +1604,56 @@ mod tests {
                 .unwrap()
                 .text()
                 .contains("wire guarded;")
+        );
+    }
+}
+
+#[cfg(test)]
+mod serialization_tests {
+    use super::*;
+
+    #[test]
+    fn serialized_file_end_comments_cannot_consume_following_tokens() {
+        let mut pp = Preprocessor::default();
+        let mut source = pp
+            .preprocess("// header without final newline", "header.svh")
+            .unwrap();
+        source.merge(pp.preprocess("module M; endmodule", "caller.sv").unwrap());
+        let text = source.text();
+        let mut files = SourceMap::default();
+        let file = files.add("serialized.sv", text.as_str());
+        let tokens = lex(&files, file).unwrap();
+        assert_eq!(
+            tokens
+                .iter()
+                .filter(|t| !t.is_trivia())
+                .map(|t| t.text.as_str())
+                .collect::<Vec<_>>(),
+            ["module", "M", ";", "endmodule"],
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn text_round_trip_preserves_expansion_token_boundaries() {
+        let code = "`define NEG -\n`define POS +\n`define LT <\n`define SLASH /\n`define EMPTY()\n`define NUM() 1\n`define ESC \\escaped\n`define CAT(a,b) a``b\n`NEG-1; `POS+1; `LT<=1; `SLASH*2; `SLASH/*block*/2; `SLASH//line\n2; `NUM().2; `NUM()e+2; `ESC+1; `ESC/*block*/ ; `ESC//line\n; \\literal/*part*/ ; `CAT(foo,bar); 1`EMPTY().2;";
+        let mut pp = Preprocessor::default();
+        let source = pp.preprocess(code, "tokens.sv").unwrap();
+        let text = source.text();
+        let mut files = SourceMap::default();
+        let file = files.add("serialized.sv", text.as_str());
+        let tokens = lex(&files, file).unwrap();
+        let significant = |tokens: &[Token]| {
+            tokens
+                .iter()
+                .filter(|t| !t.is_trivia())
+                .map(|t| (t.kind, t.text.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(significant(&tokens), significant(&source.tokens), "{text}");
+        assert!(
+            text.contains("foobar"),
+            "explicit pasting must stay intact: {text}"
         );
     }
 }

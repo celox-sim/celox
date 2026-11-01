@@ -24,7 +24,7 @@ test("the required gate rejects failures and only accepts explicitly optional sk
   assert.match(gate, /if: \$\{\{ !cancelled\(\)/);
   assert.match(
     gate,
-    /needs: \[changes, rust-tests, rust-default-tests, sv-tests, arm64-backend, napi-linux, napi-wasm\]/,
+    /needs: \[changes, rust-tests, rust-default-tests, sv-tests, sv-tests-shard, arm64-backend, napi-linux, napi-wasm\]/,
   );
   assert.match(
     gate,
@@ -44,6 +44,7 @@ test("the required gate rejects failures and only accepts explicitly optional sk
     DEFAULT_RESULT: "success",
     SV_TESTS_REQUIRED: "true",
     SV_TESTS_RESULT: "success",
+    SV_TESTS_SHARDS_RESULT: "success",
     ARM64_REQUIRED: "true",
     ARM64_RESULT: "success",
     NAPI_REQUIRED: "true",
@@ -76,6 +77,7 @@ test("the required gate rejects failures and only accepts explicitly optional sk
     "RUST_RESULT",
     "DEFAULT_RESULT",
     "SV_TESTS_RESULT",
+    "SV_TESTS_SHARDS_RESULT",
     "ARM64_RESULT",
     "NATIVE_RESULT",
     "WASM_RESULT",
@@ -109,6 +111,13 @@ test("the required gate rejects failures and only accepts explicitly optional sk
   });
   assert.match(gate, /SV_TESTS_REQUIRED: .*outputs\.rust != 'false' && needs\.changes\.outputs\.rust_sv_tests != 'false'/);
   assert.match(job("sv-tests"), /outputs\.rust == 'true' && needs\.changes\.outputs\.rust_sv_tests != 'false'/);
+  // A shard that fails fails the gate even when the driver job succeeded.
+  for (const status of ["failure", "cancelled", "skipped", ""]) {
+    cases.push({
+      env: { ...success, SV_TESTS_REQUIRED: "false", SV_TESTS_SHARDS_RESULT: status },
+      passes: false,
+    });
+  }
   // Only non-Rust changes may skip ARM64; other results fail closed.
   for (const status of ["success", "skipped", "failure", "cancelled", ""]) {
     cases.push({
@@ -319,10 +328,12 @@ test("full runs on long-lived branches report every job's result", () => {
 });
 
 test("queue validation rejects missing coverage, producer failures and detection failure", () => {
+  assert.match(job("workflow-lockfile"), /uses: \.\/\.github\/workflows\/verify-lockfile\.yml/);
   const gate = job("queue-validation");
+  assert.match(gate, /needs: \[changes, workflow-lockfile,/);
   assert.match(gate, /if: \$\{\{ !cancelled\(\) && needs\.changes\.outputs\.queue != 'false'/);
   const script = gate.match(/        run: \|\n([\s\S]*)/)[1];
-  const needs = Object.fromEntries(["lint", "rust", "napi-windows", "napi-linux-arm64", "js-ubuntu", "js-windows", "playground-browser", "docs"].map(name => [name, { result: "success" }]));
+  const needs = Object.fromEntries(["workflow-lockfile", "lint", "rust", "napi-windows", "napi-linux-arm64", "js-ubuntu", "js-windows", "playground-browser", "docs"].map(name => [name, { result: "success" }]));
   needs.changes = { result: "success", outputs: { queue: "true", full_validation: "true", fast_queue: "false", rust: "true", napi: "true", napi_arm64: "true", javascript: "true", scripts: "true", docs: "true" } };
   const passes = (value) => spawnSync("bash", ["-e", "-c", script], { env: { ...process.env, NEEDS: JSON.stringify(value) } }).status === 0;
   assert.equal(passes(needs), true);
@@ -337,9 +348,14 @@ test("queue validation rejects missing coverage, producer failures and detection
     assert.equal(passes(light), false);
   }
   const docs = structuredClone(needs);
-  for (const name of Object.keys(docs)) if (!["changes", "docs"].includes(name)) docs[name].result = "skipped";
+  for (const name of Object.keys(docs)) if (!["changes", "workflow-lockfile", "docs"].includes(name)) docs[name].result = "skipped";
   for (const flag of ["rust", "napi", "napi_arm64", "javascript", "scripts"]) docs.changes.outputs[flag] = "false";
   assert.equal(passes(docs), true);
+  const missingLockfile = structuredClone(docs);
+  delete missingLockfile["workflow-lockfile"];
+  assert.equal(passes(missingLockfile), false);
+  docs["workflow-lockfile"].result = "skipped";
+  assert.equal(passes(docs), false);
 });
 
 test("PR caches cannot evict the shared default-branch Rust caches", () => {
@@ -558,8 +574,23 @@ test("upstream SV TB runs on full CI and feeds failure reporting", () => {
 });
 
 
+test("sv-tests shards reuse one driver and together cover every case", () => {
+  const driver = job("sv-tests");
+  assert.match(driver, /cargo build --locked --release -p celox --features systemverilog --example sv_tests/);
+  assert.match(driver, /name: sv-tests-driver/);
+  const shard = job("sv-tests-shard");
+  assert.match(shard, /needs: \[changes, sv-tests\]/);
+  assert.match(shard, /if: \$\{\{ !cancelled\(\) && needs\.sv-tests\.result == 'success' \}\}/);
+  assert.doesNotMatch(shard, /cargo |rust-cache/);
+  const count = shard.match(/shard: \[([\d, ]+)\]/)[1].split(",").map(Number);
+  assert.deepEqual(count, count.map((_, index) => index + 1));
+  assert.match(shard, new RegExp(`--shard \\$\\{\\{ matrix\\.shard \\}\\}/${count.length}\n`));
+  assert.match(shard, /fail-fast: false/);
+  assert.match(shard, /name: sv-tests-report-\$\{\{ matrix\.shard \}\}/);
+});
+
 test("sv-tests generates the pinned main corpus before running and retains its summary", () => {
-  const sv = job("sv-tests");
+  const sv = job("sv-tests-shard");
   assert.match(sv, /third_party\/tests\/easyUVM third_party\/tests\/uvm-examples/);
   assert.ok(sv.indexOf("conformance/sv-tests/prepare.py") < sv.indexOf("conformance/sv-tests/run.py"));
   assert.match(sv, /sv-tests-report\.summary\.json/);
@@ -661,9 +692,23 @@ test("every rust-cache job of CI has a warm job that computes the same key", () 
     const twin = warming.get(id);
     assert.ok(twin, `rust-cache.yml warms no cache for CI job ${id}`);
     assert.equal(twin.match(/^    runs-on: (.*)$/m)?.[1], job.match(/^    runs-on: (.*)$/m)?.[1], id);
-    assert.deepEqual(stepWith(twin, "./.github/actions/setup-rust"), stepWith(job, "./.github/actions/setup-rust"), id);
+    assert.deepEqual(stepWith(twin, "$/.github/actions/setup-rust"), stepWith(job, "$/.github/actions/setup-rust"), id);
     assert.deepEqual(stepWith(twin, "Swatinem/rust-cache@v2"), stepWith(job, "Swatinem/rust-cache@v2"), id);
     assert.deepEqual(keyEnv(job), [], `${id} sets a job-level variable that enters its cache key`);
     assert.deepEqual(keyEnv(twin), [], id);
+  }
+});
+
+test("validation disables LTO without changing benchmark or publication profiles", () => {
+  for (const name of ["ci", "rust-cache"]) {
+    const source = readFileSync(new URL(`../.github/workflows/${name}.yml`, import.meta.url), "utf8");
+    const env = source.split("\nenv:\n")[1].split("\njobs:")[0];
+    for (const profile of ["DEV", "VTEST", "RELEASE", "WASM_RELEASE"]) {
+      assert.ok(env.includes(`CARGO_PROFILE_${profile}_LTO: "off"`), `${name}: ${profile}`);
+    }
+  }
+  for (const name of ["bench", "heliodor-bench", "rica-bench", "circuit-bench", "taxi-bench", "ci-napi"]) {
+    const source = readFileSync(new URL(`../.github/workflows/${name}.yml`, import.meta.url), "utf8");
+    assert.doesNotMatch(source, /CARGO_PROFILE_\w+_LTO/);
   }
 });

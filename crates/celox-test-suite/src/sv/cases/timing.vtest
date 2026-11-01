@@ -1199,6 +1199,159 @@ module Top(input bit clk,output bit[7:0]seen);bit q;Child c(clk,q);initial forev
   (run_until 3) (assert_eq a 0) (assert_eq b 20)
   (run_until 5) (assert_eq a 20) (assert_eq b 20))
 
+; The locals of a static task are one variable that every call shares, also
+; calls that overlap in time; an initializer runs once, before time zero
+; (IEEE 1800-2023 6.21, 13.3.1).
+(case timed_task_static_locals_are_shared
+  (source "static_task_locals.sv" #"
+    module Top(output int a, b, c);
+      task count(output int result);
+        static int calls = 0;
+        int seen;
+        calls++;
+        seen = calls;
+        #2;
+        result = seen;
+      endtask
+      initial begin a = 0; count(a); end
+      initial begin b = 0; #1; count(b); end
+      initial begin c = 0; #5; count(c); end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 4) (assert_eq a 2) (assert_eq b 2) (assert_eq c 0)
+  (run_until 8) (assert_eq c 3))
+
+; A variable an automatic task declares `static` is shared the same way: in
+; a module, in a package (one for the design), and in a class method (one
+; per specialization; the methods of a class are automatic, 8.6).
+(case timed_task_declared_static_locals_are_shared
+  (source "declared_static_task_locals.sv" #"
+    package tick_pkg;
+      task automatic tick(output int r);
+        static int n = 0;
+        #1;
+        n++;
+        r = n;
+      endtask
+    endpackage
+    module Sub(output int shared);
+      initial begin shared = 0; tick_pkg::tick(shared); end
+    endmodule
+    module Top(output int d, e, sum, c1, c2, c10);
+      class Counter #(int STEP = 1);
+        static task bump(output int r);
+          static int n = 0;
+          #1;
+          n += STEP;
+          r = n;
+        endtask
+      endclass
+      task automatic tally(output int result);
+        static int total = 100;
+        int mine;
+        total++;
+        mine = total;
+        #2;
+        result = mine;
+      endtask
+      int shared1, shared2;
+      Sub u1(shared1);
+      Sub u2(shared2);
+      assign sum = shared1 + shared2;
+      initial begin d = 0; tally(d); end
+      initial begin e = 0; #1; tally(e); end
+      initial begin c1 = 0; Counter#(1)::bump(c1); Counter#(1)::bump(c1); end
+      initial begin c2 = 0; #3; Counter#(1)::bump(c2); end
+      initial begin c10 = 0; Counter#(10)::bump(c10); end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 5) (assert_eq d 101) (assert_eq e 102) (assert_eq sum 3)
+  (assert_eq c1 2) (assert_eq c2 3) (assert_eq c10 10))
+
+; The task of UVM's `uvm_wait_for_nba_region`: a nonblocking assignment to a
+; static local, and a wait for its change, from overlapping calls.
+(case timed_task_static_locals_take_nonblocking_updates_and_waits
+  (source "static_task_nba.sv" #"
+    module Top(output int x, y, z, w, wakes);
+      int a = 0, b = 0;
+      task wait_for_nba_region;
+        static int nba;
+        static int next_nba;
+        next_nba++;
+        nba <= next_nba;
+        @(nba);
+      endtask
+      task gate(input bit open);
+        static bit opened = 0;
+        if (open) opened = 1;
+        else wait (opened);
+      endtask
+      initial begin wakes = 0; x = 0; a <= 5; wait_for_nba_region(); x = a; wakes++; end
+      initial begin y = 0; b <= 7; wait_for_nba_region(); y = b; wakes++; end
+      initial begin z = 0; #3; a <= 9; wait_for_nba_region(); z = a; wakes++; end
+      initial begin w = 0; gate(0); w = $time; end
+      initial begin #4; gate(1); end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 1) (assert_eq x 5) (assert_eq y 7) (assert_eq wakes 2) (assert_eq w 0)
+  (run_until 6) (assert_eq z 9) (assert_eq wakes 3) (assert_eq w 4))
+
+; Each instance of a module has its own static task locals, and a package
+; task one set for the design.
+(case timed_task_static_locals_follow_their_scope
+  (source "static_task_scopes.sv" #"
+    package tick_pkg;
+      int last = 0;
+      task tick;
+        static int n = 0;
+        #1;
+        n++;
+        last = n;
+      endtask
+    endpackage
+    module Sub(output int own);
+      import tick_pkg::*;
+      task local_tick(output int r);
+        static int n = 0;
+        #1;
+        n++;
+        r = n;
+      endtask
+      initial begin own = 0; local_tick(own); #1; local_tick(own); end
+      initial tick();
+    endmodule
+    module Top(output int own1, own2, ticks);
+      Sub u1(own1);
+      Sub u2(own2);
+      assign ticks = tick_pkg::last;
+    endmodule
+  "#)
+  (top Top)
+  (run_until 5) (assert_eq own1 2) (assert_eq own2 2) (assert_eq ticks 2))
+
+; Forked children of a task read and write the static locals it shares.
+(case timed_task_static_locals_in_forked_children
+  (source "static_task_fork.sv" #"
+    module Top(output int a, b);
+      task accumulate(output int r);
+        static int total = 0;
+        fork
+          #1 total += 1;
+          #2 total += 10;
+        join
+        r = total;
+      endtask
+      initial begin a = 0; accumulate(a); end
+      initial begin b = 0; #5; accumulate(b); end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 3) (assert_eq a 11) (assert_eq b 0)
+  (run_until 8) (assert_eq b 22))
+
 (case timed_task_in_edge_always_rearms_after_return
   (source "edge_tasks.sv" #"
     module Top(output int count);
@@ -3018,3 +3171,419 @@ program Tb;
  initial #3;
 endprogram"#)
  (top Top) (run_to_finish) (expect_output "program final at 3\n"))
+
+; Startup waits for initial/always procedures, never termination-only final
+; procedures (IEEE 1800-2023 9.2.2.2, 9.2.3). A random call forces stateful
+; comb lowering, with a deterministic result: the range contains only zero
+; (IEEE 1800-2023 18.13.2).
+
+(case comb_startup_ignores_final_two_state
+  (source "comb_final.sv" #"
+module Child(input int seed, input bit enable,
+             output int combined, classic, latched);
+    always_comb combined = seed + $urandom_range(0, 0);
+    always @(seed) classic = seed + $urandom_range(0, 0);
+    always_latch if (enable) latched = seed + $urandom_range(0, 0);
+    final $display("final value=%0d", combined);
+endmodule
+module Top(output int combined, classic, latched);
+    int seed;
+    bit enable;
+    Child child(seed, enable, combined, classic, latched);
+    initial begin
+        seed = 17; enable = 1;
+        #2 seed = 23;
+        #2 begin enable = 0; seed = 31; end
+        #1 $finish;
+    end
+endmodule
+"#)
+  (top Top)
+  (run_until 1)
+  (assert_eq combined 17)
+  (assert_eq classic 17)
+  (assert_eq latched 17)
+  (expect_output "")
+  (run_until 3)
+  (assert_eq combined 23)
+  (assert_eq classic 23)
+  (assert_eq latched 23)
+  (run_until 4)
+  (assert_eq combined 31)
+  (assert_eq classic 31)
+  (assert_eq latched 23)
+  (expect_output "")
+  (run_to_finish)
+  (expect_output "final value=31\n"))
+
+(case comb_startup_ignores_final_four_state
+  (four_state)
+  (source "comb_final.sv" #"
+module Child(input int seed, input bit enable,
+             output int combined, classic, latched);
+    always_comb combined = seed + $urandom_range(0, 0);
+    always @(seed) classic = seed + $urandom_range(0, 0);
+    always_latch if (enable) latched = seed + $urandom_range(0, 0);
+    final $display("final value=%0d", combined);
+endmodule
+module Top(output int combined, classic, latched);
+    int seed;
+    bit enable;
+    Child child(seed, enable, combined, classic, latched);
+    initial begin
+        seed = 17; enable = 1;
+        #2 seed = 23;
+        #2 begin enable = 0; seed = 31; end
+        #1 $finish;
+    end
+endmodule
+"#)
+  (top Top)
+  (run_until 1)
+  (assert_eq combined 17)
+  (assert_eq classic 17)
+  (assert_eq latched 17)
+  (expect_output "")
+  (run_until 3)
+  (assert_eq combined 23)
+  (assert_eq classic 23)
+  (assert_eq latched 23)
+  (run_until 4)
+  (assert_eq combined 31)
+  (assert_eq classic 31)
+  (assert_eq latched 23)
+  (expect_output "")
+  (run_to_finish)
+  (expect_output "final value=31\n"))
+
+; IEEE 1800-2023 10.4.2: delayed NBA updates capture values and positions
+; immediately, preserve issue order, and do not suspend the caller.
+(case wildcard_blocks_with_crossing_output_dependencies
+  (source "crossing_outputs.sv" #"
+module Top;
+  reg [7:0] s=0, t=0, a, b, x, y;
+  always @* begin a=s; x=b+1; end
+  always @* begin b=t; y=a+1; end
+  initial begin
+    #1 s=3; t=5;
+    #1 $display("%0d %0d %0d %0d", a, b, x, y);
+    $finish;
+  end
+endmodule
+"#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "3 5 6 4\n"))
+
+(case wildcard_blocks_in_a_converging_feedback_loop
+  (source "converging_wildcards.sv" #"
+module Top;
+  reg [7:0] a, b;
+  always @* b=(a<4) ? a : 8'd3;
+  always @* a=(b<4) ? b+8'd1 : b;
+  initial begin
+    #1 a=1;
+    #1 $display("%0d %0d", a, b);
+    $finish;
+  end
+endmodule
+"#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "4 3\n"))
+
+(case nonblocking_intra_assignment_delays
+  (source "delayed_nba.sv" #"
+module Top;
+  reg [7:0] q=0, rhs=8'h11, zero=0;
+  initial begin
+    q <= #3 rhs;
+    rhs=8'h22;
+    q <= #5 rhs;
+    #1 q <= #2 8'h33;
+    #1 $display("before %h", q);
+    #2 $display("ordered %h", q);
+    zero <= #0 rhs;
+    rhs=8'h44;
+    #2 $display("after %h zero %h", q, zero);
+    $finish;
+  end
+endmodule
+"#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "before 00\nordered 33\nafter 22 zero 22\n"))
+
+(case nonblocking_intra_assignment_positions
+  (source "delayed_position.sv" #"
+module Top;
+  reg [15:0] q=0;
+  integer index=0, bit_index=0;
+  reg [7:0] bits=0;
+  reg [3:0] rhs=1;
+  initial begin
+    bits[bit_index++] <= #2 1'b1;
+    bits[bit_index++] <= #2 1'b0;
+    $display("positions %0d", bit_index);
+    q[index +: 4] <= #2 rhs;
+    index=4; rhs=2;
+    q[index +: 4] <= #2 rhs;
+    index=8; rhs=3;
+    #3 $display("%h", q);
+    $display("%h %0d", bits, bit_index);
+    $finish;
+  end
+endmodule
+"#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "positions 2\n0021\n01 2\n"))
+
+(case nonblocking_intra_assignment_four_state
+  (source "delayed_four_state.sv" #"
+module Top;
+  reg [3:0] q=0, rhs=4'bxz01;
+  initial begin
+    q <= #2 rhs;
+    rhs='1;
+    #1 $display("%b", q);
+    #2 $display("%b", q);
+    $finish;
+  end
+endmodule
+"#)
+  (top Top)
+  (four_state)
+  (run_to_finish)
+  (expect_output "0000\nxz01\n"))
+
+(case nonblocking_intra_assignment_flip_flop
+  (source "delayed_flop.sv" #"
+module Top;
+  reg clk=0, rst_n=1, d=0;
+  reg q;
+  always @(posedge clk or negedge rst_n)
+    if (!rst_n) q <= #1 0;
+    else q <= #1 d;
+  initial begin
+    #1 rst_n=0;
+    #2 $display("reset %b", q);
+    rst_n=1; d=1;
+    #1 clk=1;
+    #1 d=0;
+    #1 $display("data %b", q);
+    $finish;
+  end
+endmodule
+"#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "reset 0\ndata 1\n"))
+
+(case nonblocking_intra_assignment_outlives_caller
+  (source "delayed_done.sv" #"
+module Top;
+  reg q=0;
+  initial q <= #2 1;
+  always @(q) if (q) begin
+    $display("updated");
+    $finish;
+  end
+endmodule
+"#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "updated\n"))
+
+; IEEE 1800-2023 9.4.5/10.4.1: snapshot and convert the RHS before waiting;
+; evaluate the destination, including its effects, after the wait.
+(case blocking_intra_assignment_delays
+  (source "intra_delays.sv" #"
+module Top(output bit [15:0] sampled, sum, output int data, done, zero_seen);
+  bit [7:0] a=8'hff, b=1;
+  initial begin data=41; sampled=0; done=0;
+    sampled = #4 data++;
+    done=1;
+  end
+  initial begin #1 data=99; end
+  initial sum = #2 a+b;
+  initial begin zero_seen=0; zero_seen = #0 7; end
+  initial begin #1 a=0; b=0; end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq data 42)
+  (assert_eq sampled 0) (assert_eq done 0) (assert_eq zero_seen 7)
+  (run_until 2) (assert_eq sum 256) (assert_eq sampled 0) (assert_eq done 0)
+  (run_until 4) (assert_eq sampled 41) (assert_eq data 99) (assert_eq done 1))
+
+(case blocking_intra_assignment_late_target
+  (source "intra_late_target.sv" #"
+module Top(output bit [15:0] selected, output int index, data, done);
+  initial begin data=41; index=0; selected=0; done=0;
+    selected[(index++) +: 8] = #4 data++;
+    done=1;
+  end
+  initial begin #1 data=99; index=8; end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq data 42) (assert_eq index 0)
+  (assert_eq selected 0) (assert_eq done 0)
+  (run_until 2) (assert_eq index 8) (assert_eq selected 0) (assert_eq done 0)
+  (run_until 4) (assert_eq selected 0x2900) (assert_eq index 9)
+  (assert_eq data 99) (assert_eq done 1))
+
+(case blocking_intra_assignment_events
+  (source "intra_events.sv" #"
+module Top(output int once_value, named_value);
+  bit clk;
+  event ready;
+  int data=17;
+  initial begin #1 clk=1; #1 data=99; #1 ->ready; end
+  initial begin once_value=0; once_value = @(posedge clk) data; end
+  initial begin named_value=0; named_value = @ready data; end
+endmodule
+"#)
+  (top Top) (run_until 1) (assert_eq once_value 17) (assert_eq named_value 0)
+  (run_until 3) (assert_eq once_value 17) (assert_eq named_value 17))
+
+(case blocking_intra_assignment_repeat_events
+  (source "intra_repeat_events.sv" #"
+module Top(output int repeat_value, n, data, done);
+  bit clk;
+  initial begin repeat(4) begin #1 clk=1; #1 clk=0; end end
+  initial begin repeat_value=0; done=0; n=3; data=17;
+    repeat_value = repeat(n++) @(posedge clk) data+1;
+    done=1;
+  end
+  initial begin #2 n=1; data=99; end
+endmodule
+"#)
+  (top Top) (run_until 1) (assert_eq repeat_value 0) (assert_eq n 4) (assert_eq done 0)
+  (run_until 3) (assert_eq repeat_value 0) (assert_eq done 0)
+  (run_until 5) (assert_eq repeat_value 18) (assert_eq done 1))
+
+(case blocking_intra_assignment_nonpositive_unknown_repeat
+  (four_state)
+  (source "intra_repeat.sv" #"
+module Top(output int a,b,c,d,value,done);
+  bit clk;
+  int n=-3;
+  logic [7:0] count=8'hxz;
+  initial begin value=7; done=0;
+    a = repeat(0) @(posedge clk) value++;
+    b = repeat(n) @(posedge clk) value++;
+    c = repeat(count) @(posedge clk) value++;
+    count='z;
+    d = repeat(count) @(posedge clk) value++;
+    done=1;
+  end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq a 7) (assert_eq b 8) (assert_eq c 9) (assert_eq d 10)
+  (assert_eq value 11) (assert_eq done 1))
+
+(case blocking_intra_assignment_four_state
+  (four_state)
+  (source "intra_four_state.sv" #"
+module Top(output logic [129:0] wide,
+           output bit [7:0] clean, output logic signed [127:0] signed_value);
+  logic [129:0] value={2'bxz,128'h1234};
+  logic [7:0] dirty=8'b1x0z1001;
+  logic signed [7:0] small_value=-1;
+  initial wide = #3 value;
+  initial clean = #3 dirty;
+  initial signed_value = #3 small_value;
+  initial begin #1 value='0; dirty='1; small_value=0; end
+endmodule
+"#)
+  (top Top) (run_until 3)
+  (assert_eq wide (fourstate (+ (<< 1 129) 0x1234) (+ (<< 1 129) (<< 1 128))))
+  (assert_eq clean 0x89) (assert_eq signed_value (- (<< 1 128) 1)))
+
+(case blocking_intra_assignment_automatic_tasks
+  (source "intra_tasks.sv" #"
+module Top(output int first,second,done);
+  task automatic sample(input int value, pause, ref int result);
+    result = #(pause) value;
+  endtask
+  initial begin first=0; second=0; done=0;
+    fork sample(11,4,first); sample(22,2,second); join
+    done=1;
+  end
+endmodule
+"#)
+  (top Top) (run_until 2)
+  (assert_eq first 0) (assert_eq second 22) (assert_eq done 0)
+  (run_until 4) (assert_eq first 11) (assert_eq second 22) (assert_eq done 1))
+
+; Destination tags are evaluated at the delayed write, while source member
+; access and destination-sized arithmetic are evaluated before suspension.
+(case blocking_intra_assignment_tag_checks
+  (four_state)
+  (source "intra_tag_checks.sv" #"
+module Top(output logic [7:0] result, nested_result);
+  typedef union tagged packed {void Empty; logic [7:0] Full;} inner_t;
+  typedef union tagged packed {inner_t Nested; logic [15:0] Word;} outer_t;
+  inner_t item, source_value;
+  outer_t nested_item;
+  initial begin
+    item=tagged Empty;
+    source_value=tagged Full 8'ha5;
+    item.Full = #4 source_value.Full;
+    result=item.Full;
+  end
+  initial begin
+    nested_item=tagged Word 16'd0;
+    nested_item.Nested.Full = #4 4'hf + 4'h1;
+    nested_result=nested_item.Nested.Full;
+  end
+  initial begin
+    #2 item=tagged Full 8'd0;
+    source_value=tagged Empty;
+    nested_item=tagged Nested (tagged Full 8'd0);
+  end
+endmodule
+"#)
+  (top Top) (run_until 3) (run_until 4)
+  (assert_eq result 0xa5) (assert_eq nested_result 0x10))
+
+(case blocking_intra_assignment_rejects_net
+  (source "intra_net.sv" #"
+module Top(input a,b);
+  wire w;
+  initial w = #10 a & b;
+endmodule
+"#)
+  (top Top) (expect reject))
+
+(case blocking_intra_assignment_rejects_net_port_select
+  (source "intra_net_port.sv" #"
+module Top(output wire [7:0] w);
+  initial w[3:0] = #1 4'hf;
+endmodule
+"#)
+  (top Top) (expect reject))
+
+(case blocking_intra_assignment_rejects_task_net_write
+  (source "intra_task_net.sv" #"
+module Top;
+  wire w;
+  task automatic write_value(); w = #1 1'b1; endtask
+  initial write_value();
+endmodule
+"#)
+  (top Top) (expect reject))
+
+(case blocking_intra_assignment_net_shadow_is_variable
+  (source "intra_shadow.sv" #"
+module Top(output bit value);
+  wire w=1'b0;
+  initial begin : local_scope
+    bit w;
+    w = #1 1'b1;
+    value=w;
+  end
+endmodule
+"#)
+  (top Top) (run_until 1) (assert_eq value 1))

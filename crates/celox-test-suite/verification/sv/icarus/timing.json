@@ -1608,6 +1608,29 @@
     },
     {
       "category": "Sequential",
+      "detail": "Icarus 13.0 rejects an explicit static local in an automatic task (\"Overriding the default variable lifetime is not yet supported.\"), a class declared in a module, and the package-scoped call tick_pkg::tick(b), with syntax errors. IEEE 1800-2023 6.21 and 13.3.1 permit the declaration and share it between all calls, 8.6 makes class methods automatic, and 26.3 permits the package-scoped reference. Verilator 5.052, xezim 0.11.3 and Celox run the adapter-free source with the expected sums.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_static_task_declared_locals_icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_explicit_static_task_local",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects an explicit static local in an automatic task (\"Overriding the default variable lifetime is not yet supported.\"), a class declared in a module, and the package-scoped call tick_pkg::tick(b), with syntax errors. IEEE 1800-2023 6.21 and 13.3.1 permit the declaration and share it between all calls, 8.6 makes class methods automatic, and 26.3 permits the package-scoped reference. Verilator 5.052, xezim 0.11.3 and Celox run the adapter-free source with the expected sums.",
+        "upstream": []
+      },
+      "name": "timing::timed_task_declared_static_locals_are_shared",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
       "name": "timing::timed_task_four_state_storage_survives_suspension",
@@ -1780,6 +1803,78 @@
       "name": "timing::final_procedure_output_survives_program_completion",
       "phase": "execute",
       "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 rejects the automatic task reference port: Reference ports not supported yet. IEEE 1800-2023 13.5.2 permits this ref formal, and 9.4.5 permits the blocking delay in the task. The standalone REFERENCE_PORT probe reproduces the rejection. Verilator 5.052, pinned xezim 0.11.4 and Celox pass the unchanged shared case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_intra_assignment_ref_task",
+        "category": "simulator_unsupported",
+        "phase": "compile",
+        "observed_version": "Icarus 13.0",
+        "reason": "Icarus 13.0 rejects the automatic task reference port: Reference ports not supported yet. IEEE 1800-2023 13.5.2 permits this ref formal, and 9.4.5 permits the blocking delay in the task. The standalone REFERENCE_PORT probe reproduces the rejection. Verilator 5.052, pinned xezim 0.11.4 and Celox pass the unchanged shared case.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_blocking_intra_assignment.sv",
+          "verification/repros/sv_blocking_intra_assignment.json",
+          "LIMITATIONS.md#blocking-intra-assignment-controls"
+        ]
+      },
+      "name": "timing::blocking_intra_assignment_automatic_tasks",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 waits for an event when the repeat count contains X/Z. IEEE 1800-2023 9.4.5 requires the assignment to occur as if the repeat construct were absent. The standalone UNKNOWN_REPEAT, HIGH_Z and MIXED_UNKNOWN probes leave result=0 and done=0 instead of result=9 and done=1. Celox passes the unchanged shared assertions; xezim has a separate negative-count timeout.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_intra_assignment_unknown_repeat",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Icarus 13.0",
+        "reason": "Icarus 13.0 waits for an event when the repeat count contains X/Z. IEEE 1800-2023 9.4.5 requires the assignment to occur as if the repeat construct were absent. The standalone UNKNOWN_REPEAT, HIGH_Z and MIXED_UNKNOWN probes leave result=0 and done=0 instead of result=9 and done=1. Celox passes the unchanged shared assertions; xezim has a separate negative-count timeout.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_blocking_intra_assignment.sv",
+          "verification/repros/sv_blocking_intra_assignment.json",
+          "LIMITATIONS.md#blocking-intra-assignment-controls"
+        ]
+      },
+      "name": "timing::blocking_intra_assignment_nonpositive_unknown_repeat",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 rejects the packed tagged-union typedef and constructors before the timing behavior is elaborated (syntax errors). IEEE 1800-2023 7.3.2 permits the declarations and constructors; 10.4.1 evaluates destination tag checks at the delayed write. The TAGGED standalone probe reproduces the syntax rejection; Celox passes the unchanged shared case on all supported backend/image configurations.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_intra_assignment_tagged_union",
+        "category": "simulator_unsupported",
+        "phase": "compile",
+        "observed_version": "Icarus 13.0",
+        "reason": "Icarus 13.0 rejects the packed tagged-union typedef and constructors before the timing behavior is elaborated (syntax errors). IEEE 1800-2023 7.3.2 permits the declarations and constructors; 10.4.1 evaluates destination tag checks at the delayed write. The TAGGED standalone probe reproduces the syntax rejection; Celox passes the unchanged shared case on all supported backend/image configurations.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_intra_assignment_review.sv",
+          "verification/repros/sv_intra_assignment_review.json",
+          "LIMITATIONS.md#blocking-intra-assignment-controls"
+        ]
+      },
+      "name": "timing::blocking_intra_assignment_tag_checks",
+      "phase": "skip",
+      "status": "ignored",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []

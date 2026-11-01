@@ -22,21 +22,35 @@ fn lvalue(value: crate::ir::LValue) -> LValue {
     }
 }
 
+/// Whether no call of `subroutine` can observe a value stored by an earlier
+/// call. A static function keeps its result between calls when the analyzer
+/// cannot prove that every call assigns all of it (IEEE 1800-2023 13.4.2).
+/// Without arguments and without reading that result, every call performs the
+/// same assignments, so the bits no call assigns keep their initial value and
+/// each call returns what the first one does.
+fn persistent_state_is_unobservable(subroutine: &Subroutine) -> bool {
+    match subroutine.persistent_locals.as_slice() {
+        [] => true,
+        [result] => {
+            subroutine.params.is_empty()
+                && subroutine
+                    .return_var
+                    .as_ref()
+                    .is_some_and(|name| name == result)
+                && !lifetimes::stmts_read(&subroutine.body, result)
+        }
+        _ => false,
+    }
+}
+
 /// A module's stateless zero-argument functions, evaluated at most once each.
 /// This reuses the constant interpreter only after runtime lifetime and effect
 /// checks; functions with persistent storage or observable effects stay calls.
 pub struct RuntimeConstantFunctions<'a> {
-    state: State,
+    functions: ConstantFunctions,
     constants: &'a HashMap<String, i128>,
-    cache: RefCell<HashMap<String, Option<typecheck::IntegralLiteral>>>,
+    cache: HashMap<String, Option<typecheck::IntegralLiteral>>,
     two_state: bool,
-}
-
-pub(super) fn charge(state: &State) -> Option<()> {
-    if let Some(fuel) = state.runtime_fuel.get() {
-        state.runtime_fuel.set(Some(fuel.checked_sub(1)?));
-    }
-    Some(())
 }
 
 impl<'a> RuntimeConstantFunctions<'a> {
@@ -57,7 +71,7 @@ impl<'a> RuntimeConstantFunctions<'a> {
         let mut functions = ConstantFunctionTable::default();
         for subroutine in &subroutines {
             if subroutine.is_task
-                || !subroutine.persistent_locals.is_empty()
+                || !persistent_state_is_unobservable(subroutine)
                 || readers.contains_key(&subroutine.name)
                 || subroutine
                     .params
@@ -164,8 +178,7 @@ impl<'a> RuntimeConstantFunctions<'a> {
                 functions.remove(&name);
             }
         }
-        let state = State::default();
-        *state.functions.borrow_mut() = ConstantFunctions {
+        let functions = ConstantFunctions {
             functions: Arc::new(functions),
             locals: Arc::new(
                 module
@@ -177,40 +190,33 @@ impl<'a> RuntimeConstantFunctions<'a> {
             errors: Arc::default(),
         };
         Self {
-            state,
+            functions,
             constants,
-            cache: RefCell::default(),
+            cache: HashMap::default(),
             two_state: !four_state,
         }
     }
 
     /// A call with no actual or formal arguments, or `None` when it cannot be
     /// evaluated without runtime state, effects, or exceeding the shared budget.
-    pub fn value(&self, name: &str) -> Option<typecheck::IntegralLiteral> {
-        if let Some(value) = self.cache.borrow().get(name) {
+    pub fn value(&mut self, name: &str) -> Option<typecheck::IntegralLiteral> {
+        if let Some(value) = self.cache.get(name) {
             return value.clone();
         }
-        if !self
-            .state
-            .functions
-            .borrow()
-            .functions
-            .get(name)?
-            .params
-            .is_empty()
-        {
+        if !self.functions.functions.get(name)?.params.is_empty() {
             return None;
         }
-        self.state.runtime_fuel.set(Some(MAX_ITERATIONS));
-        self.state.runtime_two_state.set(Some(self.two_state));
         let env = Environment {
             constants: self.constants,
-            functions: &self.state,
+            functions: &self.functions,
         };
-        let value = call_value(name, &[], &env).map(Value::into_literal);
-        self.state.runtime_fuel.set(None);
-        self.state.runtime_two_state.set(None);
-        self.cache.borrow_mut().insert(name.into(), value.clone());
+        let mut budget = Budget {
+            depth: 0,
+            fuel: Some(MAX_ITERATIONS),
+            two_state: Some(self.two_state),
+        };
+        let value = call_value(name, &[], &env, &mut budget).map(Value::into_literal);
+        self.cache.insert(name.into(), value.clone());
         value
     }
 }
@@ -231,6 +237,7 @@ mod tests {
                 &[],
                 &crate::ModuleInterfaces::default(),
                 &packages,
+                &mut packages.design(),
             )
             .unwrap()
             .modules()[0]
@@ -254,8 +261,58 @@ mod tests {
         );
         let constants = HashMap::default();
         for four_state in [false, true] {
-            let evaluator = RuntimeConstantFunctions::new(&module, &constants, four_state);
+            let mut evaluator = RuntimeConstantFunctions::new(&module, &constants, four_state);
             assert_eq!(evaluator.value("mixed").unwrap().value, BigUint::default());
+        }
+    }
+
+    #[test]
+    fn unread_static_result_keeps_its_initial_value() {
+        let module = module(
+            r#"module Top(output logic [3:0] q);
+            function [3:0] partial();
+                for (int i = 0; i < 2; i++) partial[i] = 1'b1;
+            endfunction
+            assign q = partial();
+        endmodule"#,
+        );
+        // The bits the loop leaves alone keep their value between calls.
+        assert!(!module.subroutines()[0].persistent_locals.is_empty());
+        let constants = HashMap::default();
+        let value = RuntimeConstantFunctions::new(&module, &constants, false)
+            .value("partial")
+            .unwrap();
+        assert_eq!(value.value, BigUint::from(0b0011u8));
+        assert_eq!(value.mask, BigUint::default());
+        let value = RuntimeConstantFunctions::new(&module, &constants, true)
+            .value("partial")
+            .unwrap();
+        assert_eq!(value.mask, BigUint::from(0b1100u8));
+        assert_eq!(
+            &value.value & BigUint::from(0b0011u8),
+            BigUint::from(0b0011u8)
+        );
+    }
+
+    #[test]
+    fn read_static_result_stays_a_call() {
+        let module = module(
+            r#"module Top(output logic [3:0] q, output logic [3:0] r);
+            function [3:0] toggle();
+                toggle[0] = !toggle[0];
+            endfunction
+            function [3:0] indexed();
+                indexed[indexed[1:0]] = 1'b1;
+            endfunction
+            assign q = toggle();
+            assign r = indexed();
+        endmodule"#,
+        );
+        let constants = HashMap::default();
+        for four_state in [false, true] {
+            let mut evaluator = RuntimeConstantFunctions::new(&module, &constants, four_state);
+            assert!(evaluator.value("toggle").is_none());
+            assert!(evaluator.value("indexed").is_none());
         }
     }
 
@@ -271,7 +328,7 @@ mod tests {
         endmodule"#,
         );
         let constants = HashMap::default();
-        let evaluator = RuntimeConstantFunctions::new(&module, &constants, true);
+        let mut evaluator = RuntimeConstantFunctions::new(&module, &constants, true);
         let value = evaluator.value("unknown_match").unwrap();
         assert_eq!(value.mask, BigUint::from(1u8));
         assert_eq!(value.value, BigUint::from(1u8));
@@ -325,7 +382,7 @@ mod tests {
         );
         let constants = HashMap::default();
         for four_state in [false, true] {
-            let evaluator = RuntimeConstantFunctions::new(&module, &constants, four_state);
+            let mut evaluator = RuntimeConstantFunctions::new(&module, &constants, four_state);
             for name in ["arithmetic", "signed_case", "skip_label", "fill_case"] {
                 assert_eq!(
                     evaluator.value(name).unwrap().value,
@@ -354,7 +411,7 @@ mod tests {
         endmodule"#,
         );
         let constants = HashMap::default();
-        let evaluator = RuntimeConstantFunctions::new(&module, &constants, true);
+        let mut evaluator = RuntimeConstantFunctions::new(&module, &constants, true);
         for (name, expected, mask) in [
             ("definite_match", 1u8, 0u8),
             ("definite_mismatch", 0, 0),
@@ -380,7 +437,7 @@ mod tests {
         endmodule"#,
         );
         let constants = HashMap::default();
-        let evaluator = RuntimeConstantFunctions::new(&module, &constants, true);
+        let mut evaluator = RuntimeConstantFunctions::new(&module, &constants, true);
         let result = evaluator.value("pattern").unwrap();
         assert_eq!(result.width, 16);
         assert_eq!(result.value, BigUint::from(0x8421u32));
@@ -402,7 +459,7 @@ mod tests {
         );
         assert!(module.subroutines()[0].persistent_locals.is_empty());
         let constants = HashMap::default();
-        let evaluator = RuntimeConstantFunctions::new(&module, &constants, true);
+        let mut evaluator = RuntimeConstantFunctions::new(&module, &constants, true);
         FUNCTION_CALLS.with(|calls| calls.set(0));
         let value = evaluator.value("pattern").unwrap();
         let mut expected = BigUint::default();
@@ -430,7 +487,7 @@ mod tests {
         endmodule"#,
         );
         let constants = HashMap::default();
-        let evaluator = RuntimeConstantFunctions::new(&module, &constants, true);
+        let mut evaluator = RuntimeConstantFunctions::new(&module, &constants, true);
         for name in [
             "stateful",
             "writes_global",
@@ -456,14 +513,14 @@ mod tests {
         endmodule"#,
         );
         let constants = HashMap::default();
-        let two_state = RuntimeConstantFunctions::new(&module, &constants, false);
+        let mut two_state = RuntimeConstantFunctions::new(&module, &constants, false);
         for name in ["explicit_unknown", "outside_select", "non_integral_local"] {
             assert!(
                 two_state.value(name).is_none(),
                 "{name} must retain runtime semantics"
             );
         }
-        let four_state = RuntimeConstantFunctions::new(&module, &constants, true);
+        let mut four_state = RuntimeConstantFunctions::new(&module, &constants, true);
         for name in ["explicit_unknown", "outside_select"] {
             assert_eq!(four_state.value(name).unwrap().value, BigUint::default());
         }
@@ -484,15 +541,8 @@ mod tests {
         endmodule"#,
         );
         let constants = HashMap::default();
-        let evaluator = RuntimeConstantFunctions::new(&module, &constants, true);
-        assert!(
-            evaluator
-                .state
-                .functions
-                .borrow()
-                .functions
-                .contains_key("slices")
-        );
+        let mut evaluator = RuntimeConstantFunctions::new(&module, &constants, true);
+        assert!(evaluator.functions.functions.contains_key("slices"));
         assert!(evaluator.value("slices").is_none());
     }
 
@@ -507,7 +557,7 @@ mod tests {
         );
         let constants = HashMap::default();
         for four_state in [false, true] {
-            let evaluator = RuntimeConstantFunctions::new(&module, &constants, four_state);
+            let mut evaluator = RuntimeConstantFunctions::new(&module, &constants, four_state);
             assert_eq!(
                 evaluator.value("unknown_local").unwrap().value,
                 BigUint::from(u8::from(!four_state))
@@ -535,7 +585,7 @@ mod tests {
         let mut actual = Vec::new();
         let mut expected = Vec::new();
         for four_state in [false, true] {
-            let evaluator = RuntimeConstantFunctions::new(&module, &constants, four_state);
+            let mut evaluator = RuntimeConstantFunctions::new(&module, &constants, four_state);
             for (name, value) in [("mixed_sign", 255u32), ("concat_width", 0xab00ffcdu32)] {
                 let result = evaluator.value(name).unwrap();
                 actual.push((four_state, name, result.value, result.mask));
@@ -587,7 +637,7 @@ mod tests {
         );
         let constants = HashMap::default();
         for four_state in [false, true] {
-            let evaluator = RuntimeConstantFunctions::new(&module, &constants, four_state);
+            let mut evaluator = RuntimeConstantFunctions::new(&module, &constants, four_state);
             for (name, expected) in [
                 ("skipped_function", 255u32),
                 ("skipped_function_false", 255),
@@ -631,7 +681,7 @@ mod tests {
         endmodule"#,
         );
         let constants = HashMap::default();
-        let evaluator = RuntimeConstantFunctions::new(&module, &constants, true);
+        let mut evaluator = RuntimeConstantFunctions::new(&module, &constants, true);
         FUNCTION_CALLS.with(|count| count.set(0));
         let result = evaluator.value("merged").unwrap();
         assert_eq!(result.value, BigUint::from(0xa5u8));

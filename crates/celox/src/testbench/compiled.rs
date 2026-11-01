@@ -4,17 +4,19 @@ use super::TestbenchStatement;
 use super::*;
 use celox_testbench::*;
 
+// Unit runs, host edge batches and host statement services since the last
+// call.
 #[cfg(test)]
-thread_local! { static COUNTERS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0,0)) }; }
-#[cfg(test)]
-pub(super) fn take_counters() -> (usize, usize) {
-    COUNTERS.with(|c| c.replace((0, 0)))
+pub(super) fn take_counters<B: SimBackend>(sim: &mut Simulator<B>) -> (usize, usize, usize) {
+    std::mem::take(&mut sim.tb_counters)
 }
 
 pub(super) fn run<B: SimBackend>(
     sim: &mut Simulator<B>,
     tb: &CompiledTestbench<B>,
     ctx: &mut DetailedExecContext,
+    // Distinct clocks of the testbench, declared or waited on.
+    testbench_clocks: usize,
 ) -> Option<ExecResult> {
     let m = tb.scheduler()?;
     let entry = m.entry?;
@@ -65,9 +67,54 @@ pub(super) fn run<B: SimBackend>(
             v
         })
         .collect();
+    // TB assertions report at their source locations.
+    let locations: HashMap<usize, SourceLocation> = sites
+        .iter()
+        .flatten()
+        .filter_map(|statement| match statement {
+            GenericTestbenchStatement::Assert {
+                site_id,
+                location: Some(location),
+                ..
+            } => Some((*site_id as usize, location.clone())),
+            _ => None,
+        })
+        .collect();
+    // The reset events `rst.assert` moves, which the generated unit writes.
+    let mut reset_events: Vec<B::Event> = vec![];
+    for statement in sites.iter().flatten() {
+        if let GenericTestbenchStatement::ResetAssert {
+            reset_event: Some(event),
+            ..
+        } = statement
+            && reset_events.iter().all(|known| known.id() != event.id())
+        {
+            reset_events.push(*event);
+        }
+    }
+    let marker = m.marker_site.map(|site| site as usize);
+    let drain = |sim: &mut Simulator<B>, ctx: &mut DetailedExecContext| {
+        let Some(marker) = marker else {
+            return drain_runtime_assertions(sim, ctx, None);
+        };
+        let format_ctx = RuntimeFormatContext {
+            tb_time: Some(ctx.simulation_time()),
+            scope: None,
+        };
+        let events = sim.drain_marked_runtime_events(format_ctx, marker);
+        record_runtime_events(
+            ctx,
+            events.into_iter().map(|(site, event)| {
+                let location = site.and_then(|site| locations.get(&site).cloned());
+                (event, location)
+            }),
+        )
+    };
     for &a in &m.control {
         sim.backend.set(a, 0u64);
     }
+    sim.backend
+        .set(m.control[TB_RECORD], u64::from(ctx.record_passes));
     sim.backend.set(m.control[TB_PHASE], u64::MAX);
     sim.backend
         .set(m.control[TB_LIMIT], ctx.tick_limit.unwrap_or(u64::MAX));
@@ -76,11 +123,10 @@ pub(super) fn run<B: SimBackend>(
             sim.backend.set(a, 0u64);
         }
     }
-    for (i, c) in m.clocks.iter().enumerate() {
+    for c in &m.clocks {
         for &a in c {
             sim.backend.set(a, 0u64);
         }
-        sim.backend.set(c[3], u64::from(i < m.declared));
     }
     for k in tb.kernels() {
         sim.backend.set(k.resume, 0u16);
@@ -88,52 +134,70 @@ pub(super) fn run<B: SimBackend>(
     let dirty = sim
         .backend
         .resolve_signal(&sim.program.runtime_schema.scheduler.as_ref()?.slots.dirty);
+    // One process on at most one clock reports time in cycles, as the
+    // synchronous path does.
+    let untimed = m.processes.len() == 1 && testbench_clocks <= 1;
     let mut reset_edges = vec![];
     let mut moves = vec![];
     let batch = clock_batch::ClockBatch::new(sim);
     // The last tick whose progress was reported.
     let mut reported = ctx.current_time;
+    let mut exits = Exits::default();
     loop {
         let schema = &sim.program.runtime_schema;
-        let native_edges = !sim.host_slot_work
-            && sim.host_watch.is_empty()
-            && sim.vcd_writer.is_none()
-            && schema.persistent_comb_state.is_empty()
-            && sim.components.is_empty()
-            && !sim.schedule.timed
-            && schema.time_slots.is_empty()
-            && schema.watches.is_empty()
-            && schema.comb_observers.is_empty()
-            && schema.sample_shadows.is_empty()
-            && !sim.backend.layout().four_state;
-        sim.backend
-            .set(m.control[TB_NATIVE_EDGES], u64::from(native_edges));
-        let native_settle = sim.host_watch.is_empty()
-            && sim.components.is_empty()
-            && !sim.schedule.timed
-            && sim.vcd_writer.is_none()
-            && schema.comb_observers.is_empty()
-            && schema.watches.is_empty();
+        // What keeps edges and settles in the host, named for the log.
+        let settle_blockers = [
+            ("host_watch", !sim.host_watch.is_empty()),
+            ("components", !sim.components.is_empty()),
+            ("timed", sim.schedule.timed),
+            ("comb_observers", !schema.comb_observers.is_empty()),
+            ("watches", !schema.watches.is_empty()),
+        ];
+        let edge_blockers = [
+            ("host_slot_work", sim.host_slot_work),
+            ("time_slots", !schema.time_slots.is_empty()),
+            ("sample_shadows", !schema.sample_shadows.is_empty()),
+        ];
+        let native_settle = settle_blockers.iter().all(|(_, blocks)| !blocks);
+        let native_edges = native_settle && edge_blockers.iter().all(|(_, blocks)| !blocks);
+        if exits.blockers.is_empty() {
+            exits.blockers = settle_blockers
+                .iter()
+                .chain(&edge_blockers)
+                .filter(|(_, blocks)| *blocks)
+                .map(|(name, _)| *name)
+                .collect();
+        }
+        let edges = match (native_edges, sim.vcd_writer.is_some()) {
+            (false, _) => 0,
+            (true, false) => 1,
+            (true, true) => TB_EDGES_PUBLISHED,
+        };
+        sim.backend.set(m.control[TB_NATIVE_EDGES], edges);
         sim.backend
             .set(m.control[TB_NATIVE_SETTLE], u64::from(native_settle));
         sim.backend.set(dirty, u8::from(sim.dirty));
+        // The host drains every event the unit recorded when it returns.
+        sim.backend.set(m.control[TB_UNMARKED], 0u64);
+        sim.backend.set(m.control[TB_PENDING], 0u64);
+        // An interpreted unit returns sooner, so that a tiered backend
+        // switches to its compiled code soon after it is ready.
         sim.backend.set(
             m.control[TB_BUDGET],
             if sim.backend.runs_compiled_scheduler() {
                 1024u64
             } else {
-                1
+                64
             },
         );
         #[cfg(test)]
-        COUNTERS.with(|c| {
-            let (runs, edges) = c.get();
-            c.set((runs + 1, edges));
-        });
+        {
+            sim.tb_counters.0 += 1;
+        }
         if let Err(e) = sim.backend.run_process(entry) {
             // A fatal assertion in a domain the unit ran ends it with an
             // error; its message is in the runtime events.
-            let drained = drain_runtime_assertions(sim, ctx, None);
+            let drained = drain(sim, ctx);
             if let Some(message) = drained.fatal_message {
                 return Some(ExecResult::Fail(message_diagnostic(&message)));
             }
@@ -146,7 +210,7 @@ pub(super) fn run<B: SimBackend>(
         }
         sim.backend.clear_triggered_bits();
         let now = sim.backend.get_as::<u64>(m.control[TB_NOW]);
-        ctx.scheduler_time = if m.processes.len() == 1 && clocks.len() <= 1 {
+        ctx.scheduler_time = if untimed {
             None
         } else {
             Some(sim.backend.get_as(m.control[TB_REPORT_TIME]))
@@ -168,14 +232,26 @@ pub(super) fn run<B: SimBackend>(
             }
         }
         reported = ctx.current_time;
-        let drained = drain_runtime_assertions(sim, ctx, None);
+        let exit = sim.backend.get_as::<u64>(m.control[TB_EXIT]);
+        // The unit settled what the step's edges need; the dump settles a
+        // deferred remainder itself. Publish before a `$finish` or fatal
+        // report ends the run, so the waveform keeps the terminating step.
+        if exit == TB_PUBLISH
+            && let Err(error) = sim.try_dump_unless_rewound(now)
+        {
+            return Some(ExecResult::Fail(
+                crate::simulation::vcd_dump_runtime_error(error).to_string(),
+            ));
+        }
+        let drained = drain(sim, ctx);
         if let Some(message) = drained.fatal_message {
             return Some(ExecResult::Fail(message_diagnostic(&message)));
         }
         if drained.finished {
             return Some(ExecResult::Finished);
         }
-        match sim.backend.get_as::<u64>(m.control[TB_EXIT]) {
+        exits.count(exit);
+        match exit {
             TB_DONE => return Some(ExecResult::Continue),
             TB_FINISHED => return Some(ExecResult::Finished),
             TB_LIMITED => {
@@ -187,8 +263,19 @@ pub(super) fn run<B: SimBackend>(
                     "testbench clock time overflow or invalid scheduler continuation".into(),
                 ));
             }
-            TB_SAFEPOINT => {}
+            TB_SAFEPOINT | TB_DRAIN | TB_PUBLISH => {}
+            TB_FAILED => {
+                return Some(ExecResult::Fail(message_diagnostic(
+                    &drained
+                        .last_message
+                        .unwrap_or_else(|| b"assertion failed".to_vec()),
+                )));
+            }
             TB_HOST | TB_RESET => {
+                #[cfg(test)]
+                {
+                    sim.tb_counters.2 += 1;
+                }
                 let index = sim.backend.get_as::<u64>(m.control[TB_CURRENT]) as usize;
                 let p = m.processes[index];
                 let kernel = &tb.kernels()[index];
@@ -223,10 +310,7 @@ pub(super) fn run<B: SimBackend>(
                                 sim.backend.set(p[0], 1u64);
                                 sim.backend.set(p[1], count);
                                 sim.backend.set(p[2], clock as u64);
-                                if sim.backend.get_as::<u64>(m.clocks[clock][3]) == 0 {
-                                    sim.backend.set(m.clocks[clock][3], 1u64);
-                                    sim.backend.set(m.clocks[clock][0], now);
-                                }
+                                wait_on_clock(sim, m.clocks[clock], now);
                                 sim.backend.set(
                                     m.control[TB_PHASE],
                                     2 + 2 * m.processes.len() as u64 + index as u64,
@@ -265,10 +349,7 @@ pub(super) fn run<B: SimBackend>(
                                 sim.backend.set(p[1], count);
                                 sim.backend.set(p[2], clock as u64);
                                 sim.backend.set(p[4], request as u64 + 1);
-                                if sim.backend.get_as::<u64>(m.clocks[clock][3]) == 0 {
-                                    sim.backend.set(m.clocks[clock][3], 1u64);
-                                    sim.backend.set(m.clocks[clock][0], now);
-                                }
+                                wait_on_clock(sim, m.clocks[clock], now);
                                 sim.backend.set(
                                     m.control[TB_PHASE],
                                     2 + 2 * m.processes.len() as u64 + index as u64,
@@ -277,7 +358,7 @@ pub(super) fn run<B: SimBackend>(
                         } else {
                             let result = exec_one_detailed(sim, statement, ctx);
                             if matches!(result, ExecResult::Finished) {
-                                if m.processes.len() == 1 && clocks.len() <= 1 {
+                                if untimed {
                                     return Some(result);
                                 }
                                 sim.backend.set(m.control[TB_STOPPED], 1u64);
@@ -304,10 +385,9 @@ pub(super) fn run<B: SimBackend>(
             }
             TB_EDGES => {
                 #[cfg(test)]
-                COUNTERS.with(|c| {
-                    let (runs, edges) = c.get();
-                    c.set((runs, edges + 1));
-                });
+                {
+                    sim.tb_counters.1 += 1;
+                }
                 let mut state = sim
                     .component_simulation
                     .take()
@@ -341,6 +421,29 @@ pub(super) fn run<B: SimBackend>(
                     {
                         events.push((*clock, 1));
                         rising = true;
+                    }
+                }
+                // A reset the unit wrote since the baselines were saved
+                // moves its event. An unknown level has no known edge to
+                // replay: the host detects it against the baselines.
+                for event in &reset_events {
+                    if reset_edges
+                        .iter()
+                        .any(|(known, _)| known.id() == event.id())
+                    {
+                        continue;
+                    }
+                    let Some(&(_, saved)) = baselines.iter().find(|(id, _)| *id == event.id())
+                    else {
+                        continue;
+                    };
+                    let level = |signal| {
+                        let (value, mask) = sim.backend.get_four_state(signal);
+                        (value != BigUint::from(0u8), mask != BigUint::from(0u8))
+                    };
+                    let current = level(sim.backend.resolve_signal(&event.addr()));
+                    if !current.1 && current != level(saved) {
+                        reset_edges.push((*event, u8::from(current.0)));
                     }
                 }
                 events.append(&mut reset_edges);
@@ -392,4 +495,57 @@ pub(super) fn run<B: SimBackend>(
         // Saved function temporaries are layout-owned roots throughout a run.
         sim.maybe_collect_heap([]);
     }
+}
+
+/// Returns of the generated TB scheduler to the host, logged when a run ends:
+/// each one is a service or safe point the generated code could not provide.
+#[derive(Default)]
+struct Exits {
+    host: u64,
+    reset: u64,
+    edges: u64,
+    safepoint: u64,
+    drain: u64,
+    publish: u64,
+    /// Design features that keep settles or edges in the host.
+    blockers: Vec<&'static str>,
+}
+
+impl Exits {
+    fn count(&mut self, exit: u64) {
+        match exit {
+            TB_HOST => self.host += 1,
+            TB_RESET => self.reset += 1,
+            TB_EDGES => self.edges += 1,
+            TB_SAFEPOINT => self.safepoint += 1,
+            TB_DRAIN => self.drain += 1,
+            TB_PUBLISH => self.publish += 1,
+            _ => {}
+        }
+    }
+}
+
+impl Drop for Exits {
+    fn drop(&mut self) {
+        tracing::debug!(
+            host = self.host,
+            reset = self.reset,
+            edges = self.edges,
+            safepoint = self.safepoint,
+            drain = self.drain,
+            publish = self.publish,
+            blockers = ?self.blockers,
+            "[testbench-exits]"
+        );
+    }
+}
+
+/// A process starts waiting on a clock (`clock` holds its scheduler slots):
+/// the next rise is at the later of now and the previous rise plus the
+/// period, and the generator runs while it has waiters.
+fn wait_on_clock<B: SimBackend>(sim: &mut Simulator<B>, clock: [SignalRef; 4], now: u64) {
+    let next = sim.backend.get_as::<u64>(clock[0]).max(now);
+    sim.backend.set(clock[0], next);
+    let waiters = sim.backend.get_as::<u64>(clock[3]);
+    sim.backend.set(clock[3], waiters + 1);
 }

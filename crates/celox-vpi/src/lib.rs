@@ -9,6 +9,10 @@
     not(any(target_arch = "x86_64", target_arch = "aarch64")),
     allow(dead_code)
 )]
+#![allow(
+    clippy::disallowed_types,
+    reason = "VPI callbacks re-enter the layer from C while it holds the simulation, so its state is shared behind the C boundary"
+)]
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 compile_error!("celox-vpi currently supports only x86-64 and AArch64");
@@ -44,6 +48,11 @@ pub const VPI_HEX_STR_VAL: i32 = 4;
 pub const VPI_SCALAR_VAL: i32 = 5;
 pub const VPI_INT_VAL: i32 = 6;
 pub const VPI_VECTOR_VAL: i32 = 9;
+pub const VPI_REAL_VAL: i32 = 7;
+pub const VPI_STRING_VAL: i32 = 8;
+pub const VPI_REAL_VAR: i32 = 47;
+pub const VPI_SHORT_REAL_VAR: i32 = 613;
+pub const VPI_STRING_VAR: i32 = 616;
 pub const VPI_SUPPRESS_VAL: i32 = 13;
 
 pub const VPI_0: i32 = 0;
@@ -60,6 +69,7 @@ pub const VPI_BINARY_CONST: i32 = 3;
 pub const VPI_NET: i32 = 36;
 pub const VPI_PORT: i32 = 44;
 pub const VPI_REG: i32 = 48;
+pub const VPI_REG_BIT: i32 = 49;
 pub const VPI_REG_ARRAY: i32 = 116;
 pub const VPI_LEFT_RANGE: i32 = 79;
 pub const VPI_PARENT: i32 = 81;
@@ -126,11 +136,12 @@ struct VpiSignalIdentity {
 
 /// A lazy view of an unpacked array. Storage grows with requested handles,
 /// rather than with the number of elements in reflected memories.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct SignalSelection {
     root: ReflectionSignalId,
     first: usize,
     depth: usize,
+    bit: Option<usize>,
 }
 
 impl SignalSelection {
@@ -139,6 +150,7 @@ impl SignalSelection {
             root,
             first: 0,
             depth: 0,
+            bit: None,
         }
     }
 
@@ -171,7 +183,7 @@ impl SignalSelection {
 
     fn domain_kind(self, runtime: &dyn VpiState) -> Option<DomainKind> {
         let root = runtime.reflection().signal(self.root)?;
-        Some(if self.depth == 0 {
+        Some(if self.depth == 0 && self.bit.is_none() {
             root.domain_kind
         } else {
             DomainKind::Other
@@ -181,7 +193,7 @@ impl SignalSelection {
     fn resolve(self, runtime: &dyn VpiState) -> Option<celox::ReflectionSignal> {
         let mut signal = runtime.reflection().signal(self.root)?.clone();
         signal.signal = self.signal(runtime)?;
-        if self.depth == 0 {
+        if self.depth == 0 && self.bit.is_none() {
             return Some(signal);
         }
         let count = signal.unpacked_dims.iter().product::<usize>();
@@ -206,12 +218,37 @@ impl SignalSelection {
         signal.unpacked_dims.drain(..self.depth);
         signal.unpacked_ranges.drain(..self.depth);
         signal.domain_kind = DomainKind::Other;
+        if let Some(bit) = self.bit {
+            let suffix = format!("[{bit}]");
+            signal.name.push_str(&suffix);
+            signal.full_name.push_str(&suffix);
+            signal.packed_dims.clear();
+            signal.signed = false;
+        }
         Some(signal)
     }
 
     fn select(self, runtime: &dyn VpiState, index: i32) -> Option<Self> {
         let root = runtime.reflection().signal(self.root)?;
-        let &(left, right) = root.unpacked_ranges.get(self.depth)?;
+        if self.bit.is_some() || root.is_parameter {
+            return None;
+        }
+        let Some(&(left, right)) = root.unpacked_ranges.get(self.depth) else {
+            if matches!(
+                root.type_kind,
+                celox::PortTypeKind::Real
+                    | celox::PortTypeKind::ShortReal
+                    | celox::PortTypeKind::String
+            ) {
+                return None;
+            }
+            let index = usize::try_from(index).ok()?;
+            let width = self.width(runtime)?;
+            return (index < width && width > 1).then_some(Self {
+                bit: Some(index),
+                ..self
+            });
+        };
         let index = i128::from(index);
         if index < left.min(right) || index > left.max(right) {
             return None;
@@ -231,6 +268,7 @@ impl SignalSelection {
             root: self.root,
             first: self.first.checked_add(position.checked_mul(stride)?)?,
             depth: self.depth + 1,
+            bit: None,
         })
     }
 
@@ -239,7 +277,7 @@ impl SignalSelection {
     fn slice(self, runtime: &dyn VpiState) -> Option<(usize, usize)> {
         let root = runtime.reflection().signal(self.root)?;
         if self.depth == 0 || root.signal.array_layout.is_some() {
-            return None;
+            return self.bit.map(|bit| (bit, 1));
         }
         let element_width = root.signal.width / root.unpacked_dims.iter().product::<usize>();
         let remaining = root
@@ -247,7 +285,10 @@ impl SignalSelection {
             .get(self.depth..)?
             .iter()
             .product::<usize>();
-        Some((self.first * element_width, remaining * element_width))
+        Some(match self.bit {
+            Some(bit) => (self.first * element_width + bit, 1),
+            None => (self.first * element_width, remaining * element_width),
+        })
     }
 
     fn width(self, runtime: &dyn VpiState) -> Option<usize> {
@@ -259,7 +300,15 @@ impl SignalSelection {
     }
 
     fn identity(self, runtime: &dyn VpiState) -> Option<VpiSignalIdentity> {
-        let storage = if self.depth == 0 || self.slice(runtime).is_some() {
+        let storage = if self.depth == 0
+            || (self.slice(runtime).is_some()
+                && runtime
+                    .reflection()
+                    .signal(self.root)?
+                    .signal
+                    .array_layout
+                    .is_none())
+        {
             runtime.signal_identity(self.root)?
         } else {
             NativeSignalIdentity::State(self.signal(runtime)?)
@@ -280,7 +329,9 @@ impl SignalSelection {
         let bits = (runtime.get_four_state(window).0 >> shift) & &mask;
         let unknowns = if signal.is_4state && runtime.four_state() {
             let mut mask_window = window;
-            mask_window.offset += signal.width.div_ceil(8);
+            mask_window.offset += signal
+                .array_layout
+                .map_or_else(|| signal.width.div_ceil(8), |array| array.plane_size);
             (runtime.get_four_state(mask_window).0 >> shift) & mask
         } else {
             BigUint::default()
@@ -308,7 +359,9 @@ impl SignalSelection {
         );
         if signal.is_4state && runtime.four_state() {
             let mut mask_window = window;
-            mask_window.offset += signal.width.div_ceil(8);
+            mask_window.offset += signal
+                .array_layout
+                .map_or_else(|| signal.width.div_ceil(8), |array| array.plane_size);
             let old = runtime.get_four_state(mask_window).0;
             runtime.set_four_state(
                 mask_window,
@@ -367,6 +420,9 @@ pub type VpiHandle = *mut VpiHandleObject;
 /// per process because standard VPI entry points carry no host context.
 #[derive(Default)]
 struct VpiHost {
+    // Read-only clock shared with cocotb bridge threads; runtime state remains
+    // confined to the installing thread.
+    published_time: std::sync::Arc<std::sync::atomic::AtomicU64>,
     runtime: RefCell<Option<Runtime>>,
     /// Untimed state can only change through the host's mutation helpers.
     /// Timed slot observers keep polling because kernels can update their state
@@ -377,17 +433,38 @@ struct VpiHost {
     pending_writes: RefCell<PendingWrites>,
     // Zero-delay inertial deposits become visible in the next update round.
     inertial_writes: RefCell<HashMap<VpiSignalIdentity, PendingDeposit>>,
+    deposit_order: Cell<u64>,
     callbacks: RefCell<callbacks::CallbackState>,
     vlog: RefCell<Option<callbacks::VlogStorage>>,
 }
 
+impl VpiHost {
+    fn next_deposit_order(&self) -> u64 {
+        let order = self.deposit_order.get();
+        self.deposit_order
+            .set(order.checked_add(1).expect("VPI deposit order overflow"));
+        order
+    }
+}
+
 struct HostRegistration {
+    time: std::sync::Arc<std::sync::atomic::AtomicU64>,
     owner: std::thread::ThreadId,
     // An owning Rc reference, accessed only after checking the owner thread.
     address: usize,
 }
 
 static ACTIVE_HOST: std::sync::Mutex<Option<HostRegistration>> = std::sync::Mutex::new(None);
+
+fn published_time() -> u64 {
+    ACTIVE_HOST
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_ref()
+        .map_or(0, |host| {
+            host.time.load(std::sync::atomic::Ordering::Relaxed)
+        })
+}
 
 /// Owns the active process VPI session. Keep this guard alive while calling VPI
 /// or plugin code. A session and all its callbacks stay on the installing thread.
@@ -550,6 +627,10 @@ struct PendingDeposit {
     id: SignalSelection,
     value: BigUint,
     mask: BigUint,
+    // Shared by edge snapshots and callback overrides so overlapping writes
+    // retain their order even after maps are coalesced or merged.
+    order: u64,
+    string: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -591,10 +672,8 @@ fn is_active_edge(kind: DomainKind, old: LogicLevel, new: LogicLevel) -> bool {
 
 fn record_pending_write(
     pending: &mut PendingWrites,
-    id: SignalSelection,
     identity: VpiSignalIdentity,
-    value: BigUint,
-    mask: BigUint,
+    deposit: PendingDeposit,
     domain_kind: DomainKind,
     edge_levels: Option<(LogicLevel, LogicLevel)>,
 ) {
@@ -611,9 +690,7 @@ fn record_pending_write(
         pending.close_edge_batch();
     }
 
-    pending
-        .deposits
-        .insert(identity, PendingDeposit { id, value, mask });
+    pending.deposits.insert(identity, deposit);
     if event_transition {
         if let Some(index) = pending.open_edge_batch {
             pending.edge_batches[index]
@@ -638,10 +715,20 @@ fn apply_pending_deposits(
     runtime: &mut NativeProgramInstance,
     deposits: &HashMap<VpiSignalIdentity, PendingDeposit>,
 ) {
-    for deposit in deposits.values() {
-        deposit
-            .id
-            .write(runtime, deposit.value.clone(), deposit.mask.clone());
+    // Identical selections coalesce in the map, while vectors and their bits
+    // have distinct identities with overlapping storage. Replay in call order.
+    let mut ordered = deposits.values().collect::<Vec<_>>();
+    ordered.sort_unstable_by_key(|deposit| deposit.order);
+    for deposit in ordered {
+        if let Some(bytes) = &deposit.string {
+            if let Some(signal) = deposit.id.signal(runtime) {
+                runtime.set_string(signal, bytes);
+            }
+        } else {
+            deposit
+                .id
+                .write(runtime, deposit.value.clone(), deposit.mask.clone());
+        }
     }
 }
 
@@ -677,6 +764,7 @@ fn install(runtime: Runtime) -> Result<VpiSession, String> {
     }
     let pointer = std::rc::Rc::into_raw(host.clone());
     *active = Some(HostRegistration {
+        time: host.published_time.clone(),
         owner: std::thread::current().id(),
         address: pointer as usize,
     });
@@ -868,9 +956,28 @@ fn new_object_handle(object: ObjectRef) -> VpiHandle {
             .reflection()
             .scope(id)
             .map(|scope| (scope.name.clone(), scope.full_name.clone())),
-        ObjectRef::Signal(id) => id
-            .resolve(runtime)
-            .map(|signal| (signal.name.clone(), signal.full_name.clone())),
+        ObjectRef::Signal(id) => {
+            let signal = id.resolve(runtime)?;
+            let root = runtime.reflection().signal(id.root)?;
+            let simple = root
+                .name
+                .as_bytes()
+                .first()
+                .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
+                && root
+                    .name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'$'));
+            if simple {
+                Some((signal.name, signal.full_name))
+            } else {
+                let suffix = signal.name.strip_prefix(&root.name)?;
+                let base = root.name.strip_prefix('\\').unwrap_or(&root.name);
+                let name = format!("\\{base} {suffix}");
+                let parent = runtime.reflection().scope(root.parent)?;
+                Some((name.clone(), format!("{}.{name}", parent.full_name)))
+            }
+        }
     })
     .flatten()
     .unwrap_or_default();
@@ -934,7 +1041,29 @@ unsafe fn object_ref(handle: VpiHandle) -> Option<ObjectRef> {
     }
 }
 
+fn unescape_vpi_name(name: &str) -> String {
+    let mut result = String::new();
+    let mut escaped = false;
+    for ch in name.chars() {
+        if escaped {
+            if ch.is_ascii_whitespace() {
+                escaped = false;
+            } else {
+                result.push(ch);
+            }
+        } else if ch == '\\' {
+            result.push(ch);
+            escaped = true;
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
 fn object_by_full_name(name: &str) -> Option<ObjectRef> {
+    let normalized = unescape_vpi_name(name);
+    let name = normalized.as_str();
     with_runtime(|runtime| {
         let reflection = runtime.reflection();
         if let Some((id, _)) = reflection.scope_by_name(name) {
@@ -1043,7 +1172,11 @@ pub unsafe extern "C" fn vpi_handle(kind: i32, reference: VpiHandle) -> VpiHandl
         ObjectRef::Signal(id) => {
             if kind == VPI_PARENT {
                 // IEEE 1800-2023 37.17: largest containing unpacked array.
-                (id.depth != 0).then(|| ObjectRef::Signal(SignalSelection::root(id.root)))
+                if id.bit.is_some() {
+                    Some(ObjectRef::Signal(SignalSelection { bit: None, ..id }))
+                } else {
+                    (id.depth != 0).then(|| ObjectRef::Signal(SignalSelection::root(id.root)))
+                }
             } else {
                 id.resolve(runtime)
                     .map(|signal| ObjectRef::Scope(signal.parent))
@@ -1155,12 +1288,19 @@ fn object_type(object: ObjectRef) -> i32 {
             let Some(signal) = id.resolve(runtime) else {
                 return 0;
             };
-            if !signal.unpacked_dims.is_empty() {
+            if id.bit.is_some() {
+                VPI_REG_BIT
+            } else if !signal.unpacked_dims.is_empty() {
                 VPI_REG_ARRAY
             } else if signal.is_parameter {
                 VPI_PARAMETER
             } else {
-                VPI_REG
+                match signal.type_kind {
+                    celox::PortTypeKind::Real => VPI_REAL_VAR,
+                    celox::PortTypeKind::ShortReal => VPI_SHORT_REAL_VAR,
+                    celox::PortTypeKind::String => VPI_STRING_VAR,
+                    _ => VPI_REG,
+                }
             }
         })
         .unwrap_or(0),
@@ -1215,13 +1355,23 @@ pub unsafe extern "C" fn vpi_get(property: i32, reference: VpiHandle) -> i32 {
         })
         .unwrap_or(0),
         VPI_TYPE => object_type(object),
-        VPI_CONST_TYPE => {
-            if object_type(object) == VPI_PARAMETER {
-                VPI_BINARY_CONST
-            } else {
-                0
+        VPI_CONST_TYPE => with_runtime(|runtime| {
+            let ObjectRef::Signal(id) = object else {
+                return 0;
+            };
+            let Some(signal) = id.resolve(runtime) else {
+                return 0;
+            };
+            if !signal.is_parameter {
+                return 0;
             }
-        }
+            match signal.type_kind {
+                celox::PortTypeKind::Real | celox::PortTypeKind::ShortReal => 2,
+                celox::PortTypeKind::String => 6,
+                _ => VPI_BINARY_CONST,
+            }
+        })
+        .unwrap_or(0),
         VPI_TOP_MODULE => i32::from(object == ObjectRef::Scope(ReflectionScopeId(0))),
         VPI_SIZE | VPI_SCALAR | VPI_VECTOR | VPI_DIRECTION | VPI_SIGNED => {
             with_runtime(|runtime| {
@@ -1231,6 +1381,13 @@ pub unsafe extern "C" fn vpi_get(property: i32, reference: VpiHandle) -> i32 {
                 let Some(signal) = id.resolve(runtime) else {
                     return 0;
                 };
+                if signal.type_kind == celox::PortTypeKind::String
+                    && signal.unpacked_dims.is_empty()
+                    && property == VPI_SIZE
+                {
+                    return i32::try_from(runtime.get_string(signal.signal).len())
+                        .unwrap_or(i32::MAX);
+                }
                 match property {
                     VPI_SIZE => i32::try_from(
                         signal
@@ -1311,6 +1468,10 @@ pub unsafe extern "C" fn vpi_get_str(property: i32, reference: VpiHandle) -> *mu
             HandleKind::Object(object) => match object_type(object) {
                 VPI_MODULE => c"vpiModule".as_ptr().cast_mut(),
                 VPI_REG => c"vpiReg".as_ptr().cast_mut(),
+                VPI_REAL_VAR => c"vpiRealVar".as_ptr().cast_mut(),
+                VPI_SHORT_REAL_VAR => c"vpiShortRealVar".as_ptr().cast_mut(),
+                VPI_STRING_VAR => c"vpiStringVar".as_ptr().cast_mut(),
+                VPI_REG_BIT => c"vpiRegBit".as_ptr().cast_mut(),
                 VPI_REG_ARRAY => c"vpiRegArray".as_ptr().cast_mut(),
                 _ => ptr::null_mut(),
             },
@@ -1332,7 +1493,13 @@ fn value_snapshot_at(
         if id.depth != signal.unpacked_dims.len() {
             return None;
         }
-        let width = if id.depth == 0 {
+        if signal.type_kind == celox::PortTypeKind::String {
+            return Some((
+                callbacks::ValueSnapshot::String(runtime.get_string(id.signal(runtime)?)),
+                id.width(runtime)?,
+            ));
+        }
+        let width = if id.depth == 0 && id.bit.is_none() {
             signal.signal.width
         } else {
             id.width(runtime)?
@@ -1349,11 +1516,12 @@ fn value_snapshot_at(
             }
         }
         if id.depth == 0
+            && id.bit.is_none()
             && let Some((value, mask)) = runtime.get_word(signal.signal)
         {
             return Some((callbacks::ValueSnapshot::Word(value, mask), width));
         }
-        let (value, mask) = if id.depth == 0 {
+        let (value, mask) = if id.depth == 0 && id.bit.is_none() {
             runtime.get_four_state(signal.signal)
         } else {
             id.read(runtime)?
@@ -1429,6 +1597,15 @@ fn encode_signal_value(
     signed: bool,
 ) {
     match value.format {
+        VPI_REAL_VAL => {
+            let known = bits ^ (bits & mask);
+            let decimal = if signed && width > 0 && known.bit((width - 1) as u64) {
+                format!("-{}", (BigUint::from(1u8) << width) - &known)
+            } else {
+                known.to_string()
+            };
+            value.value.real = decimal.parse::<f64>().unwrap_or(0.0);
+        }
         VPI_INT_VAL => {
             let mut integer = bits.iter_u32_digits().next().unwrap_or(0);
             if signed && width > 0 && width < 32 && bits.bit((width - 1) as u64) {
@@ -1487,12 +1664,30 @@ fn encode_snapshot_value(
     signed: bool,
 ) {
     let (bits, mask) = match snapshot {
+        callbacks::ValueSnapshot::String(bytes) => {
+            if value.format == VPI_STRING_VAL {
+                handle.value_string.clear();
+                handle.value_string.extend_from_slice(bytes);
+                handle.value_string.push(0);
+                value.value.str_ = handle.value_string.as_mut_ptr().cast();
+            }
+            return;
+        }
         callbacks::ValueSnapshot::Word(bits, mask) => (*bits, *mask),
         callbacks::ValueSnapshot::Wide(bits, mask) => {
             return encode_signal_value(handle, value, bits, mask, width, signed);
         }
     };
     match value.format {
+        VPI_REAL_VAL => {
+            let known = bits & !mask;
+            value.value.real =
+                if signed && width > 0 && width <= 64 && known & (1u64 << (width - 1)) != 0 {
+                    ((known << (64 - width)) as i64 >> (64 - width)) as f64
+                } else {
+                    known as f64
+                };
+        }
         VPI_INT_VAL => {
             let mut integer = bits as u32;
             if signed && width > 0 && width < 32 && (bits >> (width - 1)) & 1 != 0 {
@@ -1567,13 +1762,73 @@ unsafe fn write_snapshot_value(
         let signed = value.format == VPI_INT_VAL
             && width > 0
             && width < 32
+            && id.bit.is_none()
             && runtime.reflection().signal(id.root)?.signed;
-        Some((width, signed))
+        Some((
+            width,
+            signed,
+            runtime.reflection().signal(id.root)?.type_kind,
+        ))
     });
-    let Some((width, signed)) = metadata else {
+    let Some((width, signed, kind)) = metadata else {
         return;
     };
-    encode_snapshot_value(handle, value, snapshot, width, signed);
+    if matches!(
+        kind,
+        celox::PortTypeKind::Real | celox::PortTypeKind::ShortReal
+    ) {
+        encode_real_snapshot(handle, value, snapshot, width);
+    } else {
+        encode_snapshot_value(handle, value, snapshot, width, signed);
+    }
+}
+
+fn encode_real_snapshot(
+    handle: &mut VpiHandleObject,
+    value: &mut VpiValue,
+    snapshot: &callbacks::ValueSnapshot,
+    width: usize,
+) {
+    let word = match snapshot {
+        callbacks::ValueSnapshot::Word(bits, _) => *bits,
+        callbacks::ValueSnapshot::Wide(bits, _) => bits.iter_u64_digits().next().unwrap_or(0),
+        callbacks::ValueSnapshot::String(_) => return,
+    };
+    let number = if width == 32 {
+        f32::from_bits(word as u32) as f64
+    } else {
+        f64::from_bits(word)
+    };
+    match value.format {
+        VPI_REAL_VAL => value.value.real = number,
+        VPI_STRING_VAL => {
+            handle.value_string = format!("{number:.15e}").into_bytes();
+            handle.value_string.push(0);
+            value.value.str_ = handle.value_string.as_mut_ptr().cast();
+        }
+        _ => {
+            let rounded = number.round();
+            let valid =
+                rounded.is_finite() && rounded >= i32::MIN as f64 && rounded <= i32::MAX as f64;
+            if !valid && value.format == VPI_INT_VAL {
+                value.value.integer = 0;
+                return;
+            }
+            let integer = if valid {
+                rounded as i32 as u32 as u64
+            } else {
+                u32::MAX as u64
+            };
+            let mask = if valid { 0 } else { u32::MAX as u64 };
+            encode_snapshot_value(
+                handle,
+                value,
+                &callbacks::ValueSnapshot::Word(integer, mask),
+                32,
+                true,
+            );
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -1614,6 +1869,7 @@ pub unsafe extern "C" fn vpi_get_value(reference: VpiHandle, value: *mut VpiValu
         return;
     };
     let signed = value.format == VPI_INT_VAL
+        && id.bit.is_none()
         && width > 0
         && width < 32
         && borrow_cell(&host.runtime, |runtime| {
@@ -1622,7 +1878,22 @@ pub unsafe extern "C" fn vpi_get_value(reference: VpiHandle, value: *mut VpiValu
                 .and_then(|runtime| runtime.state().reflection().signal(id.root))
                 .is_some_and(|signal| signal.signed)
         });
-    encode_snapshot_value(handle, value, &snapshot, width, signed);
+    let real = borrow_cell(&host.runtime, |runtime| {
+        runtime
+            .as_ref()
+            .and_then(|runtime| runtime.state().reflection().signal(id.root))
+            .is_some_and(|signal| {
+                matches!(
+                    signal.type_kind,
+                    celox::PortTypeKind::Real | celox::PortTypeKind::ShortReal
+                )
+            })
+    });
+    if real {
+        encode_real_snapshot(handle, value, &snapshot, width);
+    } else {
+        encode_snapshot_value(handle, value, &snapshot, width, signed);
+    }
 }
 
 fn decode_digit(digit: u8, radix_bits: u32) -> Option<(u8, u8)> {
@@ -1799,7 +2070,7 @@ pub unsafe extern "C" fn vpi_put_value(
     let HandleKind::Object(ObjectRef::Signal(id)) = (unsafe { &*reference }).kind else {
         return ptr::null_mut();
     };
-    if id.depth != 0 && matches!(flags, VPI_FORCE_FLAG | VPI_RELEASE_FLAG) {
+    if (id.depth != 0 || id.bit.is_some()) && matches!(flags, VPI_FORCE_FLAG | VPI_RELEASE_FLAG) {
         return ptr::null_mut();
     }
     let signal_info = borrow_cell(&host.runtime, |runtime| {
@@ -1812,11 +2083,44 @@ pub unsafe extern "C" fn vpi_put_value(
             id.identity(runtime)?,
             id.width(runtime)?,
             id.signal(runtime)?.is_4state && runtime.four_state(),
+            root.type_kind,
         ))
     });
-    let Some((identity, width, is_4state)) = signal_info else {
+    let Some((identity, width, is_4state, type_kind)) = signal_info else {
         return ptr::null_mut();
     };
+    if type_kind == celox::PortTypeKind::String {
+        // String payloads own bytes until the update is applied, so queued
+        // writes and edge snapshots never hold unrooted simulator heap IDs.
+        if !matches!(flags, VPI_NO_DELAY | VPI_INERTIAL_DELAY)
+            || unsafe { (*value).format } != VPI_STRING_VAL
+        {
+            return ptr::null_mut();
+        }
+        let pointer = unsafe { (*value).value.str_ };
+        if pointer.is_null() {
+            return ptr::null_mut();
+        }
+        let bytes = unsafe { CStr::from_ptr(pointer) }.to_bytes().to_vec();
+        if flags == VPI_INERTIAL_DELAY {
+            host.inertial_writes.borrow_mut().insert(
+                identity,
+                PendingDeposit {
+                    id,
+                    value: BigUint::default(),
+                    mask: BigUint::default(),
+                    order: host.next_deposit_order(),
+                    string: Some(bytes),
+                },
+            );
+            return reference;
+        }
+        return if apply_string_value(&host, id, identity, bytes) {
+            reference
+        } else {
+            ptr::null_mut()
+        };
+    }
     if flags == VPI_RELEASE_FLAG {
         let released = borrow_cell_mut(&host.forced_values, |forced| forced.remove(&identity));
         let succeeded = released.is_none_or(|released| {
@@ -1843,10 +2147,14 @@ pub unsafe extern "C" fn vpi_put_value(
                     borrow_cell_mut(&host.pending_writes, |pending| {
                         record_pending_write(
                             pending,
-                            id,
                             identity,
-                            released_value.clone(),
-                            released_mask.clone(),
+                            PendingDeposit {
+                                id,
+                                value: released_value.clone(),
+                                mask: released_mask.clone(),
+                                order: host.next_deposit_order(),
+                                string: None,
+                            },
                             signal.domain_kind,
                             Some((old_level, new_level)),
                         );
@@ -1867,7 +2175,27 @@ pub unsafe extern "C" fn vpi_put_value(
     }
 
     // Safety: value follows the VPI value contract.
-    let Some((mut bits, mut mask)) = (unsafe { decode_value(value, width) }) else {
+    let decoded = if matches!(
+        type_kind,
+        celox::PortTypeKind::Real | celox::PortTypeKind::ShortReal
+    ) {
+        let number = match unsafe { (*value).format } {
+            VPI_REAL_VAL => unsafe { (*value).value.real },
+            VPI_INT_VAL => (unsafe { (*value).value.integer }) as f64,
+            _ => return ptr::null_mut(),
+        };
+        Some((
+            BigUint::from(if width == 32 {
+                u64::from((number as f32).to_bits())
+            } else {
+                number.to_bits()
+            }),
+            BigUint::default(),
+        ))
+    } else {
+        unsafe { decode_value(value, width) }
+    };
+    let Some((mut bits, mut mask)) = decoded else {
         return ptr::null_mut();
     };
     if width == 0 {
@@ -1892,6 +2220,8 @@ pub unsafe extern "C" fn vpi_put_value(
                 id,
                 value: bits,
                 mask,
+                order: host.next_deposit_order(),
+                string: None,
             },
         );
         return reference;
@@ -1901,6 +2231,40 @@ pub unsafe extern "C" fn vpi_put_value(
     } else {
         ptr::null_mut()
     }
+}
+
+fn apply_string_value(
+    host: &VpiHost,
+    id: SignalSelection,
+    identity: VpiSignalIdentity,
+    bytes: Vec<u8>,
+) -> bool {
+    let succeeded = with_runtime_mut(host, |runtime| {
+        let Some(signal) = id.signal(runtime) else {
+            return false;
+        };
+        runtime.set_string(signal, &bytes);
+        if runtime.schedules_writes() {
+            borrow_cell_mut(&host.pending_writes, |pending| {
+                record_pending_write(
+                    pending,
+                    identity,
+                    PendingDeposit {
+                        id,
+                        value: BigUint::default(),
+                        mask: BigUint::default(),
+                        order: host.next_deposit_order(),
+                        string: Some(bytes),
+                    },
+                    DomainKind::Other,
+                    None,
+                )
+            });
+        }
+        true
+    })
+    .unwrap_or(false);
+    succeeded && (callbacks::is_running_for_host(host) || flush_pending_writes_for_host(host))
 }
 
 fn apply_signal_value(
@@ -1931,9 +2295,24 @@ fn apply_signal_value(
         };
         Some((deposited_value, deposited_mask))
     } else if borrow_cell_mut(&host.forced_values, |forced| {
-        forced.get_mut(&identity).is_some_and(|forced| {
-            forced.deposited_value = bits.clone();
-            forced.deposited_mask = mask.clone();
+        // Forces currently cover whole vectors. A deposit through an aliased
+        // bit handle must update that vector's saved value, leaving its forced
+        // value and backing storage unchanged until release.
+        let containing = VpiSignalIdentity {
+            slice: None,
+            ..identity
+        };
+        forced.get_mut(&containing).is_some_and(|forced| {
+            if let Some((offset, width)) = identity.slice {
+                let selected = ((BigUint::from(1u8) << width) - 1u8) << offset;
+                forced.deposited_value = ((&forced.deposited_value | &selected) ^ &selected)
+                    | ((&bits << offset) & &selected);
+                forced.deposited_mask = ((&forced.deposited_mask | &selected) ^ &selected)
+                    | ((&mask << offset) & selected);
+            } else {
+                forced.deposited_value = bits.clone();
+                forced.deposited_mask = mask.clone();
+            }
             true
         })
     }) {
@@ -1975,10 +2354,14 @@ fn apply_signal_value(
             borrow_cell_mut(&host.pending_writes, |pending| {
                 record_pending_write(
                     pending,
-                    id,
                     identity,
-                    bits.clone(),
-                    mask.clone(),
+                    PendingDeposit {
+                        id,
+                        value: bits.clone(),
+                        mask: mask.clone(),
+                        order: host.next_deposit_order(),
+                        string: None,
+                    },
                     domain_kind,
                     edge_levels,
                 );
@@ -2021,15 +2404,21 @@ fn flush_inertial_writes_for_host(host: &VpiHost) -> bool {
     if writes.is_empty() {
         return false;
     }
-    for (identity, deposit) in writes {
-        if !apply_signal_value(
-            host,
-            deposit.id,
-            identity,
-            deposit.value,
-            deposit.mask,
-            VPI_NO_DELAY,
-        ) {
+    let mut ordered = writes.into_iter().collect::<Vec<_>>();
+    ordered.sort_unstable_by_key(|(_, deposit)| deposit.order);
+    for (identity, deposit) in ordered {
+        let applied = match deposit.string {
+            Some(bytes) => apply_string_value(host, deposit.id, identity, bytes),
+            None => apply_signal_value(
+                host,
+                deposit.id,
+                identity,
+                deposit.value,
+                deposit.mask,
+                VPI_NO_DELAY,
+            ),
+        };
+        if !applied {
             callbacks::fail_for_host(host, "failed to apply an inertial VPI write".into());
             return true;
         }
@@ -2265,6 +2654,7 @@ mod session_tests {
     fn scheduler_unwind_releases_the_host_registration() {
         let host = std::rc::Rc::new(VpiHost::default());
         *ACTIVE_HOST.lock().unwrap() = Some(HostRegistration {
+            time: host.published_time.clone(),
             owner: std::thread::current().id(),
             address: std::rc::Rc::into_raw(host.clone()) as usize,
         });

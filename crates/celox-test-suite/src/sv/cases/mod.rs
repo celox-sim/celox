@@ -8,6 +8,10 @@ pub(super) struct Group {
 
 pub(super) const GROUPS: &[Group] = &[
     Group {
+        file: "src/sv/cases/logic_gates.vtest",
+        text: include_str!("logic_gates.vtest"),
+    },
+    Group {
         file: "src/sv/cases/concurrent_assertions.vtest",
         text: include_str!("concurrent_assertions.vtest"),
     },
@@ -16,8 +20,32 @@ pub(super) const GROUPS: &[Group] = &[
         text: include_str!("containers.vtest"),
     },
     Group {
+        file: "src/sv/cases/array_locators.vtest",
+        text: include_str!("array_locators.vtest"),
+    },
+    Group {
+        file: "src/sv/cases/increment_decrement.vtest",
+        text: include_str!("increment_decrement.vtest"),
+    },
+    Group {
+        file: "src/sv/cases/streaming.vtest",
+        text: include_str!("streaming.vtest"),
+    },
+    Group {
         file: "src/sv/cases/fork_deferred.vtest",
         text: include_str!("fork_deferred.vtest"),
+    },
+    Group {
+        file: "src/sv/cases/events.vtest",
+        text: include_str!("events.vtest"),
+    },
+    Group {
+        file: "src/sv/cases/mailboxes.vtest",
+        text: include_str!("mailboxes.vtest"),
+    },
+    Group {
+        file: "src/sv/cases/semaphores.vtest",
+        text: include_str!("semaphores.vtest"),
     },
     Group {
         file: "src/sv/cases/fork_control.vtest",
@@ -32,12 +60,32 @@ pub(super) const GROUPS: &[Group] = &[
         text: include_str!("tagged_unions.vtest"),
     },
     Group {
+        file: "src/sv/cases/container_formals.vtest",
+        text: include_str!("container_formals.vtest"),
+    },
+    Group {
+        file: "src/sv/cases/wide_container_elements.vtest",
+        text: include_str!("wide_container_elements.vtest"),
+    },
+    Group {
+        file: "src/sv/cases/property_selects.vtest",
+        text: include_str!("property_selects.vtest"),
+    },
+    Group {
+        file: "src/sv/cases/wide_class_properties.vtest",
+        text: include_str!("wide_class_properties.vtest"),
+    },
+    Group {
         file: "src/sv/cases/references.vtest",
         text: include_str!("references.vtest"),
     },
     Group {
         file: "src/sv/cases/unions.vtest",
         text: include_str!("unions.vtest"),
+    },
+    Group {
+        file: "src/sv/cases/virtual_interfaces.vtest",
+        text: include_str!("virtual_interfaces.vtest"),
     },
     Group {
         file: "src/sv/cases/real_extensions.vtest",

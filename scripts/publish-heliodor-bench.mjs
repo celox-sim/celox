@@ -61,9 +61,9 @@ export function appendResult(source, entry, historyName = "Heliodor Benchmarks")
 // Multiple matrix jobs publish independently. A rejected fast-forward push is
 // retried against the new branch tip, preserving every other job's results.
 export function publishResult(remote, entry, {
-  beforePush = () => {}, historyName = "Heliodor Benchmarks",
+  beforePush = () => {}, historyName = "Heliodor Benchmarks", allowEmpty = false,
 } = {}) {
-  if (!entry.benches.length) return;
+  if (!entry.benches.length && !allowEmpty) return;
   const directory = mkdtempSync(join(tmpdir(), "heliodor-publish-"));
   const git = (...args) =>
     execFileSync("git", ["-C", directory, ...args], { encoding: "utf8", stdio: "pipe" });

@@ -14,13 +14,24 @@ The complete benchmark matrix and raw history are available on the
 ## Workloads
 
 The main view prioritizes complete hardware workloads: Heliodor and representative
-SHA-256, FFT and LZ77 circuits. rica's existing runner and tarunes qualification
+SHA-256, FFT and LZ77 circuits, plus rica's five self-checking RISC-V kernels.
+The **rica** tab compares Celox tiered and Veryl simulator tiered by total process
+time; its daily workflow runs at 04:47 UTC. Details and tarunes qualification
 are tracked in the [circuit collection](./collection.md), including pinned sources,
 acceptance checks and the planned SystemVerilog frontend comparisons.
 
 [API, counter and standard-library measurements](./diagnostics.md) remain available
 as diagnostics. Compilation and execution are reported separately; a faster
 compile does not imply faster generated code.
+
+The [Taxi / cocotb comparison](./taxi.md) runs daily at 03:17 UTC and publishes
+Celox/Verilator results for five fixed configurations (472 tests per sample).
+Its tab separates test-body, whole-process and HDL compilation time.
+
+The [RTLMeter comparison](./rtlmeter.md) measures cold source-to-finish latency for
+XuanTie-E902/E906 and HummingbirdV2-E203 hello programs in separate 2-state and 4-state charts, with
+Verilator and the stable xezim release pinned by Nix. Unsupported modes and
+failed qualifications remain visible in its status tables.
 
 ## Reading results
 
@@ -41,9 +52,9 @@ group share a CPU.
 Benchmark measurements run on the daily schedule or by manual dispatch. PRs
 exercise the benchmark tooling when it changes. Each measurement workflow keeps
 its running sample and at most one pending run, replacing an older pending run
-with the latest request. The regular benchmark and Heliodor use independent
+with the latest request. The regular benchmark, Heliodor and Taxi use independent
 queues; their publishers retry against the latest `gh-pages` history so concurrent
-publication preserves both sets of results. Only `master` publishes history.
+publication preserves every history. Only `master` publishes history.
 
 - Compare the same workload, backend, revision, and host environment.
 - Treat small changes on shared CI runners as noise until repeated.

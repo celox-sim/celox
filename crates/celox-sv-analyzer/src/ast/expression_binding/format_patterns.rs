@@ -2,17 +2,22 @@
 //!
 //! The analyzer rewrites each `%p` of a literal format into a conversion the
 //! formatter has: an integral value prints as `%0d`, a real as an unformatted
-//! real, and a string, class handle or container as the `%s` of its pattern
-//! text. Types whose patterns are not supported yet are rejected.
+//! real, and a string, enum value, class handle or container as the `%s` of
+//! its pattern text. Types whose patterns are not supported yet are rejected.
+
+use std::sync::Arc;
 
 use super::*;
-use crate::system_functions::ContainerLayout;
+use crate::ast::enums::EnumDomain;
+use crate::system_functions::{AggregatePattern, ContainerKind, ContainerLayout, LocatorSource};
 
 /// How `%p` prints a value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::ast) enum Pattern {
     Integral,
     String,
+    /// A value of an enumerated type, printed by the name of its member.
+    Enum(Arc<EnumDomain>),
     /// A class handle, or with its layout a container.
     Handle(Option<ContainerLayout>),
 }
@@ -85,12 +90,21 @@ pub(in crate::ast) fn rewrite_template(
 /// names are renamed).
 pub(in crate::ast) fn pattern(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     value: &Expr,
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Pattern> {
     let expression = &native.expression(ungroup(id, native)).kind;
+    // An enum value: a variable, constant, cast, method, call or conditional
+    // of an enumerated type.
+    if let Some(domain) = enums::domain(tree, session, id, native, dimensions)? {
+        if !rereadable(value) {
+            return Err(unsupported("%p of an enum value of a call with effects"));
+        }
+        return Ok(Pattern::Enum(domain));
+    }
     // A conditional has the type of its operands (11.4.11).
     if let ExprKind::Conditional {
         then_expression,
@@ -104,17 +118,24 @@ pub(in crate::ast) fn pattern(
         } = value
     {
         // A string literal is integral unless the other operand is a string
-        // (5.9, 6.16).
-        let operand = |id, value| {
-            Ok(match pattern(tree, id, value, native, dimensions)? {
-                Pattern::String
-                    if matches!(&native.expression(ungroup(id, native)).kind,
+        // (5.9, 6.16), and an enum operand is integral unless the other
+        // operand has the same enumerated type (11.4.11), which is handled
+        // above.
+        let mut operand = |id, value| {
+            if enums::domain(tree, session, id, native, dimensions)?.is_some() {
+                return Ok(Pattern::Integral);
+            }
+            Ok(
+                match pattern(tree, session, id, value, native, dimensions)? {
+                    Pattern::String
+                        if matches!(&native.expression(ungroup(id, native)).kind,
                         ExprKind::Literal(text) if text.starts_with('"')) =>
-                {
-                    Pattern::Integral
-                }
-                pattern => pattern,
-            })
+                    {
+                        Pattern::Integral
+                    }
+                    pattern => pattern,
+                },
+            )
         };
         let then_pattern = operand(*then_expression, then_expr)?;
         let else_pattern = operand(*else_expression, else_expr)?;
@@ -124,20 +145,19 @@ pub(in crate::ast) fn pattern(
             }
             (Pattern::Handle(None), _) | (_, Pattern::Handle(None)) => Pattern::Handle(None),
             (Pattern::String, _) | (_, Pattern::String) => Pattern::String,
-            (Pattern::Integral, Pattern::Integral) => Pattern::Integral,
+            _ => Pattern::Integral,
         });
     }
-    // An enum value: a variable, constant, cast, method or call of an
-    // enumerated type.
+    // A call of a function of an enumerated type whose members are not
+    // known.
     if matches!(expression, ExprKind::Call { expression, .. }
-        if direct::call_name(&tree.state, *expression, native)
+        if direct::call_name(tree, *expression, native)
             .is_some_and(|name| returns_enum(&name, dimensions)))
-        || enums::domain(tree, id, native, dimensions)?.is_some()
     {
         return Err(unsupported("%p of an enum value"));
     }
     if strings::string_value(value, dimensions)
-        || strings::native_string(tree, id, native, dimensions)
+        || strings::native_string(tree, session, id, native, dimensions)
         || matches!(expression, ExprKind::Literal(text) if text.starts_with('"'))
     {
         return Ok(Pattern::String);
@@ -145,24 +165,30 @@ pub(in crate::ast) fn pattern(
     if matches!(expression, ExprKind::Literal(text) if text == "null") {
         return Ok(Pattern::Handle(None));
     }
-    if let Some(container) = containers::native_type(id, native, tree, dimensions)? {
+    if let Some(container) = containers::native_type(id, native, tree, session, dimensions)? {
         let element = &container.element;
-        if element.is_enum || element.enum_domain.is_some() || element.packed_enum {
+        if element.is_enum || element.packed_enum {
             return Err(unsupported("%p of a container of enum values"));
         }
         if matches!(element.kind, TypeKind::Real | TypeKind::Shortreal) {
             return Err(unsupported("%p of a container of real values"));
         }
         if !element.members.is_empty()
+            || element.unpacked_struct.is_some()
             || element.container.is_some()
             || !element.unpacked_ranges.is_empty()
         {
             return Err(unsupported("%p of a container of aggregate elements"));
         }
+        if container.record.is_some() {
+            return Err(unsupported(
+                "%p of a container of elements wider than 64 bits",
+            ));
+        }
         if container
             .key
             .as_ref()
-            .is_some_and(|key| key.is_enum || key.enum_domain.is_some() || key.packed_enum)
+            .is_some_and(|key| key.is_enum || key.packed_enum)
         {
             return Err(unsupported("%p of an associative array with enum keys"));
         }
@@ -177,10 +203,10 @@ pub(in crate::ast) fn pattern(
         }
         return Ok(Pattern::Handle(Some(container.layout)));
     }
-    if objects::native_class(tree, id, native, dimensions).is_some()
+    if objects::native_class(tree, session, id, native, dimensions).is_some()
         || handle_value(value, dimensions)
         || matches!(expression, ExprKind::Call { expression, .. }
-            if direct::call_name(&tree.state, *expression, native)
+            if direct::call_name(tree, *expression, native)
                 .is_some_and(|name| returns_handle(&name, dimensions)))
     {
         return Ok(Pattern::Handle(None));
@@ -201,7 +227,7 @@ pub(in crate::ast) fn pattern(
         _ => None,
     };
     if let Some(base) = base {
-        if let Some(container) = containers::native_type(base, native, tree, dimensions)? {
+        if let Some(container) = containers::native_type(base, native, tree, session, dimensions)? {
             let element = &container.element;
             if element.is_enum || element.enum_domain.is_some() || element.packed_enum {
                 return Err(unsupported("%p of an enum value"));
@@ -210,6 +236,7 @@ pub(in crate::ast) fn pattern(
                 return Ok(Pattern::Handle(None));
             }
             if !element.members.is_empty()
+                || element.unpacked_struct.is_some()
                 || element.container.is_some()
                 || !element.unpacked_ranges.is_empty()
             {
@@ -227,7 +254,7 @@ pub(in crate::ast) fn pattern(
                     if shape.enum_domain.is_some() || shape.packed_enum {
                         return Err(unsupported("%p of an enum value"));
                     }
-                    if !shape.members.is_empty() {
+                    if !shape.members.is_empty() || shape.unpacked_struct.is_some() {
                         return Err(unsupported("%p of a structure or unpacked array"));
                     }
                 }
@@ -237,16 +264,23 @@ pub(in crate::ast) fn pattern(
     }
     // A cast to, or a call of a function that returns, a structure or an
     // unpacked array.
-    let aggregate = |ty: &Type| !ty.members.is_empty() || !ty.unpacked_ranges.is_empty();
+    let aggregate = |ty: &Type| {
+        !ty.members.is_empty() || ty.unpacked_struct.is_some() || !ty.unpacked_ranges.is_empty()
+    };
     let aggregate_value = match expression {
         ExprKind::Cast { target, .. } => {
-            enums::cast_type(tree, *target, native, dimensions)?.is_some_and(|ty| aggregate(&ty))
+            enums::cast_type(tree, session, *target, native, dimensions)?
+                .is_some_and(|ty| aggregate(&ty))
         }
-        ExprKind::Call { expression, .. } => direct::call_name(&tree.state, *expression, native)
+        ExprKind::Call { expression, .. } => direct::call_name(tree, *expression, native)
             .is_some_and(|name| returns_aggregate(&name, dimensions, aggregate)),
         _ => false,
     };
-    if aggregate_value {
+    // A value of unpacked structure type: a variable, member or property.
+    if aggregate_value
+        || unpacked_structs::native_struct(id, native, tree, session, dimensions)?.is_some()
+        || objects::aggregate_property(tree, session, id, native, dimensions)?.is_some()
+    {
         return Err(unsupported("%p of a structure or unpacked array"));
     }
     let checked = |is_enum: bool, aggregate: bool| {
@@ -263,17 +297,343 @@ pub(in crate::ast) fn pattern(
     {
         return checked(
             shape.enum_domain.is_some() || shape.packed_enum,
-            !shape.members.is_empty() || !shape.unpacked.is_empty(),
+            !shape.members.is_empty()
+                || shape.unpacked_struct.is_some()
+                || !shape.unpacked.is_empty(),
         );
     }
-    if let Some((property, _)) = objects::property(tree, id, native, dimensions)? {
+    if let Some((property, _)) = objects::property(tree, session, id, native, dimensions)? {
         let ty = &property.r#type;
         return checked(
             ty.is_enum || ty.enum_domain.is_some() || ty.packed_enum,
-            !ty.members.is_empty() || !ty.unpacked_ranges.is_empty(),
+            !ty.members.is_empty()
+                || ty.unpacked_struct.is_some()
+                || !ty.unpacked_ranges.is_empty(),
         );
     }
     Ok(Pattern::Integral)
+}
+
+/// The `%p` text of native expression `id`, bound as `value`, as a string
+/// expression when it is an unpacked structure, a container of them or of
+/// enum values, or an associative array with enum keys: an assignment
+/// pattern with named members and enum values printed by name (IEEE
+/// 1800-2023 21.2.1.6). `None` for other values, which [`pattern`]
+/// classifies.
+pub(in crate::ast) fn aggregate_text(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    value: &Expr,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<Expr>> {
+    if let Some(container) = containers::native_type(id, native, tree, session, dimensions)? {
+        let element = &container.element;
+        let element = if let Some(aggregate) = element.unpacked_struct() {
+            Element::Structure(aggregate.clone())
+        } else if let Some(domain) = &element.enum_domain
+            && element.unpacked_ranges.is_empty()
+            && element.container.is_none()
+        {
+            Element::Enum(domain.clone())
+        } else if container
+            .key
+            .as_ref()
+            .is_some_and(|key| key.enum_domain.is_some())
+            && element.members.is_empty()
+            && element.unpacked_ranges.is_empty()
+            && element.container.is_none()
+            && element.class.is_none()
+            && !element.packed_enum
+            && matches!(
+                element.kind,
+                TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
+            )
+        {
+            Element::Integral
+        } else {
+            return Ok(None);
+        };
+        return container_text(tree, id, value, &container, &element, native, dimensions).map(Some);
+    }
+    let Some(aggregate) = unpacked_structs::native_struct(id, native, tree, session, dimensions)?
+    else {
+        return Ok(None);
+    };
+    // A variable or pattern names each member value; other structure values
+    // are rejected by `pattern`.
+    let Some(leaves) = unpacked_structs::leaf_parts(&aggregate, value) else {
+        return Ok(None);
+    };
+    let mut text = Text::default();
+    text.structure(&aggregate, &mut leaves.into_iter(), dimensions)?;
+    Ok(Some(text.format()))
+}
+
+/// How [`container_text`] prints the elements of a container.
+enum Element {
+    Structure(Arc<unpacked_structs::UnpackedStruct>),
+    Enum(Arc<EnumDomain>),
+    /// An integral value, of an associative array with enum keys.
+    Integral,
+}
+
+/// The `%p` text of `container`, a container of `element` values bound as
+/// `value`, visited by an [`AggregatePattern`] loop.
+fn container_text(
+    tree: &AnalysisContext<'_>,
+    id: ExprId,
+    value: &Expr,
+    container: &ContainerType,
+    element: &Element,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Expr> {
+    let sink = dimensions.locator_locals.as_ref().ok_or_else(|| {
+        unsupported("%p of a container of structures or enum values outside a procedural body")
+    })?;
+    let key = container.key.as_ref();
+    if key.is_some_and(|key| {
+        (key.is_enum && key.enum_domain.is_none()) || key.packed_enum || key.class.is_some()
+    }) {
+        return Err(unsupported(
+            "%p of an associative array of structures or enum values with packed enum or class handle keys",
+        ));
+    }
+    if container.record.is_some() && !matches!(element, Element::Structure(_)) {
+        return Err(unsupported(
+            "%p of a container of elements wider than 64 bits",
+        ));
+    }
+    // The tokens of the argument tell its locals apart from others.
+    let tokens = native.expression(id).tokens;
+    let site = format!("{}.{}.pattern", tokens.start, tokens.end);
+    // An element kept as a record is read through its handle, a structure
+    // as its flat value (see `containers::element_member`), and any other
+    // as a value of its type.
+    let item_type = match &container.record {
+        _ if !matches!(element, Element::Structure(_)) => container.element.clone(),
+        Some(_) => {
+            let mut handle = Type::new(TypeKind::Object);
+            handle.packed_ranges.push(PackedRange::new(
+                ConstExpr::Literal("31".into()),
+                ConstExpr::Literal("0".into()),
+            ));
+            handle
+        }
+        None => {
+            let mut flat = Type::new(if container.layout.two_state {
+                TypeKind::Bit
+            } else {
+                TypeKind::Logic
+            });
+            flat.packed_ranges.push(PackedRange::new(
+                ConstExpr::Literal((container.layout.width - 1).to_string()),
+                ConstExpr::Literal("0".into()),
+            ));
+            flat
+        }
+    };
+    let string = || type_binding::builtin_type("string", None).expect("string is a builtin type");
+    let item = sink.declare(&site, "item", item_type, tree, dimensions);
+    let index = sink.declare(
+        &site,
+        "index",
+        key.cloned().unwrap_or_else(procedural::int_type),
+        tree,
+        dimensions,
+    );
+    let text = sink.declare(&site, "text", string(), tree, dimensions);
+    let item_value = Expr::Ident(item);
+    let leaves = match element {
+        Element::Structure(aggregate) => aggregate.leaves(),
+        Element::Enum(_) | Element::Integral => Vec::new(),
+    };
+    let leaf_values = leaves
+        .iter()
+        .enumerate()
+        .map(|(position, leaf)| match &container.record {
+            Some(record) => classes::object_call(
+                ObjectOp::Load(record.fields[position]),
+                vec![item_value.clone()],
+            ),
+            None => Expr::Select {
+                expr: Box::new(item_value.clone()),
+                msb: ConstExpr::Literal((leaf.offset + leaf.width - 1).to_string()),
+                lsb: ConstExpr::Literal(leaf.offset.to_string()),
+                signed: leaf.r#type.is_signed,
+            },
+        })
+        .collect::<Vec<_>>();
+    // The text of one element, after the text so far and a separator: an
+    // associative array labels it with its index (`'{1:'{...}}`).
+    let element = |separator: &[u8]| -> Converted<Expr> {
+        let mut text_so_far = Text::default();
+        text_so_far.template.extend_from_slice(b"%s");
+        text_so_far.args.push(Expr::Ident(text.clone()));
+        text_so_far.template.extend_from_slice(separator);
+        match key {
+            Some(key) if key.kind() == TypeKind::String => {
+                text_so_far.template.extend_from_slice(b"\"%s\":");
+                text_so_far.args.push(Expr::Ident(index.clone()));
+            }
+            Some(key) if let Some(domain) = &key.enum_domain => {
+                text_so_far.template.extend_from_slice(b"%s:");
+                text_so_far
+                    .args
+                    .push(enums::pattern_text(domain, Expr::Ident(index.clone())));
+            }
+            Some(_) => {
+                text_so_far.template.extend_from_slice(b"%0d:");
+                text_so_far.args.push(Expr::Ident(index.clone()));
+            }
+            None => {}
+        }
+        match element {
+            Element::Structure(aggregate) => text_so_far.structure(
+                aggregate,
+                &mut leaf_values.clone().into_iter(),
+                dimensions,
+            )?,
+            Element::Enum(domain) => {
+                text_so_far.template.extend_from_slice(b"%s");
+                text_so_far
+                    .args
+                    .push(enums::pattern_text(domain, item_value.clone()));
+            }
+            Element::Integral => {
+                text_so_far.template.extend_from_slice(b"%0d");
+                text_so_far.args.push(item_value.clone());
+            }
+        }
+        Ok(text_so_far.format())
+    };
+    let first = element(b"")?;
+    let next = element(b", ")?;
+    let start = Text::literal(b"'{");
+    let mut finish = Text::default();
+    finish.template.extend_from_slice(b"%s}");
+    finish.args.push(Expr::Ident(text.clone()));
+    let source = match container.layout.kind {
+        ContainerKind::Dynamic
+        | ContainerKind::Queue { .. }
+        | ContainerKind::Associative { .. } => LocatorSource::Container(container.layout),
+    };
+    Ok(classes::object_call(
+        ObjectOp::Pattern(AggregatePattern { source }),
+        vec![
+            value.clone(),
+            item_value,
+            Expr::Ident(index),
+            Expr::Ident(text),
+            start.format(),
+            first,
+            next,
+            finish.format(),
+        ],
+    ))
+}
+
+/// A format template and the values it converts.
+#[derive(Default)]
+struct Text {
+    template: Vec<u8>,
+    args: Vec<Expr>,
+}
+
+impl Text {
+    fn literal(bytes: &[u8]) -> Self {
+        Self {
+            template: bytes.to_vec(),
+            args: Vec::new(),
+        }
+    }
+
+    /// Append the assignment pattern of structure `aggregate` with named
+    /// members, whose leaf values `leaves` gives in order.
+    fn structure(
+        &mut self,
+        aggregate: &unpacked_structs::UnpackedStruct,
+        leaves: &mut impl std::iter::Iterator<Item = Expr>,
+        dimensions: &PackedDimensions,
+    ) -> Converted<()> {
+        self.template.extend_from_slice(b"'{");
+        for (position, member) in aggregate.members().iter().enumerate() {
+            if position > 0 {
+                self.template.extend_from_slice(b", ");
+            }
+            self.template.extend_from_slice(member.name.as_bytes());
+            self.template.push(b':');
+            if let Some(inner) = member.r#type.unpacked_struct() {
+                self.structure(inner, leaves, dimensions)?;
+                continue;
+            }
+            let leaf = leaves.next().expect("a value for each leaf");
+            let ty = &member.r#type;
+            if let Some(domain) = &ty.enum_domain
+                && ty.unpacked_ranges.is_empty()
+                && ty.container.is_none()
+            {
+                // A member of a pattern may be any expression.
+                if !rereadable(&leaf) {
+                    return Err(unsupported("%p of an enum value of a call with effects"));
+                }
+                self.template.extend_from_slice(b"%s");
+                self.args.push(enums::pattern_text(domain, leaf));
+                continue;
+            }
+            if ty.is_enum || ty.packed_enum {
+                return Err(unsupported("%p of a structure with an enum member"));
+            }
+            if !ty.members.is_empty() {
+                return Err(unsupported(
+                    "%p of a structure with a packed structure member",
+                ));
+            }
+            if ty.container.is_some()
+                || !ty.unpacked_ranges.is_empty()
+                || ty.chandle
+                || matches!(
+                    ty.kind,
+                    TypeKind::Real | TypeKind::Shortreal | TypeKind::Event | TypeKind::Process
+                )
+            {
+                return Err(unsupported(
+                    "%p of a structure with an array, real, chandle, event or process member",
+                ));
+            }
+            match ty.kind {
+                // A string prints in quotes.
+                TypeKind::String => {
+                    self.template.extend_from_slice(b"\"%s\"");
+                    self.args.push(leaf);
+                }
+                TypeKind::Object => {
+                    let (conversion, value) =
+                        pattern_argument(Pattern::Handle(None), leaf, dimensions);
+                    self.template.extend_from_slice(conversion);
+                    self.args.push(value);
+                }
+                _ => {
+                    self.template.extend_from_slice(b"%0d");
+                    self.args.push(leaf);
+                }
+            }
+        }
+        self.template.push(b'}');
+        Ok(())
+    }
+
+    /// The string that `$sformatf` makes of the template and its values.
+    fn format(self) -> Expr {
+        strings::call(
+            StringOp::Format { ticks_per_unit: 1 },
+            std::iter::once(bytes_literal(&self.template))
+                .chain(self.args)
+                .collect(),
+        )
+    }
 }
 
 /// Whether bound `value` is a class handle: a handle variable or property,
@@ -308,6 +668,27 @@ fn handle_value(value: &Expr, dimensions: &PackedDimensions) -> bool {
         },
         _ => false,
     }
+}
+
+/// Whether evaluating bound `value` again has no effects: its calls only
+/// read strings, properties or container elements, or have no effects.
+fn rereadable(value: &Expr) -> bool {
+    let mut effects = false;
+    lifetimes::visit_calls(value, &mut |callee, _| {
+        effects |= match callee {
+            Callee::String(_) | Callee::Checked { .. } => false,
+            Callee::Object(op) => !matches!(
+                **op,
+                ObjectOp::Load(_)
+                    | ObjectOp::Container {
+                        op: ContainerOp::Get,
+                        ..
+                    }
+            ),
+            callee => callee.is_effectful(),
+        }
+    });
+    !effects
 }
 
 /// Whether function `name` returns an enumerated value.
@@ -400,6 +781,7 @@ pub(in crate::ast) fn pattern_argument(
                 strings::operands(StringOp::Concat, vec![quote(), value, quote()], dimensions),
             ),
         ),
+        Pattern::Enum(domain) => (b"%s", enums::pattern_text(&domain, value)),
         Pattern::Handle(layout) => (b"%s", strings::call(StringOp::Pattern(layout), vec![value])),
     }
 }
@@ -411,6 +793,7 @@ pub(in crate::ast) fn rewrite_format(
     ids: &[ExprId],
     values: &mut [Expr],
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Vec<u8>> {
@@ -419,7 +802,11 @@ pub(in crate::ast) fn rewrite_format(
             // A conversion without an argument prints nothing.
             return Ok(&b"%0d"[..]);
         };
-        let pattern = pattern(tree, id, value, native, dimensions)?;
+        if let Some(text) = aggregate_text(tree, session, id, value, native, dimensions)? {
+            *value = text;
+            return Ok(&b"%s"[..]);
+        }
+        let pattern = pattern(tree, session, id, value, native, dimensions)?;
         let (conversion, argument) = pattern_argument(
             pattern,
             std::mem::replace(value, Expr::Literal("0".into())),
@@ -448,6 +835,7 @@ pub(in crate::ast) fn format(
     ids: &[ExprId],
     mut operands: Vec<Expr>,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
@@ -457,7 +845,7 @@ pub(in crate::ast) fn format(
         && has_pattern(&bytes)
         && let Some((first, rest)) = operands.split_first_mut()
     {
-        let template = rewrite_format(&bytes, values, rest, tree, native, dimensions)?;
+        let template = rewrite_format(&bytes, values, rest, tree, session, native, dimensions)?;
         *first = bytes_literal(&template);
     }
     Ok(strings::call(StringOp::Format { ticks_per_unit }, operands))

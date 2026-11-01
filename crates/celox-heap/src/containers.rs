@@ -39,15 +39,29 @@ pub const RSORT: u64 = 99;
 pub const PATTERN: u64 = 100;
 /// A [`PATTERN`] parameter bit: integral elements print as signed values.
 pub const SIGNED_ELEMENTS: u64 = 1 << 47;
+/// A parameter bit of a string-keyed associative array whose keys are
+/// integral indices wider than 64 bits: each key is the [`crate::ops::KEY`]
+/// of the index in big-endian bytes, extended to whole bytes, with the top
+/// bit flipped when the index type is signed, so the keys order numerically
+/// (IEEE 1800-2023 7.8.4). [`PATTERN`] prints them in decimal.
+pub const WIDE_KEY: u64 = 1 << 51;
 /// `handle_pattern(a)`: a buffer with class handle `a` as [`PATTERN`] prints
 /// an element: `null`, or `@` and the handle.
 pub const HANDLE_PATTERN: u64 = 101;
+/// `concat(a, b)`: a new sequence with the elements of sequence `a` and then
+/// those of sequence `b`, kept to the capacity of the layout (IEEE 1800-2023
+/// 10.10). Either may be empty (0).
+pub const CONCAT: u64 = 102;
+/// `slice(a, b, c)`: a new queue with the inclusive, signed bounds b..c,
+/// clipped to the source queue (IEEE 1800-2023 7.10.1).
+pub const SLICE: u64 = 103;
 
 /// The operation parameter encodes the element width (bits 0..6), whether
 /// it is two-state (7), its handle kind (8..9: none/string/object), container
 /// kind (10..11: dynamic/queue/associative), queue capacity (12..43, 0 means
 /// unbounded), associative key ordering (44 signed, 45 string), and whether
-/// associative keys are object handles that the collector traces (46).
+/// associative keys are object handles that the collector traces (46). An
+/// array with [`WIDE_KEY`] also has string keys.
 #[allow(clippy::too_many_arguments)]
 pub const fn parameter(
     width: u32,
@@ -70,12 +84,22 @@ pub const fn parameter(
 }
 
 #[derive(Clone, Copy)]
-struct Layout(u64);
+pub(crate) struct Layout(pub(crate) u64);
 impl Layout {
+    pub(crate) fn width(self) -> u32 {
+        (self.0 & 127) as u32
+    }
+    pub(crate) fn two_state(self) -> bool {
+        self.0 & 128 != 0
+    }
+    /// Whether the elements are string handles.
+    pub(crate) fn string_elements(self) -> bool {
+        (self.0 >> 8) & 3 == 1
+    }
     fn bits(self) -> u64 {
         u64::MAX >> (64 - (self.0 & 127))
     }
-    fn default(self) -> Element {
+    pub(crate) fn default(self) -> Element {
         Element {
             value: if self.0 & 128 == 0 { self.bits() } else { 0 },
             mask: if self.0 & 128 == 0 { self.bits() } else { 0 },
@@ -84,7 +108,7 @@ impl Layout {
     fn kind(self) -> u64 {
         (self.0 >> 10) & 3
     }
-    fn capacity(self) -> usize {
+    pub(crate) fn capacity(self) -> usize {
         let n = ((self.0 >> 12) & 0xffff_ffff) as usize;
         if n == 0 { usize::MAX } else { n }
     }
@@ -111,6 +135,69 @@ fn quoted(out: &mut Vec<u8>, text: &[u8]) {
     out.push(b'"');
     out.extend_from_slice(text);
     out.push(b'"');
+}
+
+/// The [`crate::ops::KEY`] string of `bytes`.
+pub(crate) fn key_string(bytes: &[u8]) -> Vec<u8> {
+    let bits = bytes.len() * 8;
+    let groups = bits.div_ceil(7);
+    let bit = |i: usize| bytes[i / 8] >> (7 - i % 8) & 1;
+    (0..groups)
+        .map(|group| {
+            (0..7).fold(0x80, |byte, k| {
+                // The groups pad the bytes with zeros on the left.
+                let position = (group * 7 + k).checked_sub(groups * 7 - bits);
+                byte | position.map_or(0, bit) << (6 - k)
+            })
+        })
+        .collect()
+}
+
+/// The bytes that the [`crate::ops::KEY`] string `key` holds.
+pub(crate) fn key_bytes(key: &[u8]) -> Vec<u8> {
+    let bits = key.len() * 7;
+    let bytes = bits / 8;
+    let bit = |i: usize| key[i / 7] >> (6 - i % 7) & 1;
+    (0..bytes)
+        .map(|byte| {
+            (0..8).fold(0, |value, k| {
+                value << 1 | bit(bits - bytes * 8 + byte * 8 + k)
+            })
+        })
+        .collect()
+}
+
+/// The [`WIDE_KEY`] key `bytes` in decimal.
+fn wide_decimal(bytes: &[u8], signed: bool) -> String {
+    let mut magnitude = bytes.to_vec();
+    let negative = signed && magnitude.first().is_some_and(|top| top & 0x80 == 0);
+    if let Some(top) = magnitude.first_mut().filter(|_| signed) {
+        *top ^= 0x80;
+    }
+    if negative {
+        // The two's complement: invert and add one.
+        let mut carry = true;
+        for byte in magnitude.iter_mut().rev() {
+            let (sum, overflow) = (!*byte).overflowing_add(u8::from(carry));
+            *byte = sum;
+            carry = overflow;
+        }
+    }
+    let mut digits = Vec::new();
+    while magnitude.iter().any(|&byte| byte != 0) || digits.is_empty() {
+        let mut remainder = 0u32;
+        for byte in magnitude.iter_mut() {
+            let value = remainder << 8 | u32::from(*byte);
+            *byte = (value / 10) as u8;
+            remainder = value % 10;
+        }
+        digits.push(b'0' + remainder as u8);
+    }
+    if negative {
+        digits.push(b'-');
+    }
+    digits.reverse();
+    String::from_utf8(digits).unwrap()
 }
 
 /// The `width`-bit `value` in decimal, as `%0d` prints it: an element with
@@ -140,29 +227,29 @@ fn decimal(value: u64, mask: u64, width: u32, signed: bool) -> String {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-struct Element {
-    value: u64,
-    mask: u64,
+pub(crate) struct Element {
+    pub(crate) value: u64,
+    pub(crate) mask: u64,
 }
 #[derive(
     Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
-enum Key {
+pub(crate) enum Key {
     Integer(u64),
     String(Arc<[u8]>),
 }
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-enum Contents {
+pub(crate) enum Contents {
     Sequence(VecDeque<Element>),
     Associative(BTreeMap<Key, Element>),
 }
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Container {
     layout: u64,
-    contents: Contents,
+    pub(crate) contents: Contents,
 }
 impl Container {
-    fn empty(layout: Layout) -> Self {
+    pub(crate) fn empty(layout: Layout) -> Self {
         Self {
             layout: layout.0,
             contents: if layout.kind() == 2 {
@@ -194,7 +281,7 @@ impl Container {
 }
 
 impl Heap {
-    fn publish_container(&mut self, container: Container, complete: bool) -> Handle {
+    pub(crate) fn publish_container(&mut self, container: Container, complete: bool) -> Handle {
         if container.len() == 0 {
             return 0;
         }
@@ -291,6 +378,9 @@ impl Heap {
                         out.extend_from_slice(b", ");
                     }
                     match key {
+                        Key::String(key) if parameter & WIDE_KEY != 0 => out.extend_from_slice(
+                            wide_decimal(&key_bytes(key), parameter & (1 << 44) != 0).as_bytes(),
+                        ),
                         Key::String(text) => quoted(&mut out, text),
                         Key::Integer(key) if parameter & (1 << 44) != 0 => {
                             out.extend_from_slice(((key ^ 1 << 63) as i64).to_string().as_bytes())
@@ -447,6 +537,43 @@ impl Heap {
                     }
                 }
                 return self.finish_container(a as Handle) as u64;
+            }
+            SLICE => {
+                let mut result = Container::empty(layout);
+                if let Contents::Sequence(dst) = &mut result.contents
+                    && let Some(Container {
+                        contents: Contents::Sequence(src),
+                        ..
+                    }) = existing.map(AsRef::as_ref)
+                {
+                    let lo = (b as i64).max(0) as usize;
+                    let hi = (c as i64).min(src.len() as i64 - 1);
+                    if hi >= 0 && lo <= hi as usize {
+                        dst.extend(src.range(lo..=hi as usize).copied().take(layout.capacity()));
+                    }
+                }
+                return self.publish_container(result, true) as u64;
+            }
+            CONCAT => {
+                let mut result = Container::empty(layout);
+                let Contents::Sequence(v) = &mut result.contents else {
+                    return 0;
+                };
+                for source in [a, b] {
+                    if let Some(Container {
+                        contents: Contents::Sequence(source),
+                        ..
+                    }) = self.containers.get(&(source as Handle)).map(AsRef::as_ref)
+                    {
+                        if v.len() + source.len() > 1 << 24 {
+                            self.fault.get_or_insert(Fault::ContainerAllocationLimit);
+                            return 0;
+                        }
+                        v.extend(source.iter().copied());
+                    }
+                }
+                v.truncate(layout.capacity());
+                return self.publish_container(result, true) as u64;
             }
             NEW => {
                 // Bound allocation before converting to usize or reserving.
@@ -624,6 +751,55 @@ mod tests {
         assert_eq!(heap.take_fault(), Some(Fault::NegativeArraySize));
     }
     #[test]
+    fn queue_slice_clips_and_copies_elements_and_masks() {
+        let mut heap = Heap::new();
+        let p = parameter(8, false, 0, 1, 0, false, false, false);
+        let a = call(&mut heap, INSERT, p, 0, 0, 17);
+        let a = call(&mut heap, INSERT, p, a, 1, 255);
+        let a = call(&mut heap, SET_MASK, p, a, 1, 255);
+        let b = call(&mut heap, SLICE, p, a, 1, u64::MAX >> 1);
+        assert_eq!(call(&mut heap, LEN, p, b, 0, 0), 1);
+        assert_eq!(call(&mut heap, GET, p, b, 0, 0), 255);
+        assert_eq!(call(&mut heap, GET_MASK, p, b, 0, 0), 255);
+        let c = call(&mut heap, SET, p, b, 0, 42);
+        assert_eq!(call(&mut heap, GET, p, c, 0, 0), 42);
+        assert_eq!(call(&mut heap, GET, p, a, 1, 0), 255);
+        let all = call(&mut heap, SLICE, p, a, u64::MAX, 9);
+        assert_eq!(call(&mut heap, LEN, p, all, 0, 0), 2);
+        for (lo, hi) in [(2, 1), (9, 10), (0, u64::MAX)] {
+            assert_eq!(call(&mut heap, SLICE, p, a, lo, hi), 0);
+        }
+        assert_eq!(call(&mut heap, SLICE, p, 0, 0, 0), 0);
+    }
+
+    #[test]
+    fn concatenation_copies_both_sequences_once_within_capacity() {
+        let mut heap = Heap::new();
+        let p = parameter(32, true, 0, 1, 0, false, false, false);
+        let a = call(&mut heap, INSERT, p, 0, 0, 1);
+        let a = call(&mut heap, INSERT, p, a, 1, 2);
+        let b = call(&mut heap, INSERT, p, 0, 0, 3);
+        let c = call(&mut heap, CONCAT, p, a, b, 0);
+        assert_eq!(call(&mut heap, LEN, p, c, 0, 0), 3);
+        assert_eq!(
+            (0..3)
+                .map(|i| call(&mut heap, GET, p, c, i, 0))
+                .collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        // The operands are unchanged, and empty operands contribute nothing.
+        assert_eq!(call(&mut heap, LEN, p, a, 0, 0), 2);
+        assert_eq!(call(&mut heap, CONCAT, p, 0, 0, 0), 0);
+        let d = call(&mut heap, CONCAT, p, 0, b, 0);
+        assert_ne!(d, b);
+        assert_eq!(call(&mut heap, GET, p, d, 0, 0), 3);
+        // A bounded queue keeps its first elements.
+        let bounded = parameter(32, true, 0, 1, 2, false, false, false);
+        let e = call(&mut heap, CONCAT, bounded, a, b, 0);
+        assert_eq!(call(&mut heap, LEN, bounded, e, 0, 0), 2);
+    }
+
+    #[test]
     fn bounded_queue_insert_and_value_copies() {
         let mut heap = Heap::new();
         let p = parameter(8, true, 0, 1, 2, false, false, false);
@@ -662,6 +838,49 @@ mod tests {
         assert!(!heap.contains(z as Handle));
         assert!(!heap.contains(a as Handle));
     }
+    #[test]
+    fn wide_keys_order_numerically_and_print_in_decimal() {
+        let mut heap = Heap::new();
+        // 72-bit signed keys: nine bytes, the top bit flipped.
+        let p = parameter(8, true, 0, 2, 0, true, true, false) | WIDE_KEY;
+        let key = |heap: &mut Heap, bytes: [u8; 9]| {
+            let buffer = heap.new_buffer(bytes.to_vec());
+            heap.call(crate::ops::KEY, buffer, 0, 0)
+        };
+        let minus_one = key(
+            &mut heap,
+            [0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+        );
+        let two_pow_64 = key(&mut heap, [0x81, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let zero = key(&mut heap, [0x80, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let mut a = 0;
+        for (k, v) in [(two_pow_64, 3), (minus_one, 1), (zero, 2)] {
+            a = call(&mut heap, SET, p, a, k, v);
+            a = call(&mut heap, SET_MASK, p, a, k, 0);
+        }
+        assert_eq!(call(&mut heap, FIRST, p, a, 0, 0), minus_one);
+        assert_eq!(call(&mut heap, NEXT, p, a, minus_one, 0), zero);
+        assert_eq!(call(&mut heap, LAST, p, a, 0, 0), two_pow_64);
+        let buffer = call(&mut heap, PATTERN, p, a, 0, 0);
+        assert_eq!(
+            heap.take_buffer(buffer),
+            b"'{-1:1, 0:2, 18446744073709551616:3}"
+        );
+        let buffer = call(&mut heap, PATTERN, p & !(1 << 44), a, 0, 0);
+        assert_eq!(
+            heap.take_buffer(buffer),
+            b"'{2361183241434822606847:1, 2361183241434822606848:2, 2379629985508532158464:3}"
+        );
+        let bytes_of = crate::ops::KEY_BYTES;
+        assert_eq!(heap.call(bytes_of, two_pow_64, 0, 2), 0x8100);
+        assert_eq!(heap.call(bytes_of, two_pow_64, 1, 8), 0);
+        assert_eq!(heap.call(bytes_of, minus_one, 8, 8), 0xff00_0000_0000_0000);
+        for bytes in [&[][..], &[0], &[0x80, 1], &[0xff; 20]] {
+            assert_eq!(key_bytes(&key_string(bytes)), bytes);
+            assert!(!key_string(bytes).contains(&0));
+        }
+    }
+
     #[test]
     fn associative_order_and_gc_follow_element_handles() {
         let mut heap = Heap::new();

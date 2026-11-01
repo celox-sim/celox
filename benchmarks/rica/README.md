@@ -20,8 +20,11 @@ parallelism follows each implementation’s defaults on the same host. `CELOX_TB
 `CELOX_RUNNER_BIN` selects the ELF-to-project exporter. `VERYL_TIMED_RUNNER_BIN` selects
 `veryl-heliodor`, the shared Veryl 0.22.0 simulator runner. Paired logs, hashes,
 qualification outcomes and individual samples are stored in `comparison/results.json`.
-These Rica results remain local; the circuit publication workflow covers SHA, FFT and LZ77. The old `resolved` and
-`rica` host harnesses remain available for API diagnostics.
+The `rica Benchmark` workflow measures all five kernels daily at 04:47 UTC and
+publishes validated results to the **rica** tab on the benchmark dashboard.
+Publication requires all five simulator pairs, three samples each, matching
+cycles and commits, and successful mailbox negative controls. The old `resolved`
+and `rica` host harnesses remain available for API diagnostics.
 
 The paired workload contract is `board-kernel-tiered-tb-v1`, with
 `cold-tiered-process-v1` timing. `processNs` measures launch through exit and is

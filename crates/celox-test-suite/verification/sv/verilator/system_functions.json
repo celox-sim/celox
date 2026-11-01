@@ -966,6 +966,133 @@
       },
       "phase": "skip",
       "status": "ignored"
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator 5.052 spells $typename differently from IEEE 1800-2023 20.6.1: it drops a signing other than the default (logic signed [0:7] gives logic[0:7], int unsigned gives int, byte unsigned gives byte), writes shortreal as real and bit [3:0][1:0] as bit[1:0][3:0], writes enumeration values in hex separated by semicolons without the base type (enum{R=2'h0;G=2'h2;}) where 20.6.1 writes enum logic[1:0]{R=2'd0,G=2'd2}, drops packed and signed from structs, and writes a variable of a class type parameter as PARAMTYPEDTYPE 'T' and a class as class{}item. Rules b, e and f of 20.6.1 keep each of these; xezim 0.11.3 also deviates and Icarus 13.0 rejects the operands.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_typename_vectors.json",
+          "verification/repros/sv_typename_aggregates.json",
+          "verification/repros/sv_typename_classes.json",
+          "verification/repros/sv_typename_constant.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_typename_spelling",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 spells $typename differently from IEEE 1800-2023 20.6.1: it drops a signing other than the default (logic signed [0:7] gives logic[0:7], int unsigned gives int, byte unsigned gives byte), writes shortreal as real and bit [3:0][1:0] as bit[1:0][3:0], writes enumeration values in hex separated by semicolons without the base type (enum{R=2'h0;G=2'h2;}) where 20.6.1 writes enum logic[1:0]{R=2'd0,G=2'd2}, drops packed and signed from structs, and writes a variable of a class type parameter as PARAMTYPEDTYPE 'T' and a class as class{}item. Rules b, e and f of 20.6.1 keep each of these; xezim 0.11.3 also deviates and Icarus 13.0 rejects the operands.",
+        "upstream": []
+      },
+      "name": "system_functions::typename_aggregates",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator 5.052 spells $typename differently from IEEE 1800-2023 20.6.1: it drops a signing other than the default (logic signed [0:7] gives logic[0:7], int unsigned gives int, byte unsigned gives byte), writes shortreal as real and bit [3:0][1:0] as bit[1:0][3:0], writes enumeration values in hex separated by semicolons without the base type (enum{R=2'h0;G=2'h2;}) where 20.6.1 writes enum logic[1:0]{R=2'd0,G=2'd2}, drops packed and signed from structs, and writes a variable of a class type parameter as PARAMTYPEDTYPE 'T' and a class as class{}item. Rules b, e and f of 20.6.1 keep each of these; xezim 0.11.3 also deviates and Icarus 13.0 rejects the operands.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_typename_vectors.json",
+          "verification/repros/sv_typename_aggregates.json",
+          "verification/repros/sv_typename_classes.json",
+          "verification/repros/sv_typename_constant.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_typename_spelling",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 spells $typename differently from IEEE 1800-2023 20.6.1: it drops a signing other than the default (logic signed [0:7] gives logic[0:7], int unsigned gives int, byte unsigned gives byte), writes shortreal as real and bit [3:0][1:0] as bit[1:0][3:0], writes enumeration values in hex separated by semicolons without the base type (enum{R=2'h0;G=2'h2;}) where 20.6.1 writes enum logic[1:0]{R=2'd0,G=2'd2}, drops packed and signed from structs, and writes a variable of a class type parameter as PARAMTYPEDTYPE 'T' and a class as class{}item. Rules b, e and f of 20.6.1 keep each of these; xezim 0.11.3 also deviates and Icarus 13.0 rejects the operands.",
+        "upstream": []
+      },
+      "name": "system_functions::typename_class_parameters",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator 5.052 spells $typename differently from IEEE 1800-2023 20.6.1: it drops a signing other than the default (logic signed [0:7] gives logic[0:7], int unsigned gives int, byte unsigned gives byte), writes shortreal as real and bit [3:0][1:0] as bit[1:0][3:0], writes enumeration values in hex separated by semicolons without the base type (enum{R=2'h0;G=2'h2;}) where 20.6.1 writes enum logic[1:0]{R=2'd0,G=2'd2}, drops packed and signed from structs, and writes a variable of a class type parameter as PARAMTYPEDTYPE 'T' and a class as class{}item. Rules b, e and f of 20.6.1 keep each of these; xezim 0.11.3 also deviates and Icarus 13.0 rejects the operands.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_typename_vectors.json",
+          "verification/repros/sv_typename_aggregates.json",
+          "verification/repros/sv_typename_classes.json",
+          "verification/repros/sv_typename_constant.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_typename_spelling",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 spells $typename differently from IEEE 1800-2023 20.6.1: it drops a signing other than the default (logic signed [0:7] gives logic[0:7], int unsigned gives int, byte unsigned gives byte), writes shortreal as real and bit [3:0][1:0] as bit[1:0][3:0], writes enumeration values in hex separated by semicolons without the base type (enum{R=2'h0;G=2'h2;}) where 20.6.1 writes enum logic[1:0]{R=2'd0,G=2'd2}, drops packed and signed from structs, and writes a variable of a class type parameter as PARAMTYPEDTYPE 'T' and a class as class{}item. Rules b, e and f of 20.6.1 keep each of these; xezim 0.11.3 also deviates and Icarus 13.0 rejects the operands.",
+        "upstream": []
+      },
+      "name": "system_functions::typename_elaboration_constant",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator 5.052 spells $typename differently from IEEE 1800-2023 20.6.1: it drops a signing other than the default (logic signed [0:7] gives logic[0:7], int unsigned gives int, byte unsigned gives byte), writes shortreal as real and bit [3:0][1:0] as bit[1:0][3:0], writes enumeration values in hex separated by semicolons without the base type (enum{R=2'h0;G=2'h2;}) where 20.6.1 writes enum logic[1:0]{R=2'd0,G=2'd2}, drops packed and signed from structs, and writes a variable of a class type parameter as PARAMTYPEDTYPE 'T' and a class as class{}item. Rules b, e and f of 20.6.1 keep each of these; xezim 0.11.3 also deviates and Icarus 13.0 rejects the operands.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_typename_vectors.json",
+          "verification/repros/sv_typename_aggregates.json",
+          "verification/repros/sv_typename_classes.json",
+          "verification/repros/sv_typename_constant.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_typename_spelling",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 spells $typename differently from IEEE 1800-2023 20.6.1: it drops a signing other than the default (logic signed [0:7] gives logic[0:7], int unsigned gives int, byte unsigned gives byte), writes shortreal as real and bit [3:0][1:0] as bit[1:0][3:0], writes enumeration values in hex separated by semicolons without the base type (enum{R=2'h0;G=2'h2;}) where 20.6.1 writes enum logic[1:0]{R=2'd0,G=2'd2}, drops packed and signed from structs, and writes a variable of a class type parameter as PARAMTYPEDTYPE 'T' and a class as class{}item. Rules b, e and f of 20.6.1 keep each of these; xezim 0.11.3 also deviates and Icarus 13.0 rejects the operands.",
+        "upstream": []
+      },
+      "name": "system_functions::typename_vectors_and_arrays",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator 5.052 rejects a string method called on the result of $typename ($typename(int).len(): \"Syntax error: Not expecting BASICDTYPE under a ATTROF in dotted expression\"). IEEE 1800-2023 20.6.1 returns a string, 6.16.1 defines len() on strings and A.8.2 permits a system function call as the root of a method call; xezim 0.11.3 compiles the case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_typename_scopes.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_typename_method_call",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "compile",
+        "reason": "Verilator 5.052 rejects a string method called on the result of $typename ($typename(int).len(): \"Syntax error: Not expecting BASICDTYPE under a ATTROF in dotted expression\"). IEEE 1800-2023 20.6.1 returns a string, 6.16.1 defines len() on strings and A.8.2 permits a system function call as the root of a method call; xezim 0.11.3 compiles the case.",
+        "upstream": []
+      },
+      "name": "system_functions::typename_scopes_and_string_operands",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

@@ -604,6 +604,28 @@ unsafe extern "C" fn record_callback(data: *mut VpiCbData) -> i32 {
         }
         CB_AFTER_DELAY => {
             assert_eq!(celox_vpi_current_time(), 5);
+            std::thread::spawn(|| {
+                // Bridge threads may read the clock without gaining access to
+                // the owner's simulation or RefCell-backed callback state.
+                assert_eq!(celox_vpi_current_time(), 5);
+                for type_ in [VPI_SIM_TIME, VPI_SCALED_REAL_TIME] {
+                    let mut time = VpiTime {
+                        type_,
+                        ..VpiTime::default()
+                    };
+                    unsafe { vpi_get_time(ptr::null_mut(), &mut time) };
+                    if type_ == VPI_SIM_TIME {
+                        assert_eq!((time.high, time.low), (0, 5));
+                    } else {
+                        assert_eq!(time.real, 5.0);
+                    }
+                }
+                assert!(
+                    unsafe { vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut()) }.is_null()
+                );
+            })
+            .join()
+            .unwrap();
             // Safety: this callback was registered with live time storage.
             let delivered = unsafe { &*(*data).time };
             assert_eq!(delivered.type_, VPI_SCALED_REAL_TIME);
@@ -4967,4 +4989,687 @@ fn callback_record_storage_is_independent_while_firing_and_reused() {
         assert_eq!(context.after_register, expected[..127]);
     }
     clear_runtime();
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn packed_bit_handles_read_and_write_without_changing_neighbors() {
+    let _serial = lock_vpi();
+    for four_state in [false, true] {
+        let source = "module Top(input logic signed [64:0] words [1:0],
+            input logic signed [64:0] vector, output logic [64:0] y);
+            assign y = vector ^ words[0] ^ words[1]; endmodule";
+        let simulator =
+            Simulator::from_sv_sources(vec![(source, std::path::Path::new("bits.sv"))], "Top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        let _session = install_runtime(trusted_instance(
+            simulator.shared_code().program_image().clone(),
+        ))
+        .unwrap();
+        unsafe {
+            for name in [c"Top.vector", c"Top.words[0]", c"Top.words[1]"] {
+                let vector = vpi_handle_by_name(name.as_ptr(), ptr::null_mut());
+                let initial = VpiValue {
+                    format: VPI_BIN_STR_VAL,
+                    value: VpiValueData {
+                        str_: c"101010101".as_ptr().cast_mut(),
+                    },
+                };
+                assert!(!vpi_put_value(vector, &initial, ptr::null(), VPI_NO_DELAY).is_null());
+                assert!(vpi_handle_by_index(vector, -1).is_null());
+                assert!(vpi_handle_by_index(vector, 65).is_null());
+                for index in [0, 7, 8, 31, 32, 63, 64] {
+                    let bit = vpi_handle_by_index(vector, index);
+                    assert!(!bit.is_null());
+                    assert_eq!(vpi_get(VPI_TYPE, bit), VPI_REG_BIT);
+                    assert_eq!(vpi_get(VPI_SIZE, bit), 1);
+                    assert_eq!(vpi_get(VPI_SCALAR, bit), 1);
+                    assert_eq!(vpi_get(VPI_SIGNED, bit), 0);
+                    assert!(vpi_handle_by_index(bit, 0).is_null());
+                    let parent = vpi_handle(VPI_PARENT, bit);
+                    assert_eq!(CStr::from_ptr(vpi_get_str(VPI_FULL_NAME, parent)), name);
+                    vpi_free_object(parent);
+                    let mut value = VpiValue {
+                        format: VPI_INT_VAL,
+                        value: VpiValueData { integer: 0 },
+                    };
+                    vpi_get_value(bit, &mut value);
+                    let expected = i32::from(index <= 8 && index % 2 == 0);
+                    assert_eq!(value.value.integer, expected, "{name:?}[{index}]");
+                    let mut sample = VpiValue {
+                        format: VPI_SCALAR_VAL,
+                        value: VpiValueData { scalar: VPI_0 },
+                    };
+                    let change = VpiCbData {
+                        reason: CB_VALUE_CHANGE,
+                        cb_rtn: Some(record_changed_scalar),
+                        obj: bit,
+                        time: ptr::null_mut(),
+                        value: &mut sample,
+                        index: 0,
+                        user_data: ptr::null_mut(),
+                    };
+                    let callback = vpi_register_cb(&change);
+                    assert!(!callback.is_null());
+                    CALLBACK_VALUE.store(i32::MIN, Ordering::SeqCst);
+                    let replacement = VpiValue {
+                        format: VPI_BIN_STR_VAL,
+                        value: VpiValueData {
+                            str_: c"x".as_ptr().cast_mut(),
+                        },
+                    };
+                    assert!(!vpi_put_value(bit, &replacement, ptr::null(), VPI_NO_DELAY).is_null());
+                    assert!(!run_callbacks_result().unwrap());
+                    assert_eq!(
+                        CALLBACK_VALUE.load(Ordering::SeqCst),
+                        if four_state {
+                            VPI_X
+                        } else if expected == 1 {
+                            VPI_0
+                        } else {
+                            i32::MIN
+                        }
+                    );
+                    assert_eq!(vpi_remove_cb(callback), 1);
+                    value.format = VPI_BIN_STR_VAL;
+                    vpi_get_value(bit, &mut value);
+                    assert_eq!(
+                        CStr::from_ptr(value.value.str_),
+                        if four_state { c"x" } else { c"0" }
+                    );
+                    value.format = VPI_INT_VAL;
+                    value.value.integer = expected;
+                    vpi_put_value(bit, &value, ptr::null(), VPI_NO_DELAY);
+                    vpi_free_object(bit);
+                }
+                let mut value = VpiValue {
+                    format: VPI_BIN_STR_VAL,
+                    value: VpiValueData { integer: 0 },
+                };
+                vpi_get_value(vector, &mut value);
+                assert_eq!(
+                    CStr::from_ptr(value.value.str_).to_str().unwrap(),
+                    format!("{:0>65}", "101010101")
+                );
+                vpi_free_object(vector);
+            }
+        }
+    }
+}
+
+struct RearmPendingChange {
+    later: VpiCbData,
+    registration: VpiHandle,
+    delivered: usize,
+}
+
+unsafe extern "C" fn count_rearmed_change(data: *mut VpiCbData) -> i32 {
+    // Safety: the test owns this context until callback dispatch completes.
+    let context = unsafe { &mut *((*data).user_data.cast::<RearmPendingChange>()) };
+    context.delivered += 1;
+    0
+}
+
+unsafe extern "C" fn rearm_later_change(data: *mut VpiCbData) -> i32 {
+    // Safety: the test owns this context and its registration throughout dispatch.
+    let context = unsafe { &mut *((*data).user_data.cast::<RearmPendingChange>()) };
+    assert_eq!(unsafe { vpi_remove_cb(context.registration) }, 1);
+    context.registration = unsafe { vpi_register_cb(&context.later) };
+    assert!(!context.registration.is_null());
+    0
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn a_callback_can_rearm_another_signals_pending_change() {
+    let _serial = lock_vpi();
+    let source = "module Top; reg a=0, b=0;
+        initial begin #10; a<=1; b<=1; #10; $finish; end endmodule";
+    let image = celox::Simulation::from_sv_sources(
+        vec![(source, std::path::Path::new("pending.sv"))],
+        "Top",
+    )
+    .compile_native()
+    .unwrap()
+    .into_program_image();
+    let simulation = celox::Simulation::from_sv_sources(Vec::new(), "")
+        .build_native_from_image(image.clone())
+        .unwrap();
+    let _session = install_timed_runtime(image, simulation).unwrap();
+    unsafe {
+        let a = vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut());
+        let b = vpi_handle_by_name(c"Top.b".as_ptr(), ptr::null_mut());
+        let mut context = RearmPendingChange {
+            later: VpiCbData {
+                reason: CB_VALUE_CHANGE,
+                cb_rtn: Some(count_rearmed_change),
+                obj: b,
+                time: ptr::null_mut(),
+                value: ptr::null_mut(),
+                index: 0,
+                user_data: ptr::null_mut(),
+            },
+            registration: ptr::null_mut(),
+            delivered: 0,
+        };
+        context.later.user_data = ptr::from_mut(&mut context).cast();
+        let earlier = VpiCbData {
+            cb_rtn: Some(rearm_later_change),
+            obj: a,
+            ..context.later
+        };
+        let first = vpi_register_cb(&earlier);
+        context.registration = vpi_register_cb(&context.later);
+        assert!(run_callbacks());
+        assert_eq!(context.delivered, 1);
+        vpi_remove_cb(first);
+        vpi_remove_cb(context.registration);
+        vpi_free_object(a);
+        vpi_free_object(b);
+    }
+}
+
+struct OverlappingDeposits {
+    writes: Vec<(VpiHandle, &'static CStr)>,
+    flags: i32,
+}
+
+unsafe extern "C" fn write_overlapping_deposits(data: *mut VpiCbData) -> i32 {
+    // Safety: the test owns this context and its handles throughout dispatch.
+    let context = unsafe { &*((*data).user_data.cast::<OverlappingDeposits>()) };
+    for &(handle, text) in &context.writes {
+        let value = VpiValue {
+            format: VPI_BIN_STR_VAL,
+            value: VpiValueData {
+                str_: text.as_ptr().cast_mut(),
+            },
+        };
+        assert_eq!(
+            unsafe { vpi_put_value(handle, &value, ptr::null(), context.flags) },
+            handle
+        );
+    }
+    0
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn overlapping_vector_and_bit_deposits_preserve_callback_write_order() {
+    let _serial = lock_vpi();
+    let source = "module Top(input logic [64:0] vector, words [1:0],
+        output logic [64:0] y); assign y=vector ^ words[0] ^ words[1]; endmodule";
+    for four_state in [false, true] {
+        let simulator = Simulator::from_sv_sources(
+            vec![(source, std::path::Path::new("overlapping.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        let _session = install_runtime(trusted_instance(
+            simulator.shared_code().program_image().clone(),
+        ))
+        .unwrap();
+        // Safety: all handles and callback context remain live through dispatch.
+        unsafe {
+            let vectors = [c"Top.vector", c"Top.words[0]", c"Top.words[1]"]
+                .map(|name| vpi_handle_by_name(name.as_ptr(), ptr::null_mut()));
+            let y = vpi_handle_by_name(c"Top.y".as_ptr(), ptr::null_mut());
+            for flags in [VPI_NO_DELAY, VPI_INERTIAL_DELAY] {
+                for &vector in &vectors {
+                    for index in [0, 7, 8, 31, 32, 63, 64] {
+                        let bit = vpi_handle_by_index(vector, index);
+                        assert!(!bit.is_null());
+                        let bit_text = if four_state { c"x" } else { c"1" };
+                        let whole = (vector, c"0");
+                        let part = (bit, bit_text);
+                        for (writes, bit_wins) in [
+                            (vec![whole, part], true),
+                            (vec![part, whole], false),
+                            (vec![whole, part, whole], false),
+                            (vec![part, whole, part], true),
+                        ] {
+                            for &handle in &vectors {
+                                put_int(handle, 0);
+                            }
+                            let mut context = OverlappingDeposits { writes, flags };
+                            let callback = VpiCbData {
+                                reason: CB_START_OF_SIMULATION,
+                                cb_rtn: Some(write_overlapping_deposits),
+                                obj: ptr::null_mut(),
+                                time: ptr::null_mut(),
+                                value: ptr::null_mut(),
+                                index: 0,
+                                user_data: ptr::from_mut(&mut context).cast(),
+                            };
+                            assert!(!vpi_register_cb(&callback).is_null());
+                            assert!(!run_callbacks_result().unwrap());
+                            let mut expected = vec![b'0'; 65];
+                            if bit_wins {
+                                expected[64 - index as usize] =
+                                    if four_state { b'x' } else { b'1' };
+                            }
+                            for handle in [vector, y] {
+                                let mut value = VpiValue {
+                                    format: VPI_BIN_STR_VAL,
+                                    value: VpiValueData { integer: 0 },
+                                };
+                                vpi_get_value(handle, &mut value);
+                                assert_eq!(
+                                    CStr::from_ptr(value.value.str_).to_bytes(),
+                                    expected,
+                                    "signal={:?} four_state={four_state} flags={flags} index={index} bit_wins={bit_wins}",
+                                    CStr::from_ptr(vpi_get_str(VPI_FULL_NAME, handle))
+                                );
+                            }
+                        }
+                        vpi_free_object(bit);
+                    }
+                }
+            }
+            for handle in vectors.into_iter().chain([y]) {
+                vpi_free_object(handle);
+            }
+        }
+    }
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn packed_bit_deposits_update_the_containing_vectors_saved_force_value() {
+    let _serial = lock_vpi();
+    let source = "module Top(input logic [64:0] v, output logic [64:0] y);
+        assign y=v; endmodule";
+    for four_state in [false, true] {
+        let simulator = Simulator::from_sv_sources(
+            vec![(source, std::path::Path::new("forced_bits.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .native_force_support(true)
+        .build()
+        .unwrap();
+        let _session = install_runtime(trusted_instance(
+            simulator.shared_code().program_image().clone(),
+        ))
+        .unwrap();
+        // Safety: all handles and callback records remain live until removal.
+        unsafe {
+            let vector = vpi_handle_by_name(c"Top.v".as_ptr(), ptr::null_mut());
+            let output = vpi_handle_by_name(c"Top.y".as_ptr(), ptr::null_mut());
+            // A second handle for the same vector must share its force state.
+            let alias = vpi_handle_by_name(c"Top.v".as_ptr(), ptr::null_mut());
+            for target in [vector, alias] {
+                for index in [1, 7, 31, 32, 63, 64] {
+                    let bit = vpi_handle_by_index(target, index);
+                    assert!(!bit.is_null());
+                    for flags in [VPI_NO_DELAY, VPI_INERTIAL_DELAY] {
+                        for text in [c"0", c"1", c"x", c"z"] {
+                            let initial = VpiValue {
+                                format: VPI_BIN_STR_VAL,
+                                value: VpiValueData {
+                                    str_: c"100000001".as_ptr().cast_mut(),
+                                },
+                            };
+                            assert_eq!(
+                                vpi_put_value(vector, &initial, ptr::null(), VPI_NO_DELAY),
+                                vector
+                            );
+                            let zero = VpiValue {
+                                format: VPI_INT_VAL,
+                                value: VpiValueData { integer: 0 },
+                            };
+                            assert_eq!(
+                                vpi_put_value(vector, &zero, ptr::null(), VPI_FORCE_FLAG),
+                                vector
+                            );
+                            let mut sample = VpiValue {
+                                format: VPI_SCALAR_VAL,
+                                value: VpiValueData { scalar: VPI_0 },
+                            };
+                            let change = VpiCbData {
+                                reason: CB_VALUE_CHANGE,
+                                cb_rtn: Some(record_changed_scalar),
+                                obj: bit,
+                                time: ptr::null_mut(),
+                                value: &mut sample,
+                                index: 0,
+                                user_data: ptr::null_mut(),
+                            };
+                            let callback = vpi_register_cb(&change);
+                            assert!(!callback.is_null());
+                            CALLBACK_VALUE.store(i32::MIN, Ordering::SeqCst);
+                            let deposit = VpiValue {
+                                format: VPI_BIN_STR_VAL,
+                                value: VpiValueData {
+                                    str_: text.as_ptr().cast_mut(),
+                                },
+                            };
+                            assert_eq!(vpi_put_value(bit, &deposit, ptr::null(), flags), bit);
+                            assert!(!run_callbacks_result().unwrap());
+                            assert_eq!(
+                                CALLBACK_VALUE.load(Ordering::SeqCst),
+                                i32::MIN,
+                                "a deposit must not change a forced bit"
+                            );
+                            assert_eq!(vpi_remove_cb(callback), 1);
+                            let mut value = VpiValue {
+                                format: VPI_BIN_STR_VAL,
+                                value: VpiValueData { integer: 0 },
+                            };
+                            for handle in [vector, target, output, bit] {
+                                vpi_get_value(handle, &mut value);
+                                assert!(
+                                    CStr::from_ptr(value.value.str_)
+                                        .to_bytes()
+                                        .iter()
+                                        .all(|&bit| bit == b'0')
+                                );
+                            }
+                            assert_eq!(
+                                vpi_put_value(vector, &zero, ptr::null(), VPI_RELEASE_FLAG),
+                                vector
+                            );
+                            let mut expected = vec![b'0'; 65];
+                            expected[64] = b'1';
+                            expected[56] = b'1';
+                            let digit = text.to_bytes()[0];
+                            expected[64 - index as usize] =
+                                if !four_state && matches!(digit, b'x' | b'z') {
+                                    b'0'
+                                } else {
+                                    digit
+                                };
+                            for handle in [vector, target, output] {
+                                vpi_get_value(handle, &mut value);
+                                assert_eq!(
+                                    CStr::from_ptr(value.value.str_).to_bytes(),
+                                    expected,
+                                    "signal={:?} target={:?} four_state={four_state} flags={flags} index={index} text={text:?}",
+                                    CStr::from_ptr(vpi_get_str(VPI_FULL_NAME, handle)),
+                                    CStr::from_ptr(vpi_get_str(VPI_FULL_NAME, target))
+                                );
+                            }
+                        }
+                    }
+                    vpi_free_object(bit);
+                }
+            }
+            for handle in [vector, alias, output] {
+                vpi_free_object(handle);
+            }
+        }
+    }
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn vpi_real_and_shortreal_values_use_floating_point_formats() {
+    let _serial = lock_vpi();
+    let source = "module Top(input real a, output real y, input shortreal b, output shortreal z); assign y=a; assign z=b; endmodule";
+    let simulator =
+        Simulator::from_sv_sources(vec![(source, std::path::Path::new("real_vpi.sv"))], "Top")
+            .build()
+            .unwrap();
+    let _session = install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ))
+    .unwrap();
+    unsafe {
+        for (input, output, short) in [(c"Top.a", c"Top.y", false), (c"Top.b", c"Top.z", true)] {
+            let input = vpi_handle_by_name(input.as_ptr(), ptr::null_mut());
+            let output = vpi_handle_by_name(output.as_ptr(), ptr::null_mut());
+            assert_eq!(
+                vpi_get(VPI_TYPE, input),
+                if short {
+                    VPI_SHORT_REAL_VAR
+                } else {
+                    VPI_REAL_VAR
+                }
+            );
+            assert!(vpi_handle_by_index(input, 0).is_null());
+            for flags in [VPI_NO_DELAY, VPI_INERTIAL_DELAY] {
+                for number in [-0.0, 5.03, -123.75, f64::INFINITY, f64::NAN] {
+                    let value = VpiValue {
+                        format: VPI_REAL_VAL,
+                        value: VpiValueData { real: number },
+                    };
+                    assert_eq!(vpi_put_value(input, &value, ptr::null(), flags), input);
+                    assert!(!run_callbacks_result().unwrap());
+                    let expected = if short {
+                        (number as f32) as f64
+                    } else {
+                        number
+                    };
+                    for handle in [input, output] {
+                        let mut read = VpiValue {
+                            format: VPI_REAL_VAL,
+                            value: VpiValueData { real: 0.0 },
+                        };
+                        vpi_get_value(handle, &mut read);
+                        if expected.is_nan() {
+                            assert!(read.value.real.is_nan());
+                        } else {
+                            assert_eq!(read.value.real.to_bits(), expected.to_bits());
+                        }
+                        if expected.is_finite()
+                            && expected >= i32::MIN as f64
+                            && expected <= i32::MAX as f64
+                        {
+                            read.format = VPI_INT_VAL;
+                            vpi_get_value(handle, &mut read);
+                            assert_eq!(read.value.integer, expected.round() as i32);
+                        }
+                    }
+                }
+            }
+            let integer = VpiValue {
+                format: VPI_INT_VAL,
+                value: VpiValueData { integer: -37 },
+            };
+            assert_eq!(
+                vpi_put_value(input, &integer, ptr::null(), VPI_NO_DELAY),
+                input
+            );
+            let mut read = VpiValue {
+                format: VPI_REAL_VAL,
+                value: VpiValueData { real: 0.0 },
+            };
+            vpi_get_value(input, &mut read);
+            assert_eq!(read.value.real, -37.0);
+            vpi_free_object(input);
+            vpi_free_object(output);
+        }
+    }
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn vpi_string_deposits_own_bytes_and_expose_the_string_value() {
+    let _serial = lock_vpi();
+    let source = "module Top(input string s, output int size); always_comb size=s.len(); endmodule";
+    let simulator =
+        Simulator::from_sv_sources(vec![(source, std::path::Path::new("string_vpi.sv"))], "Top")
+            .build()
+            .unwrap();
+    let _session = install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ))
+    .unwrap();
+    unsafe {
+        let s = vpi_handle_by_name(c"Top.s".as_ptr(), ptr::null_mut());
+        let size = vpi_handle_by_name(c"Top.size".as_ptr(), ptr::null_mut());
+        assert_eq!(vpi_get(VPI_TYPE, s), VPI_STRING_VAR);
+        assert!(vpi_handle_by_index(s, 0).is_null());
+        for flags in [VPI_NO_DELAY, VPI_INERTIAL_DELAY] {
+            for bytes in [b"".as_slice(), b"bytes", b"ansi\x1b[31m", b"\xff\xfe"] {
+                let text = std::ffi::CString::new(bytes).unwrap();
+                let value = VpiValue {
+                    format: VPI_STRING_VAL,
+                    value: VpiValueData {
+                        str_: text.as_ptr().cast_mut(),
+                    },
+                };
+                assert_eq!(vpi_put_value(s, &value, ptr::null(), flags), s);
+                drop(text);
+                assert!(!run_callbacks_result().unwrap());
+                let mut read = VpiValue {
+                    format: VPI_STRING_VAL,
+                    value: VpiValueData {
+                        str_: ptr::null_mut(),
+                    },
+                };
+                vpi_get_value(s, &mut read);
+                assert_eq!(CStr::from_ptr(read.value.str_).to_bytes(), bytes);
+                assert_eq!(vpi_get(VPI_SIZE, s), bytes.len() as i32);
+                read.format = VPI_INT_VAL;
+                vpi_get_value(size, &mut read);
+                assert_eq!(read.value.integer, bytes.len() as i32);
+            }
+        }
+        vpi_free_object(s);
+        vpi_free_object(size);
+    }
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn vpi_escaped_signal_names_round_trip_through_lookup_and_properties() {
+    let _serial = lock_vpi();
+    let source = r#"module Top(input logic a, output wire y);
+        logic [3:0] \weird.signal[1] = 0;
+        assign y=\weird.signal[1] [0] ^ a; endmodule"#;
+    let simulator = Simulator::from_sv_sources(
+        vec![(source, std::path::Path::new("escaped_vpi.sv"))],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    let _session = install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ))
+    .unwrap();
+    unsafe {
+        let top = vpi_handle_by_name(c"Top".as_ptr(), ptr::null_mut());
+        let signal = vpi_handle_by_name(c"\\weird.signal[1] ".as_ptr(), top);
+        assert!(!signal.is_null());
+        assert_eq!(
+            CStr::from_ptr(vpi_get_str(VPI_NAME, signal)),
+            c"\\weird.signal[1] "
+        );
+        assert_eq!(
+            CStr::from_ptr(vpi_get_str(VPI_FULL_NAME, signal)),
+            c"Top.\\weird.signal[1] "
+        );
+        let same = vpi_handle_by_name(vpi_get_str(VPI_FULL_NAME, signal), ptr::null_mut());
+        assert!(!same.is_null());
+        put_int(signal, 3);
+        let mut value = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: 0 },
+        };
+        vpi_get_value(same, &mut value);
+        assert_eq!(value.value.integer, 3);
+        for handle in [signal, same, top] {
+            vpi_free_object(handle);
+        }
+    }
+}
+
+struct StringCallbackContext {
+    input: VpiHandle,
+    observed: Vec<Vec<u8>>,
+}
+unsafe extern "C" fn replace_original_string(data: *mut VpiCbData) -> i32 {
+    // Safety: registrations retain their copied value request; the test keeps
+    // its callback context and signal handle live through dispatch.
+    let context = unsafe { &mut *(*data).user_data.cast::<StringCallbackContext>() };
+    let bytes = unsafe { CStr::from_ptr((*(*data).value).value.str_) }.to_bytes();
+    if bytes == b"original" {
+        let replacement = VpiValue {
+            format: VPI_STRING_VAL,
+            value: VpiValueData {
+                str_: c"replacement".as_ptr().cast_mut(),
+            },
+        };
+        assert_eq!(
+            unsafe { vpi_put_value(context.input, &replacement, ptr::null(), VPI_NO_DELAY) },
+            context.input
+        );
+    }
+    0
+}
+unsafe extern "C" fn record_string_snapshot(data: *mut VpiCbData) -> i32 {
+    // Safety: the test owns the context, and VPI owns the live callback value.
+    let context = unsafe { &mut *(*data).user_data.cast::<StringCallbackContext>() };
+    context.observed.push(
+        unsafe { CStr::from_ptr((*(*data).value).value.str_) }
+            .to_bytes()
+            .to_vec(),
+    );
+    0
+}
+#[cfg(feature = "systemverilog")]
+#[test]
+fn string_callbacks_keep_the_triggering_bytes_when_an_earlier_callback_writes() {
+    let _serial = lock_vpi();
+    let source =
+        "module Top(input string text, output int size); always_comb size=text.len(); endmodule";
+    let simulator = Simulator::from_sv_sources(
+        vec![(source, std::path::Path::new("string_callbacks.sv"))],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    let _session = install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ))
+    .unwrap();
+    unsafe {
+        let input = vpi_handle_by_name(c"Top.text".as_ptr(), ptr::null_mut());
+        let mut context = StringCallbackContext {
+            input,
+            observed: Vec::new(),
+        };
+        let mut value = VpiValue {
+            format: VPI_STRING_VAL,
+            value: VpiValueData {
+                str_: ptr::null_mut(),
+            },
+        };
+        let callback = VpiCbData {
+            reason: CB_VALUE_CHANGE,
+            cb_rtn: Some(replace_original_string),
+            obj: input,
+            time: ptr::null_mut(),
+            value: &mut value,
+            index: 0,
+            user_data: ptr::from_mut(&mut context).cast(),
+        };
+        let first = vpi_register_cb(&callback);
+        let second = vpi_register_cb(&VpiCbData {
+            cb_rtn: Some(record_string_snapshot),
+            ..callback
+        });
+        let initial = VpiValue {
+            format: VPI_STRING_VAL,
+            value: VpiValueData {
+                str_: c"original".as_ptr().cast_mut(),
+            },
+        };
+        assert_eq!(
+            vpi_put_value(input, &initial, ptr::null(), VPI_INERTIAL_DELAY),
+            input
+        );
+        assert!(!run_callbacks_result().unwrap());
+        assert_eq!(
+            context.observed,
+            [b"original".to_vec(), b"replacement".to_vec()]
+        );
+        vpi_remove_cb(first);
+        vpi_remove_cb(second);
+        vpi_free_object(input);
+    }
 }

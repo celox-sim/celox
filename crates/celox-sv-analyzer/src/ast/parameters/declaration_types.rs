@@ -30,6 +30,8 @@ pub(super) fn prefix<'a>(
             None,
             Some(
                 type_binding::builtin_type(name, data.signed)
+                    // A chandle is no constant (IEEE 1800-2023 6.14).
+                    .filter(|ty| !ty.chandle)
                     .ok_or_else(|| unsupported("unsupported parameter data type"))?,
             ),
         ),
@@ -39,7 +41,12 @@ pub(super) fn prefix<'a>(
                 .map(|part| instances::normalize_identifier(&part.name.spelling))
                 .collect::<Vec<_>>()
                 .join("::");
-            (aliases.get(&name).cloned(), None)
+            let alias = aliases.get(&name).cloned();
+            // Nor is a chandle named by a typedef.
+            if alias.as_ref().is_some_and(Type::holds_chandle) {
+                return Err(unsupported("unsupported parameter data type"));
+            }
+            (alias, None)
         }
         _ => return Err(unsupported("unsupported parameter data type")),
     };
@@ -72,10 +79,10 @@ impl Prefix<'_> {
             .or(self.primitive.as_ref())
             .is_some_and(|ty| ty.kind == TypeKind::Bit)
     }
-    pub fn scalar_width(&self, state: &AnalysisState) -> Option<usize> {
+    pub fn scalar_width(&self, functions: &const_functions::ConstantFunctions) -> Option<usize> {
         self.primitive
             .as_ref()
-            .and_then(|ty| expr_type_from_type(state, ty, &HashMap::default()))
+            .and_then(|ty| expr_type_from_type(functions, ty, &HashMap::default()))
             .map(|ty| ty.width)
     }
     pub fn signed_element_depth(&self) -> Option<usize> {
@@ -90,11 +97,17 @@ impl Prefix<'_> {
     pub fn ranges(
         &self,
         tree: &AnalysisContext<'_>,
+        session: &mut Session,
         env: &HashMap<String, i128>,
         aliases: &HashMap<String, Type>,
     ) -> Converted<Vec<PackedRange>> {
-        let mut ranges =
-            constant_binding::packed_ranges(&self.data.packed_dimensions, tree, env, aliases)?;
+        let mut ranges = constant_binding::packed_ranges(
+            &self.data.packed_dimensions,
+            tree,
+            session,
+            env,
+            aliases,
+        )?;
         if let Some(base) = self.alias.as_ref().or(self.primitive.as_ref()) {
             ranges.extend(base.packed_ranges.iter().cloned());
         }

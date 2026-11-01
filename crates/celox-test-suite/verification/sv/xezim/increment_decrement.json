@@ -1,0 +1,26 @@
+{
+  "cases": [
+    {
+      "category": "Operators",
+      "detail": "increment_decrement::increment_decrement_implication at 243:3: expect_output: expected [115, 107, 105, 112, 112, 101, 100, 32, 49, 32, 48, 10, 101, 118, 97, 108, 117, 97, 116, 101, 100, 32, 48, 32, 45, 49, 10], got [115, 107, 105, 112, 112, 101, 100, 32, 49, 32, 49, 10, 101, 118, 97, 108, 117, 97, 116, 101, 100, 32, 48, 32, 48, 10]",
+      "expectation": "Simulation",
+      "name": "increment_decrement::increment_decrement_implication",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "increment_decrement::increment_decrement_repeat_count at 259:3: expect_output: expected [114, 101, 112, 101, 97, 116, 32, 50, 32, 51, 10], got [114, 101, 112, 101, 97, 116, 32, 51, 32, 52, 10]",
+      "expectation": "Simulation",
+      "name": "increment_decrement::increment_decrement_repeat_count",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

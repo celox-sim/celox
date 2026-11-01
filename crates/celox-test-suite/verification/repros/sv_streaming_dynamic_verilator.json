@@ -1,0 +1,178 @@
+{
+  "cases": [
+    "streaming::streaming_dynamic_alignment",
+    "streaming::streaming_dynamic_pack",
+    "streaming::streaming_dynamic_unpack"
+  ],
+  "source": "src/sv/cases/streaming.vtest",
+  "standard": "IEEE 1800-2023 11.4.14: a stream assigned to a fixed-size target wider than the stream is filled with zero bits on the right, and a dynamically sized target is resized to the smallest number of elements that hold the stream; 11.4.14.1: a queue or dynamic array stream expression contributes all its elements, an empty one none; 11.4.14.4 and 6.24.3: an unpack into a list with an unbounded dynamically sized item is greedy, the first such item takes the bits left after the fixed-size items.",
+  "method": "The shared cases run unchanged in verify-sv-verilator, verify-sv-icarus and verify-sv-xezim; each reduced source below runs without the adapters (verilator --binary, iverilog -g2012 -s Top, xezim -s Top). Celox's output is the one the passing shared assertions require.",
+  "probes": [
+    {
+      "name": "dynamic_target",
+      "note": "streaming_dynamic_pack: Verilator 5.052 replaces the dynamic array target byte d[] with the packed constant (its C++ reads 0x44332211U.size()); in the shared case it assigns d = 0x44332211U, which g++ rejects: \"no match for 'operator=' (operand types are 'VlQueue<unsigned char>' and 'unsigned int')\".",
+      "reduced_source": "module Top;\n    byte d[];\n    initial begin\n        d = {<< byte {32'h11223344}};\n        $display(\"size=%0d d[0]=%h d[3]=%h\", d.size(), d[0], d[3]);\n    end\nendmodule\n",
+      "observations": [
+        {
+          "tool": "verilator",
+          "version": "Verilator 5.052 2026-09-05 rev v5.052",
+          "status": "compile_error",
+          "stderr": "VTop___024root__0__Slow.cpp:21:31: error: unable to find numeric literal operator \u2018operator\"\"U.size\u2019\nVTop___024root__0__Slow.cpp:21:57: error: unable to find numeric literal operator \u2018operator\"\"U.at\u2019\nVTop___024root__0__Slow.cpp:22:30: error: unable to find numeric literal operator \u2018operator\"\"U.at\u2019\n"
+        },
+        {
+          "tool": "icarus",
+          "version": "Icarus Verilog 13.0",
+          "status": "compile_error",
+          "stderr": "repro.sv:4: syntax error\nrepro.sv:4: error: Malformed statement\n"
+        },
+        {
+          "tool": "xezim",
+          "version": "xezim 0.11.3",
+          "stdout": "size=4 d[0]=44 d[3]=11\n"
+        },
+        {
+          "tool": "celox",
+          "stdout": "size=4 d[0]=44 d[3]=11\n"
+        }
+      ]
+    },
+    {
+      "name": "queue_into_wider_target",
+      "note": "Verilator 5.052 compiles this line of streaming_dynamic_pack but right-aligns the 24-bit stream of a queue in the int target instead of filling with zero bits on the right.",
+      "reduced_source": "module Top;\n    byte q[$] = '{8'h01, 8'h02, 8'h03};\n    int i;\n    initial begin\n        i = {>>{q}};\n        $display(\"i=%h\", i);\n    end\nendmodule\n",
+      "observations": [
+        {
+          "tool": "verilator",
+          "version": "Verilator 5.052 2026-09-05 rev v5.052",
+          "stdout": "i=00010203\n"
+        },
+        {
+          "tool": "icarus",
+          "version": "Icarus Verilog 13.0",
+          "status": "compile_error",
+          "stderr": "repro.sv:5: sorry: Streaming concatenation not supported.\n"
+        },
+        {
+          "tool": "xezim",
+          "version": "xezim 0.11.3",
+          "stdout": "i=01020300\n"
+        },
+        {
+          "tool": "celox",
+          "stdout": "i=01020300\n"
+        }
+      ]
+    },
+    {
+      "name": "dynamic_bits_into_wider_target",
+      "note": "Verilator 5.052 compiles these lines of streaming_dynamic_pack but right-aligns the 20-bit stream of bit b[$] in the 128-bit target w; the cast to the 20-bit word_t is right.",
+      "reduced_source": "module Top;\n    typedef logic [19:0] word_t;\n    bit b[$];\n    logic [127:0] w;\n    word_t word;\n    initial begin\n        {<< bit {b}} = 20'habcde;\n        $display(\"size=%0d b[0]=%b b[1]=%b b[19]=%b\", b.size(), b[0], b[1], b[19]);\n        w = {<< bit {b}};\n        word = word_t'({<< bit {b}});\n        $display(\"w=%h word=%h\", w, word);\n    end\nendmodule\n",
+      "observations": [
+        {
+          "tool": "verilator",
+          "version": "Verilator 5.052 2026-09-05 rev v5.052",
+          "stdout": "size=20 b[0]=0 b[1]=1 b[19]=1\nw=000000000000000000000000000abcde word=abcde\n"
+        },
+        {
+          "tool": "icarus",
+          "version": "Icarus Verilog 13.0",
+          "status": "compile_error",
+          "stderr": "repro.sv:7: syntax error\nrepro.sv:7: Syntax in assignment statement l-value.\nrepro.sv:9: syntax error\nrepro.sv:9: error: Malformed statement\nrepro.sv:10: syntax error\nrepro.sv:10: error: Malformed statement\n"
+        },
+        {
+          "tool": "xezim",
+          "version": "xezim 0.11.3",
+          "stdout": "size=20 b[0]=0 b[1]=1 b[19]=1\nw=abcde000000000000000000000000000 word=abcde\n"
+        },
+        {
+          "tool": "celox",
+          "stdout": "size=20 b[0]=0 b[1]=1 b[19]=1\nw=abcde000000000000000000000000000 word=abcde\n"
+        }
+      ]
+    },
+    {
+      "name": "empty_queue_operand",
+      "note": "streaming_dynamic_alignment: with an empty byte q[$] beside a fixed operand, Verilator 5.052 casts the queue to IData in its C++, which g++ rejects (it also sizes the stream {>>{q, 16'h1234}} as 16 bits, WIDTHEXPAND).",
+      "reduced_source": "module Top;\n    byte q[$];\n    int i;\n    initial begin\n        i = {>>{q, 16'h1234}};\n        $display(\"i=%h\", i);\n        i = 32'({>>{q, i >>> 16}});\n        $display(\"i=%h\", i);\n    end\nendmodule\n",
+      "observations": [
+        {
+          "tool": "verilator",
+          "version": "Verilator 5.052 2026-09-05 rev v5.052",
+          "status": "compile_error",
+          "stderr": "VTop___024root__0__Slow.cpp:23:28: error: invalid cast from type \u2018VlQueue<unsigned char>\u2019 to type \u2018IData\u2019 {aka \u2018unsigned int\u2019}\n"
+        },
+        {
+          "tool": "icarus",
+          "version": "Icarus Verilog 13.0",
+          "status": "compile_error",
+          "stderr": "repro.sv:5: sorry: Streaming concatenation not supported.\nrepro.sv:7: sorry: Streaming concatenation not supported.\n"
+        },
+        {
+          "tool": "xezim",
+          "version": "xezim 0.11.3",
+          "stdout": "i=12340000\ni=00001234\n"
+        },
+        {
+          "tool": "celox",
+          "stdout": "i=12340000\ni=00001234\n"
+        }
+      ]
+    },
+    {
+      "name": "greedy_unpack",
+      "note": "streaming_dynamic_unpack: Verilator 5.052 stops with an internal error on the unpack into a target list that holds a dynamic array.",
+      "reduced_source": "module Top;\n    int i_header = 12, i_len = 5, i_crc = 42;\n    byte i_data[];\n    int o_header, o_len, o_crc;\n    byte o_data[];\n    byte pkt[$];\n    initial begin\n        i_data = new[5];\n        foreach (i_data[k]) i_data[k] = byte'(k + 1);\n        pkt = {<< 8 {i_header, i_len, i_data, i_crc}};\n        $display(\"pkt size=%0d pkt[0]=%0d pkt[4]=%0d pkt[13]=%0d\", pkt.size(), pkt[0], pkt[4], pkt[13]);\n        {<< 8 {o_header, o_len, o_data, o_crc}} = pkt;\n        $display(\"header=%0d len=%0d crc=%0d size=%0d data[0]=%0d data[4]=%0d\", o_header, o_len, o_crc, o_data.size(), o_data[0], o_data[4]);\n    end\nendmodule\n",
+      "observations": [
+        {
+          "tool": "verilator",
+          "version": "Verilator 5.052 2026-09-05 rev v5.052",
+          "status": "compile_error",
+          "stderr": "%Error: Internal Error: repro.sv:12:31: ../V3Expand.cpp:574: Width mismatch\n"
+        },
+        {
+          "tool": "icarus",
+          "version": "Icarus Verilog 13.0",
+          "status": "compile_error",
+          "stderr": "repro.sv:10: syntax error\nrepro.sv:10: error: Malformed statement\nrepro.sv:12: syntax error\nrepro.sv:12: Syntax in assignment statement l-value.\n"
+        },
+        {
+          "tool": "xezim",
+          "version": "xezim 0.11.3",
+          "stdout": "pkt size=17 pkt[0]=42 pkt[4]=5 pkt[13]=12\nheader=12 len=5 crc=83886080 size=4 data[0]=0 data[4]=0\n"
+        },
+        {
+          "tool": "celox",
+          "stdout": "pkt size=17 pkt[0]=42 pkt[4]=5 pkt[13]=12\nheader=12 len=5 crc=42 size=5 data[0]=1 data[4]=5\n"
+        }
+      ]
+    },
+    {
+      "name": "dynamic_array_unpack_from_stream",
+      "note": "Another line of streaming_dynamic_unpack: Verilator 5.052 generates a VL_STREAML_RII call with a queue argument, which g++ rejects.",
+      "reduced_source": "module Top;\n    byte o_data[] = '{1, 2, 3, 4, 5};\n    initial begin\n        {>> {o_data}} = {<< byte {o_data}};\n        $display(\"size=%0d data[0]=%0d data[4]=%0d\", o_data.size(), o_data[0], o_data[4]);\n    end\nendmodule\n",
+      "observations": [
+        {
+          "tool": "verilator",
+          "version": "Verilator 5.052 2026-09-05 rev v5.052",
+          "status": "compile_error",
+          "stderr": "VTop___024root__0__Slow.cpp:31:38: error: no matching function for call to \u2018VL_STREAML_RII(int, VlQueue<unsigned char>&, unsigned int)\u2019\n"
+        },
+        {
+          "tool": "icarus",
+          "version": "Icarus Verilog 13.0",
+          "status": "compile_error",
+          "stderr": "repro.sv:4: sorry: Streaming concatenation not supported.\nrepro.sv:4: sorry: Streaming concatenation not supported in l-values.\nrepro.sv:4: syntax error\nrepro.sv:4: error: Malformed statement\n"
+        },
+        {
+          "tool": "xezim",
+          "version": "xezim 0.11.3",
+          "stdout": "size=5 data[0]=5 data[4]=1\n"
+        },
+        {
+          "tool": "celox",
+          "stdout": "size=5 data[0]=5 data[4]=1\n"
+        }
+      ]
+    }
+  ]
+}

@@ -1421,6 +1421,17 @@
     },
     {
       "category": "Sequential",
+      "detail": "timing::timed_task_static_locals_are_shared at 1222:17: assert_eq a: expected 0x2, got 0x1",
+      "expectation": "Simulation",
+      "name": "timing::timed_task_static_locals_are_shared",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
       "name": "timing::unknown_delays_and_conditions_count_as_zero_and_false",

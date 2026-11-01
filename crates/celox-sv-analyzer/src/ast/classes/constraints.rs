@@ -26,7 +26,7 @@ fn relation(op: &str, left: Typed, right: Typed) -> Typed {
 
 // Charge copies before allocating them: source nesting alone does not bound
 // the expanded tree of nested membership predicates.
-fn bounded_clone(value: &Typed, budget: &std::cell::Cell<usize>) -> Result<Typed, String> {
+fn bounded_clone(value: &Typed, budget: &mut usize) -> Result<Typed, String> {
     let mut pending = vec![value];
     while let Some(value) = pending.pop() {
         charge(budget)?;
@@ -39,12 +39,10 @@ fn bounded_clone(value: &Typed, budget: &std::cell::Cell<usize>) -> Result<Typed
     Ok(value.clone())
 }
 
-fn charge(budget: &std::cell::Cell<usize>) -> Result<(), String> {
-    let remaining = budget
-        .get()
+fn charge(budget: &mut usize) -> Result<(), String> {
+    *budget = budget
         .checked_sub(1)
         .ok_or("constraint expression expansion limit")?;
-    budget.set(remaining);
     Ok(())
 }
 
@@ -113,15 +111,17 @@ fn emit(value: Typed, context: Option<(u32, bool)>) -> ConstraintExpr {
 pub(in crate::ast) fn bind(
     id: ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     properties: &[Property],
     env: &HashMap<String, i128>,
 ) -> Result<ConstraintExpr, String> {
-    bind_inputs(id, tree, properties, env, &HashMap::default())
+    bind_inputs(id, tree, session, properties, env, &HashMap::default())
 }
 
 pub(in crate::ast) fn bind_inputs(
     id: ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     properties: &[Property],
     env: &HashMap<String, i128>,
     inputs: &HashMap<String, (usize, u32, bool)>,
@@ -129,20 +129,32 @@ pub(in crate::ast) fn bind_inputs(
     fn expression(
         id: ExprId,
         tree: &AnalysisContext<'_>,
+        session: &mut Session,
         properties: &[Property],
         env: &HashMap<String, i128>,
         inputs: &HashMap<String, (usize, u32, bool)>,
         depth: usize,
-        budget: &std::cell::Cell<usize>,
+        budget: &mut usize,
     ) -> Result<Typed, String> {
         if depth > 64 {
             return Err("constraint expression nesting limit".into());
         }
         charge(budget)?;
-        let recurse = |id| expression(id, tree, properties, env, inputs, depth + 1, budget);
+        let recurse = |session: &mut Session, budget: &mut usize, id| {
+            expression(
+                id,
+                tree,
+                session,
+                properties,
+                env,
+                inputs,
+                depth + 1,
+                budget,
+            )
+        };
         let native = tree.declarations();
         Ok(match &native.expression(id).kind {
-            ExprKind::Group(id) => return recurse(*id),
+            ExprKind::Group(id) => return recurse(session, budget, *id),
             ExprKind::Name(name) => {
                 let name = instances::normalize_identifier(&name.spelling);
                 if let Some((index, property)) = properties
@@ -153,6 +165,10 @@ pub(in crate::ast) fn bind_inputs(
                 {
                     if property.field.four_state {
                         return Err("4-state class property in a constraint".into());
+                    }
+                    // A chandle has no integral value to constrain (6.14).
+                    if property.r#type.holds_chandle() {
+                        return Err("a chandle in a constraint".into());
                     }
                     Typed {
                         kind: Kind::Leaf(ConstraintExpr::Field(index)),
@@ -209,7 +225,7 @@ pub(in crate::ast) fn bind_inputs(
                 expression,
                 postfix: false,
             } if matches!(operator.as_str(), "+" | "-" | "~" | "!") => {
-                let value = recurse(*expression)?;
+                let value = recurse(session, budget, *expression)?;
                 if operator == "+" {
                     return Ok(value);
                 }
@@ -224,7 +240,7 @@ pub(in crate::ast) fn bind_inputs(
                 operator,
                 right,
             } if operator == "inside" => {
-                let value = recurse(*left)?;
+                let value = recurse(session, budget, *left)?;
                 let ExprKind::Set(items) = &native.expression(*right).kind else {
                     return Err("constraint inside set".into());
                 };
@@ -237,10 +253,11 @@ pub(in crate::ast) fn bind_inputs(
                 for item in items {
                     use celox_sv_syntax::DimensionKind;
                     let (low, high) = match item.kind {
-                        DimensionKind::Index(id) => (recurse(id)?, None),
-                        DimensionKind::Range { left, right } => {
-                            (recurse(left)?, Some(recurse(right)?))
-                        }
+                        DimensionKind::Index(id) => (recurse(session, budget, id)?, None),
+                        DimensionKind::Range { left, right } => (
+                            recurse(session, budget, left)?,
+                            Some(recurse(session, budget, right)?),
+                        ),
                         _ => return Err("constraint inside range".into()),
                     };
                     for operand in std::iter::once(&low).chain(high.iter()) {
@@ -305,8 +322,8 @@ pub(in crate::ast) fn bind_inputs(
                     | "||"
             ) =>
             {
-                let a = recurse(*left)?;
-                let b = recurse(*right)?;
+                let a = recurse(session, budget, *left)?;
+                let b = recurse(session, budget, *right)?;
                 let width = a.width.max(b.width);
                 let signed = a.signed && b.signed;
                 let logical = matches!(operator.as_str(), "&&" | "||");
@@ -321,16 +338,8 @@ pub(in crate::ast) fn bind_inputs(
             _ => return Err("unsupported scalar constraint expression".into()),
         })
     }
-    expression(
-        id,
-        tree,
-        properties,
-        env,
-        inputs,
-        0,
-        &std::cell::Cell::new(16_384),
-    )
-    .map(|value| emit(value, None))
+    expression(id, tree, session, properties, env, inputs, 0, &mut 16_384)
+        .map(|value| emit(value, None))
 }
 
 impl Class {

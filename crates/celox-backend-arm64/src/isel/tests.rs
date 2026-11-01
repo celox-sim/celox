@@ -1,5 +1,6 @@
 mod floating;
 mod partial_load;
+mod planes;
 mod reductions;
 mod shifts;
 mod slice;

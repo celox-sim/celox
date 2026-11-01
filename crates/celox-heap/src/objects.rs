@@ -59,6 +59,9 @@ pub enum Fault {
     NullDereference,
     /// The first randomization subset does not implement virtual dispatch.
     RandomizationClassMismatch,
+    /// A streaming concatenation whose sizes do not fit (IEEE 1800-2023
+    /// 11.4.14), such as a stream wider than its fixed-size target.
+    Stream(String),
 }
 
 impl std::fmt::Display for Fault {
@@ -72,6 +75,7 @@ impl std::fmt::Display for Fault {
                 f.write_str("dynamic container allocation limit exceeded")
             }
             Self::NullDereference => f.write_str("null object handle dereferenced"),
+            Self::Stream(reason) => write!(f, "streaming concatenation: {reason}"),
             Self::RandomizationClassMismatch => {
                 f.write_str("class randomization through a base handle is unsupported")
             }
@@ -107,6 +111,29 @@ impl Heap {
                 record
             }
         }
+    }
+
+    /// A new named event: a handle no object or container ever gets.
+    pub fn new_event(&mut self) -> Handle {
+        self.events = true;
+        let handle = self.next_object;
+        self.next_object = handle
+            .checked_add(1)
+            .expect("the heap created more objects than handles can name");
+        handle
+    }
+
+    /// The handle the next object gets, once a named event got one: a state
+    /// file saves the handles of events as values.
+    pub fn event_watermark(&self) -> Option<Handle> {
+        self.events.then_some(self.next_object)
+    }
+
+    /// Give later objects handles from `next` on at least, so they differ
+    /// from the events of a loaded state file.
+    pub fn reserve_objects(&mut self, next: Handle) {
+        self.events = true;
+        self.next_object = self.next_object.max(next);
     }
 
     /// A new object of `class` with `size` zeroed bytes.

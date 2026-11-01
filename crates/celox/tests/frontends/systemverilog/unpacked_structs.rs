@@ -3,6 +3,55 @@
 use super::*;
 
 sv_backends! {
+    fn unpacked_struct_member_initial_values(sim) { @case "unpacked_structs::member_initial_values"; }
+    fn unpacked_struct_member_initial_values_local_lifetimes(sim) { @case "unpacked_structs::member_initial_values_local_lifetimes"; }
+    fn unpacked_struct_member_initial_values_declaration_scope(sim) { @case "unpacked_structs::member_initial_values_declaration_scope"; }
+    fn unpacked_struct_member_initial_values_specialized_functions(sim) { @case "unpacked_structs::member_initial_values_specialized_functions"; }
+    fn unpacked_struct_member_initial_values_assignment_context(sim) { @case "unpacked_structs::member_initial_values_assignment_context"; }
+    fn unpacked_struct_member_initial_values_four_state(sim) { @case "unpacked_structs::member_initial_values_four_state"; }
+    fn unpacked_struct_member_initial_values_class_properties(sim) { @case "unpacked_structs::member_initial_values_class_properties"; }
+
+    fn unpacked_struct_module_port_recursive_defaults(sim) {
+        @case "unpacked_structs::module_port_recursive_defaults";
+    }
+
+    fn unpacked_struct_module_port_patterns(sim) {
+        @case "unpacked_structs::module_port_patterns";
+    }
+    fn unpacked_struct_module_port_four_state_members(sim) {
+        @case "unpacked_structs::module_port_four_state_members";
+    }
+
+    fn unpacked_struct_module_ports(sim) {
+        @case "unpacked_structs::module_ports";
+    }
+    fn unpacked_struct_top_level_member_ports(sim) {
+        @setup {
+            let source = r#"
+                typedef struct { bit [7:0] a; bit [3:0] b; } pair_t;
+                module Top(input pair_t i, output pair_t o, output bit same);
+                    always_comb begin
+                        o = i;
+                        o.b = i.b + 1;
+                    end
+                    assign same = i == o;
+                endmodule
+            "#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("struct_ports.sv"))], "Top");
+        let ia = sim.signal("i.a");
+        let ib = sim.signal("i.b");
+        let oa = sim.signal("o.a");
+        let ob = sim.signal("o.b");
+        let same = sim.signal("same");
+        for (a, b) in [(0x12u8, 3u8), (0xfe, 15)] {
+            sim.modify(|io| { io.set(ia, a); io.set(ib, b); }).unwrap();
+            assert_eq!(sim.get(oa), BigUint::from(a));
+            assert_eq!(sim.get(ob), BigUint::from((b + 1) & 15));
+            assert_eq!(sim.get(same), BigUint::from(0u8));
+        }
+    }
+
     fn unpacked_struct_members_whole_copies_and_equality(sim) {
         @case "unpacked_structs::members_whole_copies_and_equality";
     }
@@ -341,6 +390,99 @@ sv_backends! {
         let value = sim.signal("value");
         assert_eq!(sim.get(value), BigUint::from(1231u16));
     }
+    fn structure_members_of_class_typedefs(sim) {
+        @setup {
+            let source = r#"module Top(output int value);
+                class Base;
+                    typedef enum { NEVER, STARTED, FINISHED } rs_e;
+                endclass
+                class C extends Base;
+                    typedef bit [3:0] nibble_t;
+                    typedef struct { rs_e state; nibble_t n; bit ret_val; } st_t;
+                    st_t m[string];
+                    function int f();
+                        st_t s;
+                        s.state = rs_e'(2);
+                        s.n = 4'h9;
+                        s.ret_val = 1;
+                        m["a"] = s;
+                        return m["a"].state * 100 + m["a"].n * 10 + m["a"].ret_val;
+                    endfunction
+                endclass
+                initial begin
+                    C c;
+                    c = new;
+                    value = c.f();
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("struct.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        let value = sim.signal("value");
+        assert_eq!(sim.get(value), BigUint::from(291u16));
+    }
+    fn structure_defaults_descend_to_members_of_their_type(sim) {
+        @setup {
+            let source = r#"module Top(output int value);
+                typedef struct { int n; string s; } A;
+                typedef struct { A x; A z; } B;
+                typedef struct { B b; A y; } C;
+                initial begin
+                    A a;
+                    C c;
+                    a = '{3, "abc"};
+                    c = '{default: a};
+                    value = c.b.x.n * 1000 + c.b.z.s.len() * 100 + c.y.n * 10;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("struct.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        let value = sim.signal("value");
+        assert_eq!(sim.get(value), BigUint::from(3330u16));
+    }
+    fn queue_pops_without_parentheses_are_whole_elements(sim) {
+        @setup {
+            let source = r#"module Top(output int value);
+                typedef struct { int a; string s; } row_t;
+                initial begin
+                    row_t q[$];
+                    row_t r;
+                    q = '{'{1, "a"}, '{2, "bb"}, '{3, "ccc"}};
+                    r = q.pop_front;
+                    value = r.a * 10 + r.s.len();
+                    r = q.pop_back;
+                    value = value * 100 + r.a * 10 + r.s.len() + q.size() * 1000;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("struct.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        let value = sim.signal("value");
+        assert_eq!(sim.get(value), BigUint::from(2133u16));
+    }
+    fn equal_four_state_record_updates_preserve_event_waits(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+            module Top(output bit done);
+                typedef struct { string name; logic flag; } row_t;
+                row_t d[];
+                int count, before_count;
+                initial begin
+                    d = new[1];
+                    #1 before_count = count;
+                    d[0] = d[0];
+                    #1 done = count == before_count && $isunknown(d[0].flag);
+                end
+                always @(d) count = count + 1;
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("struct.sv"))], "Top")
+            .four_state(true);
+        sim.run_until(3).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+    }
     fn unpacked_struct_module_variables(sim) {
         @case "unpacked_structs::module_variables";
     }
@@ -559,12 +701,81 @@ fn unsupported_and_illegal_uses_are_rejected() {
         let error = error.to_string();
         assert!(error.contains(want), "`{body}`: {error}");
     }
-    let source = "module Top(output i_t o); typedef struct { int a; } i_t; endmodule";
-    let Err(error) =
-        Simulator::from_sv_sources(vec![(source, Path::new("struct.sv"))], "Top").build_cranelift()
-    else {
-        panic!("an unpacked structure port is unsupported");
-    };
-    let error = error.to_string();
-    assert!(error.contains("port of unpacked structure type"), "{error}");
+}
+
+#[test]
+fn unpacked_struct_port_connections_check_nominal_types_and_expressions() {
+    for (actual, declarations) in [
+        (
+            "wrong",
+            "typedef struct { bit [7:0] a; } other_t; other_t wrong;",
+        ),
+        (
+            "'{default: wrong}",
+            "typedef struct { bit [7:0] a; } other_t; other_t wrong;",
+        ),
+        (
+            "'{a: wrong}",
+            "typedef struct { bit [7:0] a; } other_t; other_t wrong;",
+        ),
+        ("0", "row_t i;"),
+        ("i == i", "row_t i;"),
+        ("{i}", "row_t i;"),
+    ] {
+        let source = format!(
+            r#"
+            typedef struct {{ bit [7:0] a; }} row_t;
+            module Child(input row_t i); endmodule
+            module Top; {declarations} Child child(.i({actual})); endmodule
+        "#
+        );
+        let error =
+            Simulator::from_sv_sources(vec![(&source, Path::new("struct_ports.sv"))], "Top")
+                .build_native()
+                .expect_err("an incompatible structure connection must fail")
+                .to_string();
+        assert!(error.contains("unpacked structure"), "{actual}: {error}");
+    }
+}
+
+#[test]
+fn member_initial_value_boundaries_are_explicit() {
+    for (source, want) in [
+        (
+            "module Top; int runtime_value; struct { int value = runtime_value; } row; endmodule",
+            "nonconstant or unresolved unpacked structure member initial value",
+        ),
+        (
+            "module Top; struct packed { int value = 3; } row; endmodule",
+            "unsupported packed struct member",
+        ),
+        (
+            "module Top; typedef struct { int value = 3; } row_t; row_t rows[]; endmodule",
+            "dynamic container of an unpacked structure with member initial values",
+        ),
+        (
+            "module Top; typedef struct { int value = 3; } row_t; function automatic row_t make(); return '{default:0}; endfunction endmodule",
+            "unpacked structure member initial values in subroutine interfaces",
+        ),
+        (
+            "typedef struct { int value = 3; } row_t; module Top(input row_t row); endmodule",
+            "unpacked structure member initial values on a port",
+        ),
+        (
+            "module Top; typedef enum { A, B } e_t; struct { e_t value = A; } row; endmodule",
+            "unsupported unpacked structure member initial value type",
+        ),
+        (
+            "module Top; struct { string value = \"initial\"; } row; endmodule",
+            "unsupported unpacked structure member initial value type",
+        ),
+    ] {
+        let Err(error) =
+            Simulator::from_sv_sources(vec![(source, Path::new("defaults.sv"))], "Top")
+                .build_cranelift()
+        else {
+            panic!("expected unsupported: {source}");
+        };
+        assert!(error.to_string().contains(want), "{source}: {error}");
+    }
 }

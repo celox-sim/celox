@@ -1,11 +1,20 @@
-//! DPI-C imports (IEEE 1800-2023 clause 35).
+//! DPI-C imports and exports (IEEE 1800-2023 clause 35).
 //!
 //! An imported function is called through the C ABI. Arguments and results
 //! are passed by value as the C types of IEEE 1800-2023 35.5.6; other
-//! argument kinds, tasks, exports and `context` imports are rejected.
+//! argument kinds, tasks and `context` imports are rejected.
+//!
+//! An export only lets foreign code in a DPI call chain call the subroutine
+//! and does not change it (35.7). Only a `context` import may call an
+//! exported subroutine (35.5.3), so an accepted export is checked and has no
+//! further effect.
+//!
+//! The functions of UVM's C library (UVM `src/dpi`) are provided by Celox
+//! instead: an import with one of their C names and UVM's prototype binds to
+//! a [`DpiBuiltin`], so UVM runs without `UVM_NO_DPI` or a C library.
 
 use super::*;
-use crate::ir::{DpiArgument, DpiImport, DpiType};
+use crate::ir::{DpiArgument, DpiBuiltin, DpiImport, DpiType};
 
 /// The largest number of arguments an imported function may take; the
 /// limit of `celox_sir::MAX_EXTERN_CALL_ARGUMENTS`.
@@ -15,16 +24,127 @@ const MAX_DPI_ARGUMENTS: usize = 16;
 /// selection is shared with the other collectors, not rediscovered from a CST.
 pub(super) fn imports(
     items: &[generate::Item],
-    syntax: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    type_aliases: &HashMap<String, Type>,
 ) -> Result<Vec<DpiImport>, AnalyzerError> {
+    let syntax = tree.declarations();
     let mut imports = Vec::new();
+    let mut exports = HashMap::<(String, String), String>::default();
     for item in items {
-        let _interface_scope = item.interface_scope();
+        let tree = &item.scoped(tree);
         if let celox_sv_syntax::BodyItemKind::Dpi(id) = syntax.body_item(item.id).kind {
-            imports.push(import(id, syntax)?);
+            let declaration = syntax.dpi_declaration(id);
+            if declaration.import {
+                imports.push(import(id, syntax)?);
+            } else {
+                export(
+                    declaration,
+                    item,
+                    items,
+                    tree,
+                    session,
+                    type_aliases,
+                    &mut exports,
+                )?;
+            }
         }
     }
     Ok(imports)
+}
+
+/// Check the export declaration of `item` against the subroutine it names in
+/// the same elaborated scope (IEEE 1800-2023 35.7). `exports` maps the scopes
+/// and C names exported so far to their subroutines.
+fn export(
+    declaration: &celox_sv_syntax::DpiDeclaration,
+    item: &generate::Item,
+    items: &[generate::Item],
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    type_aliases: &HashMap<String, Type>,
+    exports: &mut HashMap<(String, String), String>,
+) -> Result<(), AnalyzerError> {
+    let syntax = tree.declarations();
+    use celox_sv_syntax::{BodyItemKind, Direction, DpiKind, SubroutineKind};
+    if declaration.specifier == "\"DPI\"" {
+        return Err(unsupported("\"DPI\" export (only \"DPI-C\" is supported)"));
+    }
+    let name = instances::normalize_identifier(&declaration.name.spelling);
+    let invalid = |detail: String| AnalyzerError::InvalidDpiExport {
+        name: name.clone(),
+        detail,
+    };
+    let scope = item.scope_name();
+    let subroutine = items
+        .iter()
+        .find_map(|candidate| match syntax.body_item(candidate.id).kind {
+            BodyItemKind::Subroutine(id) => {
+                let subroutine = syntax.subroutine(id);
+                (subroutine.scope.is_empty()
+                    && !subroutine.prototype
+                    && instances::normalize_identifier(&subroutine.name.spelling) == name)
+                    .then_some(subroutine)
+            }
+            _ => None,
+        })
+        .ok_or_else(|| {
+            invalid("an export names a subroutine defined in its own scope".to_owned())
+        })?;
+    let task = subroutine.kind == SubroutineKind::Task;
+    if task != (declaration.kind == DpiKind::Task) {
+        return Err(invalid(format!(
+            "`{name}` is a {}",
+            if task { "task" } else { "function" }
+        )));
+    }
+    // An exported subroutine takes the argument types of an import (35.7):
+    // no class handles and no `ref` formals (35.5.6). Types are bound in the
+    // scope of the export, as its subroutine's are.
+    let aliases = item.type_aliases(type_aliases);
+    let context = PackedDimensions::new(HashMap::default(), &item.env, &*aliases);
+    let mut class_handle = |id| -> Result<bool, AnalyzerError> {
+        Ok(type_binding::bind(id, tree, session, &context)?.is_some_and(|ty| ty.class().is_some()))
+    };
+    let ports = subroutine.ports.iter().flatten().chain(
+        subroutine
+            .port_declarations
+            .iter()
+            .flat_map(|group| &group.ports),
+    );
+    for port in ports {
+        if port.direction == Some(Direction::Ref) {
+            return Err(invalid("a `ref` formal cannot be exported".to_owned()));
+        }
+        if class_handle(port.data_type)? {
+            return Err(invalid(
+                "a class handle formal cannot be exported".to_owned(),
+            ));
+        }
+    }
+    if let Some(ty) = subroutine.return_type
+        && class_handle(ty)?
+    {
+        return Err(invalid(
+            "a class handle result cannot be exported".to_owned(),
+        ));
+    }
+    let c_name = declaration.c_name.as_ref().map_or_else(
+        || declaration.name.spelling.clone(),
+        |name| name.spelling.clone(),
+    );
+    if exports
+        .iter()
+        .any(|((exported_scope, _), exported)| exported_scope == scope && *exported == name)
+    {
+        return Err(invalid("a subroutine is exported once".to_owned()));
+    }
+    if let Some(exported) = exports.insert((scope.to_owned(), c_name.clone()), name.clone()) {
+        return Err(invalid(format!(
+            "`{exported}` is already exported as `{c_name}`"
+        )));
+    }
+    Ok(())
 }
 
 pub(super) fn import(
@@ -34,6 +154,228 @@ pub(super) fn import(
     lower_native_dpi(syntax.dpi_declaration(id), syntax)
 }
 
+/// A type in the prototype of a UVM DPI-C function.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    String,
+    Chandle,
+    Bit,
+    Int,
+    /// `uvm_hdl_data_t`, a `logic` vector.
+    HdlData,
+}
+
+/// The UVM DPI-C functions Celox provides: C name, function, result (`None`
+/// for `void`), and arguments with whether they are written.
+const BUILTINS: &[(&str, DpiBuiltin, Option<Kind>, &[(Kind, bool)])] = {
+    use DpiBuiltin::*;
+    use Kind::{Bit, Chandle, HdlData, Int, String};
+    &[
+        (
+            "uvm_re_comp",
+            ReComp,
+            Some(Chandle),
+            &[(String, false), (Bit, false)],
+        ),
+        (
+            "uvm_re_exec",
+            ReExec,
+            Some(Int),
+            &[(Chandle, false), (String, false)],
+        ),
+        ("uvm_re_free", ReFree, None, &[(Chandle, false)]),
+        (
+            "uvm_re_compexec",
+            ReCompExec,
+            Some(Chandle),
+            &[(String, false), (String, false), (Bit, false), (Int, true)],
+        ),
+        (
+            "uvm_re_compexecfree",
+            ReCompExecFree,
+            Some(Bit),
+            &[(String, false), (String, false), (Bit, false), (Int, true)],
+        ),
+        ("uvm_re_buffer", ReBuffer, Some(String), &[]),
+        (
+            "uvm_re_deglobbed",
+            ReDeglobbed,
+            Some(String),
+            &[(String, false), (Bit, false)],
+        ),
+        (
+            "uvm_dpi_get_next_arg_c",
+            NextArg,
+            Some(String),
+            &[(Int, false)],
+        ),
+        ("uvm_dpi_get_tool_name_c", ToolName, Some(String), &[]),
+        ("uvm_dpi_get_tool_version_c", ToolVersion, Some(String), &[]),
+        (
+            "uvm_hdl_check_path",
+            Unavailable,
+            Some(Int),
+            &[(String, false)],
+        ),
+        (
+            "uvm_hdl_deposit",
+            Unavailable,
+            Some(Int),
+            &[(String, false), (HdlData, false)],
+        ),
+        (
+            "uvm_hdl_force",
+            Unavailable,
+            Some(Int),
+            &[(String, false), (HdlData, false)],
+        ),
+        (
+            "uvm_hdl_read",
+            Unavailable,
+            Some(Int),
+            &[(String, false), (HdlData, true)],
+        ),
+        (
+            "uvm_hdl_release",
+            Unavailable,
+            Some(Int),
+            &[(String, false)],
+        ),
+        (
+            "uvm_hdl_release_and_read",
+            Unavailable,
+            Some(Int),
+            &[(String, false), (HdlData, true)],
+        ),
+        (
+            "uvm_hdl_signal_size",
+            Unavailable,
+            Some(Int),
+            &[(String, false)],
+        ),
+        (
+            "uvm_polling_create",
+            Unavailable,
+            Some(Chandle),
+            &[(String, false), (Int, false)],
+        ),
+        (
+            "uvm_polling_get_callback_enable",
+            Unavailable,
+            Some(Int),
+            &[(Chandle, false)],
+        ),
+        (
+            "uvm_polling_setup_notifier",
+            Unavailable,
+            Some(Int),
+            &[(String, false)],
+        ),
+        ("uvm_polling_process_changelist", Unavailable, None, &[]),
+        (
+            "uvm_polling_set_enable_callback",
+            Unavailable,
+            None,
+            &[(Chandle, false), (Int, false)],
+        ),
+        ("uvm_polling_free_mem_structures", Unavailable, None, &[]),
+    ]
+};
+
+/// The kind of a prototype type, as UVM writes it.
+fn kind(id: celox_sv_syntax::TypeId, syntax: &celox_sv_syntax::Declarations) -> Option<Kind> {
+    use celox_sv_syntax::DataTypeKind;
+    let data = syntax.data_type(id);
+    match &data.kind {
+        DataTypeKind::Builtin(name) if data.packed_dimensions.is_empty() => match name.as_str() {
+            "string" => Some(Kind::String),
+            "chandle" => Some(Kind::Chandle),
+            "bit" if data.signed.is_none() => Some(Kind::Bit),
+            "int" if data.signed.is_none() => Some(Kind::Int),
+            _ => None,
+        },
+        DataTypeKind::Builtin(name) if name == "logic" => Some(Kind::HdlData),
+        DataTypeKind::Named(path)
+            if path
+                .last()
+                .is_some_and(|part| part.name.spelling == "uvm_hdl_data_t") =>
+        {
+            Some(Kind::HdlData)
+        }
+        _ => None,
+    }
+}
+
+fn builtin_type(kind: Kind) -> DpiType {
+    match kind {
+        Kind::String => DpiType::String,
+        Kind::Chandle => DpiType::Chandle,
+        Kind::Bit => DpiType::Bit,
+        Kind::Int => DpiType::Integer {
+            width: 32,
+            signed: true,
+        },
+        // `UVM_HDL_MAX_WIDTH` bits, written by no builtin yet.
+        Kind::HdlData => DpiType::Integer {
+            width: 64,
+            signed: false,
+        },
+    }
+}
+
+/// The builtin that a UVM import with C name `c_name` binds to, when it
+/// declares UVM's prototype.
+fn builtin(
+    declaration: &celox_sv_syntax::DpiDeclaration,
+    c_name: &str,
+    syntax: &celox_sv_syntax::Declarations,
+) -> Option<DpiImport> {
+    use celox_sv_syntax::{DataTypeKind, Direction, DpiKind};
+    let &(_, builtin, result, arguments) = BUILTINS.iter().find(|(name, ..)| *name == c_name)?;
+    if !declaration.import || declaration.kind != DpiKind::Function {
+        return None;
+    }
+    let declared_result = declaration.return_type?;
+    let declared_result = match &syntax.data_type(declared_result).kind {
+        DataTypeKind::Builtin(name) if name == "void" => None,
+        _ => Some(kind(declared_result, syntax)?),
+    };
+    if declared_result != result || declaration.ports.len() != arguments.len() {
+        return None;
+    }
+    let mut written = false;
+    let mut lowered = Vec::with_capacity(arguments.len());
+    for (port, &(expected, output)) in declaration.ports.iter().zip(arguments) {
+        if let Some(direction) = port.direction {
+            written = direction != Direction::Input;
+        }
+        if written != output
+            || port.constant
+            || !port.dimensions.is_empty()
+            || port.default.is_some()
+            || kind(port.data_type, syntax) != Some(expected)
+        {
+            return None;
+        }
+        let name = port.name.as_ref()?.spelling.clone();
+        lowered.push(if output {
+            DpiArgument::output(name, builtin_type(expected))
+        } else {
+            DpiArgument::new(name, builtin_type(expected))
+        });
+    }
+    Some(
+        DpiImport::new(
+            declaration.name.spelling.clone(),
+            c_name.to_owned(),
+            false,
+            result.map(builtin_type),
+            lowered,
+        )
+        .with_builtin(builtin),
+    )
+}
+
 /// Bind an owned native body declaration to the existing C ABI/IR contract.
 /// No legacy declaration, prototype or type nodes participate in this conversion.
 fn lower_native_dpi(
@@ -41,6 +383,16 @@ fn lower_native_dpi(
     syntax: &celox_sv_syntax::Declarations,
 ) -> Result<DpiImport, AnalyzerError> {
     use celox_sv_syntax::{DataTypeKind, Direction, DpiKind, DpiProperty};
+    {
+        let name = &declaration.name.spelling;
+        let c_name = declaration
+            .c_name
+            .as_ref()
+            .map_or(name, |name| &name.spelling);
+        if let Some(import) = builtin(declaration, c_name, syntax) {
+            return Ok(import);
+        }
+    }
     if !declaration.import {
         return Err(unsupported("DPI-C export"));
     }
@@ -126,6 +478,9 @@ fn native_dpi_type(
                 signed: data_type.signed.unwrap_or(true),
             })
         }
+        // A C pointer (`void *`), a 64-bit integer on the supported hosts
+        // (IEEE 1800-2023 6.14, H.7.4).
+        DataTypeKind::Builtin(name) if name == "chandle" => Ok(DpiType::Chandle),
         DataTypeKind::Builtin(name) if matches!(name.as_str(), "integer" | "time") => Err(
             unsupported(format!("DPI-C {role} of four-state integer type")),
         ),
@@ -155,6 +510,26 @@ fn native_dpi_type(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uvm_prototypes_bind_to_builtins_by_c_name() {
+        let code = "module M;
+            import \"DPI-C\" function chandle uvm_re_comp(string re, bit deglob);
+            import \"DPI-C\" function bit uvm_re_compexecfree(string re, string str, bit deglob, output int exec_ret);
+            import \"DPI-C\" context function int uvm_hdl_read(string path, output logic [1023:0] value);
+            import \"DPI-C\" mine = function void uvm_re_free(chandle rexp);
+            import \"DPI-C\" function int uvm_re_exec(int other);
+        endmodule";
+        let source = crate::analyze_source(code, Path::new("uvm_dpi.sv")).unwrap();
+        let imports = source.modules()[0].dpi_imports();
+        assert_eq!(imports[0].builtin(), Some(DpiBuiltin::ReComp));
+        assert_eq!(imports[1].builtin(), Some(DpiBuiltin::ReCompExecFree));
+        assert!(imports[1].arguments()[3].is_output());
+        assert_eq!(imports[2].builtin(), Some(DpiBuiltin::Unavailable));
+        // Another C name, or another prototype, is an ordinary import.
+        assert_eq!(imports[3].builtin(), None);
+        assert_eq!(imports[4].builtin(), None);
+    }
 
     #[test]
     fn native_body_prototypes_bind_linkage_signedness_and_empty_argument_lists() {
@@ -190,7 +565,10 @@ mod tests {
                 "DPI-C context import",
             ),
             ("import \"DPI-C\" task f();", "DPI-C task import"),
-            ("export \"DPI-C\" function f;", "DPI-C export"),
+            (
+                "export \"DPI\" function f; function int f(); return 1; endfunction",
+                "\"DPI\" export (only \"DPI-C\" is supported)",
+            ),
             (
                 "import \"DPI-C\" function int f(input int);",
                 "DPI-C argument without a name",
@@ -220,6 +598,79 @@ mod tests {
             assert_eq!(
                 crate::analyze_source(&code, Path::new("unsupported_dpi.sv")).unwrap_err(),
                 AnalyzerError::Unsupported(want.into())
+            );
+        }
+    }
+
+    #[test]
+    fn exports_leave_their_subroutines_unchanged() {
+        let code = "module M(output int y);
+            export \"DPI-C\" function f;
+            export \"DPI-C\" c_t = task t;
+            function int f(input int a, string s); return a + s.len(); endfunction
+            task t(output int o); o = 3; endtask
+            initial begin int o; t(o); y = f(o, \"ab\"); end
+        endmodule";
+        let source = crate::analyze_source(code, Path::new("dpi_exports.sv")).unwrap();
+        assert!(source.modules()[0].dpi_imports().is_empty());
+    }
+
+    #[test]
+    fn exports_bind_formal_types_in_their_scope() {
+        // A class elsewhere that a local typedef hides does not make the
+        // formal a class handle.
+        let code = "package p; class C; endclass endpackage
+        module M(output int y);
+            typedef int C;
+            export \"DPI-C\" function f;
+            function int f(C a); return a + 1; endfunction
+            initial y = f(2);
+        endmodule";
+        let source = crate::analyze_source(code, Path::new("dpi_export_scopes.sv")).unwrap();
+        assert!(source.modules()[0].dpi_imports().is_empty());
+    }
+
+    #[test]
+    fn exports_that_35_7_forbids_are_rejected() {
+        for (items, want) in [
+            (
+                "export \"DPI-C\" function f;",
+                "an export names a subroutine defined in its own scope",
+            ),
+            (
+                "export \"DPI-C\" function f; task f(); endtask",
+                "`f` is a task",
+            ),
+            (
+                "export \"DPI-C\" task f; function int f(); return 1; endfunction",
+                "`f` is a function",
+            ),
+            (
+                "export \"DPI-C\" function f; export \"DPI-C\" g = function f; \
+                 function int f(); return 1; endfunction",
+                "a subroutine is exported once",
+            ),
+            (
+                "export \"DPI-C\" f = function f; export \"DPI-C\" f = function g; \
+                 function int f(); return 1; endfunction function int g(); return 2; endfunction",
+                "`f` is already exported as `f`",
+            ),
+            (
+                "export \"DPI-C\" function f; function int f(ref int a); return a; endfunction",
+                "a `ref` formal cannot be exported",
+            ),
+            (
+                "class C; endclass export \"DPI-C\" function f; \
+                 function int f(C c); return 1; endfunction",
+                "a class handle formal cannot be exported",
+            ),
+        ] {
+            let code = format!("module M; {items} endmodule");
+            let error =
+                crate::analyze_source(&code, Path::new("invalid_dpi_export.sv")).unwrap_err();
+            assert!(
+                matches!(&error, AnalyzerError::InvalidDpiExport { detail, .. } if detail == want),
+                "{items}: {error:?}"
             );
         }
     }

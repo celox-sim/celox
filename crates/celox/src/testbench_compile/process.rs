@@ -20,6 +20,7 @@ fn stable(var_id: Addr) -> RegionedVarAddrBase<Addr> {
 }
 struct Lower<'a> {
     runtime: &'a mut RuntimeProgram,
+    four_state: bool,
     kernel: ProcessKernelBuilder<Addr>,
     requests: Vec<KernelRequest<Addr>>,
     site: usize,
@@ -37,6 +38,76 @@ impl Lower<'_> {
             .insert(address);
         address
     }
+    /// A slot that saves `value` with its unknown bits.
+    fn saved_slot(&mut self, width: usize, string: bool, value: RegisterId) -> Addr {
+        if !self.is_logic(value) {
+            return self.slot(width, string);
+        }
+        let address = self.runtime.design.allocate_testbench_logic_slot(width);
+        self.runtime
+            .runtime_schema
+            .testbench_read_roots
+            .insert(address);
+        address
+    }
+    /// Whether loads of `address` keep its unknown bits.
+    fn holds_logic(&self, address: Addr) -> bool {
+        self.four_state
+            && self
+                .runtime
+                .design
+                .state_objects
+                .get(&address)
+                .is_some_and(|object| object.is_4state)
+    }
+    fn is_logic(&mut self, register: RegisterId) -> bool {
+        matches!(
+            self.kernel.builder().register(&register),
+            celox_sir::RegisterType::Logic { .. }
+        )
+    }
+    /// A `width`-bit register for a result computed from `operands`.
+    fn alloc(&mut self, width: usize, signed: bool, operands: &[RegisterId]) -> RegisterId {
+        if operands.iter().any(|&operand| self.is_logic(operand)) {
+            self.kernel.builder().alloc_logic(width.max(1))
+        } else {
+            self.kernel.builder().alloc_bit(width.max(1), signed)
+        }
+    }
+    /// The bit offset of a selected write: an offset with unknown bits is
+    /// invalid and selects nothing (IEEE 1800-2023 11.5.1).
+    fn index(&mut self, offset: RegisterId) -> RegisterId {
+        if !self.is_logic(offset) {
+            return offset;
+        }
+        let known = self.two_state(offset);
+        let valid = self.kernel.builder().alloc_bit(1, false);
+        self.kernel
+            .builder()
+            .emit(Inst::Binary(valid, offset, BinaryOp::EqCase, known));
+        // At least 64 bits, so that the replacement lies past every object.
+        let width = self.kernel.builder().register(&offset).width().max(64);
+        let known = self.cast(known, width, false);
+        let past = self.imm(width, (BigUint::from(1u8) << width) - BigUint::from(1u8));
+        let index = self.kernel.builder().alloc_bit(width, false);
+        self.kernel
+            .builder()
+            .emit(Inst::Mux(index, valid, known, past));
+        index
+    }
+    /// `value` with its unknown bits read as 0, as a two-state use reads them
+    /// (IEEE 1800-2023 6.11.2).
+    fn two_state(&mut self, value: RegisterId) -> RegisterId {
+        if !self.is_logic(value) {
+            return value;
+        }
+        let width = self.kernel.builder().register(&value).width();
+        let reg = self.kernel.builder().alloc_bit(width, false);
+        self.kernel
+            .builder()
+            .emit(Inst::Unary(reg, UnaryOp::ToTwoState, value));
+        reg
+    }
     fn imm(&mut self, width: usize, value: impl Into<BigUint>) -> RegisterId {
         let reg = self.kernel.builder().alloc_bit(width.max(1), false);
         self.kernel.builder().emit(Inst::Imm(
@@ -48,7 +119,11 @@ impl Lower<'_> {
         reg
     }
     fn load(&mut self, address: Addr, width: usize, signed: bool) -> RegisterId {
-        let reg = self.kernel.builder().alloc_bit(width.max(1), signed);
+        let reg = if self.holds_logic(address) {
+            self.kernel.builder().alloc_logic(width.max(1))
+        } else {
+            self.kernel.builder().alloc_bit(width.max(1), signed)
+        };
         self.kernel.builder().emit(Inst::Load(
             reg,
             stable(address),
@@ -121,7 +196,11 @@ impl Lower<'_> {
             let start = self.imm(offset_width.max(64), tail as u64);
             let shift = self.binary(BinaryOp::Sub, bound, start, offset_width.max(64));
             let shift = self.cast(shift, 64, false);
-            let old = self.kernel.builder().alloc_bit(width, false);
+            let old = if self.holds_logic(address) {
+                self.kernel.builder().alloc_logic(width)
+            } else {
+                self.kernel.builder().alloc_bit(width, false)
+            };
             self.kernel.builder().emit(Inst::Load(
                 old,
                 stable(address),
@@ -155,7 +234,7 @@ impl Lower<'_> {
     fn cast(&mut self, value: RegisterId, width: usize, signed: bool) -> RegisterId {
         let source = self.kernel.builder().register(&value).width();
         let extend = self.kernel.builder().register(&value).is_signed() && width > source;
-        let reg = self.kernel.builder().alloc_bit(width.max(1), signed);
+        let reg = self.alloc(width, signed, &[value]);
         if width < source {
             self.kernel
                 .builder()
@@ -169,7 +248,7 @@ impl Lower<'_> {
             let shift = self.imm(64, (width - source) as u64);
             let reg = self.binary(BinaryOp::Shl, reg, shift, width);
             let reg = self.binary(BinaryOp::Sar, reg, shift, width);
-            let typed = self.kernel.builder().alloc_bit(width.max(1), signed);
+            let typed = self.alloc(width, signed, &[reg]);
             self.kernel
                 .builder()
                 .emit(Inst::Unary(typed, UnaryOp::Ident, reg));
@@ -209,7 +288,7 @@ impl Lower<'_> {
             l = self.cast(l, lw.max(rw), signed);
             r = self.cast(r, lw.max(rw), signed);
         }
-        let reg = self.kernel.builder().alloc_bit(width.max(1), false);
+        let reg = self.alloc(width, false, &[l, r]);
         self.kernel.builder().emit(Inst::Binary(reg, l, op, r));
         reg
     }
@@ -228,8 +307,18 @@ impl Lower<'_> {
                 byte_offset: location.byte_offset,
             })
         })?;
+        let state_objects = &self.runtime.design.state_objects;
+        let four_state = self.four_state;
+        let logic = |address: &RegionedVarAddrBase<Addr>| {
+            four_state
+                && state_objects
+                    .get(&address.var_id)
+                    .is_some_and(|object| object.is_4state)
+        };
         let value = lowering::Expressions {
             builder: self.kernel.builder(),
+            four_state,
+            logic: &logic,
         }
         .compile(&expr)?;
         let writes: Vec<_> = expr
@@ -250,7 +339,7 @@ impl Lower<'_> {
         // Host requests resume through a fresh kernel entry. Preserve the
         // expression result in layout-owned state across that boundary.
         let width = self.kernel.builder().register(&value.register).width();
-        let saved = self.slot(width, value.string);
+        let saved = self.saved_slot(width, value.string, value.register);
         self.store(saved, width, value.register);
         for address in writes {
             let width = self.runtime.design.state_objects[&address].width;
@@ -324,6 +413,12 @@ impl Lower<'_> {
                     else_block,
                 } => {
                     let cond = self.settled_expression(expr)?.register;
+                    let cond = lowering::Expressions {
+                        builder: self.kernel.builder(),
+                        four_state: self.four_state,
+                        logic: &|_| false,
+                    }
+                    .condition(cond);
                     let yes = self.kernel.builder().new_block();
                     let no = self.kernel.builder().new_block();
                     let join = self.kernel.builder().new_block();
@@ -346,8 +441,14 @@ impl Lower<'_> {
                 TestbenchStatement::Assign { dst, expr } => {
                     let expression = self.settled_expression(expr)?;
                     let value = self.cast(expression.register, dst.width, false);
+                    // A two-state destination stores no unknown bits.
+                    let value = if self.holds_logic(dst.signal.address) {
+                        value
+                    } else {
+                        self.two_state(value)
+                    };
                     let saved = if dst.selection.is_some() {
-                        let saved = self.slot(dst.width, expression.string);
+                        let saved = self.saved_slot(dst.width, expression.string, value);
                         self.store(saved, dst.width, value);
                         Some(saved)
                     } else {
@@ -355,6 +456,7 @@ impl Lower<'_> {
                     };
                     if let Some(selection) = &dst.selection {
                         let offset = self.settled_expression(&selection.offset)?.register;
+                        let offset = self.index(offset);
                         let saved = saved.expect("selected assignments save their value");
                         self.selected_store(
                             dst.signal.address,
@@ -414,6 +516,7 @@ impl Lower<'_> {
                 signed,
             } => {
                 let value = self.settled_expression(expr)?.register;
+                let value = self.two_state(value);
                 (self.cast(value, *width, *signed), *width, *signed)
             }
         })
@@ -644,6 +747,7 @@ pub(crate) fn lower(
     sir: &mut SirProgram,
     runtime: &mut RuntimeProgram,
     program: &mut TestbenchProgram<Addr>,
+    four_state: bool,
 ) -> Result<(), String> {
     let mut kernels = Vec::new();
     let external_observers = !program.component_bindings().is_empty()
@@ -654,7 +758,28 @@ pub(crate) fn lower(
             .processes
             .iter()
             .any(|p| p.kind != ProcessKind::Callable);
+    let marker_site = event_site(runtime, marker_event_site());
+    let mut display_sites = Vec::new();
     for body in program.processes() {
+        let mut statements = Vec::new();
+        statement_sites(body, &mut statements);
+        display_sites.push(
+            statements
+                .into_iter()
+                .enumerate()
+                .filter_map(|(site, statement)| {
+                    let SemanticStatement::Display { message, newline } = statement else {
+                        return None;
+                    };
+                    Some((
+                        site,
+                        event_site(runtime, display_event_site(message, *newline)?),
+                    ))
+                })
+                .collect::<Vec<_>>(),
+        );
+    }
+    for (body, display_sites) in program.processes().zip(display_sites) {
         let slots = ProcessSlots {
             kind: ProcessKind::Callable,
             requires_timed_simulation: false,
@@ -669,6 +794,7 @@ pub(crate) fn lower(
         }
         let mut lower = Lower {
             runtime,
+            four_state,
             kernel: ProcessKernelBuilder::new(slots),
             requests: vec![],
             site: 0,
@@ -697,14 +823,103 @@ pub(crate) fn lower(
             status: slots.status,
             request: slots.delay,
             requests: lower.requests,
+            display_sites,
         });
     }
     program.set_kernels(kernels);
-    allocate_scheduler(runtime, program);
+    allocate_scheduler(runtime, program, marker_site);
     Ok(())
 }
 
-fn allocate_scheduler(runtime: &mut RuntimeProgram, program: &mut TestbenchProgram<Addr>) {
+/// The statements of `body` in site order: each statement before the
+/// statements it contains.
+fn statement_sites<'a>(
+    body: &'a [SemanticStatement<Addr>],
+    out: &mut Vec<&'a SemanticStatement<Addr>>,
+) {
+    for statement in body {
+        out.push(statement);
+        match statement {
+            SemanticStatement::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                statement_sites(then_block, out);
+                statement_sites(else_block, out);
+            }
+            SemanticStatement::For { body, .. } => statement_sites(body, out),
+            _ => {}
+        }
+    }
+}
+
+fn event_site(runtime: &mut RuntimeProgram, site: celox_design::RuntimeEventSite) -> u32 {
+    let sites = &mut runtime.runtime_schema.runtime_event_sites;
+    sites.push(site);
+    (sites.len() - 1) as u32
+}
+
+/// A record that prints nothing and carries a simulation time.
+fn marker_event_site() -> celox_design::RuntimeEventSite {
+    celox_design::RuntimeEventSite {
+        kind: celox_design::RuntimeEventKind::Write,
+        template: Some(String::new()),
+        sizing: celox_design::DisplaySizing::Veryl,
+        scope: None,
+        location: None,
+        assertion: None,
+        deferred: None,
+        timestamp_arg: false,
+        arg_widths: vec![64],
+        arg_signed: vec![false],
+        arg_is_string: vec![false],
+        arg_float_precision: vec![None],
+        arg_is_handle: Vec::new(),
+    }
+}
+
+/// The site a `$display` records its message at, formatted as the host
+/// formats it. String arguments are heap handles in compiled code, which
+/// the host formats itself: `None` for those.
+pub(crate) fn display_event_site(
+    message: &Option<AssertMessage<SemanticArgument<Addr>>>,
+    newline: bool,
+) -> Option<celox_design::RuntimeEventSite> {
+    let (template, args) = match message {
+        None => (Some(String::new()), &[][..]),
+        Some(AssertMessage::Formatted { template, args }) => (Some(template.clone()), &args[..]),
+        Some(AssertMessage::DynamicArgs(args)) => (None, &args[..]),
+    };
+    if args.iter().any(|arg| arg.is_string) {
+        return None;
+    }
+    Some(celox_design::RuntimeEventSite {
+        kind: if newline {
+            celox_design::RuntimeEventKind::Display
+        } else {
+            celox_design::RuntimeEventKind::Write
+        },
+        template,
+        sizing: celox_design::DisplaySizing::Veryl,
+        scope: None,
+        location: None,
+        assertion: None,
+        deferred: None,
+        timestamp_arg: false,
+        arg_widths: args.iter().map(|arg| arg.width.max(1)).collect(),
+        arg_signed: args.iter().map(|arg| arg.signed).collect(),
+        arg_is_string: vec![false; args.len()],
+        arg_float_precision: args.iter().map(|arg| arg.float_precision).collect(),
+        arg_is_handle: Vec::new(),
+    })
+}
+
+fn allocate_scheduler(
+    runtime: &mut RuntimeProgram,
+    program: &mut TestbenchProgram<Addr>,
+    marker_site: u32,
+) {
     fn collect(body: &[SemanticStatement<Addr>], clocks: &mut Vec<(Addr, u64)>) {
         for statement in body {
             match statement {
@@ -735,12 +950,8 @@ fn allocate_scheduler(runtime: &mut RuntimeProgram, program: &mut TestbenchProgr
             }
         }
     }
-    let mut clocks: Vec<_> = program
-        .clocks()
-        .iter()
-        .map(|c| (c.event, c.period.max(2)))
-        .collect();
-    let declared = clocks.len();
+    // Only clocks some process waits on take edges.
+    let mut clocks = Vec::new();
     collect(program.statements(), &mut clocks);
     let mut slot = || {
         let a = runtime.design.allocate_testbench_slot(64, false);
@@ -802,8 +1013,8 @@ fn allocate_scheduler(runtime: &mut RuntimeProgram, program: &mut TestbenchProgr
         clocks: clock_slots,
         events: clocks.iter().map(|c| c.0).collect(),
         periods: clocks.iter().map(|c| c.1).collect(),
-        declared,
         locals,
         baselines,
+        marker_site: Some(marker_site),
     });
 }

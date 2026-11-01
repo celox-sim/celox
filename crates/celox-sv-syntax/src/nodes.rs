@@ -294,6 +294,24 @@ pub struct AssignSyntax {
     pub tokens: TokenRange,
 }
 
+/// A scalar n-input logic gate declaration (IEEE 1800-2023 28.4).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LogicGate {
+    pub kind: String,
+    pub strength: Option<DriveStrength>,
+    pub delay: Option<AssignmentDelay>,
+    pub instances: Vec<LogicGateInstance>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LogicGateInstance {
+    pub name: Option<Name>,
+    pub dimensions: Vec<Dimension>,
+    /// Output first, followed by one or more inputs.
+    pub terminals: Vec<ExprId>,
+    pub tokens: TokenRange,
+}
+
 /// Stable handle for an authored parameter/localparam statement in any scope.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct ParameterDeclarationId(pub(crate) usize);
@@ -322,6 +340,11 @@ pub struct Port {
     pub data_type: Option<TypeId>,
     pub dimensions: Vec<Dimension>,
     pub default: Option<ExprId>,
+    /// The type of the port declaration of a non-ANSI port whose net or
+    /// variable declaration repeats its range in other words. The ranges
+    /// must have the same bounds (IEEE 1800-2023 23.2.2.1), which takes
+    /// parameter values to check.
+    pub declared_type: Option<TypeId>,
     pub tokens: TokenRange,
 }
 
@@ -658,6 +681,7 @@ pub enum BodyItemKind {
     Dpi(DpiId),
     Parameter(ParameterDeclarationId),
     Assign(AssignId),
+    LogicGate(Box<LogicGate>),
     Procedure(ProcedureId),
     Subroutine(SubroutineId),
     TypeAlias(TypeAliasId),
@@ -1168,9 +1192,10 @@ pub enum StatementKind {
         right: ExprId,
         nonblocking: bool,
         timing: Option<TokenRange>,
-        /// Native event payload within an otherwise unsupported intra-assignment
-        /// control. Delay/cycle and repeat-count syntax retains its token range.
-        event_control: Option<TimingControlId>,
+        /// Native delay or event payload; cycle controls remain unsupported.
+        timing_control: Option<TimingControlId>,
+        /// A repeat count evaluated once before an intra-assignment event wait.
+        repeat_count: Option<ExprId>,
     },
     Expression(ExprId),
     Declaration(LocalDeclaration),
@@ -1199,7 +1224,12 @@ pub enum StatementKind {
         failure: Option<StatementId>,
     },
     Disable(TokenRange),
-    EventTrigger(TokenRange),
+    /// `-> e;` or `->> [control] e;` (IEEE 1800-2023 15.5.1).
+    EventTrigger {
+        nonblocking: bool,
+        control: Option<TimingControlId>,
+        target: ExprId,
+    },
     ProceduralRelease(TokenRange),
     Unconverted {
         category: String,

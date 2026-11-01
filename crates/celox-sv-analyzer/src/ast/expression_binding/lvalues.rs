@@ -1,31 +1,42 @@
 //! Assignment targets bind native name/member/selection identities directly.
 use super::*;
+/// The variable target `root` of a procedural write, which may be a chandle
+/// if `chandle`: an assignment with `=` writes one (IEEE 1800-2023 6.14).
 pub(in crate::ast) fn variable_lvalue(
     root: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
+    chandle: bool,
 ) -> Converted<LValue> {
-    direct::selected_lvalue(root, native, tree, dimensions, false)
+    chandles::check_target(chandle, root, tree, native, dimensions, session)?;
+    direct::selected_lvalue(root, native, tree, session, dimensions, false)
 }
 pub(in crate::ast) fn net_lvalue(
     root: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<LValue> {
-    if direct::member_context(root, native, tree, dimensions)?
+    // No continuous assignment drives a chandle (6.14).
+    chandles::check_target(false, root, tree, native, dimensions, session)?;
+    if direct::member_context(root, native, tree, session, dimensions)?
         .is_some_and(|(guards, _)| !guards.is_empty())
     {
         return Err(unsupported("continuous driver of a tagged union member"));
     }
-    direct::selected_lvalue(root, native, tree, dimensions, true)
+    let target = direct::selected_lvalue(root, native, tree, session, dimensions, true)?;
+    crate::ast::virtual_interfaces::check_target(&target)?;
+    Ok(target)
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn deep_native_target_range_bounds_and_widths_use_worklists() {
+        let session = &mut Session::default();
         let path = Path::new("deep-native-target-range.sv");
         for continuous in [false, true] {
             let prefix = if continuous { "assign" } else { "initial" };
@@ -59,9 +70,16 @@ mod tests {
                         .unwrap()
                 };
                 let target = if continuous {
-                    net_lvalue(root, &native, &tree, &PackedDimensions::default())
+                    net_lvalue(root, &native, &tree, session, &PackedDimensions::default())
                 } else {
-                    variable_lvalue(root, &native, &tree, &PackedDimensions::default())
+                    variable_lvalue(
+                        root,
+                        &native,
+                        &tree,
+                        session,
+                        &PackedDimensions::default(),
+                        false,
+                    )
                 }
                 .unwrap();
                 let LValue::Select { msb, lsb, .. } = target else {
@@ -77,6 +95,7 @@ mod tests {
     }
     #[test]
     fn deep_native_target_indices_bind_without_recursive_native_traversal() {
+        let session = &mut Session::default();
         let path = Path::new("deep-native-target.sv");
         for continuous in [false, true] {
             let prefix = if continuous { "assign" } else { "initial" };
@@ -108,9 +127,16 @@ mod tests {
                     .unwrap()
             };
             let target = if continuous {
-                net_lvalue(root, &native, &tree, &PackedDimensions::default())
+                net_lvalue(root, &native, &tree, session, &PackedDimensions::default())
             } else {
-                variable_lvalue(root, &native, &tree, &PackedDimensions::default())
+                variable_lvalue(
+                    root,
+                    &native,
+                    &tree,
+                    session,
+                    &PackedDimensions::default(),
+                    false,
+                )
             }
             .unwrap();
             let LValue::Select { msb, lsb, .. } = target else {

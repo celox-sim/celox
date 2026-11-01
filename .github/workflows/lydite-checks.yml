@@ -24,7 +24,8 @@ env:
   CARGO_INCREMENTAL: "0"
   # The workspace release profile uses fat LTO for the simulator. lydite's
   # gates hash the checker they build, so a faster profile changes nothing.
-  CARGO_PROFILE_RELEASE_LTO: "false"
+  CARGO_PROFILE_DEV_LTO: "off"
+  CARGO_PROFILE_RELEASE_LTO: "off"
   CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
 
 defaults:

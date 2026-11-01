@@ -6,10 +6,11 @@ pub(super) fn connections(
     key: interface_binding::InstanceKey,
     native: &InstanceDeclarator,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
     interface: Option<&ModuleInterface>,
 ) -> Result<Vec<PortConnection>, AnalyzerError> {
-    let imported = scope::imported(&tree.state);
+    let imported = scope::imported(tree);
     let binding = imported.interface_instances.get(&key);
     if native.connections.is_empty() {
         return Ok(Vec::new());
@@ -50,7 +51,13 @@ pub(super) fn connections(
                 continue;
             }
             if let Some(id) = value {
-                lowered.push(expression_connection(formal.clone(), id, tree, dimensions)?);
+                lowered.push(expression_connection(
+                    formal.clone(),
+                    id,
+                    tree,
+                    session,
+                    dimensions,
+                )?);
             }
         }
     } else {
@@ -66,7 +73,9 @@ pub(super) fn connections(
                         continue;
                     }
                     if let ConnectionValue::Expression(id) = value {
-                        lowered.push(expression_connection(formal, *id, tree, dimensions)?);
+                        lowered.push(expression_connection(
+                            formal, *id, tree, session, dimensions,
+                        )?);
                         continue;
                     }
                     let actual_expr = match value {
@@ -76,6 +85,7 @@ pub(super) fn connections(
                             *id,
                             tree.declarations(),
                             tree,
+                            session,
                             dimensions,
                         )?),
                     };
@@ -96,6 +106,7 @@ fn expression_connection(
     formal: String,
     root: celox_sv_syntax::ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<PortConnection> {
     let native = tree.declarations();
@@ -105,10 +116,22 @@ fn expression_connection(
         celox_sv_syntax::ExprKind::Pattern { target: None, .. }
     ) {
         let mut connection = PortConnection::new(formal.clone(), formal, None);
-        connection.bound_pattern = Some(bound_patterns::from_port(root, tree, dims)?);
+        connection.bound_pattern = Some(bound_patterns::from_port(root, tree, session, dims)?);
         return Ok(connection);
     }
-    let expr = expression_binding::value(root, native, tree, dims)?;
-    let actual = expr_ident_name(&expr).unwrap_or_else(|| formal.clone());
+    let expr = expression_binding::value(root, native, tree, session, dims)?;
+    let actual = unpacked_structs::native_member(root, native, dims)
+        .or_else(|| match &native.expression(root).kind {
+            celox_sv_syntax::ExprKind::Name(name)
+                if dims
+                    .get(&normalize_identifier(&name.spelling))
+                    .is_some_and(|ty| ty.unpacked_struct.is_some()) =>
+            {
+                Some(normalize_identifier(&name.spelling))
+            }
+            _ => None,
+        })
+        .or_else(|| expr_ident_name(&expr))
+        .unwrap_or_else(|| formal.clone());
     Ok(PortConnection::new(formal, actual, Some(expr)))
 }

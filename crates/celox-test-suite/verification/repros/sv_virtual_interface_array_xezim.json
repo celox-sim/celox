@@ -1,0 +1,23 @@
+{
+  "tool": "xezim",
+  "version": "xezim version 0.11.3",
+  "source": "sv_virtual_interface_array_xezim.sv",
+  "standard": "IEEE 1800-2023 25.9, 7.4.5",
+  "command": "xezim sv_virtual_interface_array_xezim.sv",
+  "expected_output": "12",
+  "observations": [
+    {
+      "exit_code": 0,
+      "output": "xx\nSimulation finished at time 0\n"
+    }
+  ],
+  "verilator_version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "verilator_observations": [
+    {
+      "build_exit_code": 0,
+      "exit_code": 0,
+      "output": "12\n"
+    }
+  ],
+  "note": "`grid[0][1]` is an element of a two-dimensional array of virtual interfaces that denotes `a`, so writing `grid[0][1].data` writes a.data (25.9). xezim 0.11.3 loses the write and prints a.data as xx; with a one-dimensional or package array it writes the member. Verilator 5.052 and Celox print 12."
+}

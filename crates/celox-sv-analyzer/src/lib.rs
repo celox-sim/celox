@@ -2,7 +2,8 @@
     test,
     allow(
         clippy::disallowed_macros,
-        reason = "thread-local counters exist only in unit tests; non-test library builds enforce the ban"
+        clippy::disallowed_types,
+        reason = "thread-local counters and their cells exist only in unit tests; non-test library builds enforce the bans"
     )
 )]
 //! SystemVerilog analyzer for Celox.
@@ -36,7 +37,11 @@ pub use ast::interfaces::{
     InterfacePrototype, interface_prototypes, interface_prototypes_for,
     interface_prototypes_with_options,
 };
-pub use ast::packages::Packages;
+pub use ast::packages::{Design, Packages};
+pub use ast::virtual_interfaces::{
+    VirtualInterface, VirtualInterfaceDeclaration, VirtualInterfaceMember, VirtualInterfaceSignal,
+    VirtualInterfaces,
+};
 pub use ast::{ModuleInterface, ModuleInterfaces};
 pub use ir::Ir;
 pub use parsed::ParsedSource;
@@ -46,14 +51,23 @@ pub use parsed::ParsedSource;
 pub const DIV_ZERO_UNKNOWN_LITERAL: &str = "$celox_div_zero_unknown";
 
 /// Language compatibility checks and implementation-defined timing defaults.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct AnalysisOptions {
     pub allow_mixed_timescales: bool,
     /// Compatibility mode: return zero for every empty array reduction,
     /// rather than the product/bitwise-AND identity. Disabled by default.
     pub legacy_empty_reductions: bool,
+    /// Treat a variable that only several `always @*` blocks write, each
+    /// before it reads it, and that nothing else reads, as a temporary of
+    /// each block, instead of a variable whose writes wake the other blocks
+    /// (IEEE 1800-2023 9.4.2.2). Off by default; see the
+    /// `shared_always_temporary` diagnostic.
+    pub shared_always_temporaries: bool,
     /// Default unit/precision exponents; precision also bounds global resolution.
     pub default_timescale: Option<(i32, i32)>,
+    /// The virtual interfaces of the design (IEEE 1800-2023 25.9), which the
+    /// frontend provides when the design declares virtual interface types.
+    pub virtual_interfaces: Option<std::sync::Arc<ast::virtual_interfaces::VirtualInterfaces>>,
 }
 
 /// Errors reported by the SystemVerilog analyzer.
@@ -70,6 +84,9 @@ pub enum AnalyzerError {
     Parse(String),
     #[error("Unsupported SystemVerilog construct: {0}")]
     Unsupported(String),
+    /// IEEE 1800-2023 Table 10-1: a procedural assignment needs a variable.
+    #[error("procedural assignment to net `{name}`")]
+    ProceduralNetAssignment { name: String },
     /// A class member is inaccessible from the lexical scope (IEEE 1800-2023 8.18).
     #[error("{visibility} class member `{owner}::{name}` is not accessible from this scope")]
     InaccessibleClassMember {
@@ -160,8 +177,8 @@ pub enum AnalyzerError {
     )]
     IncompatibleUnpackedArray {
         context: String,
-        actual: typecheck::UnpackedArrayType,
-        target: typecheck::UnpackedArrayType,
+        actual: String,
+        target: String,
     },
     /// A handle of class `actual` assigned to a variable of class `target`
     /// that `actual` neither derives from nor implements; only `$cast` may
@@ -174,6 +191,19 @@ pub enum AnalyzerError {
         actual: String,
         target: String,
     },
+    /// A value assigned to or compared with a virtual interface that is not
+    /// `null`, a virtual interface or an interface instance of its type
+    /// (IEEE 1800-2023 25.9).
+    #[error("{context}: {actual} is not assignment compatible with `{target}`")]
+    IncompatibleVirtualInterface {
+        context: String,
+        actual: String,
+        target: String,
+    },
+    /// An assignment to a member that the modport of a virtual interface
+    /// lists as an input (IEEE 1800-2023 25.5, 23.3.3.4).
+    #[error("assignment to `{member}`, an input of `{target}`")]
+    InputModportAssignment { member: String, target: String },
     /// `posedge`, `negedge` or `edge` of a real expression, which has no
     /// least significant bit to judge the edge on (IEEE 1800-2023 6.12).
     #[error("`{edge}` of a real expression: edge event controls do not apply to reals")]
@@ -209,6 +239,9 @@ pub enum AnalyzerError {
     UnknownClassParameter { class: String, name: String },
     /// A `ref` or `const ref` formal bound to an actual, or used in a way,
     /// that IEEE 1800-2023 13.5.2 forbids.
+    /// A use of a `chandle` that IEEE 1800-2023 6.14 does not allow.
+    #[error("chandle: {detail} (IEEE 1800-2023 6.14)")]
+    IllegalChandleUse { detail: String },
     #[error("ref argument `{argument}` of `{subroutine}`: {detail}")]
     InvalidRefArgument {
         subroutine: String,
@@ -221,6 +254,13 @@ pub enum AnalyzerError {
     /// none for a formal without a default (13.5.3).
     #[error("arguments of `{subroutine}`: {detail}")]
     InvalidCallArguments { subroutine: String, detail: String },
+    /// A DPI export declaration that IEEE 1800-2023 35.7 forbids.
+    #[error("DPI-C export of `{name}`: {detail}")]
+    InvalidDpiExport { name: String, detail: String },
+    /// A streaming concatenation that IEEE 1800-2023 11.4.14 forbids, such
+    /// as one wider than its fixed-size target.
+    #[error("streaming concatenation: {0} (IEEE 1800-2023 11.4.14)")]
+    InvalidStream(String),
 }
 
 impl miette::Diagnostic for AnalyzerError {}
@@ -377,7 +417,7 @@ fn analyze_interface_source(
 ) -> Result<Ir, AnalyzerError> {
     let source = ParsedSource::parse(code, path)?;
     let packages = ParsedSource::analyze_packages(&[&source])?;
-    let plan = &packages.interface_plan;
+    let plan = packages.interface_plan.clone();
     let mut names = source
         .module_names()
         .iter()
@@ -433,6 +473,7 @@ fn analyze_interface_source(
             &[],
             &ModuleInterfaces::default(),
             &packages,
+            &mut packages.design(),
         )?;
         modules.extend(ir.modules().iter().cloned());
         warnings.extend(ir.warnings().iter().cloned());
@@ -546,6 +587,7 @@ pub fn analyze_source_module_with_packages(
     module_name: &str,
     parameter_overrides: &HashMap<String, i128>,
     packages: &Packages,
+    design: &mut Design,
 ) -> Result<Ir, AnalyzerError> {
     let overrides = parameter_overrides
         .iter()
@@ -569,5 +611,6 @@ pub fn analyze_source_module_with_packages(
         &[],
         &ModuleInterfaces::default(),
         packages,
+        design,
     )
 }

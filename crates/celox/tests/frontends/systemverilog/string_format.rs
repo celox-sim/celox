@@ -19,6 +19,10 @@ sv_backends! {
     fn display_later_formats(sim) { @case "string_format::display_later_formats"; }
     fn pattern_format(sim) { @case "string_format::pattern_format"; }
     fn pattern_format_keys_and_handles(sim) { @case "string_format::pattern_format_keys_and_handles"; }
+    fn pattern_format_structure_containers(sim) { @case "string_format::pattern_format_structure_containers"; }
+    fn pattern_format_structure_values(sim) { @case "string_format::pattern_format_structure_values"; }
+    fn pattern_format_enums(sim) { @case "string_format::pattern_format_enums"; }
+    fn formatted_strings_into_integral_outputs(sim) { @case "string_format::formatted_strings_into_integral_outputs"; }
     // A string literal operand leaves a conditional integral (5.9): `%p`
     // prints it unformatted, not in quotes.
     fn pattern_format_conditional_string_literal(sim) {
@@ -44,6 +48,34 @@ sv_backends! {
             celox::RuntimeEvent::Display { message: b"65".to_vec() },
             celox::RuntimeEvent::Display { message: b"65".to_vec() },
             celox::RuntimeEvent::Display { message: b"66".to_vec() },
+        ]);
+    }
+    // An enum operand leaves a conditional integral unless the other operand
+    // has the same enumerated type (11.4.11).
+    fn pattern_format_mixed_enum_conditional(sim) {
+        @setup {
+            let source = r#"
+                module Top;
+                    typedef enum {A, B} e_t;
+                    bit f;
+                    string s;
+                    initial begin
+                        f = 1;
+                        $display("%p", f ? B : 0);
+                        s = $sformatf("%p", f ? B : 7);
+                        $display("%s", s);
+                        f = 0;
+                        $display("%p", f ? B : 7);
+                    end
+                endmodule
+            "#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("pattern_enum.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.drain_runtime_events(), vec![
+            celox::RuntimeEvent::Display { message: b"1".to_vec() },
+            celox::RuntimeEvent::Display { message: b"1".to_vec() },
+            celox::RuntimeEvent::Display { message: b"7".to_vec() },
         ]);
     }
     // External testbenches wrap the design, so the hierarchical name `%m`
@@ -158,14 +190,13 @@ fn later_formats_keep_default_conversions_of_locals() {
 #[test]
 fn pattern_format_rejects_unsupported_types() {
     for (declarations, expected) in [
-        ("typedef enum {A, B} e_t; e_t v;", "%p of an enum value"),
+        (
+            "typedef enum bit {A, B} e_t; e_t [1:0] v;",
+            "%p of an enum value",
+        ),
         (
             "typedef struct packed { bit [3:0] a; } s_t; s_t v;",
             "%p of a structure or unpacked array",
-        ),
-        (
-            "typedef enum {A, B} e_t; e_t v[$];",
-            "%p of a container of enum values",
         ),
         (
             "class C; endclass int v[C];",
@@ -182,6 +213,12 @@ fn pattern_format_rejects_unsupported_types() {
         ),
         ("int m[2][3];", "m[1]"),
         ("int a[4];", "a[1:2]"),
+        ("typedef struct { int n; string s; } r_t; r_t q[$];", "q[0]"),
+        (
+            "typedef struct { int n; } r_t; \
+             function automatic r_t make(); r_t r; r.n = 1; return r; endfunction",
+            "make()",
+        ),
         (
             "typedef struct packed { bit [3:0] a; } s_t; \
              function automatic s_t make(); return s_t'(4'h3); endfunction",
@@ -190,20 +227,24 @@ fn pattern_format_rejects_unsupported_types() {
     ] {
         check_rejected(declarations, value, "%p of a structure or unpacked array");
     }
+    // An enum value is printed by name through more than one evaluation.
     for (declarations, value) in [
-        ("typedef enum {A, B} e_t; e_t q[$];", "q[0]"),
         ("typedef enum {A, B} e_t; e_t q[$];", "q.pop_front()"),
-        ("typedef enum {A, B} e_t; e_t a[2];", "a[1]"),
-        ("typedef enum {A, B} e_t; e_t a, b; bit f;", "f ? a : b"),
-        ("typedef enum {A, B} e_t;", "A"),
-        ("typedef enum {A, B} e_t;", "e_t'(1)"),
-        ("typedef enum {A, B} e_t; e_t v;", "v.next()"),
         (
             "typedef enum {A, B} e_t; function automatic e_t pick(); return B; endfunction",
             "pick()",
         ),
+        (
+            "typedef enum {A, B} e_t; typedef struct { e_t e; } s_t; \
+             function automatic e_t pick(); return B; endfunction",
+            "s_t'{pick()}",
+        ),
     ] {
-        check_rejected(declarations, value, "%p of an enum value");
+        check_rejected(
+            declarations,
+            value,
+            "%p of an enum value of a call with effects",
+        );
     }
 }
 

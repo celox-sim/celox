@@ -1,0 +1,23 @@
+{
+  "tool": "xezim",
+  "version": "xezim version 0.11.3",
+  "source": "sv_virtual_interface_function_xezim.sv",
+  "standard": "IEEE 1800-2023 25.9, 11.4.5",
+  "command": "xezim sv_virtual_interface_function_xezim.sv",
+  "expected_output": "66 1 0",
+  "observations": [
+    {
+      "exit_code": 0,
+      "output": "66 0 0\nSimulation finished at time 0\n"
+    }
+  ],
+  "verilator_version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "verilator_observations": [
+    {
+      "build_exit_code": 0,
+      "exit_code": 0,
+      "output": "66 1 0\n"
+    }
+  ],
+  "note": "`pick(1)` returns a virtual interface denoting `second`. Assigned to `v`, it writes second.data, but xezim 0.11.3 reports `v == pick(1)` as 0: the equality of a virtual interface with a function result is false although both denote the same instance. Verilator 5.052 and Celox print 66 1 0."
+}

@@ -1,0 +1,234 @@
+{
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 does not parse an array method call with a with clause (\"syntax error\", \"Malformed statement\"), and so rejects every locator method that IEEE 1800-2023 7.12 and 7.12.1 define; for the structure elements it also reports \"sorry: Unpacked structs not supported.\". Verilator 5.052 and xezim 0.11.3 compile the cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/sv/limitations/array-locators-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_array_locators",
+        "observed_version": "Icarus Verilog 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not parse an array method call with a with clause (\"syntax error\", \"Malformed statement\"), and so rejects every locator method that IEEE 1800-2023 7.12 and 7.12.1 define; for the structure elements it also reports \"sorry: Unpacked structs not supported.\". Verilator 5.052 and xezim 0.11.3 compile the cases.",
+        "upstream": []
+      },
+      "name": "array_locators::array_locator_associative",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 does not parse an array method call with a with clause (\"syntax error\", \"Malformed statement\"), and so rejects every locator method that IEEE 1800-2023 7.12 and 7.12.1 define; for the structure elements it also reports \"sorry: Unpacked structs not supported.\". Verilator 5.052 and xezim 0.11.3 compile the cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/sv/limitations/array-locators-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_array_locators",
+        "observed_version": "Icarus Verilog 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not parse an array method call with a with clause (\"syntax error\", \"Malformed statement\"), and so rejects every locator method that IEEE 1800-2023 7.12 and 7.12.1 define; for the structure elements it also reports \"sorry: Unpacked structs not supported.\". Verilator 5.052 and xezim 0.11.3 compile the cases.",
+        "upstream": []
+      },
+      "name": "array_locators::array_locator_class_predicates",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 does not parse an array method call with a with clause (\"syntax error\", \"Malformed statement\"), and so rejects every locator method that IEEE 1800-2023 7.12 and 7.12.1 define; for the structure elements it also reports \"sorry: Unpacked structs not supported.\". Verilator 5.052 and xezim 0.11.3 compile the cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/sv/limitations/array-locators-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_array_locators",
+        "observed_version": "Icarus Verilog 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not parse an array method call with a with clause (\"syntax error\", \"Malformed statement\"), and so rejects every locator method that IEEE 1800-2023 7.12 and 7.12.1 define; for the structure elements it also reports \"sorry: Unpacked structs not supported.\". Verilator 5.052 and xezim 0.11.3 compile the cases.",
+        "upstream": []
+      },
+      "name": "array_locators::array_locator_find",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 does not parse an array method call with a with clause (\"syntax error\", \"Malformed statement\"), and so rejects every locator method that IEEE 1800-2023 7.12 and 7.12.1 define; for the structure elements it also reports \"sorry: Unpacked structs not supported.\". Verilator 5.052 and xezim 0.11.3 compile the cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/sv/limitations/array-locators-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_array_locators",
+        "observed_version": "Icarus Verilog 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not parse an array method call with a with clause (\"syntax error\", \"Malformed statement\"), and so rejects every locator method that IEEE 1800-2023 7.12 and 7.12.1 define; for the structure elements it also reports \"sorry: Unpacked structs not supported.\". Verilator 5.052 and xezim 0.11.3 compile the cases.",
+        "upstream": []
+      },
+      "name": "array_locators::array_locator_fixed",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 does not parse an array method call with a with clause (\"syntax error\", \"Malformed statement\"), and so rejects every locator method that IEEE 1800-2023 7.12 and 7.12.1 define; for the structure elements it also reports \"sorry: Unpacked structs not supported.\". Verilator 5.052 and xezim 0.11.3 compile the cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/sv/limitations/array-locators-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_array_locators",
+        "observed_version": "Icarus Verilog 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not parse an array method call with a with clause (\"syntax error\", \"Malformed statement\"), and so rejects every locator method that IEEE 1800-2023 7.12 and 7.12.1 define; for the structure elements it also reports \"sorry: Unpacked structs not supported.\". Verilator 5.052 and xezim 0.11.3 compile the cases.",
+        "upstream": []
+      },
+      "name": "array_locators::array_locator_fixed_struct_enum",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 does not parse an array method call with a with clause (\"syntax error\", \"Malformed statement\"), and so rejects every locator method that IEEE 1800-2023 7.12 and 7.12.1 define; for the structure elements it also reports \"sorry: Unpacked structs not supported.\". Verilator 5.052 and xezim 0.11.3 compile the cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/sv/limitations/array-locators-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_array_locators",
+        "observed_version": "Icarus Verilog 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not parse an array method call with a with clause (\"syntax error\", \"Malformed statement\"), and so rejects every locator method that IEEE 1800-2023 7.12 and 7.12.1 define; for the structure elements it also reports \"sorry: Unpacked structs not supported.\". Verilator 5.052 and xezim 0.11.3 compile the cases.",
+        "upstream": []
+      },
+      "name": "array_locators::array_locator_four_state",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 does not parse an array method call with a with clause (\"syntax error\", \"Malformed statement\"), and so rejects every locator method that IEEE 1800-2023 7.12 and 7.12.1 define; for the structure elements it also reports \"sorry: Unpacked structs not supported.\". Verilator 5.052 and xezim 0.11.3 compile the cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/sv/limitations/array-locators-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_array_locators",
+        "observed_version": "Icarus Verilog 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not parse an array method call with a with clause (\"syntax error\", \"Malformed statement\"), and so rejects every locator method that IEEE 1800-2023 7.12 and 7.12.1 define; for the structure elements it also reports \"sorry: Unpacked structs not supported.\". Verilator 5.052 and xezim 0.11.3 compile the cases.",
+        "upstream": []
+      },
+      "name": "array_locators::array_locator_index_argument",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 does not parse an array method call with a with clause (\"syntax error\", \"Malformed statement\"), and so rejects every locator method that IEEE 1800-2023 7.12 and 7.12.1 define; for the structure elements it also reports \"sorry: Unpacked structs not supported.\". Verilator 5.052 and xezim 0.11.3 compile the cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/sv/limitations/array-locators-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_array_locators",
+        "observed_version": "Icarus Verilog 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not parse an array method call with a with clause (\"syntax error\", \"Malformed statement\"), and so rejects every locator method that IEEE 1800-2023 7.12 and 7.12.1 define; for the structure elements it also reports \"sorry: Unpacked structs not supported.\". Verilator 5.052 and xezim 0.11.3 compile the cases.",
+        "upstream": []
+      },
+      "name": "array_locators::array_locator_iterator_names",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 does not parse an array method call with a with clause (\"syntax error\", \"Malformed statement\"), and so rejects every locator method that IEEE 1800-2023 7.12 and 7.12.1 define; for the structure elements it also reports \"sorry: Unpacked structs not supported.\". Verilator 5.052 and xezim 0.11.3 compile the cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/sv/limitations/array-locators-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_array_locators",
+        "observed_version": "Icarus Verilog 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not parse an array method call with a with clause (\"syntax error\", \"Malformed statement\"), and so rejects every locator method that IEEE 1800-2023 7.12 and 7.12.1 define; for the structure elements it also reports \"sorry: Unpacked structs not supported.\". Verilator 5.052 and xezim 0.11.3 compile the cases.",
+        "upstream": []
+      },
+      "name": "array_locators::array_locator_min_max_unique",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 does not parse an array method call with a with clause (\"syntax error\", \"Malformed statement\"), and so rejects every locator method that IEEE 1800-2023 7.12 and 7.12.1 define; for the structure elements it also reports \"sorry: Unpacked structs not supported.\". Verilator 5.052 and xezim 0.11.3 compile the cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/sv/limitations/array-locators-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_array_locators",
+        "observed_version": "Icarus Verilog 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not parse an array method call with a with clause (\"syntax error\", \"Malformed statement\"), and so rejects every locator method that IEEE 1800-2023 7.12 and 7.12.1 define; for the structure elements it also reports \"sorry: Unpacked structs not supported.\". Verilator 5.052 and xezim 0.11.3 compile the cases.",
+        "upstream": []
+      },
+      "name": "array_locators::array_locator_struct_elements",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

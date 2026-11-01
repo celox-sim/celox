@@ -96,7 +96,7 @@ fn indexed_items(
     }
 }
 fn select<'a>(
-    state: &AnalysisState,
+    functions: &const_functions::ConstantFunctions,
     kind: NativeKind,
     bindings: Vec<Pair>,
     shape: Shape<'a>,
@@ -112,11 +112,11 @@ fn select<'a>(
         ));
     }
     if let Some((dim, rest)) = shape.unpacked.split_first() {
-        let (left, right, count) = dimension_bounds(state, &dim.left, &dim.right, dims)?;
+        let (left, right, count) = dimension_bounds(functions, &dim.left, &dim.right, dims)?;
         let sub = Shape::Owned(Rc::new(VariableDimensions {
+            declared: type_names::Declared::default(),
             container: None,
             real: false,
-            string: false,
             class: None,
             unpacked: rest.to_vec(),
             ..(*shape).clone()
@@ -144,15 +144,18 @@ fn select<'a>(
     if let Some((dim, rest)) = shape.packed.split_first()
         && !rest.is_empty()
     {
-        let (left, right, count) = dimension_bounds(state, &dim.left, &dim.right, dims)?;
+        let (left, right, count) = dimension_bounds(functions, &dim.left, &dim.right, dims)?;
         let sub = Shape::Owned(Rc::new(VariableDimensions {
+            declared: type_names::Declared::default(),
             container: None,
+            chandle: false,
             randomizable: true,
             enum_domain: None,
             packed_enum: false,
             real: false,
             string: false,
             class: None,
+            virtual_interface: None,
             packed: rest.to_vec(),
             unpacked: Vec::new(),
             signed: shape.signed_element_depth == Some(1),
@@ -256,16 +259,19 @@ fn select<'a>(
             false,
         ));
     }
-    let width = shape_width(state, &shape, dims)
+    let width = shape_width(functions, &shape, dims)
         .ok_or_else(|| unsupported("assignment pattern target width"))?;
     let bit = Shape::Owned(Rc::new(VariableDimensions {
+        declared: type_names::Declared::default(),
         container: None,
+        chandle: false,
         randomizable: true,
         enum_domain: None,
         packed_enum: false,
         real: false,
         string: false,
         class: None,
+        virtual_interface: None,
         packed: Vec::new(),
         unpacked: Vec::new(),
         signed: false,
@@ -337,25 +343,28 @@ pub(in crate::ast) fn typed_shape(
 pub(in crate::ast) fn constant_native(
     root: ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<bound_patterns::Value> {
     let shape =
         typed_shape(root, tree, dims)?.ok_or_else(|| unsupported("assignment pattern type"))?;
-    let value = bind_native(root, tree.declarations(), tree, dims, Some(&shape))?;
-    super::constant_pattern_value(&tree.state, value, &shape, dims)
+    let value = bind_native(root, tree.declarations(), tree, session, dims, Some(&shape))?;
+    super::constant_pattern_value(tree, session, value, &shape, dims)
 }
 pub(in crate::ast) fn expression(
     root: ExprId,
     shape: &VariableDimensions,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Option<Expr>> {
-    bind_native(root, tree.declarations(), tree, dims, Some(shape)).map(Some)
+    bind_native(root, tree.declarations(), tree, session, dims, Some(shape)).map(Some)
 }
 pub(in crate::ast) fn bind_native(
     root: ExprId,
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
     shape: Option<&VariableDimensions>,
 ) -> Converted<Expr> {
@@ -379,9 +388,9 @@ pub(in crate::ast) fn bind_native(
     while let Some(job) = jobs.pop() {
         match job {
             Job::Pattern(id, shape) => {
-                let plan = bound_patterns::prepare_native(id, tree, dims, Some(&shape))?;
+                let plan = bound_patterns::prepare_native(id, tree, session, dims, Some(&shape))?;
                 let (items, reverse, keep) =
-                    select(&tree.state, plan.kind, plan.bindings, shape, dims)?;
+                    select(&tree.functions, plan.kind, plan.bindings, shape, dims)?;
                 jobs.push(Job::Finish {
                     count: items.len(),
                     reverse,
@@ -405,11 +414,12 @@ pub(in crate::ast) fn bind_native(
                     && !pattern
                     && native_rank(id, native, dims) < shape.unpacked.len()
                 {
-                    let (_, _, count) = dimension_bounds(&tree.state, &dim.left, &dim.right, dims)?;
+                    let (_, _, count) =
+                        dimension_bounds(&tree.functions, &dim.left, &dim.right, dims)?;
                     let sub = Shape::Owned(Rc::new(VariableDimensions {
+                        declared: type_names::Declared::default(),
                         container: None,
                         real: false,
-                        string: false,
                         class: None,
                         unpacked: rest.to_vec(),
                         ..(*shape).clone()
@@ -424,19 +434,21 @@ pub(in crate::ast) fn bind_native(
                     continue;
                 }
                 if check {
-                    check_native_array(&tree.state, id, native, &shape, dims)?;
+                    check_native_array(tree, session, id, &shape, dims)?;
                 }
                 // A typed pattern of a member must name the member's
                 // structure type (6.22.3).
                 if pattern && let Some(aggregate) = shape.unpacked_struct.as_deref() {
-                    unpacked_structs::check_value(aggregate, id, native, tree, dims)?;
+                    unpacked_structs::check_value(aggregate, id, native, tree, session, dims)?;
                 }
                 if let Some(aggregate) = shape.unpacked_struct.clone()
                     && !pattern
                 {
                     // A default that is not a structure of the member's type
                     // applies to each of its members (IEEE 1800-2023 10.9.2).
-                    if default && unpacked_structs::native_struct(id, native, tree, dims)?.is_none()
+                    if default
+                        && !unpacked_structs::native_struct(id, native, tree, session, dims)?
+                            .is_some_and(|value| value.same_type(&aggregate))
                     {
                         let members = aggregate.members();
                         jobs.push(Job::Finish {
@@ -456,23 +468,24 @@ pub(in crate::ast) fn bind_native(
                         }));
                         continue;
                     }
-                    unpacked_structs::check_value(&aggregate, id, native, tree, dims)?;
+                    unpacked_structs::check_value(&aggregate, id, native, tree, session, dims)?;
                     values.push(expression_binding::bind_value(
-                        id, native, tree, dims, None,
+                        id, native, tree, session, dims, None,
                     )?);
                     continue;
                 }
                 if let Some(class) = shape.class.as_deref()
                     && !pattern
                 {
-                    if let Some(call) =
-                        expression_binding::object_constructor(tree, id, native, dims, class)?
-                    {
+                    if let Some(call) = expression_binding::object_constructor(
+                        tree, session, id, native, dims, class,
+                    )? {
                         values.push(call);
                         continue;
                     }
                     expression_binding::check_handle_assignment(
                         tree,
+                        session,
                         id,
                         native,
                         dims,
@@ -480,9 +493,11 @@ pub(in crate::ast) fn bind_native(
                         || "assignment pattern member".into(),
                     )?;
                 }
-                if (shape.string || shape.class.is_some()) && !pattern {
-                    let value = expression_binding::bind_value(id, native, tree, dims, None)?;
-                    values.push(if shape.string {
+                let scalar_string = shape.string && shape.unpacked.is_empty();
+                if (scalar_string || shape.class.is_some()) && !pattern {
+                    let value =
+                        expression_binding::bind_value(id, native, tree, session, dims, None)?;
+                    values.push(if scalar_string {
                         expression_binding::string_operand(value, dims)
                     } else {
                         value
@@ -490,6 +505,12 @@ pub(in crate::ast) fn bind_native(
                     continue;
                 }
                 if pattern {
+                    // A chandle has no elements a pattern could give (6.14).
+                    if shape.chandle && shape.unpacked.is_empty() {
+                        expression_binding::check_chandle_assignment(
+                            true, id, tree, native, dims, session,
+                        )?;
+                    }
                     let typed = typed_shape(id, tree, dims)?;
                     jobs.push(Job::Pattern(
                         id,
@@ -498,17 +519,29 @@ pub(in crate::ast) fn bind_native(
                             .unwrap_or(shape),
                     ));
                 } else {
-                    let value = expression_binding::bind_value(id, native, tree, dims, None)?;
-                    let type_dims = dimensions::query_context_for_operand(id, tree, dims)?;
+                    let chandle = shape.chandle && shape.unpacked.is_empty();
+                    expression_binding::check_chandle_assignment(
+                        chandle, id, tree, native, dims, session,
+                    )?;
+                    let value = if chandle {
+                        expression_binding::bind_chandle_value(
+                            id, native, tree, session, dims, None,
+                        )?
+                    } else {
+                        expression_binding::bind_value(id, native, tree, session, dims, None)?
+                    };
+                    let type_dims = dimensions::query_context_for_operand(id, tree, session, dims)?;
                     let signed =
                         dimensions::expression_signedness(&value, &type_dims, &type_dims.const_env)
                             .ok_or_else(|| unsupported("assignment pattern operand signedness"))?;
                     let descend_default = default
                         && (shape.unpacked.is_empty()
                             || native_rank(id, native, dims) < shape.unpacked.len());
-                    let value_type = bound_patterns::native_value_type(id, tree, &type_dims)?;
+                    let value_type =
+                        bound_patterns::native_value_type(id, tree, session, &type_dims)?;
                     values.push(assignment_value(
-                        &tree.state,
+                        tree,
+                        session,
                         &value,
                         signed,
                         value_type.as_ref(),
@@ -643,16 +676,16 @@ fn native_rank(
     }
 }
 fn check_native_array(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
-    native: &celox_sv_syntax::Declarations,
     shape: &VariableDimensions,
     dims: &PackedDimensions,
 ) -> Converted<()> {
     array_compatibility::check_native_unpacked_assignment(
-        state,
+        tree,
+        session,
         id,
-        native,
         shape,
         || "assignment pattern item".into(),
         dims,
@@ -678,6 +711,7 @@ mod tests {
     }
     #[test]
     fn deeply_nested_native_typed_patterns_share_the_job_stack() {
+        let session = &mut Session::default();
         let tree = std::thread::Builder::new()
             .stack_size(128 * 1024 * 1024)
             .spawn(|| {
@@ -701,7 +735,7 @@ mod tests {
             &HashMap::default(),
             &HashMap::from_iter([("T".into(), Type::new(TypeKind::Logic))]),
         );
-        let result = bind_native(root, tree.declarations(), tree, &dims, None).map(Some);
+        let result = bind_native(root, tree.declarations(), tree, session, &dims, None).map(Some);
         drop(context);
         drop(original);
         assert!(matches!(
@@ -711,6 +745,7 @@ mod tests {
     }
     #[test]
     fn deeply_nested_native_scalar_patterns_bind_on_the_default_stack() {
+        let session = &mut Session::default();
         let tree = std::thread::Builder::new()
             .stack_size(128 * 1024 * 1024)
             .spawn(|| {
@@ -735,7 +770,7 @@ mod tests {
         let shape = procedural::dimensions_from_type(&Type::new(TypeKind::Logic));
         let dims =
             PackedDimensions::new(HashMap::default(), &HashMap::default(), &HashMap::default());
-        let result = expression(root, &shape, tree, &dims);
+        let result = expression(root, &shape, tree, session, &dims);
         let mut ty = Type::new(TypeKind::Logic);
         ty.packed_ranges = vec![
             PackedRange::new(
@@ -744,7 +779,13 @@ mod tests {
             );
             500
         ];
-        let ranked = expression(root, &procedural::dimensions_from_type(&ty), tree, &dims);
+        let ranked = expression(
+            root,
+            &procedural::dimensions_from_type(&ty),
+            tree,
+            session,
+            &dims,
+        );
         drop(context);
         drop(original);
         assert!(matches!(

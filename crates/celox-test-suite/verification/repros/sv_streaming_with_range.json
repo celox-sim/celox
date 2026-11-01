@@ -1,0 +1,30 @@
+{
+  "case": "streaming::streaming_arrays",
+  "source": "src/sv/cases/streaming.vtest",
+  "standard": "IEEE 1800-2023 11.4.14.4 (Syntax 11-5): a stream expression may be a one-dimensional unpacked array followed by with [array_range_expression]; in a pack it behaves as an array slice, only the specified items are streamed, and items outside the array are the nonexistent-entry value of Table 7-1 (7.4.5), 0 for byte. So {>>{up with [1 +: 2]}} streams up[1] and up[2], {>>{down with [4:2]}} of byte down [3:0] streams 0, down[3] and down[2], and the 32-bit target is padded with zero bits on the right (11.4.14).",
+  "method": "The shared case runs unchanged in verify-sv-verilator, verify-sv-icarus and verify-sv-xezim; the reduced source below runs without the adapters.",
+  "reduced_source": "module Top;\n    byte up [0:3] = '{8'h11, 8'h22, 8'h33, 8'h44};\n    byte down [3:0] = '{8'h11, 8'h22, 8'h33, 8'h44};\n    bit [31:0] v;\n    initial begin\n        v = {>>{up with [1 +: 2]}};\n        $display(\"up[1+:2]=%h\", v);\n        v = {>>{down with [4]}};\n        $display(\"down[4]=%h\", v);\n        v = {>>{down with [4:2]}};\n        $display(\"down[4:2]=%h\", v);\n    end\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "status": "compile_error",
+      "stderr": "%Error-UNSUPPORTED: repro.sv:6:20: Unsupported: with[] stream expression\n%Error-UNSUPPORTED: repro.sv:8:22: Unsupported: with[] stream expression\n%Error-UNSUPPORTED: repro.sv:10:22: Unsupported: with[] stream expression\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "status": "compile_error",
+      "stderr": "repro.sv:6: syntax error\nrepro.sv:6: error: Malformed statement\nrepro.sv:8: syntax error\nrepro.sv:8: error: Malformed statement\nrepro.sv:10: syntax error\nrepro.sv:10: error: Malformed statement\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "up[1+:2]=11223344\ndown[4]=11223344\ndown[4:2]=11223344\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "up[1+:2]=22330000\ndown[4]=00000000\ndown[4:2]=00112200\n"
+    }
+  ]
+}

@@ -211,7 +211,17 @@ pub(super) fn hoist_invariant_loads(func: &mut MFunction) {
     }
 }
 
+/// A trip counter to replace: the latch, its exit condition, the index
+/// update to compare instead, the trip count, the comparison and the
+/// counter's update chain.
+type Plan = (usize, VReg, VReg, i32, CmpKind, Vec<VReg>);
+
 pub(super) fn run(func: &mut MFunction) {
+    let plans = plans(func);
+    apply(func, &plans);
+}
+
+fn plans(func: &MFunction) -> Vec<Plan> {
     let positions = func
         .blocks
         .iter()
@@ -231,7 +241,7 @@ pub(super) fn run(func: &mut MFunction) {
         .collect();
     let Ok(cfg) = celox_analysis::cfg::ForwardControlFlowGraph::analyze_structure(successors, 0)
     else {
-        return;
+        return Vec::new();
     };
     let mut definitions = vec![None; func.vregs.count() as usize];
     let mut uses = vec![0usize; definitions.len()];
@@ -342,44 +352,74 @@ pub(super) fn run(func: &mut MFunction) {
             }
         }
     }
-    for (latch, condition, next_index, trips, kind, chain) in plans {
-        for block in &mut func.blocks {
-            block.insts.retain(|inst| inst.def() != Some(condition));
-        }
-        let before_branch = func.blocks[latch].insts.len() - 1;
-        func.blocks[latch].insts.insert(
+    plans
+}
+
+fn apply(func: &mut MFunction, plans: &[Plan]) {
+    if plans.is_empty() {
+        return;
+    }
+    // Rewrite every plan in one pass over the function. The chains are
+    // disjoint, each ending at its own counter phi, and a rewritten
+    // condition or comparison never reads another plan's chain, so this
+    // equals applying the plans one after another.
+    let conditions = plans
+        .iter()
+        .map(|&(_, condition, ..)| condition)
+        .collect::<HashSet<_>>();
+    for block in &mut func.blocks {
+        block
+            .insts
+            .retain(|inst| inst.def().is_none_or(|dst| !conditions.contains(&dst)));
+    }
+    let mut chain_of = HashMap::<VReg, usize>::default();
+    for (plan, (latch, condition, next_index, trips, kind, chain)) in plans.iter().enumerate() {
+        let before_branch = func.blocks[*latch].insts.len() - 1;
+        func.blocks[*latch].insts.insert(
             before_branch,
             MInst::CmpImm {
-                dst: condition,
-                lhs: next_index,
-                imm: trips,
-                kind,
+                dst: *condition,
+                lhs: *next_index,
+                imm: *trips,
+                kind: *kind,
             },
         );
-        // The old induction variable is a dead SSA cycle. Ordinary local DCE
-        // cannot collect it, so remove it only if its entire use set is private.
-        let private = func.blocks.iter().all(|block| {
-            block.phis.iter().all(|phi| {
-                chain.contains(&phi.dst)
-                    || phi
-                        .sources
-                        .iter()
-                        .all(|(_, source)| !chain.contains(source))
-            }) && block.insts.iter().all(|inst| {
-                inst.def().is_some_and(|dst| chain.contains(&dst))
-                    || inst
-                        .uses()
-                        .into_iter()
-                        .all(|source| !chain.contains(&source))
-            })
-        });
-        if private {
-            for block in &mut func.blocks {
-                block.phis.retain(|phi| !chain.contains(&phi.dst));
-                block
-                    .insts
-                    .retain(|inst| inst.def().is_none_or(|dst| !chain.contains(&dst)));
+        for &value in chain {
+            let previous = chain_of.insert(value, plan);
+            debug_assert_eq!(previous, None, "trip counter chains overlap at {value}");
+        }
+    }
+    // The old induction variable is a dead SSA cycle. Ordinary local DCE
+    // cannot collect it, so remove it only if its entire use set is private.
+    let mut private = vec![true; plans.len()];
+    let mut escape = |owner: Option<usize>, source: VReg| {
+        if let Some(&plan) = chain_of.get(&source)
+            && owner != Some(plan)
+        {
+            private[plan] = false;
+        }
+    };
+    for block in &func.blocks {
+        for phi in &block.phis {
+            let owner = chain_of.get(&phi.dst).copied();
+            for &(_, source) in &phi.sources {
+                escape(owner, source);
             }
+        }
+        for inst in &block.insts {
+            let owner = inst.def().and_then(|dst| chain_of.get(&dst).copied());
+            for source in inst.uses() {
+                escape(owner, source);
+            }
+        }
+    }
+    let removed = |value: VReg| chain_of.get(&value).is_some_and(|&plan| private[plan]);
+    if private.contains(&true) {
+        for block in &mut func.blocks {
+            block.phis.retain(|phi| !removed(phi.dst));
+            block
+                .insts
+                .retain(|inst| inst.def().is_none_or(|dst| !removed(dst)));
         }
     }
 }
@@ -507,6 +547,157 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The rewrite as it was before it was batched: each plan applied with
+    /// its own passes over the function.
+    fn apply_one_by_one(func: &mut MFunction, plans: Vec<Plan>) {
+        for (latch, condition, next_index, trips, kind, chain) in plans {
+            for block in &mut func.blocks {
+                block.insts.retain(|inst| inst.def() != Some(condition));
+            }
+            let before_branch = func.blocks[latch].insts.len() - 1;
+            func.blocks[latch].insts.insert(
+                before_branch,
+                MInst::CmpImm {
+                    dst: condition,
+                    lhs: next_index,
+                    imm: trips,
+                    kind,
+                },
+            );
+            let private = func.blocks.iter().all(|block| {
+                block.phis.iter().all(|phi| {
+                    chain.contains(&phi.dst)
+                        || phi
+                            .sources
+                            .iter()
+                            .all(|(_, source)| !chain.contains(source))
+                }) && block.insts.iter().all(|inst| {
+                    inst.def().is_some_and(|dst| chain.contains(&dst))
+                        || inst
+                            .uses()
+                            .into_iter()
+                            .all(|source| !chain.contains(&source))
+                })
+            });
+            if private {
+                for block in &mut func.blocks {
+                    block.phis.retain(|phi| !chain.contains(&phi.dst));
+                    block
+                        .insts
+                        .retain(|inst| inst.def().is_none_or(|dst| !chain.contains(&dst)));
+                }
+            }
+        }
+    }
+
+    /// `loops` fixture loops in sequence, each with its own values, the
+    /// exit of one jumping to the entry of the next.
+    fn loop_sequence(loops: &[(u64, u64, bool, bool, bool)]) -> MFunction {
+        let mut vregs = VRegAllocator::new();
+        for _ in 0..14 * loops.len() {
+            vregs.alloc();
+        }
+        let mut function = MFunction::new(vregs, vec![SpillDesc::transient(); 14 * loops.len()]);
+        for (index, &(trips, mask, reversed, observed, shared)) in loops.iter().enumerate() {
+            let mut part = fixture(trips, mask, u32::MAX as u64, reversed, observed);
+            if shared {
+                // A second reader of the exit test keeps the old counter.
+                part.blocks[3].insts.insert(
+                    0,
+                    MInst::Store {
+                        base: BaseReg::SimState,
+                        offset: 24,
+                        src: VReg(11),
+                        size: OpSize::S64,
+                    },
+                );
+            }
+            let values = (0..14)
+                .map(|value| (VReg(value), VReg(value + 14 * index as u32)))
+                .collect::<HashMap<_, _>>();
+            let block = |id: BlockId| BlockId(id.0 + 4 * index as u32);
+            for mut part in part.blocks {
+                part.id = block(part.id);
+                for phi in &mut part.phis {
+                    phi.dst = values[&phi.dst];
+                    for (pred, source) in &mut phi.sources {
+                        *pred = block(*pred);
+                        *source = values[source];
+                    }
+                }
+                for inst in &mut part.insts {
+                    rewrite_uses(inst, &values);
+                    if let Some(dst) = inst.def_mut() {
+                        *dst = values[dst];
+                    }
+                    match inst {
+                        MInst::Jump { target } => *target = block(*target),
+                        MInst::Branch {
+                            true_bb, false_bb, ..
+                        } => {
+                            *true_bb = block(*true_bb);
+                            *false_bb = block(*false_bb);
+                        }
+                        MInst::Return if index + 1 < loops.len() => {
+                            *inst = MInst::Jump {
+                                target: block(BlockId(4)),
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                function.blocks.push(part);
+            }
+        }
+        function
+    }
+
+    #[test]
+    fn batched_rewrites_equal_one_plan_at_a_time() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = |bound: u64| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) % bound
+        };
+        let (mut rewritten, mut kept) = (0, 0);
+        for count in [1, 2, 5, 17, 40] {
+            for _ in 0..8 {
+                let loops = (0..count)
+                    .map(|_| {
+                        (
+                            [1, 7, 31, 63, 0, 64][next(6).min(next(6)) as usize],
+                            [63, 61][usize::from(next(8) == 0)],
+                            next(2) == 0,
+                            next(2) == 0,
+                            next(8) == 0,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let function = loop_sequence(&loops);
+                function.verify();
+                let found = plans(&function);
+                rewritten += found.len();
+                kept += loops.len() - found.len();
+                let mut batched = function.clone();
+                apply(&mut batched, &found);
+                batched.verify();
+                let mut sequential = function;
+                apply_one_by_one(&mut sequential, found);
+                assert_eq!(
+                    format!("{batched:?}"),
+                    format!("{sequential:?}"),
+                    "{loops:?}"
+                );
+            }
+        }
+        assert!(
+            rewritten > 200 && kept > 50,
+            "{rewritten} rewritten, {kept} kept"
+        );
     }
 
     #[test]

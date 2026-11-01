@@ -159,9 +159,11 @@ impl CallSites for Type {
             members,
             signed_element_depth: _,
             class: _,
+            virtual_interface: _,
             container: _,
-            nominal: _,
             unpacked_struct: _,
+            spelling: _,
+            chandle: _,
         } = self;
         packed_ranges.call_sites(visit);
         unpacked_ranges.call_sites(visit);
@@ -189,6 +191,7 @@ impl CallSites for UnpackedRange {
 impl CallSites for VariableDimensions {
     fn call_sites(&self, visit: &mut dyn FnMut(usize)) {
         let VariableDimensions {
+            declared: _,
             container: _,
             randomizable: _,
             enum_domain: _,
@@ -196,6 +199,7 @@ impl CallSites for VariableDimensions {
             real: _,
             string: _,
             class: _,
+            virtual_interface: _,
             packed,
             unpacked,
             signed: _,
@@ -203,6 +207,7 @@ impl CallSites for VariableDimensions {
             members,
             signed_element_depth: _,
             unpacked_struct: _,
+            chandle: _,
         } = self;
         packed.call_sites(visit);
         unpacked.call_sites(visit);
@@ -236,7 +241,7 @@ impl CallSites for UnpackedDimension {
 impl CallSites for Item {
     fn call_sites(&self, visit: &mut dyn FnMut(usize)) {
         let Item {
-            state: _,
+            imported: _,
             id: _,
             env: _,
             literals,

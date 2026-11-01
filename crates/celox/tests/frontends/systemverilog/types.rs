@@ -74,6 +74,9 @@ sv_backends! {
     fn undriven_internal_nets_convert_to_two_state_zero(sim) {
         @case "types::undriven_internal_nets_convert_to_two_state_zero";
     }
+    fn chandles_hold_null_and_copies(sim) {
+        @case "types::chandles_hold_null_and_copies";
+    }
 }
 
 sv_backends! {
@@ -87,6 +90,10 @@ sv_backends! {
 
     fn enum_methods_in_combinational_and_sequential_logic(sim) {
         @case "types::enum_methods_in_combinational_and_sequential_logic";
+    }
+
+    fn unpacked_array_assignments_through_selects_and_calls(sim) {
+        @case "types::unpacked_array_assignments_through_selects_and_calls";
     }
 }
 

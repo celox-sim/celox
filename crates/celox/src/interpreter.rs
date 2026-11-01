@@ -441,6 +441,7 @@ fn exec_instruction<A, M: InterpMachine<A>>(
         }
         SIRInstruction::Unary(dst, op, src) => {
             if regs.accepts_small(*dst)
+                && !matches!(op, UnaryOp::ToPlanes | UnaryOp::FromPlanes)
                 && let Some(src_value) = regs.get_small(*src)?
             {
                 let out = alu_unary_u64(
@@ -461,6 +462,12 @@ fn exec_instruction<A, M: InterpMachine<A>>(
                 regs.is_signed(*src),
                 regs.width(*dst),
             )?;
+            // A two-state register has no mask plane to receive.
+            let out = if four_state || *op != UnaryOp::FromPlanes {
+                out
+            } else {
+                SIRValue::new(out.payload)
+            };
             regs.set(*dst, truncate(out, regs.width(*dst)));
         }
         SIRInstruction::Load(dst, addr, offset, bits) => {
@@ -841,6 +848,9 @@ fn alu_unary_u64(
     let src = src & mask_u64(src_width);
     let result = match op {
         UnaryOp::Float { op, precision } => celox_design::eval_float_unary(*op, *precision, src),
+        UnaryOp::ToPlanes | UnaryOp::FromPlanes => {
+            unreachable!("plane operations have an operand wider than 64 bits")
+        }
         UnaryOp::Ident => {
             if src_signed {
                 sign_extend_u64(src, src_width, dst_width)
@@ -1354,6 +1364,14 @@ fn alu_unary(
     dst_width: usize,
 ) -> Result<SIRValue, InterpError> {
     let out = match op {
+        UnaryOp::ToPlanes => {
+            let all = width_mask(src_width);
+            SIRValue::new(((&src.mask & &all) << src_width) | (&src.payload & &all))
+        }
+        UnaryOp::FromPlanes => {
+            let all = width_mask(dst_width);
+            SIRValue::new_four_state(&src.payload & &all, (&src.payload >> dst_width) & &all)
+        }
         UnaryOp::Float { op, precision } => SIRValue::new(celox_design::eval_float_unary(
             *op,
             *precision,
@@ -1475,9 +1493,13 @@ fn alu_unary(
         }
     };
     let truncated = truncate(out, dst_width);
-    // Identity and two-state casts preserve the incoming bit pattern; every
-    // other unary operation adopts the normalized unknown-bit convention.
-    if matches!(op, UnaryOp::Ident | UnaryOp::ToTwoState) {
+    // Identity and two-state casts and plane moves preserve the incoming bit
+    // pattern; every other unary operation adopts the normalized unknown-bit
+    // convention.
+    if matches!(
+        op,
+        UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::ToPlanes | UnaryOp::FromPlanes
+    ) {
         Ok(truncated)
     } else {
         Ok(normalize(truncated))
@@ -2602,5 +2624,68 @@ mod tests {
         let mut machine = FakeMachine::default();
         execute_unit(&unit, &mut machine, &[], true).unwrap();
         assert_eq!(machine.runtime_events, vec![(3, vec![SIRValue::new(11u8)])]);
+    }
+
+    #[test]
+    fn planes_move_value_and_mask_words_both_ways() {
+        // X where both planes are set, Z where only the mask is.
+        let value = BigUint::from(0xf0e1_d2c3_b4a5_9687_7869_5a4b_3c2d_1e0fu128);
+        let mask = BigUint::from(0x00ff_0000_0000_f00f_8000_0000_0000_0003u128);
+        let source = SIRValue::new_four_state(value.clone(), mask.clone());
+        let planes = alu_unary(&UnaryOp::ToPlanes, &source, 128, false, 256).unwrap();
+        assert_eq!(planes, SIRValue::new((&mask << 128usize) | &value));
+        let back = alu_unary(&UnaryOp::FromPlanes, &planes, 256, false, 128).unwrap();
+        assert_eq!(back, source);
+    }
+
+    #[test]
+    fn two_state_from_planes_drops_the_mask_plane() {
+        // A two-state backend has no mask plane for `FromPlanes` to fill, so
+        // `ToPlanes` reads it back as zero.
+        let unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [block(
+                0,
+                vec![],
+                vec![
+                    SIRInstruction::Imm(RegisterId(0), SIRValue::new((1u128 << 64) | 1)),
+                    SIRInstruction::Unary(RegisterId(1), UnaryOp::FromPlanes, RegisterId(0)),
+                    SIRInstruction::Unary(RegisterId(2), UnaryOp::ToPlanes, RegisterId(1)),
+                    SIRInstruction::Store(
+                        9u32,
+                        SIROffset::Static(0),
+                        128,
+                        RegisterId(2),
+                        Vec::new(),
+                        Vec::new(),
+                    ),
+                ],
+                SIRTerminator::Return,
+            )]
+            .into_iter()
+            .collect(),
+            register_map: [
+                (
+                    RegisterId(0),
+                    RegisterType::Bit {
+                        width: 128,
+                        signed: false,
+                    },
+                ),
+                (RegisterId(1), RegisterType::Logic { width: 64 }),
+                (
+                    RegisterId(2),
+                    RegisterType::Bit {
+                        width: 128,
+                        signed: false,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let mut machine = FakeMachine::default();
+        execute_unit(&unit, &mut machine, &[], false).unwrap();
+        assert_eq!(machine.stored(9, 0, 128).payload, BigUint::from(1u8));
     }
 }

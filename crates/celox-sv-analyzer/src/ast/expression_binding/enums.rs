@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use super::direct::call_name;
 use super::*;
-use crate::ast::enums::EnumDomain;
+use crate::ast::enums::{EnumDomain, EnumMember};
 
 /// An enumerated type method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +56,7 @@ impl Method {
 /// with the expression it is called on and that expression's type.
 pub(super) fn method(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
@@ -74,7 +75,8 @@ pub(super) fn method(
     let Some(method) = Method::parse(&instances::normalize_identifier(&name.spelling)) else {
         return Ok(None);
     };
-    Ok(domain(tree, *expression, native, dimensions)?.map(|domain| (method, *expression, domain)))
+    Ok(domain(tree, session, *expression, native, dimensions)?
+        .map(|domain| (method, *expression, domain)))
 }
 
 /// The enumerated type of native expression `id`, judged before it is
@@ -83,12 +85,13 @@ pub(super) fn method(
 /// process.
 pub(super) fn domain(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<Arc<EnumDomain>>> {
     // `process::state` (9.7).
-    if let Some(domain) = processes::state(tree, id, native, dimensions) {
+    if let Some(domain) = processes::state(tree, session, id, native, dimensions) {
         return Ok(Some(domain));
     }
     Ok(match &native.expression(ungroup(id, native)).kind {
@@ -96,28 +99,28 @@ pub(super) fn domain(
             let name = instances::normalize_identifier(&name.spelling);
             match dimensions.get(&name) {
                 Some(shape) => variable(shape),
-                None => match objects::property(tree, id, native, dimensions)? {
+                None => match objects::property(tree, session, id, native, dimensions)? {
                     Some((property, _)) => scalar(&property.r#type),
-                    None => constant(&tree.state, &name, dimensions),
+                    None => constant(tree, &name, dimensions),
                 },
             }
         }
-        ExprKind::Member { .. } => match method(tree, id, native, dimensions)? {
+        ExprKind::Member { .. } => match method(tree, session, id, native, dimensions)? {
             // A method called without parentheses (6.19.5.7).
             Some((method, _, domain)) => method.returns_member().then_some(domain),
-            None => match objects::static_property(tree, id, native, dimensions)?
-                .or_else(|| call_name(&tree.state, id, native))
+            None => match objects::static_property(tree, session, id, native, dimensions)?
+                .or_else(|| call_name(tree, id, native))
                 .and_then(|name| dimensions.get(&name))
             {
                 // A static property or a package variable.
                 Some(shape) => variable(shape),
                 // A package-qualified enum constant.
-                None if let Some(domain) = call_name(&tree.state, id, native)
-                    .and_then(|name| constant(&tree.state, &name, dimensions)) =>
+                None if let Some(domain) = call_name(tree, id, native)
+                    .and_then(|name| constant(tree, &name, dimensions)) =>
                 {
                     Some(domain)
                 }
-                None => match objects::property(tree, id, native, dimensions)? {
+                None => match objects::property(tree, session, id, native, dimensions)? {
                     Some((property, _)) => scalar(&property.r#type),
                     // A member of a container element of unpacked structure
                     // type.
@@ -125,22 +128,25 @@ pub(super) fn domain(
                         ungroup(id, native),
                         native,
                         tree,
+                        session,
                         dimensions,
                     )? =>
                     {
                         scalar(&ty)
                     }
                     // A member of a packed struct.
-                    None => dimensions::operand_shape(id, tree, dimensions)
+                    None => dimensions::operand_shape(id, tree, session, dimensions)
                         .ok()
                         .flatten()
                         .and_then(|shape| variable(&shape)),
                 },
             },
         },
-        ExprKind::Select { .. } => element(tree, id, native, dimensions)?,
+        ExprKind::Select { .. } => element(tree, session, id, native, dimensions)?,
         ExprKind::Call { expression, .. } => {
-            if let Some((method, _, domain)) = method(tree, *expression, native, dimensions)? {
+            if let Some((method, _, domain)) =
+                method(tree, session, *expression, native, dimensions)?
+            {
                 method.returns_member().then_some(domain)
             } else if let ExprKind::Member {
                 expression: base,
@@ -148,14 +154,15 @@ pub(super) fn domain(
                 ..
             } = &native.expression(ungroup(*expression, native)).kind
                 && matches!(name.spelling.as_str(), "pop_front" | "pop_back")
-                && let Some(container) = containers::native_type(*base, native, tree, dimensions)?
+                && let Some(container) =
+                    containers::native_type(*base, native, tree, session, dimensions)?
             {
                 // An element popped from a queue (7.10.2.4, 7.10.2.5).
                 scalar(&container.element)
             } else {
-                let name = match objects::method(tree, *expression, native, dimensions)? {
+                let name = match objects::method(tree, session, *expression, native, dimensions)? {
                     Some((name, _, _)) => Some(name),
-                    None => call_name(&tree.state, *expression, native),
+                    None => call_name(tree, *expression, native),
                 };
                 name.and_then(|name| {
                     dimensions
@@ -171,7 +178,7 @@ pub(super) fn domain(
                 })
             }
         }
-        ExprKind::Cast { target, .. } => cast_type(tree, *target, native, dimensions)?
+        ExprKind::Cast { target, .. } => cast_type(tree, session, *target, native, dimensions)?
             .as_ref()
             .and_then(scalar),
         ExprKind::Conditional {
@@ -179,8 +186,8 @@ pub(super) fn domain(
             else_expression,
             ..
         } => {
-            let then_domain = domain(tree, *then_expression, native, dimensions)?;
-            let else_domain = domain(tree, *else_expression, native, dimensions)?;
+            let then_domain = domain(tree, session, *then_expression, native, dimensions)?;
+            let else_domain = domain(tree, session, *else_expression, native, dimensions)?;
             then_domain.filter(|domain| else_domain.as_ref() == Some(domain))
         }
         _ => None,
@@ -191,15 +198,16 @@ pub(super) fn domain(
 /// type rather than a width or signedness.
 pub(super) fn cast_type(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     target: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<Type>> {
     let target = ungroup(target, native);
-    Ok(if let Some(name) = call_name(&tree.state, target, native) {
+    Ok(if let Some(name) = call_name(tree, target, native) {
         dimensions.type_aliases.get(&name).cloned()
     } else if let ExprKind::Type(id) = native.expression(target).kind {
-        type_binding::binding::bind_in(id, native, tree, dimensions)?
+        type_binding::binding::bind_in(id, native, tree, session, dimensions)?
     } else {
         None
     })
@@ -225,7 +233,7 @@ fn variable(shape: &VariableDimensions) -> Option<Arc<EnumDomain>> {
 /// local type declares is the package item an import makes visible; other
 /// scopes may declare members of the same name and value.
 fn constant(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     name: &str,
     dimensions: &PackedDimensions,
 ) -> Option<Arc<EnumDomain>> {
@@ -255,7 +263,7 @@ fn constant(
     match name.rsplit_once("::") {
         Some((scope, member)) => find(Some(scope), member),
         None => find(None, name).or_else(|| {
-            let qualified = scope::imported(state).aliases.get(name)?.clone();
+            let qualified = scope::imported(tree).aliases.get(name)?.clone();
             let (scope, member) = qualified.rsplit_once("::")?;
             find(Some(scope), member)
         }),
@@ -266,6 +274,7 @@ fn constant(
 /// container whose elements are of one.
 fn element(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
@@ -281,7 +290,8 @@ fn element(
             return Ok(None);
         }
         if selects == 0
-            && let Some(container) = containers::native_type(*expression, native, tree, dimensions)?
+            && let Some(container) =
+                containers::native_type(*expression, native, tree, session, dimensions)?
         {
             return Ok(scalar(&container.element));
         }
@@ -304,9 +314,10 @@ fn element(
         }
         // A static property or a package variable.
         ExprKind::Member { .. }
-            if let Some(shape) = objects::static_property(tree, root, native, dimensions)?
-                .or_else(|| call_name(&tree.state, root, native))
-                .and_then(|name| dimensions.get(&name)) =>
+            if let Some(shape) =
+                objects::static_property(tree, session, root, native, dimensions)?
+                    .or_else(|| call_name(tree, root, native))
+                    .and_then(|name| dimensions.get(&name)) =>
         {
             if shape.container.is_some() {
                 return Ok(None);
@@ -318,7 +329,7 @@ fn element(
             )
         }
         ExprKind::Name(_) | ExprKind::Member { .. } => {
-            match objects::property(tree, root, native, dimensions)? {
+            match objects::property(tree, session, root, native, dimensions)? {
                 Some((property, _)) if property.r#type.container.is_none() => (
                     property.r#type.unpacked_ranges.len(),
                     property.r#type.enum_domain.clone(),
@@ -339,13 +350,15 @@ fn element(
 
 /// The value of `method` of `domain` called on `receiver` with `count`.
 pub(super) fn call(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
     method: Method,
     domain: &EnumDomain,
     receiver: Option<Expr>,
     count: Option<Expr>,
     dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
+    let functions = &tree.functions;
     let members = &domain.members;
     let member = |index: usize| {
         Expr::Literal(format_typed_parameter_literal(
@@ -399,7 +412,7 @@ pub(super) fn call(
             // extended by its own signedness; the type is 2-state, so unknown
             // bits become 0.
             let count = casts::runtime_cast_target_expr(
-                state,
+                tree,
                 casts::RuntimeCastTarget::Integral {
                     target: ExprType {
                         width: 32,
@@ -411,8 +424,8 @@ pub(super) fn call(
                 count.unwrap_or_else(|| int(1)),
                 dimensions,
             )?;
-            let constant = expr_to_const(state, count.clone())
-                .and_then(|count| eval_ast_const_expr(state, &count, &dimensions.const_env))
+            let constant = expr_to_const(session, count.clone())
+                .and_then(|count| eval_ast_const_expr(functions, &count, &dimensions.const_env))
                 .map(|count| (count as u32 as usize) % count_members);
             if let Some(shift) = constant {
                 let shift = if method == Method::Next {
@@ -478,41 +491,99 @@ pub(super) fn call(
                 lookup(domain.width, domain.signed, position, pairs, default)
             }
         }
-        Method::Name => {
-            // The bytes of each name, which a value that is no member
-            // replaces by the empty string (6.19.5.6).
-            let width = 8 * members
-                .iter()
-                .map(|member| member.name.len())
-                .max()
-                .unwrap_or(0)
-                .max(1);
-            let pairs = (0..count_members)
-                .map(|index| {
-                    let bytes = members[index].name.as_bytes();
-                    let name = if bytes.is_empty() {
-                        "8'h0".to_string()
-                    } else {
-                        format!(
-                            "{}'h{}",
-                            8 * bytes.len(),
-                            bytes
-                                .iter()
-                                .map(|byte| format!("{byte:02x}"))
-                                .collect::<String>()
-                        )
-                    };
-                    (member(index), Expr::Literal(name))
-                })
-                .collect();
-            let bytes = lookup(
-                width,
-                false,
-                receiver.clone(),
-                pairs,
-                Expr::Literal(format!("{width}'h0")),
-            );
-            strings::call(StringOp::FromBits, vec![bytes])
-        }
+        Method::Name => strings::call(
+            StringOp::FromBits,
+            vec![name_bytes(domain, receiver.clone())],
+        ),
     })
+}
+
+/// A lookup of `receiver` among the members of `domain` that gives the
+/// value of the pair of its member, or `default` for a value that is no
+/// member.
+fn member_lookup(
+    domain: &EnumDomain,
+    receiver: Expr,
+    width: usize,
+    value: impl Fn(&EnumMember) -> Expr,
+    default: Expr,
+) -> Expr {
+    Expr::Call {
+        callee: Callee::Lookup {
+            width,
+            signed: false,
+        },
+        args: std::iter::once(Some(receiver))
+            .chain(domain.members.iter().flat_map(|member| {
+                [
+                    Some(Expr::Literal(format_typed_parameter_literal(
+                        member.value,
+                        domain.width,
+                        domain.signed,
+                    ))),
+                    Some(value(member)),
+                ]
+            }))
+            .chain(std::iter::once(Some(default)))
+            .collect(),
+        arg_order: Vec::new(),
+    }
+}
+
+/// The bytes of the name of the member that `receiver` has the value of,
+/// which a value that is no member replaces by the empty string (6.19.5.6).
+fn name_bytes(domain: &EnumDomain, receiver: Expr) -> Expr {
+    let width = 8 * domain
+        .members
+        .iter()
+        .map(|member| member.name.len())
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    member_lookup(
+        domain,
+        receiver,
+        width,
+        |member| {
+            let bytes = member.name.as_bytes();
+            Expr::Literal(if bytes.is_empty() {
+                "8'h0".to_string()
+            } else {
+                format!(
+                    "{}'h{}",
+                    8 * bytes.len(),
+                    bytes
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>()
+                )
+            })
+        },
+        Expr::Literal(format!("{width}'h0")),
+    )
+}
+
+/// The `%p` text of `value` of enumerated type `domain`: the name of its
+/// member, or for a value that is no member, the value as its base type
+/// prints (IEEE 1800-2023 21.2.1.6). `value` is evaluated more than once,
+/// so it has no effects.
+pub(in crate::ast) fn pattern_text(domain: &EnumDomain, value: Expr) -> Expr {
+    let named = member_lookup(
+        domain,
+        value.clone(),
+        1,
+        |_| Expr::Literal("1'b1".into()),
+        Expr::Literal("1'b0".into()),
+    );
+    Expr::Mux {
+        condition: Box::new(named),
+        then_expr: Box::new(strings::call(
+            StringOp::FromBits,
+            vec![name_bytes(domain, value.clone())],
+        )),
+        else_expr: Box::new(strings::call(
+            StringOp::Format { ticks_per_unit: 1 },
+            vec![super::format_patterns::bytes_literal(b"%0d"), value],
+        )),
+    }
 }

@@ -294,7 +294,6 @@ impl WasmBackend {
         let mut four_state_inits = Vec::new();
         if options.four_state {
             for (addr, &offset) in &layout.offsets {
-                let width = layout.widths[addr];
                 let is_4state = sir
                     .design
                     .state_objects
@@ -302,12 +301,11 @@ impl WasmBackend {
                     .map(|metadata| metadata.is_4state)
                     .unwrap_or(false);
                 if is_4state {
-                    four_state_inits.push((offset, get_byte_size(width)));
+                    four_state_inits.push((offset, layout.plane_size(addr)));
                 }
             }
             for (addr, &rel_offset) in &layout.working_offsets {
                 let offset = layout.working_base_offset + rel_offset;
-                let width = layout.widths[addr];
                 let is_4state = sir
                     .design
                     .state_objects
@@ -315,7 +313,7 @@ impl WasmBackend {
                     .map(|metadata| metadata.is_4state)
                     .unwrap_or(false);
                 if is_4state {
-                    four_state_inits.push((offset, get_byte_size(width)));
+                    four_state_inits.push((offset, layout.plane_size(addr)));
                 }
             }
         }
@@ -545,7 +543,14 @@ impl WasmBackend {
             offset,
             width,
             is_4state,
-            array_layout: None,
+            array_layout: self.layout.unpacked_arrays.get(addr).map(|array| {
+                celox_runtime::SignalArrayLayout {
+                    element_width: array.element_width,
+                    element_count: array.element_count,
+                    element_stride: array.element_stride,
+                    plane_size: array.plane_size,
+                }
+            }),
         }
     }
 
@@ -566,6 +571,16 @@ impl WasmBackend {
     }
 
     pub fn set<T: Copy>(&mut self, signal: SignalRef, value: T) {
+        if signal.array_layout.is_some() {
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    (&value as *const T).cast::<u8>(),
+                    std::mem::size_of::<T>(),
+                )
+            };
+            self.set_wide(signal, BigUint::from_bytes_le(bytes));
+            return;
+        }
         celox_runtime::backend::SimBackend::mark_vcd_signal(self, signal);
         let allocated_size = get_byte_size(signal.width);
         let provided_size = std::mem::size_of::<T>();
@@ -594,6 +609,19 @@ impl WasmBackend {
     }
 
     pub fn set_wide(&mut self, signal: SignalRef, value: BigUint) {
+        if let Some(array) = signal.array_layout {
+            celox_runtime::backend::SimBackend::mark_vcd_signal(self, signal);
+            let mem = self.memory.data_mut(&mut self.store);
+            let end = signal.offset + array.element_extent();
+            array.scatter(&mut mem[signal.offset..end], &value);
+            if self.options.four_state && signal.is_4state {
+                array.scatter(
+                    &mut mem[signal.offset + array.plane_size..end + array.plane_size],
+                    &BigUint::from(0u8),
+                );
+            }
+            return;
+        }
         celox_runtime::backend::SimBackend::mark_vcd_signal(self, signal);
         let allocated_size = get_byte_size(signal.width);
         let mut bytes = value.to_bytes_le();
@@ -611,6 +639,19 @@ impl WasmBackend {
     }
 
     pub fn set_four_state(&mut self, signal: SignalRef, value: BigUint, mask: BigUint) {
+        if let Some(array) = signal.array_layout {
+            celox_runtime::backend::SimBackend::mark_vcd_signal(self, signal);
+            let mem = self.memory.data_mut(&mut self.store);
+            let end = signal.offset + array.element_extent();
+            array.scatter(&mut mem[signal.offset..end], &value);
+            if self.options.four_state && signal.is_4state {
+                array.scatter(
+                    &mut mem[signal.offset + array.plane_size..end + array.plane_size],
+                    &mask,
+                );
+            }
+            return;
+        }
         celox_runtime::backend::SimBackend::mark_vcd_signal(self, signal);
         let allocated_size = get_byte_size(signal.width);
         let mut v_bytes = value.to_bytes_le();
@@ -629,6 +670,11 @@ impl WasmBackend {
     }
 
     pub fn get(&self, signal: SignalRef) -> BigUint {
+        if let Some(array) = signal.array_layout {
+            let mem = self.memory.data(&self.store);
+            let end = signal.offset + array.element_extent();
+            return array.gather(&mem[signal.offset..end]);
+        }
         let byte_size = get_byte_size(signal.width);
         let mem = self.memory.data(&self.store);
         let slice = &mem[signal.offset..signal.offset + byte_size];
@@ -642,6 +688,19 @@ impl WasmBackend {
     }
 
     pub fn get_as<T: Default + Copy>(&self, signal: SignalRef) -> T {
+        if signal.array_layout.is_some() {
+            assert!(get_byte_size(signal.width) <= std::mem::size_of::<T>());
+            let bytes = self.get(signal).to_bytes_le();
+            let mut value = T::default();
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    bytes.as_ptr(),
+                    (&mut value as *mut T).cast::<u8>(),
+                    bytes.len(),
+                );
+            }
+            return value;
+        }
         let byte_size = get_byte_size(signal.width);
         let provided_size = std::mem::size_of::<T>();
         assert!(byte_size <= provided_size);
@@ -658,6 +717,19 @@ impl WasmBackend {
     }
 
     pub fn get_four_state(&self, signal: SignalRef) -> (BigUint, BigUint) {
+        if let Some(array) = signal.array_layout {
+            let mem = self.memory.data(&self.store);
+            let end = signal.offset + array.element_extent();
+            let value = array.gather(&mem[signal.offset..end]);
+            return (
+                value,
+                if self.options.four_state && signal.is_4state {
+                    array.gather(&mem[signal.offset + array.plane_size..end + array.plane_size])
+                } else {
+                    BigUint::from(0u8)
+                },
+            );
+        }
         let byte_size = get_byte_size(signal.width);
         let mem = self.memory.data(&self.store);
         let v_slice = &mem[signal.offset..signal.offset + byte_size];

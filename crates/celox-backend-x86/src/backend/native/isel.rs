@@ -50,7 +50,7 @@ use runtime_events::{
     load_runtime_event_ptr_and_comb_capture_enabled, lower_runtime_event_write,
 };
 use wide::{ShiftDir, lower_wide_binary, lower_wide_runtime_shift_chunks, wide_reduce_or};
-use wide_unary::{lower_wide_extract, lower_wide_unary};
+use wide_unary::{lower_planes, lower_wide_extract, lower_wide_unary};
 
 use super::mir::*;
 use super::sparse_write_state::{
@@ -984,6 +984,17 @@ pub fn lower_execution_unit_with_diagnostics(
     four_state: bool,
     diagnostics: &crate::NativeDiagnostics,
 ) -> MFunction {
+    lower_execution_unit_counting_verifications(eu, layout, four_state, diagnostics).0
+}
+
+/// Lower like [`lower_execution_unit_with_diagnostics`], also returning how
+/// many wide values the debug invariant checks verified.
+fn lower_execution_unit_counting_verifications(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    layout: &MemoryLayout,
+    four_state: bool,
+    diagnostics: &crate::NativeDiagnostics,
+) -> (MFunction, usize) {
     let expanded = strided::expand_strided_accesses(eu, layout);
     let eu = expanded.as_ref();
     if cfg!(debug_assertions) || diagnostics.verify_sir {
@@ -1109,6 +1120,7 @@ pub fn lower_execution_unit_with_diagnostics(
         trigger_only_seen: HashSet::default(),
         sparse_descriptor_table,
         trace_regs,
+        wide_value_verifications: 0,
     };
     // Pre-seed wide block params so instructions in those blocks can read the
     // full chunked value before phi nodes are materialized in a later pass.
@@ -1568,6 +1580,7 @@ pub fn lower_execution_unit_with_diagnostics(
     }
     let saved_wide_regs = std::mem::take(&mut ctx.wide_regs);
     let saved_wide_masks = std::mem::take(&mut ctx.wide_masks);
+    let wide_value_verifications = ctx.wide_value_verifications;
     drop(ctx); // Release borrows on func
 
     // Build phi nodes from SIR block params and predecessor terminators.
@@ -1710,7 +1723,7 @@ pub fn lower_execution_unit_with_diagnostics(
         func.spill_descs.push(SpillDesc::transient());
     }
 
-    func
+    (func, wide_value_verifications)
 }
 
 /// Compute a bitmask of `width` bits (e.g., width=8 → 0xFF).
@@ -1761,11 +1774,6 @@ type WideMaskMap = crate::HashMap<RegisterId, Vec<(VReg, usize)>>;
 /// Tracks known constant values for SIR registers (for constant folding in ISel).
 type ConstMap = crate::HashMap<RegisterId, u64>;
 
-#[cfg(test)]
-thread_local! {
-    static WIDE_VALUE_VERIFICATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
 struct ISelContext<'a> {
     vregs: &'a mut VRegAllocator,
     spill_descs: &'a mut Vec<SpillDesc>,
@@ -1802,6 +1810,8 @@ struct ISelContext<'a> {
     /// sparse region it can write.
     sparse_descriptor_table: Option<ConstantTableId>,
     trace_regs: HashSet<RegisterId>,
+    /// Wide values the debug invariant checks have verified.
+    wide_value_verifications: usize,
 }
 
 impl<'a> ISelContext<'a> {
@@ -2205,6 +2215,7 @@ impl<'a> ISelContext<'a> {
         } else {
             if cfg!(debug_assertions) {
                 self.verify_wide_value(&reg, &chunks);
+                self.wide_value_verifications += 1;
             }
             self.wide_regs.replace(reg, chunks);
         }
@@ -2255,15 +2266,16 @@ impl<'a> ISelContext<'a> {
     /// real SIR type wider than one machine word.  Narrow results of wide
     /// operations are kept in `reg_map` and must never be allowed to re-enter
     /// this map through a direct insertion.
-    fn verify_wide_values(&self) {
+    fn verify_wide_values(&mut self) {
+        let mut verified = 0;
         for (reg, chunks) in self.wide_regs.iter() {
             self.verify_wide_value(reg, chunks);
+            verified += 1;
         }
+        self.wide_value_verifications += verified;
     }
 
     fn verify_wide_value(&self, reg: &RegisterId, chunks: &[(VReg, usize)]) {
-        #[cfg(test)]
-        WIDE_VALUE_VERIFICATIONS.with(|count| count.set(count.get() + 1));
         let width = self.sir_width(reg);
         assert!(
             width > 64,

@@ -32,19 +32,30 @@ impl<B: SimBackend> SimulationState<B> {
         let Some((lsb, width)) = refs.range(backend) else {
             return Ok(());
         };
-        // A program process's update waits for the Re-NBA region (IEEE
-        // 1800-2023 24.3.1).
-        let queue = if self.model.processes[process].program.is_some() {
-            &mut self.process_state.re_nba_queue
-        } else {
-            &mut self.process_state.nba_queue
-        };
-        queue.push(NbaUpdate {
+        let program = self.model.processes[process].program.is_some();
+        let update = NbaUpdate {
             target: refs.target,
             lsb,
             width,
             value: read(backend, refs.value),
-        });
+        };
+        if refs.delay > 0 {
+            let time = self.scheduler.time.checked_add(refs.delay).ok_or_else(|| {
+                Halt::Error(crate::SimulatorErrorCode::Runtime {
+                    message: "nonblocking assignment delay overflows simulation time".into(),
+                    signals: Vec::new(),
+                })
+            })?;
+            self.process_state
+                .delayed_nba
+                .entry(time)
+                .or_default()
+                .push((program, update));
+        } else if program {
+            self.process_state.re_nba_queue.push(update);
+        } else {
+            self.process_state.nba_queue.push(update);
+        }
         Ok(())
     }
 
@@ -76,10 +87,18 @@ impl<B: SimBackend> SimulationState<B> {
         } else {
             0
         };
+        // `->>` triggers its events in this region (IEEE 1800-2023 15.5.1).
+        let events = !self.process_state.nba_events.is_empty();
+        if events {
+            let now = self.scheduler.time;
+            for handle in std::mem::take(&mut self.process_state.nba_events) {
+                self.trigger_event(handle, now);
+            }
+        }
         let mut queued = std::mem::take(&mut self.process_state.nba_queue);
         if queued.is_empty() && flagged == 0 {
             self.process_state.nba_queue = queued;
-            return Ok(false);
+            return Ok(events);
         }
         // Several updates may pulse an event signal: each is an update the
         // event domains see, not only the final value.
