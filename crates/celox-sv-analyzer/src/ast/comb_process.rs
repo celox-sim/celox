@@ -125,12 +125,25 @@ fn comb_processes_from_item(
         }
         celox_sv_syntax::BodyItemKind::Net(id) => {
             // `wire [7:0] w = expr;` declares a net and drives it continuously.
-            for assignment in net_declaration_assignments(
-                syntax_tree.declarations().net_declaration(*id),
-                syntax_tree,
-                session,
-                packed_dimensions,
-            )? {
+            let declaration = syntax_tree.declarations().net_declaration(*id);
+            let delay = if declaration
+                .variables
+                .iter()
+                .any(|variable| variable.value.is_some())
+            {
+                declaration
+                    .delay
+                    .as_ref()
+                    .map(|delay| {
+                        continuous_delays::ticks(delay, syntax_tree, session, packed_dimensions)
+                    })
+                    .transpose()?
+            } else {
+                None
+            };
+            for assignment in
+                net_declaration_assignments(declaration, syntax_tree, session, packed_dimensions)?
+            {
                 let assignment = substitute_assignment_constants_with_parameter_literals(
                     syntax_tree,
                     session,
@@ -138,13 +151,15 @@ fn comb_processes_from_item(
                     const_env,
                     parameter_literals,
                 );
-                processes.push(CombProcess::new(
+                let mut process = CombProcess::new(
                     CombProcessKind::ContinuousAssign,
                     condition
                         .clone()
                         .map(|condition| substitute_const_expr_constants(condition, const_env)),
                     vec![assignment],
-                ));
+                );
+                process.delay = delay;
+                processes.push(process);
             }
         }
         celox_sv_syntax::BodyItemKind::Unconverted { category, .. } if category == "alias" => {
