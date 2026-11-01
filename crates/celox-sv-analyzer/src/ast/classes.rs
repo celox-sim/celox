@@ -390,10 +390,31 @@ pub(super) fn declaration<'a>(
     name: &str,
 ) -> Option<&'a celox_sv_syntax::ClassDeclaration> {
     let name = specializations::generic(session, name);
-    tree.declarations()
-        .classes
-        .iter()
-        .find(|class| declared_name(tree, class) == name)
+    let classes = &tree.declarations().classes;
+    let index = tree.spans().classes.get_or_init(|| ClassIndex {
+        path: tree.compilation_path().to_owned(),
+        by_name: classes
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(index, class)| (declared_name(tree, class), index))
+            .collect(),
+    });
+    // The names of `$unit` classes depend on the compilation path.
+    if index.path != tree.compilation_path() {
+        return classes
+            .iter()
+            .find(|class| declared_name(tree, class) == name);
+    }
+    index.by_name.get(&name).map(|index| &classes[*index])
+}
+
+/// The class declarations of a file by [`declared_name`], the first of each
+/// name, indexed once per file.
+#[derive(Debug)]
+pub(crate) struct ClassIndex {
+    path: std::path::PathBuf,
+    by_name: HashMap<String, usize>,
 }
 
 /// The name of class declaration `declaration`: qualified by the package
