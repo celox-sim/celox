@@ -967,6 +967,10 @@
       "title": "randomize(e) of a non-rand enumeration property assigns a value outside its type: with the constraint e == 5 on an enum of 1, 4 and 9 it succeeds and stores 5",
       "standard": "IEEE 1800-2023 18.3, 18.11"
     },
+    "sv_foreach_string_property": {
+      "title": "A foreach over a string class property (foreach (p.m_name[i])) runs its body once instead of once per character",
+      "standard": "IEEE 1800-2023 12.7.3"
+    },
     "sv_parenless_method_chain": {
       "title": "A method called without parentheses on the handle that another parenless method call returns (n.get_peer.get_id) reads unknown bits",
       "standard": "IEEE 1800-2023 13.5.5"
@@ -5411,6 +5415,14 @@
       "classification": "xezim_bug",
       "bug": "sv_selected_enum_domain",
       "note": "sel.randomize(e), where e has type enum bit [3:0] {A = 1, B = 4, C = 9} and the constraint is e == 5, must fail and leave e at 0; xezim returns 1 and stores 5. The earlier assertions (enumeration values, the implication, the randc cycle) pass."
+    },
+    {
+      "suite": "sv",
+      "name": "string::foreach_iterates_the_characters",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_foreach_string_property",
+      "note": "before_b counts the characters of p.m_name (\"a.b.c\") before the first \"b\", which is 2; the body runs once, so it is 1. A foreach over a string variable iterates every character."
     }
   ]
 }

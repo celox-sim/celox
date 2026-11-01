@@ -3330,6 +3330,35 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             innermost = false;
             let (name, left, right) = match bound {
                 ForeachLoop::Static(name, left, right) => (name, left, right),
+                ForeachLoop::String { array, index } => {
+                    let index_expr = Expr::Ident(index.clone());
+                    body = vec![Stmt::Loop {
+                        kind: LoopKind::For,
+                        init: vec![Stmt::Local {
+                            name: index.clone(),
+                            init: Some(Expr::Literal("0".into())),
+                        }],
+                        condition: Some(Expr::Binary {
+                            left: Box::new(index_expr.clone()),
+                            op: BinaryOp::Lt,
+                            right: Box::new(expression_binding::string_call(
+                                StringOp::Len,
+                                vec![array],
+                            )),
+                        }),
+                        step: vec![Stmt::Assign {
+                            lhs: LValue::Ident(index),
+                            rhs: Expr::Binary {
+                                left: Box::new(index_expr),
+                                op: BinaryOp::Add,
+                                right: Box::new(Expr::Literal("1".into())),
+                            },
+                            nonblocking: false,
+                        }],
+                        body,
+                    }];
+                    continue;
+                }
                 ForeachLoop::Container {
                     array,
                     index,
