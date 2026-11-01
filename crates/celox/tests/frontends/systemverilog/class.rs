@@ -1610,12 +1610,41 @@ sv_backends! {
     fn class_static_initializers_run_once_before_time_zero(sim) { @case "class::static_initializers_run_once_before_time_zero"; }
     fn class_method_defaults_use_the_object(sim) { @case "class::method_defaults_use_the_object"; }
     fn class_methods_called_without_parentheses(sim) { @case "class::methods_called_without_parentheses"; }
+    fn class_constrained_enumerations_and_randc(sim) { @case "class::constrained_enumerations_and_randc"; }
     fn class_prototype_formals_inherit_types(sim) { @case "class::prototype_formals_inherit_types"; }
     fn class_real_values_round_into_integral_properties(sim) { @case "class::real_values_round_into_integral_properties"; }
     fn class_real_properties(sim) { @case "class::real_properties"; }
 }
 
 sv_backends! {
+    // A random enumeration of 1024 members takes one of them (IEEE 1800-2023
+    // 18.3): its domain stays within the solver's limits.
+    fn class_randomizes_large_enumerations(sim) {
+        @setup {
+            let members = (0..1024)
+                .map(|index| format!("M{index} = 12'd{}", index * 3))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let source = format!(
+                "module Top(output int ok, output int value);
+                    typedef enum bit [11:0] {{ {members} }} big_e;
+                    class Big; rand big_e e; constraint c {{ e > 12'd30; }} endclass
+                    Big b;
+                    initial begin
+                        b = new;
+                        ok = b.randomize() with {{ 1; }};
+                        value = b.e;
+                    end
+                endmodule"
+            );
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source.as_str(), Path::new("big_enum.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("ok")), 1u32.into());
+        let value: u32 = sim.get(sim.signal("value")).try_into().unwrap();
+        assert!(value > 30 && value.is_multiple_of(3), "{value}");
+    }
+
     // A class parameter hides the module's constant of its name also in a
     // static call that passes it on by name (8.25).
     fn class_parameter_literals_hide_module_constants_in_static_calls(sim) {

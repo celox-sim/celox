@@ -103,6 +103,17 @@
     },
     {
       "category": "Types",
+      "detail": "class::constrained_enumerations_and_randc at 4142:52: assert_eq independent: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "class::constrained_enumerations_and_randc",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Verilator invokes post_randomize unconditionally after an UNSAT ordinary randomize call. Generated C++ calls the post hook after constraint.next without testing its return. IEEE 1800-2023 18.6.3 requires skipping the post hook on failure. The case keeps its assertion and tests that pre_randomize updates state before solving.",
       "expectation": "Simulation",
       "known_issue": {

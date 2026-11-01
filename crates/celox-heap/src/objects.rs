@@ -206,25 +206,43 @@ impl Heap {
         let Some(object) = self.object_mut(handle) else {
             return 0;
         };
-        let remaining = object.random_cycles.entry(offset).or_default();
-        if remaining.is_empty() {
-            remaining.extend(0..count as u16);
-        }
-        let count = remaining.len() as u64;
-        let threshold = count.wrapping_neg() % count;
+        let left = cycle(object, offset, count, false).len() as u64;
+        let threshold = left.wrapping_neg() % left;
         let index = loop {
             let draw = object.random();
             if draw >= threshold {
-                break (draw % count) as usize;
+                break (draw % left) as usize;
             }
         };
-        u64::from(
-            object
-                .random_cycles
-                .get_mut(&offset)
-                .unwrap()
-                .swap_remove(index),
-        )
+        u64::from(cycle(object, offset, count, false).swap_remove(index))
+    }
+
+    /// The entries the current cycle of the randc property at `offset`, of
+    /// `count` entries, has not produced; `restart` starts a new cycle.
+    pub(crate) fn cycle_remaining(
+        &mut self,
+        handle: Handle,
+        offset: u32,
+        count: u64,
+        restart: bool,
+    ) -> Vec<u64> {
+        self.object_mut(handle).map_or_else(Vec::new, |object| {
+            cycle(object, offset, count, restart)
+                .iter()
+                .map(|entry| u64::from(*entry))
+                .collect()
+        })
+    }
+
+    /// Record that the cycle of the randc property at `offset`, of `count`
+    /// entries, produced `entry`.
+    pub(crate) fn take_cycle_entry(&mut self, handle: Handle, offset: u32, count: u64, entry: u64) {
+        if let Some(object) = self.object_mut(handle) {
+            let remaining = cycle(object, offset, count, false);
+            if let Some(index) = remaining.iter().position(|left| u64::from(*left) == entry) {
+                remaining.swap_remove(index);
+            }
+        }
     }
 
     /// Random properties start enabled. Modes are shared by aliases of an
@@ -373,6 +391,21 @@ impl Heap {
             })
             .collect()
     }
+}
+
+/// The cycle of the randc property at `offset` of `object`: the entries,
+/// `0..count`, that it has not produced, a new cycle once it has produced
+/// them all or when `restart` asks. Both the unconstrained draw and the
+/// constraint solver keep a property's cycle here, as the indices of the
+/// members of an enumeration and as the values of an integral property
+/// (IEEE 1800-2023 18.4.2).
+fn cycle(object: &mut Object, offset: u32, count: u64, restart: bool) -> &mut Vec<u16> {
+    let remaining = object.random_cycles.entry(offset).or_default();
+    if restart || remaining.is_empty() {
+        remaining.clear();
+        remaining.extend(0..count as u16);
+    }
+    remaining
 }
 
 #[cfg(test)]

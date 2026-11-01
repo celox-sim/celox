@@ -90,6 +90,17 @@
     },
     {
       "category": "Types",
+      "detail": "class::constrained_enumerations_and_randc at 4142:3: assert_eq selected: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "class::constrained_enumerations_and_randc",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "the simulation ended before the script did",
       "expectation": "Simulation",
       "name": "class::constructors_chain_to_base",

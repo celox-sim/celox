@@ -4115,3 +4115,115 @@ endmodule
   (assert_eq incremented_from 0x3ff8000000000000)
   (assert_eq incremented 0x4004000000000000)
   (assert_eq widened 0x41f0000000000000))
+
+; A random enumeration takes only the values of its type (IEEE 1800-2023
+; 18.3), and a randc property draws each value its constraints allow once
+; per cycle (18.4.2).
+(case constrained_enumerations_and_randc
+  (source "class.sv" #"
+module Top(output int legal, output int implied, output bit both_kinds, output int cycle_ok,
+           output int selected, output int mixed_cycle, output int independent,
+           output int kept);
+    typedef enum {READ, WRITE} kind_e;
+    typedef enum bit [3:0] {A = 4'd1, B = 4'd4, C = 4'd9} gap_e;
+    class Item;
+        rand kind_e kind;
+        rand gap_e g;
+        rand bit [7:0] addr;
+        constraint c { kind == WRITE -> addr > 5; g != C; }
+    endclass
+    class Cyc;
+        randc bit [2:0] id;
+        rand bit [3:0] other;
+        constraint c { id < 6; other == id; }
+    endclass
+    typedef enum bit [3:0] {P = 4'd4, Q = 4'd9} sparse_e;
+    // Selecting a property makes it random, with the values of its type.
+    class Sel;
+        gap_e e;
+        constraint c { e == 5; }
+    endclass
+    class Sparse;
+        randc sparse_e z;
+    endclass
+    // Each randc property restarts its own cycle once its legal values are
+    // exhausted: a's after two draws, b's after three.
+    class Two;
+        randc bit [1:0] a, b;
+        constraint c { a < 2; b < 3; }
+    endclass
+    Two two;
+    bit [3:0] seen_b;
+    // A call that fails leaves the cycle unfinished (18.4.2, 18.6.3).
+    class One;
+        randc bit k;
+    endclass
+    One one;
+    bit drawn;
+    Item it;
+    Cyc cy;
+    Sel sel;
+    Sparse sp;
+    sparse_e first, second;
+    int seen_read, seen_write, ok;
+    bit [7:0] mask;
+    initial begin
+        it = new;
+        legal = 1; implied = 1;
+        repeat (40) begin
+            ok = it.randomize();
+            if (!ok) legal = 0;
+            if (!(it.g inside {A, B})) legal = 0;
+            if (!(it.kind inside {READ, WRITE})) legal = 0;
+            if (it.kind == WRITE && it.addr <= 5) implied = 0;
+            if (it.kind == READ) seen_read++; else seen_write++;
+        end
+        cy = new;
+        cycle_ok = 1;
+        repeat (3) begin
+            mask = 0;
+            repeat (6) begin
+                ok = cy.randomize();
+                if (!ok || cy.id >= 6 || mask[cy.id] || cy.other != cy.id) cycle_ok = 0;
+                mask[cy.id] = 1;
+            end
+            if (mask != 8'h3f) cycle_ok = 0;
+        end
+        both_kinds = seen_read > 0 && seen_write > 0;
+        sel = new;
+        selected = sel.randomize(e) == 0 && sel.e == 0;
+        // Calls with and without an inline constraint share one cycle.
+        sp = new;
+        mixed_cycle = 1;
+        repeat (4) begin
+            void'(sp.randomize());
+            first = sp.z;
+            void'(sp.randomize() with { 1; });
+            second = sp.z;
+            if (first == second || !(first inside {P, Q}) || !(second inside {P, Q}))
+                mixed_cycle = 0;
+        end
+        two = new;
+        independent = 1;
+        repeat (4) begin
+            seen_b = 0;
+            repeat (3) begin
+                if (!two.randomize() || two.a >= 2 || two.b >= 3 || seen_b[two.b]) independent = 0;
+                seen_b[two.b] = 1;
+            end
+        end
+        one = new;
+        kept = 1;
+        repeat (4) begin
+            void'(one.randomize());
+            drawn = one.k;
+            if (one.randomize() with { 0; }) kept = 0;
+            void'(one.randomize());
+            if (one.k == drawn) kept = 0;
+        end
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq legal 1) (assert_eq implied 1) (assert_eq both_kinds 1) (assert_eq cycle_ok 1)
+  (assert_eq selected 1) (assert_eq mixed_cycle 1) (assert_eq independent 1) (assert_eq kept 1))
