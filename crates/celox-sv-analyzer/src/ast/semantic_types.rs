@@ -11,12 +11,14 @@
 use fxhash::FxHashMap as HashMap;
 use std::sync::{Arc, Weak};
 
+mod bindings;
 mod conversion;
 mod relations;
 mod spelling;
 #[cfg(test)]
 mod tests;
 
+pub(super) use bindings::ConstantType;
 pub(super) use conversion::{of_shape, of_type};
 
 /// An interned semantic type of a [`TyTable`].
