@@ -1837,12 +1837,16 @@ impl<'p, 'a> Comb<'p, 'a> {
                     this.alloc(SLTNode::Binary(raised, BinaryOp::Shr, down))
                 };
                 let placed_mask = place(self, mask)?;
-                let placed_value = place(self, value)?;
-                let placed_value =
-                    self.alloc(SLTNode::Binary(placed_value, BinaryOp::And, placed_mask))?;
-                let keep = self.alloc(SLTNode::Unary(UnaryOp::BitNot, placed_mask))?;
-                let kept = self.alloc(SLTNode::Binary(current, BinaryOp::And, keep))?;
-                let mut updated = self.alloc(SLTNode::Binary(kept, BinaryOp::Or, placed_value))?;
+                let mut updated = if self.m.four_state && self.m.var(id).is_4state {
+                    masked::dynamic_four_state(self.arena, current, value, placed_mask, up, down)?
+                } else {
+                    let placed_value = place(self, value)?;
+                    let placed_value =
+                        self.alloc(SLTNode::Binary(placed_value, BinaryOp::And, placed_mask))?;
+                    let keep = self.alloc(SLTNode::Unary(UnaryOp::BitNot, placed_mask))?;
+                    let kept = self.alloc(SLTNode::Binary(current, BinaryOp::And, keep))?;
+                    self.alloc(SLTNode::Binary(kept, BinaryOp::Or, placed_value))?
+                };
                 if self.m.four_state {
                     // A write at an unknown position is ignored (IEEE 1800-2023 11.5.1).
                     let mut known = None;

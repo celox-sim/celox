@@ -3430,19 +3430,23 @@ impl<'p, 'a> Ff<'p, 'a> {
                             .map_err(slt_error)
                     };
                     let placed_mask = place(arena, mask)?;
-                    let placed_value = place(arena, value)?;
-                    let placed_value = arena
-                        .alloc(SLTNode::Binary(placed_value, BinaryOp::And, placed_mask))
-                        .map_err(slt_error)?;
-                    let keep = arena
-                        .alloc(SLTNode::Unary(UnaryOp::BitNot, placed_mask))
-                        .map_err(slt_error)?;
-                    let kept = arena
-                        .alloc(SLTNode::Binary(current, BinaryOp::And, keep))
-                        .map_err(slt_error)?;
-                    let mut updated = arena
-                        .alloc(SLTNode::Binary(kept, BinaryOp::Or, placed_value))
-                        .map_err(slt_error)?;
+                    let mut updated = if self.m.four_state && self.m.var(id).is_4state {
+                        masked::dynamic_four_state(arena, current, value, placed_mask, up, down)?
+                    } else {
+                        let placed_value = place(arena, value)?;
+                        let placed_value = arena
+                            .alloc(SLTNode::Binary(placed_value, BinaryOp::And, placed_mask))
+                            .map_err(slt_error)?;
+                        let keep = arena
+                            .alloc(SLTNode::Unary(UnaryOp::BitNot, placed_mask))
+                            .map_err(slt_error)?;
+                        let kept = arena
+                            .alloc(SLTNode::Binary(current, BinaryOp::And, keep))
+                            .map_err(slt_error)?;
+                        arena
+                            .alloc(SLTNode::Binary(kept, BinaryOp::Or, placed_value))
+                            .map_err(slt_error)?
+                    };
                     if self.m.four_state {
                         // A write at an unknown position is ignored (IEEE 1800-2023 11.5.1).
                         let mut known = None;
