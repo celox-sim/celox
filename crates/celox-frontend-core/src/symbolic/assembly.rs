@@ -1967,6 +1967,42 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         (HashMap::default(), HashMap::default())
     };
 
+    // Size the declared private variables before building either metadata
+    // projection, so reflection and storage agree on the raw snapshot widths.
+    if let Some(scheduler) = &scheduler_slots {
+        let mut widths = vec![celox_design::SCHEDULER_FLAG_WIDTH; scheduler.baseline.len()];
+        for site in &timing.wait_sites {
+            let terms = site
+                .terms
+                .iter()
+                .map(|(signal, _)| {
+                    let metadata = &modules[&instance_modules[&signal.instance_id]].variables
+                        [&signal.var_id]
+                        .metadata;
+                    metadata
+                        .array_dims
+                        .is_empty()
+                        .then_some((metadata.width, four_state && metadata.is_4state))
+                })
+                .collect::<Option<Vec<_>>>();
+            if let Some(layout) = terms
+                .as_deref()
+                .and_then(celox_design::schedule::CompiledWaitLayout::new)
+            {
+                widths[site.process] = widths[site.process].max(layout.bits);
+            }
+        }
+        for (baseline, width) in scheduler.baseline.iter().zip(widths) {
+            modules
+                .get_mut(&root_id)
+                .unwrap()
+                .variables
+                .get_mut(baseline)
+                .expect("declared scheduler baseline")
+                .metadata
+                .width = width;
+        }
+    }
     let (mod_vars, mod_path_idx) = module_variables(&modules);
     // A variable bound to a package variable has no state object of its own:
     // its initial writes, such as a constant `initial` assignment, go to the

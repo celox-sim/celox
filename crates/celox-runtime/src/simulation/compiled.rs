@@ -218,6 +218,17 @@ impl<B: SimBackend> SimulationState<B> {
                 continue;
             };
             let (waiting, baseline) = (*waiting, *baseline);
+            if let Some(layout) = &scheduler.raw_waits[process] {
+                let Some(waiter) = self.process_state.waiters.get(process) else {
+                    backend.set(waiting, 0u8);
+                    continue;
+                };
+                let packed = pack_wait_snapshot(layout, &waiter.baselines)?;
+                backend.set(waiting, 1u8);
+                backend.set_wide(baseline, packed);
+                self.process_state.waiters.remove(process);
+                continue;
+            }
             // The edge level of the one-bit signal: its value bit, and its
             // mask bit, which a two-state image lacks; above them the index
             // of the edge the wait site waits for.
@@ -380,7 +391,10 @@ impl<B: SimBackend> SimulationState<B> {
             };
             if pending(process)
                 || backend.get_as::<u8>(waiting) == 0
-                || status(process) != Some(celox_design::ProcessStatus::Wait)
+                || !matches!(
+                    status(process),
+                    Some(celox_design::ProcessStatus::Wait | celox_design::ProcessStatus::Pending)
+                )
             {
                 continue;
             }
@@ -390,6 +404,21 @@ impl<B: SimBackend> SimulationState<B> {
                 .wait_sites
                 .get(site)
                 .ok_or_else(|| Self::site_error(process, site))?;
+            if let Some(layout) = &scheduler.raw_waits[process] {
+                let mut packed = backend.get(baseline).to_bytes_le();
+                packed.resize(layout.bits.div_ceil(8), 0);
+                let mut restored = Ok(());
+                self.process_state.waiters.register(
+                    process,
+                    terms.iter().any(|term| term.driven),
+                    |waiter| {
+                        waiter.site = site;
+                        restored = unpack_wait_snapshot(layout, &packed, &mut waiter.baselines);
+                    },
+                );
+                restored?;
+                continue;
+            }
             let level = backend.get_as::<u8>(baseline);
             // A four-state signal's image holds its mask plane after its value.
             let planes = [level & 1, u8::from(level & LEVEL_UNKNOWN != 0)];
@@ -516,5 +545,114 @@ impl<B: SimBackend> SimulationState<B> {
     /// sampled copies are made before entering each later timestamp.
     fn one_slot_runs(&self) -> bool {
         !self.model.sample_shadows.is_empty()
+    }
+}
+
+fn pack_wait_snapshot(
+    layout: &celox_design::schedule::CompiledWaitLayout,
+    baselines: &[Baseline],
+) -> Result<num_bigint::BigUint, SimulatorErrorCode> {
+    if layout.scalar_byte || baselines.len() != layout.terms.len() {
+        return Err(SimulatorErrorCode::InternalError);
+    }
+    let mut packed = vec![0u8; layout.bits.div_ceil(8)];
+    for (term, baseline) in layout.terms.iter().zip(baselines) {
+        let bytes = term.width.div_ceil(8);
+        let len = bytes * if term.mask_offset.is_some() { 2 } else { 1 };
+        let encoded;
+        let raw = match baseline {
+            Baseline::Raw(raw) => raw.as_slice(),
+            Baseline::Value(value) => {
+                encoded = crate::timing::encode_planes(value, term.width, len);
+                &encoded
+            }
+            _ => return Err(SimulatorErrorCode::InternalError),
+        };
+        if raw.len() < len {
+            return Err(SimulatorErrorCode::InternalError);
+        }
+        let at = term.value_offset / 8;
+        packed[at..at + bytes].copy_from_slice(&raw[..bytes]);
+        if let Some(mask) = term.mask_offset {
+            let at = mask / 8;
+            packed[at..at + bytes].copy_from_slice(&raw[bytes..bytes * 2]);
+        }
+        if term.width % 8 != 0 {
+            let keep = ((1u16 << (term.width % 8)) - 1) as u8;
+            packed[term.value_offset / 8 + bytes - 1] &= keep;
+            if let Some(mask) = term.mask_offset {
+                packed[mask / 8 + bytes - 1] &= keep;
+            }
+        }
+    }
+    Ok(num_bigint::BigUint::from_bytes_le(&packed))
+}
+
+fn unpack_wait_snapshot(
+    layout: &celox_design::schedule::CompiledWaitLayout,
+    packed: &[u8],
+    baselines: &mut Vec<Baseline>,
+) -> Result<(), SimulatorErrorCode> {
+    if layout.scalar_byte || packed.len() < layout.bits.div_ceil(8) {
+        return Err(SimulatorErrorCode::InternalError);
+    }
+    baselines.truncate(layout.terms.len());
+    for (index, term) in layout.terms.iter().enumerate() {
+        let bytes = term.width.div_ceil(8);
+        let len = bytes * if term.mask_offset.is_some() { 2 } else { 1 };
+        if index == baselines.len() {
+            baselines.push(Baseline::Raw(Vec::with_capacity(len)));
+        }
+        if !matches!(baselines[index], Baseline::Raw(_)) {
+            baselines[index] = Baseline::Raw(Vec::with_capacity(len));
+        }
+        let Baseline::Raw(raw) = &mut baselines[index] else {
+            unreachable!()
+        };
+        raw.resize(len, 0);
+        let at = term.value_offset / 8;
+        raw[..bytes].copy_from_slice(&packed[at..at + bytes]);
+        if let Some(mask) = term.mask_offset {
+            let at = mask / 8;
+            raw[bytes..].copy_from_slice(&packed[at..at + bytes]);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod raw_wait_snapshot_tests {
+    use super::*;
+    use num_bigint::BigUint;
+
+    #[test]
+    fn raw_wait_snapshot_handover_preserves_partial_bytes_and_mask_planes() {
+        let dimensions = [(1, false), (9, true), (65, true), (127, false)];
+        let layout = celox_design::schedule::CompiledWaitLayout::new(&dimensions).unwrap();
+        let baselines = dimensions
+            .iter()
+            .map(|&(width, masked)| {
+                let high = BigUint::from(1u8) << (width - 1);
+                Baseline::Value((
+                    high.clone() | BigUint::from(5u8),
+                    if masked { high } else { BigUint::default() },
+                ))
+            })
+            .collect::<Vec<_>>();
+        let packed = pack_wait_snapshot(&layout, &baselines).unwrap();
+        let mut bytes = packed.to_bytes_le();
+        bytes.resize(layout.bits.div_ceil(8), 0);
+        let mut restored = Vec::new();
+        unpack_wait_snapshot(&layout, &bytes, &mut restored).unwrap();
+        for ((term, expected), actual) in layout.terms.iter().zip(&baselines).zip(&restored) {
+            let Baseline::Value(value) = expected else {
+                unreachable!()
+            };
+            let Baseline::Raw(raw) = actual else {
+                unreachable!()
+            };
+            let bytes = term.width.div_ceil(8) * if term.mask_offset.is_some() { 2 } else { 1 };
+            assert_eq!(*raw, crate::timing::encode_planes(value, term.width, bytes));
+        }
     }
 }
