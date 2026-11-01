@@ -12,8 +12,8 @@ impl ScopeElaboration<'_> {
         inline_randomizations: Vec<classes::constraints::InlineRequest>,
     ) -> Option<scope::ScopeSymbols> {
         if self.is_package || self.export_symbols {
-            self.enum_constants.declarations.extend(
-                classes::specializations::export_enum_constants(syntax_tree, session),
+            Arc::make_mut(&mut self.packed_dimensions.constant_types).extend(
+                classes::specializations::export_constant_types(syntax_tree, session),
             );
         }
         // A package keeps its symbols for the scopes that use it.
@@ -36,6 +36,7 @@ impl ScopeElaboration<'_> {
                 .chain(classes::scope_class_types(syntax_tree))
                 .collect(),
             enum_constants: self.enum_constants.clone(),
+            constant_types: (*self.packed_dimensions.constant_types).clone(),
             functions: self.functions.clone(),
             function_return_types: (*self.packed_dimensions.function_return_types).clone(),
             constant_functions: syntax_tree.functions.clone(),
