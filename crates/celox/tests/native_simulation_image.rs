@@ -359,3 +359,70 @@ endmodule"#;
         }
     }
 }
+
+#[test]
+fn reactive_waits_survive_gated_clock_image_reload() {
+    let source = r#"`timescale 1ns/1ns
+module Top(input bit enabled);
+    bit clk = 0;
+    wire gated = clk & enabled;
+    bit [7:0] primary = 0;
+    bit [69:0] data = 0;
+    wire [69:0] expression = data + data;
+    bit [69:0] middle = 0;
+    int count = 0;
+    always #1 clk = ~clk;
+    always @(posedge clk) primary <= primary + 1;
+    always @(posedge gated) data <= data + primary + 1;
+    initial forever begin @(expression); middle = expression; end
+    initial forever begin @(middle); count = count + 1; end
+    initial #13 $finish;
+endmodule"#;
+    for level in [celox::OptLevel::O0, celox::OptLevel::O2] {
+        for four_state in [false, true] {
+            let build = || builder(source).four_state(four_state).opt_level(level);
+            let image = reloaded(&build().compile_native().unwrap().into_program_image());
+            let mut expected = build()
+                .scheduler_mode(SchedulerMode::Reference)
+                .build_native()
+                .unwrap();
+            let mut actual = Simulation::from_sv_sources(Vec::new(), "Top")
+                .four_state(four_state)
+                .scheduler_mode(SchedulerMode::DifferentialRuns)
+                .build_native_from_image(image)
+                .unwrap();
+            for simulation in [&mut expected, &mut actual] {
+                let enabled = simulation.signal("enabled");
+                simulation.modify(|io| io.set(enabled, 1u8)).unwrap();
+            }
+            for end in [2, 3, 7, 12] {
+                expected.run_until(end).unwrap();
+                actual.run_until(end).unwrap();
+                assert_eq!(actual.time(), expected.time());
+                for name in ["data", "middle", "count"] {
+                    assert_eq!(
+                        actual.get(actual.signal(name)),
+                        expected.get(expected.signal(name)),
+                        "{name}"
+                    );
+                }
+            }
+            assert_eq!(
+                actual.get(actual.signal("count")),
+                num_bigint::BigUint::from(6u8)
+            );
+            let stats = actual.scheduler_stats();
+            assert!(
+                stats.compiled_slots > 0 && stats.checked_steps > 0,
+                "{stats:?}"
+            );
+            assert!(
+                stats
+                    .kernels
+                    .iter()
+                    .all(|kernel| matches!(kernel, celox::KernelSchedule::Compiled)),
+                "{stats:?}"
+            );
+        }
+    }
+}

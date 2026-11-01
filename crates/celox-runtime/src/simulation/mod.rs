@@ -187,6 +187,9 @@ pub struct SimulationState<B: SimBackend> {
     /// observes inside a slot: the kernels and host clocks that write them
     /// run in the reference loop.
     observed_events: crate::schedule::EventMask,
+    /// A host also watches data without a compiled event bit. Its changes
+    /// must be reported before native waiting kernels consume them.
+    observed_data: bool,
 }
 
 /// The most recent processes of a time slot that a slot that does not
@@ -262,6 +265,7 @@ impl<B: SimBackend> SimulationState<B> {
             process_names: Vec::new(),
             stats: SchedulerStats::default(),
             observed_events: Default::default(),
+            observed_data: false,
         };
         state.stats.kernels = (0..state.model.processes.len())
             .map(|index| match state.model.kernel_fallback.get(index) {
@@ -493,16 +497,24 @@ impl<B: SimBackend> SimulationState<B> {
     /// host clock of the compiled scheduler may change an observed event
     /// signal run in the reference loop, where the host sees the change
     /// before any domain commits; the other kernels' slots stay compiled.
+    /// When data without an event bit is observed, slots that can resume
+    /// design-driven waiters also use the reference loop, preserving the
+    /// boundary between a data change and the processes it wakes.
     pub fn set_observed_signals(&mut self, signals: impl IntoIterator<Item = SignalRef>) {
         let Some(scheduler) = &self.model.scheduler else {
             return;
         };
-        self.observed_events = crate::schedule::EventMask::of(
-            signals
-                .into_iter()
-                .filter_map(|signal| self.model.signal_to_id.get(&signal))
-                .filter_map(|event| scheduler.events.iter().position(|id| id == event)),
-        );
+        self.observed_data = false;
+        self.observed_events =
+            crate::schedule::EventMask::of(signals.into_iter().filter_map(|signal| {
+                let bit = self
+                    .model
+                    .signal_to_id
+                    .get(&signal)
+                    .and_then(|event| scheduler.events.iter().position(|id| id == event));
+                self.observed_data |= bit.is_none();
+                bit
+            }));
     }
 
     /// [`Self::step_until`], showing the step to `observer`. An error of
