@@ -108,6 +108,12 @@ pub(super) fn domain(
         ExprKind::Member { .. } => match method(tree, session, id, native, dimensions)? {
             // A method called without parentheses (6.19.5.7).
             Some((method, _, domain)) => method.returns_member().then_some(domain),
+            // A class method called without parentheses (13.5.5).
+            None if let Some((name, ..)) =
+                objects::method(tree, session, id, native, dimensions)? =>
+            {
+                returned_domain(&name, dimensions)
+            }
             None => match objects::static_property(tree, session, id, native, dimensions)?
                 .or_else(|| call_name(tree, id, native))
                 .and_then(|name| dimensions.get(&name))
@@ -164,18 +170,7 @@ pub(super) fn domain(
                     Some((name, _, _)) => Some(name),
                     None => call_name(tree, *expression, native),
                 };
-                name.and_then(|name| {
-                    dimensions
-                        .function_return_types
-                        .get(&name)
-                        .and_then(|metadata| metadata.enum_domain.clone())
-                        .or_else(|| {
-                            dimensions
-                                .functions
-                                .get(&name)
-                                .and_then(|function| function.return_enum_domain.clone())
-                        })
-                })
+                name.and_then(|name| returned_domain(&name, dimensions))
             }
         }
         ExprKind::Cast { target, .. } => cast_type(tree, session, *target, native, dimensions)?
@@ -192,6 +187,20 @@ pub(super) fn domain(
         }
         _ => None,
     })
+}
+
+/// The enumerated type that function or method `name` returns.
+fn returned_domain(name: &str, dimensions: &PackedDimensions) -> Option<Arc<EnumDomain>> {
+    dimensions
+        .function_return_types
+        .get(name)
+        .and_then(|metadata| metadata.enum_domain.clone())
+        .or_else(|| {
+            dimensions
+                .functions
+                .get(name)
+                .and_then(|function| function.return_enum_domain.clone())
+        })
 }
 
 /// The type a cast to native `target` converts to, when `target` names a

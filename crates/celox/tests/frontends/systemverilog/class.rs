@@ -299,6 +299,89 @@ sv_backends! {
     }
 }
 
+/// A static method called without its empty parentheses may be the receiver
+/// of a member, and a method that returns a chandle so called gives a chandle
+/// (IEEE 1800-2023 13.5.5).
+#[test]
+fn parenless_static_factories_and_chandle_results() {
+    let source = r#"
+    module Top(output int latest_id, output int latest_value, output bit empty);
+        class Node;
+            static Node last;
+            int id;
+            chandle ch;
+            function new(int id); this.id = id; last = this; endfunction
+            function int get_id(); return id; endfunction
+            function chandle get_handle(); return ch; endfunction
+            static function Node latest(); return last; endfunction
+        endclass
+        Node n;
+        chandle h;
+        initial begin
+            n = new(3);
+            n = new(5);
+            latest_id = Node::latest.get_id();
+            latest_value = Node::latest.id;
+            h = n.get_handle;
+            empty = h == null;
+        end
+    endmodule"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    let latest_id = sim.signal("latest_id");
+    let latest_value = sim.signal("latest_value");
+    let empty = sim.signal("empty");
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(latest_id), BigUint::from(5u8));
+    assert_eq!(sim.get(latest_value), BigUint::from(5u8));
+    assert_eq!(sim.get(empty), BigUint::from(1u8));
+}
+
+/// A method that returns an unpacked structure or a virtual interface and is
+/// called without its empty parentheses gives a value of that type, to an
+/// assignment and to an argument (IEEE 1800-2023 13.5.5).
+#[test]
+fn parenless_method_results_of_structure_and_interface_types() {
+    let source = r#"
+    interface Bus; int data; endinterface
+    module Top(output int sum, output int passed, output int read);
+        typedef struct { int a; int b; } pair_t;
+        class Holder;
+            pair_t p;
+            virtual Bus bus;
+            function pair_t get(); return p; endfunction
+            function virtual Bus get_bus(); return bus; endfunction
+        endclass
+        function automatic int total(pair_t q); return q.a + q.b; endfunction
+        Bus b();
+        Holder h;
+        pair_t g;
+        virtual Bus v;
+        initial begin
+            h = new;
+            h.p.a = 2; h.p.b = 5;
+            h.bus = b;
+            b.data = 7;
+            g = h.get;
+            sum = g.a + g.b;
+            passed = total(h.get);
+            v = h.get_bus;
+            read = v.data;
+        end
+    endmodule"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    let sum = sim.signal("sum");
+    let passed = sim.signal("passed");
+    let read = sim.signal("read");
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sum), BigUint::from(7u8));
+    assert_eq!(sim.get(passed), BigUint::from(7u8));
+    assert_eq!(sim.get(read), BigUint::from(7u8));
+}
+
 /// A write of a class property does not wake a process waiting on it, so a
 /// wait whose condition reads one is rejected instead of never waking. The
 /// condition reads it in a method through `this`, through a handle, through
@@ -1526,6 +1609,7 @@ sv_backends! {
     fn class_parameter_literals_hide_module_constants(sim) { @case "class::parameter_literals_hide_module_constants"; }
     fn class_static_initializers_run_once_before_time_zero(sim) { @case "class::static_initializers_run_once_before_time_zero"; }
     fn class_method_defaults_use_the_object(sim) { @case "class::method_defaults_use_the_object"; }
+    fn class_methods_called_without_parentheses(sim) { @case "class::methods_called_without_parentheses"; }
 }
 
 sv_backends! {

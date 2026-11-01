@@ -229,6 +229,17 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 10; see <case>/build.log\n<case>/source_0.sv:18: syntax error\n<case>/source_0.sv:18: error: Malformed statement\n<case>/source_0.sv:21: syntax error\n<case>/source_0.sv:21: error: Malformed statement\n<case>/source_0.sv:23: syntax error\n<case>/source_0.sv:23: error: Malformed statement\n<case>/source_0.sv:25: syntax error\n<case>/source_0.sv:25: error: Malformed statement\n<case>/source_0.sv:27: syntax error\n<case>/source_0.sv:27: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "array_locators::array_locator_unique_class_handles",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

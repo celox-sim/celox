@@ -643,6 +643,7 @@ fn bind_value_in(
                     });
                     continue;
                 }
+                let method_call = objects::method_call(tree, session, id, native, dimensions)?;
                 let (finish, children) = match &native.expression(id).kind {
                     ExprKind::Group(inner) => {
                         permits.grant_if(permitted, *inner);
@@ -845,14 +846,9 @@ fn bind_value_in(
                             cast_shape(*target, native, tree, session, dimensions)?.map(Rc::new),
                         )],
                     ),
-                    ExprKind::Call {
-                        expression,
-                        arguments: args,
-                    } if objects::method(tree, session, *expression, native, dimensions)?
-                        .is_some() =>
-                    {
+                    _ if let Some((callee, args)) = method_call => {
                         let (name, formals, receiver) =
-                            objects::method(tree, session, *expression, native, dimensions)?
+                            objects::method(tree, session, callee, native, dimensions)?
                                 .expect("checked by the guard");
                         let selection = name
                             .ends_with("::randomize")
