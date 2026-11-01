@@ -1,1 +1,6 @@
-Address PR #2917 stdout backpressure and shared process-phase return budget reviews; refresh onto current master and update the affected native MIR snapshot before republishing.
+Revision history for #2917:
+
+rev 2 (content) 2026-11-01 20:27 UTC — Address PR #2917 stdout backpressure and shared process-phase return budget reviews; refresh onto current master and update the affected native MIR snapshot before republishing.
+rev 1 (initial) 2026-11-01 20:27 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2917,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"086d85c8f5a5c7d9fc1a1508e4f7b18cc7fe62ce","timestamp_iso":"2026-11-01T20:27:55Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"086d85c8f5a5c7d9fc1a1508e4f7b18cc7fe62ce","new_sha":"3c9d09b6b4a7ddb00b17b3f2534778141ad27207","timestamp_iso":"2026-11-01T20:27:55Z","reason":"Address PR #2917 stdout backpressure and shared process-phase return budget reviews; refresh onto current master and update the affected native MIR snapshot before republishing.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/086d85c8f5a5c7d9fc1a1508e4f7b18cc7fe62ce...3c9d09b6b4a7ddb00b17b3f2534778141ad27207"}]} -->
