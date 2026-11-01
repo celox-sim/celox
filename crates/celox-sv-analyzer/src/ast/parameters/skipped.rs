@@ -754,7 +754,7 @@ pub(in crate::ast) fn literal_widths(
     if let Some(proof) = expr_to_const(session, proof)
         && let Some(ty) = infer_const_expr_type_inner(
             &proof,
-            &parameter_types_from_const_env(&dims.const_env),
+            &|name| dimensions::parameter_type_from_const_env(&dims.const_env, name),
             true,
         )
         && ty.width <= constant_folding::MAX_CONSTANT_CONCAT_BITS
