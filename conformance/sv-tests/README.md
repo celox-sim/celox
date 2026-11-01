@@ -622,3 +622,11 @@ members, declaration-scope dimensions, dynamic indices, X/Z preservation,
 member-array and subarray copies, wide elements and local lifetime. Variable-size
 and non-integral array members and array-member structure interfaces remain
 unsupported; see the language reference for the exact boundaries.
+
+Default-only associative array literals update two reviewed expectation rows:
+`chapter-7/arrays/associative/literals.sv` passes in both state modes in a
+focused official-runner invocation. This is not a new full-corpus measurement.
+Shared cases check assignment-time string defaults, replacing defaults on
+copies, entry deletion and clearing, unknown-index reads with X/Z defaults,
+wide elements and heap lifetime. Explicit index entries in associative array
+literals remain unsupported.

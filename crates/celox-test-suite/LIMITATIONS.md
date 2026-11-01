@@ -1807,3 +1807,23 @@ scalar broadcasts and four-state value copies. Standalone
 [four-state](verification/repros/sv_struct_array_member_defaults_four_state.sv)
 probes reproduce the exact Verilator and xezim failures above. Incompatible
 member-array lengths and element widths remain rejected by Celox.
+
+### Associative array defaults
+
+Four `containers::associative_default_*` cases exercise default-only literals:
+string values captured at assignment, copies that replace prior defaults,
+entry deletion and clearing, X/Z and unknown indices, 129-bit elements and
+heap lifetime. Defaults do not create entries or affect traversal.
+
+Verilator 5.052 passes the three two-state cases; the four-state case is a
+capability skip. Icarus 13.0 rejects all four; the exact cases are recorded in
+[focused evidence](verification/sv/limitations/associative-defaults-icarus.json).
+Xezim 0.11.4 passes the wide case and disagrees on the other three, retained in
+[focused evidence](verification/sv/limitations/associative-defaults-xezim.json).
+Standalone probes show [a changing source changes the captured default](verification/repros/sv_associative_default_strings.sv),
+[copying an array without a user default retains an old default](verification/repros/sv_associative_default_copy.sv),
+and [an unknown index fails to read the user default](verification/repros/sv_associative_default_four_state.sv).
+IEEE 1800-2023 7.9.9 and 7.9.11 govern the assignment and default value;
+7.8.6 explicitly applies user defaults to unknown-index reads. Only the exact
+observed failures are excluded. Keyed entries and mixed keyed/default literals
+remain unsupported by Celox in this change.
