@@ -95,6 +95,10 @@ sv_backends! {
     fn unpacked_array_assignments_through_selects_and_calls(sim) {
         @case "types::unpacked_array_assignments_through_selects_and_calls";
     }
+
+    fn local_typedefs(sim) {
+        @case "types::local_typedefs";
+    }
 }
 
 // Receivers, counts and contexts that the external simulators of the shared
@@ -276,4 +280,148 @@ fn enum_methods_of_packed_array_elements_are_rejected() {
             "{error}"
         );
     }
+}
+
+/// Local typedefs of the same name in different scopes declare different
+/// types, so unpacked arrays of their enumerations are not assignment
+/// compatible (IEEE 1800-2023 6.18, 7.6).
+#[test]
+fn local_enumerations_of_one_name_are_distinct_types() {
+    let source = "module Top; initial begin \
+        typedef enum {A, B} t; t a[2]; \
+        begin typedef enum {C, D} t; t b[2]; b = a; end end endmodule";
+    let Err(error) =
+        Simulator::from_sv_sources(vec![(source, Path::new("types.sv"))], "Top").build_cranelift()
+    else {
+        panic!("arrays of distinct local enumerations are not assignment compatible");
+    };
+    let error = error.to_string();
+    assert!(error.contains("assignment"), "{error}");
+}
+
+/// A member of a local enumeration is a member of that enumeration, also
+/// where a typedef of the module has a member of its name and value, so its
+/// methods are those of the local enumeration (IEEE 1800-2023 6.19.5).
+/// Verilator 5.052 does not call methods of enum constants, so this is not
+/// a shared case.
+#[test]
+fn local_enumeration_constants_shadow_module_members() {
+    let source = r#"
+    module Top(output int nums);
+        typedef enum {SA = 0, SB = 1} se_t;
+        initial begin
+            typedef enum {SA = 0, SC = 2, SD = 3} sf_t;
+            nums = SA.num();
+        end
+    endmodule"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("shadow.sv"))], "Top")
+        .build()
+        .unwrap();
+    let nums = sim.signal("nums");
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(nums), BigUint::from(3u8));
+}
+
+/// A local typedef that hides an enumeration typedef leaves the members of
+/// that enumeration visible, with their type (IEEE 1800-2023 6.19).
+#[test]
+fn local_typedef_hiding_an_enumeration_keeps_its_members() {
+    let source = r#"
+    module Top(output int nums, output int next);
+        typedef enum {A, B} e_t;
+        initial begin
+            typedef bit e_t;
+            e_t flag;
+            flag = 1;
+            nums = A.num();
+            next = A.next() + flag;
+        end
+    endmodule"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("hide.sv"))], "Top")
+        .build()
+        .unwrap();
+    let nums = sim.signal("nums");
+    let next = sim.signal("next");
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(nums), BigUint::from(2u8));
+    assert_eq!(sim.get(next), BigUint::from(2u8));
+}
+
+/// The bounds of the base type of a local enumeration are those of the
+/// declaring scope, also where a member of the enumeration shadows a
+/// constant they read (IEEE 1800-2023 6.18, 6.19). Verilator 5.052 stops
+/// with an internal error on this, so it is not a shared case.
+#[test]
+fn local_enumeration_bounds_precede_its_members() {
+    let source = r#"
+    module Top(output int nbits);
+        localparam int NB = 4;
+        initial begin
+            typedef enum bit [NB-1:0] {NB = 1} nb_t;
+            nb_t v;
+            nbits = $bits(v);
+        end
+    endmodule"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("bounds.sv"))], "Top")
+        .build()
+        .unwrap();
+    let nbits = sim.signal("nbits");
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(nbits), BigUint::from(4u8));
+}
+
+/// An explicitly sized initializer of a local enumeration must have the
+/// width of its base type, as one of a typedef of the module (IEEE
+/// 1800-2023 6.19).
+#[test]
+fn local_enumeration_initializers_are_checked() {
+    let source = "module Top; int y; initial begin \
+        typedef enum logic [1:0] {A = 3'd1} e_t; y = A; end endmodule";
+    let Err(error) =
+        Simulator::from_sv_sources(vec![(source, Path::new("types.sv"))], "Top").build_cranelift()
+    else {
+        panic!("an enum initializer of another width is rejected");
+    };
+    let error = error.to_string();
+    assert!(error.contains("enum"), "{error}");
+}
+
+/// `$typename` of a variable of a local typedef of a queue of an
+/// enumeration names the enumeration (IEEE 1800-2023 20.6.1).
+#[test]
+fn local_typedef_of_a_queue_of_an_enumeration_has_a_type_name() {
+    let source = r#"
+    module Top(output bit ok);
+        initial begin
+            typedef enum {LA, LB} e_t[$];
+            e_t q;
+            ok = $typename(q) != "";
+        end
+    endmodule"#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("typename.sv"))], "Top")
+            .build()
+            .unwrap();
+    let ok = sim.signal("ok");
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(ok), BigUint::from(1u8));
+}
+
+/// The members of a local enumeration declared with nested container
+/// dimensions are members of that enumeration (IEEE 1800-2023 6.19.5).
+#[test]
+fn local_enumeration_of_nested_containers_keeps_its_members() {
+    let source = r#"
+    module Top(output int n);
+        initial begin
+            typedef enum {NA, NB, NC} ne_t[$][$];
+            n = NA.num();
+        end
+    endmodule"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("nested.sv"))], "Top")
+        .build()
+        .unwrap();
+    let n = sim.signal("n");
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(n), BigUint::from(3u8));
 }

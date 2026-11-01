@@ -26,6 +26,11 @@ use crate::procedural::{
 /// One lexical scope: the locals it declares and the bindings they shadow.
 struct Scope {
     entries: Vec<ScopeEntry>,
+    /// The types that the typedefs of the scope shadow, in declaration
+    /// order.
+    shadowed_types: Vec<(String, Option<Type>)>,
+    /// The enumerations that the members of its local enumerations shadow.
+    shadowed_enum_constants: Vec<(String, Option<Arc<enums::EnumDomain>>)>,
 }
 
 struct ScopeEntry {
@@ -435,6 +440,8 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             names: Names {
                 scopes: vec![Scope {
                     entries: Vec::new(),
+                    shadowed_types: Vec::new(),
+                    shadowed_enum_constants: Vec::new(),
                 }],
                 local_constants: HashMap::default(),
             },
@@ -465,6 +472,8 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     fn push_scope(&mut self) {
         self.names.scopes.push(Scope {
             entries: Vec::new(),
+            shadowed_types: Vec::new(),
+            shadowed_enum_constants: Vec::new(),
         });
     }
 
@@ -472,6 +481,25 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         let Some(scope) = self.names.scopes.pop() else {
             return;
         };
+        for (name, shadowed) in scope.shadowed_enum_constants.into_iter().rev() {
+            let constants = Arc::make_mut(&mut self.dims.enum_constants);
+            match shadowed {
+                Some(domain) => constants.insert(name, domain),
+                None => constants.remove(&name),
+            };
+        }
+        for (name, shadowed) in scope.shadowed_types.into_iter().rev() {
+            match shadowed {
+                Some(ty) => {
+                    self.type_aliases.insert(name.clone(), ty.clone());
+                    self.dims.type_aliases.insert(name, ty);
+                }
+                None => {
+                    self.type_aliases.remove(&name);
+                    self.dims.type_aliases.remove(&name);
+                }
+            }
+        }
         for entry in scope.entries.into_iter().rev() {
             for (key, value) in entry.shadowed_constants {
                 if let Some(value) = value {
@@ -2030,6 +2058,140 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         }
     }
 
+    /// Declare typedef `id` of a block or subroutine body, visible to the
+    /// rest of the scope (IEEE 1800-2023 6.18). A forward typedef declares
+    /// nothing a body uses.
+    fn local_type_alias(&mut self, id: celox_sv_syntax::TypeAliasId) -> Converted<()> {
+        let native = self.tree.declarations();
+        let alias = native.type_alias(id);
+        let celox_sv_syntax::TypeAliasTarget::DataType(target) = alias.target else {
+            return Ok(());
+        };
+        // The members of an enumeration the typedef declares, collected and
+        // checked as those of a typedef of the module (6.19); a typedef of
+        // another enumeration declares none.
+        let mut members = EnumMemberConstants::default();
+        let mut dimension_env = (*self.dims.const_env).clone();
+        parameters::enum_members_of(
+            self.tree,
+            self.session,
+            target,
+            &mut dimension_env,
+            &self.type_aliases,
+            &mut members,
+        )?;
+        // The typedef is bound as one of the module: its base type in the
+        // scope's constants, its dimensions also with its members.
+        let local = *self.state.counter;
+        *self.state.counter += 1;
+        let aliases: SharedMap<Type> = self.type_aliases.clone().into();
+        let dimension_env: SharedMap<i128> = dimension_env.into();
+        let mut ty = types::bind_alias(
+            self.tree,
+            self.session,
+            alias,
+            &self.dims.const_env,
+            &aliases,
+            &dimension_env,
+            false,
+            // Each local typedef is a type of its own, also where another
+            // scope declares one of the same name; it is written with the
+            // name of its design element.
+            || {
+                let (identity, typename) = types::declaration_name(self.tree, alias, None);
+                (format!("{identity}@{local}"), typename)
+            },
+        )?
+        .ok_or_else(|| unsupported("local type declaration of this type"))?;
+        drop(aliases);
+        types::freeze_bounds(&mut ty, &self.tree.functions, &dimension_env);
+        let name = instances::normalize_identifier(&alias.name.spelling);
+        // The type hides a variable or constant of an enclosing scope with
+        // its name.
+        let hidden = self.take_binding(&name, None, 0);
+        self.names
+            .scopes
+            .last_mut()
+            .expect("a body always has a scope")
+            .entries
+            .push(hidden);
+        // The members are constants of the scope, also where a visible
+        // typedef has a member of their name and value.
+        // An enumeration with container dimensions is the element of their
+        // innermost container.
+        let mut declared = &ty;
+        let domain = loop {
+            match (&declared.enum_domain, &declared.container) {
+                (Some(domain), _) => break Some(domain.clone()),
+                (None, Some(container)) => declared = &container.element,
+                (None, None) => break None,
+            }
+        };
+        // The members of an enumeration whose typedef this one hides stay
+        // visible, and keep their type for `A.num()` and other methods.
+        if let Some(outer) = self
+            .dims
+            .type_aliases
+            .get(&name)
+            .and_then(|ty| ty.enum_domain.clone())
+        {
+            for member in &outer.members {
+                if self.dims.enum_constants.contains_key(&member.name) {
+                    continue;
+                }
+                Arc::make_mut(&mut self.dims.enum_constants)
+                    .insert(member.name.clone(), outer.clone());
+                self.names
+                    .scopes
+                    .last_mut()
+                    .expect("a body always has a scope")
+                    .shadowed_enum_constants
+                    .push((member.name.clone(), None));
+            }
+        }
+        for (member, number) in members.numbers {
+            let r#type = members.types[&member];
+            let entry = self.take_binding(&member, None, 0);
+            self.dims.const_env.insert(member.clone(), number);
+            self.dims.const_env.insert(enum_marker(&member), number);
+            insert_parameter_type_markers(&mut self.dims.const_env, &member, r#type);
+            if let Some(Expr::Literal(literal)) = members.exprs.get(&member) {
+                self.names
+                    .local_constants
+                    .insert(member.clone(), literal.clone());
+            }
+            if let Some(literal) = members.exprs.get(&member) {
+                self.dims
+                    .parameter_values
+                    .insert(member.clone(), literal.clone());
+            }
+            self.dims
+                .expression_signedness
+                .insert(member.clone(), r#type.signed);
+            let shadowed = domain.as_ref().and_then(|domain| {
+                Arc::make_mut(&mut self.dims.enum_constants).insert(member.clone(), domain.clone())
+            });
+            let scope = self
+                .names
+                .scopes
+                .last_mut()
+                .expect("a body always has a scope");
+            scope.entries.push(entry);
+            if domain.is_some() {
+                scope.shadowed_enum_constants.push((member, shadowed));
+            }
+        }
+        let shadowed = self.type_aliases.insert(name.clone(), ty.clone());
+        self.dims.type_aliases.insert(name.clone(), ty);
+        self.names
+            .scopes
+            .last_mut()
+            .expect("a body always has a scope")
+            .shadowed_types
+            .push((name, shadowed));
+        Ok(())
+    }
+
     /// Declare native local variables and return their initializations.
     pub(super) fn block_item_declaration(
         &mut self,
@@ -2039,8 +2201,9 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             celox_sv_syntax::LocalDeclaration::Parameters(id) => return self.local_parameters(*id),
             celox_sv_syntax::LocalDeclaration::Variables(value)
             | celox_sv_syntax::LocalDeclaration::Constructed(value) => value,
-            celox_sv_syntax::LocalDeclaration::TypeAlias(_) => {
-                return Err(unsupported("local type declaration"));
+            celox_sv_syntax::LocalDeclaration::TypeAlias(id) => {
+                self.local_type_alias(*id)?;
+                return Ok(Vec::new());
             }
             celox_sv_syntax::LocalDeclaration::Unconverted(_) => {
                 return Err(unsupported("let declaration inside a procedural block"));
