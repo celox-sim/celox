@@ -3670,6 +3670,10 @@ impl NativeBackend {
             self.memory.resize_zeroed_within_capacity(mem_size_words);
         }
         self.compiled = shared;
+        // The helper and image-local kernel table belongs to this code image.
+        // Replacement may release the previous table, so rebind before any
+        // generated function can execute against the transferred live state.
+        self.install_extern_functions();
         self.slow_calls = self.execution_timing.is_some() || self.compiled.layout.settle_check();
     }
 
@@ -4356,6 +4360,42 @@ mod tests {
     use crate::ir::{
         BasicBlock, BlockId, RegisterId, RegisterType, SIRInstruction, SIRTerminator, SIRValue,
     };
+
+    #[test]
+    fn replacing_code_installs_the_new_callee_table() {
+        let image = crate::Simulator::builder(
+            "module Top(a: input bit<8>, b: input bit<8>, y: output bit<8>) { assign y = a + b; }",
+            "Top",
+        )
+        .compile_native()
+        .unwrap()
+        .into_program_image();
+        // SAFETY: both images were produced by the compiler immediately above.
+        let original = Arc::new(unsafe { SharedNativeCode::from_image(image.clone()).unwrap() });
+        // SAFETY: the replacement is another load of the same compiler output.
+        let replacement = Arc::new(unsafe { SharedNativeCode::from_image(image).unwrap() });
+        let old_table = original.extern_functions.as_ptr() as usize;
+        let new_table = replacement.extern_functions.as_ptr() as usize;
+        assert_ne!(old_table, new_table);
+        // Retain the old image so allocator reuse cannot hide a stale binding.
+        let mut backend = NativeBackend::from_shared(original.clone());
+        backend.replace_shared_code(replacement);
+        let offset = celox_state_layout::STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET;
+        // SAFETY: the fixed header slot lies within the backend's live image.
+        let installed = unsafe {
+            backend
+                .memory
+                .as_ptr()
+                .cast::<u8>()
+                .add(offset)
+                .cast::<u64>()
+                .read_unaligned()
+        };
+        assert_eq!(
+            installed, new_table as u64,
+            "generated code must use its own helper and kernel table"
+        );
+    }
 
     #[test]
     fn replacing_images_does_not_accumulate_alignment_padding() {
