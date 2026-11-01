@@ -16,6 +16,7 @@ serde_json = { workspace = true }
 serde = { workspace = true, features = ["rc"] }
 fxhash = { workspace = true }
 regex = { workspace = true }
+imbl = { version = "7", features = ["serde"] }
 
 [lints]
 workspace = true
