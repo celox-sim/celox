@@ -1,0 +1,1 @@
+Rebuilt on the value-select refactor: the member path selects the property's value; writes convert as any member assignment (two-state), patterns take the member type
