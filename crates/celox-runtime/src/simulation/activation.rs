@@ -285,6 +285,7 @@ impl<B: SimBackend> SimulationState<B> {
                 activation.join = None;
                 state.waiters.remove(id);
                 state.ready.remove(&id);
+                state.deferred_ready.remove(&id);
                 state.reactive.remove(&id);
                 state.observed.remove(&id);
                 state.inactive.remove(&id);

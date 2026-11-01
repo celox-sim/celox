@@ -65,9 +65,8 @@ pub(super) fn always_kind(
     })
 }
 
-/// Native statement traversal excludes intra-assignment controls, matching the
-/// existing process-classification contract. Typed leaf restrictions remain in
-/// their semantic binders.
+/// Timing controls, including delayed assignments, require process kernels.
+/// Typed leaf restrictions remain in their semantic binders.
 fn has_timing_control(
     root: celox_sv_syntax::StatementId,
     native: &celox_sv_syntax::Declarations,
@@ -78,7 +77,10 @@ fn has_timing_control(
         let statement = native.statement(id);
         if matches!(
             statement.kind,
-            StatementKind::Timing { .. }
+            StatementKind::Assignment {
+                timing: Some(_),
+                ..
+            } | StatementKind::Timing { .. }
                 | StatementKind::Assertion {
                     header: celox_sv_syntax::AssertionHeader::Concurrent { .. },
                     ..
