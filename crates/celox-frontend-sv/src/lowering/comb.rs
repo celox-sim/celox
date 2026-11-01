@@ -3443,11 +3443,9 @@ impl<'p, 'a> Comb<'p, 'a> {
                 .id(&param.name)
                 .ok_or_else(|| unsupported(format!("argument `{}`", param.source_name)))?;
             let width = self.m.var(id).width;
-            let actual = args
-                .get(position)
-                .cloned()
-                .flatten()
-                .or_else(|| param.default.clone());
+            let actual = subroutine
+                .actual(position, args, false)
+                .map_err(unsupported)?;
             if param.direction.is_reference() && !param.leaves.is_empty() {
                 // Each member of a formal of unpacked structure type names
                 // the matching member variable of the actual.

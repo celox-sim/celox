@@ -4695,6 +4695,29 @@ impl<'p, 'a> Ff<'p, 'a> {
                 "function call `{name}` with too many arguments"
             )));
         }
+        // A default that uses the object reads the receiver as the call
+        // evaluated it, kept before the other arguments are evaluated
+        // (IEEE 1800-2023 13.5.3).
+        let receiver_kept =
+            matches!(args.first(), Some(Some(_))) && subroutine.defaults_read_object(args);
+        let kept_args;
+        let args = match args.split_first() {
+            Some((Some(receiver), rest)) if receiver_kept => {
+                let this = self
+                    .m
+                    .id(&subroutine.params[0].name)
+                    .ok_or_else(|| unsupported(format!("object of `{name}`")))?;
+                let value = self.eval(receiver, None)?;
+                let Err(kept) = self.kept_input(this, value, true) else {
+                    unreachable!("a kept input is kept")
+                };
+                kept_args = std::iter::once(Some(sv::ir::Expr::Ident(kept)))
+                    .chain(rest.iter().cloned())
+                    .collect::<Vec<_>>();
+                &kept_args[..]
+            }
+            _ => args,
+        };
         // Each inlined automatic task activation owns persistent storage, so
         // another process can enter the same task while this one is suspended.
         // Static formals/locals deliberately keep their module-wide addresses.
@@ -4769,11 +4792,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                 .m
                 .id(&param.name)
                 .ok_or_else(|| unsupported(format!("argument `{}`", param.source_name)))?;
-            let actual = args
-                .get(position)
-                .cloned()
-                .flatten()
-                .or_else(|| param.default.clone());
+            let actual = subroutine
+                .actual(position, args, receiver_kept)
+                .map_err(unsupported)?;
             if param.leaves.is_empty() {
                 match self.reference(name, param, actual)? {
                     Reference::Variable(target) => {
@@ -4820,11 +4841,10 @@ impl<'p, 'a> Ff<'p, 'a> {
             subroutine.params.get(position).is_some_and(|param| {
                 param.direction.is_read()
                     && !param.direction.is_reference()
-                    && args
-                        .get(position)
-                        .cloned()
+                    && subroutine
+                        .actual(position, args, receiver_kept)
+                        .ok()
                         .flatten()
-                        .or_else(|| param.default.clone())
                         .is_some_and(|actual| self.m.makes_host_request(&actual))
             })
         });
@@ -4841,11 +4861,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                 .m
                 .id(&param.name)
                 .ok_or_else(|| unsupported(format!("argument `{}`", param.source_name)))?;
-            let actual = args
-                .get(position)
-                .cloned()
-                .flatten()
-                .or_else(|| param.default.clone());
+            let actual = subroutine
+                .actual(position, args, receiver_kept)
+                .map_err(unsupported)?;
             if param.direction.is_written() {
                 let reference = actual
                     .as_ref()

@@ -990,6 +990,29 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus 13.0 does not parse a parameter port list of a class (class Box #(int N = 4); is a syntax error), which IEEE 1800-2023 8.25 defines; each case declares a parameterized class. Verilator passes all but two cases, see sv_verilator_class_specialization_identity and sv_verilator_untyped_class_parameters.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_parameterized_classes",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not parse a parameter port list of a class (class Box #(int N = 4); is a syntax error), which IEEE 1800-2023 8.25 defines; each case declares a parameterized class. Verilator passes all but two cases, see sv_verilator_class_specialization_identity and sv_verilator_untyped_class_parameters.",
+        "upstream": []
+      },
+      "name": "class::method_defaults_use_the_object",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Invalid module item.\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: error: Syntax error in continuous assignment\n",
       "expectation": "Simulation",
       "name": "class::method_ranges_of_scope_declarations",
