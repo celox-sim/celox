@@ -480,6 +480,17 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 17; see <case>/build.log\n<case>/source_0.sv:5: error: Type names are not valid expressions here.\n<case>/source_0.sv:5: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:5:               : Expression is: <type>\n<case>/source_0.sv:5:               : Expression type: 10PETypename\n<case>/source_0.sv:5: error: Dimensions must be constant.\n<case>/source_0.sv:5       : This size expression violates the rule: <type>\n<case>/source_0.sv:11: Sorry: Queue of type `class Item{}` is not yet supported.\n<case>/source_0.sv:11: sorry: Queues inside classes are not yet supported.\n<case>/source_0.sv:22: Sorry: Queue of type `class Item{}` is not yet supported.\n:0: Sorry: Queue of type `class Item{}` is not yet supported.\n<case>/source_0.sv:27: Sorry: Queue of type `class Item{}` is not yet supported.\n<case>/source_0.sv:65: error: Type names are not valid expressions here.\n<case>/source_0.sv:65: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:65:               : Expression is: <type>\n<case>/source_0.sv:65:               : Expression type: 10PETypename\n<case>/source_0.sv:65: error: Dimensions must be constant.\n<case>/source_0.sv:65       : This size expression violates the rule: <type>\n<case>/source_0.sv:50: warning: ignoring out of bounds l-value array access m[7302757].\n<case>/source_0.sv:51: warning: ignoring out of bounds l-value array access m[7632751].\n<case>/source_0.sv:52: error: the type of the variable 'm' doesn't match the context type.\n<case>/source_0.sv:52:      : variable type=netvector_t:bool signed[31:0]\n<case>/source_0.sv:52:      : context type=11netuarray_t\n<case>/source_0.sv:16: error: Can't find task push_back in class Box\n<case>/source_0.sv:16: error: Enable of unknown task ``items.push_back''.\n<case>/source_0.sv:23: error: Class Box has no property get_items.\n<case>/source_0.sv:31: error: Variable all[i] does not have a field named: v.\n<case>/source_0.sv:72: error: Object celox_suite_tb.dut.$unm_blk_1.m has no method \"num(...)\".\n<case>/source_0.sv:72: warning: returning 'bx for out of bounds array access m[7632751].\n17 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "containers::functions_returning_containers",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

@@ -60,6 +60,7 @@ impl FunctionReturnMetadata {
                 .filter(|ty| ty.unpacked_ranges.is_empty())
                 .and_then(|ty| ty.enum_domain.clone()),
             virtual_interface: ty.and_then(|ty| ty.virtual_interface.clone()),
+            container: ty.and_then(|ty| ty.container.clone()),
             chandle: ty.is_some_and(|ty| ty.chandle && ty.unpacked_ranges.is_empty()),
             pattern_type: ty
                 .filter(|ty| {
@@ -90,6 +91,7 @@ impl FunctionReturnMetadata {
             pattern_type: function.return_type.clone(),
             enum_domain: function.return_enum_domain.clone(),
             virtual_interface: function.return_virtual_interface.clone(),
+            container: function.return_container.clone(),
         }
     }
 
@@ -134,6 +136,7 @@ impl FunctionReturnMetadata {
             pattern_type: None,
             enum_domain: None,
             virtual_interface: None,
+            container: None,
         })
     }
 }

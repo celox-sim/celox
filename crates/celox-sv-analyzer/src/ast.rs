@@ -3208,6 +3208,9 @@ struct Function {
     return_class: Option<String>,
     /// The function returns a virtual interface of this type.
     return_virtual_interface: Option<Arc<virtual_interfaces::VirtualInterface>>,
+    /// The container type of a dynamic array, associative array or queue
+    /// result (IEEE 1800-2023 7.5, 7.8, 7.10).
+    return_container: Option<Arc<ContainerType>>,
 }
 
 fn function_argument_metadata(params: &[FunctionParam]) -> Arc<[FunctionArgumentMetadata]> {
@@ -3450,6 +3453,9 @@ struct FunctionReturnMetadata {
     enum_domain: Option<Arc<enums::EnumDomain>>,
     /// The function returns a virtual interface of this type.
     virtual_interface: Option<Arc<virtual_interfaces::VirtualInterface>>,
+    /// The function returns a dynamic array, associative array or queue of
+    /// this type (IEEE 1800-2023 7.5, 7.8, 7.10).
+    container: Option<Arc<ContainerType>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
