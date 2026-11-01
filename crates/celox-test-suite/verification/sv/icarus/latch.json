@@ -1,0 +1,54 @@
+{
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "Icarus rejects the partial-range sensitivity source with constant selects in always_* processes are not fully supported and always_latch process has no event control. It rejects the function-write source with functions cannot have non blocking assignment statements. Both diagnostics reproduce without the suite adapters. IEEE 1800-2023 9.2.2.2.1 defines sensitivity at the longest static prefix, 9.2.2.3 permits the nonblocking latch form, and 13.4 does not forbid scheduling NBA updates of module variables.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_support",
+        "evidence": [
+          "verification/repros/nonblocking_latch_sensitivity.json",
+          "verification/repros/nonblocking_latch_partial_sensitivity.sv",
+          "verification/repros/nonblocking_latch_function_writes.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_nonblocking_latch_sensitivity_support",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "phase": "compile",
+        "reason": "Icarus rejects the partial-range sensitivity source with constant selects in always_* processes are not fully supported and always_latch process has no event control. It rejects the function-write source with functions cannot have non blocking assignment statements. Both diagnostics reproduce without the suite adapters. IEEE 1800-2023 9.2.2.2.1 defines sensitivity at the longest static prefix, 9.2.2.3 permits the nonblocking latch form, and 13.4 does not forbid scheduling NBA updates of module variables.",
+        "upstream": []
+      },
+      "name": "latch::nonblocking_latch_function_writes",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus rejects the partial-range sensitivity source with constant selects in always_* processes are not fully supported and always_latch process has no event control. It rejects the function-write source with functions cannot have non blocking assignment statements. Both diagnostics reproduce without the suite adapters. IEEE 1800-2023 9.2.2.2.1 defines sensitivity at the longest static prefix, 9.2.2.3 permits the nonblocking latch form, and 13.4 does not forbid scheduling NBA updates of module variables.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_support",
+        "evidence": [
+          "verification/repros/nonblocking_latch_sensitivity.json",
+          "verification/repros/nonblocking_latch_partial_sensitivity.sv",
+          "verification/repros/nonblocking_latch_function_writes.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_nonblocking_latch_sensitivity_support",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "phase": "compile",
+        "reason": "Icarus rejects the partial-range sensitivity source with constant selects in always_* processes are not fully supported and always_latch process has no event control. It rejects the function-write source with functions cannot have non blocking assignment statements. Both diagnostics reproduce without the suite adapters. IEEE 1800-2023 9.2.2.2.1 defines sensitivity at the longest static prefix, 9.2.2.3 permits the nonblocking latch form, and 13.4 does not forbid scheduling NBA updates of module variables.",
+        "upstream": []
+      },
+      "name": "latch::nonblocking_latch_partial_sensitivity",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

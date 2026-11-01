@@ -1811,7 +1811,7 @@ impl<'a> Frame<'a> {
             Stmt::DelayedNonblocking { .. }
             | Stmt::Delay { .. }
             | Stmt::WaitEvent(_)
-            | Stmt::WaitImplicit(_)
+            | Stmt::WaitImplicit { .. }
             | Stmt::Wait(_) => {
                 return None;
             }

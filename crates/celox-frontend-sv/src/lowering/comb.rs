@@ -2077,7 +2077,7 @@ impl<'p, 'a> Comb<'p, 'a> {
             | sv::ir::Stmt::DelayedNonblocking { .. }
             | sv::ir::Stmt::Delay { .. }
             | sv::ir::Stmt::WaitEvent(_)
-            | sv::ir::Stmt::WaitImplicit(_)
+            | sv::ir::Stmt::WaitImplicit { .. }
             | sv::ir::Stmt::Wait(_) => Err(unsupported("procedural timing control")),
             sv::ir::Stmt::Local { name, init } => {
                 let id = self
@@ -4019,9 +4019,9 @@ impl<'p, 'a> Comb<'p, 'a> {
         // Every bit a process may write must be defined on every path;
         // otherwise it would hold its previous value (a latch).
         let mut visited = HashSet::default();
-        let mut static_writes = Vec::new();
-        self.static_writes(body, &mut visited, &mut static_writes);
-        for (id, access) in static_writes {
+        let mut writes = Vec::new();
+        static_writes(self.m, body, &mut visited, &mut writes, false);
+        for (id, access) in writes {
             let defined = store.get(&id).is_some_and(|range| {
                 range
                     .get_parts_ref(access)
@@ -4176,102 +4176,136 @@ pub(super) fn subtract_written_sensitivity(
     result
 }
 
-impl Comb<'_, '_> {
-    /// The module variables (and constant bit ranges) a statement list may
-    /// write, following subroutine calls.
-    fn static_writes(
-        &self,
-        stmts: &[sv::ir::Stmt],
-        visited: &mut HashSet<String>,
-        writes: &mut Vec<(SourceVarId, BitAccess)>,
-    ) {
-        let mut calls = Vec::new();
-        let record =
-            |this: &Self, lvalue: &sv::ir::LValue, writes: &mut Vec<(SourceVarId, BitAccess)>| {
-                let Some(id) = this.m.id(lvalue.name()) else {
-                    return;
-                };
-                if this.m.is_hidden(id) {
-                    return;
-                }
-                let variable = this.m.var(id);
-                let access = match lvalue {
-                    sv::ir::LValue::Ident(_) => full(variable.width),
-                    sv::ir::LValue::Select { msb, lsb, .. } => {
-                        let bounds = sv::typecheck::eval_const_expr_with_types(
-                            msb,
-                            this.m.constants,
-                            this.m.parameter_types,
-                        )
-                        .zip(sv::typecheck::eval_const_expr_with_types(
-                            lsb,
-                            this.m.constants,
-                            this.m.parameter_types,
-                        ))
-                        .and_then(|(msb, lsb)| constant_select_write(variable, msb, lsb));
-                        match bounds {
-                            Some((Some(access), _)) => access,
-                            // A constant select entirely outside the vector
-                            // writes nothing.
-                            Some((None, _)) => return,
-                            // A run-time select may write any bit; the written
-                            // value keeps the others, so it defines the whole
-                            // vector, or the one element its constant part names.
-                            None => {
-                                let element = dynamic_array_element_lvalue(
+/// The module variables (and constant bit ranges) a statement list may
+/// write, following subroutine calls.
+pub(super) fn static_writes(
+    m: &ProcModule<'_>,
+    stmts: &[sv::ir::Stmt],
+    visited: &mut HashSet<String>,
+    writes: &mut Vec<(SourceVarId, BitAccess)>,
+    functions_only: bool,
+) {
+    let mut calls = Vec::new();
+    let record = |this: &ProcModule<'_>,
+                  lvalue: &sv::ir::LValue,
+                  writes: &mut Vec<(SourceVarId, BitAccess)>| {
+        let Some(id) = this.id(lvalue.name()) else {
+            return;
+        };
+        if this.is_hidden(id) {
+            return;
+        }
+        let variable = this.var(id);
+        let access = match lvalue {
+            sv::ir::LValue::Ident(_) => full(variable.width),
+            sv::ir::LValue::Select { msb, lsb, .. } => {
+                let bounds = sv::typecheck::eval_const_expr_with_types(
+                    msb,
+                    this.constants,
+                    this.parameter_types,
+                )
+                .zip(sv::typecheck::eval_const_expr_with_types(
+                    lsb,
+                    this.constants,
+                    this.parameter_types,
+                ))
+                .and_then(|(msb, lsb)| constant_select_write(variable, msb, lsb));
+                match bounds {
+                    Some((Some(access), _)) => access,
+                    // A constant select entirely outside the vector
+                    // writes nothing.
+                    Some((None, _)) => return,
+                    // A run-time select may write any bit; the written
+                    // value keeps the others, so it defines the whole
+                    // vector, or the one element its constant part names.
+                    None => {
+                        let element = dynamic_array_element_lvalue(
+                            lvalue,
+                            this.variables,
+                            this.name_to_id,
+                            this.constants,
+                            this.parameter_types,
+                        );
+                        element
+                            .is_none()
+                            .then(|| {
+                                dynamic_packed_write(
                                     lvalue,
-                                    this.m.variables,
-                                    this.m.name_to_id,
-                                    this.m.constants,
-                                    this.m.parameter_types,
-                                );
-                                element
-                                    .is_none()
-                                    .then(|| {
-                                        dynamic_packed_write(
-                                            lvalue,
-                                            this.m.variables,
-                                            this.m.name_to_id,
-                                            this.m.constants,
-                                            this.m.parameter_types,
-                                        )
-                                    })
-                                    .flatten()
-                                    .and_then(|write| write.window)
-                                    .unwrap_or(full(variable.width))
-                            }
-                        }
+                                    this.variables,
+                                    this.name_to_id,
+                                    this.constants,
+                                    this.parameter_types,
+                                )
+                            })
+                            .flatten()
+                            .and_then(|write| write.window)
+                            .unwrap_or(full(variable.width))
                     }
-                };
-                writes.push((id, access));
-            };
-        for stmt in stmts {
-            stmt.walk(&mut |stmt| match stmt {
-                sv::ir::Stmt::Assign { lhs, .. } => record(self, lhs, writes),
+                }
+            }
+        };
+        writes.push((id, access));
+    };
+    for stmt in stmts {
+        stmt.walk(&mut |stmt| {
+            match stmt {
+                sv::ir::Stmt::Assign { lhs, .. } => record(m, lhs, writes),
                 sv::ir::Stmt::AssignConcat { parts, .. } => {
                     for part in parts {
-                        record(self, part, writes);
+                        record(m, part, writes);
                     }
                 }
                 sv::ir::Stmt::Call { name, args, .. } => calls.push((name.clone(), args.clone())),
                 _ => {}
-            });
-        }
-        for (name, args) in calls {
-            let Some(subroutine) = self.m.subroutine(&name).cloned() else {
-                continue;
-            };
-            for (param, arg) in subroutine.params.iter().zip(&args) {
-                if param.direction.is_written()
-                    && let Some(lvalues) = arg.as_ref().and_then(lvalue_from_expr)
-                {
-                    for lvalue in &lvalues {
-                        record(self, lvalue, writes);
+            }
+            if functions_only {
+                let mut expressions = Vec::new();
+                stmt_calls(stmt, &mut expressions);
+                calls.extend(expressions.into_iter().filter_map(|(callee, args)| {
+                    if let sv::ir::Callee::Subroutine(name) = callee {
+                        Some((name, args))
+                    } else {
+                        None
                     }
+                }));
+            }
+        });
+    }
+    let mut index = 0;
+    while index < calls.len() {
+        let (name, args) = calls[index].clone();
+        index += 1;
+        let Some(subroutine) = m.subroutine(&name).cloned() else {
+            continue;
+        };
+        if functions_only {
+            // Defaults execute at each call that omits an argument, even if
+            // this subroutine's body has already been visited at another call.
+            let mut defaults = Vec::new();
+            default_calls(&subroutine, &args, &mut defaults);
+            calls.extend(defaults.into_iter().filter_map(|(callee, args)| {
+                if let sv::ir::Callee::Subroutine(name) = callee {
+                    Some((name, args))
+                } else {
+                    None
+                }
+            }));
+        }
+        for (param, arg) in subroutine.params.iter().zip(&args) {
+            if param.direction.is_written()
+                && let Some(lvalues) = arg.as_ref().and_then(lvalue_from_expr)
+            {
+                for lvalue in &lvalues {
+                    record(m, lvalue, writes);
                 }
             }
-            if visited.insert(name) {
-                self.static_writes(&subroutine.body, visited, writes);
+        }
+        if visited.insert(name) && (!functions_only || !subroutine.is_task) {
+            static_writes(m, &subroutine.body, visited, writes, functions_only);
+            if functions_only {
+                // Sensitivity is syntactic: folded branches still exclude
+                // their written expressions, including writes in callees.
+                static_writes(m, &subroutine.sensitivity_body, visited, writes, true);
             }
         }
     }

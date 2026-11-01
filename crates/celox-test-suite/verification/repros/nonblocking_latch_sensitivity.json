@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "standard": "IEEE 1800-2023 9.2.2.3 applies 9.2.2.2.1 to always_latch: written expressions are excluded, including writes within functions. 10.4.2 schedules nonblocking updates after evaluation. 13.4 forbids time-controlling statements in functions; these functions schedule NBA updates of a module variable, not automatic locals.",
+  "adapter_free": true,
+  "cases": [
+    {
+      "case": "latch::nonblocking_latch_partial_sensitivity",
+      "source": "verification/repros/nonblocking_latch_partial_sensitivity.sv",
+      "expected": "Finish successfully without an extra activation caused by a write excluded from implicit sensitivity.",
+      "verilator": {
+        "version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "compile_command": "verilator --binary --timing -j 2 --top-module Top -Wno-fatal --converge-limit 10000 --Mdir <build-dir> verification/repros/nonblocking_latch_partial_sensitivity.sv",
+        "compile_exit_code": 0,
+        "run_exit_code": 1,
+        "run_output": "%Error-DIDNOTCONVERGE: Settle region did not converge after '--converge-limit' of 10000 tries\nAborting...\n"
+      },
+      "icarus": {
+        "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "compile_command": "iverilog -g2012 -s Top -o <output> verification/repros/nonblocking_latch_partial_sensitivity.sv",
+        "compile_exit_code": 1,
+        "compile_output": "verification/repros/nonblocking_latch_partial_sensitivity.sv:5: sorry: constant selects in always_* processes are not fully supported (the process will be sensitive to all bits in 'value[7:0]').\nverification/repros/nonblocking_latch_partial_sensitivity.sv:5: error: always_latch process has no event control.\nElaboration failed\n"
+      }
+    },
+    {
+      "case": "latch::nonblocking_latch_function_writes",
+      "source": "verification/repros/nonblocking_latch_function_writes.sv",
+      "expected": "Finish successfully without an extra activation caused by a write excluded from implicit sensitivity.",
+      "verilator": {
+        "version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "compile_command": "verilator --binary --timing -j 2 --top-module Top -Wno-fatal --converge-limit 10000 --Mdir <build-dir> verification/repros/nonblocking_latch_function_writes.sv",
+        "compile_exit_code": 0,
+        "run_exit_code": 1,
+        "run_output": "%Error-DIDNOTCONVERGE: Settle region did not converge after '--converge-limit' of 10000 tries\nAborting...\n"
+      },
+      "icarus": {
+        "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "compile_command": "iverilog -g2012 -s Top -o <output> verification/repros/nonblocking_latch_function_writes.sv",
+        "compile_exit_code": 1,
+        "compile_output": "verification/repros/nonblocking_latch_function_writes.sv:6: error: functions cannot have non blocking assignment statements.\n1 error(s) during elaboration.\n"
+      }
+    }
+  ]
+}

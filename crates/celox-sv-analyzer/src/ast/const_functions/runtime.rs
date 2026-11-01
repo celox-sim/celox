@@ -111,7 +111,7 @@ impl<'a> RuntimeConstantFunctions<'a> {
                     | Stmt::Call { .. }
                     | Stmt::Delay { .. }
                     | Stmt::WaitEvent(_)
-                    | Stmt::WaitImplicit(_)
+                    | Stmt::WaitImplicit { .. }
                     | Stmt::Wait(_)
                     | Stmt::Fork { .. }
                     | Stmt::AssertionRegion { .. }
