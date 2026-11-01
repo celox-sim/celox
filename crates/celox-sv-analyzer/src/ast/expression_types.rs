@@ -127,7 +127,7 @@ fn resolve(
     {
         return of_shape(session, shape);
     }
-    match &native.expression(id).kind {
+    let resolved = match &native.expression(id).kind {
         ExprKind::Name(name) => {
             let name = instances::normalize_identifier(&name.spelling);
             if let Some(shape) = dims.get(&name) {
@@ -183,7 +183,12 @@ fn resolve(
             })
         }
         _ => property_type(tree, session, id, native, dims),
-    }
+    };
+    resolved.or_else(|| {
+        enums::constant_binding(tree, session, id, native, dims)
+            .ok()??
+            .type_id(&mut session.types)
+    })
 }
 
 /// The declared result of an ordinary function or class method, given its

@@ -177,6 +177,10 @@ impl ScopeSymbols {
         );
         extend_missing(&mut self.enum_constants.exprs, &other.enum_constants.exprs);
         extend_missing(&mut self.enum_constants.types, &other.enum_constants.types);
+        extend_missing(
+            &mut self.enum_constants.declarations,
+            &other.enum_constants.declarations,
+        );
         extend_missing(&mut self.functions, &other.functions);
         extend_missing(
             &mut self.function_return_types,
@@ -272,6 +276,7 @@ impl ScopeSymbols {
         alias_entry(&mut self.enum_constants.numbers, name, target);
         alias_entry(&mut self.enum_constants.exprs, name, target);
         alias_entry(&mut self.enum_constants.types, name, target);
+        alias_entry(&mut self.enum_constants.declarations, name, target);
         alias_entry(&mut self.functions, name, target);
         alias_entry(&mut self.function_return_types, name, target);
         self.constant_functions.alias(name, target);
@@ -341,6 +346,9 @@ impl ScopeSymbols {
         self.enum_constants.numbers.retain(|name, _| kept(name));
         self.enum_constants.exprs.retain(|name, _| kept(name));
         self.enum_constants.types.retain(|name, _| kept(name));
+        self.enum_constants
+            .declarations
+            .retain(|name, _| kept(name));
         self.functions.retain(|name, _| kept(name));
         self.function_return_types.retain(|name, _| kept(name));
         self.constant_functions
@@ -435,6 +443,12 @@ impl ScopeSymbols {
                 .map(|(name, r#type)| (key(name), rename.r#type(r#type.clone())))
                 .collect(),
             enum_constants: EnumMemberConstants {
+                declarations: self
+                    .enum_constants
+                    .declarations
+                    .iter()
+                    .map(|(name, ty)| (key(name), ty.clone()))
+                    .collect(),
                 numbers: self
                     .enum_constants
                     .numbers

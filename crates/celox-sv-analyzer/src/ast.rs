@@ -1203,6 +1203,10 @@ impl Module {
                 &const_env,
                 &type_aliases,
             );
+            packed_dimensions.enum_constants = Arc::new(enum_constants.declarations.clone());
+            for parameter in &parameters {
+                Arc::make_mut(&mut packed_dimensions.enum_constants).remove(parameter.name());
+            }
             // Four-state parameter values cannot be represented by the numeric
             // environment. Keep their expressions for constant case analysis.
             packed_dimensions.parameter_values = parameter_value_env_with_imported(
@@ -1744,6 +1748,11 @@ impl Module {
                 .iter()
                 .flat_map(|process| process.assignments().iter().cloned())
                 .collect();
+            if is_package || export_symbols {
+                enum_constants.declarations.extend(
+                    classes::specializations::export_enum_constants(syntax_tree, session),
+                );
+            }
             // A package keeps its symbols for the scopes that use it.
             let symbols = (is_package || export_symbols).then(|| scope::ScopeSymbols {
                 package_scopes: imported.package_scopes.clone(),
@@ -3348,6 +3357,7 @@ struct EnumMemberConstants {
     exprs: HashMap<String, Expr>,
     /// Base width and signedness retained for early constant substitution.
     types: HashMap<String, ExprType>,
+    declarations: HashMap<String, enums::ConstantType>,
 }
 
 impl EnumMemberConstants {
@@ -3363,6 +3373,11 @@ impl EnumMemberConstants {
         }
         for (name, value) in &other.types {
             self.types.entry(name.clone()).or_insert(*value);
+        }
+        for (name, value) in &other.declarations {
+            self.declarations
+                .entry(name.clone())
+                .or_insert_with(|| value.clone());
         }
     }
 }
@@ -3492,7 +3507,7 @@ struct PackedDimensions {
     effect_values: Arc<HashMap<celox_sv_syntax::ExprId, Expr>>,
     /// The enumerations of the members of the local enumerations of a
     /// procedural body, which visible typedefs may have members like.
-    enum_constants: Arc<HashMap<String, Arc<enums::EnumDomain>>>,
+    enum_constants: Arc<HashMap<String, enums::ConstantType>>,
     /// The class property expression whose select is being bound against
     /// the property's template; every other property is read through its
     /// object.
