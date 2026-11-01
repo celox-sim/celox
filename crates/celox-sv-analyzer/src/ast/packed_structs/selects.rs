@@ -82,7 +82,7 @@ fn member_dimensions(name: &str, r#type: &Type, dimensions: &PackedDimensions) -
     let mut result = dimensions.clone();
     result.insert(
         name.to_string(),
-        VariableDimensions {
+        VariableDimensions::new(VariableShape {
             declared: type_names::Declared::default(),
             container: None,
             chandle: false,
@@ -100,7 +100,7 @@ fn member_dimensions(name: &str, r#type: &Type, dimensions: &PackedDimensions) -
             members: r#type.members.clone(),
             signed_element_depth: r#type.signed_element_depth,
             unpacked_struct: None,
-        },
+        }),
     );
     result
 }

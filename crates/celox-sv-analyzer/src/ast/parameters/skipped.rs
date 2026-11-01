@@ -481,7 +481,7 @@ fn pattern_items(
             count,
             left.min(right),
             left.max(right),
-            VariableDimensions {
+            VariableDimensions::new(VariableShape {
                 declared: type_names::Declared::default(),
                 container: None,
                 chandle: false,
@@ -489,8 +489,8 @@ fn pattern_items(
                 string: false,
                 class: None,
                 unpacked: rest.to_vec(),
-                ..shape.clone()
-            },
+                ..shape.clone_shape()
+            }),
         )
     } else if let Some((dim, rest)) = shape.packed.split_first()
         && !rest.is_empty()
@@ -507,15 +507,15 @@ fn pattern_items(
             count,
             left.min(right),
             left.max(right),
-            VariableDimensions {
+            VariableDimensions::new(VariableShape {
                 declared: type_names::Declared::default(),
                 container: None,
                 real: false,
                 string: false,
                 class: None,
                 packed: rest.to_vec(),
-                ..shape.clone()
-            },
+                ..shape.clone_shape()
+            }),
         )
     } else {
         let count = patterns::shape_width(&tree.functions, shape, dims).ok_or_else(wrong)?;
@@ -523,7 +523,7 @@ fn pattern_items(
             count,
             0,
             count as i128 - 1,
-            VariableDimensions {
+            VariableDimensions::new(VariableShape {
                 declared: type_names::Declared::default(),
                 container: None,
                 chandle: false,
@@ -541,7 +541,7 @@ fn pattern_items(
                 is_2state: shape.is_2state,
                 signed_element_depth: None,
                 unpacked_struct: None,
-            },
+            }),
         )
     };
     match plan.kind {

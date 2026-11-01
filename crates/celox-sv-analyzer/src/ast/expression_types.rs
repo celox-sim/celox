@@ -56,7 +56,7 @@ fn resolve(
         semantic_types::of_type(&mut session.types, &tree.functions, ty, &dims.const_env)
     };
     let of_shape = |session: &mut Session, shape: &VariableDimensions| {
-        semantic_types::of_shape(&mut session.types, &tree.functions, shape, &dims.const_env)
+        shape.type_id(&mut session.types, &tree.functions, &dims.const_env)
     };
     let class = |session: &mut Session, name: &str| {
         session

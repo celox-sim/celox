@@ -57,12 +57,9 @@ pub(in crate::ast) fn element_member(
     // The variable, or a parameter table of a package, such as `p::T`.
     let name = direct::call_name(tree, id, native)?;
     let table = &mut session.types;
-    let mut ty = semantic_types::of_shape(
-        table,
-        &tree.functions,
-        dimensions.get(&name)?,
-        &dimensions.const_env,
-    )?;
+    let mut ty = dimensions
+        .get(&name)?
+        .type_id(table, &tree.functions, &dimensions.const_env)?;
     for _ in &indices {
         let TyData::Array {
             kind: ArrayKind::Fixed(_),

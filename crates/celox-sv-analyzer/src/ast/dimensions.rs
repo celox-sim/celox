@@ -132,7 +132,7 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
     for port in ports {
         dimensions.insert(
             port.name().to_string(),
-            VariableDimensions {
+            VariableDimensions::new(VariableShape {
                 declared: type_names::Declared::new(port.r#type()),
                 chandle: port.r#type().chandle,
                 container: port.r#type().container.clone(),
@@ -162,7 +162,7 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                 members: port.r#type().members.clone(),
                 signed_element_depth: port.r#type().signed_element_depth,
                 unpacked_struct: port.r#type().unpacked_struct.clone(),
-            },
+            }),
         );
     }
     for port in ports {
@@ -181,7 +181,7 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
     for signal in signals {
         dimensions.insert(
             signal.name().to_string(),
-            VariableDimensions {
+            VariableDimensions::new(VariableShape {
                 declared: type_names::Declared::new(signal.r#type()),
                 chandle: signal.r#type().chandle,
                 container: signal.r#type().container.clone(),
@@ -212,7 +212,7 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                 members: signal.r#type().members.clone(),
                 signed_element_depth: signal.r#type().signed_element_depth,
                 unpacked_struct: signal.r#type().unpacked_struct.clone(),
-            },
+            }),
         );
     }
     PackedDimensions::new(dimensions, const_env, type_aliases)
@@ -604,7 +604,7 @@ pub(super) fn parameter_packed_dimensions(parameters: &[Parameter]) -> VariableP
         .map(|parameter| {
             (
                 parameter.name.clone(),
-                VariableDimensions {
+                VariableDimensions::new(VariableShape {
                     declared: type_names::Declared::default(),
                     container: None,
                     chandle: false,
@@ -622,7 +622,7 @@ pub(super) fn parameter_packed_dimensions(parameters: &[Parameter]) -> VariableP
                     members: parameter.members.clone(),
                     signed_element_depth: parameter.signed_element_depth,
                     unpacked_struct: None,
-                },
+                }),
             )
         })
         .collect()
