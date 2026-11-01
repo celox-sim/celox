@@ -4481,6 +4481,32 @@ pub(super) fn lower_subroutine(
                 kept.push(param.name.clone());
             }
         }
+        // Overlapping calls of a task that suspends share its static formals
+        // (IEEE 1800-2023 13.3.2). Those of a package or `$unit` task are
+        // variables of that scope, shared by every module calling it; a
+        // module allocates its own once.
+        let shared_scope = !matches!(
+            tree.root_unit(),
+            Ok(unit) if unit.kind != celox_sv_syntax::UnitKind::Package
+        );
+        if suspends && shared_scope {
+            for param in &subroutine.params {
+                if matches!(
+                    param.direction,
+                    ParamDirection::Input | ParamDirection::Output | ParamDirection::Inout
+                ) && !subroutine.automatic_locals.contains(&param.name)
+                    && !kept.contains(&param.name)
+                    // An unpacked structure or array formal keeps its
+                    // members or elements apart, which the scope does not
+                    // declare as variables.
+                    && param.leaves.is_empty()
+                    && param.r#type.structure_leaves().is_empty()
+                    && param.r#type.unpacked_ranges().is_empty()
+                {
+                    kept.push(param.name.clone());
+                }
+            }
+        }
         for initializer in &mut initializers {
             qualify_stmt(item, initializer);
             substitute_stmt_constants(
