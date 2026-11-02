@@ -1,0 +1,1 @@
+Codex round 1: call-stack guard = MAX_ACCESS_OVERREACH (shared documented overreach, also the lane-segment guard), boundary test on an image ending at a PROT_NONE page (faults with 8 bytes); identity of CLIF/wasm/layout on 10 real designs x 2 state modes recorded.
