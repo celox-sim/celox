@@ -1,0 +1,1 @@
+Rebase onto master: master's f747824 tracks call/kernel writes in BitExtractPeephole/ConcatFolding via StateWritePositions, so drop this PR's OpaqueWrites/OpaqueWriteEpochs guards
