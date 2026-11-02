@@ -1586,6 +1586,7 @@ impl<'a> Frame<'a> {
 
     fn assign(&mut self, lhs: &LValue, value: Value) -> Option<()> {
         match lhs {
+            LValue::Object { .. } => crate::ast::lowered_object(),
             LValue::Ident(name) => {
                 if self.type_of(name).is_none() {
                     let ty = self
@@ -1699,6 +1700,7 @@ impl<'a> Frame<'a> {
         match stmt {
             Stmt::Assign { lhs, rhs, .. } => {
                 let width = match lhs {
+                    LValue::Object { .. } => crate::ast::lowered_object(),
                     LValue::Ident(name) => self.type_of(name)?.0,
                     LValue::Select { msb, lsb, .. } => usize::try_from(
                         self.eval_lowered(&msb.clone().into())?

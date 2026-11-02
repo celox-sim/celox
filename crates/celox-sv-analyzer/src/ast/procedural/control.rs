@@ -122,7 +122,9 @@ impl BodyBuilder<'_, '_, '_> {
             }
         }
         let depth = self.names.scopes.len();
-        let result = self.native_body_machine(ids);
+        let result = self
+            .native_body_machine(ids)
+            .and_then(|stmts| reject_escaped_places(&stmts).map(|()| stmts));
         // Restore lexical bindings on every diagnostic path, just as the old
         // recursive block/for wrappers did; no native failure is retried.
         while self.names.scopes.len() > depth {

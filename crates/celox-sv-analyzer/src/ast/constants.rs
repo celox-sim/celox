@@ -193,6 +193,7 @@ pub(super) fn substitute_lvalue_constants(
     parameter_literals: &HashMap<String, Expr>,
 ) -> LValue {
     match lvalue {
+        LValue::Object { .. } => lowered_object(),
         LValue::Ident(name) => LValue::Ident(name),
         LValue::Select {
             name,
