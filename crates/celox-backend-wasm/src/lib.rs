@@ -18,12 +18,13 @@ pub type HashMap<K, V> = fxhash::FxHashMap<K, V>;
 pub type HashSet<K> = fxhash::FxHashSet<K>;
 
 use celox_design::{
-    BinaryOp, SPARSE_WORKING_REGION, STABLE_REGION, StateAddr, TriggerIdWithKind, UnaryOp,
+    BinaryOp, FRAME_REGION, SPARSE_WORKING_REGION, STABLE_REGION, StateAddr, TriggerIdWithKind,
+    UnaryOp,
 };
 use celox_sir::extern_abi::{ExternValue, SV_LOGIC_MASK_SHIFT};
 use celox_sir::{
-    BlockId, ExecutionUnit, RegisterId, RegisterType, SIRInstruction, SIROffset, SIRTerminator,
-    SIRValue,
+    BlockId, ExecutionUnit, FrameSlot, FunctionId, FunctionUnit, RegisterId, RegisterType,
+    SIRInstruction, SIROffset, SIRTerminator, SIRValue,
 };
 #[cfg(test)]
 use celox_state_layout::MemoryLayoutMode;
@@ -70,6 +71,8 @@ struct LocalAllocator {
     trigger_locals: HashMap<(AbsoluteAddr, u32), u32>,
     /// Total number of i64 locals declared.
     num_locals: u32,
+    /// The parameter holding the frame base address, in a function unit.
+    frame_base: Option<u32>,
 }
 
 impl LocalAllocator {
@@ -80,6 +83,18 @@ impl LocalAllocator {
             block_arg_locals: HashMap::default(),
             trigger_locals: HashMap::default(),
             num_locals: 0,
+            frame_base: None,
+        }
+    }
+
+    /// The locals of a function unit, whose only parameter, local 0, is the
+    /// `i32` frame base address.
+    fn for_function_unit() -> Self {
+        Self {
+            next: 1,
+            num_locals: 1,
+            frame_base: Some(0),
+            ..Self::new()
         }
     }
 
@@ -152,16 +167,49 @@ pub fn compile_units(
     four_state: bool,
     emit_triggers: bool,
 ) -> WasmModule {
-    let mut module = Module::new();
-    let externs = ExternImports::collect(units);
+    compile_units_calling(units, &[], layout, four_state, emit_triggers)
+}
 
-    // Type section: () -> i64 for `run`, then one type per extern import.
+/// [`compile_units`] for units that may call the program's `functions`.
+///
+/// A module whose units call a function embeds every function unit, as an
+/// internal function `(i32 frame_base) -> i64` returning the unit's status:
+/// function `k` has index `externs + 1 + k`, after the imports and `run`.
+/// Its frame slots are addressed from `frame_base`, the absolute address of
+/// its frame in the call stack ([`celox_state_layout::CallStackLayout`]). A
+/// module whose units call nothing is the one [`compile_units`] builds.
+pub fn compile_units_calling(
+    units: &[ExecutionUnit<RegionedAbsoluteAddr>],
+    functions: &[FunctionUnit<RegionedAbsoluteAddr>],
+    layout: &MemoryLayout,
+    four_state: bool,
+    emit_triggers: bool,
+) -> WasmModule {
+    let calls = units
+        .iter()
+        .flat_map(|unit| unit.blocks.values())
+        .flat_map(|block| &block.instructions)
+        .any(|instruction| matches!(instruction, SIRInstruction::Call { .. }));
+    let functions = if calls { functions } else { &[] };
+    let mut module = Module::new();
+    let externs = ExternImports::collect(
+        units
+            .iter()
+            .chain(functions.iter().map(|function| &function.unit)),
+    );
+
+    // Type section: () -> i64 for `run`, then one type per extern import,
+    // then (i32) -> i64 for function units.
     let mut types = TypeSection::new();
     types.ty().function(vec![], vec![ValType::I64]);
     for &(_, arity) in &externs.functions {
         types
             .ty()
             .function(vec![ValType::I64; arity], vec![ValType::I64]);
+    }
+    let function_type = externs.functions.len() as u32 + 1;
+    if !functions.is_empty() {
+        types.ty().function(vec![ValType::I32], vec![ValType::I64]);
     }
     module.section(&types);
 
@@ -189,24 +237,78 @@ pub fn compile_units(
     module.section(&imports);
 
     // Function section: `run` has type 0. Imported functions come first in
-    // the function index space.
-    let mut functions = FunctionSection::new();
-    functions.function(0);
-    module.section(&functions);
+    // the function index space; function units follow `run`.
+    let mut function_section = FunctionSection::new();
+    function_section.function(0);
+    for _ in functions {
+        function_section.function(function_type);
+    }
+    module.section(&function_section);
 
     // Export section: export the function as "run"
     let mut exports = ExportSection::new();
     exports.export("run", ExportKind::Func, externs.functions.len() as u32);
     module.section(&exports);
 
+    let calls = Calls::new(functions, externs.functions.len() as u32 + 1, layout);
+
     // Code section
     let mut codes = CodeSection::new();
-    let func = compile_function(units, layout, four_state, emit_triggers, &externs);
+    let func = compile_function(
+        units,
+        layout,
+        four_state,
+        emit_triggers,
+        &externs,
+        &calls,
+        LocalAllocator::new(),
+    );
     codes.function(&func);
+    for function in functions {
+        let func = compile_function(
+            std::slice::from_ref(&function.unit),
+            layout,
+            four_state,
+            emit_triggers,
+            &externs,
+            &calls,
+            LocalAllocator::for_function_unit(),
+        );
+        codes.function(&func);
+    }
     module.section(&codes);
 
     WasmModule {
         bytes: module.finish(),
+    }
+}
+
+/// The function units a module embeds, as its code sees them.
+struct Calls<'a> {
+    functions: &'a [FunctionUnit<RegionedAbsoluteAddr>],
+    /// Every frame slot, by its address.
+    slots: HashMap<RegionedAbsoluteAddr, &'a FrameSlot<RegionedAbsoluteAddr>>,
+    /// The Wasm function index of function 0.
+    first_index: u32,
+    stack: Option<celox_state_layout::CallStackLayout>,
+}
+
+impl<'a> Calls<'a> {
+    fn new(
+        functions: &'a [FunctionUnit<RegionedAbsoluteAddr>],
+        first_index: u32,
+        layout: &MemoryLayout,
+    ) -> Self {
+        Self {
+            functions,
+            slots: functions
+                .iter()
+                .flat_map(|function| &function.frame.slots)
+                .map(|slot| (slot.addr, slot))
+                .collect(),
+            first_index,
+            stack: layout.call_stack,
+        }
     }
 }
 
@@ -222,10 +324,12 @@ struct ExternImports {
 }
 
 impl ExternImports {
-    fn collect(units: &[ExecutionUnit<RegionedAbsoluteAddr>]) -> Self {
+    fn collect<'u>(
+        units: impl IntoIterator<Item = &'u ExecutionUnit<RegionedAbsoluteAddr>>,
+    ) -> Self {
         let mut arities = std::collections::BTreeMap::new();
         for instruction in units
-            .iter()
+            .into_iter()
             .flat_map(|unit| unit.blocks.values())
             .flat_map(|block| &block.instructions)
         {
@@ -263,15 +367,18 @@ impl ExternImports {
     }
 }
 
-/// Compile all execution units into a single WASM function body.
+/// Compile all execution units into a single WASM function body, whose
+/// parameters `locals` starts after.
 fn compile_function(
     units: &[ExecutionUnit<RegionedAbsoluteAddr>],
     layout: &MemoryLayout,
     four_state: bool,
     emit_triggers: bool,
     externs: &ExternImports,
+    calls: &Calls<'_>,
+    mut locals: LocalAllocator,
 ) -> Function {
-    let mut locals = LocalAllocator::new();
+    let params = locals.next;
 
     // Pre-allocate locals for all registers in all units.
     // RegisterId is scoped per-unit but we flatten them into one function,
@@ -329,6 +436,7 @@ fn compile_function(
             four_state,
             emit_triggers,
             externs,
+            calls,
             &mut locals,
             &mut instrs,
         );
@@ -338,8 +446,8 @@ fn compile_function(
     instrs.push(Instruction::I64Const(0));
     instrs.push(Instruction::End);
 
-    // Build the function with all locals declared as i64.
-    let mut func = Function::new(vec![(locals.num_locals, ValType::I64)]);
+    // Build the function with all locals but its parameters declared as i64.
+    let mut func = Function::new(vec![(locals.num_locals - params, ValType::I64)]);
     for i in &instrs {
         func.instruction(i);
     }
@@ -369,12 +477,14 @@ fn compile_function(
 ///   ) ;; $dispatch
 /// ) ;; $exit
 /// ```
+#[allow(clippy::too_many_arguments)]
 fn compile_unit(
     unit: &ExecutionUnit<RegionedAbsoluteAddr>,
     layout: &MemoryLayout,
     four_state: bool,
     emit_triggers: bool,
     externs: &ExternImports,
+    calls: &Calls<'_>,
     locals: &mut LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
@@ -474,6 +584,7 @@ fn compile_unit(
                 four_state,
                 emit_triggers,
                 externs,
+                calls,
                 locals,
                 instrs,
             );
@@ -512,6 +623,7 @@ fn compile_instruction(
     four_state: bool,
     emit_triggers: bool,
     externs: &ExternImports,
+    calls: &Calls<'_>,
     locals: &mut LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
@@ -571,9 +683,53 @@ fn compile_instruction(
                 compile_unary(dst, op, src, unit, four_state, locals, instrs);
             }
         }
+        // A frame slot has no entry in the state layout, and its address may
+        // share its object identity with a state object: resolve it before
+        // any layout lookup.
+        SIRInstruction::Load(dst, addr, offset, op_width) if addr.region == FRAME_REGION => {
+            let slot = calls.slots[addr];
+            let dst = locals.reg_map[dst].clone();
+            let base = Base::I32(
+                locals
+                    .frame_base
+                    .expect("only function units access frames"),
+            );
+            load_slot(
+                &dst,
+                base,
+                slot,
+                static_bits(offset),
+                *op_width,
+                four_state,
+                instrs,
+            );
+        }
         SIRInstruction::Load(dst, addr, offset, op_width) => {
             compile_load(
                 dst, addr, offset, *op_width, layout, four_state, locals, instrs,
+            );
+        }
+        SIRInstruction::Store(addr, offset, op_width, src, triggers, comb_capture_sites)
+            if addr.region == FRAME_REGION =>
+        {
+            // Frame slots are not state: nothing observes their stores.
+            debug_assert!(triggers.is_empty() && comb_capture_sites.is_empty());
+            let slot = calls.slots[addr];
+            let src = locals.reg_map[src].clone();
+            let base = Base::I32(
+                locals
+                    .frame_base
+                    .expect("only function units access frames"),
+            );
+            store_slot(
+                &src,
+                base,
+                slot,
+                static_bits(offset),
+                *op_width,
+                four_state,
+                locals,
+                instrs,
             );
         }
         SIRInstruction::Store(addr, offset, op_width, src, triggers, comb_capture_sites) => {
@@ -654,8 +810,17 @@ fn compile_instruction(
         SIRInstruction::CombCaptureEnableIfChanged { old, new, sites } => {
             compile_comb_capture_enable_if_changed(old, new, sites, four_state, locals, instrs);
         }
-        SIRInstruction::Call { .. } => {
-            unreachable!("programs with function calls are rejected before code generation")
+        SIRInstruction::Call {
+            function,
+            frame,
+            args,
+            outputs,
+            dst,
+            ..
+        } => {
+            compile_call(
+                *function, *frame, args, outputs, *dst, unit, four_state, calls, locals, instrs,
+            );
         }
         SIRInstruction::ExternCall { dst, func, args } => {
             compile_extern_call(
@@ -667,6 +832,290 @@ fn compile_instruction(
                 instrs,
             );
         }
+    }
+}
+
+/// Where the addresses of a memory access start from.
+#[derive(Clone, Copy)]
+enum Base {
+    /// Offsets are absolute addresses into linear memory.
+    Absolute,
+    /// Offsets are relative to the address held by an `i32` local.
+    I32(u32),
+    /// Offsets are relative to the address held by an `i64` local.
+    I64(u32),
+}
+
+/// Push the address `offset` bytes from `base`.
+fn emit_address(base: Base, offset: usize, instrs: &mut Vec<Instruction<'static>>) {
+    match base {
+        Base::Absolute => {
+            instrs.push(Instruction::I32Const(offset as i32));
+            return;
+        }
+        Base::I32(local) => instrs.push(Instruction::LocalGet(local)),
+        Base::I64(local) => {
+            instrs.push(Instruction::LocalGet(local));
+            instrs.push(Instruction::I32WrapI64);
+        }
+    }
+    if offset != 0 {
+        instrs.push(Instruction::I32Const(offset as i32));
+        instrs.push(Instruction::I32Add);
+    }
+}
+
+/// The bit offset of a frame slot access, which the verifier requires to be
+/// static.
+fn static_bits(offset: &SIROffset) -> usize {
+    match offset {
+        SIROffset::Static(bits) => *bits,
+        offset => unreachable!("a frame slot is accessed at offset {offset}"),
+    }
+}
+
+/// Load `op_width` bits `bits` into `slot`, of the frame at `base`, into
+/// `dst`.
+fn load_slot(
+    dst: &RegLocal,
+    base: Base,
+    slot: &FrameSlot<RegionedAbsoluteAddr>,
+    bits: usize,
+    op_width: usize,
+    four_state: bool,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    let (byte, shift) = (slot.offset + bits / 8, bits % 8);
+    compile_load_at_offset_based(base, dst, byte, shift, op_width, instrs);
+    let Some(mask_idx) = dst.mask_idx.filter(|_| four_state) else {
+        return;
+    };
+    if slot.four_state {
+        let mask = RegLocal {
+            value_idx: mask_idx,
+            num_chunks: dst.num_chunks,
+            mask_idx: None,
+        };
+        compile_load_at_offset_based(
+            base,
+            &mask,
+            byte + slot.plane_size(),
+            shift,
+            op_width,
+            instrs,
+        );
+    } else {
+        for c in 0..dst.num_chunks {
+            instrs.push(Instruction::I64Const(0));
+            instrs.push(Instruction::LocalSet(mask_idx + c as u32));
+        }
+    }
+}
+
+/// Store `op_width` bits of `src` `bits` into `slot`, of the frame at
+/// `base`.
+#[allow(clippy::too_many_arguments)]
+fn store_slot(
+    src: &RegLocal,
+    base: Base,
+    slot: &FrameSlot<RegionedAbsoluteAddr>,
+    bits: usize,
+    op_width: usize,
+    four_state: bool,
+    locals: &mut LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    if op_width == 0 {
+        return;
+    }
+    let (byte, shift) = (slot.offset + bits / 8, bits % 8);
+    compile_store_at_offset_based(base, src, byte, shift, op_width, locals, instrs);
+    if !four_state || !slot.four_state {
+        return;
+    }
+    let mask = match src.mask_idx {
+        Some(mask_idx) => RegLocal {
+            value_idx: mask_idx,
+            num_chunks: src.num_chunks,
+            mask_idx: None,
+        },
+        None => {
+            // A two-state source gets a zero mask.
+            let zero = locals.alloc(src.num_chunks);
+            for c in 0..src.num_chunks {
+                instrs.push(Instruction::I64Const(0));
+                instrs.push(Instruction::LocalSet(zero + c as u32));
+            }
+            RegLocal {
+                value_idx: zero,
+                num_chunks: src.num_chunks,
+                mask_idx: None,
+            }
+        }
+    };
+    compile_store_at_offset_based(
+        base,
+        &mask,
+        byte + slot.plane_size(),
+        shift,
+        op_width,
+        locals,
+        instrs,
+    );
+}
+
+/// Run `function` in the frame based `frame` bytes into the stack: guard the
+/// stack and the call depth (trapping), store the arguments, call it, end the
+/// running unit with its status when that is nonzero, and load `dst` from its
+/// output slots.
+#[allow(clippy::too_many_arguments)]
+fn compile_call(
+    function: FunctionId,
+    frame: RegisterId,
+    args: &[(usize, RegisterId)],
+    outputs: &[usize],
+    dst: Option<RegisterId>,
+    unit: &ExecutionUnit<RegionedAbsoluteAddr>,
+    four_state: bool,
+    calls: &Calls<'_>,
+    locals: &mut LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    let stack = calls
+        .stack
+        .expect("the layout of a program that calls functions has a call stack");
+    let callee = &calls.functions[function.0 as usize].frame;
+
+    // The frame, `offset` bytes past the stack base, must lie in the stack.
+    // Producers keep calls within it, so a frame outside is a broken
+    // invariant, not a simulation error.
+    let offset = locals.alloc(1);
+    instrs.push(Instruction::LocalGet(locals.reg_map[&frame].value_idx));
+    let frame_width = unit.register_map[&frame].width();
+    if frame_width < 64 {
+        instrs.push(Instruction::I64Const(((1u64 << frame_width) - 1) as i64));
+        instrs.push(Instruction::I64And);
+    }
+    instrs.push(Instruction::LocalSet(offset));
+    match stack.size.checked_sub(callee.size) {
+        Some(limit) => {
+            instrs.push(Instruction::LocalGet(offset));
+            instrs.push(Instruction::I64Const(limit as i64));
+            instrs.push(Instruction::I64GtU);
+        }
+        None => instrs.push(Instruction::I32Const(1)),
+    }
+    instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
+    instrs.push(Instruction::Unreachable);
+    instrs.push(Instruction::End);
+
+    let depth = locals.alloc(1);
+    let memarg = wasm_encoder::MemArg {
+        offset: 0,
+        align: 0,
+        memory_index: 0,
+    };
+    instrs.push(Instruction::I32Const(stack.depth_offset as i32));
+    instrs.push(Instruction::I64Load(memarg));
+    instrs.push(Instruction::LocalTee(depth));
+    instrs.push(Instruction::I64Const(celox_sir::MAX_CALL_DEPTH as i64));
+    instrs.push(Instruction::I64GeU);
+    instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
+    instrs.push(Instruction::Unreachable);
+    instrs.push(Instruction::End);
+    instrs.push(Instruction::I32Const(stack.depth_offset as i32));
+    instrs.push(Instruction::LocalGet(depth));
+    instrs.push(Instruction::I64Const(1));
+    instrs.push(Instruction::I64Add);
+    instrs.push(Instruction::I64Store(memarg));
+
+    // Slot offsets are relative to the frame, `stack.base_offset + offset`.
+    let frame_base = Base::I64(offset);
+    let in_frame = |slot: &FrameSlot<RegionedAbsoluteAddr>| FrameSlot {
+        offset: stack.base_offset + slot.offset,
+        ..slot.clone()
+    };
+    for &(position, arg) in args {
+        let slot = in_frame(&callee.slots[position]);
+        let src = locals.reg_map[&arg].clone();
+        store_slot(
+            &src, frame_base, &slot, 0, slot.width, four_state, locals, instrs,
+        );
+    }
+
+    emit_address(frame_base, stack.base_offset, instrs);
+    instrs.push(Instruction::Call(calls.first_index + function.0));
+    let status = locals.alloc(1);
+    instrs.push(Instruction::LocalSet(status));
+    // The callee left the depth as it found it, also when it failed.
+    instrs.push(Instruction::I32Const(stack.depth_offset as i32));
+    instrs.push(Instruction::LocalGet(depth));
+    instrs.push(Instruction::I64Store(memarg));
+    instrs.push(Instruction::LocalGet(status));
+    instrs.push(Instruction::I64Const(0));
+    instrs.push(Instruction::I64Ne);
+    instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
+    instrs.push(Instruction::LocalGet(status));
+    instrs.push(Instruction::Return);
+    instrs.push(Instruction::End);
+
+    let Some(dst) = dst else {
+        return;
+    };
+    let dst = locals.reg_map[&dst].clone();
+    if let [position] = outputs {
+        let slot = in_frame(&callee.slots[*position]);
+        load_slot(&dst, frame_base, &slot, 0, slot.width, four_state, instrs);
+        return;
+    }
+    // The concatenation of several slots, the first in the least significant
+    // bits: each is loaded whole, with no bits set above its width, and ored
+    // into place.
+    let planes = |local: &RegLocal| {
+        std::iter::once(local.value_idx).chain(local.mask_idx.filter(|_| four_state))
+    };
+    for plane in planes(&dst) {
+        for c in 0..dst.num_chunks {
+            instrs.push(Instruction::I64Const(0));
+            instrs.push(Instruction::LocalSet(plane + c as u32));
+        }
+    }
+    let mut shift = 0;
+    for &position in outputs {
+        let slot = in_frame(&callee.slots[position]);
+        let chunks = num_i64_chunks(slot.width);
+        let part = RegLocal {
+            value_idx: locals.alloc(chunks),
+            num_chunks: chunks,
+            mask_idx: four_state.then(|| locals.alloc(chunks)),
+        };
+        load_slot(&part, frame_base, &slot, 0, slot.width, four_state, instrs);
+        for (into, from) in planes(&dst).zip(planes(&part)) {
+            for c in 0..chunks {
+                let bit = shift + c * 64;
+                let (word, offset) = (bit / 64, bit % 64);
+                let from = from + c as u32;
+                if word < dst.num_chunks {
+                    instrs.push(Instruction::LocalGet(into + word as u32));
+                    instrs.push(Instruction::LocalGet(from));
+                    if offset != 0 {
+                        instrs.push(Instruction::I64Const(offset as i64));
+                        instrs.push(Instruction::I64Shl);
+                    }
+                    instrs.push(Instruction::I64Or);
+                    instrs.push(Instruction::LocalSet(into + word as u32));
+                }
+                if offset != 0 && word + 1 < dst.num_chunks {
+                    instrs.push(Instruction::LocalGet(into + word as u32 + 1));
+                    instrs.push(Instruction::LocalGet(from));
+                    instrs.push(Instruction::I64Const((64 - offset) as i64));
+                    instrs.push(Instruction::I64ShrU);
+                    instrs.push(Instruction::I64Or);
+                    instrs.push(Instruction::LocalSet(into + word as u32 + 1));
+                }
+            }
+        }
+        shift += slot.width;
     }
 }
 
@@ -4335,12 +4784,30 @@ fn compile_load_at_offset(
     op_width: usize,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
+    compile_load_at_offset_based(
+        Base::Absolute,
+        dst,
+        byte_offset,
+        bit_shift,
+        op_width,
+        instrs,
+    )
+}
+
+fn compile_load_at_offset_based(
+    base: Base,
+    dst: &RegLocal,
+    byte_offset: usize,
+    bit_shift: usize,
+    op_width: usize,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
     let num_chunks = num_i64_chunks(op_width);
 
     for c in 0..dst.num_chunks {
         if c < num_chunks {
             let chunk_byte_off = byte_offset + c * 8;
-            instrs.push(Instruction::I32Const(chunk_byte_off as i32));
+            emit_address(base, chunk_byte_off, instrs);
             instrs.push(Instruction::I64Load(wasm_encoder::MemArg {
                 offset: 0,
                 align: 0, // unaligned
@@ -4353,7 +4820,7 @@ fn compile_load_at_offset(
                 if c + 1 < num_chunks || (c * 64 + 64 - bit_shift) < op_width {
                     // Load next 8 bytes and shift left
                     let next_off = chunk_byte_off + 8;
-                    instrs.push(Instruction::I32Const(next_off as i32));
+                    emit_address(base, next_off, instrs);
                     instrs.push(Instruction::I64Load(wasm_encoder::MemArg {
                         offset: 0,
                         align: 0,
@@ -5055,6 +5522,26 @@ fn compile_store_at_offset(
     locals: &mut LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
+    compile_store_at_offset_based(
+        Base::Absolute,
+        src,
+        byte_offset,
+        bit_shift,
+        op_width,
+        locals,
+        instrs,
+    )
+}
+
+fn compile_store_at_offset_based(
+    base: Base,
+    src: &RegLocal,
+    byte_offset: usize,
+    bit_shift: usize,
+    op_width: usize,
+    locals: &mut LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
     let store_bytes = get_byte_size(op_width);
     let num_chunks = num_i64_chunks(op_width);
 
@@ -5062,7 +5549,7 @@ fn compile_store_at_offset(
         && bit_shift + op_width <= 64
         && (bit_shift != 0 || !op_width.is_multiple_of(8))
     {
-        emit_partial_store_small(src, byte_offset, bit_shift, op_width, locals, instrs);
+        emit_partial_store_small_based(base, src, byte_offset, bit_shift, op_width, locals, instrs);
     } else if bit_shift == 0 {
         // Byte-aligned store. Break remaining bytes into power-of-2
         // sized stores (8/4/2/1) so every byte of the value is written.
@@ -5084,7 +5571,8 @@ fn compile_store_at_offset(
                     num_chunks: 1,
                     mask_idx: None,
                 };
-                emit_partial_store_small(
+                emit_partial_store_small_based(
+                    base,
                     &tail,
                     byte_offset + c * 8,
                     0,
@@ -5103,7 +5591,7 @@ fn compile_store_at_offset(
                     align: 0,
                     memory_index: 0,
                 };
-                instrs.push(Instruction::I32Const(chunk_off as i32));
+                emit_address(base, chunk_off, instrs);
                 if written == 0 {
                     if let Some(src_local) = src_local {
                         instrs.push(Instruction::LocalGet(src_local));
@@ -5175,7 +5663,7 @@ fn compile_store_at_offset(
 
             let byte_len = affected_bytes.saturating_sub(chunk * 8).min(8);
             let merged = locals.alloc(1);
-            emit_load_small_word(byte_offset + chunk * 8, byte_len, instrs);
+            emit_load_small_word_based(base, byte_offset + chunk * 8, byte_len, instrs);
             instrs.push(Instruction::I64Const(
                 (mask_for_bytes(byte_len) & !field_mask) as i64,
             ));
@@ -5185,12 +5673,13 @@ fn compile_store_at_offset(
             instrs.push(Instruction::I64And);
             instrs.push(Instruction::I64Or);
             instrs.push(Instruction::LocalSet(merged));
-            emit_store_small_word(byte_offset + chunk * 8, byte_len, merged, instrs);
+            emit_store_small_word_based(base, byte_offset + chunk * 8, byte_len, merged, instrs);
         }
     }
 }
 
-fn emit_partial_store_small(
+fn emit_partial_store_small_based(
+    base: Base,
     src: &RegLocal,
     byte_offset: usize,
     bit_shift: usize,
@@ -5201,7 +5690,7 @@ fn emit_partial_store_small(
     let affected_bytes = (bit_shift + op_width).div_ceil(8);
     let tmp = locals.alloc(1);
 
-    emit_load_small_word(byte_offset, affected_bytes, instrs);
+    emit_load_small_word_based(base, byte_offset, affected_bytes, instrs);
     let clear_mask = !((((1u128 << op_width) - 1) << bit_shift) as u64);
     instrs.push(Instruction::I64Const(mask_for_bytes(affected_bytes) as i64));
     instrs.push(Instruction::I64And);
@@ -5219,7 +5708,7 @@ fn emit_partial_store_small(
     }
     instrs.push(Instruction::I64Or);
     instrs.push(Instruction::LocalSet(tmp));
-    emit_store_small_word(byte_offset, affected_bytes, tmp, instrs);
+    emit_store_small_word_based(base, byte_offset, affected_bytes, tmp, instrs);
 }
 
 fn compile_store_dynamic(
@@ -5864,10 +6353,19 @@ fn emit_load_small_word(
     byte_len: usize,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
+    emit_load_small_word_based(Base::Absolute, byte_offset, byte_len, instrs)
+}
+
+fn emit_load_small_word_based(
+    base: Base,
+    byte_offset: usize,
+    byte_len: usize,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
     match byte_len {
         0 => instrs.push(Instruction::I64Const(0)),
         1 => {
-            instrs.push(Instruction::I32Const(byte_offset as i32));
+            emit_address(base, byte_offset, instrs);
             instrs.push(Instruction::I32Load8U(wasm_encoder::MemArg {
                 offset: 0,
                 align: 0,
@@ -5876,7 +6374,7 @@ fn emit_load_small_word(
             instrs.push(Instruction::I64ExtendI32U);
         }
         2 => {
-            instrs.push(Instruction::I32Const(byte_offset as i32));
+            emit_address(base, byte_offset, instrs);
             instrs.push(Instruction::I32Load16U(wasm_encoder::MemArg {
                 offset: 0,
                 align: 0,
@@ -5885,14 +6383,14 @@ fn emit_load_small_word(
             instrs.push(Instruction::I64ExtendI32U);
         }
         3 => {
-            emit_load_small_word(byte_offset, 2, instrs);
-            emit_load_small_word(byte_offset + 2, 1, instrs);
+            emit_load_small_word_based(base, byte_offset, 2, instrs);
+            emit_load_small_word_based(base, byte_offset + 2, 1, instrs);
             instrs.push(Instruction::I64Const(16));
             instrs.push(Instruction::I64Shl);
             instrs.push(Instruction::I64Or);
         }
         4 => {
-            instrs.push(Instruction::I32Const(byte_offset as i32));
+            emit_address(base, byte_offset, instrs);
             instrs.push(Instruction::I32Load(wasm_encoder::MemArg {
                 offset: 0,
                 align: 0,
@@ -5901,32 +6399,32 @@ fn emit_load_small_word(
             instrs.push(Instruction::I64ExtendI32U);
         }
         5 => {
-            emit_load_small_word(byte_offset, 4, instrs);
-            emit_load_small_word(byte_offset + 4, 1, instrs);
+            emit_load_small_word_based(base, byte_offset, 4, instrs);
+            emit_load_small_word_based(base, byte_offset + 4, 1, instrs);
             instrs.push(Instruction::I64Const(32));
             instrs.push(Instruction::I64Shl);
             instrs.push(Instruction::I64Or);
         }
         6 => {
-            emit_load_small_word(byte_offset, 4, instrs);
-            emit_load_small_word(byte_offset + 4, 2, instrs);
+            emit_load_small_word_based(base, byte_offset, 4, instrs);
+            emit_load_small_word_based(base, byte_offset + 4, 2, instrs);
             instrs.push(Instruction::I64Const(32));
             instrs.push(Instruction::I64Shl);
             instrs.push(Instruction::I64Or);
         }
         7 => {
-            emit_load_small_word(byte_offset, 4, instrs);
-            emit_load_small_word(byte_offset + 4, 2, instrs);
+            emit_load_small_word_based(base, byte_offset, 4, instrs);
+            emit_load_small_word_based(base, byte_offset + 4, 2, instrs);
             instrs.push(Instruction::I64Const(32));
             instrs.push(Instruction::I64Shl);
             instrs.push(Instruction::I64Or);
-            emit_load_small_word(byte_offset + 6, 1, instrs);
+            emit_load_small_word_based(base, byte_offset + 6, 1, instrs);
             instrs.push(Instruction::I64Const(48));
             instrs.push(Instruction::I64Shl);
             instrs.push(Instruction::I64Or);
         }
         _ => {
-            instrs.push(Instruction::I32Const(byte_offset as i32));
+            emit_address(base, byte_offset, instrs);
             instrs.push(Instruction::I64Load(wasm_encoder::MemArg {
                 offset: 0,
                 align: 0,
@@ -5936,7 +6434,8 @@ fn emit_load_small_word(
     }
 }
 
-fn emit_store_small_word(
+fn emit_store_small_word_based(
+    base: Base,
     byte_offset: usize,
     byte_len: usize,
     value_local: u32,
@@ -5950,59 +6449,59 @@ fn emit_store_small_word(
     match byte_len {
         0 => {}
         1 => {
-            instrs.push(Instruction::I32Const(byte_offset as i32));
+            emit_address(base, byte_offset, instrs);
             instrs.push(Instruction::LocalGet(value_local));
             instrs.push(Instruction::I64Store8(memarg));
         }
         2 => {
-            instrs.push(Instruction::I32Const(byte_offset as i32));
+            emit_address(base, byte_offset, instrs);
             instrs.push(Instruction::LocalGet(value_local));
             instrs.push(Instruction::I64Store16(memarg));
         }
         3 => {
-            emit_store_small_word(byte_offset, 2, value_local, instrs);
+            emit_store_small_word_based(base, byte_offset, 2, value_local, instrs);
             instrs.push(Instruction::LocalGet(value_local));
             instrs.push(Instruction::I64Const(16));
             instrs.push(Instruction::I64ShrU);
             instrs.push(Instruction::LocalSet(value_local));
-            emit_store_small_word(byte_offset + 2, 1, value_local, instrs);
+            emit_store_small_word_based(base, byte_offset + 2, 1, value_local, instrs);
         }
         4 => {
-            instrs.push(Instruction::I32Const(byte_offset as i32));
+            emit_address(base, byte_offset, instrs);
             instrs.push(Instruction::LocalGet(value_local));
             instrs.push(Instruction::I64Store32(memarg));
         }
         5 => {
-            emit_store_small_word(byte_offset, 4, value_local, instrs);
+            emit_store_small_word_based(base, byte_offset, 4, value_local, instrs);
             instrs.push(Instruction::LocalGet(value_local));
             instrs.push(Instruction::I64Const(32));
             instrs.push(Instruction::I64ShrU);
             instrs.push(Instruction::LocalSet(value_local));
-            emit_store_small_word(byte_offset + 4, 1, value_local, instrs);
+            emit_store_small_word_based(base, byte_offset + 4, 1, value_local, instrs);
         }
         6 => {
-            emit_store_small_word(byte_offset, 4, value_local, instrs);
+            emit_store_small_word_based(base, byte_offset, 4, value_local, instrs);
             instrs.push(Instruction::LocalGet(value_local));
             instrs.push(Instruction::I64Const(32));
             instrs.push(Instruction::I64ShrU);
             instrs.push(Instruction::LocalSet(value_local));
-            emit_store_small_word(byte_offset + 4, 2, value_local, instrs);
+            emit_store_small_word_based(base, byte_offset + 4, 2, value_local, instrs);
         }
         7 => {
-            emit_store_small_word(byte_offset, 4, value_local, instrs);
+            emit_store_small_word_based(base, byte_offset, 4, value_local, instrs);
             instrs.push(Instruction::LocalGet(value_local));
             instrs.push(Instruction::I64Const(32));
             instrs.push(Instruction::I64ShrU);
             instrs.push(Instruction::LocalSet(value_local));
-            emit_store_small_word(byte_offset + 4, 2, value_local, instrs);
+            emit_store_small_word_based(base, byte_offset + 4, 2, value_local, instrs);
             instrs.push(Instruction::LocalGet(value_local));
             instrs.push(Instruction::I64Const(16));
             instrs.push(Instruction::I64ShrU);
             instrs.push(Instruction::LocalSet(value_local));
-            emit_store_small_word(byte_offset + 6, 1, value_local, instrs);
+            emit_store_small_word_based(base, byte_offset + 6, 1, value_local, instrs);
         }
         _ => {
-            instrs.push(Instruction::I32Const(byte_offset as i32));
+            emit_address(base, byte_offset, instrs);
             instrs.push(Instruction::LocalGet(value_local));
             instrs.push(Instruction::I64Store(memarg));
         }
@@ -6491,6 +6990,9 @@ fn compile_float_to_integer(
 }
 
 #[cfg(test)]
+mod call_tests;
+
+#[cfg(test)]
 mod bit_count_tests {
     mod slice_tests;
 
@@ -6560,6 +7062,7 @@ mod bit_count_tests {
             runtime_event_slot_size: 0,
             runtime_event_buffer_size: 0,
             runtime_event_site_layouts: Vec::new(),
+            call_stack: None,
         }
     }
 

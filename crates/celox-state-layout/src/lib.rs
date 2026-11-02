@@ -124,11 +124,18 @@ impl<A> LayoutRequirements<A> {
 /// Smaller-line CPUs use the same layout; objects within a lane segment
 /// remain packed rather than each receiving this alignment.
 pub const LANE_SEGMENT_ALIGN: usize = 256;
-/// Minimum gap after a lane segment. Native code may widen a sub-word
-/// read-modify-write past the end of an object (up to eight bytes for a
-/// dynamic store plus its trailing byte); the gap keeps such accesses inside
-/// storage owned by the same lane.
-pub const LANE_SEGMENT_GUARD: usize = 16;
+/// The most bytes generated code may access past the last byte of the plane
+/// an access names. Native code widens a sub-word read-modify-write by up to
+/// eight bytes for a dynamic store plus its trailing byte; Cranelift's
+/// multi-word load reads whole 64-bit words from the word holding the first
+/// bit and one word past its last chunk, at most `8 * (ceil(width / 64) +
+/// 1)` bytes for a plane of `ceil(width / 8)`, so at most 15 bytes past it.
+/// Storage that ends where unrelated or no storage follows keeps this many
+/// bytes after it.
+pub const MAX_ACCESS_OVERREACH: usize = 16;
+/// Minimum gap after a lane segment, which keeps the accesses that reach
+/// past an object inside storage owned by the same lane.
+pub const LANE_SEGMENT_GUARD: usize = MAX_ACCESS_OVERREACH;
 
 /// Lanes that write each state home in lane-partitioned kernels, as a bit
 /// set per object. An absent object is not written by any partitioned unit.
@@ -178,7 +185,35 @@ pub struct LayoutInput<A> {
     /// it. Homes are placed in rank order so data used together shares cache
     /// lines and is read in address order; unranked homes go last.
     pub access_rank: HashMap<A, u32>,
+    /// The bytes of frames to reserve for function calls, when the program
+    /// calls function units; see [`CallStackLayout`].
+    pub call_stack: Option<usize>,
 }
+
+/// Where the frames of function calls live: inside the state image, so that
+/// generated code reaches them from the memory pointer as it does the state.
+///
+/// The region starts with the current call depth, a `u64` that is zero
+/// whenever no call is running; each call increments it before entering the
+/// callee and restores it after the callee returns, whatever its status. The
+/// frames follow: the frame of a call based `frame` bytes into the stack
+/// starts at [`Self::base_offset`]` + frame`. A guard of
+/// [`CALL_STACK_GUARD`] bytes after the frames keeps every access of a slot
+/// that ends the stack inside the image, the word that generated code reads
+/// past an access's last chunk included.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallStackLayout {
+    /// Offset of the call depth.
+    pub depth_offset: usize,
+    /// Offset of the first byte of the frames, eight-byte aligned.
+    pub base_offset: usize,
+    /// The bytes the frames may occupy.
+    pub size: usize,
+}
+
+/// Bytes kept after the call stack's frames, see [`CallStackLayout`]: the
+/// image may end there, after a slot that ends the stack.
+pub const CALL_STACK_GUARD: usize = MAX_ACCESS_OVERREACH;
 
 /// Adapter implemented by the phase artifact that precedes physical layout.
 pub trait LayoutSource<A> {
@@ -228,6 +263,9 @@ pub struct MemoryLayout<A> {
     pub runtime_event_slot_size: usize,
     pub runtime_event_buffer_size: usize,
     pub runtime_event_site_layouts: Vec<RuntimeEventSiteLayout>,
+    /// Present when the program calls function units.
+    #[serde(default)]
+    pub call_stack: Option<CallStackLayout>,
 }
 
 type PhysicalLayoutObject<A> = (A, usize, bool, usize, usize);
@@ -372,6 +410,7 @@ where
             runtime_event_sites,
             lane_writers,
             access_rank,
+            call_stack,
         } = input;
 
         let mut stable_objects = state_objects
@@ -541,7 +580,21 @@ where
             sparse_active_bits_offset + sparse_active_capacity.div_ceil(64) * 8;
         let triggered_bits_offset = align_up(sparse_metadata_offset, 8);
         let triggered_bits_total_size = num_events.div_ceil(8);
-        let scratch_base_offset = align_up(triggered_bits_offset + triggered_bits_total_size, 8);
+        let triggered_bits_end = triggered_bits_offset + triggered_bits_total_size;
+        // The call stack follows every region the program's state needs, so a
+        // program that calls no function keeps the offsets it had without it.
+        let call_stack = call_stack.map(|size| {
+            let depth_offset = align_up(triggered_bits_end, 8);
+            CallStackLayout {
+                depth_offset,
+                base_offset: depth_offset + 8,
+                size,
+            }
+        });
+        let scratch_base_offset = match call_stack {
+            Some(stack) => align_up(stack.base_offset + stack.size + CALL_STACK_GUARD, 8),
+            None => align_up(triggered_bits_end, 8),
+        };
         let runtime_event_buffer_size =
             RUNTIME_EVENT_HEADER_SIZE + RUNTIME_EVENT_CAPACITY * runtime_event_slot_size;
         let merged_total_size = scratch_base_offset;
@@ -591,6 +644,7 @@ where
             runtime_event_slot_size,
             runtime_event_buffer_size,
             runtime_event_site_layouts,
+            call_stack,
         }
     }
 
@@ -822,6 +876,7 @@ mod tests {
                     runtime_event_sites: Vec::new(),
                     lane_writers: Default::default(),
                     access_rank: Default::default(),
+                    call_stack: None,
                 }
             }
         }
@@ -864,6 +919,7 @@ mod tests {
                     runtime_event_sites: Vec::new(),
                     lane_writers: Default::default(),
                     access_rank,
+                    call_stack: None,
                 }
             }
         }
@@ -916,6 +972,7 @@ mod tests {
                     runtime_event_sites: Vec::new(),
                     lane_writers,
                     access_rank: Default::default(),
+                    call_stack: None,
                 }
             }
         }
@@ -965,6 +1022,7 @@ mod tests {
                     runtime_event_sites: Vec::new(),
                     lane_writers: LaneWriters::default(),
                     access_rank: Default::default(),
+                    call_stack: None,
                 }
             }
         }
@@ -999,6 +1057,7 @@ mod tests {
                     runtime_event_sites: Vec::new(),
                     lane_writers: Default::default(),
                     access_rank: Default::default(),
+                    call_stack: None,
                 }
             }
         }
@@ -1013,6 +1072,74 @@ mod tests {
         assert_eq!(expanded.offsets, base.offsets);
         assert_eq!(expanded.working_offsets, base.working_offsets);
         assert_eq!(expanded.triggered_bits_offset, base.triggered_bits_offset);
+    }
+
+    #[test]
+    fn a_call_stack_follows_the_state_and_moves_nothing_else() {
+        struct Source(Option<usize>);
+
+        impl LayoutSource<u32> for Source {
+            fn layout_input(&self, _mode: MemoryLayoutMode) -> LayoutInput<u32> {
+                LayoutInput {
+                    state_objects: (0..3)
+                        .map(|address| StateObjectLayout {
+                            address,
+                            width: 13 + 40 * address as usize,
+                            is_4state: address == 1,
+                        })
+                        .collect(),
+                    working_addresses: vec![1],
+                    sparse_addresses: vec![2],
+                    unpacked_arrays: HashMap::default(),
+                    requirements: LayoutRequirements::default(),
+                    ff_referenced_addresses: HashSet::default(),
+                    num_events: 11,
+                    runtime_event_sites: Vec::new(),
+                    lane_writers: Default::default(),
+                    access_rank: Default::default(),
+                    call_stack: self.0,
+                }
+            }
+        }
+
+        for four_state in [false, true] {
+            let build =
+                |stack| MemoryLayout::build(&Source(stack), four_state, MemoryLayoutMode::Packed);
+            let plain = build(None);
+            // Without a stack, the state ends where it did before stacks
+            // existed: scratch directly follows the trigger bits.
+            assert_eq!(plain.call_stack, None);
+            assert_eq!(
+                plain.scratch_base_offset,
+                align_up(
+                    plain.triggered_bits_offset + plain.triggered_bits_total_size,
+                    8
+                )
+            );
+            assert_eq!(plain.merged_total_size, plain.scratch_base_offset);
+
+            let called = build(Some(4096));
+            let stack = called.call_stack.expect("a requested stack");
+            assert_eq!(stack.size, 4096);
+            assert_eq!(stack.depth_offset % 8, 0);
+            assert!(
+                stack.depth_offset
+                    >= called.triggered_bits_offset + called.triggered_bits_total_size
+            );
+            assert_eq!(stack.base_offset, stack.depth_offset + 8);
+            assert!(
+                stack.base_offset + stack.size + CALL_STACK_GUARD <= called.scratch_base_offset
+            );
+            assert_eq!(called.merged_total_size, called.scratch_base_offset);
+            // Every other region keeps its place.
+            assert_eq!(called.offsets, plain.offsets);
+            assert_eq!(called.working_base_offset, plain.working_base_offset);
+            assert_eq!(called.working_offsets, plain.working_offsets);
+            assert_eq!(called.sparse_base_offset, plain.sparse_base_offset);
+            assert_eq!(called.sparse_offsets, plain.sparse_offsets);
+            assert_eq!(called.triggered_bits_offset, plain.triggered_bits_offset);
+            assert_eq!(called.total_size, plain.total_size);
+        }
     }
 
     #[test]

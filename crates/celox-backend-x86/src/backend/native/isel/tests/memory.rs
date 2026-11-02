@@ -830,6 +830,7 @@ fn narrowed_wide_binary_store_does_not_write_source_width() {
         runtime_event_slot_size: 0,
         runtime_event_buffer_size: 0,
         runtime_event_site_layouts: vec![],
+        call_stack: None,
     };
     let mut function = lower_execution_unit(&eu, &layout, false);
     mir_legalize::legalize(&mut function);
@@ -1157,6 +1158,7 @@ fn execute_unaligned_64_bit_load(dynamic: bool) -> u64 {
         runtime_event_slot_size: 0,
         runtime_event_buffer_size: 0,
         runtime_event_site_layouts: vec![],
+        call_stack: None,
     };
     let mut function = lower_execution_unit(&eu, &layout, false);
     mir_legalize::legalize(&mut function);
@@ -1321,6 +1323,7 @@ fn verify_scalar_alignment_matrix(dynamic: bool, four_state: bool) {
         runtime_event_slot_size: 0,
         runtime_event_buffer_size: 0,
         runtime_event_site_layouts: vec![],
+        call_stack: None,
     };
     let mut function = lower_execution_unit(&eu, &layout, four_state);
     if dynamic {
@@ -1538,6 +1541,7 @@ fn verify_wide_alignment_matrix(dynamic: bool) {
         runtime_event_slot_size: 0,
         runtime_event_buffer_size: 0,
         runtime_event_site_layouts: vec![],
+        call_stack: None,
     };
     let mut function = lower_execution_unit(&eu, &layout, false);
     if dynamic {

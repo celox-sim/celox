@@ -187,14 +187,15 @@ impl WasmBackend {
         laid_out: &crate::ir::LaidOutProgram,
         options: &SimulatorOptions,
     ) -> Result<Self, crate::SimulatorError> {
-        laid_out.reject_function_calls("wasm")?;
+        laid_out.reject_triggered_calls("wasm")?;
         let engine = Engine::default();
         let sir = laid_out;
         let layout = laid_out.layout().clone();
 
         // Compile eval_comb
-        let comb_wasm = wasm_codegen::compile_units(
+        let comb_wasm = wasm_codegen::compile_units_calling(
             &sir.sir.eval_comb,
+            &sir.sir.functions,
             &layout,
             options.four_state,
             options.emit_triggers,
@@ -231,8 +232,9 @@ impl WasmBackend {
                     id
                 });
 
-                let wasm = wasm_codegen::compile_units(
+                let wasm = wasm_codegen::compile_units_calling(
                     units,
+                    &sir.sir.functions,
                     &layout,
                     options.four_state,
                     options.emit_triggers,
@@ -448,8 +450,9 @@ impl WasmBackend {
             .processes
             .iter()
             .map(|unit| {
-                let wasm = wasm_codegen::compile_units(
+                let wasm = wasm_codegen::compile_units_calling(
                     std::slice::from_ref(unit),
+                    &sir.sir.functions,
                     &layout,
                     options.four_state,
                     false,

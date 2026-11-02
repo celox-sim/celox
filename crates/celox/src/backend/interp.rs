@@ -194,9 +194,6 @@ struct Calls {
     stack: Vec<u8>,
 }
 
-/// The largest stack the interpreter gives function frames.
-const STACK_LIMIT: usize = 64 << 20;
-
 impl Calls {
     fn new(functions: &[FunctionUnit<RegionedAbsoluteAddr>]) -> Self {
         Self {
@@ -792,7 +789,7 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
             .ok_or_else(|| InterpError::Machine(format!("call of missing {function}")))?;
         let end = base
             .checked_add(size)
-            .filter(|&end| end <= STACK_LIMIT)
+            .filter(|&end| end <= celox_sir::STACK_SIZE)
             .ok_or_else(|| InterpError::Machine("stack overflow".to_string()))?;
         if self.frames.stack.len() < end {
             self.frames.stack.resize(end, 0);

@@ -6,8 +6,37 @@ use cranelift::{
 use super::core::{TransValue, cast_type, get_chunk_as_i64, get_cl_type, promote_to_physical};
 use super::{MemoryLayout, SIRTranslator, TranslationState, get_byte_size};
 use crate::{
-    AbsoluteAddr, RegionedAbsoluteAddr, RegisterId, SIROffset, STABLE_REGION, TriggerIdWithKind,
+    AbsoluteAddr, FrameSlot, RegionedAbsoluteAddr, RegisterId, SIROffset, STABLE_REGION,
+    TriggerIdWithKind,
 };
+
+/// Where the object an access names lies: its value plane `offset` bytes
+/// from `base`, and its mask plane `plane` bytes after that when it is
+/// `four_state` (in a four-state build).
+#[derive(Clone, Copy)]
+pub(super) struct Placement {
+    pub base: Value,
+    pub offset: usize,
+    pub four_state: bool,
+    pub plane: usize,
+}
+
+impl Placement {
+    /// The placement of `slot` in the frame at `frame`.
+    pub(super) fn slot(
+        frame: Value,
+        slot: &FrameSlot<RegionedAbsoluteAddr>,
+        four_state_build: bool,
+    ) -> Self {
+        let four_state = four_state_build && slot.four_state;
+        Self {
+            base: frame,
+            offset: slot.offset,
+            four_state,
+            plane: slot.plane_size(),
+        }
+    }
+}
 
 /// Convert a logical array access to physical bits. Layout selection keeps
 /// ordinary accesses within one element; aggregate zeroing/commits are split
@@ -500,13 +529,36 @@ impl SIRTranslator {
         offset: &SIROffset,
         op_width: &usize,
     ) {
-        let physical = physical_offset(&self.layout, &addr.absolute_addr(), offset);
-        let offset = &physical;
+        // A frame slot has no entry in the state layout, and its address may
+        // share its object identity with a state object: resolve it before
+        // any layout lookup.
+        let (offset, place) = if addr.region == crate::FRAME_REGION {
+            (offset.clone(), self.frame_placement(state, addr))
+        } else {
+            (
+                physical_offset(&self.layout, &addr.absolute_addr(), offset),
+                self.state_placement(state, addr),
+            )
+        };
         let d_phys_width = state.register_map[dst].width();
+        let value = self.translate_placed_load(state, &offset, *op_width, d_phys_width, place);
+        state.regs.insert(*dst, value);
+    }
+
+    /// Load `op_width` bits at `offset` of the object at `place`, as a value
+    /// of a `d_phys_width`-bit register.
+    pub(super) fn translate_placed_load(
+        &self,
+        state: &mut TranslationState,
+        offset: &SIROffset,
+        op_width: usize,
+        d_phys_width: usize,
+        place: Placement,
+    ) -> TransValue {
+        let op_width = &op_width;
 
         // 1. Calculate base memory address
-        let abs = addr.absolute_addr();
-        let (mem_base, base_offset_bytes) = (state.mem_ptr, self.layout.region_base_offset(addr));
+        let (mem_base, base_offset_bytes) = (place.base, place.offset);
 
         if let SIROffset::Static(val) = offset {
             let byte_off = (val >> 3) as i64;
@@ -525,8 +577,8 @@ impl SIRTranslator {
                         d_phys_width,
                     );
                     if self.options.four_state {
-                        let m = if self.layout.is_4states[&abs] {
-                            let var_byte_size = self.layout.plane_size(&abs);
+                        let m = if place.four_state {
+                            let var_byte_size = place.plane;
                             let static_addr_m = state
                                 .builder
                                 .ins()
@@ -540,17 +592,12 @@ impl SIRTranslator {
                         } else {
                             state.builder.ins().iconst(types::I64, 0)
                         };
-                        state.regs.insert(
-                            *dst,
-                            TransValue::FourState {
-                                values: vec![v],
-                                masks: vec![m],
-                            },
-                        );
-                    } else {
-                        state.regs.insert(*dst, TransValue::TwoState(vec![v]));
+                        return TransValue::FourState {
+                            values: vec![v],
+                            masks: vec![m],
+                        };
                     }
-                    return;
+                    return TransValue::TwoState(vec![v]);
                 }
 
                 if d_phys_width > 64 && (*op_width).is_multiple_of(64) {
@@ -561,8 +608,8 @@ impl SIRTranslator {
                         d_phys_width,
                     );
                     if self.options.four_state {
-                        let chunks_m = if self.layout.is_4states[&abs] {
-                            let var_byte_size = self.layout.plane_size(&abs);
+                        let chunks_m = if place.four_state {
+                            let var_byte_size = place.plane;
                             let static_addr_m = state
                                 .builder
                                 .ins()
@@ -577,17 +624,12 @@ impl SIRTranslator {
                             let zero_chunk = state.builder.ins().iconst(types::I64, 0);
                             vec![zero_chunk; d_phys_width.div_ceil(64)]
                         };
-                        state.regs.insert(
-                            *dst,
-                            TransValue::FourState {
-                                values: chunks_v,
-                                masks: chunks_m,
-                            },
-                        );
-                    } else {
-                        state.regs.insert(*dst, TransValue::TwoState(chunks_v));
+                        return TransValue::FourState {
+                            values: chunks_v,
+                            masks: chunks_m,
+                        };
                     }
-                    return;
+                    return TransValue::TwoState(chunks_v);
                 }
             }
         }
@@ -622,9 +664,8 @@ impl SIRTranslator {
         };
 
         if self.options.four_state {
-            let is_var_4state = self.layout.is_4states[&abs];
-            let res_chunks_m = if is_var_4state {
-                let var_byte_size = self.layout.plane_size(&abs);
+            let res_chunks_m = if place.four_state {
+                let var_byte_size = place.plane;
                 let final_addr_m = state
                     .builder
                     .ins()
@@ -655,15 +696,12 @@ impl SIRTranslator {
                     vec![zero_chunk; d_phys_width.div_ceil(64)]
                 }
             };
-            state.regs.insert(
-                *dst,
-                TransValue::FourState {
-                    values: res_chunks_v,
-                    masks: res_chunks_m,
-                },
-            );
+            TransValue::FourState {
+                values: res_chunks_v,
+                masks: res_chunks_m,
+            }
         } else {
-            state.regs.insert(*dst, TransValue::TwoState(res_chunks_v));
+            TransValue::TwoState(res_chunks_v)
         }
     }
 
@@ -677,6 +715,15 @@ impl SIRTranslator {
         triggers: &[TriggerIdWithKind],
         comb_capture_sites: &[u32],
     ) {
+        if addr.region == crate::FRAME_REGION {
+            // Frame slots are not state: nothing observes their stores.
+            debug_assert!(triggers.is_empty() && comb_capture_sites.is_empty());
+            let place = self.frame_placement(state, addr);
+            let value = state.regs[src_reg].clone();
+            let width = state.register_map[src_reg].width();
+            self.translate_placed_store(state, &value, width, offset, *op_width, place);
+            return;
+        }
         if let Some(pieces) = strided_pieces(&self.layout, &addr.absolute_addr(), offset, *op_width)
         {
             // Only exact-zero aggregate stores are admitted by layout selection.
@@ -852,96 +899,22 @@ impl SIRTranslator {
             vec![]
         };
 
-        if s_phys_width <= 64 {
-            // Handle single register (i8 ~ i128)
-            let val_v = v_chunks[0];
-            let no_rmw_width = matches!(*op_width, 8 | 16 | 32 | 64);
-            let is_static_aligned = matches!(offset, SIROffset::Static(v) if v & 7 == 0);
-            if no_rmw_width && is_static_aligned {
-                self.translate_store_native_aligned(state, final_addr, *op_width, val_v);
-                if self.options.four_state && self.layout.is_4states[&abs] {
-                    let var_byte_size = self.layout.plane_size(&abs);
-                    let final_addr_m = state
-                        .builder
-                        .ins()
-                        .iadd_imm_s(final_addr, var_byte_size as i64);
-                    self.translate_store_native_aligned(
-                        state,
-                        final_addr_m,
-                        *op_width,
-                        m_chunks[0],
-                    );
-                }
+        self.store_planes(
+            state,
+            final_addr,
+            bit_shift_val,
+            offset,
+            *op_width,
+            s_phys_width,
+            &v_chunks,
+            &m_chunks,
+            captures_four_state,
+            if captures_four_state {
+                self.layout.plane_size(&abs)
             } else {
-                self.translate_store_native(
-                    state,
-                    final_addr,
-                    bit_shift_val,
-                    *op_width,
-                    val_v,
-                    max_bit_shift(offset),
-                );
-                if self.options.four_state && self.layout.is_4states[&abs] {
-                    let var_byte_size = self.layout.plane_size(&abs);
-                    let final_addr_m = state
-                        .builder
-                        .ins()
-                        .iadd_imm_s(final_addr, var_byte_size as i64);
-                    self.translate_store_native(
-                        state,
-                        final_addr_m,
-                        bit_shift_val,
-                        *op_width,
-                        m_chunks[0],
-                        max_bit_shift(offset),
-                    );
-                }
-            }
-        } else {
-            // Handle multiple registers (i64 * n)
-            let is_static_aligned = matches!(offset, SIROffset::Static(v) if v & 7 == 0);
-            let full_word_store = (*op_width).is_multiple_of(64);
-            if is_static_aligned && full_word_store {
-                self.translate_store_multi_word_aligned_words(
-                    state, final_addr, *op_width, &v_chunks,
-                );
-                if self.options.four_state && self.layout.is_4states[&abs] {
-                    let var_byte_size = self.layout.plane_size(&abs);
-                    let final_addr_m = state
-                        .builder
-                        .ins()
-                        .iadd_imm_s(final_addr, var_byte_size as i64);
-                    self.translate_store_multi_word_aligned_words(
-                        state,
-                        final_addr_m,
-                        *op_width,
-                        &m_chunks,
-                    );
-                }
-            } else {
-                self.translate_store_multi_word_from_chunks(
-                    state,
-                    final_addr,
-                    bit_shift_val,
-                    *op_width,
-                    &v_chunks,
-                );
-                if self.options.four_state && self.layout.is_4states[&abs] {
-                    let var_byte_size = self.layout.plane_size(&abs);
-                    let final_addr_m = state
-                        .builder
-                        .ins()
-                        .iadd_imm_s(final_addr, var_byte_size as i64);
-                    self.translate_store_multi_word_from_chunks(
-                        state,
-                        final_addr_m,
-                        bit_shift_val,
-                        *op_width,
-                        &m_chunks,
-                    );
-                }
-            }
-        }
+                0
+            },
+        );
 
         if !comb_capture_sites.is_empty() {
             let new_value_chunks = if s_phys_width <= 64 {
@@ -1018,6 +991,188 @@ impl SIRTranslator {
         }
         // 5. Trigger detection
         self.translate_trigger_detection(state, addr, offset, op_width, triggers);
+    }
+
+    /// Store `v_chunks` (and, when the target is `four_state`, `m_chunks`
+    /// into its mask plane `plane` bytes later) as `op_width` bits at
+    /// `final_addr`, `bit_shift_val` bits in, from an `s_phys_width`-bit
+    /// register.
+    #[allow(clippy::too_many_arguments)]
+    fn store_planes(
+        &self,
+        state: &mut TranslationState,
+        final_addr: Value,
+        bit_shift_val: Value,
+        offset: &SIROffset,
+        op_width: usize,
+        s_phys_width: usize,
+        v_chunks: &[Value],
+        m_chunks: &[Value],
+        four_state: bool,
+        plane: usize,
+    ) {
+        if s_phys_width <= 64 {
+            // Handle single register (i8 ~ i128)
+            let val_v = v_chunks[0];
+            let no_rmw_width = matches!(op_width, 8 | 16 | 32 | 64);
+            let is_static_aligned = matches!(offset, SIROffset::Static(v) if v & 7 == 0);
+            if no_rmw_width && is_static_aligned {
+                self.translate_store_native_aligned(state, final_addr, op_width, val_v);
+                if four_state {
+                    let var_byte_size = plane;
+                    let final_addr_m = state
+                        .builder
+                        .ins()
+                        .iadd_imm_s(final_addr, var_byte_size as i64);
+                    self.translate_store_native_aligned(state, final_addr_m, op_width, m_chunks[0]);
+                }
+            } else {
+                self.translate_store_native(
+                    state,
+                    final_addr,
+                    bit_shift_val,
+                    op_width,
+                    val_v,
+                    max_bit_shift(offset),
+                );
+                if four_state {
+                    let var_byte_size = plane;
+                    let final_addr_m = state
+                        .builder
+                        .ins()
+                        .iadd_imm_s(final_addr, var_byte_size as i64);
+                    self.translate_store_native(
+                        state,
+                        final_addr_m,
+                        bit_shift_val,
+                        op_width,
+                        m_chunks[0],
+                        max_bit_shift(offset),
+                    );
+                }
+            }
+        } else {
+            // Handle multiple registers (i64 * n)
+            let is_static_aligned = matches!(offset, SIROffset::Static(v) if v & 7 == 0);
+            let full_word_store = (op_width).is_multiple_of(64);
+            if is_static_aligned && full_word_store {
+                self.translate_store_multi_word_aligned_words(
+                    state, final_addr, op_width, v_chunks,
+                );
+                if four_state {
+                    let var_byte_size = plane;
+                    let final_addr_m = state
+                        .builder
+                        .ins()
+                        .iadd_imm_s(final_addr, var_byte_size as i64);
+                    self.translate_store_multi_word_aligned_words(
+                        state,
+                        final_addr_m,
+                        op_width,
+                        m_chunks,
+                    );
+                }
+            } else {
+                self.translate_store_multi_word_from_chunks(
+                    state,
+                    final_addr,
+                    bit_shift_val,
+                    op_width,
+                    v_chunks,
+                );
+                if four_state {
+                    let var_byte_size = plane;
+                    let final_addr_m = state
+                        .builder
+                        .ins()
+                        .iadd_imm_s(final_addr, var_byte_size as i64);
+                    self.translate_store_multi_word_from_chunks(
+                        state,
+                        final_addr_m,
+                        bit_shift_val,
+                        op_width,
+                        m_chunks,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Store the `s_phys_width`-bit `value` as `op_width` bits at `offset` of
+    /// the object at `place`. Nothing observes the store: it has no triggers
+    /// or comb capture sites.
+    pub(super) fn translate_placed_store(
+        &self,
+        state: &mut TranslationState,
+        value: &TransValue,
+        s_phys_width: usize,
+        offset: &SIROffset,
+        op_width: usize,
+        place: Placement,
+    ) {
+        if op_width == 0 {
+            return;
+        }
+        let (byte_offset_val, bit_shift_val) = packed_byte_and_shift(state, offset);
+        let final_addr = state
+            .builder
+            .ins()
+            .iadd_imm_s(place.base, place.offset as i64);
+        let final_addr = state.builder.ins().iadd(final_addr, byte_offset_val);
+        let v_chunks = value.load_value_chunks(state.builder);
+        let m_chunks = if self.options.four_state {
+            value.load_mask_chunks(state.builder).unwrap_or_else(|| {
+                // A two-state value gets a zero mask.
+                let s_phys_ty = get_cl_type(s_phys_width);
+                v_chunks
+                    .iter()
+                    .map(|_| state.builder.ins().iconst(s_phys_ty, 0))
+                    .collect()
+            })
+        } else {
+            vec![]
+        };
+        self.store_planes(
+            state,
+            final_addr,
+            bit_shift_val,
+            offset,
+            op_width,
+            s_phys_width,
+            &v_chunks,
+            &m_chunks,
+            place.four_state,
+            place.plane,
+        );
+    }
+
+    /// The placement of state object `addr` in the state image.
+    fn state_placement(&self, state: &TranslationState, addr: &RegionedAbsoluteAddr) -> Placement {
+        let abs = addr.absolute_addr();
+        let four_state = self.options.four_state && self.layout.is_4states[&abs];
+        Placement {
+            base: state.mem_ptr,
+            offset: self.layout.region_base_offset(addr),
+            four_state,
+            plane: if four_state {
+                self.layout.plane_size(&abs)
+            } else {
+                0
+            },
+        }
+    }
+
+    /// The placement of frame slot `addr` in the frame of the running
+    /// function unit.
+    fn frame_placement(&self, state: &TranslationState, addr: &RegionedAbsoluteAddr) -> Placement {
+        let slot = &self.callees.slots[addr];
+        Placement::slot(
+            state
+                .frame_ptr
+                .expect("only function units access frame slots"),
+            slot,
+            self.options.four_state,
+        )
     }
 
     fn translate_chunks_changed(

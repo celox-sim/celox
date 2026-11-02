@@ -553,6 +553,7 @@ fn lowers_shared_selector_roots_to_cached_indexed_table_loads() {
         runtime_event_slot_size: 0,
         runtime_event_buffer_size: 0,
         runtime_event_site_layouts: vec![],
+        call_stack: None,
     };
 
     let mut function = lower_execution_unit(&fixture.eu, &layout, false);
