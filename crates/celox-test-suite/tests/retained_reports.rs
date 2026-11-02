@@ -1025,6 +1025,12 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                         ("icarus", "containers::element_part_selects") => {
                             ("compile_error", "compile", "Unpacked structs not supported")
                         }
+                        ("icarus", "scan::sscanf_class_property_outputs") => {
+                            ("compile_error", "compile", "is not an input port")
+                        }
+                        ("icarus", "scan::sscanf_inputs_before_property_outputs") => {
+                            ("runtime_error", "execute", "unresolved functor reference")
+                        }
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }
