@@ -383,3 +383,27 @@
   (modify (set s 1))
   (assert_eq x 1)
 )
+
+(case complete_case_after_local_mux
+  (source "local_mux.sv" #"
+    module Top(input bit [15:0] a, output logic [7:0] y);
+      always_comb begin
+        case (a[15:12])
+          14: begin
+            logic [1:0] part;
+            if (a[7]) part = a[10:9]; else part = a[4:3];
+            case ({part, a[8]})
+              0: y=8; 1: y=9; 2: y=10; 3: y=11;
+              4: y=12; 5: y=13; 6: y=14; 7: y=15;
+            endcase
+          end
+          default: y=0;
+        endcase
+      end
+    endmodule
+  "#)
+  (top Top)
+  (modify (set a 0xe000)) (assert_eq y 8)
+  (modify (set a 0xe318)) (assert_eq y 15)
+  (modify (set a 0xe680)) (assert_eq y 14)
+  (modify (set a 0x1000)) (assert_eq y 0))

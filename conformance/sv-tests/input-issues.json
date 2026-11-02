@@ -4,6 +4,13 @@
     "generated/uvm-examples/uvm_alu_config_analysis.sv": {
       "missing_include": "tests/uvm_tb",
       "reason": "Upstream uvm-examples uses a string instead of a file list and combines two include directories into one entry. Preserve this dashboard input and report the driver's missing-include failure."
+    },
+    "generated/ariane/cva6_tb_cv64a6_imafdc_sv39.sv": {
+      "missing_includes": [
+        "third_party/cores/ariane/tools/spike/include/disasm",
+        "tests/corev_apu/axi_node"
+      ],
+      "reason": "The pinned CVA6 testbench generator retains an uninstalled Spike include and resolves its relative axi_node include against the sv-tests tests directory. Preserve the upstream input and report a driver input failure, not a language-support failure."
     }
   }
 }

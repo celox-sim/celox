@@ -258,4 +258,7 @@ sv_backends! {
     fn two_state_case_equality_keeps_unknown_expression_bits(sim) {
         @case "operators::two_state_case_equality_keeps_unknown_expression_bits";
     }
+    fn one_bit_casts(sim) {
+        @case "operators::one_bit_casts";
+    }
 }

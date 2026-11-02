@@ -947,6 +947,38 @@
       "title": "%p prints enum constants, casts, method results, conditionals and associative array keys as their values instead of their names, and a string returned by $sformatf as its packed value",
       "standard": "IEEE 1800-2023 21.2.1.6"
     },
+    "sv_associative_element_selects": {
+      "title": "A bit-select of an associative array element as an assignment target writes nothing",
+      "standard": "IEEE 1800-2023 11.5.1"
+    },
+    "sv_method_default_receiver": {
+      "title": "A default argument of a method that reads a property of the object reads 0 when the call is made on an array element selected by a static property that an earlier default changes",
+      "standard": "IEEE 1800-2023 13.5.3"
+    },
+    "sv_rand_mode_method_settle": {
+      "title": "Under the suite testbench, an initial block that calls a class method reading rand_mode() has not assigned its later outputs when the testbench samples them at time 0; run alone, the same source assigns them",
+      "standard": "IEEE 1800-2023 18.8, 9.2.1"
+    },
+    "sv_static_task_formals_per_call": {
+      "title": "Overlapping calls of a static task do not share its formals: each call keeps the value it passed, also for a package task called from two modules",
+      "standard": "IEEE 1800-2023 13.3.2, 6.21"
+    },
+    "sv_selected_enum_domain": {
+      "title": "randomize(e) of a non-rand enumeration property assigns a value outside its type: with the constraint e == 5 on an enum of 1, 4 and 9 it succeeds and stores 5",
+      "standard": "IEEE 1800-2023 18.3, 18.11"
+    },
+    "sv_foreach_string_property": {
+      "title": "A foreach over a string class property (foreach (p.m_name[i])) runs its body once instead of once per character",
+      "standard": "IEEE 1800-2023 12.7.3"
+    },
+    "sv_parenless_method_chain": {
+      "title": "A method called without parentheses on the handle that another parenless method call returns (n.get_peer.get_id) reads unknown bits",
+      "standard": "IEEE 1800-2023 13.5.5"
+    },
+    "sv_local_typedef_shadowing": {
+      "title": "A typedef in a begin-end block does not shadow a typedef of the enclosing module",
+      "standard": "IEEE 1800-2023 6.18"
+    },
     "sv_pattern_structure_members": {
       "title": "%p of an unpacked structure prints bit-vector members in hexadecimal ('hff), null class handle members as 0, and a structure member of an associative array element (m[5].n) as 0",
       "standard": "IEEE 1800-2023 21.2.1.6"
@@ -954,6 +986,10 @@
     "sv_nested_container_foreach": {
       "title": "A foreach over a container of containers with a loop variable per dimension leaves the inner variable x and iterates the outer dimension only: foreach (all[k, j]) over int all[int][$] prints j as x once per key, and foreach (d[i, j]) over int d[$][] runs no iteration",
       "standard": "IEEE 1800-2023 12.7.3"
+    },
+    "sv_container_returns_in_instance_functions": {
+      "title": "In a module instantiated below the top, a function that builds a queue, dynamic array or associative array in an automatic local and returns it returns a container that has lost elements: a queue_t of three pushes comes back with one element, an associative array with none, while the same functions with the module as the top return every element",
+      "standard": "IEEE 1800-2023 13.4.1, 7.5, 7.8, 7.10"
     }
   },
   "cases": [
@@ -1918,6 +1954,22 @@
       "classification": "xezim_bug",
       "bug": "sv_rest-X1",
       "note": "FLAGS is localparam [1:0][3:0] = 8'b10100101, so FLAGS[1][i] is bit i of 4'b1010; xezim takes FLAGS[1] as a single bit (bit 1 = 0), so i=0 gives 0 and i=1..3 give x (expected 1 at i=1). Same X1 select bug in a non-top module (dut)."
+    },
+    {
+      "suite": "sv",
+      "name": "class::method_defaults_use_the_object",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_method_default_receiver",
+      "note": "m1 = ps[Pair::i].f(), whose defaults are x = bump(), which increments Pair::i and returns 0, and y = n, is 0 instead of 1 (ps[0].n); m1 is the first assertion that fails, the earlier ones pass."
+    },
+    {
+      "suite": "sv",
+      "name": "class::methods_called_without_parentheses",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_parenless_method_chain",
+      "note": "peer_id = n.get_peer.get_id, where get_peer returns the handle of a Node whose id is 9, reads unknown bits in a two-state run; it is the first output the run reports."
     },
     {
       "suite": "sv",
@@ -3914,6 +3966,14 @@
     },
     {
       "suite": "sv",
+      "name": "types::local_typedefs",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_local_typedef_shadowing",
+      "note": "In the block that declares typedef bit [7:0] nib_t, n is declared with the module's bit [3:0] nib_t, so b, the first assertion that fails, is 'hf instead of 'hff; a, the result of the method that declares typedefs, is as expected."
+    },
+    {
+      "suite": "sv",
       "name": "types::inherited_parameter_aliases_materialize_replication_masks",
       "status": "mismatch",
       "classification": "xezim_bug",
@@ -4919,6 +4979,14 @@
     },
     {
       "suite": "sv",
+      "name": "container_formals::selects_of_reference_container_elements",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_associative_element_selects",
+      "note": "m[\"k\"][3] = 1'b1 leaves m[\"k\"] at 'h100 and m[\"n\"][0] = 1'b1 leaves m[\"n\"] at 0, so d is 'h2100 instead of 'h12108; the part-select assignment operator m[\"k\"][15:12] += 4'h2 and the selects of dynamic array and queue elements, also through ref formals, write as expected."
+    },
+    {
+      "suite": "sv",
       "name": "container_formals::container_formals_of_class_methods",
       "status": "mismatch",
       "classification": "xezim_bug",
@@ -5308,6 +5376,46 @@
       "classification": "xezim_bug",
       "bug": "sv_conditional_unpacked_arrays",
       "note": "h = s ? c : d with s = 1 and c = '{4, 3} must copy c (11.4.11), so h[0] = 4 and the sum is 18324313; the pinned xezim leaves h = '{0, 0} and returns 18330343. The other assignments of the case (slices, results, defaults, enum arrays, hierarchical names) agree; see verification/repros/sv_conditional_unpacked_arrays_xezim.sv. Verilator 5.052 and Celox print h='{4, 3}."
+    },
+    {
+      "suite": "sv",
+      "name": "containers::functions_returning_containers",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_container_returns_in_instance_functions",
+      "note": "A function returning a container returns its value, so q = make_queue(3) gives three elements and m = make_map() two (13.4.1, 7.10). The pinned xezim, with Top under the suite testbench, returns one queue element and an empty associative array, and a queue built in a method one element short; returning a module-scope queue agrees. The adapter-free source prints [3 20 2] with Top as the top and [1 0 0] with Wrapped; see verification/repros/sv_container_returns_in_instance_functions_xezim.json. Verilator 5.052 passes the shared case, and Celox prints [3 20 2] for both tops."
+    },
+    {
+      "suite": "sv",
+      "name": "operators::one_bit_casts",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rand_mode_method_settle",
+      "note": "was_rand = f.is_rand(), which returns bit'(value.rand_mode()) of a rand property, reads 0 at time 0: low, odd and picked, assigned before the call, pass. Run alone, xezim prints was_rand = 1 and now_fixed = 1."
+    },
+    {
+      "suite": "sv",
+      "name": "timing::static_formals_of_package_tasks",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_static_task_formals_per_call",
+      "note": "Top calls p::wait_for(2, ...) at time 0 and Other calls p::wait_for(3, ...) at time 1, while Top's call waits; the formal n is static, so after its delay Top's call logs 3. xezim logs 2, the value Top passed. Verilator 5.052 and Celox log 3 and 3."
+    },
+    {
+      "suite": "sv",
+      "name": "class::constrained_enumerations_and_randc",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_selected_enum_domain",
+      "note": "sel.randomize(e), where e has type enum bit [3:0] {A = 1, B = 4, C = 9} and the constraint is e == 5, must fail and leave e at 0; xezim returns 1 and stores 5. The earlier assertions (enumeration values, the implication, the randc cycle) pass."
+    },
+    {
+      "suite": "sv",
+      "name": "string::foreach_iterates_the_characters",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_foreach_string_property",
+      "note": "before_b counts the characters of p.m_name (\"a.b.c\") before the first \"b\", which is 2; the body runs once, so it is 1. A foreach over a string variable iterates every character."
     }
   ]
 }

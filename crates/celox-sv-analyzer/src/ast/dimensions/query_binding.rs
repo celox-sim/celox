@@ -1051,6 +1051,7 @@ mod tests {
         context.function_return_types.insert(
             "f".into(),
             FunctionReturnMetadata {
+                semantic_type: None,
                 arguments: Some(Arc::from([])),
                 width: Some(8),
                 first_packed_dimension_width: Some(2),
@@ -1061,8 +1062,8 @@ mod tests {
                 chandle: false,
                 pattern_type: None,
                 enum_domain: None,
-                class: None,
                 virtual_interface: None,
+                container: None,
             },
         );
         for declaration in &tree.declarations().data_declarations {

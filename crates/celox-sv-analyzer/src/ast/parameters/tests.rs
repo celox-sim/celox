@@ -1578,3 +1578,67 @@ fn inherited_evaluation_masks_pending_local_names_and_their_type_markers() {
     assert!(!environment.types.contains_key("LOCAL"));
     assert_eq!(environment.bindings.get("EXTERNAL"), Some(&8));
 }
+
+#[test]
+fn resolved_wide_unknown_enum_predecessors_cannot_increment_implicitly() {
+    for declaration in [
+        "enum logic [255:0] { A = 256'd1 << 128, B = A / 0, C } state;",
+        "typedef enum logic [255:0] { A = 256'd1 << 128, B = A / 0, C } E;",
+    ] {
+        let error = crate::analyze_source(
+            &format!("module Top; {declaration} endmodule"),
+            Path::new("wide_unknown_enum.sv"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("enum member `C` cannot implicitly increment an X/Z value"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn resolved_wide_unknown_enum_initializers_require_a_four_state_base() {
+    let error = crate::analyze_source(
+        "module Top; enum bit [255:0] { A = 256'd1 << 128, B = A / 0 } state; endmodule",
+        Path::new("wide_unknown_bit_enum.sv"),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("enum member `B` X/Z value requires an explicit four-state base type"),
+        "{error}"
+    );
+}
+
+#[test]
+fn wide_enum_arithmetic_initializers_check_discarded_bits() {
+    for declaration in [
+        "enum logic [255:0] { HI = 512'd1 << 256 } state;",
+        "enum logic signed [255:0] { HI = 512'sd1 << 255 } state;",
+        "enum logic signed [255:0] { HI = -(512'sd1 << 255) - 512'sd1 } state;",
+    ] {
+        let error = crate::analyze_source(
+            &format!("module Top; {declaration} endmodule"),
+            Path::new("wide_enum_overflow.sv"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("value does not fit its base type"),
+            "{declaration}: {error}"
+        );
+    }
+    for declaration in [
+        "enum logic [255:0] { HI = 512'd1 << 128 } state;",
+        "enum logic signed [255:0] { HI = -(512'sd1 << 255) } state;",
+        "enum logic signed [255:0] { HI = (512'sd1 << 255) - 512'sd1 } state;",
+    ] {
+        crate::analyze_source(
+            &format!("module Top; {declaration} endmodule"),
+            Path::new("wide_enum_fits.sv"),
+        )
+        .unwrap();
+    }
+}

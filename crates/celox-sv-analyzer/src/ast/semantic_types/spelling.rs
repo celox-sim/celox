@@ -58,6 +58,7 @@ impl TyTable {
             TyData::Real => "real".into(),
             TyData::Shortreal => "shortreal".into(),
             TyData::String => "string".into(),
+            TyData::Null => "null".into(),
             TyData::Class(decl) => format!("class {}", spell_decl(decl)),
             TyData::VirtualInterface { interface, modport } => match modport {
                 Some(modport) => format!("virtual {}.{modport}", spell_decl(interface)),

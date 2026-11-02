@@ -51,6 +51,13 @@ pub(super) fn precision(
             callee: sv::ir::Callee::System(F::Bitstoshortreal),
             ..
         } => Some(FP::F32),
+        E::Call {
+            callee: sv::ir::Callee::Object(op),
+            ..
+        } => match &**op {
+            sv::ir::ObjectOp::Load(field) => field_precision(field),
+            _ => None,
+        },
         E::Unary {
             op: sv::ir::UnaryOp::Plus | sv::ir::UnaryOp::Minus | sv::ir::UnaryOp::ToTwoState,
             expr,
@@ -79,6 +86,13 @@ pub(super) fn precision(
         }
         _ => None,
     }
+}
+
+/// The precision of a `real` or `shortreal` class property.
+pub(super) fn field_precision(field: &sv::ir::ObjectField) -> Option<FP> {
+    field
+        .real
+        .then_some(if field.width == 32 { FP::F32 } else { FP::F64 })
 }
 
 fn binary(op: sv::ir::BinaryOp) -> Option<(FB, bool)> {

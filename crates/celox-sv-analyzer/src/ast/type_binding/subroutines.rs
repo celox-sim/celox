@@ -30,13 +30,23 @@ pub(in crate::ast) fn subroutine_formals(
             }
             direction = ParamDirection::declared(declared, port.constant);
         }
-        let Some(name) = &port.name else { continue };
+        // A prototype's lone identifier that names no type is the formal's
+        // name, its type omitted.
+        let renamed = classes::prototype_formal_name(port, tree, session, context);
+        let name = match (&port.name, renamed.as_ref()) {
+            (Some(name), _) => instances::normalize_identifier(&name.spelling),
+            (None, Some(name)) => name.clone(),
+            (None, None) => continue,
+        };
         let data = tree.declarations().data_type(port.data_type);
-        let omitted = matches!(data.kind, celox_sv_syntax::DataTypeKind::Implicit)
-            && data.signed.is_none()
-            && data.packed_dimensions.is_empty();
+        let omitted = renamed.is_some()
+            || matches!(data.kind, celox_sv_syntax::DataTypeKind::Implicit)
+                && data.signed.is_none()
+                && data.packed_dimensions.is_empty();
         let mut ty = if port.direction.is_none() && omitted {
             previous_type.clone().unwrap_or(Type::new(TypeKind::Logic))
+        } else if renamed.is_some() {
+            Type::new(TypeKind::Logic)
         } else {
             bind(port.data_type, tree, session, context)?.ok_or_else(|| {
                 unsupported(format!(
@@ -56,12 +66,7 @@ pub(in crate::ast) fn subroutine_formals(
         // A container formal that is not a reference holds a copy of the
         // container (IEEE 1800-2023 13.5.1), as an assignment makes one.
         ty = containers::with_dimensions(ty, &port.dimensions, tree, session, context)?;
-        result.push((
-            instances::normalize_identifier(&name.spelling),
-            direction,
-            ty,
-            port.default,
-        ));
+        result.push((name, direction, ty, port.default));
     }
     Ok(result)
 }

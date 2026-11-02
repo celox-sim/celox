@@ -114,6 +114,133 @@ impl Ff<'_, '_> {
         Ok(sv::ir::Expr::Ident(name))
     }
 
+    /// Capture writable text outputs once in argument order.
+    pub(super) fn string_file_function(
+        &mut self,
+        function: sv::ir::SystemFunction,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        use celox_design::ValueKind;
+        use sv::ir::{BinaryOp, Expr};
+        let error_status = function == sv::ir::SystemFunction::Ferror;
+        let name = function.name();
+        if self.kernel.is_none() {
+            return Err(unsupported(format!("{name} outside a scheduled process")));
+        }
+        let destination = args[usize::from(error_status)]
+            .as_ref()
+            .ok_or_else(|| unsupported(format!("omitted {name} destination")))?;
+        let parts = lvalue_from_expr(destination)
+            .ok_or_else(|| unsupported(format!("{name} requires a writable text destination")))?;
+        let [target] = parts.as_slice() else {
+            return Err(unsupported(format!(
+                "{name} requires a single text destination"
+            )));
+        };
+        let id = self
+            .m
+            .id(target.name())
+            .ok_or_else(|| unsupported(format!("{name} destination")))?;
+        let variable = self.m.var(id);
+        let string_target = variable.value_kind == ValueKind::StrRef;
+        let width = self.lvalue_width(target)?;
+        if matches!(target, sv::ir::LValue::Ident(_)) && !variable.array_dims.is_empty()
+            || if string_target {
+                width != celox_design::HANDLE_WIDTH
+            } else {
+                !error_status || variable.value_kind != ValueKind::Bits || width < 640
+            }
+        {
+            return Err(unsupported(format!(
+                "{name} requires a string{} destination",
+                if error_status {
+                    " or packed buffer of at least 640 bits"
+                } else {
+                    ""
+                }
+            )));
+        }
+        let descriptor = args[usize::from(!error_status)]
+            .as_ref()
+            .ok_or_else(|| unsupported(format!("omitted {name} descriptor")))?;
+        // $ferror evaluates fd before its output index; $fgets has reverse order.
+        let early_descriptor = if error_status {
+            Some(self.file_descriptor_arg(&sv::ir::SystemTaskArg::Expr(descriptor.clone()))?)
+        } else {
+            None
+        };
+        let (lvalues, _, guards) = self.capture_system_actual(destination)?;
+        let descriptor = match early_descriptor {
+            Some(value) => value,
+            None => self.file_descriptor_arg(&sv::ir::SystemTaskArg::Expr(descriptor.clone()))?,
+        };
+        let value_kind = if string_target {
+            ValueKind::StrRef
+        } else {
+            ValueKind::Bits
+        };
+        let (count, count_name) = self.m.temp("file_result", 32, true, false);
+        let (line, line_name) = self.m.temp("file_text", width, false, false);
+        self.m
+            .variables
+            .get_mut(&line)
+            .expect("file text result")
+            .value_kind = value_kind;
+        self.file_io_request(
+            if error_status { 15 } else { 14 },
+            vec![descriptor],
+            vec![
+                HostRequestValue {
+                    value_kind: ValueKind::Bits,
+                    id: count,
+                    width: 32,
+                    signed: true,
+                    is_string: false,
+                    float_precision: None,
+                },
+                HostRequestValue {
+                    value_kind,
+                    id: line,
+                    width,
+                    signed: false,
+                    is_string: false,
+                    float_precision: None,
+                },
+            ],
+            Vec::new(),
+        )?;
+        let join = if error_status {
+            None
+        } else {
+            let condition = Expr::Binary {
+                left: Box::new(Expr::Ident(count_name.clone())),
+                op: BinaryOp::Gt,
+                right: Box::new(Expr::Literal("0".into())),
+            };
+            let (condition, _) = self.eval_truth(&condition)?;
+            let write = self.b.new_block();
+            let join = self.b.new_block();
+            self.b.seal_block(SIRTerminator::Branch {
+                cond: condition,
+                true_block: (write, Vec::new()),
+                false_block: (join, Vec::new()),
+            });
+            self.b.switch_to_block(write);
+            Some(join)
+        };
+        self.check_tagged_guards(&guards)?;
+        let value = Expr::Ident(line_name);
+        match lvalues.as_slice() {
+            [one] => self.assign(one, &value)?,
+            _ => return Err(unsupported(format!("{name} text destination"))),
+        }
+        if let Some(join) = join {
+            self.jump(join);
+            self.b.switch_to_block(join);
+        }
+        Ok(Expr::Ident(count_name))
+    }
+
     pub(super) fn file_function(
         &mut self,
         function: sv::ir::SystemFunction,

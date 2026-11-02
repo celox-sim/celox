@@ -2,6 +2,84 @@
   "cases": [
     {
       "category": "Types",
+      "detail": "Xezim 0.11.4 keeps a reference to the default expression rather than capturing its value (changing seed changes the default and its copies), retains a previous default when assigning an array without a user default, and returns 0 for an unknown-index read instead of the user default 10xz. Standalone probes reproduce each observation. IEEE 1800-2023 7.9.9 and 7.9.11 specify array assignment and user defaults; 7.8.6 also applies user defaults to unknown-index reads.",
+      "expectation": "Simulation",
+      "name": "containers::associative_default_copy",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_xezim_associative_defaults",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "xezim version 0.11.4",
+        "reason": "Xezim 0.11.4 keeps a reference to the default expression rather than capturing its value (changing seed changes the default and its copies), retains a previous default when assigning an array without a user default, and returns 0 for an unknown-index read instead of the user default 10xz. Standalone probes reproduce each observation. IEEE 1800-2023 7.9.9 and 7.9.11 specify array assignment and user defaults; 7.8.6 also applies user defaults to unknown-index reads.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/associative-defaults-xezim.json",
+          "verification/repros/sv_associative_default_strings.sv",
+          "verification/repros/sv_associative_default_copy.sv",
+          "verification/repros/sv_associative_default_four_state.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Xezim 0.11.4 keeps a reference to the default expression rather than capturing its value (changing seed changes the default and its copies), retains a previous default when assigning an array without a user default, and returns 0 for an unknown-index read instead of the user default 10xz. Standalone probes reproduce each observation. IEEE 1800-2023 7.9.9 and 7.9.11 specify array assignment and user defaults; 7.8.6 also applies user defaults to unknown-index reads.",
+      "expectation": "Simulation",
+      "name": "containers::associative_default_four_state",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_xezim_associative_defaults",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "xezim version 0.11.4",
+        "reason": "Xezim 0.11.4 keeps a reference to the default expression rather than capturing its value (changing seed changes the default and its copies), retains a previous default when assigning an array without a user default, and returns 0 for an unknown-index read instead of the user default 10xz. Standalone probes reproduce each observation. IEEE 1800-2023 7.9.9 and 7.9.11 specify array assignment and user defaults; 7.8.6 also applies user defaults to unknown-index reads.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/associative-defaults-xezim.json",
+          "verification/repros/sv_associative_default_strings.sv",
+          "verification/repros/sv_associative_default_copy.sv",
+          "verification/repros/sv_associative_default_four_state.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Xezim 0.11.4 keeps a reference to the default expression rather than capturing its value (changing seed changes the default and its copies), retains a previous default when assigning an array without a user default, and returns 0 for an unknown-index read instead of the user default 10xz. Standalone probes reproduce each observation. IEEE 1800-2023 7.9.9 and 7.9.11 specify array assignment and user defaults; 7.8.6 also applies user defaults to unknown-index reads.",
+      "expectation": "Simulation",
+      "name": "containers::associative_default_strings",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_xezim_associative_defaults",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "xezim version 0.11.4",
+        "reason": "Xezim 0.11.4 keeps a reference to the default expression rather than capturing its value (changing seed changes the default and its copies), retains a previous default when assigning an array without a user default, and returns 0 for an unknown-index read instead of the user default 10xz. Standalone probes reproduce each observation. IEEE 1800-2023 7.9.9 and 7.9.11 specify array assignment and user defaults; 7.8.6 also applies user defaults to unknown-index reads.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/associative-defaults-xezim.json",
+          "verification/repros/sv_associative_default_strings.sv",
+          "verification/repros/sv_associative_default_copy.sv",
+          "verification/repros/sv_associative_default_four_state.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
       "detail": "containers::methods_of_nested_container_elements at 1035:3: expect_output: expected [50, 32, 50, 32, 49, 32, 48, 10, 49, 32, 50, 10, 50, 32, 52, 32, 53, 32, 48, 10, 50, 32, 48, 32, 51, 10], got [50, 32, 50, 32, 49, 32, 48, 10, 49, 32, 50, 10, 50, 32, 52, 32, 53, 32, 48, 10, 50, 32, 48, 32, 48, 10]",
       "expectation": "Simulation",
       "name": "containers::methods_of_nested_container_elements",
@@ -57,6 +135,30 @@
     },
     {
       "category": "Types",
+      "detail": "Xezim 0.11.4 misclassifies rows[next_row()].shuffle() on a queue-valued associative array element as a class method and aborts at time 0 with a null class handle diagnostic. IEEE 1800-2023 7.12.2 permits shuffle on this selected queue. The standalone probe reproduces the diagnostic; Verilator 5.052 and all Celox backends pass the shared case.",
+      "expectation": "Simulation",
+      "name": "containers::shuffle_nested_receivers",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_xezim_container_shuffle",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "xezim version 0.11.4",
+        "reason": "Xezim 0.11.4 misclassifies rows[next_row()].shuffle() on a queue-valued associative array element as a class method and aborts at time 0 with a null class handle diagnostic. IEEE 1800-2023 7.12.2 permits shuffle on this selected queue. The standalone probe reproduces the diagnostic; Verilator 5.052 and all Celox backends pass the shared case.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/shuffle-xezim.json",
+          "verification/repros/sv_shuffle_nested_receiver.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
       "detail": "containers::wide_associative_keys at 1245:3: expect_output: expected [117, 32, 52, 32, 52, 32, 49, 32, 48, 10, 101, 97, 99, 104, 32, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 53, 32, 49, 10, 101, 97, 99, 104, 32, 48, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 32, 50, 10, 101, 97, 99, 104, 32, 49, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 32, 51, 10, 101, 97, 99, 104, 32, 49, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 32, 52, 10, 110, 101, 120, 116, 32, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 53, 10, 110, 101, 120, 116, 32, 48, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 10, 110, 101, 120, 116, 32, 49, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 10, 110, 101, 120, 116, 32, 49, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 10, 112, 114, 101, 118, 32, 49, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 10, 112, 114, 101, 118, 32, 49, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 10, 112, 114, 101, 118, 32, 48, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 10, 112, 114, 101, 118, 32, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 53, 10, 99, 111, 112, 121, 32, 51, 32, 48, 32, 49, 48, 32, 52, 10, 115, 116, 114, 117, 99, 116, 32, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 50, 32, 48, 48, 48, 48, 48, 48, 48, 48, 32, 97, 10, 115, 116, 114, 117, 99, 116, 32, 48, 48, 48, 48, 48, 48, 48, 49, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 50, 32, 48, 48, 48, 48, 48, 48, 48, 49, 32, 98, 10, 115, 116, 114, 117, 99, 116, 32, 102, 102, 102, 102, 102, 102, 102, 102, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 32, 102, 102, 102, 102, 102, 102, 102, 102, 32, 99, 10, 102, 105, 114, 115, 116, 32, 48, 48, 48, 48, 48, 48, 48, 48, 32, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 50, 32, 97, 10, 110, 101, 120, 116, 32, 48, 48, 48, 48, 48, 48, 48, 49, 32, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 50, 32, 98, 10, 100, 101, 108, 101, 116, 101, 100, 32, 50, 32, 48, 10], got [117, 32, 52, 32, 52, 32, 49, 32, 48, 10, 101, 97, 99, 104, 32, 48, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 32, 50, 10, 101, 97, 99, 104, 32, 49, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 32, 52, 10, 101, 97, 99, 104, 32, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 53, 32, 49, 10, 101, 97, 99, 104, 32, 49, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 32, 51, 10, 110, 101, 120, 116, 32, 48, 51, 48, 51, 48, 51, 48, 51, 48, 51, 48, 51, 48, 51, 48, 51, 53, 10, 112, 114, 101, 118, 32, 48, 54, 54, 54, 54, 54, 54, 54, 54, 54, 54, 54, 54, 54, 54, 54, 54, 10, 99, 111, 112, 121, 32, 51, 32, 48, 32, 49, 48, 32, 52, 10, 115, 116, 114, 117, 99, 116, 32, 48, 48, 48, 48, 48, 48, 48, 49, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 50, 32, 48, 48, 48, 48, 48, 48, 48, 49, 32, 98, 10, 115, 116, 114, 117, 99, 116, 32, 102, 102, 102, 102, 102, 102, 102, 102, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 102, 32, 102, 102, 102, 102, 102, 102, 102, 102, 32, 99, 10, 115, 116, 114, 117, 99, 116, 32, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 50, 32, 48, 48, 48, 48, 48, 48, 48, 48, 32, 97, 10, 102, 105, 114, 115, 116, 32, 51, 48, 51, 48, 51, 48, 51, 48, 32, 51, 48, 51, 48, 51, 48, 51, 48, 51, 48, 51, 48, 51, 48, 51, 50, 32, 10, 110, 101, 120, 116, 32, 51, 48, 51, 48, 51, 48, 51, 48, 32, 51, 48, 51, 48, 51, 48, 51, 48, 51, 48, 51, 48, 51, 48, 51, 50, 32, 10, 100, 101, 108, 101, 116, 101, 100, 32, 51, 32, 48, 10]",
       "expectation": "Simulation",
       "name": "containers::wide_associative_keys",
@@ -82,6 +184,17 @@
       "detail": "containers::wide_signed_associative_keys at 1276:3: expect_output: expected [115, 105, 103, 110, 101, 100, 32, 45, 49, 51, 50, 57, 50, 50, 55, 57, 57, 53, 55, 56, 52, 57, 49, 53, 56, 55, 50, 57, 48, 51, 56, 48, 55, 48, 54, 48, 50, 56, 48, 51, 52, 52, 53, 55, 54, 32, 48, 10, 115, 105, 103, 110, 101, 100, 32, 45, 49, 32, 49, 10, 115, 105, 103, 110, 101, 100, 32, 48, 32, 50, 10, 115, 105, 103, 110, 101, 100, 32, 49, 50, 54, 55, 54, 53, 48, 54, 48, 48, 50, 50, 56, 50, 50, 57, 52, 48, 49, 52, 57, 54, 55, 48, 51, 50, 48, 53, 51, 55, 54, 32, 51, 10, 102, 105, 114, 115, 116, 32, 45, 49, 51, 50, 57, 50, 50, 55, 57, 57, 53, 55, 56, 52, 57, 49, 53, 56, 55, 50, 57, 48, 51, 56, 48, 55, 48, 54, 48, 50, 56, 48, 51, 52, 52, 53, 55, 54, 10, 108, 97, 115, 116, 32, 49, 50, 54, 55, 54, 53, 48, 54, 48, 48, 50, 50, 56, 50, 50, 57, 52, 48, 49, 52, 57, 54, 55, 48, 51, 50, 48, 53, 51, 55, 54, 10, 98, 101, 102, 111, 114, 101, 32, 122, 101, 114, 111, 32, 45, 49, 10, 97, 102, 116, 101, 114, 32, 109, 105, 110, 117, 115, 32, 111, 110, 101, 32, 48, 10, 99, 108, 101, 97, 114, 101, 100, 32, 48, 32, 48, 10], got [115, 105, 103, 110, 101, 100, 32, 48, 32, 48, 10, 115, 105, 103, 110, 101, 100, 32, 49, 50, 54, 55, 54, 53, 48, 54, 48, 48, 50, 50, 56, 50, 50, 57, 52, 48, 49, 52, 57, 54, 55, 48, 51, 50, 48, 53, 51, 55, 54, 32, 51, 10, 115, 105, 103, 110, 101, 100, 32, 51, 51, 56, 57, 53, 51, 49, 51, 56, 57, 50, 53, 49, 53, 51, 53, 52, 55, 53, 57, 48, 52, 55, 48, 56, 48, 48, 51, 55, 49, 52, 56, 55, 56, 54, 54, 56, 56, 48, 32, 48, 10, 115, 105, 103, 110, 101, 100, 32, 51, 52, 48, 50, 56, 50, 51, 54, 54, 57, 50, 48, 57, 51, 56, 52, 54, 51, 52, 54, 51, 51, 55, 52, 54, 48, 55, 52, 51, 49, 55, 54, 56, 50, 49, 49, 52, 53, 53, 32, 49, 10, 102, 105, 114, 115, 116, 32, 52, 56, 10, 108, 97, 115, 116, 32, 49, 51, 54, 49, 49, 50, 57, 52, 54, 55, 54, 56, 51, 55, 53, 51, 56, 53, 51, 56, 53, 51, 52, 57, 56, 52, 50, 57, 55, 50, 55, 48, 55, 50, 56, 52, 53, 56, 50, 10, 98, 101, 102, 111, 114, 101, 32, 122, 101, 114, 111, 32, 48, 10, 97, 102, 116, 101, 114, 32, 109, 105, 110, 117, 115, 32, 111, 110, 101, 32, 45, 49, 10, 99, 108, 101, 97, 114, 101, 100, 32, 48, 32, 48, 10]",
       "expectation": "Simulation",
       "name": "containers::wide_signed_associative_keys",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "containers::functions_returning_containers at 1628:3: expect_output: expected [51, 32, 49, 48, 32, 50, 48, 10, 51, 32, 51, 10, 50, 32, 50, 10, 49, 32, 53, 32, 51, 48, 10, 49, 49, 32, 50, 10], got [49, 32, 48, 32, 48, 10, 49, 32, 48, 10, 48, 32, 48, 10, 49, 32, 53, 32, 53, 10, 49, 49, 32, 49, 10]",
+      "expectation": "Simulation",
+      "name": "containers::functions_returning_containers",
       "phase": "execute",
       "status": "mismatch",
       "stronger_than_sv": false,

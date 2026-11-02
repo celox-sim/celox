@@ -695,6 +695,124 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                         ("icarus", "string_format::pattern_format_enums") => {
                             ("compile_error", "compile", "Unpacked structs not supported")
                         }
+                        (
+                            "icarus",
+                            "container_formals::selects_of_four_state_container_elements",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "failed assertion name_tail.index.size() == 1",
+                        ),
+                        (
+                            "icarus",
+                            "container_formals::selects_of_reference_container_elements",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "Type names are not valid expressions here.",
+                        ),
+                        ("icarus", "class::casts_to_class_properties") => (
+                            "compile_error",
+                            "compile",
+                            "Type names are not valid expressions here.",
+                        ),
+                        ("icarus", "class::void_casts_of_class_handles") => (
+                            "runtime_error",
+                            "execute",
+                            "System task/function $cast() is not defined by any module.",
+                        ),
+                        ("icarus", "class::failing_casts_evaluate_their_sources") => {
+                            ("compile_error", "compile", "source_0.sv:23: syntax error")
+                        }
+                        ("verilator", "class::failing_casts_evaluate_their_sources") => (
+                            "mismatch",
+                            "execute",
+                            "expect_output: expected [49, 10, 50, 10, 51, 10, 49, 32, 49, 10], got [48, 10, 48, 10, 48, 10, 49, 32, 49, 10]",
+                        ),
+                        ("icarus", "class::members_hide_module_names") => (
+                            "compile_error",
+                            "compile",
+                            "Object f in celox_suite_tb.dut is not a function.",
+                        ),
+                        ("icarus", "array_locators::array_locator_unique_class_handles") => {
+                            ("compile_error", "compile", "source_0.sv:18: syntax error")
+                        }
+                        ("icarus", "class::methods_called_without_parentheses") => {
+                            ("compile_error", "compile", "source_0.sv:27: syntax error")
+                        }
+                        ("icarus", "types::local_typedefs") => (
+                            "compile_error",
+                            "compile",
+                            "Unable to bind wire/reg/memory `HIGH'",
+                        ),
+                        ("icarus", "class::prototype_formals_inherit_types") => {
+                            ("compile_error", "compile", "source_0.sv:7: syntax error")
+                        }
+                        ("icarus", "virtual_interfaces::unit_import_package_variables") => {
+                            ("compile_error", "compile", "source_0.sv:17: syntax error")
+                        }
+                        ("icarus", "containers::functions_returning_containers") => (
+                            "compile_error",
+                            "compile",
+                            "Type names are not valid expressions here.",
+                        ),
+                        ("xezim", "containers::functions_returning_containers") => {
+                            ("mismatch", "execute", "got [49, 32, 48, 32, 48, 10")
+                        }
+                        ("icarus", "class::real_properties") => (
+                            "runtime_error",
+                            "execute",
+                            "recv_real(1.000000) not implemented",
+                        ),
+                        ("icarus", "operators::one_bit_casts") => (
+                            "compile_error",
+                            "compile",
+                            "Method name nesting is not supported yet",
+                        ),
+                        ("xezim", "operators::one_bit_casts") => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq was_rand: expected 0x1, got 0x0",
+                        ),
+                        ("icarus", "timing::static_formals_of_package_tasks") => {
+                            ("compile_error", "compile", "syntax error")
+                        }
+                        ("xezim", "timing::static_formals_of_package_tasks") => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq first: expected 0x3, got 0x2",
+                        ),
+                        ("icarus", "class::constrained_enumerations_and_randc") => (
+                            "compile_error",
+                            "compile",
+                            "Constraint declarations not supported",
+                        ),
+                        ("xezim", "class::constrained_enumerations_and_randc") => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq selected: expected 0x1, got 0x0",
+                        ),
+                        ("verilator", "class::constrained_enumerations_and_randc") => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq independent: expected 0x1, got 0x0",
+                        ),
+                        ("icarus", "string::foreach_iterates_the_characters") => {
+                            ("compile_error", "compile", "syntax error")
+                        }
+                        ("xezim", "string::foreach_iterates_the_characters") => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq before_b: expected 0x2, got 0x1",
+                        ),
+                        ("icarus", "array_locators::ordering_methods_with_expressions") => {
+                            ("compile_error", "compile", "syntax error")
+                        }
+                        ("icarus", "containers::foreach_enumeration_index_methods") => (
+                            "compile_error",
+                            "compile",
+                            "Type names are not valid expressions here",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

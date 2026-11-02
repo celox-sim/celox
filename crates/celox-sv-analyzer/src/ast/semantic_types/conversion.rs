@@ -69,7 +69,9 @@ pub(in crate::ast) fn of_shape(
         virtual_interface: shape.virtual_interface.as_deref(),
         unpacked_struct: shape.unpacked_struct.as_deref(),
         kind,
-        enumeration: shape.enum_domain.is_some() || shape.packed_enum,
+        enumeration: shape.enum_domain.is_some()
+            || shape.packed_enum
+            || type_names::declared_type(shape).is_some_and(|ty| ty.is_enum),
         packed_enum: shape.packed_enum,
         enum_domain: shape.enum_domain.as_ref(),
         members: &shape.members,

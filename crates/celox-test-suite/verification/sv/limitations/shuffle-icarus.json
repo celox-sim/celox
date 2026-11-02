@@ -1,0 +1,67 @@
+{
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:7: sorry: 'shuffle()' array sorting method is not currently supported.\n<case>/source_0.sv:7: error: Enable of unknown task ``values.shuffle''.\n2 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "containers::shuffle_four_state",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 16; see <case>/build.log\n<case>/source_0.sv:7: Sorry: Queue of type `class Cell{}` is not yet supported.\n<case>/source_0.sv:7: Sorry: Queue of type `class Cell{}` is not yet supported.\n<case>/source_0.sv:12: Error: Class/null r-value not allowed in this context.\n<case>/source_0.sv:12: Error: Class/null r-value not allowed in this context.\n<case>/source_0.sv:12: Error: Class/null r-value not allowed in this context.\n<case>/source_0.sv:13: sorry: 'shuffle()' array sorting method is not currently supported.\n<case>/source_0.sv:13: error: Enable of unknown task ``values.shuffle''.\n<case>/source_0.sv:13: sorry: 'shuffle()' array sorting method is not currently supported.\n<case>/source_0.sv:13: error: Enable of unknown task ``words.shuffle''.\n<case>/source_0.sv:17: error: Both arguments (logic, class) must be class/null for '==' operator.\n<case>/source_0.sv:18: error: Variable values[i] does not have a field named: value.\n<case>/source_0.sv:18: error: Unable to elaborate condition expression.\n<case>/source_0.sv:21: sorry: 'sort()' array sorting method is not currently supported.\n<case>/source_0.sv:21: error: Enable of unknown task ``words.sort''.\n<case>/source_0.sv:22: error: Variable copy['sd0] does not have a field named: value.\n<case>/source_0.sv:22: error: Variable copy['sd1] does not have a field named: value.\n16 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "containers::shuffle_handles",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 8; see <case>/build.log\n<case>/source_0.sv:10: sorry: 'shuffle()' array sorting method is not currently supported.\n<case>/source_0.sv:10: error: Enable of unknown task ``values.shuffle''.\n<case>/source_0.sv:11: sorry: 'shuffle()' array sorting method is not currently supported.\n<case>/source_0.sv:11: error: Enable of unknown task ``bounded.shuffle''.\n<case>/source_0.sv:22: sorry: 'shuffle()' array sorting method is not currently supported.\n<case>/source_0.sv:22: error: Enable of unknown task ``empty.shuffle''.\n<case>/source_0.sv:22: sorry: 'shuffle()' array sorting method is not currently supported.\n<case>/source_0.sv:22: error: Enable of unknown task ``single.shuffle''.\n8 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "containers::shuffle_integral",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 12; see <case>/build.log\n<case>/source_0.sv:4: error: Type names are not valid expressions here.\n<case>/source_0.sv:4: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:4:               : Expression is: <type>\n<case>/source_0.sv:4:               : Expression type: 10PETypename\n<case>/source_0.sv:4: error: Dimensions must be constant.\n<case>/source_0.sv:4       : This size expression violates the rule: <type>\n<case>/source_0.sv:4: sorry: array of queue type is not yet supported.\n<case>/source_0.sv:8: warning: ignoring out of bounds l-value array access rows[7].\n<case>/source_0.sv:8: error: Concatenation operand \"'sd3\" has indefinite width.\n<case>/source_0.sv:8: error: Concatenation operand \"'sd5\" has indefinite width.\n<case>/source_0.sv:8: error: Concatenation operand \"'sd7\" has indefinite width.\n<case>/source_0.sv:9: error: Scope index expression is not constant: next_row()\n<case>/source_0.sv:9: error: Scope index expression is not constant: next_row()\n<case>/source_0.sv:9: error: Enable of unknown task ``rows[next_row()].shuffle''.\n<case>/source_0.sv:11: warning: returning 'bx for out of bounds array access rows[7].\n<case>/source_0.sv:11: error: Object celox_suite_tb.dut.rows['sd7] has no method \"size(...)\".\n<case>/source_0.sv:12: error: Object celox_suite_tb.dut.rows['sd7] has no method \"size(...)\".\n12 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "containers::shuffle_nested_receivers",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:9: sorry: 'shuffle()' array sorting method is not currently supported.\n<case>/source_0.sv:9: error: Enable of unknown task ``values.shuffle''.\n2 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "containers::shuffle_wide",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "exclude_stronger_than_sv": false,
+  "include_ignored": false,
+  "schema_version": 3,
+  "suite": "sv",
+  "suite_version": "0.12.0",
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+  "scope": "Focused dynamic-array and queue shuffle failures before reviewed exclusions; passing and unsupported cases omitted."
+}

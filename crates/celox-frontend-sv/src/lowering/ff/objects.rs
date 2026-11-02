@@ -10,6 +10,36 @@ use celox_heap::ops;
 use sv::ir::{HandleProperty, ObjectOp};
 
 impl Ff<'_, '_> {
+    /// `expr` converted for property `field` when either is real: a real
+    /// value rounds to the nearest integer of an integral property's width,
+    /// and a real property holds the real value of `expr` (IEEE 1800-2023
+    /// 6.12.1). `None` when neither is real.
+    fn real_field_value(
+        &mut self,
+        expr: &sv::ir::Expr,
+        field: &sv::ir::ObjectField,
+    ) -> Result<Option<RegisterId>, sv::AnalyzerError> {
+        let from = self.m.expr_float_precision(expr);
+        let to = floating::field_precision(field);
+        if from.is_none() && to.is_none() {
+            return Ok(None);
+        }
+        let signed = self.expr_signed(expr);
+        let mut arena = SLTNodeArena::new();
+        let node = self.expr_slt(expr, None, &mut arena)?;
+        let node = floating::convert(
+            &mut arena,
+            node,
+            from,
+            to,
+            field.width as usize,
+            if from.is_none() { signed } else { field.signed },
+            true,
+        )
+        .ok_or_else(|| unsupported("real property conversion"))?;
+        self.lower_slt(&arena, node).map(Some)
+    }
+
     /// The value of object operation `op`, as a temporary.
     pub(super) fn object_call(
         &mut self,
@@ -48,9 +78,14 @@ impl Ff<'_, '_> {
                         _ => (64, false),
                     }
                 };
+                // A real value, or any value of a real property, keeps its
+                // type and width until the store converts it.
+                let real = index == 1
+                    && matches!(op, ObjectOp::Store(field)
+                        if field.real || self.m.expr_float_precision(arg).is_some());
                 *arg = self.heap_operand(
                     arg,
-                    Some((width, signed)),
+                    (!real).then_some((width, signed)),
                     (index == 0).then_some(celox_design::ValueKind::ObjRef),
                 )?;
             }
@@ -212,19 +247,16 @@ impl Ff<'_, '_> {
                 // storing it again leaves a container unchanged.
                 self.heap_call(ops::OBJECT_FINISH_RECORD, &[object])
             }
-            ObjectOp::Store(field) if field.four_state && self.m.four_state => {
+            ObjectOp::Store(field) if field.four_state && self.m.four_state || field.width > 64 => {
                 let object = self.handle(&args[0])?;
                 let expr = self.hoist(&args[1])?;
-                let signed = self.expr_signed(&expr);
-                let value = self.eval(&expr, Some((field.width as usize, signed)))?;
-                self.store_field(object, *field, value);
-                self.constant64(0)
-            }
-            ObjectOp::Store(field) if field.width > 64 => {
-                let object = self.handle(&args[0])?;
-                let expr = self.hoist(&args[1])?;
-                let signed = self.expr_signed(&expr);
-                let value = self.eval(&expr, Some((field.width as usize, signed)))?;
+                let value = match self.real_field_value(&expr, field)? {
+                    Some(value) => value,
+                    None => {
+                        let signed = self.expr_signed(&expr);
+                        self.eval(&expr, Some((field.width as usize, signed)))?
+                    }
+                };
                 self.store_field(object, *field, value);
                 self.constant64(0)
             }
@@ -232,8 +264,19 @@ impl Ff<'_, '_> {
                 let object = self.handle(&args[0])?;
                 let place =
                     self.constant64(u64::from(field.offset) | u64::from(field.bytes()) << 32);
-                let signed = self.expr_signed(&args[1]);
-                let value = self.integer_of_width(&args[1], field.width as usize, signed)?;
+                let expr = self.hoist(&args[1])?;
+                let value = match self.real_field_value(&expr, field)? {
+                    Some(value) => {
+                        let operand = self.b.alloc_bit(64, false);
+                        self.b
+                            .emit(SIRInstruction::Unary(operand, UnaryOp::Ident, value));
+                        operand
+                    }
+                    None => {
+                        let signed = self.expr_signed(&expr);
+                        self.integer_of_width(&expr, field.width as usize, signed)?
+                    }
+                };
                 self.heap_call(ops::OBJECT_STORE, &[object, place, value])
             }
             ObjectOp::RandomCyclic { offset, count } => {
@@ -333,6 +376,9 @@ impl Ff<'_, '_> {
         };
         if let Some(kind) = kind {
             self.m.variables.get_mut(&temp).unwrap().value_kind = kind;
+        }
+        if let ObjectOp::Load(field) = op {
+            self.m.variables.get_mut(&temp).unwrap().float = floating::field_precision(field);
         }
         self.store(temp, SIROffset::Static(0), width, value);
         Ok(sv::ir::Expr::Ident(name))

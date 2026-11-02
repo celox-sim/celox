@@ -243,6 +243,9 @@ fn native_signature(
         None => result.map(|ty| ty.width),
     };
     Ok(Function {
+        return_semantic_type: ty.as_ref().and_then(|ty| {
+            semantic_types::of_type(&mut session.types, &tree.functions, ty, &context.const_env)
+        }),
         return_real: ty
             .as_ref()
             .is_some_and(|ty| matches!(ty.kind(), TypeKind::Real | TypeKind::Shortreal)),
@@ -277,6 +280,7 @@ fn native_signature(
             .filter(|ty| ty.unpacked_ranges.is_empty() && ty.container.is_none())
             .and_then(|ty| ty.class().map(str::to_owned)),
         return_virtual_interface: ty.as_ref().and_then(|ty| ty.virtual_interface.clone()),
+        return_container: ty.as_ref().and_then(|ty| ty.container.clone()),
         return_type: ty
             .filter(|ty| {
                 !ty.members.is_empty()

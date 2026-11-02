@@ -190,7 +190,7 @@ impl CallSites for UnpackedRange {
 
 impl CallSites for VariableDimensions {
     fn call_sites(&self, visit: &mut dyn FnMut(usize)) {
-        let VariableDimensions {
+        let VariableShape {
             declared: _,
             container: _,
             randomizable: _,
@@ -208,7 +208,7 @@ impl CallSites for VariableDimensions {
             signed_element_depth: _,
             unpacked_struct: _,
             chandle: _,
-        } = self;
+        } = &**self;
         packed.call_sites(visit);
         unpacked.call_sites(visit);
         members.call_sites(visit);
@@ -247,6 +247,7 @@ impl CallSites for Item {
             literals,
             parameter_dimensions,
             qualified_types,
+            constant_types: _, // Frozen declaration types contain no runtime call sites.
             names: _,
             imports: _,
             shadowed: _,

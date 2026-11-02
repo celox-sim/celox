@@ -54,7 +54,7 @@ pub(super) fn indexed_expression(
         expression_binding::bind_value(root, native, tree, session, &context, None)
     }
 }
-fn bind_in(
+pub(super) fn bind_in(
     root: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
@@ -92,6 +92,17 @@ fn bind_in_context(
                         true,
                     ),
                 ));
+            }
+            Job::Enter(id) if dimensions.effect_values.contains_key(&id) => {
+                let Some(value) = selects::indexed_expression_value(
+                    tree,
+                    session,
+                    dimensions.effect_values[&id].clone(),
+                    query_dimensions,
+                ) else {
+                    return Ok(None);
+                };
+                values.push(value);
             }
             Job::Enter(id) => match &native.expression(id).kind {
                 ExprKind::Group(inner) => jobs.push(Job::Enter(*inner)),

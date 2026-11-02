@@ -141,6 +141,8 @@ pub(crate) struct Spans {
     pub validation: std::sync::OnceLock<crate::ast::validation::Facts>,
     /// Facts the import analysis derives from the whole file.
     pub imports: std::sync::OnceLock<crate::ast::imports::Facts>,
+    /// The class declarations by their declared names.
+    pub classes: std::sync::OnceLock<crate::ast::ClassIndex>,
     pub(super) text: std::sync::OnceLock<SourceText>,
 }
 
@@ -201,6 +203,7 @@ impl Spans {
             subroutines: indexed(&mut native.subroutines.iter().map(|node| node.tokens)),
             validation: Default::default(),
             imports: Default::default(),
+            classes: Default::default(),
             text: Default::default(),
         }
     }

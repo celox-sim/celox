@@ -193,6 +193,7 @@ fn complete_scope_queries_match_syntax_discovery_without_rewalking_declarations(
             (
                 name.clone(),
                 FunctionReturnMetadata {
+                    semantic_type: None,
                     arguments: Some(function_argument_metadata(&f.params)),
                     width: f.return_width,
                     first_packed_dimension_width: f.return_first_packed_dimension_width,
@@ -203,8 +204,8 @@ fn complete_scope_queries_match_syntax_discovery_without_rewalking_declarations(
                     chandle: false,
                     pattern_type: f.return_type.clone(),
                     enum_domain: None,
-                    class: None,
                     virtual_interface: None,
+                    container: None,
                 },
             )
         }));

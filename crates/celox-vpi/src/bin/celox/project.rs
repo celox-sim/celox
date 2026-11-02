@@ -63,6 +63,9 @@ pub(super) struct DesignArgs {
     /// Treat ordered SV files as one compilation unit (default; overrides project).
     #[arg(long, conflicts_with = "separate_units")]
     single_unit: bool,
+    /// Require UTF-8 even in SV comments (legacy comment bytes are accepted by default).
+    #[arg(long)]
+    strict_source_encoding: bool,
     /// Treat each SV file as a separate compilation unit, isolating source macros.
     #[arg(long)]
     separate_units: bool,
@@ -113,6 +116,7 @@ struct Manifest {
     include_dirs: Vec<PathBuf>,
     defines: BTreeMap<String, String>,
     single_unit: Option<bool>,
+    strict_source_encoding: Option<bool>,
     parameters: BTreeMap<String, ParameterValue>,
     top: Option<String>,
     opt_level: Option<String>,
@@ -148,6 +152,7 @@ struct Target {
     include_dirs: Vec<PathBuf>,
     defines: BTreeMap<String, String>,
     single_unit: Option<bool>,
+    strict_source_encoding: Option<bool>,
     parameters: BTreeMap<String, ParameterValue>,
     top: Option<String>,
     opt_level: Option<String>,
@@ -166,6 +171,7 @@ pub(super) struct Design {
     pub include_dirs: Vec<PathBuf>,
     pub defines: BTreeMap<String, String>,
     single_unit: Option<bool>,
+    strict_source_encoding: Option<bool>,
     pub parameters: BTreeMap<String, u64>,
     sv_parameters: BTreeMap<String, String>,
     pub top: String,
@@ -339,6 +345,7 @@ impl DesignArgs {
                 design.max_steps = config.max_steps;
                 design.four_state = config.four_state;
                 design.single_unit = config.single_unit;
+                design.strict_source_encoding = config.strict_source_encoding;
                 if let Some(target) = selected {
                     design.extend_parameters(&target.parameters)?;
                     design.diagnostics.0.extend(target.diagnostics.0.clone());
@@ -363,6 +370,9 @@ impl DesignArgs {
                     design.max_steps = target.max_steps.or(design.max_steps);
                     design.four_state = target.four_state.or(design.four_state);
                     design.single_unit = target.single_unit.or(design.single_unit);
+                    design.strict_source_encoding = target
+                        .strict_source_encoding
+                        .or(design.strict_source_encoding);
                 }
                 design.timescale = timescale.map(str::parse).transpose()?;
                 design.opt_level = opt_level
@@ -392,6 +402,9 @@ impl DesignArgs {
         design.opt_level = self.opt_level.or(design.opt_level);
         if let Some(timescale) = self.timescale {
             design.timescale = Some(timescale.parse()?);
+        }
+        if self.strict_source_encoding {
+            design.strict_source_encoding = Some(true);
         }
         if self.single_unit {
             design.single_unit = Some(true);
@@ -457,6 +470,9 @@ impl DesignArgs {
         }
         if !design.is_sv() && design.single_unit.is_some() {
             return Err("compilation-unit options require SystemVerilog sources".into());
+        }
+        if !design.is_sv() && design.strict_source_encoding.is_some() {
+            return Err("source encoding options require SystemVerilog sources".into());
         }
         if !design.is_sv() && design.timescale.is_some() {
             return Err("timescale requires SystemVerilog sources".into());
@@ -720,6 +736,11 @@ impl Design {
 
     #[cfg(feature = "systemverilog")]
     pub fn sv_sources(&self) -> Result<Vec<(String, PathBuf)>, String> {
+        let encoding = if self.strict_source_encoding.unwrap_or(false) {
+            celox_sv_analyzer::syntax::SourceEncoding::Utf8
+        } else {
+            celox_sv_analyzer::syntax::SourceEncoding::default()
+        };
         let macros = self
             .defines
             .iter()
@@ -735,7 +756,8 @@ impl Design {
                 .sources
                 .iter()
                 .map(|path| {
-                    std::fs::read_to_string(path)
+                    encoding
+                        .read(path)
                         .map(|text| (text, path))
                         .map_err(|error| format!("failed to read {}: {error}", path.display()))
                 })
@@ -744,8 +766,10 @@ impl Design {
                 .iter()
                 .map(|(text, path)| (text.as_str(), path.as_path()))
                 .collect::<Vec<_>>();
-            let text = celox_sv_analyzer::syntax::preprocess_sources(&borrowed, &macros, &includes)
-                .map_err(|error| format!("preprocessing compilation unit failed: {error}"))?;
+            let text = celox_sv_analyzer::syntax::preprocess_sources_with_encoding(
+                &borrowed, &macros, &includes, encoding,
+            )
+            .map_err(|error| format!("preprocessing compilation unit failed: {error}"))?;
             return Ok(vec![(
                 text,
                 self.sources.first().cloned().unwrap_or_default(),
@@ -754,10 +778,11 @@ impl Design {
         self.sources
             .iter()
             .map(|path| {
-                let text = std::fs::read_to_string(path)
+                let text = encoding
+                    .read(path)
                     .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-                let text = celox_sv_analyzer::syntax::preprocess_source(
-                    &text, path, &macros, &includes,
+                let text = celox_sv_analyzer::syntax::preprocess_source_with_encoding(
+                    &text, path, &macros, &includes, encoding,
                 )
                 .map_err(|error| format!("preprocessing {} failed: {error}", path.display()))?;
                 Ok((text, path.clone()))

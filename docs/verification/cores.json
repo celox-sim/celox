@@ -1,0 +1,560 @@
+{
+  "schema_version": 2,
+  "classification_version": 1,
+  "revision": "db159ad8e9cbbd62036569d240153f753258f640",
+  "complete": true,
+  "collected": 42,
+  "meta_tags_expanded": true,
+  "requested": 42,
+  "collection_errors": [],
+  "groups": {
+    "cores": {
+      "2state": {
+        "passed": 0,
+        "failed": 16,
+        "skipped": 5,
+        "executed": 16,
+        "upstream_input_issues": 1,
+        "pass_percent": 0.0,
+        "tags_passed": 0,
+        "tags_tested": 8,
+        "skipped_by_tag": {
+          "ibex": 1,
+          "veer-eh1": 2,
+          "veer-el2": 2
+        },
+        "by_tag": {
+          "RgGen": {
+            "passed": 0,
+            "executed": 1
+          },
+          "TNoC": {
+            "passed": 0,
+            "executed": 1
+          },
+          "ariane": {
+            "passed": 0,
+            "executed": 5
+          },
+          "black-parrot": {
+            "passed": 0,
+            "executed": 6
+          },
+          "cva6": {
+            "passed": 0,
+            "executed": 5
+          },
+          "fx68k": {
+            "passed": 0,
+            "executed": 1
+          },
+          "rsd": {
+            "passed": 0,
+            "executed": 1
+          },
+          "scr1": {
+            "passed": 0,
+            "executed": 1
+          }
+        },
+        "by_execution_mode": {
+          "elaboration": {
+            "fail": 16
+          }
+        },
+        "by_failure_category": {
+          "compile_error": 5,
+          "input_issue": 1,
+          "unclassified": 1,
+          "unsupported": 9
+        }
+      },
+      "4state": {
+        "passed": 0,
+        "failed": 16,
+        "skipped": 5,
+        "executed": 16,
+        "upstream_input_issues": 1,
+        "pass_percent": 0.0,
+        "tags_passed": 0,
+        "tags_tested": 8,
+        "skipped_by_tag": {
+          "ibex": 1,
+          "veer-eh1": 2,
+          "veer-el2": 2
+        },
+        "by_tag": {
+          "RgGen": {
+            "passed": 0,
+            "executed": 1
+          },
+          "TNoC": {
+            "passed": 0,
+            "executed": 1
+          },
+          "ariane": {
+            "passed": 0,
+            "executed": 5
+          },
+          "black-parrot": {
+            "passed": 0,
+            "executed": 6
+          },
+          "cva6": {
+            "passed": 0,
+            "executed": 5
+          },
+          "fx68k": {
+            "passed": 0,
+            "executed": 1
+          },
+          "rsd": {
+            "passed": 0,
+            "executed": 1
+          },
+          "scr1": {
+            "passed": 0,
+            "executed": 1
+          }
+        },
+        "by_execution_mode": {
+          "elaboration": {
+            "fail": 16
+          }
+        },
+        "by_failure_category": {
+          "compile_error": 5,
+          "input_issue": 1,
+          "unclassified": 1,
+          "unsupported": 9
+        }
+      }
+    }
+  },
+  "cases": [
+    {
+      "test": "generated/ariane/cva6_cv32a6_imac_sv32.sv",
+      "state_mode": "2state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "ariane cva6",
+      "failure_category": "compile_error",
+      "diagnostic": "parse_error",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/ariane/cva6_cv32a6_imac_sv32.sv",
+      "state_mode": "4state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "ariane cva6",
+      "failure_category": "compile_error",
+      "diagnostic": "parse_error",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/ariane/cva6_cv64a6_imafdc_sv39.sv",
+      "state_mode": "2state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "ariane cva6",
+      "failure_category": "compile_error",
+      "diagnostic": "parse_error",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/ariane/cva6_cv64a6_imafdc_sv39.sv",
+      "state_mode": "4state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "ariane cva6",
+      "failure_category": "compile_error",
+      "diagnostic": "parse_error",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/ariane/cva6_cv64a6_imafdc_sv39_hpdcache.sv",
+      "state_mode": "2state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "ariane cva6",
+      "failure_category": "compile_error",
+      "diagnostic": "parse_error",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/ariane/cva6_cv64a6_imafdc_sv39_hpdcache.sv",
+      "state_mode": "4state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "ariane cva6",
+      "failure_category": "compile_error",
+      "diagnostic": "parse_error",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/ariane/cva6_cv64a6_imafdch_sv39.sv",
+      "state_mode": "2state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "ariane cva6",
+      "failure_category": "compile_error",
+      "diagnostic": "parse_error",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/ariane/cva6_cv64a6_imafdch_sv39.sv",
+      "state_mode": "4state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "ariane cva6",
+      "failure_category": "compile_error",
+      "diagnostic": "parse_error",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/ariane/cva6_tb_cv64a6_imafdc_sv39.sv",
+      "state_mode": "2state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "ariane cva6",
+      "failure_category": "input_issue",
+      "diagnostic": "reviewed_upstream_input",
+      "input_issue": "The pinned CVA6 testbench generator retains an uninstalled Spike include and resolves its relative axi_node include against the sv-tests tests directory. Preserve the upstream input and report a driver input failure, not a language-support failure."
+    },
+    {
+      "test": "generated/ariane/cva6_tb_cv64a6_imafdc_sv39.sv",
+      "state_mode": "4state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "ariane cva6",
+      "failure_category": "input_issue",
+      "diagnostic": "reviewed_upstream_input",
+      "input_issue": "The pinned CVA6 testbench generator retains an uninstalled Spike include and resolves its relative axi_node include against the sv-tests tests directory. Preserve the upstream input and report a driver input failure, not a language-support failure."
+    },
+    {
+      "test": "generated/black-parrot/bp_default.sv",
+      "state_mode": "2state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "black-parrot",
+      "failure_category": "unsupported",
+      "diagnostic": "unsupported_construct",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/black-parrot/bp_default.sv",
+      "state_mode": "4state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "black-parrot",
+      "failure_category": "unsupported",
+      "diagnostic": "unsupported_construct",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/black-parrot/bp_multicore_1.sv",
+      "state_mode": "2state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "black-parrot",
+      "failure_category": "unsupported",
+      "diagnostic": "unsupported_construct",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/black-parrot/bp_multicore_1.sv",
+      "state_mode": "4state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "black-parrot",
+      "failure_category": "unsupported",
+      "diagnostic": "unsupported_construct",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/black-parrot/bp_multicore_1_cce_ucode.sv",
+      "state_mode": "2state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "black-parrot",
+      "failure_category": "unsupported",
+      "diagnostic": "unsupported_construct",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/black-parrot/bp_multicore_1_cce_ucode.sv",
+      "state_mode": "4state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "black-parrot",
+      "failure_category": "unsupported",
+      "diagnostic": "unsupported_construct",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/black-parrot/bp_multicore_4.sv",
+      "state_mode": "2state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "black-parrot",
+      "failure_category": "unsupported",
+      "diagnostic": "unsupported_construct",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/black-parrot/bp_multicore_4.sv",
+      "state_mode": "4state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "black-parrot",
+      "failure_category": "unsupported",
+      "diagnostic": "unsupported_construct",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/black-parrot/bp_multicore_4_cce_ucode_cfg.sv",
+      "state_mode": "2state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "black-parrot",
+      "failure_category": "unsupported",
+      "diagnostic": "unsupported_construct",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/black-parrot/bp_multicore_4_cce_ucode_cfg.sv",
+      "state_mode": "4state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "black-parrot",
+      "failure_category": "unsupported",
+      "diagnostic": "unsupported_construct",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/black-parrot/bp_unicore.sv",
+      "state_mode": "2state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "black-parrot",
+      "failure_category": "unsupported",
+      "diagnostic": "unsupported_construct",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/black-parrot/bp_unicore.sv",
+      "state_mode": "4state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "black-parrot",
+      "failure_category": "unsupported",
+      "diagnostic": "unsupported_construct",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/fusesoc/ibex-sim.sv",
+      "state_mode": "2state",
+      "result": "skip",
+      "mode": "",
+      "tags": "ibex",
+      "failure_category": "",
+      "diagnostic": "",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/fusesoc/ibex-sim.sv",
+      "state_mode": "4state",
+      "result": "skip",
+      "mode": "",
+      "tags": "ibex",
+      "failure_category": "",
+      "diagnostic": "",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/fusesoc/veer-eh1-sim.sv",
+      "state_mode": "2state",
+      "result": "skip",
+      "mode": "",
+      "tags": "veer-eh1",
+      "failure_category": "",
+      "diagnostic": "",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/fusesoc/veer-eh1-sim.sv",
+      "state_mode": "4state",
+      "result": "skip",
+      "mode": "",
+      "tags": "veer-eh1",
+      "failure_category": "",
+      "diagnostic": "",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/fusesoc/veer-eh1-synth.sv",
+      "state_mode": "2state",
+      "result": "skip",
+      "mode": "",
+      "tags": "veer-eh1",
+      "failure_category": "",
+      "diagnostic": "",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/fusesoc/veer-eh1-synth.sv",
+      "state_mode": "4state",
+      "result": "skip",
+      "mode": "",
+      "tags": "veer-eh1",
+      "failure_category": "",
+      "diagnostic": "",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/fx68k/fx68k.sv",
+      "state_mode": "2state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "fx68k",
+      "failure_category": "compile_error",
+      "diagnostic": "illegal_context",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/fx68k/fx68k.sv",
+      "state_mode": "4state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "fx68k",
+      "failure_category": "compile_error",
+      "diagnostic": "illegal_context",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/rggen/rggen.sv",
+      "state_mode": "2state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "RgGen",
+      "failure_category": "unsupported",
+      "diagnostic": "unsupported_construct",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/rggen/rggen.sv",
+      "state_mode": "4state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "RgGen",
+      "failure_category": "unsupported",
+      "diagnostic": "unsupported_construct",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/rsd/rsd.sv",
+      "state_mode": "2state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "rsd",
+      "failure_category": "unsupported",
+      "diagnostic": "unsupported_construct",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/rsd/rsd.sv",
+      "state_mode": "4state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "rsd",
+      "failure_category": "unsupported",
+      "diagnostic": "unsupported_construct",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/scr1/scr1.sv",
+      "state_mode": "2state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "scr1",
+      "failure_category": "unclassified",
+      "diagnostic": "unrecognized_diagnostic",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/scr1/scr1.sv",
+      "state_mode": "4state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "scr1",
+      "failure_category": "unclassified",
+      "diagnostic": "unrecognized_diagnostic",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/tnoc/tnoc.sv",
+      "state_mode": "2state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "TNoC",
+      "failure_category": "unsupported",
+      "diagnostic": "unsupported_construct",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/tnoc/tnoc.sv",
+      "state_mode": "4state",
+      "result": "fail",
+      "mode": "elaboration",
+      "tags": "TNoC",
+      "failure_category": "unsupported",
+      "diagnostic": "unsupported_construct",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/veer-config/veer-el2_sim/veer-el2_sim.sv",
+      "state_mode": "2state",
+      "result": "skip",
+      "mode": "",
+      "tags": "veer-el2",
+      "failure_category": "",
+      "diagnostic": "",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/veer-config/veer-el2_sim/veer-el2_sim.sv",
+      "state_mode": "4state",
+      "result": "skip",
+      "mode": "",
+      "tags": "veer-el2",
+      "failure_category": "",
+      "diagnostic": "",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/veer-config/veer-el2_synth/veer-el2_synth.sv",
+      "state_mode": "2state",
+      "result": "skip",
+      "mode": "",
+      "tags": "veer-el2",
+      "failure_category": "",
+      "diagnostic": "",
+      "input_issue": ""
+    },
+    {
+      "test": "generated/veer-config/veer-el2_synth/veer-el2_synth.sv",
+      "state_mode": "4state",
+      "result": "skip",
+      "mode": "",
+      "tags": "veer-el2",
+      "failure_category": "",
+      "diagnostic": "",
+      "input_issue": ""
+    }
+  ],
+  "driver_profile": "heliodor-dev",
+  "measured_at": "2026-11-01T12:03:29.403796+00:00",
+  "celox_revision": "5a6e42ebaf3348c374c5a83ea4dd06828d4fdaf6",
+  "run_url": null
+}

@@ -6,6 +6,7 @@
 use std::path::Path;
 
 use crate::AnalyzerError;
+pub use celox_sv_syntax::SourceEncoding;
 
 /// Expand macros and includes using the native preprocessor.
 /// Each call is one compilation unit; source-defined macros do not escape it.
@@ -17,7 +18,18 @@ pub fn preprocess_source(
     macros: &[(String, Option<String>)],
     includes: &[&Path],
 ) -> Result<String, AnalyzerError> {
-    preprocessor(macros, includes)?
+    preprocess_source_with_encoding(code, path, macros, includes, SourceEncoding::default())
+}
+
+/// Expand one compilation unit with an explicit source/header encoding policy.
+pub fn preprocess_source_with_encoding(
+    code: &str,
+    path: &Path,
+    macros: &[(String, Option<String>)],
+    includes: &[&Path],
+    source_encoding: SourceEncoding,
+) -> Result<String, AnalyzerError> {
+    preprocessor(macros, includes, source_encoding)?
         .preprocess(code, path)
         .map(|source| source.text())
         .map_err(|error| AnalyzerError::Parse(error.to_string()))
@@ -32,7 +44,17 @@ pub fn preprocess_sources(
     macros: &[(String, Option<String>)],
     includes: &[&Path],
 ) -> Result<String, AnalyzerError> {
-    let mut preprocessor = preprocessor(macros, includes)?;
+    preprocess_sources_with_encoding(sources, macros, includes, SourceEncoding::default())
+}
+
+/// Expand ordered compilation-unit sources with an explicit header encoding policy.
+pub fn preprocess_sources_with_encoding(
+    sources: &[(&str, &Path)],
+    macros: &[(String, Option<String>)],
+    includes: &[&Path],
+    source_encoding: SourceEncoding,
+) -> Result<String, AnalyzerError> {
+    let mut preprocessor = preprocessor(macros, includes, source_encoding)?;
     let mut expanded = String::new();
     for (code, path) in sources {
         let source = preprocessor
@@ -49,11 +71,13 @@ pub fn preprocess_sources(
 fn preprocessor(
     macros: &[(String, Option<String>)],
     includes: &[&Path],
+    source_encoding: SourceEncoding,
 ) -> Result<celox_sv_syntax::Preprocessor, AnalyzerError> {
     let mut preprocessor = celox_sv_syntax::Preprocessor::new(celox_sv_syntax::Options {
         include_paths: includes.iter().map(|path| path.to_path_buf()).collect(),
         ..Default::default()
-    });
+    })
+    .with_source_encoding(source_encoding);
     for (name, value) in macros {
         let definition = format!("`define {name} {}\n", value.as_deref().unwrap_or("1"));
         preprocessor

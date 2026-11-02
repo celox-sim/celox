@@ -132,15 +132,15 @@ pub(in crate::ast) fn classify<'a>(
                 "nonblocking assignment to an automatic task variable",
             ));
         }
-        // Imported package/$unit subroutine locals are currently allocated
-        // per consuming module, unlike the scope's actual shared variables.
-        // Reject static formals until they can use that shared storage too.
+        // The static formals of a package or `$unit` task are variables of
+        // that scope when the task suspends (see `lower_subroutine`); others
+        // would be allocated per consuming module.
         if is_timed
             && subroutine.name.contains("::")
-            && subroutine
-                .params
-                .iter()
-                .any(|param| !subroutine.automatic_locals.contains(&param.name))
+            && subroutine.params.iter().any(|param| {
+                !subroutine.automatic_locals.contains(&param.name)
+                    && !subroutine.persistent_locals.contains(&param.name)
+            })
         {
             return Err(unsupported(
                 "static arguments in a package or compilation-unit timed task (declare the task automatic)",

@@ -12,14 +12,15 @@ from BaseRunner import BaseRunner
 
 
 def known_missing_include(path, params):
-    """Keep one reviewed malformed upstream fixture as a tool failure, not a skip."""
+    """Keep reviewed malformed upstream fixtures as tool failures, not skips."""
     issues = json.loads((Path(__file__).resolve().parents[1] / "input-issues.json").read_text())
     case = os.environ.get("CELOX_SV_TESTS_CASE")
     issue = issues["cases"].get(case)
     if not issue or params["should_fail"] != "0":
         return False
     root = Path(os.environ["TESTS_DIR"]).resolve().parent
-    if path != root / issue["missing_include"]:
+    paths = issue.get("missing_includes") or [issue["missing_include"]]
+    if path not in {root / relative for relative in paths}:
         return False
     revision = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
     return revision == issues["revision"]

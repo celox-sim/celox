@@ -1,0 +1,34 @@
+{
+  "schema_version": 3,
+  "tool": "verilator",
+  "version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "suite": "sv",
+  "suite_version": "0.12.0",
+  "include_ignored": false,
+  "exclude_stronger_than_sv": false,
+  "scope": "Focused array-valued unpacked-structure pattern-item failures before exclusions; the unsupported Verilator four-state case is omitted.",
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:7:20: Item is incompatible with the array type.\n    7 |         listed = '{source_row, source_row};\n      |                    ^~~~~~~~~~\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: <case>/source_0.sv:7:18: CONST '32'h0' is not an unpacked array, but is in an unpacked array context\n    7 |         listed = '{source_row, source_row};\n      |                  ^~\n%Error: <case>/source_0.sv:8:22: Array initialization has too many elements. 2 elements are expected, but at least 2 elements exist.\n    8 |         defaults = '{default: source_row};\n      |                      ^~~~~~~\n%Warning-ZERODLY: <case>/testbench.sv:103:25: Value of # delay control statically unknown. Assuming it can be #0.\n                                            : ... If all # delays are non-zero at runtime,\n                                            : ... use '--no-sched-zero-delay' for improved performance.\n                                            : ... If a real #0 is expected at runtime,\n                                            : ... use '--sched-zero-delay' to suppress this warning.\n  103 |         if (t1 > $time) #(t1 - $time);\n      |                         ^\n                  ... For warning description see https://verilator.org/warn/ZERODLY?v=5.052\n                  ... Use \"/* verilator lint_off ZERODLY */\" and lint_on around source to disable this message.\n%Error: Exiting due to 5 error(s)\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::fixed_array_pattern_rows",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "counts": {
+    "compile_error": 1,
+    "emission_error": 0,
+    "ignored": 0,
+    "mismatch": 0,
+    "passed": 0,
+    "rejected": 0,
+    "runtime_error": 0,
+    "unexpected_accept": 0,
+    "unsupported": 0
+  }
+}

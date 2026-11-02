@@ -1,8 +1,10 @@
 //! Value containers. Published entries are immutable; updates allocate a new
 //! handle so ordinary state stores detect changes and array assignment copies
-//! values. Class handles inside elements retain reference semantics.
+//! values. Persistent trees share unchanged nodes between versions, so retaining
+//! intermediate updates until a heap safepoint does not retain a full copy per
+//! update. Class handles inside elements retain reference semantics.
 
-use std::collections::{BTreeMap, VecDeque};
+use imbl::{OrdMap, Vector};
 use std::sync::Arc;
 
 use crate::{Fault, Handle, Heap, Root};
@@ -55,6 +57,10 @@ pub const CONCAT: u64 = 102;
 /// `slice(a, b, c)`: a new queue with the inclusive, signed bounds b..c,
 /// clipped to the source queue (IEEE 1800-2023 7.10.1).
 pub const SLICE: u64 = 103;
+/// An empty associative array with default payload b and X/Z mask c.
+pub const WITH_DEFAULT: u64 = 104;
+/// Shuffle sequence a with seed b, moving complete payload/mask pairs.
+pub const SHUFFLE: u64 = 105;
 
 /// The operation parameter encodes the element width (bits 0..6), whether
 /// it is two-state (7), its handle kind (8..9: none/string/object), container
@@ -240,22 +246,25 @@ pub(crate) enum Key {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Contents {
-    Sequence(VecDeque<Element>),
-    Associative(BTreeMap<Key, Element>),
+    Sequence(Vector<Element>),
+    Associative(OrdMap<Key, Element>),
 }
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Container {
     layout: u64,
+    #[serde(default)]
+    default: Option<Element>,
     pub(crate) contents: Contents,
 }
 impl Container {
     pub(crate) fn empty(layout: Layout) -> Self {
         Self {
             layout: layout.0,
+            default: None,
             contents: if layout.kind() == 2 {
-                Contents::Associative(BTreeMap::new())
+                Contents::Associative(OrdMap::new())
             } else {
-                Contents::Sequence(VecDeque::new())
+                Contents::Sequence(Vector::new())
             },
         }
     }
@@ -266,7 +275,7 @@ impl Container {
         }
     }
     pub(crate) fn size(&self) -> usize {
-        self.len() * std::mem::size_of::<Element>()
+        (self.len() + usize::from(self.default.is_some())) * std::mem::size_of::<Element>()
             + match &self.contents {
                 Contents::Associative(v) => v
                     .keys()
@@ -282,7 +291,7 @@ impl Container {
 
 impl Heap {
     pub(crate) fn publish_container(&mut self, container: Container, complete: bool) -> Handle {
-        if container.len() == 0 {
+        if container.len() == 0 && container.default.is_none() {
             return 0;
         }
         let handle = self.next_object;
@@ -337,6 +346,7 @@ impl Heap {
             kind,
             handle: element.value as Handle,
         };
+        roots.extend(container.default.iter().map(root));
         match &container.contents {
             Contents::Sequence(v) => roots.extend(v.iter().map(root)),
             Contents::Associative(v) => roots.extend(v.values().map(root)),
@@ -409,6 +419,9 @@ impl Heap {
         let layout = Layout(parameter);
         let key = layout.key(self, b);
         let existing = self.containers.get(&(a as Handle));
+        let default = existing
+            .and_then(|entry| entry.default)
+            .unwrap_or_else(|| layout.default());
         let get = || {
             existing
                 .and_then(|entry| match &entry.contents {
@@ -416,7 +429,7 @@ impl Heap {
                     Contents::Associative(v) => v.get(&key),
                 })
                 .copied()
-                .unwrap_or_else(|| layout.default())
+                .unwrap_or(default)
         };
         match op {
             EQUAL | CASE_EQUAL => {
@@ -466,18 +479,10 @@ impl Heap {
             }
             LEN => return existing.map_or(0, |v| v.len() as u64),
             GET => {
-                return if c == 0 {
-                    get().value
-                } else {
-                    layout.default().value
-                };
+                return if c == 0 { get().value } else { default.value };
             }
             GET_MASK => {
-                return if c == 0 {
-                    get().mask
-                } else {
-                    layout.default().mask
-                };
+                return if c == 0 { get().mask } else { default.mask };
             }
             EXISTS => {
                 return existing.is_some_and(|entry| match &entry.contents {
@@ -485,7 +490,19 @@ impl Heap {
                     _ => false,
                 }) as u64;
             }
-            CLEAR => return 0,
+            WITH_DEFAULT => {
+                let mut result = Container::empty(layout);
+                result.default = Some(Element {
+                    value: b & layout.bits(),
+                    mask: c & layout.bits(),
+                });
+                return self.publish_container(result, true) as u64;
+            }
+            CLEAR => {
+                let mut result = Container::empty(layout);
+                result.default = existing.and_then(|entry| entry.default);
+                return self.publish_container(result, true) as u64;
+            }
             FIRST | LAST | NEXT | PREV | ITER_VALID => {
                 let traversal = if op == ITER_VALID { c } else { op };
                 let found = existing.and_then(|entry| {
@@ -493,8 +510,8 @@ impl Heap {
                         return None;
                     };
                     match traversal {
-                        FIRST => v.first_key_value(),
-                        LAST => v.last_key_value(),
+                        FIRST => v.iter().next(),
+                        LAST => v.iter().next_back(),
                         NEXT => v
                             .range((
                                 std::ops::Bound::Excluded(key.clone()),
@@ -549,7 +566,13 @@ impl Heap {
                     let lo = (b as i64).max(0) as usize;
                     let hi = (c as i64).min(src.len() as i64 - 1);
                     if hi >= 0 && lo <= hi as usize {
-                        dst.extend(src.range(lo..=hi as usize).copied().take(layout.capacity()));
+                        dst.extend(
+                            src.iter()
+                                .skip(lo)
+                                .take(hi as usize - lo + 1)
+                                .copied()
+                                .take(layout.capacity()),
+                        );
                     }
                 }
                 return self.publish_container(result, true) as u64;
@@ -589,7 +612,10 @@ impl Heap {
                 let Contents::Sequence(v) = &mut result.contents else {
                     return 0;
                 };
-                v.resize((a as usize).min(layout.capacity()), layout.default());
+                v.extend(std::iter::repeat_n(
+                    layout.default(),
+                    (a as usize).min(layout.capacity()),
+                ));
                 if let Some(Container {
                     contents: Contents::Sequence(source),
                     ..
@@ -616,7 +642,31 @@ impl Heap {
                     return a;
                 };
                 match op {
-                    REVERSE => v.make_contiguous().reverse(),
+                    REVERSE => *v = v.iter().rev().copied().collect(),
+                    SHUFFLE => {
+                        // Fisher-Yates with unbiased bounded draws from SplitMix64.
+                        let mut state = b;
+                        let mut next = || {
+                            state = state.wrapping_add(0x9e3779b97f4a7c15);
+                            let mut word = state;
+                            word = (word ^ (word >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+                            word = (word ^ (word >> 27)).wrapping_mul(0x94d049bb133111eb);
+                            word ^ (word >> 31)
+                        };
+                        let mut values: Vec<_> = v.iter().copied().collect();
+                        for i in (1..values.len()).rev() {
+                            let bound = (i + 1) as u64;
+                            let threshold = bound.wrapping_neg() % bound;
+                            let j = loop {
+                                let word = next();
+                                if word >= threshold {
+                                    break (word % bound) as usize;
+                                }
+                            };
+                            values.swap(i, j);
+                        }
+                        *v = values.into_iter().collect();
+                    }
                     SORT | RSORT => {
                         let strings = (layout.0 >> 8) & 3 == 1;
                         let sign = if b != 0 && !strings {
@@ -633,13 +683,14 @@ impl Heap {
                             };
                             if op == RSORT { order.reverse() } else { order }
                         };
-                        let values = v.make_contiguous();
+                        let mut values: Vec<_> = v.iter().copied().collect();
                         // X/Z comparisons yield X (11.4.4). Preserve those
                         // elements and sort the fully known runs between them;
                         // Rust's sort requires a total comparison within a run.
                         for known in values.split_mut(|value| value.mask != 0) {
                             known.sort_by(&compare);
                         }
+                        *v = values.into_iter().collect();
                     }
                     SET if index < v.len() => v[index] = value,
                     SET if layout.kind() == 1 && index == v.len() && index < layout.capacity() => {
@@ -680,6 +731,146 @@ mod tests {
     fn call(heap: &mut Heap, op: u64, p: u64, a: u64, b: u64, c: u64) -> u64 {
         heap.call(encode(op, p), a, b, c)
     }
+    #[test]
+    fn associative_defaults_survive_updates_and_clear_without_creating_entries() {
+        let mut heap = Heap::new();
+        let p = parameter(4, false, 0, 2, 0, false, false, false);
+        let original = call(&mut heap, WITH_DEFAULT, p, 0, 0b1001, 0b0011);
+        assert_ne!(original, 0);
+        assert_eq!(
+            call(&mut heap, WITH_DEFAULT, p, 0, 0b1001, 0b0011),
+            original
+        );
+        assert_eq!(call(&mut heap, LEN, p, original, 0, 0), 0);
+        assert_eq!(call(&mut heap, EXISTS, p, original, 7, 0), 0);
+        assert_eq!(call(&mut heap, ITER_VALID, p, original, 0, FIRST), 0);
+        assert_eq!(call(&mut heap, GET, p, original, 7, 0), 0b1001);
+        assert_eq!(call(&mut heap, GET_MASK, p, original, 7, 1), 0b0011);
+        let changed = call(&mut heap, SET, p, original, 7, 5);
+        let changed = call(&mut heap, SET_MASK, p, changed, 7, 0);
+        assert_eq!(call(&mut heap, GET, p, changed, 7, 0), 5);
+        assert_eq!(call(&mut heap, GET, p, changed, 8, 0), 0b1001);
+        assert_eq!(call(&mut heap, DELETE, p, changed, 7, 0), original);
+        assert_eq!(call(&mut heap, CLEAR, p, changed, 0, 0), original);
+        assert_eq!(call(&mut heap, GET, p, original, 7, 0), 0b1001);
+        let data = serde_json::to_string(heap.containers[&(original as Handle)].as_ref()).unwrap();
+        let restored: Container = serde_json::from_str(&data).unwrap();
+        assert_eq!(restored, *heap.containers[&(original as Handle)]);
+        // Existing serialized containers have no explicit default field.
+        let mut data: serde_json::Value = serde_json::from_str(&data).unwrap();
+        data.as_object_mut().unwrap().remove("default");
+        let restored: Container = serde_json::from_value(data).unwrap();
+        assert!(restored.default.is_none());
+    }
+
+    #[test]
+    fn empty_associative_defaults_keep_string_and_nested_container_roots_alive() {
+        let mut heap = Heap::new();
+        let text = heap.intern(b"captured default");
+        let strings = parameter(32, true, 1, 2, 0, false, false, false);
+        let inner = call(&mut heap, WITH_DEFAULT, strings, 0, text as u64, 0);
+        let objects = parameter(32, true, 2, 2, 0, false, false, false);
+        let outer = call(&mut heap, WITH_DEFAULT, objects, 0, inner, 0);
+        heap.collect([Root::object(outer as Handle)]);
+        assert_eq!(call(&mut heap, GET, objects, outer, 7, 0), inner);
+        let read = call(&mut heap, GET, strings, inner, 8, 0);
+        assert_eq!(heap.string(read as Handle), b"captured default");
+        assert_eq!(heap.containers.len(), 2);
+        heap.collect([]);
+        assert!(heap.containers.is_empty());
+    }
+
+    #[test]
+    fn shuffle_preserves_payload_mask_pairs_and_is_seeded_without_changing_the_source() {
+        let mut heap = Heap::new();
+        let p = parameter(8, false, 0, 1, 0, false, false, false);
+        let mut source = call(&mut heap, NEW, p, 8, 0, 0);
+        let mut expected = Vec::new();
+        for i in 0..8 {
+            source = call(&mut heap, SET, p, source, i, i);
+            source = call(&mut heap, SET_MASK, p, source, i, i % 3);
+            expected.push((i, i % 3));
+        }
+        let mut permutations = fxhash::FxHashSet::default();
+        for seed in 0..32 {
+            let shuffled = call(&mut heap, SHUFFLE, p, source, seed, 0);
+            assert_eq!(call(&mut heap, SHUFFLE, p, source, seed, 0), shuffled);
+            assert_eq!(call(&mut heap, LEN, p, shuffled, 0, 0), 8);
+            let mut values = (0..8)
+                .map(|i| {
+                    (
+                        call(&mut heap, GET, p, shuffled, i, 0),
+                        call(&mut heap, GET_MASK, p, shuffled, i, 0),
+                    )
+                })
+                .collect::<Vec<_>>();
+            permutations.insert(values.clone());
+            values.sort_unstable();
+            assert_eq!(values, expected);
+        }
+        assert!(permutations.len() > 1);
+        for &(value, mask) in &expected {
+            assert_eq!(call(&mut heap, GET, p, source, value, 0), value);
+            assert_eq!(call(&mut heap, GET_MASK, p, source, value, 0), mask);
+        }
+        assert_eq!(call(&mut heap, SHUFFLE, p, 0, 17, 0), 0);
+    }
+
+    #[test]
+    fn retained_updates_share_storage_and_preserve_snapshots() {
+        // No collection: model all the intermediate handles of one time slot.
+        // Count distinct element addresses, not logical lengths (which count
+        // shared nodes repeatedly). A full copy per update exceeds this bound.
+        for kind in [1, 2] {
+            let mut heap = Heap::new();
+            let p = parameter(32, false, 0, kind, 0, false, false, false);
+            let mut handle = 0;
+            let mut snapshots = Vec::new();
+            for i in 0..1024 {
+                handle = call(
+                    &mut heap,
+                    if kind == 1 { INSERT } else { SET },
+                    p,
+                    handle,
+                    i,
+                    i,
+                );
+                handle = call(&mut heap, SET_MASK, p, handle, i, i & 1);
+                snapshots.push(handle);
+            }
+            let mut addresses = fxhash::FxHashSet::default();
+            for (i, &handle) in snapshots.iter().enumerate() {
+                assert_eq!(call(&mut heap, LEN, p, handle, 0, 0), i as u64 + 1);
+                assert_eq!(call(&mut heap, GET, p, handle, i as u64, 0), i as u64);
+                assert_eq!(
+                    call(&mut heap, GET_MASK, p, handle, i as u64, 0),
+                    i as u64 & 1
+                );
+                match &heap.containers[&(handle as Handle)].contents {
+                    Contents::Sequence(v) => {
+                        addresses.extend(v.iter().map(|e| e as *const Element))
+                    }
+                    Contents::Associative(v) => {
+                        addresses.extend(v.values().map(|e| e as *const Element))
+                    }
+                }
+            }
+            assert!(
+                addresses.len() < 1024 * 256,
+                "{} distinct elements",
+                addresses.len()
+            );
+            let original = heap.containers[&(handle as Handle)].clone();
+            if kind == 1 {
+                let json = serde_json::to_string(original.as_ref()).unwrap();
+                let restored: Container = serde_json::from_str(&json).unwrap();
+                assert_eq!(*original, restored);
+            }
+            heap.collect([Root::object(handle as Handle)]);
+            assert_eq!(heap.containers.len(), 1);
+        }
+    }
+
     #[test]
     fn completed_updates_intern_values_and_collection_releases_lookup_entries() {
         let mut heap = Heap::new();

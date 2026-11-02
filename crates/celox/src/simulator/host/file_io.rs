@@ -2,6 +2,43 @@ use super::*;
 use celox_design::HostRequestSite;
 use celox_runtime::{Halt, SimulatorErrorCode};
 
+/// Render the captured request values identically for a host round trip and
+/// a synchronous native call. Neither path rereads the HDL expressions.
+pub(super) fn formatted_file_write(
+    site: &HostRequestSite<SignalRef>,
+    values: &[(BigUint, BigUint)],
+    format: &RuntimeEventSite,
+    timestamp: u64,
+) -> (Vec<RuntimeEventArgValue>, Vec<u8>) {
+    let args: Vec<_> = site
+        .args
+        .iter()
+        .zip(values)
+        .skip(1)
+        .map(|(arg, (value, mask))| RuntimeEventArgValue {
+            values: value.to_u64_digits(),
+            masks: mask.to_u64_digits(),
+            width: arg.width,
+            signed: arg.signed,
+            is_string: arg.is_string,
+            float_precision: arg.float_precision,
+            handle: false,
+        })
+        .collect();
+    let mut message = render_runtime_event_message(
+        format,
+        &args,
+        RuntimeFormatContext {
+            tb_time: Some(timestamp),
+            ..Default::default()
+        },
+    );
+    if site.operation == 3 {
+        message.push(b'\n');
+    }
+    (args, message)
+}
+
 impl<B: SimBackend> Simulator<B> {
     /// The hierarchical name of the instance that runs `process`, which a
     /// `%m` of its host requests prints.
@@ -25,6 +62,43 @@ impl<B: SimBackend> Simulator<B> {
             })
     }
 
+    /// Read bytes through the descriptor manager so EOF and pushback retain
+    /// their usual meaning. A no-data/error return does not copy out a value.
+    fn run_fgets_request(&mut self, site: &HostRequestSite<SignalRef>) -> Result<(), Halt> {
+        let (descriptor, mask) = self.backend.get_four_state(site.args[0].id);
+        if mask != BigUint::default() {
+            return Err(Halt::Error(SimulatorErrorCode::Runtime {
+                message: "$fgets descriptor contains X or Z".into(),
+                signals: Vec::new(),
+            }));
+        }
+        let descriptor = descriptor.to_u32_digits().first().copied().unwrap_or(0);
+        let mut line = Vec::new();
+        let success = loop {
+            match self.file_io.read_byte(descriptor) {
+                Ok(Some(byte)) => {
+                    line.push(byte);
+                    if byte == b'\n' {
+                        break true;
+                    }
+                }
+                Ok(None) => break true,
+                Err(_) => break false,
+            }
+        };
+        let count = if success { line.len() as u32 } else { 0 };
+        if count != 0 {
+            // Characters consumed still count, but a SystemVerilog string
+            // cannot contain NUL characters (6.16).
+            line.retain(|&byte| byte != 0);
+            let handle = self.backend.heap_mut().intern(&line);
+            self.backend.set(site.results[1].id, handle);
+        }
+        self.backend.set(site.results[0].id, count);
+        self.dirty = true;
+        Ok(())
+    }
+
     pub(crate) fn run_file_io_request(
         &mut self,
         site: &HostRequestSite<SignalRef>,
@@ -32,6 +106,30 @@ impl<B: SimBackend> Simulator<B> {
     ) -> Result<(), Halt> {
         if site.operation == 13 {
             return self.run_fread_request(site);
+        }
+        if site.operation == 15 {
+            let (descriptor, mask) = self.backend.get_four_state(site.args[0].id);
+            if mask != BigUint::default() {
+                return Err(Halt::Error(SimulatorErrorCode::Runtime {
+                    message: "$ferror descriptor contains X or Z".into(),
+                    signals: Vec::new(),
+                }));
+            }
+            let descriptor = descriptor.to_u32_digits().first().copied().unwrap_or(0);
+            let (code, message) = self.file_io.error(descriptor);
+            let bytes: Vec<_> = message.bytes().filter(|byte| *byte != 0).collect();
+            let result = if site.results[1].value_kind == celox_design::ValueKind::StrRef {
+                BigUint::from(self.backend.heap_mut().intern(&bytes))
+            } else {
+                BigUint::from_bytes_be(&bytes)
+            };
+            self.backend.set_wide(site.results[1].id, result);
+            self.backend.set(site.results[0].id, code);
+            self.dirty = true;
+            return Ok(());
+        }
+        if site.operation == 14 {
+            return self.run_fgets_request(site);
         }
         let error = |message: String| {
             Halt::Error(SimulatorErrorCode::Runtime {
@@ -85,21 +183,6 @@ impl<B: SimBackend> Simulator<B> {
                 .close(number(0)?)
                 .map_err(|err| error(format!("$fclose: {err}")))?,
             2 | 3 => {
-                let args: Vec<_> = site
-                    .args
-                    .iter()
-                    .zip(&values)
-                    .skip(1)
-                    .map(|(arg, (value, mask))| RuntimeEventArgValue {
-                        values: value.to_u64_digits(),
-                        masks: mask.to_u64_digits(),
-                        width: arg.width,
-                        signed: arg.signed,
-                        is_string: arg.is_string,
-                        float_precision: arg.float_precision,
-                        handle: false,
-                    })
-                    .collect();
                 let scope = self.process_scope(site.process);
                 let format = RuntimeEventSite {
                     kind: RuntimeEventKind::Write,
@@ -116,17 +199,7 @@ impl<B: SimBackend> Simulator<B> {
                     arg_float_precision: Vec::new(),
                     arg_is_handle: Vec::new(),
                 };
-                let mut message = render_runtime_event_message(
-                    &format,
-                    &args,
-                    RuntimeFormatContext {
-                        tb_time: Some(timestamp),
-                        ..Default::default()
-                    },
-                );
-                if site.operation == 3 {
-                    message.push(b'\n');
-                }
+                let (args, message) = formatted_file_write(site, &values, &format, timestamp);
                 let (stdout, write_result) = self.file_io.write_with_stdout(number(0)?, &message);
                 if stdout {
                     let mut format = format;

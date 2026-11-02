@@ -107,16 +107,24 @@ fn native_continuous_assignment_ids_preserve_selected_generate_and_loop_scopes()
 #[test]
 fn native_continuous_assignment_delay_restrictions_preserve_captured_scopes() {
     for body in [
-        "assign #1 y=0;",
-        "if(1)begin:g assign #1 y=0;end",
-        "checker C;assign #1 y=0;endchecker",
-        "module N;assign #1 y=0;endmodule",
+        "assign #(1,2) y=0;",
+        "if(1)begin:g assign #(1,2) y=0;end",
+        "checker C;assign #(1,2) y=0;endchecker",
+        "module N;assign #(1,2) y=0;endmodule",
+        "wire #(1,2) n=0;",
+        "wire #(1,2) n;",
+        "if(1)begin:g wire #(1,2) n;end",
+        "module N;wire #(1,2) n;endmodule",
+        "if(1)begin:g wire #(1,2) n=0;end",
+        "module N;wire #(1,2) n=0;endmodule",
     ] {
         let code = format!("module M(output wire y);{body} endmodule");
         let tree = parse_source(&code, Path::new("native-assign-delay-validation.sv")).unwrap();
-        let error =
+        let Err(error) =
             Source::from_syntax_module_with_parameter_overrides(&tree, "M", &HashMap::default())
-                .unwrap_err();
+        else {
+            panic!("accepted unsupported delay: {body}");
+        };
         assert!(
             error.to_string().contains("delayed continuous assignment"),
             "{body}: {error}"
@@ -246,5 +254,18 @@ fn native_target_class_disagreement_never_selects_a_typed_leaf() {
             .unwrap();
         tree.declarations.expressions[index].kind = celox_sv_syntax::ExprKind::Literal("7".into());
         assert!((crate::ast::Source::from_syntax(&tree)).is_err());
+    }
+}
+
+#[test]
+fn native_net_delay_connections_ignore_formal_name_fallbacks() {
+    for connection in [".w()", ".w(1'b0)", ".w(a & b)", "1'b0", "a & b", ".w(a)"] {
+        let code = format!(
+            "module Child(input wire w); endmodule \
+             module Top(input bit a,b); wire #1 w; assign w=a; Child c({connection}); endmodule"
+        );
+        let tree = parse_source(&code, Path::new("net-delay-formal-fallback.sv")).unwrap();
+        Source::from_syntax_module_with_parameter_overrides(&tree, "Top", &HashMap::default())
+            .unwrap_or_else(|error| panic!("unrelated connection {connection}: {error}"));
     }
 }

@@ -13,6 +13,98 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus 13.0 rejects default-only associative array literals and associative array declarations in the four focused cases. IEEE 1800-2023 7.9.11 permits user defaults for associative arrays.",
+      "expectation": "Simulation",
+      "name": "containers::associative_default_copy",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_associative_defaults",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects default-only associative array literals and associative array declarations in the four focused cases. IEEE 1800-2023 7.9.11 permits user defaults for associative arrays.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/associative-defaults-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects default-only associative array literals and associative array declarations in the four focused cases. IEEE 1800-2023 7.9.11 permits user defaults for associative arrays.",
+      "expectation": "Simulation",
+      "name": "containers::associative_default_four_state",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_associative_defaults",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects default-only associative array literals and associative array declarations in the four focused cases. IEEE 1800-2023 7.9.11 permits user defaults for associative arrays.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/associative-defaults-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects default-only associative array literals and associative array declarations in the four focused cases. IEEE 1800-2023 7.9.11 permits user defaults for associative arrays.",
+      "expectation": "Simulation",
+      "name": "containers::associative_default_strings",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_associative_defaults",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects default-only associative array literals and associative array declarations in the four focused cases. IEEE 1800-2023 7.9.11 permits user defaults for associative arrays.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/associative-defaults-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects default-only associative array literals and associative array declarations in the four focused cases. IEEE 1800-2023 7.9.11 permits user defaults for associative arrays.",
+      "expectation": "Simulation",
+      "name": "containers::associative_default_wide",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_associative_defaults",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects default-only associative array literals and associative array declarations in the four focused cases. IEEE 1800-2023 7.9.11 permits user defaults for associative arrays.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/associative-defaults-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
       "detail": "Icarus 13.0 rejects an associative array whose index type is a type name (\"Type names are not valid expressions here.\"), as for the class-handle and string indices of these nested containers, does not support a dynamic array of dynamic arrays (\"Sorry: Dynamic array of type `dynamic array of ...` is not yet supported.\"), and does not support unpacked structures (see sv_icarus_unpacked_structs). IEEE 1800-2023 7.4.5, 7.8 and 7.8.5 define these. Verilator passes these cases.",
       "expectation": "Simulation",
       "known_issue": {
@@ -39,6 +131,17 @@
       "detail": "Icarus build exit status: 134; see <case>/build.log\n<case>/source_0.sv:7: error: Type names are not valid expressions here.\n<case>/source_0.sv:7: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:7:               : Expression is: <type>\n<case>/source_0.sv:7:               : Expression type: 10PETypename\n<case>/source_0.sv:7: error: Dimensions must be constant.\n<case>/source_0.sv:7       : This size expression violates the rule: <type>\n<case>/source_0.sv:4: error: Type names are not valid expressions here.\n<case>/source_0.sv:4: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:4:               : Expression is: <type>\n<case>/source_0.sv:4:               : Expression type: 10PETypename\n<case>/source_0.sv:4: error: Dimensions must be constant.\n<case>/source_0.sv:4       : This size expression violates the rule: <type>\n<case>/source_0.sv:5: sorry: Queues inside classes are not yet supported.\n<case>/source_0.sv:13: Error: Class/null r-value not allowed in this context.\n<case>/source_0.sv:13: error: The expression ''sd1' cannot be implicitly cast to the target type.\n<case>/source_0.sv:14: Error: Class/null r-value not allowed in this context.\n<case>/source_0.sv:15: Error: Class/null r-value not allowed in this context.\n<case>/source_0.sv:16: warning: ignoring out of bounds l-value array access m[97].\n<case>/source_0.sv:17: warning: ignoring out of bounds l-value array access m[97].\n<case>/source_0.sv:18: warning: ignoring out of bounds l-value array access m[97].\n<case>/source_0.sv:19: warning: ignoring out of bounds l-value array access m[97].\n<case>/source_0.sv:25: assert: elab_lval.cc:343: failed assertion use_sel == index_component_t::SEL_NONE\nAborted (core dumped)\n",
       "expectation": "Simulation",
       "name": "containers::compound_element_assignments",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 11; see <case>/build.log\n<case>/source_0.sv:15: error: Type names are not valid expressions here.\n<case>/source_0.sv:15: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:15:               : Expression is: <type>\n<case>/source_0.sv:15:               : Expression type: 10PETypename\n<case>/source_0.sv:15: error: Dimensions must be constant.\n<case>/source_0.sv:15       : This size expression violates the rule: <type>\n<case>/source_0.sv:6: error: Type names are not valid expressions here.\n<case>/source_0.sv:6: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:6:               : Expression is: <type>\n<case>/source_0.sv:6:               : Expression type: 10PETypename\n<case>/source_0.sv:6: error: Dimensions must be constant.\n<case>/source_0.sv:6       : This size expression violates the rule: <type>\n<case>/source_0.sv:9: error: The expression ''sd3' cannot be implicitly cast to the target type.\n<case>/source_0.sv:9: error: The expression ''sd2' cannot be implicitly cast to the target type.\n<case>/source_0.sv:10: error: Object celox_suite_tb.dut.R.names.$ivl_foreach0.s has no method \"name(...)\".\n<case>/source_0.sv:20: warning: ignoring out of bounds l-value array access lv[3].\n<case>/source_0.sv:20: warning: ignoring out of bounds l-value array access lv[1].\n<case>/source_0.sv:21: error: Object celox_suite_tb.dut.$ivl_foreach1.k has no method \"name(...)\".\n<case>/source_0.sv:21: error: Object celox_suite_tb.dut.$ivl_foreach1.k has no method \"next(...)\".\n11 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "containers::foreach_enumeration_index_methods",
       "phase": "compile",
       "status": "compile_error",
       "stronger_than_sv": false,
@@ -232,6 +335,121 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus 13.0 reports that the shuffle array sorting method is not currently supported in the scalar sequence cases, and additionally rejects queues of class handles and associative arrays of queues in the other cases. IEEE 1800-2023 7.12.2 permits shuffle on non-associative unpacked arrays. The focused report records the exact five compilation failures.",
+      "expectation": "Simulation",
+      "name": "containers::shuffle_four_state",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_container_shuffle",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 reports that the shuffle array sorting method is not currently supported in the scalar sequence cases, and additionally rejects queues of class handles and associative arrays of queues in the other cases. IEEE 1800-2023 7.12.2 permits shuffle on non-associative unpacked arrays. The focused report records the exact five compilation failures.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/shuffle-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 reports that the shuffle array sorting method is not currently supported in the scalar sequence cases, and additionally rejects queues of class handles and associative arrays of queues in the other cases. IEEE 1800-2023 7.12.2 permits shuffle on non-associative unpacked arrays. The focused report records the exact five compilation failures.",
+      "expectation": "Simulation",
+      "name": "containers::shuffle_handles",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_container_shuffle",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 reports that the shuffle array sorting method is not currently supported in the scalar sequence cases, and additionally rejects queues of class handles and associative arrays of queues in the other cases. IEEE 1800-2023 7.12.2 permits shuffle on non-associative unpacked arrays. The focused report records the exact five compilation failures.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/shuffle-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 reports that the shuffle array sorting method is not currently supported in the scalar sequence cases, and additionally rejects queues of class handles and associative arrays of queues in the other cases. IEEE 1800-2023 7.12.2 permits shuffle on non-associative unpacked arrays. The focused report records the exact five compilation failures.",
+      "expectation": "Simulation",
+      "name": "containers::shuffle_integral",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_container_shuffle",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 reports that the shuffle array sorting method is not currently supported in the scalar sequence cases, and additionally rejects queues of class handles and associative arrays of queues in the other cases. IEEE 1800-2023 7.12.2 permits shuffle on non-associative unpacked arrays. The focused report records the exact five compilation failures.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/shuffle-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 reports that the shuffle array sorting method is not currently supported in the scalar sequence cases, and additionally rejects queues of class handles and associative arrays of queues in the other cases. IEEE 1800-2023 7.12.2 permits shuffle on non-associative unpacked arrays. The focused report records the exact five compilation failures.",
+      "expectation": "Simulation",
+      "name": "containers::shuffle_nested_receivers",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_container_shuffle",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 reports that the shuffle array sorting method is not currently supported in the scalar sequence cases, and additionally rejects queues of class handles and associative arrays of queues in the other cases. IEEE 1800-2023 7.12.2 permits shuffle on non-associative unpacked arrays. The focused report records the exact five compilation failures.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/shuffle-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 reports that the shuffle array sorting method is not currently supported in the scalar sequence cases, and additionally rejects queues of class handles and associative arrays of queues in the other cases. IEEE 1800-2023 7.12.2 permits shuffle on non-associative unpacked arrays. The focused report records the exact five compilation failures.",
+      "expectation": "Simulation",
+      "name": "containers::shuffle_wide",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_container_shuffle",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 reports that the shuffle array sorting method is not currently supported in the scalar sequence cases, and additionally rejects queues of class handles and associative arrays of queues in the other cases. IEEE 1800-2023 7.12.2 permits shuffle on non-associative unpacked arrays. The focused report records the exact five compilation failures.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/shuffle-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
       "detail": "Icarus build exit status: 7; see <case>/build.log\n<case>/source_1.sv:6: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_1.sv:8: syntax error\n<case>/source_1.sv:8: Syntax in assignment statement l-value.\n<case>/testbench.sv:50: syntax error\n<case>/testbench.sv:50: error: Syntax error in task/function port declaration.\n<case>/testbench.sv:51: syntax error\n<case>/testbench.sv:51: error: Malformed statement\n",
       "expectation": "Simulation",
       "name": "containers::string_indices_from_calls",
@@ -268,6 +486,17 @@
       "detail": "Icarus build exit status: 10; see <case>/build.log\n<case>/source_0.sv:4: error: Type names are not valid expressions here.\n<case>/source_0.sv:4: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:4:               : Expression is: <type>\n<case>/source_0.sv:4:               : Expression type: 10PETypename\n<case>/source_0.sv:4: error: Dimensions must be constant.\n<case>/source_0.sv:4       : This size expression violates the rule: <type>\n<case>/source_0.sv:7: warning: ignoring out of bounds l-value array access s[-1].\nwarning: verinum::as_long() truncated 128 bits to 63, returns 0\nwarning: verinum::as_long() truncated 128 bits to 63, returns -9223372036854775808\n<case>/source_0.sv:9: warning: ignoring out of bounds l-value array access s[-9223372036854775808].\n<case>/source_0.sv:12: error: Enable of unknown task ``s.first''.\n<case>/source_0.sv:14: error: Enable of unknown task ``s.last''.\n<case>/source_0.sv:17: error: Enable of unknown task ``s.prev''.\n<case>/source_0.sv:20: error: Enable of unknown task ``s.next''.\n<case>/source_0.sv:22: error: Enable of unknown task ``s.delete''.\n<case>/source_0.sv:23: error: Object celox_suite_tb.dut.s has no method \"num(...)\".\n<case>/source_0.sv:23: error: Object celox_suite_tb.dut.s has no method \"first(...)\".\n10 error(s) during elaboration.\n",
       "expectation": "Simulation",
       "name": "containers::wide_signed_associative_keys",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 17; see <case>/build.log\n<case>/source_0.sv:5: error: Type names are not valid expressions here.\n<case>/source_0.sv:5: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:5:               : Expression is: <type>\n<case>/source_0.sv:5:               : Expression type: 10PETypename\n<case>/source_0.sv:5: error: Dimensions must be constant.\n<case>/source_0.sv:5       : This size expression violates the rule: <type>\n<case>/source_0.sv:11: Sorry: Queue of type `class Item{}` is not yet supported.\n<case>/source_0.sv:11: sorry: Queues inside classes are not yet supported.\n<case>/source_0.sv:22: Sorry: Queue of type `class Item{}` is not yet supported.\n:0: Sorry: Queue of type `class Item{}` is not yet supported.\n<case>/source_0.sv:27: Sorry: Queue of type `class Item{}` is not yet supported.\n<case>/source_0.sv:65: error: Type names are not valid expressions here.\n<case>/source_0.sv:65: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:65:               : Expression is: <type>\n<case>/source_0.sv:65:               : Expression type: 10PETypename\n<case>/source_0.sv:65: error: Dimensions must be constant.\n<case>/source_0.sv:65       : This size expression violates the rule: <type>\n<case>/source_0.sv:50: warning: ignoring out of bounds l-value array access m[7302757].\n<case>/source_0.sv:51: warning: ignoring out of bounds l-value array access m[7632751].\n<case>/source_0.sv:52: error: the type of the variable 'm' doesn't match the context type.\n<case>/source_0.sv:52:      : variable type=netvector_t:bool signed[31:0]\n<case>/source_0.sv:52:      : context type=11netuarray_t\n<case>/source_0.sv:16: error: Can't find task push_back in class Box\n<case>/source_0.sv:16: error: Enable of unknown task ``items.push_back''.\n<case>/source_0.sv:23: error: Class Box has no property get_items.\n<case>/source_0.sv:31: error: Variable all[i] does not have a field named: v.\n<case>/source_0.sv:72: error: Object celox_suite_tb.dut.$unm_blk_1.m has no method \"num(...)\".\n<case>/source_0.sv:72: warning: returning 'bx for out of bounds array access m[7632751].\n17 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "containers::functions_returning_containers",
       "phase": "compile",
       "status": "compile_error",
       "stronger_than_sv": false,

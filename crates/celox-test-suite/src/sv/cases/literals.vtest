@@ -74,3 +74,30 @@
   (assert_eq underscore 0x415f42)
   (assert_eq empty_width 8)
   (assert_eq extended 0x80))
+
+; A time literal in an expression is a realtime value scaled to the time unit
+; (IEEE 1800-2023 5.8). The suite runs timed cases at 1ns/1ps.
+(case time_literals_scale_to_the_time_unit
+  (source "time_literals.sv" #"
+module Top(output longint timeout, output logic [63:0] half, output logic [63:0] fraction,
+           output longint tiny, output longint micro);
+    class Root;
+        time phase_timeout = 9200s;
+    endclass
+    Root o;
+    initial begin
+        o = new;
+        timeout = o.phase_timeout;
+        half = $realtobits(2.5ns);
+        fraction = $realtobits(1.25ns);
+        tiny = 2.5ps;
+        micro = 1us;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq timeout 9200000000000)
+  (assert_eq half 0x4004000000000000)
+  (assert_eq fraction 0x3ff4000000000000)
+  (assert_eq tiny 0)
+  (assert_eq micro 1000))

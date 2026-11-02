@@ -81,6 +81,9 @@ impl<A: std::hash::Hash + Eq + Clone> Builder<'_, A> {
         yes: NodeId,
         no: NodeId,
     ) -> Result<NodeId, celox_slt::SLTNodeFactsError> {
+        if yes == no {
+            return Ok(yes);
+        }
         self.node(SLTNode::Mux {
             cond,
             then_expr: yes,
@@ -119,6 +122,9 @@ impl<A: std::hash::Hash + Eq + Clone> Builder<'_, A> {
         }
     }
     fn truth(&mut self, p: Planes) -> Result<Planes, celox_slt::SLTNodeFactsError> {
+        if self.zero(p.1) {
+            return Ok((self.any(p.0)?, self.zeros(1)?));
+        }
         let not_mask = self.unary(UnaryOp::BitNot, p.1)?;
         let known = self.binary(p.0, BinaryOp::And, not_mask)?;
         let known_one = self.any(known)?;
@@ -401,6 +407,79 @@ impl<A: std::hash::Hash + Eq + Clone> Builder<'_, A> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn complete_case_after_a_local_mux_is_not_a_two_state_latch() {
+        let source = r#"module Top(input bit [15:0] a, output logic [7:0] y);
+            always_comb begin
+                case(a[15:12])
+                  14: begin
+                    logic [1:0] part;
+                    if(a[7]) part=a[10:9]; else part=a[4:3];
+                    case({part,a[8]})
+                      0:y=8;1:y=9;2:y=10;3:y=11;
+                      4:y=12;5:y=13;6:y=14;7:y=15;
+                    endcase
+                  end
+                  default:y=0;
+                endcase
+            end
+        endmodule"#;
+        crate::schedule_sources(
+            &[(source, std::path::Path::new("local_mux.sv"))],
+            "Top",
+            &[],
+            &[],
+            &[],
+            false,
+            &Default::default(),
+            &Default::default(),
+            None,
+            &mut Vec::new(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn known_mux_conditions_do_not_create_unknown_masks() {
+        let mut arena = SLTNodeArena::<SourceVarId>::new();
+        let condition = arena
+            .alloc(SLTNode::Input {
+                variable: SourceVarId::default(),
+                signed: false,
+                index: Vec::new(),
+                access: BitAccess::new(0, 0),
+            })
+            .unwrap();
+        let yes = arena
+            .alloc(SLTNode::Constant(3u8.into(), BigUint::zero(), 3, false))
+            .unwrap();
+        let no = arena
+            .alloc(SLTNode::Constant(4u8.into(), BigUint::zero(), 3, false))
+            .unwrap();
+        let value = arena
+            .alloc(SLTNode::Mux {
+                cond: condition,
+                then_expr: yes,
+                else_expr: no,
+            })
+            .unwrap();
+        assert!(is_known(&mut arena, value).unwrap());
+        let unknown = arena
+            .alloc(SLTNode::Constant(1u8.into(), 1u8.into(), 1, false))
+            .unwrap();
+        let value = arena
+            .alloc(SLTNode::Mux {
+                cond: unknown,
+                then_expr: yes,
+                else_expr: no,
+            })
+            .unwrap();
+        assert!(
+            !is_known(&mut arena, value).unwrap(),
+            "literal X must still merge differing bits"
+        );
+    }
 
     #[test]
     fn deep_known_operands_reuse_the_original_comparison() {

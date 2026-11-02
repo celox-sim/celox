@@ -226,3 +226,38 @@ fn unsigned_target_bound_zero_extends_signed_slice_without_losing_state_kind() {
     ));
     assert!(!lowerer.get_bound_signed(casted, &arena));
 }
+
+#[test]
+fn plane_round_trip_has_valid_register_types() {
+    for four_state in [false, true] {
+        for width in [64, 128] {
+            let mut arena = SLTNodeArena::<u32>::new();
+            let input = arena
+                .alloc(SLTNode::Input {
+                    variable: 0,
+                    signed: true,
+                    index: vec![],
+                    access: BitAccess::new(0, width - 1),
+                })
+                .unwrap();
+            let planes = arena
+                .alloc(SLTNode::Unary(UnaryOp::ToPlanes, input))
+                .unwrap();
+            let restored = arena
+                .alloc(SLTNode::Unary(UnaryOp::FromPlanes, planes))
+                .unwrap();
+            let mut builder = SIRBuilder::<u32>::new();
+            let mut lowerer = SLTToSIRLowerer::new(four_state);
+            let result = lowerer.lower(
+                &mut builder,
+                restored,
+                &arena,
+                &mut crate::HashMap::default(),
+            );
+            assert!(
+                matches!(builder.register(&result), RegisterType::Logic { width: actual } if *actual == width)
+            );
+            finish_lowering(builder);
+        }
+    }
+}

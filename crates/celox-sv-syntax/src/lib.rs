@@ -5,12 +5,14 @@
 //! spelling location and macro expansion chain instead of acquiring locations
 //! in a rewritten source string.
 
+mod encoding;
 mod lexer;
 mod nodes;
 mod parser;
 mod preprocess;
 mod source;
 
+pub use encoding::SourceEncoding;
 pub use lexer::{Token, TokenKind, lex};
 pub use nodes::*;
 pub use parser::{Declarations, ParseError, ParseErrorKind};

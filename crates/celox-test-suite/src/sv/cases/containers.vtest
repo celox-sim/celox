@@ -1,5 +1,211 @@
 (group containers (category types))
 
+(case shuffle_integral
+  (source "shuffle.sv" #"
+module Top(output bit same);
+  int values[] = {1, 2, 3, 4, 5}, copy[];
+  int bounded[$:5] = {1, 2, 3, 4, 5}, empty[$], single[$] = {17};
+  int count;
+  initial begin
+    copy = values;
+    same = 1;
+    repeat (8) begin
+      values.shuffle;
+      bounded.shuffle();
+      same = same && values.size() == 5 && bounded.size() == 5;
+      for (int key = 1; key <= 5; key++) begin
+        count = 0;
+        foreach (values[i]) if (values[i] == key) count++;
+        same = same && count == 1;
+        count = 0;
+        foreach (bounded[i]) if (bounded[i] == key) count++;
+        same = same && count == 1;
+      end
+    end
+    empty.shuffle(); single.shuffle;
+    same = same && copy[0] == 1 && copy[4] == 5
+      && empty.size() == 0 && single.size() == 1 && single[0] == 17;
+  end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq same 1))
+
+(case shuffle_four_state
+  (source "shuffle.sv" #"
+module Top(output bit same);
+  logic [3:0] values[$] = {4'b10xz, 4'bz001, 4'bxxxx, 4'h3}, copy[$];
+  int a, b, c, d;
+  initial begin
+    copy = values;
+    values.shuffle();
+    foreach (values[i]) begin
+      a += values[i] === 4'b10xz; b += values[i] === 4'bz001;
+      c += values[i] === 4'bxxxx; d += values[i] === 4'h3;
+    end
+    same = values.size() == 4 && a == 1 && b == 1 && c == 1 && d == 1
+      && copy[0] === 4'b10xz && copy[1] === 4'bz001;
+  end
+endmodule
+"#)
+  (four_state) (top Top) (run_until 0) (assert_eq same 1))
+
+(case shuffle_handles
+  (source "shuffle.sv" #"
+module Top(output bit same);
+  class Cell;
+    int value;
+    function new(int n); value = n; endfunction
+  endclass
+  Cell first, second, values[$], copy[$];
+  string words[] = {"alpha", "beta", "gamma"};
+  int a, b, c;
+  initial begin
+    first = new(11); second = new(22);
+    values.push_back(first); values.push_back(second); values.push_back(null); copy = values;
+    values.shuffle(); words.shuffle;
+    first = null; second = null;
+    #1;
+    foreach (values[i]) begin
+      if (values[i] == null) c++;
+      else if (values[i].value == 11) a++;
+      else if (values[i].value == 22) b++;
+    end
+    words.sort();
+    same = a == 1 && b == 1 && c == 1 && copy[0].value == 11 && copy[1].value == 22
+      && words[0] == "alpha" && words[1] == "beta" && words[2] == "gamma";
+  end
+endmodule
+"#)
+  (top Top) (run_until 1) (assert_eq same 1))
+
+(case shuffle_wide
+  (source "shuffle.sv" #"
+module Top(output bit same);
+  bit [128:0] values[], copy[];
+  int count;
+  initial begin
+    values = new[4];
+    for (int i = 0; i < 4; i++) values[i] = 129'h100000000000000000000000000000000 + i;
+    copy = values;
+    values.shuffle();
+    #1;
+    same = values.size() == 4;
+    for (int key = 0; key < 4; key++) begin
+      count = 0;
+      foreach (values[i]) if (values[i] == 129'h100000000000000000000000000000000 + key) count++;
+      same = same && count == 1;
+    end
+    same = same && copy[0] == 129'h100000000000000000000000000000000
+      && copy[3] == 129'h100000000000000000000000000000003;
+  end
+endmodule
+"#)
+  (top Top) (run_until 1) (assert_eq same 1))
+
+(case shuffle_nested_receivers
+  (source "shuffle.sv" #"
+module Top(output bit same);
+  typedef int queue_t[$];
+  queue_t rows[int];
+  int calls, total;
+  function automatic int next_row(); calls++; return 7; endfunction
+  initial begin
+    rows[7] = {3, 5, 7};
+    rows[next_row()].shuffle();
+    #1;
+    for (int i = 0; i < rows[7].size(); i++) total += rows[7][i];
+    same = calls == 1 && rows[7].size() == 3 && total == 15;
+  end
+endmodule
+"#)
+  (top Top) (run_until 1) (assert_eq same 1))
+
+
+(case associative_default_strings
+  (source "assoc_defaults.sv" #"
+module Top(output bit same);
+  string seed = "hello";
+  string words[int] = '{default: seed}, copy[int];
+  int index = 99;
+  initial begin
+    same = words[1] == "hello" && words.num() == 0 && !words.exists(1)
+      && words.first(index) == 0 && index == 99;
+    copy = words;
+    seed = "changed";
+    words[1] = "world";
+    same = same && words[0] == "hello" && words[1] == "world"
+      && copy[1] == "hello" && copy.num() == 0;
+    copy = words;
+    words.delete(1);
+    same = same && words[1] == "hello" && words.num() == 0
+      && copy[1] == "world" && copy[2] == "hello";
+    copy.delete();
+    words = '{default: "other"};
+    #1;
+    same = same && copy[7] == "hello" && copy.num() == 0
+      && words[7] == "other" && words.num() == 0;
+  end
+endmodule
+"#)
+  (top Top) (run_until 1) (assert_eq same 1))
+
+(case associative_default_copy
+  (source "assoc_defaults.sv" #"
+module Top(output bit same);
+  int values[string], copy[string], plain[string];
+  function automatic int make_default(); return -17; endfunction
+  initial begin
+    values = '{default: make_default()};
+    values["known"] = 5;
+    copy = values;
+    values = plain;
+    same = values["missing"] == 0 && values.num() == 0
+      && copy["known"] == 5 && copy["missing"] == -17;
+    copy.delete();
+    same = same && copy["missing"] == -17 && copy.num() == 0 && !copy.exists("missing");
+  end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq same 1))
+
+(case associative_default_four_state
+  (source "assoc_defaults.sv" #"
+module Top(output bit same);
+  logic [3:0] values[logic [7:0]] = '{default: 4'b10xz}, copy[logic [7:0]];
+  logic [7:0] unknown_index = 'x;
+  initial begin
+    values[unknown_index] = 0;
+    same = values[unknown_index] === 4'b10xz && values[2] === 4'b10xz
+      && values.num() == 0;
+    values[1] = 4'bz001;
+    copy = values;
+    values.delete();
+    same = same && values[1] === 4'b10xz && copy[1] === 4'bz001
+      && copy[2] === 4'b10xz && values.num() == 0;
+  end
+endmodule
+"#)
+  (four_state) (top Top) (run_until 0) (assert_eq same 1))
+
+(case associative_default_wide
+  (source "assoc_defaults.sv" #"
+module Top(output bit same);
+  bit [128:0] values[string] = '{default: 129'h100000000000000000000000000000001}, copy[string];
+  initial begin
+    copy = values;
+    values["known"] = 7;
+    #1;
+    same = values["missing"] == 129'h100000000000000000000000000000001
+      && copy["known"] == 129'h100000000000000000000000000000001
+      && values["known"] == 7 && copy.num() == 0;
+    values.delete();
+    same = same && values["known"] == 129'h100000000000000000000000000000001;
+  end
+endmodule
+"#)
+  (top Top) (run_until 1) (assert_eq same 1))
+
+
 (case class_container_inheritance_static
   (source "class_containers.sv" #"
 module Top(output bit [3:0] flags);
@@ -1537,3 +1743,144 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "2 2 1\n"))
+
+(case queue_40bit_pop_result
+  (source "queue_40bit_pop.sv" #"
+    module Top(input logic clk, input logic [39:0] a, output logic [39:0] y);
+      logic [39:0] q[$];
+      always @(posedge clk) begin
+        q.push_back(a);
+        y = q.pop_front();
+      end
+    endmodule
+  "#)
+  (top Top)
+  (modify (set a 0xabcdef1234))
+  (tick clk)
+  (assert_eq y 0xabcdef1234)
+  (modify (set a 0xffffffffff))
+  (tick clk)
+  (assert_eq y 0xffffffffff)
+  (modify (set a 0))
+  (tick clk)
+  (assert_eq y 0))
+
+(case functions_returning_containers
+  (source "returns.sv" #"
+module Top(output int total, output bit done);
+    typedef int queue_t[$];
+    typedef int array_t[];
+    typedef int map_t[string];
+    class Item;
+        int v;
+    endclass
+    class Box;
+        typedef Item items_t[$];
+        Item items[$];
+        function void add(int v);
+            Item item;
+            item = new;
+            item.v = v;
+            items.push_back(item);
+        endfunction
+        virtual function items_t get_items();
+            return items;
+        endfunction
+        function int count();
+            Item all[$];
+            all = this.get_items;
+            return all.size();
+        endfunction
+        function int sum();
+            Item all[$];
+            all = get_items();
+            sum = 0;
+            foreach (all[i])
+                sum += all[i].v;
+        endfunction
+    endclass
+    int source_q[$];
+    function automatic queue_t make_queue(int n);
+        queue_t q;
+        for (int i = 0; i < n; i++)
+            q.push_back(i * 10);
+        return q;
+    endfunction
+    function automatic array_t make_array();
+        array_t a;
+        a = new[3];
+        foreach (a[i])
+            a[i] = i + 1;
+        return a;
+    endfunction
+    function automatic map_t make_map();
+        map_t m;
+        m["one"] = 1;
+        m["two"] = 2;
+        return m;
+    endfunction
+    function automatic int total_of(int q[$]);
+        total_of = 0;
+        foreach (q[i])
+            total_of += q[i];
+    endfunction
+    function automatic queue_t copy();
+        return source_q;
+    endfunction
+    initial begin
+        int q[$];
+        int a[];
+        int m[string];
+        Box box;
+        q = make_queue(3);
+        $display("%0d %0d %0d", q.size(), q[1], q[2]);
+        a = make_array();
+        $display("%0d %0d", a.size(), a[2]);
+        m = make_map();
+        $display("%0d %0d", m.num(), m["two"]);
+        source_q.push_back(5);
+        q = copy();
+        source_q[0] = 6;
+        $display("%0d %0d %0d", q.size(), q[0], total_of(make_queue(3)));
+        box = new;
+        box.add(4);
+        box.add(7);
+        total = box.sum();
+        $display("%0d %0d", total, box.count());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq total 11)
+  (expect_output "3 10 20\n3 3\n2 2\n1 5 30\n11 2\n"))
+; The loop variable of a foreach over an enumeration-indexed associative
+; array has the index type (IEEE 1800-2023 12.7.3), so its enumeration
+; methods apply (6.19.5).
+(case foreach_enumeration_index_methods
+  (source "containers.sv" #"
+module Top(output bit names_ok, output bit levels_ok, output int last);
+    typedef enum {INFO, WARN, ERROR = 5} sev_t;
+    typedef enum bit [1:0] {LOW = 2'd1, HIGH = 2'd3} lvl_t;
+    class R;
+        int count[sev_t];
+        function string names();
+            string text;
+            count[ERROR] = 3; count[INFO] = 1; count[WARN] = 2;
+            foreach (count[s]) text = {text, $sformatf("%s:%0d ", s.name(), count[s])};
+            return text;
+        endfunction
+    endclass
+    R o;
+    string lv[lvl_t];
+    string t;
+    initial begin
+        o = new;
+        names_ok = o.names() == "INFO:1 WARN:2 ERROR:3 ";
+        lv[HIGH] = "h"; lv[LOW] = "l";
+        foreach (lv[k]) begin t = {t, k.name(), "=", lv[k], " "}; last = k.next(); end
+        levels_ok = t == "LOW=l HIGH=h ";
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq names_ok 1) (assert_eq levels_ok 1) (assert_eq last 1))

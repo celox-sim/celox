@@ -101,13 +101,19 @@ pub(super) fn domain(
                 Some(shape) => variable(shape),
                 None => match objects::property(tree, session, id, native, dimensions)? {
                     Some((property, _)) => scalar(&property.r#type),
-                    None => constant(tree, &name, dimensions),
+                    None => constant(tree, session, id, native, dimensions),
                 },
             }
         }
         ExprKind::Member { .. } => match method(tree, session, id, native, dimensions)? {
             // A method called without parentheses (6.19.5.7).
             Some((method, _, domain)) => method.returns_member().then_some(domain),
+            // A class method called without parentheses (13.5.5).
+            None if let Some((name, ..)) =
+                objects::method(tree, session, id, native, dimensions)? =>
+            {
+                returned_domain(&name, dimensions)
+            }
             None => match objects::static_property(tree, session, id, native, dimensions)?
                 .or_else(|| call_name(tree, id, native))
                 .and_then(|name| dimensions.get(&name))
@@ -115,9 +121,7 @@ pub(super) fn domain(
                 // A static property or a package variable.
                 Some(shape) => variable(shape),
                 // A package-qualified enum constant.
-                None if let Some(domain) = call_name(tree, id, native)
-                    .and_then(|name| constant(tree, &name, dimensions)) =>
-                {
+                None if let Some(domain) = constant(tree, session, id, native, dimensions) => {
                     Some(domain)
                 }
                 None => match objects::property(tree, session, id, native, dimensions)? {
@@ -164,18 +168,7 @@ pub(super) fn domain(
                     Some((name, _, _)) => Some(name),
                     None => call_name(tree, *expression, native),
                 };
-                name.and_then(|name| {
-                    dimensions
-                        .function_return_types
-                        .get(&name)
-                        .and_then(|metadata| metadata.enum_domain.clone())
-                        .or_else(|| {
-                            dimensions
-                                .functions
-                                .get(&name)
-                                .and_then(|function| function.return_enum_domain.clone())
-                        })
-                })
+                name.and_then(|name| returned_domain(&name, dimensions))
             }
         }
         ExprKind::Cast { target, .. } => cast_type(tree, session, *target, native, dimensions)?
@@ -192,6 +185,20 @@ pub(super) fn domain(
         }
         _ => None,
     })
+}
+
+/// The enumerated type that function or method `name` returns.
+fn returned_domain(name: &str, dimensions: &PackedDimensions) -> Option<Arc<EnumDomain>> {
+    dimensions
+        .function_return_types
+        .get(name)
+        .and_then(|metadata| metadata.enum_domain.clone())
+        .or_else(|| {
+            dimensions
+                .functions
+                .get(name)
+                .and_then(|function| function.return_enum_domain.clone())
+        })
 }
 
 /// The type a cast to native `target` converts to, when `target` names a
@@ -227,47 +234,17 @@ fn variable(shape: &VariableDimensions) -> Option<Arc<EnumDomain>> {
         .flatten()
 }
 
-/// The enumerated type of enum constant `name`: the named type of its scope
-/// declaring a member of that name and value. A qualified constant is one
-/// of a type of the scope that qualifies it, and an unqualified one that no
-/// local type declares is the package item an import makes visible; other
-/// scopes may declare members of the same name and value.
+/// The enum method domain retained by the constant's resolved declaration.
 fn constant(
     tree: &AnalysisContext<'_>,
-    name: &str,
+    session: &mut Session,
+    id: ExprId,
+    native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Option<Arc<EnumDomain>> {
-    let value = *dimensions.const_env.get(name)?;
-    let find = |scope: Option<&str>, member: &str| {
-        let mut candidates = dimensions
-            .type_aliases
-            .iter()
-            .filter(|(alias, _)| match scope {
-                Some(scope) => alias
-                    .strip_prefix(scope)
-                    .is_some_and(|rest| rest.starts_with("::")),
-                None => !alias.contains("::"),
-            })
-            .filter_map(|(_, ty)| ty.enum_domain.as_ref())
-            .filter(|domain| {
-                domain
-                    .members
-                    .iter()
-                    .any(|candidate| candidate.name == member && candidate.value == value)
-            });
-        let domain = candidates.next()?;
-        candidates
-            .all(|other| other == domain)
-            .then(|| domain.clone())
-    };
-    match name.rsplit_once("::") {
-        Some((scope, member)) => find(Some(scope), member),
-        None => find(None, name).or_else(|| {
-            let qualified = scope::imported(tree).aliases.get(name)?.clone();
-            let (scope, member) = qualified.rsplit_once("::")?;
-            find(Some(scope), member)
-        }),
-    }
+    crate::ast::enums::constant_binding(tree, session, id, native, dimensions)
+        .ok()??
+        .domain()
 }
 
 /// The enumerated type of an element select `id` of an unpacked array or

@@ -1,0 +1,23 @@
+{
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "string::fixed_array_mutation_indices at 58:27: assert_eq same: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "string::fixed_array_mutation_indices",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "exclude_stronger_than_sv": false,
+  "include_ignored": false,
+  "schema_version": 3,
+  "suite": "sv",
+  "suite_version": "0.12.0",
+  "tool": "xezim",
+  "version": "xezim version 0.11.4",
+  "scope": "Focused blocking mutations of fixed string-array elements before reviewed exclusions; passing and unsupported cases omitted."
+}

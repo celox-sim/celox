@@ -594,3 +594,264 @@ endmodule
   (top Top)
   (run_until 1)
   (assert_eq checks 3))
+
+; IEEE 1800-2023 6.18: a typedef in a block or subroutine body names its type
+; in the rest of that scope, shadowing a typedef of an enclosing scope there.
+(case local_typedefs
+ (source "local_typedefs.sv" #"module Top(output int a, output int b, output int c, output int d, output int e,
+           output int bounds, output int aliased, output int hidden, output int chained, output int levels, output int bound, output int pairs);
+ typedef bit [3:0] nib_t;
+ typedef enum {A1 = 1} e1_t;
+ int tt;
+ class C;
+  int v;
+  local function int f();
+   typedef C self_t;
+   typedef bit [7:0] byte_t;
+   self_t h;
+   byte_t x;
+   h = this;
+   x = h.v + 300;
+   return x;
+  endfunction
+  function int g(); return f(); endfunction
+ endclass
+ function automatic int pick(int i);
+  typedef enum {LOW, MID, HIGH} level_t;
+  level_t l;
+  l = level_t'(i);
+  return l == HIGH ? 10 : l == MID ? 5 : 0;
+ endfunction
+ C o;
+ initial begin
+  o = new;
+  o.v = 1;
+  a = o.g();
+  begin
+   typedef bit [7:0] nib_t;
+   nib_t n;
+   n = 8'hff;
+   b = n;
+  end
+  begin
+   nib_t n;
+   n = 8'hff;
+   c = n;
+  end
+  d = $bits(nib_t);
+  e = pick(2) + pick(1);
+  begin
+   // The bounds are those of the scope that declares the typedef.
+   localparam int N = 4;
+   typedef bit [N-1:0] w_t;
+   begin
+    localparam int N = 8;
+    w_t x;
+    bounds = $bits(x);
+   end
+  end
+  begin
+   // A typedef of another enumeration declares no constants.
+   int A1;
+   typedef e1_t f_t;
+   A1 = 7;
+   aliased = A1;
+  end
+  begin
+   // The type hides a variable of the module with its name.
+   typedef bit [7:0] tt;
+   hidden = $bits(tt);
+  end
+  begin
+   // An enumeration may read the constants of an earlier one.
+   typedef enum {P = 2} p_t;
+   typedef enum {Q = P + 3} q_t;
+   chained = Q;
+  end
+  begin
+   // An enumeration declared with container dimensions declares its
+   // members too.
+   typedef enum {LOW2 = 1, HIGH2 = 2} levels_t[$];
+   levels_t q;
+   q.push_back(HIGH2);
+   levels = q[0];
+  end
+  begin
+   // Its dimensions may read its members: a queue of at most three.
+   typedef enum {LOW3 = 1, HIGH3 = 2} lq_t[$:HIGH3];
+   lq_t q;
+   repeat (4) q.push_back(LOW3);
+   bound = q.size();
+  end
+  begin
+   // A packed array of an enumeration of the module.
+   typedef e1_t [1:0] pair_t;
+   pair_t p;
+   pairs = $bits(p);
+  end
+ end
+endmodule"#)
+ (top Top)
+ (run_until 1)
+ (assert_eq a 45)
+ (assert_eq b 255)
+ (assert_eq c 15)
+ (assert_eq d 4)
+ (assert_eq e 15)
+ (assert_eq bounds 4)
+ (assert_eq aliased 7)
+ (assert_eq hidden 8)
+ (assert_eq chained 5)
+ (assert_eq levels 2)
+ (assert_eq bound 3)
+ (assert_eq pairs 64))
+
+(case package_enum_unknown_constants
+  (source "package_enum_unknown.sv" #"
+    package commands;
+      typedef enum logic [3:0] {
+        READ = 4'b0101, DESELECT = 4'b1xxx, HIGHZ = 4'bzzzz,
+        MERGED = DESELECT | 4'b0010, ZERO = DESELECT & 4'b0000, NEXT
+      } command_t;
+    endpackage
+    module Top(output logic exact, output logic [3:0] zero_value, next_value);
+      assign exact = (commands::DESELECT === 4'b1xxx)
+                  && (commands::HIGHZ === 4'bzzzz)
+                  && (commands::MERGED === 4'b1x1x);
+      assign zero_value = commands::ZERO;
+      assign next_value = commands::NEXT;
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq exact 1)
+  (assert_eq zero_value 0)
+  (assert_eq next_value 1))
+
+(case package_enum_unknown_storage
+  (four_state)
+  (source "package_enum_unknown_storage.sv" #"
+    package commands;
+      typedef enum logic [3:0] { DESELECT = 4'b1xxx, HIGHZ = 4'bzzzz } command_t;
+    endpackage
+    module Top(output logic [3:0] x_value, z_value, output logic exact);
+      assign x_value = commands::DESELECT;
+      assign z_value = commands::HIGHZ;
+      assign exact = (x_value === 4'b1xxx) && (z_value === 4'bzzzz);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq exact 1)
+  (let x_mask (xmask (get x_value)))
+  (let z_mask (xmask (get z_value)))
+  (assert (== x_mask 7))
+  (assert (== z_mask 15)))
+
+(case inline_enum_state_machine
+  (source "inline_enum.sv" #"
+    module Top(input bit clk, reset, output int q, output bit constants_ok);
+      localparam int START = 3;
+      enum int unsigned { IDLE = START, RUN, DONE = RUN + 2 } state;
+      localparam int AFTER = DONE + 1;
+      assign q = state;
+      assign constants_ok = IDLE == 3 && RUN == 4 && DONE == 6 && AFTER == 7;
+      always_ff @(posedge clk)
+        if (reset) state <= IDLE;
+        else case (state)
+          IDLE: state <= RUN;
+          RUN: state <= DONE;
+          default: state <= IDLE;
+        endcase
+    endmodule
+  "#)
+  (top Top) (set clk 0) (set reset 1) (eval)
+  (tick clk) (assert_eq q 3) (assert_eq constants_ok 1)
+  (set reset 0)
+  (tick clk) (assert_eq q 4)
+  (tick clk) (assert_eq q 6)
+  (tick clk) (assert_eq q 3))
+
+(case inline_enum_four_state_constants
+  (source "inline_enum_xz.sv" #"
+    module Top(output bit ok);
+      enum logic [7:0] { BAD = 8'b10xz0011, GOOD = 8'h32 } state;
+      initial begin
+        state = BAD;
+        ok = state === 8'b10xz0011 && BAD === 8'b10xz0011 && GOOD == 8'h32;
+      end
+    endmodule
+  "#)
+  (four_state) (top Top) (run_until 0) (assert_eq ok 1))
+
+(case inline_enum_wide_unused
+  (source "inline_enum_wide_unused.sv" #"
+    module Top(output bit ok);
+      enum logic [255:0] { HI = 256'h1_00000000_00000000_00000000_00000000 } state;
+      assign ok = 1'b1;
+    endmodule
+  "#)
+  (top Top) (eval) (assert_eq ok 1))
+
+(case inline_enum_wide_constants
+  (source "inline_enum_wide.sv" #"
+    module Top(output logic [255:0] q, output bit ok);
+      enum logic [255:0] {
+        HI = 256'h1_00000000_00000000_00000000_00000000,
+        NEXT,
+        LATER = NEXT + 256'd3,
+        LAST
+      } state;
+      assign q = LAST;
+      assign ok = HI == (256'd1 << 128) &&
+                  NEXT == (256'd1 << 128) + 256'd1 &&
+                  LATER == (256'd1 << 128) + 256'd4;
+    endmodule
+  "#)
+  (top Top) (eval) (assert_eq ok 1)
+  (assert_eq q 340282366920938463463374607431768211461))
+
+; An explicit known value may restart enumeration after a resolved X/Z value.
+(case inline_enum_wide_unknown_explicit_successor
+  (source "inline_enum_wide_unknown_explicit.sv" #"
+    module Top(output bit ok);
+      enum logic [255:0] { A = 256'd1 << 128, B = A / 0, C = 256'd9, D } state;
+      assign ok = B === 256'bx && C == 256'd9 && D == 256'd10;
+    endmodule
+  "#)
+  (four_state) (top Top) (eval) (assert_eq ok 1))
+
+(case inline_enum_wider_expression_initializer
+  (source "inline_enum_wider_expression.sv" #"
+    module Top(output logic [255:0] q, output bit ok);
+      enum logic [255:0] { HI = 512'd1 << 128, NEXT, LATER = NEXT + 512'd2, LAST } state;
+      enum logic signed [255:0] { SIGNED_HI = 512'sd1 << 128, SIGNED_NEXT } signed_state;
+      assign q = LAST;
+      assign ok = NEXT == (256'd1 << 128) + 256'd1 &&
+                  SIGNED_NEXT == (256'd1 << 128) + 256'd1;
+    endmodule
+  "#)
+  (top Top) (eval) (assert_eq ok 1)
+  (assert_eq q 340282366920938463463374607431768211460))
+(case scalar_integral_type_casts
+  (source "scalar_integral_casts.sv" #"
+    module Top(input logic [7:0] a, output logic [7:0] q, output bit b, output logic r);
+      assign q = logic'(a);
+      assign b = bit'(a);
+      assign r = reg'(a);
+    endmodule
+  "#)
+  (top Top) (set a 0xfe) (eval)
+  (assert_eq q 0) (assert_eq b 0) (assert_eq r 0)
+  (set a 0x81) (eval)
+  (assert_eq q 1) (assert_eq b 1) (assert_eq r 1))
+
+(case scalar_integral_type_casts_four_state
+  (source "scalar_integral_casts_xz.sv" #"
+    module Top(output bit ok);
+      logic [7:0] x = 8'b1010000x, z = 8'b0100000z;
+      assign ok = logic'(x) === 1'bx && reg'(z) === 1'bz &&
+                  bit'(x) === 1'b0 && bit'(z) === 1'b0;
+    endmodule
+  "#)
+  (four_state) (top Top) (run_until 0) (assert_eq ok 1))

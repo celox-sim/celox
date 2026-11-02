@@ -184,6 +184,14 @@ pub(super) fn native_type(
     session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Option<Arc<ContainerType>>> {
+    // The result of a function or method call that returns a container
+    // (IEEE 1800-2023 13.4.1), whose callee may also name a variable.
+    let ungrouped = expression_binding::ungroup(id, native);
+    if let ExprKind::Call { expression, .. } = &native.expression(ungrouped).kind
+        && let Some(container) = returned_container(*expression, true, native, tree, session, dims)
+    {
+        return Ok(Some(container));
+    }
     // A variable, also a package variable named `p::q` (IEEE 1800-2023
     // 26.3).
     if let Some(name) = expression_binding::native_name(tree, id, native)
@@ -220,6 +228,13 @@ pub(super) fn native_type(
     {
         return Ok(Some(inner));
     }
+    // The result of a method called without parentheses, `h.m` (13.4.1,
+    // 13.5.5).
+    if matches!(native.expression(ungrouped).kind, ExprKind::Member { .. })
+        && let Some(container) = returned_container(ungrouped, false, native, tree, session, dims)
+    {
+        return Ok(Some(container));
+    }
     // A queue slice retains the element type; an index into a container of
     // containers selects its inner type, as for `m[a]` of `m[a][b]`.
     if let ExprKind::Select {
@@ -251,6 +266,27 @@ pub(super) fn native_type(
         session,
         dims,
     )
+}
+
+/// The container type that callee `callee` returns: a method's, or with
+/// `called`, a function's.
+fn returned_container(
+    callee: ExprId,
+    called: bool,
+    native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Option<Arc<ContainerType>> {
+    let name = match expression_binding::object_method(tree, session, callee, native, dims)
+        .ok()
+        .flatten()
+    {
+        Some((name, ..)) => name,
+        None if called => expression_binding::callable_name(tree, callee, native)?,
+        None => return None,
+    };
+    dims.function_return_types.get(&name)?.container.clone()
 }
 
 pub(super) fn call(op: ContainerOp, layout: ContainerLayout, args: Vec<Expr>) -> Expr {
@@ -310,6 +346,25 @@ pub(super) fn assignment(
             None => Expr::Literal("0".into()),
         };
         return Ok(call(ContainerOp::New, target.layout, vec![size, init]));
+    }
+    if matches!(target.layout.kind, ContainerKind::Associative { .. })
+        && let ExprKind::Pattern {
+            target: None,
+            items,
+        } = &native.expression(root).kind
+        && items.len() == 1
+        && items[0].key.is_some_and(|key| {
+            matches!(
+                &native.expression(expression_binding::ungroup(key, native)).kind,
+                ExprKind::Literal(text) if text == "default"
+            )
+        })
+    {
+        return Ok(call(
+            ContainerOp::WithDefault,
+            target.layout,
+            vec![element_value(items[0].value, tree, session, dims, target)?],
+        ));
     }
     let items = match &native.expression(root).kind {
         ExprKind::Concatenation(items) => Some(items.clone()),
@@ -673,7 +728,7 @@ pub(super) fn value(
                     let bound = index_value(id, *expression, tree, session, dims, &target)?;
                     if expression_binding::real_value(&bound, dims)
                         || expression_binding::native_string(tree, session, id, native, dims)
-                        || expression_types::type_of(tree, session, id, native, dims).is_some_and(
+                        || expression_types::type_of(tree, session, id, native, dims).is_ok_and(
                             |ty| {
                                 !matches!(session.types.data(ty), semantic_types::TyData::Packed(_))
                             },
@@ -749,29 +804,36 @@ pub(super) fn value(
                 return Err(unsupported("container scoped call"));
             }
             let (op, count) = match name.spelling.as_str() {
-                "reverse" | "sort" | "rsort"
+                "reverse" | "sort" | "rsort" | "shuffle"
                     if !matches!(target.layout.kind, ContainerKind::Associative { .. }) =>
                 {
                     let op = match name.spelling.as_str() {
                         "reverse" => ContainerOp::Reverse,
                         "sort" => ContainerOp::Sort,
+                        "shuffle" => ContainerOp::Shuffle,
                         _ => ContainerOp::Rsort,
                     };
-                    if op != ContainerOp::Reverse && target.element.unpacked_struct().is_some() {
+                    if matches!(op, ContainerOp::Sort | ContainerOp::Rsort)
+                        && target.element.unpacked_struct().is_some()
+                    {
                         return Err(unsupported(
                             "sorting unpacked structures requires a with expression",
                         ));
                     }
-                    if op != ContainerOp::Reverse && target.record.is_some() {
+                    if matches!(op, ContainerOp::Sort | ContainerOp::Rsort)
+                        && target.record.is_some()
+                    {
                         return Err(unsupported("sorting elements wider than 64 bits"));
                     }
                     // Chandles have no relational operators (6.14, 7.12.2).
-                    if op != ContainerOp::Reverse && target.element.chandle {
+                    if matches!(op, ContainerOp::Sort | ContainerOp::Rsort)
+                        && target.element.chandle
+                    {
                         return Err(AnalyzerError::IllegalChandleUse {
                             detail: "sorting chandles".into(),
                         });
                     }
-                    if op != ContainerOp::Reverse
+                    if matches!(op, ContainerOp::Sort | ContainerOp::Rsort)
                         && target.layout.handle == Some(HandleProperty::Object)
                     {
                         return Err(unsupported(
@@ -1034,6 +1096,77 @@ fn query(
             right: Box::new(Expr::Literal("1".into())),
         },
     }))
+}
+
+/// The element `c[k]` of a dynamic array, queue or associative array of
+/// integral elements that native target `left` selects bits of, as in
+/// `c[k][i] = v`: its native expression, the container's type, and the
+/// values of the container and the index.
+pub(super) fn selected_element(
+    left: ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<Option<(ExprId, Arc<ContainerType>, Expr, Expr)>> {
+    let native = tree.declarations();
+    let mut current = expression_binding::ungroup(left, native);
+    while let ExprKind::Select { expression, .. } = &native.expression(current).kind {
+        let element = expression_binding::ungroup(*expression, native);
+        if let ExprKind::Select {
+            expression: container,
+            dimension,
+        } = &native.expression(element).kind
+            && matches!(
+                dimension.kind,
+                DimensionKind::Index(_) | DimensionKind::Queue(None)
+            )
+            && let Some(target) = native_type(*container, native, tree, session, dims)?
+        {
+            let ty = &target.element;
+            // A select of an element that is a container selects its
+            // elements, see `set`; other elements have no bits to select.
+            if ty.container.is_some()
+                || ty.class.is_some()
+                || ty.chandle
+                || ty.unpacked_struct().is_some()
+                || !ty.unpacked_ranges.is_empty()
+                || target.layout.handle.is_some()
+                || target.record.is_some()
+                || matches!(
+                    ty.kind(),
+                    TypeKind::Real
+                        | TypeKind::Shortreal
+                        | TypeKind::String
+                        | TypeKind::Object
+                        | TypeKind::Event
+                        | TypeKind::Process
+                )
+            {
+                return Ok(None);
+            }
+            let container_value =
+                expression_binding::value(*container, native, tree, session, dims)?;
+            let index = match dimension.kind {
+                DimensionKind::Index(index) => {
+                    index_value(index, *container, tree, session, dims, &target)?
+                }
+                // `q[$]`, the last element of a queue.
+                _ if matches!(target.layout.kind, ContainerKind::Queue { .. }) => Expr::Binary {
+                    left: Box::new(call(
+                        ContainerOp::Size,
+                        target.layout,
+                        vec![container_value.clone()],
+                    )),
+                    op: BinaryOp::Sub,
+                    right: Box::new(Expr::Literal("1".into())),
+                },
+                _ => return Ok(None),
+            };
+            return Ok(Some((element, target, container_value, index)));
+        }
+        current = element;
+    }
+    Ok(None)
 }
 
 pub(super) fn set(
@@ -1312,6 +1445,9 @@ mod method_call_tests {
     #[test]
     fn ordering_methods_reject_unsupported_receivers_arguments_and_void_values() {
         for statement in [
+            "map.shuffle;",
+            "q.shuffle(1);",
+            "value = q.shuffle();",
             "map.sort;",
             "map.rsort();",
             "map.reverse;",
@@ -1340,17 +1476,30 @@ mod method_call_tests {
 
     #[test]
     fn ordering_with_clauses_are_not_silently_ignored() {
+        // `reverse` and `shuffle` take no with clause (IEEE 1800-2023 7.12.2), and the
+        // ordering methods of a fixed array take none yet.
         for call in [
-            "a.sort with (-item)",
-            "a.rsort(x) with (x)",
             "a.reverse with (item)",
+            "a.shuffle with (item)",
+            "f.sort with (-item)",
+            "m.sort with (item)",
         ] {
-            let source = format!("module Top; int a[]; initial {call}; endmodule");
+            let source = format!("module Top; int a[], f[4], m[int]; initial {call}; endmodule");
             assert!(
                 crate::analyze_source(&source, Path::new("ordering-with.sv")).is_err(),
                 "{call}"
             );
         }
+    }
+
+    #[test]
+    fn ordering_with_receivers_are_read_once() {
+        // The sort reads and updates its array many times.
+        let source = "module Top; class H; int q[$]; endclass H h;
+             function H get(); return h; endfunction
+             initial get().q.sort with (item); endmodule";
+        let error = crate::analyze_source(source, Path::new("ordering-receiver.sv")).unwrap_err();
+        assert!(error.to_string().contains("side effect"), "{error}");
     }
 
     #[test]

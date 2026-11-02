@@ -992,16 +992,7 @@ pub(super) fn delay_literal(
     text: &str,
     tree: &AnalysisContext<'_>,
 ) -> Converted<Option<u64>> {
-    let Some((number, exponent)) = [
-        ("fs", -15),
-        ("ps", -12),
-        ("ns", -9),
-        ("us", -6),
-        ("ms", -3),
-        ("s", 0),
-    ]
-    .into_iter()
-    .find_map(|(suffix, exponent)| text.strip_suffix(suffix).map(|n| (n, exponent))) else {
+    let Some((number, exponent)) = time_literal_parts(text) else {
         return Ok(None);
     };
     let context = &*tree.timescale;
@@ -1040,6 +1031,59 @@ pub(super) fn delay_literal(
     Ok(Some(u64::try_from(ticks).map_err(|_| {
         unsupported("time literal delay exceeds scheduler range")
     })?))
+}
+
+/// A time literal in an expression: a realtime value scaled to the time unit
+/// of the scope (IEEE 1800-2023 5.8), as the text of a real literal. Unlike a
+/// delay, the time precision does not round it (3.14.1, 20.3).
+pub(super) fn real_literal(
+    node: celox_sv_syntax::ExprId,
+    text: &str,
+    tree: &AnalysisContext<'_>,
+) -> Converted<Option<String>> {
+    let Some((number, exponent)) = time_literal_parts(text) else {
+        return Ok(None);
+    };
+    let scale = scope_scale(node, tree)?;
+    let number = number.replace('_', "");
+    let (whole, fraction) = number.split_once('.').unwrap_or((&number, ""));
+    let digits = format!("{whole}{fraction}");
+    let shift = i64::from(exponent) - i64::from(scale.unit) - fraction.len() as i64;
+    Ok(Some(if shift >= 0 {
+        format!("{digits}{}.0", "0".repeat(shift as usize))
+    } else {
+        let places = shift.unsigned_abs() as usize;
+        let digits = format!("{digits:0>width$}", width = places + 1);
+        let (whole, fraction) = digits.split_at(digits.len() - places);
+        format!("{whole}.{fraction}")
+    }))
+}
+
+/// The number and the power of ten of the unit of time literal `text`.
+fn time_literal_parts(text: &str) -> Option<(&str, i32)> {
+    [
+        ("fs", -15),
+        ("ps", -12),
+        ("ns", -9),
+        ("us", -6),
+        ("ms", -3),
+        ("s", 0),
+    ]
+    .into_iter()
+    .find_map(|(suffix, exponent)| text.strip_suffix(suffix).map(|n| (n, exponent)))
+}
+
+/// The time scale of the scope that `node` appears in.
+fn scope_scale(node: celox_sv_syntax::ExprId, tree: &AnalysisContext<'_>) -> Converted<Scale> {
+    let context = &*tree.timescale;
+    let source = key(tree);
+    let extended = (!context.design.units.contains_key(&source))
+        .then(|| context.design.including_tree(tree))
+        .transpose()?;
+    let design = extended.as_ref().unwrap_or(&context.design);
+    let unit = &design.units[&source];
+    let at = tree.declarations().expression(node).tokens.start;
+    Ok(scope_at(&unit.scopes, &unit.parents, at).map_or(unit.scale, |i| unit.scopes[i].scale))
 }
 
 #[cfg(test)]

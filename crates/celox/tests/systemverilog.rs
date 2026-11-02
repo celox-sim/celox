@@ -115,6 +115,8 @@ mod edges;
 mod file_core;
 #[path = "frontends/systemverilog/file_io.rs"]
 mod file_io;
+#[path = "frontends/systemverilog/file_lines.rs"]
+mod file_lines;
 #[path = "frontends/systemverilog/final.rs"]
 mod final_procedures;
 #[path = "frontends/systemverilog/generate.rs"]
@@ -296,3 +298,6 @@ mod unpacked_structs;
 
 #[path = "frontends/systemverilog/logic_gates.rs"]
 mod logic_gates;
+
+#[path = "frontends/systemverilog/file_errors.rs"]
+mod file_errors;

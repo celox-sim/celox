@@ -264,6 +264,12 @@ cocotbからの書き込みは現在時刻のブロッキング代入です。�
 スコープを維持し、`celox_sv_analyzer::syntax::preprocess_sources` で単一単位の
 前処理を明示できます。
 
+SystemVerilog ソースと include ヘッダーでは、コメント中の非 UTF-8 バイトを
+デフォルトで許容します。不正なバイトは空白に置き換え、正しい UTF-8 とソースの
+バイト位置は保持します。文字列とコードには引き続き UTF-8 が必要です。
+`--strict-source-encoding`、または `celox.toml` のルート・ターゲットに
+`strict_source_encoding = true` を指定すると、ファイル全体に UTF-8 を要求します。
+
 ```sh
 celox run -f rtlmeter.f --top tb --four-state
 ```

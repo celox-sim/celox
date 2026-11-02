@@ -21,6 +21,21 @@ pub struct FileIo {
     stdin_open: bool,
     stdout_open: bool,
     stderr_open: bool,
+    errors: BTreeMap<u32, FileError>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct FileError {
+    code: i32,
+    message: String,
+}
+impl From<&io::Error> for FileError {
+    fn from(error: &io::Error) -> Self {
+        Self {
+            code: error.raw_os_error().filter(|code| *code != 0).unwrap_or(1),
+            message: error.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
@@ -52,6 +67,7 @@ impl FileIo {
             stdin_open: true,
             stdout_open: true,
             stderr_open: true,
+            errors: BTreeMap::new(),
         }
     }
 
@@ -84,6 +100,7 @@ impl FileIo {
                 .collect(),
             stdin_input: self.stdin_input.clone(),
             standard_open: [self.stdin_open, self.stdout_open, self.stderr_open],
+            errors: self.errors.clone(),
         }
     }
 
@@ -142,6 +159,7 @@ impl FileIo {
                 },
             );
         }
+        manager.errors = snapshot.errors.clone();
         manager.stdin_input = snapshot.stdin_input.clone();
         [manager.stdin_open, manager.stdout_open, manager.stderr_open] = snapshot.standard_open;
         Ok(manager)
@@ -150,12 +168,29 @@ impl FileIo {
     /// Open an MCD when mode is absent, otherwise an FD. Failure returns zero,
     /// as specified by 21.3.1. Closed channel numbers are reused.
     pub fn open(&mut self, path: impl AsRef<Path>, mode: Option<&str>) -> u32 {
+        match self.open_inner(path.as_ref(), mode) {
+            Ok(descriptor) => {
+                self.errors.remove(&0);
+                self.errors.remove(&descriptor);
+                descriptor
+            }
+            Err(error) => {
+                self.errors.insert(0, FileError::from(&error));
+                0
+            }
+        }
+    }
+
+    fn open_inner(&mut self, path: &Path, mode: Option<&str>) -> io::Result<u32> {
         let Some(options) = FileMode::parse(mode.unwrap_or("w")) else {
-            return 0;
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid file mode",
+            ));
         };
         let key = if mode.is_some() {
             let Some(key) = (3..FD_FLAG).find(|key| !self.descriptors.contains_key(key)) else {
-                return 0;
+                return Err(io::Error::other("file descriptor table is full"));
             };
             key
         } else {
@@ -163,13 +198,11 @@ impl FileIo {
                 .map(|bit| 1u32 << bit)
                 .find(|key| !self.channels.contains_key(key))
             else {
-                return 0;
+                return Err(io::Error::other("file descriptor table is full"));
             };
             key
         };
-        let Ok(id) = self.backend.lock().unwrap().open(path.as_ref(), options) else {
-            return 0;
-        };
+        let id = self.backend.lock().unwrap().open(path, options)?;
         let mut file = BackendFile {
             id,
             closed: false,
@@ -178,8 +211,8 @@ impl FileIo {
         if let Some(mode) = mode {
             // Table 21-6 places the initial position at EOF for append modes,
             // including the read position of update streams (a+).
-            if mode.starts_with('a') && file.seek(SeekFrom::End(0)).is_err() {
-                return 0;
+            if mode.starts_with('a') {
+                file.seek(SeekFrom::End(0))?;
             }
             self.descriptors.insert(
                 key,
@@ -189,16 +222,20 @@ impl FileIo {
                     input: InputState::default(),
                 },
             );
-            key | FD_FLAG
+            Ok(key | FD_FLAG)
         } else {
             self.channels.insert(key, file);
-            key
+            Ok(key)
         }
     }
 
     /// Close every selected MCD channel, or one FD. Closing a standard stream
     /// changes this simulation only; it never closes the host process stream.
     pub fn close(&mut self, descriptor: u32) -> io::Result<()> {
+        self.with_status(descriptor, |manager| manager.close_inner(descriptor))
+    }
+
+    fn close_inner(&mut self, descriptor: u32) -> io::Result<()> {
         if descriptor == 0 {
             return Err(invalid_descriptor());
         }
@@ -246,6 +283,10 @@ impl FileIo {
     /// caller so they can use the simulator's ordinary output/event interface.
     /// Stderr is written directly. All selected valid channels are attempted.
     pub fn write(&mut self, descriptor: u32, bytes: &[u8]) -> io::Result<bool> {
+        self.with_status(descriptor, |manager| manager.write_inner(descriptor, bytes))
+    }
+
+    fn write_inner(&mut self, descriptor: u32, bytes: &[u8]) -> io::Result<bool> {
         if descriptor == 0 {
             return Err(invalid_descriptor());
         }
@@ -302,6 +343,10 @@ impl FileIo {
     /// Read a byte from an FD. EOF is latched only after a read reaches it;
     /// a pushed-back byte is returned before the underlying file is read.
     pub fn read_byte(&mut self, descriptor: u32) -> io::Result<Option<u8>> {
+        self.with_status(descriptor, |manager| manager.read_byte_inner(descriptor))
+    }
+
+    fn read_byte_inner(&mut self, descriptor: u32) -> io::Result<Option<u8>> {
         if descriptor == FD_FLAG && self.stdin_open {
             return read_input_byte(&mut BackendStdin(&self.backend), &mut self.stdin_input);
         }
@@ -312,6 +357,12 @@ impl FileIo {
     /// Push back one character without changing the file. One byte is
     /// guaranteed, as with C stdio; another unread before a read is rejected.
     pub fn unread_byte(&mut self, descriptor: u32, byte: u8) -> io::Result<()> {
+        self.with_status(descriptor, |manager| {
+            manager.unread_byte_inner(descriptor, byte)
+        })
+    }
+
+    fn unread_byte_inner(&mut self, descriptor: u32, byte: u8) -> io::Result<()> {
         let input = if descriptor == FD_FLAG && self.stdin_open {
             &mut self.stdin_input
         } else {
@@ -330,6 +381,10 @@ impl FileIo {
 
     /// Whether a previous read encountered EOF (21.3.8).
     pub fn eof(&mut self, descriptor: u32) -> io::Result<bool> {
+        self.with_status(descriptor, |manager| manager.eof_inner(descriptor))
+    }
+
+    fn eof_inner(&mut self, descriptor: u32) -> io::Result<bool> {
         if descriptor == FD_FLAG && self.stdin_open {
             return Ok(self.stdin_input.eof);
         }
@@ -338,6 +393,10 @@ impl FileIo {
 
     /// Byte position of the next read/write, accounting for pushback.
     pub fn tell(&mut self, descriptor: u32) -> io::Result<u64> {
+        self.with_status(descriptor, |manager| manager.tell_inner(descriptor))
+    }
+
+    fn tell_inner(&mut self, descriptor: u32) -> io::Result<u64> {
         let file = self.positioned_file(descriptor)?;
         file.file
             .stream_position()?
@@ -353,6 +412,12 @@ impl FileIo {
     /// Seek relative to start (0), logical current position (1), or end (2).
     /// Successful positioning clears both pushback and the EOF indicator.
     pub fn seek(&mut self, descriptor: u32, offset: i64, operation: i32) -> io::Result<()> {
+        self.with_status(descriptor, |manager| {
+            manager.seek_inner(descriptor, offset, operation)
+        })
+    }
+
+    fn seek_inner(&mut self, descriptor: u32, offset: i64, operation: i32) -> io::Result<()> {
         let file = self.positioned_file(descriptor)?;
         let position = match operation {
             0 => SeekFrom::Start(u64::try_from(offset).map_err(|_| {
@@ -395,6 +460,27 @@ impl FileIo {
     /// Flush one FD/MCD, or all open output files when no descriptor is given.
     /// Attempt every selected channel even if another selected channel fails.
     pub fn flush(&mut self, descriptor: Option<u32>) -> io::Result<()> {
+        if let Some(descriptor) = descriptor {
+            return self.with_status(descriptor, |manager| manager.flush_inner(Some(descriptor)));
+        }
+        let descriptors: Vec<_> = self
+            .descriptors
+            .keys()
+            .map(|key| key | FD_FLAG)
+            .chain(self.channels.keys().copied())
+            .chain(self.stdout_open.then_some(FD_FLAG | 1))
+            .chain(self.stderr_open.then_some(FD_FLAG | 2))
+            .collect();
+        let mut result = Ok(());
+        for descriptor in descriptors {
+            if let Err(error) = self.flush(Some(descriptor)) {
+                result = Err(error);
+            }
+        }
+        result
+    }
+
+    fn flush_inner(&mut self, descriptor: Option<u32>) -> io::Result<()> {
         if let Some(descriptor) = descriptor {
             if descriptor == 0 {
                 return Err(invalid_descriptor());
@@ -440,6 +526,51 @@ impl FileIo {
             }
         }
         error.map_or(Ok(()), Err)
+    }
+
+    fn with_status<T>(
+        &mut self,
+        descriptor: u32,
+        action: impl FnOnce(&mut Self) -> io::Result<T>,
+    ) -> io::Result<T> {
+        let result = action(self);
+        match &result {
+            Ok(_) => {
+                self.errors.remove(&descriptor);
+            }
+            Err(error) if self.valid_fd(descriptor) => {
+                self.errors.insert(descriptor, FileError::from(error));
+            }
+            Err(_) => {
+                self.errors.remove(&descriptor);
+            }
+        }
+        result
+    }
+
+    /// Latest I/O status for an FD (21.3.7). Querying does not clear it.
+    /// Codes and messages depend on the host; successful operations clear both.
+    pub fn error(&self, descriptor: u32) -> (i32, String) {
+        if let Some(error) = self.errors.get(&descriptor) {
+            return (error.code, error.message.clone());
+        }
+        if self.valid_fd(descriptor) {
+            (0, String::new())
+        } else {
+            let error = FileError::from(&invalid_descriptor());
+            (error.code, error.message)
+        }
+    }
+
+    fn valid_fd(&self, descriptor: u32) -> bool {
+        match descriptor {
+            0x8000_0000 => self.stdin_open,
+            0x8000_0001 => self.stdout_open,
+            0x8000_0002 => self.stderr_open,
+            _ => {
+                descriptor & FD_FLAG != 0 && self.descriptors.contains_key(&(descriptor & !FD_FLAG))
+            }
+        }
     }
 
     fn positioned_file(&mut self, descriptor: u32) -> io::Result<&mut InputFile> {
@@ -520,6 +651,8 @@ pub struct FileIoSnapshot {
     descriptors: Vec<(u32, u64, bool, InputState)>,
     stdin_input: InputState,
     standard_open: [bool; 3],
+    #[serde(default)]
+    errors: BTreeMap<u32, FileError>,
 }
 
 #[derive(Debug)]
@@ -603,6 +736,40 @@ fn invalid_descriptor() -> io::Error {
 mod tests {
     use super::*;
     use num_bigint::BigUint;
+
+    #[test]
+    fn error_status_is_per_descriptor_and_cleared_by_success() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("errors");
+        std::fs::write(&path, b"x").unwrap();
+        let mut files = FileIo::default();
+        let fd = files.open(&path, Some("r"));
+        let other = files.open(&path, Some("r"));
+        assert_eq!(files.error(fd), (0, String::new()));
+        assert!(files.seek(fd, -1, 0).is_err());
+        let error = files.error(fd);
+        assert_ne!(error.0, 0);
+        assert!(!error.1.is_empty());
+        assert_eq!(files.error(fd), error);
+        assert_eq!(files.read_byte(other).unwrap(), Some(b'x'));
+        assert_eq!(files.error(fd), error);
+        assert_eq!(files.error(other), (0, String::new()));
+        assert_eq!(files.read_byte(fd).unwrap(), Some(b'x'));
+        assert_eq!(files.read_byte(fd).unwrap(), None);
+        assert_eq!(files.error(fd), (0, String::new()));
+        assert!(files.write(fd, b"denied").is_err());
+        assert_ne!(files.error(fd).0, 0);
+        files.rewind(fd).unwrap();
+        assert_eq!(files.error(fd), (0, String::new()));
+        files.close(fd).unwrap();
+        assert_ne!(files.error(fd).0, 0);
+        let reopened = files.open(&path, Some("r"));
+        assert_eq!(reopened, fd);
+        assert_eq!(files.error(reopened), (0, String::new()));
+        assert_eq!(files.open(directory.path().join("missing"), Some("r")), 0);
+        assert_ne!(files.error(0).0, 0);
+        assert!(!files.error(0).1.is_empty());
+    }
 
     #[test]
     fn byte_input_tracks_eof_pushback_and_logical_position() {

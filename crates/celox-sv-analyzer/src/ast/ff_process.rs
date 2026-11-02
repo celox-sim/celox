@@ -160,16 +160,11 @@ fn ff_event_control_and_body(
         {
             return Ok(None);
         }
-        // Bound without the types of the scope, so its value is checked
-        // with them.
+        // Member clocks need the scope's types to distinguish a structure
+        // leaf (9.4.2) from a hierarchical reference into another instance.
         expression_binding::check_chandle_read(item.expression, tree, native, dimensions, session)?;
-        let expression = expression_binding::value(
-            item.expression,
-            native,
-            tree,
-            session,
-            &PackedDimensions::default(),
-        )?;
+        let expression =
+            expression_binding::value(item.expression, native, tree, session, dimensions)?;
         let Some(signal) = expr_ident_name(&expression) else {
             return Ok(None);
         };

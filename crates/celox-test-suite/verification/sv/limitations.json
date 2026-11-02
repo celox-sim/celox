@@ -246,7 +246,9 @@
         "system_functions::isunbounded_restores_procedural_parameter_type_metadata",
         "types::packed_parameters_of_signed_named_types_have_signed_elements",
         "aggregate_regressions::parameter_element_forwarding",
-        "aggregate_regressions::parameter_runtime_element_bit"
+        "aggregate_regressions::parameter_runtime_element_bit",
+        "indexed_select::wide_parameter_index_bounds",
+        "indexed_select::wide_parameter_unknown_index_bounds"
       ]
     }
   },
@@ -2100,6 +2102,7 @@
         "class::parameter_defaults_bind_where_the_class_is_declared",
         "class::specialization_keys_follow_the_bound_parameters",
         "class::derived_classes_keep_their_declaration_scopes",
+        "class::method_defaults_use_the_object",
         "property_selects::property_selects_of_parameterized_classes",
         "wide_container_elements::wide_elements_of_parameterized_classes"
       ]
@@ -2872,7 +2875,9 @@
         "concurrent_assertions::sampled_history_predicates",
         "concurrent_assertions::sampled_history_gates_and_indices",
         "concurrent_assertions::sampled_history_unknown_transitions",
-        "concurrent_assertions::sampled_history_while_disabled"
+        "concurrent_assertions::sampled_history_while_disabled",
+        "concurrent_assertions::overlapped_boolean_implication",
+        "concurrent_assertions::overlapped_unknown_antecedent"
       ]
     }
   },
@@ -3076,6 +3081,143 @@
         "unpacked_structs::member_initial_values_four_state",
         "unpacked_structs::member_initial_values_local_lifetimes",
         "unpacked_structs::member_initial_values_specialized_functions"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_fixed_struct_array_bounds",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 returns an existing struct element for invalid indices in a multidimensional unpacked array: rows[0][0] of rows[2:1][0:0] reads {3,4}, and rows[2][1].a reads 1. IEEE 1800-2023 7.4.5 requires the element type's default values, which are zero for these bit members. The standalone reproduction also confirms the valid subarray copy succeeds.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/struct-arrays-verilator.json",
+      "verification/repros/sv_struct_array_subarray_and_bounds.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "unpacked_structs::fixed_array_multidimensional_and_bounds"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_fixed_struct_array_nba_index",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 evaluates the index of a nonblocking assignment to a 129-bit member of an unpacked-structure array when applying the NBA update. After rows[index].data[67:60] <= 8'hab; index = 1; it updates row 1 rather than row 0. IEEE 1800-2023 10.4.2 requires the destination index to be evaluated when the assignment is scheduled; xezim agrees with the expected row-0 update.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/struct-arrays-verilator.json",
+      "verification/repros/sv_verilator_struct_array_nba_index.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "unpacked_structs::fixed_array_wide_and_nba"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_struct_array_pattern_rows",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 rejects compatible unpacked-structure subarrays used as list or default assignment-pattern items with \"Item is incompatible with the array type\" and \"Array initialization has too many elements\". IEEE 1800-2023 10.9.1 assigns each item to its corresponding element or subarray type; 6.22.2 and 7.6 permit equivalent arrays with different index bounds.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/struct-array-pattern-rows-verilator.json",
+      "verification/repros/sv_struct_array_pattern_rows.sv",
+      "verification/repros/sv_struct_array_pattern_rows_four_state.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "unpacked_structs::fixed_array_pattern_rows"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_struct_array_pattern_rows",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+    "reason": "Icarus 13.0 rejects the unpacked-structure declarations in both array-valued assignment-pattern cases with \"Unpacked structs not supported.\" IEEE 1800-2023 7.2 and 10.9.1 permit the structures and patterns.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/struct-array-pattern-rows-icarus.json",
+      "verification/repros/sv_struct_array_pattern_rows.sv",
+      "verification/repros/sv_struct_array_pattern_rows_four_state.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "unpacked_structs::fixed_array_pattern_rows",
+        "unpacked_structs::fixed_array_pattern_rows_four_state"
+      ]
+    }
+  },
+  {
+    "id": "sv_xezim_struct_array_pattern_rows",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "xezim version 0.11.4",
+    "reason": "Xezim 0.11.4 does not copy array-valued struct rows in list and default assignment patterns: the two-state probe prints zero for all rows instead of {1,-2} and {3,-4}, and the four-state probe prints 000x for each member instead of preserving the source X/Z values. IEEE 1800-2023 7.6 and 10.9.1 require assignment-compatible row values to be copied by element position.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/struct-array-pattern-rows-xezim.json",
+      "verification/repros/sv_struct_array_pattern_rows.sv",
+      "verification/repros/sv_struct_array_pattern_rows_four_state.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "xezim": [
+        "unpacked_structs::fixed_array_pattern_rows",
+        "unpacked_structs::fixed_array_pattern_rows_four_state"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_fixed_struct_arrays",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+    "reason": "Icarus 13.0 rejects all six fixed-size unpacked-structure array cases with \"Unpacked structs not supported.\" IEEE 1800-2023 7.2 and 7.4 permit these structures and arrays.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/struct-arrays-icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "unpacked_structs::fixed_array_four_state",
+        "unpacked_structs::fixed_array_local_lifetime",
+        "unpacked_structs::fixed_array_members_and_copies",
+        "unpacked_structs::fixed_array_multidimensional_and_bounds",
+        "unpacked_structs::fixed_array_nested_members",
+        "unpacked_structs::fixed_array_wide_and_nba"
+      ]
+    }
+  },
+  {
+    "id": "sv_xezim_fixed_struct_arrays",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "xezim version 0.11.4",
+    "reason": "Xezim 0.11.4 treats an X index of an unpacked-structure array as element 0 for both reads and writes, and copies a selected subarray to a differently bounded destination as zero. IEEE 1800-2023 7.4.5 requires type-default reads and ignored writes for invalid indices; 7.6 copies compatible arrays by left-to-right element position regardless of their index bounds.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/struct-arrays-xezim.json",
+      "LIMITATIONS.md#systemverilog-suite",
+      "verification/repros/sv_xezim_struct_array_unknown_index.sv",
+      "verification/repros/sv_struct_array_subarray_and_bounds.sv"
+    ],
+    "cases": {
+      "xezim": [
+        "unpacked_structs::fixed_array_four_state",
+        "unpacked_structs::fixed_array_multidimensional_and_bounds"
       ]
     }
   },
@@ -4128,6 +4270,418 @@
     "cases": {
       "verilator": [
         "string::fixed_array_invalid_indices"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_struct_array_members_syntax",
+    "category": "simulator_disagreement",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+    "reason": "Icarus 13.0 rejects unpacked structure declarations in all eleven integral array-member cases, including array-valued defaults. IEEE 1800-2023 7.2 permits unpacked arrays as unpacked structure members.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/struct-array-members-icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "unpacked_structs::integral_array_members",
+        "unpacked_structs::integral_array_members_four_state",
+        "unpacked_structs::integral_array_members_local",
+        "unpacked_structs::integral_array_members_nested",
+        "unpacked_structs::integral_array_members_of_arrays",
+        "unpacked_structs::integral_array_members_of_arrays_four_state",
+        "unpacked_structs::integral_array_members_parameters",
+        "unpacked_structs::integral_array_members_replication",
+        "unpacked_structs::integral_array_members_wide",
+        "unpacked_structs::integral_array_member_defaults",
+        "unpacked_structs::integral_array_member_defaults_four_state"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_struct_array_members_invalid_index",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 aliases rows[9].values[2] to rows[1].values[2] in a two-element structure array: the invalid write stores 999 in the valid element, and the invalid read returns 999. IEEE 1800-2023 7.4.5 requires invalid writes to be ignored and invalid reads to return the element default. The standalone probe also confirms normal member-array copies before the invalid write.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/struct-array-members-verilator.json",
+      "verification/repros/sv_struct_array_members_bounds.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "unpacked_structs::integral_array_members_of_arrays"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_struct_array_members_wide",
+    "category": "simulator_disagreement",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 emits uncompilable C++ for a structure containing a two-element array of 129-bit integral values: VL_CONST_W_1X receives VlUnpacked<VlWide<5>, 2> where WDataOutP is required. The standalone probe reproduces the build failure; Celox and xezim pass the shared case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/struct-array-members-verilator.json",
+      "verification/repros/sv_struct_array_members_wide.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "unpacked_structs::integral_array_members_wide"
+      ]
+    }
+  },
+  {
+    "id": "sv_xezim_struct_array_members_copies",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "xezim version 0.11.4",
+    "reason": "Xezim 0.11.4 reverses element order when copying values[3:2] into saved[0:1] (22,11 instead of 11,22), and does not copy a member-array expression or subarray of a fixed structure array (saved remains 0,0 and rows[0].values remains 11,55). IEEE 1800-2023 7.6 assigns corresponding array elements in left-to-right order. Standalone probes preserve both observations.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/struct-array-members-xezim.json",
+      "verification/repros/sv_struct_array_members_basic.sv",
+      "verification/repros/sv_struct_array_members_bounds.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "xezim": [
+        "unpacked_structs::integral_array_members",
+        "unpacked_structs::integral_array_members_of_arrays"
+      ]
+    }
+  },
+  {
+    "id": "sv_xezim_struct_array_members_invalid_index",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "xezim version 0.11.4",
+    "reason": "Xezim 0.11.4 applies an X-indexed outer-array write to row zero and reads part of row zero through the invalid index. The standalone probe prints row0=0000,z001 invalid=xxxx,0000 copy=0000,z001,z. IEEE 1800-2023 7.4.5 requires ignored writes and per-member default values (all X for these logic members).",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/struct-array-members-xezim.json",
+      "verification/repros/sv_struct_array_members_four_state.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "xezim": [
+        "unpacked_structs::integral_array_members_of_arrays_four_state"
+      ]
+    }
+  },
+  {
+    "id": "sv_xezim_struct_array_members_replication",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "xezim version 0.11.4",
+    "reason": "Xezim 0.11.4 initializes only the first member of a replicated structure pattern and drops or misplaces items in nested replicated array patterns: triple=1,0,0 rows=7,22,0,0,0 instead of triple=1,1,1 rows=7,11,22,11,22. IEEE 1800-2023 10.9.2 requires replicated items to fill the corresponding structure members.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/struct-array-members-xezim.json",
+      "verification/repros/sv_struct_array_members_replication.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "xezim": [
+        "unpacked_structs::integral_array_members_replication"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_struct_array_member_defaults",
+    "category": "simulator_disagreement",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 reports an internal error in V3Ast.cpp:665 (Node has no back, already unlinked?) when a multidimensional array assignment pattern uses src.a as its default. The adapter-free probe reproduces the error at values = default src.a. IEEE 1800-2023 10.9.1 and 10.9.2 permit matching array-valued defaults; scalar defaults still apply recursively.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/struct-array-members-verilator.json",
+      "verification/repros/sv_struct_array_member_defaults.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "unpacked_structs::integral_array_member_defaults"
+      ]
+    }
+  },
+  {
+    "id": "sv_xezim_struct_array_member_defaults",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "xezim version 0.11.4",
+    "reason": "Xezim 0.11.4 leaves destinations of matching array-valued defaults at their initial values: dst, nested members, array rows and selected subarrays remain zero, while the scalar default correctly produces 7,7. The four-state probe leaves dst as xxxx,xxxx instead of copying 10xz,z001. IEEE 1800-2023 10.9.2 evaluates a matching default in the context of assignment to the array member.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/struct-array-members-xezim.json",
+      "verification/repros/sv_struct_array_member_defaults.sv",
+      "verification/repros/sv_struct_array_member_defaults_four_state.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "xezim": [
+        "unpacked_structs::integral_array_member_defaults",
+        "unpacked_structs::integral_array_member_defaults_four_state"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_associative_defaults",
+    "category": "simulator_disagreement",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+    "reason": "Icarus 13.0 rejects default-only associative array literals and associative array declarations in the four focused cases. IEEE 1800-2023 7.9.11 permits user defaults for associative arrays.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/associative-defaults-icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "containers::associative_default_strings",
+        "containers::associative_default_copy",
+        "containers::associative_default_four_state",
+        "containers::associative_default_wide"
+      ]
+    }
+  },
+  {
+    "id": "sv_xezim_associative_defaults",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "xezim version 0.11.4",
+    "reason": "Xezim 0.11.4 keeps a reference to the default expression rather than capturing its value (changing seed changes the default and its copies), retains a previous default when assigning an array without a user default, and returns 0 for an unknown-index read instead of the user default 10xz. Standalone probes reproduce each observation. IEEE 1800-2023 7.9.9 and 7.9.11 specify array assignment and user defaults; 7.8.6 also applies user defaults to unknown-index reads.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/associative-defaults-xezim.json",
+      "verification/repros/sv_associative_default_strings.sv",
+      "verification/repros/sv_associative_default_copy.sv",
+      "verification/repros/sv_associative_default_four_state.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "xezim": [
+        "containers::associative_default_strings",
+        "containers::associative_default_copy",
+        "containers::associative_default_four_state"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_fixed_string_array_mutations",
+    "category": "simulator_disagreement",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 reports an internal error in V3Ast.h:1113 (AstNode is not of expected type, but instead has type ARRAYSEL) for putc and integer-conversion methods on fixed string-array elements. The standalone conversion probe reproduces the error at words[0].itoa(-17). IEEE 1800-2023 6.16.2 and 6.16.11-14 define these methods on string variables.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/string-array-mutations-verilator.json",
+      "verification/repros/sv_string_array_mutations_methods.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "string::fixed_array_mutations",
+        "string::fixed_array_mutating_methods",
+        "string::fixed_array_mutation_indices"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_fixed_string_array_mutations",
+    "category": "simulator_disagreement",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+    "reason": "Icarus 13.0 rejects dynamic indices in string-array method receivers with Scope index expression is not constant, cannot elaborate selected putc tasks, and rejects the multidimensional string-array copy. The four exact cases retain their compiler diagnostics. IEEE 1800-2023 6.16.2 and 6.16.11-14 apply the methods to selected string variables.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/string-array-mutations-icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "string::fixed_array_mutations",
+        "string::fixed_array_mutating_methods",
+        "string::fixed_array_mutation_indices",
+        "string::fixed_array_mutations_invalid_indices"
+      ]
+    }
+  },
+  {
+    "id": "sv_xezim_fixed_string_array_mutations",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "xezim version 0.11.4",
+    "reason": "Xezim 0.11.4 evaluates each of the two authored select_word() calls twice and also increments a postfix array index twice while updating string-array elements. The standalone probe prints calls=4 index=2 words=ZXQ,12 instead of calls=2 index=1 words=12,def. IEEE 1800-2023 6.16.2 makes putc equivalent to a character assignment; lowering its read and write must preserve the effects of evaluating the selected destination.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/string-array-mutations-xezim.json",
+      "verification/repros/sv_string_array_mutations_indices.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "xezim": [
+        "string::fixed_array_mutation_indices"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_container_shuffle",
+    "category": "simulator_disagreement",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+    "reason": "Icarus 13.0 reports that the shuffle array sorting method is not currently supported in the scalar sequence cases, and additionally rejects queues of class handles and associative arrays of queues in the other cases. IEEE 1800-2023 7.12.2 permits shuffle on non-associative unpacked arrays. The focused report records the exact five compilation failures.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/shuffle-icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "containers::shuffle_integral",
+        "containers::shuffle_four_state",
+        "containers::shuffle_handles",
+        "containers::shuffle_wide",
+        "containers::shuffle_nested_receivers"
+      ]
+    }
+  },
+  {
+    "id": "sv_xezim_container_shuffle",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "xezim version 0.11.4",
+    "reason": "Xezim 0.11.4 misclassifies rows[next_row()].shuffle() on a queue-valued associative array element as a class method and aborts at time 0 with a null class handle diagnostic. IEEE 1800-2023 7.12.2 permits shuffle on this selected queue. The standalone probe reproduces the diagnostic; Verilator 5.052 and all Celox backends pass the shared case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/shuffle-xezim.json",
+      "verification/repros/sv_shuffle_nested_receiver.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "xezim": [
+        "containers::shuffle_nested_receivers"
+      ]
+    }
+  },
+  {
+    "id": "sv_xezim_continuous_delay_selects",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "xezim version 0.11.4",
+    "reason": "Xezim 0.11.4 propagates both selected continuous drivers at the shorter delay: y becomes 1111 instead of 0011, and generated g becomes 11 instead of 01. IEEE 1800-2023 10.3.3 attaches each delay to its assignment. The standalone probe prints y=1111 g=11 at 6.5 ns where Icarus and Celox preserve the later selected updates; Verilator also passes both shared cases.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/continuous-delays-xezim.json",
+      "verification/repros/sv_continuous_delay_selects.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "xezim": [
+        "timing::continuous_delay_selected_drivers",
+        "timing::continuous_delay_generate_parameters"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_independent_net_delays",
+    "category": "simulator_disagreement",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+    "reason": "Icarus 13.0 rejects independent net delays with Net delays not supported in all seven focused cases. IEEE 1800-2023 10.3.3 and 28.16 specify this form separately from net-declaration continuous initializers, which pass. The standalone probe reproduces the compilation diagnostic.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/independent-net-delays-icarus.json",
+      "verification/repros/sv_independent_net_delay.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "timing::continuous_delay_net_four_state",
+        "timing::continuous_delay_net_gate_driver",
+        "timing::continuous_delay_net_independent",
+        "timing::continuous_delay_net_mixed_generate",
+        "timing::continuous_delay_net_partially_undriven",
+        "timing::continuous_delay_net_per_bit",
+        "timing::continuous_delay_net_selected_drivers"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_independent_net_delays",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 reschedules an entire delayed vector when another bit changes, postponing the first bit: the standalone probe prints w=00 selected=00 at 10.1 ns instead of 01 for both. IEEE 1800-2023 10.3.3 and 28.16 apply the independent net delay to each bit. Xezim and Celox preserve the first bit deadline. Only the whole-vector and selected-driver cases are excluded.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/independent-net-delays-verilator.json",
+      "verification/repros/sv_independent_net_delay.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "timing::continuous_delay_net_per_bit",
+        "timing::continuous_delay_net_selected_drivers"
+      ]
+    }
+  },
+  {
+    "id": "sv_xezim_independent_net_undriven_bits",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "xezim version 0.11.4",
+    "reason": "Xezim 0.11.4 initializes undriven bits of a partially driven delayed vector to X until the net delay elapses: the standalone probe prints xxxx at 1 ns, then zz00 at 4 ns. IEEE 1800-2023 6.7.1 requires bits without drivers to default to Z, so the first value must be zzxx. The wholly undriven scalar net and the other six independent-delay cases pass.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/independent-net-delays-xezim.json",
+      "verification/repros/sv_independent_net_delay_partial.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "xezim": [
+        "timing::continuous_delay_net_partially_undriven"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_ferror_success_description",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 returns code zero but writes \"Success\" into the description for a successful file operation, including packed buffers. IEEE 1800-2023 21.3.7 explicitly requires the description to be cleared when the most recent operation did not produce an error. Icarus 13.0 and Celox clear both output forms; the standalone probe prints the difference.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/ferror-verilator.json",
+      "verification/repros/sv_ferror_clears_description.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "file_io::ferror_success_clears_description"
+      ]
+    }
+  },
+  {
+    "id": "sv_xezim_ferror_success_description",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "xezim version 0.11.4",
+    "reason": "Xezim 0.11.4 returns code zero but writes \"No error\" into the description for a successful file operation, including packed buffers. IEEE 1800-2023 21.3.7 explicitly requires the description to be cleared when the most recent operation did not produce an error. Icarus 13.0 and Celox clear both output forms; the standalone probe prints the difference.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/ferror-xezim.json",
+      "verification/repros/sv_ferror_clears_description.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "xezim": [
+        "file_io::ferror_success_clears_description"
       ]
     }
   }

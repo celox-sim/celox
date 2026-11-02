@@ -28,7 +28,7 @@ synthesis and is tested at the design level.
 
 | Area | Supported |
 | --- | --- |
-| Types | `logic`, `bit`, `reg`, packed vectors, multidimensional packed arrays with ascending or descending ranges and arbitrary constant bounds, packed structs, unpacked structs (see [unpacked structures](#unpacked-structures)), hard and soft packed untagged unions, enums (with implicit values) and their methods `first`, `last`, `next`, `prev`, `num` and `name` on any enum-typed expression except an element of a packed array of enums ([#2417](https://github.com/celox-sim/celox/issues/2417)), `typedef`, unpacked arrays used as memories, signed and unsigned |
+| Types | `logic`, `bit`, `reg`, packed vectors, multidimensional packed arrays with ascending or descending ranges and arbitrary constant bounds, packed structs, unpacked structs (see [unpacked structures](#unpacked-structures)), hard and soft packed untagged unions, enums (with implicit values) and their methods `first`, `last`, `next`, `prev`, `num` and `name` on any enum-typed expression except an element of a packed array of enums ([#2417](https://github.com/celox-sim/celox/issues/2417)), `typedef` (also in a block or subroutine body, for the rest of that scope), unpacked arrays used as memories, signed and unsigned |
 | Expressions | arithmetic including `**`, logic, shift, comparison, reduction, concatenation and replication, `?:`, `inside`, `==?` / `!=?`, casts (`N'(x)`, `signed'(x)`, `T'(x)`), `$signed` / `$unsigned` |
 | Selects | constant and run-time bit selects and indexed part-selects (`[i]`, `[i +: W]`, `[i -: W]`), in reads and writes, in either declaration direction |
 | Patterns | assignment patterns for packed and unpacked structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
@@ -313,6 +313,45 @@ delay such as `#1.5` or `#r` rounds the same way, with ties away from zero
 (6.12.1); a negative one waits its two's complement (9.4.1), and a NaN one
 waits zero.
 
+### Continuous assignment delays {#continuous-assignment-delays}
+
+`assign #5 y = a;` accepts one nonnegative integral constant delay, including
+parameters and generate-local constants, or a time literal such as `#1.25ns`.
+The same delay applies to each continuous initializer in a net declaration,
+such as `wire #5 w = a, v = b;` (10.3.3); these are continuous assignments,
+not one-time variable initializers.
+Time literals round at the declaring scope's precision. The target must be a
+scalar or packed integral variable/net, optionally with a constant bit or part
+select; the RHS must be integral and contain no subroutine calls.
+
+Updates use inertial delay (IEEE 1800-2023 10.3.3): a changed, destination-sized
+RHS cancels the pending update. A return to the current driven value cancels
+without scheduling another update; input changes that leave the RHS unchanged
+preserve the pending deadline. Assignments to disjoint bit/part selects keep
+independent deadlines. Overlapping multiple net drivers retain the existing
+unsupported diagnostic. X/Z, wide values, checkpoint replay and timer
+cancellation are supported. `#0` uses ordinary continuous-assignment evaluation.
+
+Rise/fall/turn-off delay lists, variable or negative amounts, unitless fractional
+real amounts, concatenated or aggregate destinations and dynamic destination
+selects remain unsupported ([#444](https://github.com/celox-sim/celox/issues/444)).
+Independent net delays such as `wire #5 w; assign w = a;` also accept one
+constant delay on scalar and packed integral nets. They delay each bit of the
+resolved driving value independently (10.3.3, 28.16), after any delay on its
+driving assignment. A change to another bit preserves the first bit's pending
+update, unlike a vector assignment delay. Continuous assignments to static destinations and supported
+logic gates may drive the net; undriven nets and statically undriven bits remain
+Z from time zero (6.7.1).
+Mixed declarations such as `wire #5 a = expr, b;` keep assignment delay on `a`
+and independent net delay on `b`.
+
+Independent delayed nets used in instance port connections and delayed
+input/inout ports remain unsupported, as do unpacked/nonintegral delayed nets
+and drivers with dynamic destination selects.
+Connect the delayed value through an ordinary continuous assignment when
+exporting a local delayed net. Existing restrictions on overlapping drivers
+still apply.
+
 ### Built-in functions and tasks
 
 | Area | Supported |
@@ -322,7 +361,7 @@ waits zero.
 | Simulation time | `$time`, `$stime` and `$realtime` in clocked and combinational processes, continuous assignments, `initial` blocks and their subroutines |
 | Sampled values | `$sampled` in processes, combinational logic and the subroutines they call; `$past`, `$rose`, `$fell`, `$stable` and `$changed` in edge-triggered processes whose clock they infer and the subroutines those call; see [Sampled values](#sampled-values) |
 | System tasks | `$printtimescale`, `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish`, `$stop`, `$exit` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
-| Runtime I/O | `$test$plusargs`, `$value$plusargs`, `$fopen`, `$fclose`, `$fdisplay` / `$fwrite` and radix variants, `$writememh` / `$writememb`, `$sformatf` / `$sformat` / `$swrite` and its radix variants (see [Formatted output to strings](#formatted-output-to-strings)), and [VCD controls](./vcd#systemverilog-source-controls) in timed processes |
+| Runtime I/O | `$system`, `$test$plusargs`, `$value$plusargs`, `$fopen`, `$fclose`, `$fdisplay` / `$fwrite` and radix variants, `$writememh` / `$writememb`, `$sformatf` / `$sformat` / `$swrite` and its radix variants (see [Formatted output to strings](#formatted-output-to-strings)), and [VCD controls](./vcd#systemverilog-source-controls) in timed processes |
 | State | two-state and four-state simulation |
 
 Every construct above is covered by tests that compare the result with a
@@ -342,6 +381,28 @@ their type; a whole structure is assigned and compared with `==`, `!=`,
 from an assignment pattern (`'{a, b}`, `'{m: v, default: d}`, `T'{...}`, with
 `default` applied to the members of nested structures). Other operators,
 selects and casts of a whole structure are rejected.
+
+Module variables and procedural locals also support fixed-size unpacked array
+members of simple integral types, including packed vectors. Member dimensions
+may be multidimensional, use arbitrary constant bounds, or come from a typedef.
+Nested structures, assignment patterns (including structure replication), whole
+structure copies, compatible member-array and subarray copies, array-valued
+`default:` items, and dynamic indices are supported. Invalid indices follow 7.4.5, including preserving X/Z
+in untouched members. Array members of enum, packed aggregate, string, handle
+or unpacked structure type, variable-size dimensions and declared initial
+values on array members remain unsupported. Structures with array members
+cannot yet be ports, class properties, subroutine interfaces or dynamic
+container elements.
+
+Fixed-size arrays of structures are supported for module variables and
+procedural locals when every leaf member is integral, all leaves are 2-state
+or all are 4-state, and no member has a declared initial value. This includes
+nested structures, integral array members, multidimensional arrays, element and
+member assignments, assignment patterns, and copies of elements and whole arrays. Compatible subarrays
+can be items of list and `default:` assignment patterns. Invalid indices
+read the element's default value and ignore writes (7.4.5). Arrays with string,
+handle, mixed-state or defaulted members, and array ports, class properties and
+subroutine interfaces remain unsupported.
 
 Constant integral member initial values are supported for module variables,
 procedural locals and class properties (7.2.2). They are captured in the type's
@@ -363,7 +424,7 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
 
 - Class features beyond those [listed](#classes): `$cast` to a variable that is not a class handle, anonymous enumeration, struct and union types and named four-state or string constants of a module or package as class parameter values (a class passes its own such parameters on by name), module-local classes as type arguments to package-class specializations, properties that are `real` or arrays, reads of bit and part selects of a property not declared `[N-1:0]`, selects of a member of a property of unpacked structure type, packed structure members of a property, properties as `output` or `inout` arguments, and randomization or constraints over 4-state properties. Recursive calls remain unsupported.
 - Behavioral and verification constructs: nonblocking intra-assignment event controls and nonconstant delays,
-  delayed continuous assignments ([#444](https://github.com/celox-sim/celox/issues/444)),
+  continuous assignment delays beyond the [supported subset](#continuous-assignment-delays) ([#444](https://github.com/celox-sim/celox/issues/444)),
   `wait fork` / `disable fork`, temporal concurrent assertions beyond the Boolean subset below, `force` / `release`.
 - Named events beyond those [listed](#named-events): arrays of events, event ports,
   event members of unpacked structures, functions returning an event, triggers
@@ -385,8 +446,9 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
 - Declarations: variable declaration initializers of members of an interface
   array, ANSI port default values, tagged unions, unpacked unions, packed union assignment patterns, internal nets without a driver ([#460](https://github.com/celox-sim/celox/issues/460)),
   `real`, and unpacked structs as ports, nets, parameters, static, `rand` or
-  `const` class properties, fixed-size array elements, or with members that
-  are arrays (also dynamic arrays, queues and associative arrays) or `real`.
+  `const` class properties, or with members that
+  are `real` or arrays outside the [supported subset](#unpacked-structures)
+  (including dynamic arrays, queues and associative arrays).
   Restrictions on member initial values are listed [above](#unpacked-structures).
 - Sequential processes: `iff` qualifiers in `always_ff` event lists ([#452](https://github.com/celox-sim/celox/issues/452)), and in
   `always_ff` edge operands other than a plain signal ([#464](https://github.com/celox-sim/celox/issues/464)), multi-bit
@@ -401,7 +463,7 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   ([#456](https://github.com/celox-sim/celox/issues/456)).
 - System tasks and functions: Celox knows every name IEEE 1800-2023
   defines, including the optional ones of its Annex D. One it does not support where it is called, such as
-  `$fgets`, is
+  `$get_coverage`, is
   reported with its name wherever it is written, including in an unused
   parameter and in a function body. A `$` name that is not a system task or
   function, a call with the wrong number of arguments, an omitted argument
@@ -481,8 +543,11 @@ Fixed unpacked arrays of strings support assignment patterns, whole-array and
 subarray copies, indexed reads and assignments, and string methods that do not
 modify the receiver. A full element selection yields a string; a further index
 reads a character. Invalid element indices read as the empty string and writes
-are ignored (7.4.5). Mutating methods and character writes on array elements,
-and array-valued string arguments or return values, remain unsupported.
+are ignored (7.4.5). Complete elements also support blocking character writes,
+`putc`, `itoa`, `hextoa`, `octtoa` and `bintoa`. Each array index is evaluated
+once before the update; copies of the string retain their prior text.
+Nonblocking character writes, method calls on whole arrays or subarrays,
+and array-valued string arguments or return values remain unsupported.
 
 Not yet supported: `atoreal` / `realtoa`, string
 arguments of `$value$plusargs`, file I/O and DPI-C, and string values in VPI,
@@ -500,6 +565,14 @@ included, which order numerically by the signedness of the index type (7.8.4),
 `num` / `size`, `exists`, `delete`, and `first` / `last` / `next` / `prev`
 (7.8–7.10). The locator methods that return indices (`find_index` and the
 like) are not supported for integral keys wider than 64 bits.
+A default-only literal, such as `string words[int] = '{default: "hello"}`,
+sets the value read for a missing or unknown index (7.8.6, 7.9.11). The value
+is captured by the assignment, preserved by array copies and `delete()`, and
+does not create entries for `num()`, `exists()` or traversal. Assigning an array
+without a user default restores the element type's normal default. Explicit
+index entries and mixtures of index entries with `default:` in associative
+array literals remain unsupported.
+
 Traversal leaves its index unchanged when no key is found. A container
 declared with several dynamic dimensions, `T m[a][b]`, holds containers as
 elements: `m[a][b] = v` updates the inner container of `m[a]`, which reads as
@@ -530,16 +603,20 @@ results may be discarded with `void'(...)`; type queries such as
 Integral pop result queries preserve the element's packed dimensions and
 declared bounds. Queries on string- or class-valued pop results remain unsupported.
 
-Dynamic arrays and queues support `reverse`, `sort` and `rsort`, with or
+Dynamic arrays and queues support `reverse`, `sort`, `rsort` and `shuffle`, with or
 without empty parentheses (IEEE 1800-2023 7.12.2). These void methods reorder
 the receiver in place and preserve its size and queue bound; a prior array
 assignment keeps its own copy. Sorting supports integral elements up to 64 bits,
-using their signedness, and strings in lexicographic order. Reversal also
-supports class handles. Element X/Z bits and class identity are preserved.
+using their signedness, and strings in lexicographic order. Reversal and
+shuffling also support class handles and wide elements. Element X/Z bits and
+class identity are preserved.
+Shuffling draws its seed from the calling process's random stream; process
+seeding and checkpoint restoration apply to later shuffles.
 For module variables, `@(a[i])` observes changes to the selected element,
 including changes caused by ordering methods (9.4.2).
-Associative arrays cannot use ordering methods. Fixed-array ordering, `shuffle`,
-and ordering `with` expressions and iterator arguments remain unsupported.
+Associative arrays cannot use ordering methods. Fixed-array ordering and
+ordering `with` expressions and iterator arguments remain unsupported.
+A `with` clause on `shuffle` is rejected, as 7.12.2 requires.
 
 Elements may be packed integral values of any width, strings, class
 handles or [unpacked structures](#unpacked-structures); a missing
@@ -548,7 +625,11 @@ structure's default members. Containers of elements wider than 64 bits are
 not compared with `==`, sorted, reduced or printed with `%p`. Containers of unpacked structures with a string
 or handle member, or wider than 64 bits, are not compared with `==` or sorted
 without `with`; a member of such an element is read, not written (assign
-the whole element). Positional assignment patterns and element concatenations construct
+the whole element). A bit-select or part-select of an integral element up to
+64 bits wide, `q[i][3] = b` or `m[k][7:4] += 1`, also of an element of a
+container passed by reference, writes those bits of the element; its
+container and index are evaluated for both the read and the write of the
+element, so they may not have side effects. Positional assignment patterns and element concatenations construct
 sequences; assignments between dynamic arrays and queues copy values and
 respect the destination queue's bound. Associative assignment requires the
 same key type. Equality (`==`, `!=`, `===`, `!==`) between equivalent container types compares contents,
@@ -900,7 +981,13 @@ arguments with ANSI-declared defaults, also between given ones. A name with no
 formal, a formal bound twice, a positional argument after a named one, too
 many arguments, and an omitted argument whose formal has no default are
 compile errors. Defaults are evaluated only when used,
-in the enclosing declaration scope (IEEE 1800-2023 13.5.3). Constant calls use
+in the enclosing declaration scope (IEEE 1800-2023 13.5.3); the default of a
+method that is not static may use the object the method is called on, calling
+its methods (virtual ones through the object's class) and reading its
+properties, of the object the call evaluates. In a function called from an
+`always_comb` or `assign`, such a default evaluates the receiver again, so a
+receiver with effects is rejected there, and so is any receiver when another
+argument evaluated before the default reads the object has effects. Constant calls use
 the same formal names in parameter initializers, ranges and generate conditions;
 generate-local declarations retain their own signatures. Named calls with
 procedural effects in selection indices are rejected.
@@ -1366,6 +1453,42 @@ optional start and count operands select the range. Packed destinations ignore
 those operands. Partial reads preserve bits that received no input, including
 X/Z bits. The return value is the number of bytes read, or zero on an I/O error.
 
+### File error status
+
+`$ferror(fd, str)` returns a signed 32-bit error code and description for the
+most recent I/O operation on that FD (IEEE 1800-2023 21.3.7). Success returns
+zero and clears the destination. Outputs may be `string` variables, selected
+fixed string-array elements or packed buffers of at least 640 bits. The FD and
+output selection are evaluated once, in that order.
+
+Queries do not clear the status; a successful operation on the same FD does.
+Other FDs are independent, and ordinary EOF is not an error. Codes and wording
+are host dependent. Celox also exposes a failed `$fopen`'s details through FD 0.
+Unknown descriptor bits after 32-bit conversion cause a runtime error. Status
+is part of the file-handler snapshot, restored alongside a core checkpoint.
+Class properties and dynamic-container destinations remain unsupported.
+
+### Line input
+
+`$fgets(str, fd)` reads one line into a writable `string` variable or selected
+fixed string-array element (IEEE 1800-2023 21.3.4.2). The signed 32-bit result
+counts bytes read, including a transferred newline. An unterminated final line
+returns its remaining bytes; EOF detection and `$ungetc` use the same state as
+`$fgetc`. NUL bytes are counted as input but omitted from the resulting string,
+which cannot contain NUL (6.16); other bytes need not be UTF-8.
+
+When no bytes are read, or a read fails, the result is zero and Celox leaves the
+destination unchanged. Other simulators differ on the no-data EOF destination;
+the clause specifies the count but does not explicitly specify that value.
+The destination is captured once before evaluating the descriptor, including
+side effects in a selected array index. The descriptor is converted to 32 bits;
+unknown bits remaining after conversion cause a runtime error.
+
+The call runs in timed `Simulation` processes, including subroutines and
+scheduled edge processes. Packed integral buffers, class properties and dynamic
+container destinations are outside this subset. External input state is owned
+by the file handler; replay needs its snapshot as well as the core checkpoint.
+
 ### Byte input and file positioning
 
 `$fgetc(fd)` returns the next byte as an integer from 0 to 255, or -1 on EOF
@@ -1442,6 +1565,16 @@ Each call with conversions is a host request of a timed `Simulation`, like the
 file output tasks below; a format without conversions and arguments is a
 constant. Calls from combinational processes and continuous assignments are
 unsupported.
+
+### Host commands
+
+`$system([command])` executes a host shell command at runtime as a task or a function
+(IEEE 1800-2023 20.17.1).
+The signed 32-bit result is the C `system()` return value, including the host
+platform's exit-status encoding. With no argument it queries command-processor
+availability; an empty string executes an empty command. Commands run only when
+the simulation reaches the call, in scheduled processes. WebAssembly hosts do
+not support shell execution (a WASM simulation backend on a native host does).
 
 ### Runtime file output
 

@@ -13,6 +13,7 @@ mod effects;
 mod final_procedures;
 mod foreach;
 mod intra_assignment;
+mod ordering;
 use foreach::ForeachLoop;
 pub(super) mod randomization;
 pub(super) mod references;
@@ -26,12 +27,16 @@ use crate::procedural::{
 /// One lexical scope: the locals it declares and the bindings they shadow.
 struct Scope {
     entries: Vec<ScopeEntry>,
+    /// The types that the typedefs of the scope shadow, in declaration
+    /// order.
+    shadowed_types: Vec<(String, Option<Type>)>,
 }
 
 struct ScopeEntry {
     source: String,
     unique: Option<String>,
     shadowed_dimensions: Option<VariableDimensions>,
+    shadowed_constant_type: Option<semantic_types::ConstantType>,
     shadowed_constants: Vec<(String, Option<i128>)>,
     shadowed_literal: Option<String>,
     shadowed_parameter_value: Option<Expr>,
@@ -172,7 +177,7 @@ impl Names {
 
 /// The packed and unpacked shape of a declared type, as selects see it.
 pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
-    VariableDimensions {
+    VariableDimensions::new(VariableShape {
         chandle: r#type.chandle,
         container: r#type.container.clone(),
         randomizable: r#type.container.is_none()
@@ -201,7 +206,19 @@ pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
         signed_element_depth: r#type.signed_element_depth,
         unpacked_struct: r#type.unpacked_struct.clone(),
         declared: type_names::Declared::new(r#type),
-    }
+    })
+}
+
+/// A declaration whose type can be resolved in its own lexical environment.
+pub(super) fn bound_dimensions_from_type(
+    ty: &Type,
+    functions: &const_functions::ConstantFunctions,
+    table: &mut semantic_types::TyTable,
+    env: &HashMap<String, i128>,
+) -> VariableDimensions {
+    let shape = dimensions_from_type(ty);
+    shape.bind_type(table, functions, env);
+    shape
 }
 
 /// `r#type` with the constants of its declaration scope substituted into its
@@ -435,6 +452,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             names: Names {
                 scopes: vec![Scope {
                     entries: Vec::new(),
+                    shadowed_types: Vec::new(),
                 }],
                 local_constants: HashMap::default(),
             },
@@ -465,6 +483,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     fn push_scope(&mut self) {
         self.names.scopes.push(Scope {
             entries: Vec::new(),
+            shadowed_types: Vec::new(),
         });
     }
 
@@ -472,7 +491,29 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         let Some(scope) = self.names.scopes.pop() else {
             return;
         };
+        for (name, shadowed) in scope.shadowed_types.into_iter().rev() {
+            match shadowed {
+                Some(ty) => {
+                    self.type_aliases.insert(name.clone(), ty.clone());
+                    self.dims.type_aliases.insert(name, ty);
+                }
+                None => {
+                    self.type_aliases.remove(&name);
+                    self.dims.type_aliases.remove(&name);
+                }
+            }
+        }
         for entry in scope.entries.into_iter().rev() {
+            match entry.shadowed_constant_type {
+                Some(binding) => {
+                    Arc::make_mut(&mut self.dims.constant_types)
+                        .insert(entry.source.clone(), binding);
+                }
+                None if self.dims.constant_types.contains_key(&entry.source) => {
+                    Arc::make_mut(&mut self.dims.constant_types).remove(&entry.source);
+                }
+                None => {}
+            }
             for (key, value) in entry.shadowed_constants {
                 if let Some(value) = value {
                     self.dims.const_env.insert(key, value);
@@ -524,9 +565,14 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     pub(super) fn declare(&mut self, source: &str, r#type: Type) -> String {
         let unique = format!("{source}@{}", *self.state.counter);
         *self.state.counter += 1;
+        let shape = bound_dimensions_from_type(
+            &r#type,
+            &self.tree.functions,
+            &mut self.session.types,
+            &self.dims.const_env,
+        );
         let entry = self.take_binding(source, Some(unique.clone()), r#type.packed_ranges.len());
-        self.dims
-            .insert(source.to_string(), dimensions_from_type(&r#type));
+        self.dims.insert(source.to_string(), shape);
         self.dims
             .expression_signedness
             .insert(source.to_string(), r#type.is_signed());
@@ -572,16 +618,25 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             shadowed_literal: self.names.local_constants.remove(source),
             shadowed_parameter_value: self.dims.parameter_values.remove(source),
             shadowed_dimensions: self.dims.remove(source),
+            shadowed_constant_type: if self.dims.constant_types.contains_key(source) {
+                Arc::make_mut(&mut self.dims.constant_types).remove(source)
+            } else {
+                None
+            },
             shadowed_signedness: self.dims.expression_signedness.remove(source),
         }
     }
 
-    /// Hide the module-scope names that the properties of `class` shadow
-    /// inside its methods (IEEE 1800-2023 8.5), until the scope ends.
+    /// Hide the module-scope names that the properties and methods of
+    /// `class` shadow inside its methods (IEEE 1800-2023 8.5, 23.9), until
+    /// the scope ends.
     /// A static property's name is renamed to the module variable that holds
     /// it (IEEE 1800-2023 8.9).
     fn enter_class_scope(&mut self, class: &classes::Class) {
         self.dims.class_scope = Some(class.name.clone());
+        let constants =
+            classes::specializations::enum_constants(self.tree, self.session, &class.name);
+        Arc::make_mut(&mut self.dims.constant_types).extend(constants);
         // The name of a property of unpacked structure type, whose members
         // are properties named by their member paths, is hidden too.
         let aggregates = class
@@ -589,11 +644,15 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             .iter()
             .filter(|aggregate| !aggregate.name.contains('.'))
             .map(|aggregate| aggregate.name.as_str());
+        // A method's name hides a module variable too, so that an
+        // unqualified call names the method.
+        let methods = class.methods.iter().map(|method| method.name.as_str());
         for name in class
             .properties
             .iter()
             .map(|property| property.name.as_str())
             .chain(aggregates)
+            .chain(methods)
         {
             let entry = self.take_binding(name, None, 0);
             self.names
@@ -609,15 +668,18 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             if property.local && property.owner != class.name {
                 continue;
             }
+            let shape = bound_dimensions_from_type(
+                &property.r#type,
+                &self.tree.functions,
+                &mut self.session.types,
+                &self.dims.const_env,
+            );
             let entry = self.take_binding(
                 &property.name,
                 Some(property.variable.clone()),
                 property.r#type.packed_ranges.len(),
             );
-            self.dims.insert(
-                property.name.clone(),
-                dimensions_from_type(&property.r#type),
-            );
+            self.dims.insert(property.name.clone(), shape);
             self.dims
                 .expression_signedness
                 .insert(property.name.clone(), property.r#type.is_signed());
@@ -748,6 +810,20 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         deferred_destination_checks: Option<&mut Vec<Expr>>,
     ) -> Result<Stmt, AnalyzerError> {
         let (left, right) = native;
+        if op != "="
+            && unpacked_structs::native_struct(
+                left,
+                self.tree.declarations(),
+                self.tree,
+                self.session,
+                &self.dims,
+            )?
+            .is_some()
+        {
+            return Err(unsupported(format!(
+                "operator `{op}` on an unpacked structure"
+            )));
+        }
         if containers::element_member(
             left,
             self.tree.declarations(),
@@ -908,6 +984,38 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             && let Some((_, ty)) = &member_context
         {
             let shape = procedural::dimensions_from_type(ty);
+            if !shape.unpacked.is_empty() {
+                array_compatibility::check_native_unpacked_assignment(
+                    self.tree,
+                    self.session,
+                    right,
+                    &shape,
+                    || "assignment to a structure array member".into(),
+                    &self.dims,
+                )?;
+                if !matches!(
+                    self.tree
+                        .declarations()
+                        .expression(expression_binding::ungroup(right, self.tree.declarations()))
+                        .kind,
+                    celox_sv_syntax::ExprKind::Pattern { target: None, .. }
+                ) && let Some(actual) =
+                    dimensions::operand_shape(right, self.tree, self.session, &self.dims)?
+                    && let Some((actual, target)) = array_compatibility::incompatible(
+                        self.tree,
+                        self.session,
+                        &actual,
+                        &shape,
+                        &self.dims,
+                    )
+                {
+                    return Err(AnalyzerError::IncompatibleUnpackedArray {
+                        context: "assignment to a structure array member".into(),
+                        actual,
+                        target,
+                    });
+                }
+            }
             expression_binding::bind_value(
                 right,
                 self.tree.declarations(),
@@ -1808,6 +1916,70 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             self.rename_expr(&mut store);
             return Ok(Stmt::Eval(store));
         }
+        if expression_binding::fixed_string_array_element(self.tree, string, native, &self.dims) {
+            if nonblocking {
+                return Err(unsupported(
+                    "nonblocking assignment to a string array character",
+                ));
+            }
+            // Capture authored indices before flattening repeats them in bounds
+            // and range guards. The method's arguments may change those indices.
+            let mut indices = Vec::new();
+            let mut base = string;
+            while let celox_sv_syntax::ExprKind::Select {
+                expression,
+                dimension,
+            } = &native
+                .expression(expression_binding::ungroup(base, native))
+                .kind
+            {
+                let celox_sv_syntax::DimensionKind::Index(index) = dimension.kind else {
+                    return Err(unsupported("string mutation of a subarray"));
+                };
+                indices.push(index);
+                base = *expression;
+            }
+            let saved = self.dims.effect_values.clone();
+            let mut body = Vec::new();
+            for index in indices.into_iter().rev() {
+                let mut value =
+                    expression_binding::value(index, native, self.tree, self.session, &self.dims)?;
+                let ty = dimensions::bound_bits_type(self.tree, &value, &self.dims)
+                    .ok_or_else(|| unsupported("string array index type"))?;
+                let (source, unique) = self.hidden(vector_type(ty.width, ty.signed));
+                self.rename_expr(&mut value);
+                body.push(Stmt::Assign {
+                    lhs: LValue::Ident(unique),
+                    rhs: value,
+                    nonblocking: false,
+                });
+                Arc::make_mut(&mut self.dims.effect_values).insert(index, Expr::Ident(source));
+            }
+            let target = self.native_lvalue(string, false);
+            self.dims.effect_values = saved;
+            let (written, _) = target?;
+            let receiver = (op == StringOp::Putc).then(|| {
+                expression_binding::string_call(
+                    StringOp::FromHandle,
+                    vec![expr_from_lvalue(self.tree, &written, &self.dims)],
+                )
+            });
+            let mut rhs =
+                expression_binding::string_call(op, receiver.into_iter().chain(args).collect());
+            let mut lhs = written;
+            self.rename_lvalue(&mut lhs);
+            self.rename_expr(&mut rhs);
+            body.push(Stmt::Assign {
+                lhs,
+                rhs,
+                nonblocking,
+            });
+            return Ok(Stmt::If {
+                condition: Expr::Literal("1'b1".into()),
+                then_body: body,
+                else_body: Vec::new(),
+            });
+        }
         let (written, lhs) = self.native_lvalue(string, false)?;
         let LValue::Ident(name) = &written else {
             return Err(unsupported(format!(
@@ -1908,6 +2080,12 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     stmts.extend(assignment);
                     return Ok(stmts);
                 }
+                if let Some(assignment) =
+                    self.element_select_assignment(operator, *nonblocking, *left, *right)?
+                {
+                    stmts.extend(assignment);
+                    return Ok(stmts);
+                }
                 stmts.push(self.assignment_value(
                     if *nonblocking { "=" } else { operator },
                     *nonblocking,
@@ -1918,6 +2096,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             StatementKind::Expression(id) => {
                 if let Some(stmts) = self.update_statement(*id)? {
                     return Ok(stmts);
+                }
+                if let Some(stmts) = self.ordering_with_statement(*id)? {
+                    let mut effects = self.effects(&[*id])?;
+                    effects.extend(stmts);
+                    return Ok(effects);
                 }
                 let mut stmts = self.effects(&[*id])?;
                 stmts.extend(self.subroutine_call_statement(*id)?);
@@ -2005,6 +2188,110 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         }
     }
 
+    /// Declare typedef `id` of a block or subroutine body, visible to the
+    /// rest of the scope (IEEE 1800-2023 6.18). A forward typedef declares
+    /// nothing a body uses.
+    fn local_type_alias(&mut self, id: celox_sv_syntax::TypeAliasId) -> Converted<()> {
+        let native = self.tree.declarations();
+        let alias = native.type_alias(id);
+        let celox_sv_syntax::TypeAliasTarget::DataType(target) = alias.target else {
+            return Ok(());
+        };
+        // The members of an enumeration the typedef declares, collected and
+        // checked as those of a typedef of the module (6.19); a typedef of
+        // another enumeration declares none.
+        let mut members = EnumMemberConstants::default();
+        let mut dimension_env = (*self.dims.const_env).clone();
+        parameters::enum_members_of(
+            self.tree,
+            self.session,
+            target,
+            &mut dimension_env,
+            &self.type_aliases,
+            &mut members,
+        )?;
+        // The typedef is bound as one of the module: its base type in the
+        // scope's constants, its dimensions also with its members.
+        let local = *self.state.counter;
+        *self.state.counter += 1;
+        let aliases: SharedMap<Type> = self.type_aliases.clone().into();
+        let dimension_env: SharedMap<i128> = dimension_env.into();
+        let mut ty = types::bind_alias(
+            self.tree,
+            self.session,
+            alias,
+            &self.dims.const_env,
+            &aliases,
+            &dimension_env,
+            false,
+            // Each local typedef is a type of its own, also where another
+            // scope declares one of the same name; it is written with the
+            // name of its design element.
+            || {
+                let (identity, typename) = types::declaration_name(self.tree, alias, None);
+                (format!("{identity}@{local}"), typename)
+            },
+        )?
+        .ok_or_else(|| unsupported("local type declaration of this type"))?;
+        drop(aliases);
+        types::freeze_bounds(&mut ty, &self.tree.functions, &dimension_env);
+        let name = instances::normalize_identifier(&alias.name.spelling);
+        // The type hides a variable or constant of an enclosing scope with
+        // its name.
+        let hidden = self.take_binding(&name, None, 0);
+        self.names
+            .scopes
+            .last_mut()
+            .expect("a body always has a scope")
+            .entries
+            .push(hidden);
+        let binding = parameters::enum_constant_type(
+            self.tree,
+            self.session,
+            target,
+            &ty,
+            &self.dims.const_env,
+            &self.type_aliases,
+        )?;
+        for (member, literal) in members.exprs {
+            let r#type = members.types[&member];
+            let entry = self.take_binding(&member, None, 0);
+            if let Some(&number) = members.numbers.get(&member) {
+                self.dims.const_env.insert(member.clone(), number);
+            }
+            self.dims.const_env.insert(enum_marker(&member), 1);
+            insert_parameter_type_markers(&mut self.dims.const_env, &member, r#type);
+            if let Expr::Literal(text) = &literal {
+                self.names
+                    .local_constants
+                    .insert(member.clone(), text.clone());
+            }
+            self.dims.parameter_values.insert(member.clone(), literal);
+            self.dims
+                .expression_signedness
+                .insert(member.clone(), r#type.signed);
+            if let Some(binding) = &binding {
+                Arc::make_mut(&mut self.dims.constant_types)
+                    .insert(member.clone(), binding.clone());
+            }
+            self.names
+                .scopes
+                .last_mut()
+                .expect("a body always has a scope")
+                .entries
+                .push(entry);
+        }
+        let shadowed = self.type_aliases.insert(name.clone(), ty.clone());
+        self.dims.type_aliases.insert(name.clone(), ty);
+        self.names
+            .scopes
+            .last_mut()
+            .expect("a body always has a scope")
+            .shadowed_types
+            .push((name, shadowed));
+        Ok(())
+    }
+
     /// Declare native local variables and return their initializations.
     pub(super) fn block_item_declaration(
         &mut self,
@@ -2014,8 +2301,9 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             celox_sv_syntax::LocalDeclaration::Parameters(id) => return self.local_parameters(*id),
             celox_sv_syntax::LocalDeclaration::Variables(value)
             | celox_sv_syntax::LocalDeclaration::Constructed(value) => value,
-            celox_sv_syntax::LocalDeclaration::TypeAlias(_) => {
-                return Err(unsupported("local type declaration"));
+            celox_sv_syntax::LocalDeclaration::TypeAlias(id) => {
+                self.local_type_alias(*id)?;
+                return Ok(Vec::new());
             }
             celox_sv_syntax::LocalDeclaration::Unconverted(_) => {
                 return Err(unsupported("let declaration inside a procedural block"));
@@ -2031,7 +2319,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             None,
         )?;
         let mut stmts = Vec::new();
-        for (signal, assignment) in
+        for (mut signal, assignment) in
             signals
                 .into_iter()
                 .zip(native.variables.iter().filter(|variable| {
@@ -2042,6 +2330,14 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     )
                 }))
         {
+            if signal.r#type.unpacked_struct().is_some()
+                && !signal.r#type.unpacked_ranges.is_empty()
+            {
+                if signal.is_const {
+                    return Err(unsupported("const variable of unpacked structure type"));
+                }
+                signal.r#type = unpacked_structs::array_storage(signal.r#type)?;
+            }
             // A declaration may not repeat a name of its own scope, such as
             // a subroutine argument (IEEE 1800-2023 6.21).
             let scope = self.names.scopes.last().expect("a body always has a scope");
@@ -2105,7 +2401,9 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 None => None,
             };
             let implicit_event = assignment.value.is_none() && init.is_some();
-            if signal.r#type().unpacked_struct().is_some() {
+            if signal.r#type().unpacked_struct().is_some()
+                && signal.r#type().unpacked_ranges.is_empty()
+            {
                 let explicit = native.lifetime.as_deref() == Some("static");
                 stmts.extend(self.aggregate_local(
                     &signal,
@@ -2238,8 +2536,14 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             return Err(unsupported("array of unpacked structures"));
         }
         for (name, ty) in unpacked_structs::aggregates(source, r#type) {
+            let shape = bound_dimensions_from_type(
+                &ty,
+                &self.tree.functions,
+                &mut self.session.types,
+                &self.dims.const_env,
+            );
             let entry = self.take_binding(&name, None, 0);
-            self.dims.insert(name.clone(), dimensions_from_type(&ty));
+            self.dims.insert(name.clone(), shape);
             self.names
                 .scopes
                 .last_mut()
@@ -2319,6 +2623,9 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 parameter_packed_dimensions(std::slice::from_ref(parameter)).remove(name)
             {
                 self.dims.insert(name.to_string(), dimensions);
+            }
+            if let Some(ty) = &parameter.semantic_type {
+                Arc::make_mut(&mut self.dims.constant_types).insert(name.into(), ty.clone());
             }
             if let Some(ty) = types.get(name) {
                 self.dims
@@ -2503,17 +2810,30 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         let args = (!arguments.iter().any(|arg| arg.name.is_some())).then_some(presence);
         let name = name.spelling.as_str();
         // `$cast` as a task reports a run-time error when the cast fails
-        // (IEEE 1800-2023 6.24.2).
+        // (IEEE 1800-2023 6.24.2); the result of a `void'` cast is discarded.
         if name == "$cast"
-            && !discarded
-            && let Some(cast) = expression_binding::object_cast(
+            && let [destination, source] = arguments
+            && let (Some(destination), Some(source), None, None) = (
+                destination.value,
+                source.value,
+                &destination.name,
+                &source.name,
+            )
+            && let Some(cast) = expression_binding::object_cast_to(
                 self.tree,
                 self.session,
-                arguments,
+                destination,
+                source,
                 declarations,
                 &self.dims,
             )?
         {
+            if discarded {
+                if let expression_binding::ObjectCast::Fails = cast {
+                    return Ok(Vec::new());
+                }
+                return Ok(vec![Stmt::Eval(self.native_value(root)?)]);
+            }
             let error = Stmt::SystemTask {
                 task: SystemTask::Severity(system_functions::Severity::Error),
                 site: source_span(declarations.expression(root).tokens, self.tree),
@@ -3016,6 +3336,35 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             innermost = false;
             let (name, left, right) = match bound {
                 ForeachLoop::Static(name, left, right) => (name, left, right),
+                ForeachLoop::String { array, index } => {
+                    let index_expr = Expr::Ident(index.clone());
+                    body = vec![Stmt::Loop {
+                        kind: LoopKind::For,
+                        init: vec![Stmt::Local {
+                            name: index.clone(),
+                            init: Some(Expr::Literal("0".into())),
+                        }],
+                        condition: Some(Expr::Binary {
+                            left: Box::new(index_expr.clone()),
+                            op: BinaryOp::Lt,
+                            right: Box::new(expression_binding::string_call(
+                                StringOp::Len,
+                                vec![array],
+                            )),
+                        }),
+                        step: vec![Stmt::Assign {
+                            lhs: LValue::Ident(index),
+                            rhs: Expr::Binary {
+                                left: Box::new(index_expr),
+                                op: BinaryOp::Add,
+                                right: Box::new(Expr::Literal("1".into())),
+                            },
+                            nonblocking: false,
+                        }],
+                        body,
+                    }];
+                    continue;
+                }
                 ForeachLoop::Container {
                     array,
                     index,
@@ -3243,7 +3592,12 @@ pub(super) fn subroutine_argument_names(
             let param_shapes: Vec<VariableDimensions> = params
                 .iter()
                 .map(|(_, _, r#type, _)| {
-                    dimensions_from_type(&scoped_type(r#type.clone(), &item.env))
+                    bound_dimensions_from_type(
+                        &scoped_type(r#type.clone(), &item.env),
+                        &tree.functions,
+                        &mut session.types,
+                        &item.env,
+                    )
                 })
                 .collect();
             let param_directions: Vec<ParamDirection> =
@@ -3312,7 +3666,12 @@ pub(super) fn subroutine_argument_names(
                     params
                         .iter()
                         .map(|(_, _, r#type, _)| {
-                            dimensions_from_type(&scoped_type(r#type.clone(), &env))
+                            bound_dimensions_from_type(
+                                &scoped_type(r#type.clone(), &env),
+                                &tree.functions,
+                                &mut session.types,
+                                &env,
+                            )
                         })
                         .collect(),
                 );
@@ -3324,7 +3683,12 @@ pub(super) fn subroutine_argument_names(
             for method in ["randomize", "srandom", "rand_mode"] {
                 let qualified = item.name(&classes::Class::subroutine_name(&class, method));
                 let mut param_names = vec![classes::THIS.to_owned()];
-                let mut param_shapes = vec![dimensions_from_type(&handle)];
+                let mut param_shapes = vec![bound_dimensions_from_type(
+                    &handle,
+                    &tree.functions,
+                    &mut session.types,
+                    &env,
+                )];
                 let (argument, ty) = match method {
                     "randomize" => (
                         "$selection",
@@ -3337,7 +3701,12 @@ pub(super) fn subroutine_argument_names(
                     _ => ("on_off", classes::unsigned_type(1)),
                 };
                 param_names.push(argument.into());
-                param_shapes.push(dimensions_from_type(&ty));
+                param_shapes.push(bound_dimensions_from_type(
+                    &ty,
+                    &tree.functions,
+                    &mut session.types,
+                    &env,
+                ));
                 directions.insert(
                     qualified.clone(),
                     vec![ParamDirection::Input; param_names.len()],
@@ -3345,7 +3714,12 @@ pub(super) fn subroutine_argument_names(
                 shapes.insert(qualified.clone(), param_shapes);
                 names.insert(qualified, param_names);
             }
-            let handle = dimensions_from_type(&scoped_type(handle, &env));
+            let handle = bound_dimensions_from_type(
+                &scoped_type(handle, &env),
+                &tree.functions,
+                &mut session.types,
+                &env,
+            );
             if !constructor && !layout.is_some_and(|layout| layout.is_interface) {
                 let qualified = item.name(&classes::Class::subroutine_name(&class, "new"));
                 directions.insert(qualified.clone(), vec![ParamDirection::Input]);
@@ -3687,6 +4061,17 @@ pub(super) fn lower_subroutine(
             "unpacked structure member initial values in subroutine interfaces",
         ));
     }
+    if return_type
+        .as_ref()
+        .into_iter()
+        .chain(params.iter().map(|(_, _, ty, _)| ty))
+        .filter_map(|ty| ty.unpacked_struct())
+        .any(|aggregate| aggregate.has_array_members())
+    {
+        return Err(unsupported(
+            "unpacked structure array members in subroutine interfaces",
+        ));
+    }
     // An event control could not tell a call of such a function from a
     // value (IEEE 1800-2023 15.5).
     if return_type
@@ -3736,6 +4121,22 @@ pub(super) fn lower_subroutine(
         // declaration in the method's own lexical scope (8.5, 6.21).
         builder.push_scope();
     }
+    // A method that is not static receives the handle of its object first,
+    // and a constructor returns the handle of the object it initializes.
+    // Its defaults are evaluated in the scope of the method, so they may
+    // use the object (IEEE 1800-2023 13.5.3); the frontend replaces the
+    // handle with the receiver of a call that uses one.
+    let this = handle.clone().filter(|_| !is_static).map(|handle| {
+        (
+            classes::THIS.to_owned(),
+            ParamDirection::Input,
+            handle,
+            None,
+        )
+    });
+    let mut this_name = this
+        .as_ref()
+        .map(|(source, _, r#type, _)| builder.declare(source, r#type.clone()));
     // Defaults bind in the enclosing declaration scope, before
     // any formal can shadow those names (IEEE 1800-2023 13.5.3).
     let defaults = params
@@ -3786,16 +4187,6 @@ pub(super) fn lower_subroutine(
         .collect::<Result<Vec<_>, _>>()?;
     let mut lowered_params = Vec::new();
     let mut formal_types = HashMap::default();
-    // A method that is not static receives the handle of its object first,
-    // and a constructor returns the handle of the object it initializes.
-    let this = handle.clone().filter(|_| !is_static).map(|handle| {
-        (
-            classes::THIS.to_owned(),
-            ParamDirection::Input,
-            handle,
-            None,
-        )
-    });
     let defaults = this
         .iter()
         .map(|_| None)
@@ -3803,7 +4194,10 @@ pub(super) fn lower_subroutine(
         .collect::<Vec<_>>();
     let mut aggregate_formals = Vec::new();
     for ((source, direction, r#type, _), default) in this.into_iter().chain(params).zip(defaults) {
-        let name = builder.declare(&source, r#type.clone());
+        let name = match this_name.take() {
+            Some(name) => name,
+            None => builder.declare(&source, r#type.clone()),
+        };
         if r#type.unpacked_struct().is_some() {
             aggregate_formals.push((lowered_params.len(), r#type.clone()));
         }
@@ -4125,6 +4519,32 @@ pub(super) fn lower_subroutine(
                 kept.push(param.name.clone());
             }
         }
+        // Overlapping calls of a task that suspends share its static formals
+        // (IEEE 1800-2023 13.3.2). Those of a package or `$unit` task are
+        // variables of that scope, shared by every module calling it; a
+        // module allocates its own once.
+        let shared_scope = !matches!(
+            tree.root_unit(),
+            Ok(unit) if unit.kind != celox_sv_syntax::UnitKind::Package
+        );
+        if suspends && shared_scope {
+            for param in &subroutine.params {
+                if matches!(
+                    param.direction,
+                    ParamDirection::Input | ParamDirection::Output | ParamDirection::Inout
+                ) && !subroutine.automatic_locals.contains(&param.name)
+                    && !kept.contains(&param.name)
+                    // An unpacked structure or array formal keeps its
+                    // members or elements apart, which the scope does not
+                    // declare as variables.
+                    && param.leaves.is_empty()
+                    && param.r#type.structure_leaves().is_empty()
+                    && param.r#type.unpacked_ranges().is_empty()
+                {
+                    kept.push(param.name.clone());
+                }
+            }
+        }
         for initializer in &mut initializers {
             qualify_stmt(item, initializer);
             substitute_stmt_constants(
@@ -4207,6 +4627,7 @@ fn dispatch_body(
             handle: None,
             four_state: false,
             nullable: false,
+            real: false,
         }),
         vec![this.clone()],
     );
@@ -4694,6 +5115,208 @@ impl BodyBuilder<'_, '_, '_> {
         Ok(Some(body))
     }
 
+    /// `c[k][i] op value` for an element of a dynamic array, queue or
+    /// associative array: the element is read into a local, the select
+    /// assigned there, and the local stored back as the element, so the
+    /// select keeps the semantics of a select of a variable (IEEE 1800-2023
+    /// 11.5.1).
+    fn element_select_assignment(
+        &mut self,
+        op: &str,
+        nonblocking: bool,
+        left: celox_sv_syntax::ExprId,
+        right: celox_sv_syntax::ExprId,
+    ) -> Converted<Option<Vec<Stmt>>> {
+        let Some((element, target, mut container, mut index)) =
+            containers::selected_element(left, self.tree, self.session, &self.dims)?
+        else {
+            return Ok(None);
+        };
+        if nonblocking {
+            return Err(unsupported("nonblocking dynamic element assignment"));
+        }
+        // The container and the index are evaluated for both the load and
+        // the store.
+        if inlining::effectful(&container) || inlining::effectful(&index) {
+            return Err(unsupported(
+                "select of a dynamic element selected with a side effect",
+            ));
+        }
+        // An index captured before a value with effects keeps its width,
+        // signedness and unknown bits, so one out of range stays out of
+        // range.
+        let index_type = target.key.clone().or_else(|| {
+            dimensions::bound_bits_type(self.tree, &index, &self.dims)
+                .map(|ty| vector_type(ty.width, ty.signed))
+        });
+        self.rename_expr(&mut container);
+        self.rename_expr(&mut index);
+        let native = self.tree.declarations();
+        let mut body = Vec::new();
+        // Only the target is bound against the local; the value reads the
+        // container.
+        self.push_scope();
+        let local = self.declare(ELEMENT_SELECT, target.element.clone());
+        self.dims.element_select = Some((element, ELEMENT_SELECT.to_owned()));
+        let lhs = expression_binding::variable_lvalue(
+            left,
+            native,
+            self.tree,
+            self.session,
+            &self.dims,
+            false,
+        );
+        let lhs = lhs.and_then(|lhs| self.hoist_index_calls(lhs, op != "=", &mut body));
+        // A position that changes the container, such as `q[0][q.pop_front()]`,
+        // would be evaluated after the element is read.
+        let lhs = lhs.and_then(|lhs| match &lhs {
+            LValue::Select {
+                msb,
+                lsb,
+                array_slice_width,
+                ..
+            } if [Some(msb), Some(lsb), array_slice_width.as_ref()]
+                .into_iter()
+                .flatten()
+                .any(inlining::effectful_position) =>
+            {
+                Err(unsupported(
+                    "select of a dynamic element at a position with effects",
+                ))
+            }
+            _ => Ok(lhs),
+        });
+        // The width of the selection, the context of the value: an indexed
+        // part-select at a runtime position, `[i -: 4]`, has the width it
+        // states.
+        let width = lhs
+            .as_ref()
+            .ok()
+            .and_then(|lhs| {
+                statements::lvalue_expr_type(&self.tree.functions, lhs, &self.dims)
+                    .map(|ty| ty.width)
+            })
+            .or_else(|| {
+                match &native
+                    .expression(expression_binding::ungroup(left, native))
+                    .kind
+                {
+                    celox_sv_syntax::ExprKind::Select { dimension, .. }
+                        if target.element.packed_ranges.len() <= 1 =>
+                    {
+                        match dimension.kind {
+                            celox_sv_syntax::DimensionKind::Indexed { width, .. } => {
+                                constant_binding::bind(width, self.tree, self.session, &self.dims)
+                                    .ok()
+                                    .flatten()
+                                    .and_then(|width| {
+                                        eval_ast_const_expr(
+                                            &self.tree.functions,
+                                            &width,
+                                            &self.dims.const_env,
+                                        )
+                                    })
+                                    .and_then(|width| usize::try_from(width).ok())
+                                    .filter(|&width| width > 0)
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                }
+            });
+        let rhs = lhs.and_then(|lhs| {
+            let rhs = if op == "=" {
+                expression_binding::expression(
+                    right,
+                    native,
+                    &lhs,
+                    self.tree,
+                    self.session,
+                    &self.dims,
+                )
+            } else {
+                expression_binding::value(right, native, self.tree, self.session, &self.dims)
+                    .and_then(|value| {
+                        assignment_op_expr(self.tree, self.session, &lhs, op, value, &self.dims)
+                    })
+            };
+            let mut lhs = lhs;
+            self.rename_lvalue(&mut lhs);
+            rhs.map(|mut rhs| {
+                self.rename_expr(&mut rhs);
+                (lhs, rhs)
+            })
+        });
+        self.dims.element_select = None;
+        self.pop_scope();
+        let (lhs, rhs) = rhs?;
+        // A value with effects, a call or a container method, may write the
+        // container or what its index reads: the index is evaluated before
+        // it, so the element read is the one written, and the bits it does
+        // not replace are read after it (IEEE 1800-2023 11.4.1).
+        let effects = inlining::calls_subroutine(&rhs) || inlining::effectful(&rhs);
+        if effects {
+            if !matches!(container, Expr::Ident(_)) {
+                return Err(unsupported(
+                    "select of an element of a selected container assigned a value with effects",
+                ));
+            }
+            let index_type =
+                index_type.ok_or_else(|| unsupported("index of a dynamic element select"))?;
+            let (_, captured) = self.hidden(index_type);
+            body.push(Stmt::Assign {
+                lhs: LValue::Ident(captured.clone()),
+                rhs: index,
+                nonblocking: false,
+            });
+            index = Expr::Ident(captured);
+        }
+        let load = Stmt::Assign {
+            lhs: LValue::Ident(local.clone()),
+            rhs: containers::element_read(
+                &target,
+                containers::call(
+                    system_functions::ContainerOp::Get,
+                    target.layout,
+                    vec![container.clone(), index.clone()],
+                ),
+            ),
+            nonblocking: false,
+        };
+        let rhs = if effects {
+            // The value is evaluated in the context of the selection.
+            let width = width.ok_or_else(|| unsupported("select of a dynamic element"))?;
+            let (_, value) = self.hidden(vector_type(width, false));
+            if op != "=" {
+                // The operator reads the target as it is before the call.
+                body.push(load.clone());
+            }
+            body.push(Stmt::Assign {
+                lhs: LValue::Ident(value.clone()),
+                rhs,
+                nonblocking: false,
+            });
+            Expr::Ident(value)
+        } else {
+            rhs
+        };
+        body.extend([
+            load,
+            Stmt::Assign {
+                lhs,
+                rhs,
+                nonblocking: false,
+            },
+            Stmt::Eval(containers::call(
+                system_functions::ContainerOp::Set,
+                target.layout,
+                vec![container, index, Expr::Ident(local)],
+            )),
+        ]);
+        Ok(Some(body))
+    }
+
     /// `lhs` with each subroutine call in its selection evaluated before
     /// it, into a local that `body` assigns: the call may write the property
     /// whose value the selection is written into.
@@ -5124,6 +5747,8 @@ fn lower_class(
 /// The formals of [`classes::Class::cast_name`].
 pub(super) const CAST_DESTINATION: &str = "destination";
 pub(super) const CAST_SOURCE: &str = "source";
+/// The local that a select of a dynamic container element is assigned in.
+const ELEMENT_SELECT: &str = "$element_select";
 
 /// The subroutine `$cast` to a variable of class `name` calls: it assigns
 /// the source handle to the destination and returns 1 when the source is
@@ -5262,7 +5887,7 @@ pub(super) fn substitute_stmt_constants(
             );
         },
         &mut |lvalue| {
-            *lvalue = substitute_lvalue_constants(lvalue.clone(), const_env);
+            *lvalue = substitute_lvalue_constants(lvalue.clone(), const_env, literals);
         },
         &mut |_| {},
     );
@@ -5873,3 +6498,6 @@ fn vector_type(width: usize, signed: bool) -> Type {
     }
     r#type
 }
+
+#[cfg(test)]
+mod enum_binding_tests;

@@ -48,9 +48,12 @@ impl ScopeImports {
         use celox_sv_syntax::{PackageBindingItemKind, PackageBindingKind};
         let mut imports = Self::default();
         let blocks = generate_scopes(tree)?;
-        let nested = nested_declarations(tree);
-        let class_types = class_type_parameter_scopes(tree);
+        let mut class_types = NameRanges::default();
+        class_types.extend_scopes(class_type_parameter_scopes(tree));
+        let mut shadows = NameRanges::default();
+        shadows.extend_scopes(nested_declarations(tree));
         let aliases = type_alias_scopes(tree, &blocks);
+        let classes = visible_classes(tree);
         for view in package_owners::scope(tree)? {
             let binding = tree.declarations().package_binding(view.id);
             for native in &binding.items {
@@ -136,21 +139,11 @@ impl ScopeImports {
                     continue;
                 }
                 // `C::name` names a member of class `C` (IEEE 1800-2023 8.23).
-                if visible_class(tree, &package)
-                    || aliases.iter().any(|(start, end, name)| {
-                        (*start..*end).contains(&expression.tokens.start) && name == &package
-                    })
-                {
+                let offset = expression.tokens.start;
+                if classes.contains(&package) || aliases.covers(&package, offset) {
                     continue;
                 }
-                if !nested
-                    .iter()
-                    .chain(&class_types)
-                    .any(|(start, end, names)| {
-                        (*start..*end).contains(&expression.tokens.start)
-                            && names.contains(&package)
-                    })
-                {
+                if !shadows.covers(&package, offset) && !class_types.covers(&package, offset) {
                     imports
                         .qualified
                         .push((package, normalize_identifier(&name.spelling)));
@@ -165,20 +158,16 @@ impl ScopeImports {
                 // `C::T` names a type of class `C` (IEEE 1800-2023 8.23).
                 && !(package.name.spelling == "std"
                     && matches!(name.name.spelling.as_str(), "process" | "semaphore" | "mailbox"))
-                && !visible_class(tree, &normalize_identifier(&package.name.spelling))
-                && !aliases.iter().any(|(start, end, name)| {
-                    (*start..*end).contains(&ty.tokens.start)
-                        && name == &normalize_identifier(&package.name.spelling)
-                })
-                && !class_types.iter().any(|(start, end, names)| {
-                    (*start..*end).contains(&ty.tokens.start)
-                        && names.contains(&normalize_identifier(&package.name.spelling))
-                })
             {
-                imports.qualified.push((
-                    normalize_identifier(&package.name.spelling),
-                    normalize_identifier(&name.name.spelling),
-                ));
+                let package = normalize_identifier(&package.name.spelling);
+                if !classes.contains(&package)
+                    && !aliases.covers(&package, ty.tokens.start)
+                    && !class_types.covers(&package, ty.tokens.start)
+                {
+                    imports
+                        .qualified
+                        .push((package, normalize_identifier(&name.name.spelling)));
+                }
             }
         }
         for (package, _) in &imports.qualified {
@@ -194,29 +183,79 @@ impl ScopeImports {
     }
 }
 
-/// Whether a class named `name` is declared in the current scope or in the
-/// compilation unit, where the scope sees it (IEEE 1800-2023 3.12.1).
-fn visible_class(tree: &SyntaxTree, name: &str) -> bool {
+/// The names of the classes declared in the current scope or in the
+/// compilation unit, where the scope sees them (IEEE 1800-2023 3.12.1).
+fn visible_classes(tree: &SyntaxTree) -> HashSet<String> {
     let native = tree.declarations();
     let scope = tree.root_unit().ok().map(|unit| unit.tokens);
-    native.classes.iter().any(|class| {
-        normalize_identifier(&class.name.spelling) == name && {
+    native
+        .classes
+        .iter()
+        .filter(|class| {
             let unit = super::classes::enclosing_unit(native, class.tokens).map(|unit| unit.tokens);
             unit.is_none() || unit == scope
+        })
+        .map(|class| normalize_identifier(&class.name.spelling))
+        .collect()
+}
+
+/// Token ranges by a name declared in them, so a lookup checks only the
+/// ranges that declare that name.
+#[derive(Default)]
+struct NameRanges(HashMap<String, Vec<(usize, usize)>>);
+
+impl NameRanges {
+    fn add(&mut self, name: String, start: usize, end: usize) {
+        self.0.entry(name).or_default().push((start, end));
+    }
+
+    fn extend_scopes(&mut self, scopes: Vec<(usize, usize, HashSet<String>)>) {
+        for (start, end, names) in scopes {
+            for name in names {
+                self.add(name, start, end);
+            }
         }
-    })
+    }
+
+    /// Whether a range that declares `name` contains `offset`.
+    fn covers(&self, name: &str, offset: usize) -> bool {
+        self.0.get(name).is_some_and(|ranges| {
+            ranges
+                .iter()
+                .any(|(start, end)| (*start..*end).contains(&offset))
+        })
+    }
+}
+
+/// The out-of-block subroutine definitions (8.24), by the class name that
+/// qualifies them.
+fn out_of_block_subroutines(
+    native: &celox_sv_syntax::Declarations,
+) -> HashMap<String, Vec<&celox_sv_syntax::Subroutine>> {
+    let mut result: HashMap<String, Vec<_>> = HashMap::default();
+    for id in native.subroutine_ids() {
+        let sub = native.subroutine(id);
+        if let [scope] = &sub.scope[..] {
+            result
+                .entry(normalize_identifier(&scope.name.spelling))
+                .or_default()
+                .push(sub);
+        }
+    }
+    result
 }
 
 /// A typedef's name becomes visible after its declaration, within its
 /// lexical scope (6.18). A class alias can qualify members too (8.23).
-fn type_alias_scopes(tree: &SyntaxTree, blocks: &[GenerateScope]) -> Vec<(usize, usize, String)> {
+fn type_alias_scopes(tree: &SyntaxTree, blocks: &[GenerateScope]) -> NameRanges {
     use celox_sv_syntax::BodyItemKind;
     let native = tree.declarations();
+    let mut result = NameRanges::default();
     let Ok(items) = body_items(tree) else {
-        return Vec::new();
+        return result;
     };
     let scope_end = tree.root_unit().map_or(usize::MAX, |unit| unit.tokens.end);
-    let mut result = Vec::new();
+    let mut out_of_block = None;
     for id in items {
         let BodyItemKind::TypeAlias(id) = native.body_item(id).kind else {
             continue;
@@ -236,17 +275,20 @@ fn type_alias_scopes(tree: &SyntaxTree, blocks: &[GenerateScope]) -> Vec<(usize,
             .map(|block| block.end)
             .chain(class.map(|class| class.tokens.end))
             .fold(scope_end, usize::min);
-        result.push((alias.tokens.end, end, name.clone()));
+        result.add(name.clone(), alias.tokens.end, end);
         if let Some(class) = class {
             let owner =
                 super::classes::enclosing_unit(native, class.tokens).map(|unit| unit.tokens);
-            for id in native.subroutine_ids() {
-                let sub = native.subroutine(id);
-                if matches!(&sub.scope[..], [scope] if normalize_identifier(&scope.name.spelling) == normalize_identifier(&class.name.spelling))
-                    && super::classes::enclosing_unit(native, sub.tokens).map(|unit| unit.tokens)
-                        == owner
+            let out_of_block = out_of_block.get_or_insert_with(|| out_of_block_subroutines(native));
+            for sub in out_of_block
+                .get(&normalize_identifier(&class.name.spelling))
+                .into_iter()
+                .flatten()
+            {
+                if super::classes::enclosing_unit(native, sub.tokens).map(|unit| unit.tokens)
+                    == owner
                 {
-                    result.push((sub.tokens.start, sub.tokens.end, name.clone()));
+                    result.add(name.clone(), sub.tokens.start, sub.tokens.end);
                 }
             }
         }
@@ -521,20 +563,17 @@ pub(super) fn unqualified_names(tree: &SyntaxTree) -> HashMap<String, Vec<usize>
     let Ok(ranges) = active_ranges(tree) else {
         return HashMap::default();
     };
-    let mut nested = nested_declarations(tree);
-    nested.extend(class_type_parameter_scopes(tree));
+    let mut nested = NameRanges::default();
+    nested.extend_scopes(nested_declarations(tree));
+    nested.extend_scopes(class_type_parameter_scopes(tree));
     let aliases = type_alias_scopes(tree, &generate_scopes(tree).unwrap_or_default());
     let Facts { pattern_keys, .. } = Facts::of(tree);
     let mut names: HashMap<String, Vec<usize>> = HashMap::default();
     let mut add = |name: &str, offset| {
         let name = normalize_identifier(name);
         if in_ranges(offset, &ranges)
-            && !nested.iter().any(|(start, end, declared)| {
-                (*start..*end).contains(&offset) && declared.contains(&name)
-            })
-            && !aliases
-                .iter()
-                .any(|(start, end, declared)| (*start..*end).contains(&offset) && declared == &name)
+            && !nested.covers(&name, offset)
+            && !aliases.covers(&name, offset)
         {
             names.entry(name).or_default().push(offset);
         }
@@ -807,6 +846,7 @@ fn class_type_parameter_scopes(tree: &SyntaxTree) -> Vec<(usize, usize, HashSet<
     let Ok(items) = body_items(tree) else {
         return result;
     };
+    let mut out_of_block = None;
     for id in items {
         if !matches!(&native.body_item(id).kind, BodyItemKind::Unconverted { category, .. } if category == "class")
         {
@@ -834,11 +874,14 @@ fn class_type_parameter_scopes(tree: &SyntaxTree) -> Vec<(usize, usize, HashSet<
             // only within that class's declaring scope (8.24, 8.25.1).
             let class_scope =
                 super::classes::enclosing_unit(native, class.tokens).map(|unit| unit.tokens);
-            for id in native.subroutine_ids() {
-                let sub = native.subroutine(id);
-                if matches!(&sub.scope[..], [scope] if normalize_identifier(&scope.name.spelling) == normalize_identifier(&class.name.spelling))
-                    && super::classes::enclosing_unit(native, sub.tokens).map(|unit| unit.tokens)
-                        == class_scope
+            let out_of_block = out_of_block.get_or_insert_with(|| out_of_block_subroutines(native));
+            for sub in out_of_block
+                .get(&normalize_identifier(&class.name.spelling))
+                .into_iter()
+                .flatten()
+            {
+                if super::classes::enclosing_unit(native, sub.tokens).map(|unit| unit.tokens)
+                    == class_scope
                 {
                     result.push((sub.tokens.start, sub.tokens.end, names.clone()));
                 }

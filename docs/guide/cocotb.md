@@ -255,6 +255,12 @@ not specify a default. The Rust source-list APIs retain their per-file scope;
 and `--max-steps` override the target/root run settings. VPI builds retain the
 existing force-compatible compilation settings.
 
+SystemVerilog sources and included headers accept non-UTF-8 bytes in comments by
+default. Invalid comment bytes become spaces while valid UTF-8 and source byte
+offsets stay intact. Strings and code still require UTF-8. Use
+`--strict-source-encoding` or `strict_source_encoding = true` at the root or in a
+selected target of `celox.toml` to require UTF-8 throughout each file.
+
 Without `--target`, Celox uses `default_target`, otherwise the root `top`,
 otherwise the sole target. Multiple targets without a default require
 `--target`. A project may also name a single `.veryl` entry file; its Veryl

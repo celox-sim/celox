@@ -1,0 +1,56 @@
+{
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:8: error: Scope index expression is not constant: index\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "string::fixed_array_mutating_methods",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 7; see <case>/build.log\n<case>/source_0.sv:8: error: Scope index expression is not constant: select_word()\n<case>/source_0.sv:8: error: Scope index expression is not constant: select_word()\n<case>/source_0.sv:8: error: Enable of unknown task ``words[select_word()].putc''.\n<case>/source_0.sv:9: error: Scope index expression is not constant: index\n<case>/source_0.sv:9: error: Scope index expression is not constant: index\n<case>/source_0.sv:9: error: Enable of unknown task ``words[index].putc''.\n<case>/source_0.sv:12: error: Scope index expression is not constant: i(index)\n7 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "string::fixed_array_mutation_indices",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 5; see <case>/build.log\n<case>/source_0.sv:6: error: the type of the variable 'words' doesn't match the context type.\n<case>/source_0.sv:6:      : variable type=string\n<case>/source_0.sv:6:      : context type=11netuarray_t\n<case>/source_0.sv:9: error: Enable of unknown task ``words['sd1]['sd0].putc''.\n<case>/source_0.sv:10: error: Enable of unknown task ``words['sd2]['sd0].putc''.\n<case>/source_0.sv:11: error: Enable of unknown task ``words['sd2]['sd0].putc''.\n<case>/source_0.sv:12: error: Enable of unknown task ``words['sd2]['sd0].putc''.\n5 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "string::fixed_array_mutations",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:7: error: Scope index expression is not constant: bad\n<case>/source_0.sv:7: error: Scope index expression is not constant: bad\n<case>/source_0.sv:7: error: Enable of unknown task ``words[bad].putc''.\n<case>/source_0.sv:8: error: Scope index expression is not constant: unknown_index\n4 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "string::fixed_array_mutations_invalid_indices",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "exclude_stronger_than_sv": false,
+  "include_ignored": false,
+  "schema_version": 3,
+  "suite": "sv",
+  "suite_version": "0.12.0",
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+  "scope": "Focused blocking mutations of fixed string-array elements before reviewed exclusions; passing and unsupported cases omitted."
+}

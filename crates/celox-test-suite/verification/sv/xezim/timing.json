@@ -1267,6 +1267,17 @@
     },
     {
       "category": "Sequential",
+      "detail": "timing::static_formals_of_package_tasks at 3771:47: assert_eq first: expected 0x3, got 0x2",
+      "expectation": "Simulation",
+      "name": "timing::static_formals_of_package_tasks",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
       "name": "timing::static_function_readonly_initializer_calls_execute_once",
@@ -1539,6 +1550,78 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Xezim 0.11.4 propagates both selected continuous drivers at the shorter delay: y becomes 1111 instead of 0011, and generated g becomes 11 instead of 01. IEEE 1800-2023 10.3.3 attaches each delay to its assignment. The standalone probe prints y=1111 g=11 at 6.5 ns where Icarus and Celox preserve the later selected updates; Verilator also passes both shared cases.",
+      "expectation": "Simulation",
+      "name": "timing::continuous_delay_generate_parameters",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_xezim_continuous_delay_selects",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "xezim version 0.11.4",
+        "reason": "Xezim 0.11.4 propagates both selected continuous drivers at the shorter delay: y becomes 1111 instead of 0011, and generated g becomes 11 instead of 01. IEEE 1800-2023 10.3.3 attaches each delay to its assignment. The standalone probe prints y=1111 g=11 at 6.5 ns where Icarus and Celox preserve the later selected updates; Verilator also passes both shared cases.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/continuous-delays-xezim.json",
+          "verification/repros/sv_continuous_delay_selects.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Sequential",
+      "detail": "Xezim 0.11.4 propagates both selected continuous drivers at the shorter delay: y becomes 1111 instead of 0011, and generated g becomes 11 instead of 01. IEEE 1800-2023 10.3.3 attaches each delay to its assignment. The standalone probe prints y=1111 g=11 at 6.5 ns where Icarus and Celox preserve the later selected updates; Verilator also passes both shared cases.",
+      "expectation": "Simulation",
+      "name": "timing::continuous_delay_selected_drivers",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_xezim_continuous_delay_selects",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "xezim version 0.11.4",
+        "reason": "Xezim 0.11.4 propagates both selected continuous drivers at the shorter delay: y becomes 1111 instead of 0011, and generated g becomes 11 instead of 01. IEEE 1800-2023 10.3.3 attaches each delay to its assignment. The standalone probe prints y=1111 g=11 at 6.5 ns where Icarus and Celox preserve the later selected updates; Verilator also passes both shared cases.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/continuous-delays-xezim.json",
+          "verification/repros/sv_continuous_delay_selects.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Sequential",
+      "detail": "Xezim 0.11.4 initializes undriven bits of a partially driven delayed vector to X until the net delay elapses: the standalone probe prints xxxx at 1 ns, then zz00 at 4 ns. IEEE 1800-2023 6.7.1 requires bits without drivers to default to Z, so the first value must be zzxx. The wholly undriven scalar net and the other six independent-delay cases pass.",
+      "expectation": "Simulation",
+      "name": "timing::continuous_delay_net_partially_undriven",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_xezim_independent_net_undriven_bits",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "xezim version 0.11.4",
+        "reason": "Xezim 0.11.4 initializes undriven bits of a partially driven delayed vector to X until the net delay elapses: the standalone probe prints xxxx at 1 ns, then zz00 at 4 ns. IEEE 1800-2023 6.7.1 requires bits without drivers to default to Z, so the first value must be zzxx. The wholly undriven scalar net and the other six independent-delay cases pass.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/independent-net-delays-xezim.json",
+          "verification/repros/sv_independent_net_delay_partial.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
     }
   ]
 }

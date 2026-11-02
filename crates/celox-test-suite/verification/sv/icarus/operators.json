@@ -225,6 +225,17 @@
     },
     {
       "category": "Operators",
+      "detail": "Icarus build exit status: 3; see <case>/build.log\n<case>/source_0.sv:6: sorry: Method name nesting is not supported yet.\n<case>/source_0.sv:6:      : method path: value.rand_mode\n<case>/source_0.sv:6: error: Object celox_suite_tb.dut.F.this has no method \"value.rand_mode(...)\".\n<case>/source_0.sv:19: error: Can't find task rand_mode in class F\n<case>/source_0.sv:19: error: Enable of unknown task ``f.value.rand_mode''.\n3 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "operators::one_bit_casts",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
       "detail": "",
       "expectation": "Simulation",
       "name": "operators::preserves_disjoint_slice_writes_in_merged_always_ff_processes",

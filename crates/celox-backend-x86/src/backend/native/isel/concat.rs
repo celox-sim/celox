@@ -224,12 +224,20 @@ pub(super) fn try_lower_concat_of_muxes(
     sir_block: &crate::BasicBlock<RegionedAbsoluteAddr>,
     sir_defs: &HashMap<RegisterId, usize>,
 ) -> bool {
-    if ctx.four_state || args.len() < 2 {
+    if args.len() < 2
+        || (ctx.four_state
+            && args
+                .iter()
+                .any(|arg| !ctx.single_use_registers.contains(arg)))
+    {
         return false;
     }
 
     let total_width = args.iter().map(|arg| ctx.sir_width(arg)).sum::<usize>();
     if total_width == 0 || total_width != ctx.sir_width(&dst) {
+        return false;
+    }
+    if ctx.four_state && args.len() < 2 * ISelContext::num_chunks(total_width) {
         return false;
     }
 
@@ -265,18 +273,77 @@ pub(super) fn try_lower_concat_of_muxes(
     }
 
     let cond = cond.expect("non-empty mux concat must have a condition");
-    let (cond_vreg, _) = lower_mux_condition_state(ctx, block, cond);
+    let (cond_vreg, cond_unknown) = lower_mux_condition_state(ctx, block, cond);
 
-    let then_chunks = lower_concat_parts_to_chunks(ctx, block, &then_parts, total_width);
-    let else_chunks = lower_concat_parts_to_chunks(ctx, block, &else_parts, total_width);
-    let result_chunks = lower_mux_chunk_blend(
+    let then_chunks = lower_concat_register_parts_to_chunks(
         ctx,
         block,
-        cond_vreg,
-        &then_chunks,
-        &else_chunks,
+        &then_parts.iter().copied().rev().collect::<Vec<_>>(),
         total_width,
+        false,
+        sir_block,
+        sir_defs,
     );
+    let else_chunks = lower_concat_register_parts_to_chunks(
+        ctx,
+        block,
+        &else_parts.iter().copied().rev().collect::<Vec<_>>(),
+        total_width,
+        false,
+        sir_block,
+        sir_defs,
+    );
+    let result_chunks = if ctx.four_state {
+        let then_masks = lower_concat_register_parts_to_chunks(
+            ctx,
+            block,
+            &then_parts.iter().copied().rev().collect::<Vec<_>>(),
+            total_width,
+            true,
+            sir_block,
+            sir_defs,
+        );
+        let else_masks = lower_concat_register_parts_to_chunks(
+            ctx,
+            block,
+            &else_parts.iter().copied().rev().collect::<Vec<_>>(),
+            total_width,
+            true,
+            sir_block,
+            sir_defs,
+        );
+        let mut values = Vec::with_capacity(then_chunks.len());
+        let mut masks = Vec::with_capacity(then_chunks.len());
+        for (index, &(then_value, width)) in then_chunks.iter().enumerate() {
+            let (value, mask) = lower_four_state_mux_chunk(
+                ctx,
+                block,
+                cond_vreg,
+                cond_unknown,
+                then_value,
+                then_masks[index].0,
+                else_chunks[index].0,
+                else_masks[index].0,
+                width,
+            );
+            values.push((value, width));
+            masks.push((mask, width));
+        }
+        ctx.set_mask(dst, masks[0].0);
+        if total_width > 64 {
+            ctx.wide_masks.insert(dst, masks);
+        }
+        values
+    } else {
+        lower_mux_chunk_blend(
+            ctx,
+            block,
+            cond_vreg,
+            &then_chunks,
+            &else_chunks,
+            total_width,
+        )
+    };
 
     if total_width <= 64 {
         let dst_vreg = ctx.reg_map.get(dst);
@@ -290,32 +357,156 @@ pub(super) fn try_lower_concat_of_muxes(
     true
 }
 
-fn lower_concat_parts_to_chunks(
+/// Recover captured words after a pure Slice/Concat round trip. Unlike
+/// arithmetic rewrites this copies both planes and preserves Z unchanged.
+pub(super) fn try_lower_concat_of_adjacent_slices(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    destination: RegisterId,
+    arguments: &[RegisterId],
+    sir_block: &crate::BasicBlock<RegionedAbsoluteAddr>,
+    definitions: &HashMap<RegisterId, usize>,
+) -> bool {
+    let slice = |register: RegisterId| {
+        let index = *definitions.get(&register)?;
+        match sir_block.instructions[index] {
+            SIRInstruction::Slice(_, source, offset, width)
+                if width == ctx.sir_width(&register) =>
+            {
+                Some((source, offset, width))
+            }
+            _ => None,
+        }
+    };
+    if !arguments
+        .windows(2)
+        .any(|pair| match (slice(pair[1]), slice(pair[0])) {
+            (Some((a, offset, width)), Some((b, next, next_width))) => {
+                a == b && offset + width == next && next + next_width <= ctx.sir_width(&a)
+            }
+            _ => false,
+        })
+    {
+        return false;
+    }
+    let parts: Vec<_> = arguments
+        .iter()
+        .rev()
+        .map(|&register| (register, ctx.sir_width(&register)))
+        .collect();
+    let width = ctx.sir_width(&destination);
+    if width == 0 || parts.iter().map(|part| part.1).sum::<usize>() != width {
+        return false;
+    }
+    let values = lower_concat_register_parts_to_chunks(
+        ctx,
+        block,
+        &parts,
+        width,
+        false,
+        sir_block,
+        definitions,
+    );
+    ctx.set_wide_chunks(destination, values);
+    if ctx.four_state {
+        let masks = lower_concat_register_parts_to_chunks(
+            ctx,
+            block,
+            &parts,
+            width,
+            true,
+            sir_block,
+            definitions,
+        );
+        ctx.set_mask(destination, masks[0].0);
+        if width > 64 {
+            ctx.wide_masks.insert(destination, masks);
+        }
+    }
+    true
+}
+
+/// Pack low-to-high SSA parts, recovering adjacent slices of a captured
+/// source before packing. This avoids splitting a word into lanes only to
+/// assemble the same word again. Never reload its physical state home:
+/// intervening stores must not change the captured value or unknown plane.
+fn lower_concat_register_parts_to_chunks(
     ctx: &mut ISelContext,
     block: &mut MBlock,
     parts: &[(RegisterId, usize)],
     total_width: usize,
+    mask: bool,
+    sir_block: &crate::BasicBlock<RegionedAbsoluteAddr>,
+    definitions: &HashMap<RegisterId, usize>,
 ) -> Vec<(VReg, usize)> {
-    let mut flat_bits: Vec<(VReg, usize)> = Vec::with_capacity(parts.len());
-    for &(reg, width) in parts.iter().rev() {
-        if width > 64 || ctx.wide_regs.contains_key(&reg) {
-            let chunks = ctx.get_wide_chunks(&reg, block);
-            let mut remaining = width;
-            for (chunk, chunk_width) in chunks {
-                if remaining == 0 {
+    let slice = |register: RegisterId, width: usize| {
+        let index = *definitions.get(&register)?;
+        match sir_block.instructions[index] {
+            SIRInstruction::Slice(_, source, offset, slice_width) if slice_width == width => {
+                Some((source, offset))
+            }
+            _ => None,
+        }
+    };
+    let mut flat = Vec::with_capacity(parts.len());
+    let mut index = 0;
+    while index < parts.len() {
+        let (register, width) = parts[index];
+        let mut end = index + 1;
+        let mut combined_width = width;
+        let mut recovered = None;
+        if let Some((source, offset)) = slice(register, width) {
+            while let Some(&(next, next_width)) = parts.get(end) {
+                if slice(next, next_width) != Some((source, offset + combined_width)) {
                     break;
                 }
-                let take = chunk_width.min(remaining);
-                flat_bits.push((chunk, take));
-                remaining -= take;
+                combined_width += next_width;
+                end += 1;
             }
-        } else {
-            let vreg = ctx.reg_map.get(reg);
-            flat_bits.push((vreg, width));
+            if end > index + 1 && offset + combined_width <= ctx.sir_width(&source) {
+                recovered = Some((source, offset));
+            }
         }
+        let (source, offset, take_width) = if let Some((source, offset)) = recovered {
+            (source, offset, combined_width)
+        } else {
+            end = index + 1;
+            (register, 0, width)
+        };
+        let chunks = if mask {
+            get_wide_mask_chunks(
+                ctx,
+                block,
+                &source,
+                ISelContext::num_chunks(ctx.sir_width(&source)),
+            )
+        } else {
+            ctx.get_wide_chunks(&source, block)
+                .into_iter()
+                .map(|chunk| chunk.0)
+                .collect()
+        };
+        let mut consumed = 0;
+        while consumed < take_width {
+            let position = offset + consumed;
+            let shift = position % 64;
+            let take = (64 - shift).min(take_width - consumed);
+            let mut value = chunks[position / 64];
+            if shift > 0 {
+                let shifted = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::ShrImm {
+                    dst: shifted,
+                    src: value,
+                    imm: shift as u8,
+                });
+                value = shifted;
+            }
+            flat.push((value, take));
+            consumed += take;
+        }
+        index = end;
     }
-
-    lower_flat_concat_to_chunks(ctx, block, flat_bits, total_width)
+    lower_flat_concat_to_chunks(ctx, block, flat, total_width)
 }
 
 /// Replace an adjacent run of the same canonical one-bit value by one fill
@@ -536,4 +727,177 @@ fn lower_mux_chunk_blend(
     }
 
     result_chunks
+}
+
+/// Lift independently computed bitwise lanes before assembling their result.
+/// Every lifted operation performs its original four-state normalization;
+/// packing the captured operands themselves preserves raw Z encodings.
+pub(super) fn try_lower_concat_of_bitwise_lanes(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    destination: RegisterId,
+    arguments: &[RegisterId],
+    sir_block: &crate::BasicBlock<RegionedAbsoluteAddr>,
+    definitions: &HashMap<RegisterId, usize>,
+) -> bool {
+    let width = ctx.sir_width(&destination);
+    if !ctx.four_state || arguments.len() < 3 || width > 64 {
+        return false;
+    }
+    let parts: Vec<_> = arguments
+        .iter()
+        .rev()
+        .map(|&register| (register, ctx.sir_width(&register)))
+        .collect();
+    let Some(lanes) = match_bitwise_lanes(ctx, &parts, sir_block, definitions) else {
+        return false;
+    };
+    let (value, mask) = lower_bitwise_lanes(ctx, block, lanes, width, sir_block, definitions, 0);
+    let dst = ctx.reg_map.get(destination);
+    ctx.emit_mov(block, dst, value);
+    ctx.set_mask(destination, mask);
+    true
+}
+
+struct BitwiseLanes {
+    operation: BinaryOp,
+    left: Vec<(RegisterId, usize)>,
+    right: Vec<(RegisterId, usize)>,
+}
+
+fn match_bitwise_lanes(
+    ctx: &ISelContext,
+    parts: &[(RegisterId, usize)],
+    sir_block: &crate::BasicBlock<RegionedAbsoluteAddr>,
+    definitions: &HashMap<RegisterId, usize>,
+) -> Option<BitwiseLanes> {
+    let mut operation = None;
+    let mut left = Vec::with_capacity(parts.len());
+    let mut right = Vec::with_capacity(parts.len());
+    for &(register, width) in parts {
+        if width == 0 || !ctx.single_use_registers.contains(&register) {
+            return None;
+        }
+        let index = *definitions.get(&register)?;
+        let SIRInstruction::Binary(_, lhs, op, rhs) = sir_block.instructions[index] else {
+            return None;
+        };
+        let op = match op {
+            BinaryOp::LogicAnd if width == 1 => BinaryOp::And,
+            BinaryOp::LogicOr if width == 1 => BinaryOp::Or,
+            BinaryOp::And | BinaryOp::Or | BinaryOp::Xor => op,
+            _ => return None,
+        };
+        if operation.is_some_and(|old| old != op)
+            || ctx.sir_width(&lhs) != width
+            || ctx.sir_width(&rhs) != width
+        {
+            return None;
+        }
+        operation = Some(op);
+        left.push((lhs, width));
+        right.push((rhs, width));
+    }
+    Some(BitwiseLanes {
+        operation: operation?,
+        left,
+        right,
+    })
+}
+
+fn lower_bitwise_lane_operands(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    parts: &[(RegisterId, usize)],
+    width: usize,
+    sir_block: &crate::BasicBlock<RegionedAbsoluteAddr>,
+    definitions: &HashMap<RegisterId, usize>,
+    depth: usize,
+) -> (VReg, VReg) {
+    // Each lifted register has exactly one use. Recursion therefore consumes
+    // distinct source definitions rather than expanding a shared expression
+    // DAG. Bound its depth as well, keeping compiler stack use independent of
+    // an adversarially deep lane expression.
+    if depth < 16
+        && let Some(lanes) = match_bitwise_lanes(ctx, parts, sir_block, definitions)
+    {
+        return lower_bitwise_lanes(ctx, block, lanes, width, sir_block, definitions, depth + 1);
+    }
+    let value = lower_concat_register_parts_to_chunks(
+        ctx,
+        block,
+        parts,
+        width,
+        false,
+        sir_block,
+        definitions,
+    )[0]
+    .0;
+    let mask = lower_concat_register_parts_to_chunks(
+        ctx,
+        block,
+        parts,
+        width,
+        true,
+        sir_block,
+        definitions,
+    )[0]
+    .0;
+    (value, mask)
+}
+
+fn lower_bitwise_lanes(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    lanes: BitwiseLanes,
+    width: usize,
+    sir_block: &crate::BasicBlock<RegionedAbsoluteAddr>,
+    definitions: &HashMap<RegisterId, usize>,
+    depth: usize,
+) -> (VReg, VReg) {
+    let (lhs, lm) = lower_bitwise_lane_operands(
+        ctx,
+        block,
+        &lanes.left,
+        width,
+        sir_block,
+        definitions,
+        depth,
+    );
+    let (rhs, rm) = lower_bitwise_lane_operands(
+        ctx,
+        block,
+        &lanes.right,
+        width,
+        sir_block,
+        definitions,
+        depth,
+    );
+    let mask = lower_binary_mask(ctx, block, &lanes.operation, lhs, rhs, lm, rm, width);
+    let value = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(match lanes.operation {
+        BinaryOp::And => MInst::And {
+            dst: value,
+            lhs,
+            rhs,
+        },
+        BinaryOp::Or => MInst::Or {
+            dst: value,
+            lhs,
+            rhs,
+        },
+        BinaryOp::Xor => MInst::Xor {
+            dst: value,
+            lhs,
+            rhs,
+        },
+        _ => unreachable!(),
+    });
+    let normalized = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::Or {
+        dst: normalized,
+        lhs: value,
+        rhs: mask,
+    });
+    (normalized, mask)
 }

@@ -313,3 +313,112 @@ endmodule"#)
  (assert_eq forwarded 22)
  (assert_eq copied 22)
  (assert_eq read 12041053))
+
+; IEEE 1800-2023 11.5.1, 13.5.2: a bit-select or part-select of an element
+; of a dynamic array, queue or associative array, also one passed by
+; reference, writes those bits of the element, with `=` or an assignment
+; operator. A value with effects is evaluated before the other bits of the
+; element are read, and the element read is the one written.
+(case selects_of_reference_container_elements
+ (source "selects_of_reference_container_elements.sv" #"module Top(output int a, output int b, output int c, output int d, output int e, output int g, output int h, output int k, output int n);
+ class Packer;
+  bit [63:0] m_bits;
+  int iter;
+  function void unpack_bytes(ref byte value[], input int size = -1);
+   if (size < 0) size = value.size() * $bits(byte);
+   for (int i = 0; i < size; i++)
+    value[i / $bits(byte)][i % $bits(byte)] = m_bits[iter + i];
+   iter += size;
+  endfunction
+  function void unpack_ints(ref int value[], input int size = -1);
+   if (size < 0) size = value.size() * $bits(int);
+   for (int i = 0; i < size; i++)
+    value[i / $bits(int)][i % $bits(int)] = m_bits[iter + i];
+   iter += size;
+  endfunction
+ endclass
+ function automatic void set_nibble(ref bit [7:0] q[$]);
+  q[1][7:4] = 4'ha;
+ endfunction
+ Packer p;
+ byte bs[];
+ int is[];
+ bit [7:0] q[$];
+ int m[string];
+ bit [7:0] r[$];
+ int j;
+ function automatic int move();
+  j = 1;
+  return 1;
+ endfunction
+ function automatic bit [3:0] one();
+  return 1;
+ endfunction
+ initial begin
+  p = new;
+  p.m_bits = 64'h0123_4567_89ab_cdef;
+  bs = new[2];
+  p.unpack_bytes(bs);
+  a = {bs[1], bs[0]};
+  is = new[1];
+  p.unpack_ints(is, 16);
+  b = is[0];
+  q = '{8'h11, 8'h22};
+  set_nibble(q);
+  c = q[1];
+  m["k"] = 32'h100;
+  m["k"][3] = 1'b1;
+  m["k"][15:12] += 4'h2;
+  m["n"][0] = 1'b1;
+  d = m["k"] + m["n"] * 65536;
+  q[0][2+:3] = 3'b101;
+  q[$][0] = 1'b1;
+  e = {q[0], q[1]};
+  // Either order of the index and the call reads and writes one element:
+  // r[0] gives '{0, 0}, r[1] '{1, 1}.
+  r = '{8'h01, 8'h00};
+  j = 0;
+  r[j][0] += move();
+  g = {r[0], r[1]} == 16'h0000 || {r[0], r[1]} == 16'h0101;
+  r = '{8'h10, 8'h20};
+  r[0][0] = r.pop_front();
+  h = r.size() * 256 + r[0];
+  // The value is evaluated in the context of the 4-bit selection, where
+  // 4'hf + 1 wraps to 0.
+  r = '{8'hff, 8'h00};
+  r[0][3:0] = (4'hf + one()) >> 1;
+  k = {r[0], r[1]};
+  j = 7;
+  r[0][j -: 4] = one();
+  n = r[0];
+ end
+endmodule"#)
+ (top Top)
+ (run_until 1)
+ (assert_eq a 0xcdef)
+ (assert_eq b 0x89ab)
+ (assert_eq c 0xa2)
+ (assert_eq d 0x12108)
+ (assert_eq e 0x15a3)
+ (assert_eq g 1)
+ (assert_eq h 0x120)
+ (assert_eq k 0xf000)
+ (assert_eq n 0x10))
+
+; IEEE 1800-2023 11.5.1: a select of a four-state element writes unknown bits
+; and leaves the others.
+(case selects_of_four_state_container_elements
+ (source "selects_of_four_state_container_elements.sv" #"module Top(output bit f);
+ logic [7:0] l[$];
+ int i = 1;
+ initial begin
+  l = '{8'h0f};
+  l[0][7] = 1'bx;
+  l[0][i] = 1'b0;
+  f = l[0] === 8'bx0001101;
+ end
+endmodule"#)
+ (four_state)
+ (top Top)
+ (run_until 1)
+ (assert_eq f 1))

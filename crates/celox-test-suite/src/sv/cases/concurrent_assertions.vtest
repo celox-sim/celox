@@ -199,3 +199,39 @@ module Top(output int passed, failed);
 endmodule
 "#)
  (top Top) (run_until 10) (assert_eq passed 2) (assert_eq failed 1))
+
+; IEEE 1800-2023 16.12.7: a single-cycle antecedent starts its consequent
+; at the same sampled tick; no antecedent match makes the implication true.
+(case overlapped_boolean_implication
+ (source "overlapped.sv" #"module Top(output int passed, failed);
+ bit clk, request, ready;
+ always @(posedge clk) begin request <= ~request; ready <= ~ready; end
+ p: assert property (@(posedge clk) request |-> ready)
+    passed++; else failed++;
+ initial begin
+   #1 clk=1; #1 clk=0;
+   #1 clk=1; #1 clk=0;
+   #1 clk=1; #1 clk=0;
+   ready=0;
+   #1 clk=1;
+ end
+endmodule"#)
+ (top Top) (run_until 7)
+ (assert_eq passed 3) (assert_eq failed 1))
+
+(case overlapped_unknown_antecedent
+ (source "overlapped_unknown.sv" #"module Top(output int passed, failed);
+ bit clk;
+ logic [1:0] request, ready;
+ p: assert property (@(posedge clk) request |-> ready) passed++; else failed++;
+ initial begin
+   request=2'bx0; ready=2'bxx;
+   #1 clk=1; #1 clk=0;
+   request=2'b1x;
+   #1 clk=1; #1 clk=0;
+   ready=2'b1x;
+   #1 clk=1;
+ end
+endmodule"#)
+ (top Top) (four_state) (run_until 5)
+ (assert_eq passed 2) (assert_eq failed 1))

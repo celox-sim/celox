@@ -746,3 +746,18 @@ fn cache_tracks_cli_parameter_overrides() {
         assert!(output.contains(&format!("value={value}")), "{output}");
     }
 }
+
+#[test]
+fn vcd_cache_separates_traced_layout_and_reuses_it_for_other_output_paths() {
+    let project = project(SOURCE);
+    cached(project.path(), &[], "miss", true);
+    cached(project.path(), &["--vcd", "first.vcd"], "miss", true);
+    cached(project.path(), &["--vcd", "second.vcd"], "hit", true);
+    let first = fs::read_to_string(project.path().join("first.vcd")).unwrap();
+    let second = fs::read_to_string(project.path().join("second.vcd")).unwrap();
+    assert_eq!(
+        first.split_once("$enddefinitions").unwrap().1,
+        second.split_once("$enddefinitions").unwrap().1
+    );
+    cached(project.path(), &[], "hit", true);
+}

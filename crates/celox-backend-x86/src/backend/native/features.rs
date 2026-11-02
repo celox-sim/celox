@@ -91,6 +91,12 @@ impl X86Features {
         self.bmi2
     }
 
+    #[cfg(test)]
+    pub(crate) const fn with_bmi2(mut self, enabled: bool) -> Self {
+        self.bmi2 = enabled;
+        self
+    }
+
     pub(crate) const fn avx(self) -> bool {
         self.avx
     }

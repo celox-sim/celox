@@ -13,6 +13,17 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 8; see <case>/build.log\n:0: Sorry: Queue of type `9netenum_t` is not yet supported.\n:0: Sorry: Queue of type `9netenum_t` is not yet supported.\n<case>/source_0.sv:81: error: Unable to bind parameter `HIGH3' in `celox_suite_tb.dut.$unm_blk_10'\n:0: error: queue bound must be constant.\n<case>/source_0.sv:23: error: Unable to bind wire/reg/memory `HIGH' in `celox_suite_tb.dut.pick'\n<case>/source_0.sv:69: error: Unable to bind wire/reg/memory `Q' in `celox_suite_tb.dut.$unm_blk_8'\n<case>/source_0.sv:76: error: Unable to bind wire/reg/memory `HIGH2' in `celox_suite_tb.dut.$unm_blk_9'\n<case>/source_0.sv:83: error: Unable to bind wire/reg/memory `LOW3' in `celox_suite_tb.dut.$unm_blk_10'\n8 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "types::local_typedefs",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "",
       "expectation": "Simulation",
       "name": "types::packed_arrays_of_signed_named_types_have_signed_elements",

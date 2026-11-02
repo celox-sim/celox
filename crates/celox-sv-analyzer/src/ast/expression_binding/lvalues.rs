@@ -10,6 +10,12 @@ pub(in crate::ast) fn variable_lvalue(
     dimensions: &PackedDimensions,
     chandle: bool,
 ) -> Converted<LValue> {
+    if matches!(
+        native.expression(ungroup(root, native)).kind,
+        ExprKind::Select { .. }
+    ) {
+        unpacked_structs::check_operands(ungroup(root, native), native, tree, session, dimensions)?;
+    }
     chandles::check_target(chandle, root, tree, native, dimensions, session)?;
     direct::selected_lvalue(root, native, tree, session, dimensions, false)
 }
@@ -20,6 +26,12 @@ pub(in crate::ast) fn net_lvalue(
     session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<LValue> {
+    if matches!(
+        native.expression(ungroup(root, native)).kind,
+        ExprKind::Select { .. }
+    ) {
+        unpacked_structs::check_operands(ungroup(root, native), native, tree, session, dimensions)?;
+    }
     // No continuous assignment drives a chandle (6.14).
     chandles::check_target(false, root, tree, native, dimensions, session)?;
     if direct::member_context(root, native, tree, session, dimensions)?

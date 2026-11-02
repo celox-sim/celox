@@ -10,6 +10,14 @@ pub struct Field {
     pub offset: u32,
     pub width: u32,
     pub random: bool,
+    /// The values a random enumeration property may take (IEEE 1800-2023
+    /// 18.3); empty for others.
+    #[serde(default)]
+    pub domain: Vec<u64>,
+    /// A `randc` property, which cycles through the values its constraints
+    /// allow before repeating one (IEEE 1800-2023 18.4.2).
+    #[serde(default)]
+    pub cyclic: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -47,6 +55,59 @@ pub enum Expr {
 pub struct Program {
     pub fields: Vec<Field>,
     pub constraints: Vec<Expr>,
+}
+
+/// Whether `term` is one of `values`, as a balanced tree so that a large
+/// domain stays within the solver's depth limit.
+fn member(term: &Term, width: u32, values: impl IntoIterator<Item = u64>) -> Term {
+    fn all(mut terms: Vec<Term>) -> Term {
+        match terms.len() {
+            0 => boolv(true),
+            1 => terms.pop().expect("one term"),
+            len => {
+                let right = terms.split_off(len / 2);
+                and(all(terms), all(right))
+            }
+        }
+    }
+    let differs = values
+        .into_iter()
+        .map(|value| not(eq(term.clone(), bv(width, value))))
+        .collect();
+    not(all(differs))
+}
+
+/// The number of values in the cycle of randc `field`: the members of an
+/// enumeration, which the cycle holds by their indices, or every value of
+/// its width.
+fn cycle_size(field: &Field) -> u64 {
+    if field.domain.is_empty() {
+        1 << field.width
+    } else {
+        field.domain.len() as u64
+    }
+}
+
+/// The value of cycle entry `index` of randc `field`.
+fn cycle_value(field: &Field, index: u64) -> u64 {
+    if field.domain.is_empty() {
+        index
+    } else {
+        field.domain[index as usize]
+    }
+}
+
+/// The cycle entry of value `value` of randc `field`.
+fn cycle_index(field: &Field, value: u64) -> Option<u64> {
+    if field.domain.is_empty() {
+        Some(value)
+    } else {
+        field
+            .domain
+            .iter()
+            .position(|member| *member == value)
+            .map(|index| index as u64)
+    }
 }
 
 fn truth(value: Term) -> Term {
@@ -205,6 +266,7 @@ impl Heap {
             let mut projection = Env::new();
             let mut terms = Vec::new();
             let mut active = Vec::new();
+            let mut cyclic = Vec::new();
             let mut formula = boolv(true);
             for (index, field) in program.fields.iter().enumerate() {
                 if !(1..=64).contains(&field.width) {
@@ -216,6 +278,18 @@ impl Heap {
                 if enabled {
                     projection.insert(name, term.clone());
                     active.push((index, field));
+                    if !field.domain.is_empty() {
+                        formula = and(
+                            formula,
+                            member(&term, field.width, field.domain.iter().copied()),
+                        );
+                    }
+                    if field.cyclic {
+                        if field.domain.is_empty() && field.width > 8 || field.domain.len() > 256 {
+                            return Err("randc property with more than 256 values".into());
+                        }
+                        cyclic.push((field, term.clone()));
+                    }
                 } else {
                     let value = self.load(
                         handle,
@@ -244,7 +318,57 @@ impl Heap {
             };
             // Initial integration uses seeded SAT search, not hash-cell acceptance.
             // It finds a valid model without claiming uniform sampling (#2187).
-            let outcome = solve_seeded(&formula, &projection, limits, seed);
+            // A randc property takes a value its cycle has not produced yet
+            // (IEEE 1800-2023 18.4.2). A cycle restarts only when the
+            // constraints leave it no value: first those cycles exhausted on
+            // their own, then, while the remaining values of the others
+            // still exclude every solution, one more cycle at a time.
+            // A restart takes effect only when the call succeeds.
+            let restriction = |heap: &mut Self, field: &Field, term: &Term, restart: bool| {
+                let remaining = if restart {
+                    (0..cycle_size(field)).collect()
+                } else {
+                    heap.cycle_remaining(handle, field.offset, cycle_size(field), false)
+                };
+                member(
+                    term,
+                    field.width,
+                    remaining.into_iter().map(|entry| cycle_value(field, entry)),
+                )
+            };
+            let mut restarted = vec![false; cyclic.len()];
+            let solve_with = |heap: &mut Self, restarted: &[bool]| {
+                let mut attempt = formula.clone();
+                for ((field, term), restart) in cyclic.iter().zip(restarted) {
+                    attempt = and(attempt, restriction(heap, field, term, *restart));
+                }
+                solve_seeded(&attempt, &projection, limits.clone(), seed)
+            };
+            let mut outcome = solve_with(self, &restarted);
+            if matches!(outcome.verdict, Verdict::Unsat) && !cyclic.is_empty() {
+                for (position, (field, term)) in cyclic.iter().enumerate() {
+                    let alone = and(formula.clone(), restriction(self, field, term, false));
+                    restarted[position] = matches!(
+                        solve_seeded(&alone, &projection, limits.clone(), seed).verdict,
+                        Verdict::Unsat
+                    );
+                }
+                let mut next = 0;
+                loop {
+                    if restarted.iter().any(|restart| *restart) {
+                        outcome = solve_with(self, &restarted);
+                        if !matches!(outcome.verdict, Verdict::Unsat) {
+                            break;
+                        }
+                    }
+                    let Some(position) = (next..cyclic.len()).find(|&index| !restarted[index])
+                    else {
+                        break;
+                    };
+                    restarted[position] = true;
+                    next = position + 1;
+                }
+            }
             match outcome.verdict {
                 Verdict::Unsat => Ok(false),
                 Verdict::Unknown => Err(outcome
@@ -259,6 +383,18 @@ impl Heap {
                             _ => Err("missing constraint field value".to_owned()),
                         })
                         .collect::<Result<Vec<_>, _>>()?;
+                    for ((field, _), restart) in cyclic.iter().zip(&restarted) {
+                        if *restart {
+                            self.cycle_remaining(handle, field.offset, cycle_size(field), true);
+                        }
+                    }
+                    for (field, value) in &updates {
+                        if field.cyclic
+                            && let Some(entry) = cycle_index(field, *value)
+                        {
+                            self.take_cycle_entry(handle, field.offset, cycle_size(field), entry);
+                        }
+                    }
                     for (field, value) in updates {
                         self.store(
                             handle,
@@ -292,6 +428,8 @@ mod tests {
                 offset: 0,
                 width: 4,
                 random: true,
+                domain: Vec::new(),
+                cyclic: false,
             }],
             constraints: vec![Expr::Binary {
                 op: "<".into(),
@@ -359,6 +497,130 @@ mod tests {
     }
 
     #[test]
+    fn cyclic_fields_draw_each_allowed_value_once_per_cycle() {
+        let mut heap = Heap::new();
+        let object = heap.new_object(1, 1);
+        let mut program = program();
+        program.fields[0].width = 2;
+        program.fields[0].cyclic = true;
+        program.constraints[0] = Expr::Binary {
+            op: "<".into(),
+            left: Box::new(Expr::Field(0)),
+            right: Box::new(Expr::Literal(2, 3)),
+            signed: false,
+        };
+        for _ in 0..3 {
+            let mut seen = Vec::new();
+            for _ in 0..3 {
+                assert!(heap.randomize_object(object, &program, false));
+                seen.push(heap.load(object, 0, 1));
+            }
+            seen.sort_unstable();
+            assert_eq!(seen, [0, 1, 2]);
+        }
+    }
+
+    #[test]
+    fn exhausted_cycles_restart_alone() {
+        // a < 2 runs out after two draws; b < 3 keeps its cycle.
+        let mut heap = Heap::new();
+        let object = heap.new_object(1, 2);
+        let field = |offset| Field {
+            offset,
+            width: 2,
+            random: true,
+            domain: Vec::new(),
+            cyclic: true,
+        };
+        let below = |field, bound| Expr::Binary {
+            op: "<".into(),
+            left: Box::new(Expr::Field(field)),
+            right: Box::new(Expr::Literal(2, bound)),
+            signed: false,
+        };
+        let program = Program {
+            fields: vec![field(0), field(1)],
+            constraints: vec![below(0, 2), below(1, 3)],
+        };
+        for _ in 0..4 {
+            let mut seen = Vec::new();
+            for _ in 0..3 {
+                assert!(heap.randomize_object(object, &program, false));
+                seen.push(heap.load(object, 1, 1));
+            }
+            seen.sort_unstable();
+            assert_eq!(seen, [0, 1, 2]);
+        }
+    }
+
+    #[test]
+    fn enumeration_cycles_hold_member_indices() {
+        // The unconstrained draw and the solver share the cycle of a randc
+        // enumeration with values {4, 9}.
+        let mut heap = Heap::new();
+        let object = heap.new_object(1, 1);
+        let mut program = program();
+        program.fields[0].domain = vec![4, 9];
+        program.fields[0].cyclic = true;
+        program.constraints.clear();
+        for _ in 0..4 {
+            let first = [4, 9][heap.random_cyclic_object(object, 0, 2) as usize];
+            assert!(heap.randomize_object(object, &program, false));
+            let second = heap.load(object, 0, 1);
+            assert_ne!(first, second);
+            assert!([4, 9].contains(&second));
+        }
+    }
+
+    #[test]
+    fn failed_calls_keep_unfinished_cycles() {
+        let mut heap = Heap::new();
+        let object = heap.new_object(1, 1);
+        let mut program = program();
+        program.fields[0].width = 1;
+        program.fields[0].cyclic = true;
+        program.constraints.clear();
+        let mut impossible = program.clone();
+        impossible.constraints = vec![Expr::Literal(1, 0)];
+        for _ in 0..4 {
+            assert!(heap.randomize_object(object, &program, false));
+            let first = heap.load(object, 0, 1);
+            assert!(!heap.randomize_object(object, &impossible, false));
+            assert!(heap.randomize_object(object, &program, false));
+            assert_ne!(heap.load(object, 0, 1), first);
+        }
+    }
+
+    #[test]
+    fn large_domains_stay_within_the_solver_depth() {
+        let mut heap = Heap::new();
+        let object = heap.new_object(1, 2);
+        let mut program = program();
+        program.fields[0].width = 12;
+        program.fields[0].domain = (0..1024).map(|value| value * 3).collect();
+        program.constraints.clear();
+        assert!(heap.randomize_object(object, &program, false));
+        assert_eq!(heap.load(object, 0, 2) % 3, 0);
+    }
+
+    #[test]
+    fn domains_restrict_random_fields_only() {
+        let mut heap = Heap::new();
+        let object = heap.new_object(1, 1);
+        let mut program = program();
+        program.fields[0].domain = vec![1, 9];
+        program.constraints.clear();
+        for _ in 0..16 {
+            assert!(heap.randomize_object(object, &program, false));
+            assert!([1, 9].contains(&heap.load(object, 0, 1)));
+        }
+        heap.set_random_mode(object, 0, false);
+        heap.store(object, 0, 1, 5);
+        assert!(heap.randomize_object(object, &program, false));
+        assert_eq!(heap.load(object, 0, 1), 5);
+    }
+
+    #[test]
     fn modes_unsat_faults_and_snapshot_replay() {
         let mut heap = Heap::new();
         let object = heap.new_object(1, 1);
@@ -419,6 +681,8 @@ mod tests {
                     offset: i as u32 * 8,
                     width,
                     random: true,
+                    domain: Vec::new(),
+                    cyclic: false,
                 })
                 .collect(),
             constraints: vec![

@@ -128,6 +128,10 @@ sv_backends! {
     fn package_configuration_database(sim) {
         @case "virtual_interfaces::package_configuration_database";
     }
+
+    fn unit_import_package_variables(sim) {
+        @case "virtual_interfaces::unit_import_package_variables";
+    }
 }
 
 /// A wait through a handle that a class property, an automatic variable or
