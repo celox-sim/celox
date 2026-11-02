@@ -1,0 +1,7 @@
+Revision history for #2993:
+
+rev 3 (content) 2026-11-02 07:34 UTC
+rev 2 (content) 2026-11-02 07:02 UTC — Codex round 1: bit-extract peephole kept out of the function pipeline (its reload ignores ordinary stores; test fails with it in); capture-site stores count as host in call effects (lane footprint keeps CaptureFlags).
+rev 1 (initial) 2026-11-02 07:02 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2993,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"b077e2c1c8a85e3e3db750af3dd727f259dada82","timestamp_iso":"2026-11-02T07:02:06Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"b077e2c1c8a85e3e3db750af3dd727f259dada82","new_sha":"672a365c6f934e2082815b9905bc11d862eac1fe","timestamp_iso":"2026-11-02T07:02:06Z","reason":"Codex round 1: bit-extract peephole kept out of the function pipeline (its reload ignores ordinary stores; test fails with it in); capture-site stores count as host in call effects (lane footprint keeps CaptureFlags).","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/b077e2c1c8a85e3e3db750af3dd727f259dada82...672a365c6f934e2082815b9905bc11d862eac1fe"},{"number":3,"change_type":"content","old_sha":"672a365c6f934e2082815b9905bc11d862eac1fe","new_sha":"21be6c7b2e4d8e5b1afe9db83b7d795b2067857b","timestamp_iso":"2026-11-02T07:34:28Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/672a365c6f934e2082815b9905bc11d862eac1fe...21be6c7b2e4d8e5b1afe9db83b7d795b2067857b"}]} -->
