@@ -1,6 +1,1 @@
-Revision history for #3027:
-
-rev 2 (content) 2026-11-02 13:29 UTC — Remove development investigation notes from docs/internals at the user request; retain them only under ignored local work/. Update the PR description accordingly.
-rev 1 (initial) 2026-11-02 13:29 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":3027,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"7cdcb29fbd2b05a8872d785420506645e5a61221","timestamp_iso":"2026-11-02T13:29:44Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"7cdcb29fbd2b05a8872d785420506645e5a61221","new_sha":"b8301c775447e2d288d62e088acefb3e0da3999f","timestamp_iso":"2026-11-02T13:29:44Z","reason":"Remove development investigation notes from docs/internals at the user request; retain them only under ignored local work/. Update the PR description accordingly.","replay_sha":"b7750d80e1fbcc683019528e29659baacb8f7f03","compare_url":"https://github.com/celox-sim/celox/compare/7cdcb29fbd2b05a8872d785420506645e5a61221...b7750d80e1fbcc683019528e29659baacb8f7f03"}]} -->
+Replay compact scheduler commit after correctness fixes to its hotspot core dependency.
