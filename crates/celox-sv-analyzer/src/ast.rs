@@ -2968,7 +2968,7 @@ pub enum LValue {
 }
 
 /// The variable a selection of an [`ObjectPlace`] selects from.
-pub(crate) const OBJECT_VALUE: &str = "$object_value";
+pub(crate) const OBJECT_VALUE: &str = crate::ir::PLACE_VALUE;
 
 /// An [`LValue::Object`] past the statement that assigns it: the body
 /// builder lowers each place with its statement, into a load and a store of

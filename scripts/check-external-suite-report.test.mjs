@@ -415,6 +415,8 @@ test("every retained baseline accepts only its existing failures", () => {
                 "references::ref_task_keeps_a_property_while_suspended",
                 "references::ref_task_keeps_the_reference_while_suspended",
                 "references::ref_writes_are_seen_before_the_return",
+                "scan::sscanf_class_property_outputs",
+                "scan::sscanf_inputs_before_property_outputs",
                 "semaphores::get_waits_until_enough_keys_are_put",
                 "semaphores::one_key_admits_one_process_at_a_time",
                 "semaphores::try_get_takes_only_available_keys",

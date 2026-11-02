@@ -126,3 +126,75 @@
   (top Top)
   (run_until 0)
   (assert_eq ok 1))
+
+(case sscanf_class_property_outputs
+  (source "sscanf_properties.sv" #"
+    module Top(output int verbosity, output int offset, output int count, output int parsed,
+               output int local_value, output bit matched);
+      class Setting;
+        int verbosity;
+        int offset = 7;
+        function int parse(string text, output int extra);
+          // An output may be a class property (IEEE 1800-2023 21.3.4.3).
+          return $sscanf(text, "%d %d", verbosity, extra);
+        endfunction
+      endclass
+      Setting setting;
+      initial begin
+        setting = new;
+        count = $sscanf("42 8", "%d %d", setting.verbosity, setting.offset);
+        verbosity = setting.verbosity;
+        offset = setting.offset;
+        matched = 0;
+        if ($sscanf("9", "%d", setting.offset) == 1) matched = setting.offset == 9;
+        parsed = setting.parse("5 6", local_value);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 0)
+  (assert_eq verbosity 42) (assert_eq offset 8) (assert_eq count 2) (assert_eq matched 1)
+  (assert_eq parsed 2) (assert_eq local_value 6))
+
+(case sscanf_inputs_before_property_outputs
+  (source "sscanf_property_order.sv" #"
+    module Top(output int a0, output int a1, output int c0,
+               output int c1, output int d0, output int d1, output int e0,
+               output bit [7:0] bits, output int counts);
+      class Setting; int offset = 7; int level = 3; bit [7:0] bits; endclass
+      Setting settings[2];
+      int i;
+      int q[$];
+      function automatic string next_text(); i = 1; return "42 5"; endfunction
+      function automatic int pick(); i = 0; return 1; endfunction
+      initial begin
+        settings[0] = new;
+        settings[1] = new;
+        q = '{10, 20};
+        // The text, the format and then each output, left to right, are
+        // evaluated before the scan writes any output, whether an output
+        // is a variable, a class property, a container element or a select
+        // of one (IEEE 1800-2023 21.3.4.3).
+        i = 0;
+        counts = $sscanf(next_text(), "%d %d", settings[i].offset, settings[i].level);
+        a0 = settings[0].offset;
+        a1 = settings[1].level;
+        i = 1;
+        counts += $sscanf("8 9", "%d %d", settings[pick()].level, settings[i].offset);
+        c0 = settings[1].level;
+        c1 = settings[0].offset;
+        i = 1;
+        counts += $sscanf("0 4", "%d %d", i, q[i]);
+        d0 = q[1];
+        d1 = i;
+        counts += $sscanf("3 a", "%d %h", q[pick()], settings[i].bits[3:0]);
+        e0 = q[1];
+        bits = settings[0].bits;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 0)
+  (assert_eq a0 7) (assert_eq a1 5) (assert_eq c0 8)
+  (assert_eq c1 9) (assert_eq d0 4) (assert_eq d1 0) (assert_eq e0 3) (assert_eq bits 0x0a)
+  (assert_eq counts 8))

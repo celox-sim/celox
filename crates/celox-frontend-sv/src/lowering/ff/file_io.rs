@@ -230,10 +230,10 @@ impl Ff<'_, '_> {
         };
         self.check_tagged_guards(&guards)?;
         let value = Expr::Ident(line_name);
-        match lvalues.as_slice() {
-            [one] => self.assign(one, &value)?,
-            _ => return Err(unsupported(format!("{name} text destination"))),
+        if lvalues.parts.len() != 1 {
+            return Err(unsupported(format!("{name} text destination")));
         }
+        self.write_system_actual(&lvalues, &value)?;
         if let Some(join) = join {
             self.jump(join);
             self.b.switch_to_block(join);
