@@ -1028,27 +1028,45 @@ impl Plan {
         // combinational cones: writing an input of a waited
         // expression can wake its consumer after the settle, even when no
         // kernel stores the expression itself.
+        // Several process kernels commonly wait on the same clock or signal
+        // set. Their dependency cones are identical within this immutable
+        // plan; materialize each distinct set once instead of walking and
+        // cloning the combinational IR again for every waiter.
+        let mut wait_dependencies = HashMap::default();
         let dependencies: Vec<(HashSet<AbsoluteAddr>, HashSet<AbsoluteAddr>)> = kernels
             .iter()
             .map(|kernel| {
                 let Some(wait) = kernel.as_ref().and_then(|kernel| kernel.wait.as_ref()) else {
                     return (HashSet::default(), HashSet::default());
                 };
-                let signals = wait.terms.iter().map(|&(signal, _)| signal);
-                let cone = wait_slicer
-                    .as_ref()
-                    .map(|slicer| slicer.slice(signals.clone()))
-                    .unwrap_or_default();
-                let comb: HashSet<_> = cone
-                    .iter()
-                    .flat_map(loads)
-                    .map(storage)
-                    .filter(|input| !control_slots.contains(input))
-                    .collect();
-                let all = signals.map(storage).chain(comb.iter().copied()).collect();
-                (all, comb)
+                let mut signals: Vec<_> = wait.terms.iter().map(|&(signal, _)| signal).collect();
+                signals.sort_unstable();
+                signals.dedup();
+                wait_dependencies
+                    .entry(signals)
+                    .or_insert_with_key(|signals| {
+                        let cone = wait_slicer
+                            .as_ref()
+                            .map(|slicer| slicer.slice(signals.iter().copied()))
+                            .unwrap_or_default();
+                        let comb: HashSet<_> = cone
+                            .iter()
+                            .flat_map(loads)
+                            .map(storage)
+                            .filter(|input| !control_slots.contains(input))
+                            .collect();
+                        let all: HashSet<_> = signals
+                            .iter()
+                            .copied()
+                            .map(storage)
+                            .chain(comb.iter().copied())
+                            .collect();
+                        (all, comb)
+                    })
+                    .clone()
             })
             .collect();
+        tracing::debug!(target: "celox::scheduler", kernels = kernels.len(), distinct_wait_sets = wait_dependencies.len(), "scheduler wait dependency slices");
         let mut remaining: HashSet<usize> = kernels
             .iter()
             .enumerate()

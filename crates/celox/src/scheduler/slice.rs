@@ -469,7 +469,36 @@ impl<'a> CombSlicer<'a> {
             .iter()
             .enumerate()
             .map(|(unit_index, unit)| {
-                let mut unit = unit.clone();
+                // A dependency cone can keep only a handful of instructions
+                // from a large settle. Do not deep-clone every instruction
+                // (including constants and argument vectors) just to drop it.
+                let mut unit = Unit {
+                    entry_block_id: unit.entry_block_id,
+                    register_map: unit.register_map.clone(),
+                    blocks: unit
+                        .blocks
+                        .iter()
+                        .map(|(&id, block)| {
+                            (
+                                id,
+                                celox_sir::BasicBlock {
+                                    id: block.id,
+                                    params: block.params.clone(),
+                                    instructions: block
+                                        .instructions
+                                        .iter()
+                                        .enumerate()
+                                        .filter(|(position, _)| {
+                                            kept[unit_index].contains(&(id, *position))
+                                        })
+                                        .map(|(_, instruction)| instruction.clone())
+                                        .collect(),
+                                    terminator: block.terminator.clone(),
+                                },
+                            )
+                        })
+                        .collect(),
+                };
                 let needed =
                     |register: &RegisterId| seen.contains(&Need::Register(unit_index, *register));
                 // Unneeded parameters go with their arguments.
@@ -479,12 +508,6 @@ impl<'a> CombSlicer<'a> {
                     .map(|(&id, block)| (id, block.params.iter().map(|p| !needed(p)).collect()))
                     .collect();
                 for (&id, block) in unit.blocks.iter_mut() {
-                    let mut position = 0;
-                    block.instructions.retain(|_| {
-                        let keep = kept[unit_index].contains(&(id, position));
-                        position += 1;
-                        keep
-                    });
                     let mut index = 0;
                     block.params.retain(|_| {
                         let keep = !dropped[&id][index];
