@@ -304,8 +304,36 @@ pub(crate) fn execute_prepared_unit<A, M: InterpMachine<A>>(
     regs: &mut Registers,
     functions: &[FunctionUnit<A>],
 ) -> Result<UnitExit, InterpError> {
+    execute_prepared_unit_with_hook(
+        unit,
+        machine,
+        entry_args,
+        four_state,
+        regs,
+        functions,
+        &mut |_, _, _, _| Ok(None),
+    )
+}
+
+/// A hook may execute a top-level region and return its last block. The
+/// original final terminator performs the exit transfer; internal jumps must
+/// preserve parallel arguments. None must leave state/registers unchanged.
+pub(crate) fn execute_prepared_unit_with_hook<A, M: InterpMachine<A>>(
+    unit: &ExecutionUnit<A>,
+    machine: &mut M,
+    entry_args: &[SIRValue],
+    four_state: bool,
+    regs: &mut Registers,
+    functions: &[FunctionUnit<A>],
+    hook: &mut impl FnMut(
+        &ExecutionUnit<A>,
+        BlockId,
+        &mut Registers,
+        &mut M,
+    ) -> Result<Option<BlockId>, InterpError>,
+) -> Result<UnitExit, InterpError> {
     regs.begin_execution();
-    execute_unit_inner(unit, machine, entry_args, four_state, regs, functions)
+    execute_unit_inner(unit, machine, entry_args, four_state, regs, functions, hook)
 }
 
 fn execute_unit_inner<A, M: InterpMachine<A>>(
@@ -315,6 +343,12 @@ fn execute_unit_inner<A, M: InterpMachine<A>>(
     four_state: bool,
     regs: &mut Registers,
     functions: &[FunctionUnit<A>],
+    hook: &mut impl FnMut(
+        &ExecutionUnit<A>,
+        BlockId,
+        &mut Registers,
+        &mut M,
+    ) -> Result<Option<BlockId>, InterpError>,
 ) -> Result<UnitExit, InterpError> {
     let entry = unit
         .blocks
@@ -330,7 +364,7 @@ fn execute_unit_inner<A, M: InterpMachine<A>>(
         regs.set(*param, value.clone());
     }
     let mut calls = Vec::new();
-    let result = run_activations(unit, machine, four_state, regs, functions, &mut calls);
+    let result = run_activations(unit, machine, four_state, regs, functions, &mut calls, hook);
     // A failing call leaves the frames it entered.
     for _ in &calls {
         machine.pop_frame();
@@ -347,15 +381,31 @@ fn run_activations<'u, A, M: InterpMachine<A>>(
     regs: &mut Registers,
     functions: &'u [FunctionUnit<A>],
     calls: &mut Vec<(Activation<'u, A>, Registers)>,
+    hook: &mut impl FnMut(
+        &ExecutionUnit<A>,
+        BlockId,
+        &mut Registers,
+        &mut M,
+    ) -> Result<Option<BlockId>, InterpError>,
 ) -> Result<UnitExit, InterpError> {
     let mut running = unit;
     let mut current = unit.entry_block_id;
     let mut next = 0;
     loop {
-        let block = running
+        let mut block = running
             .blocks
             .get(&current)
             .ok_or(InterpError::UnknownBlock(current))?;
+        if next == 0 && calls.is_empty() {
+            if let Some(tail) = hook(running, current, regs, machine)? {
+                current = tail;
+                block = running
+                    .blocks
+                    .get(&current)
+                    .ok_or(InterpError::UnknownBlock(current))?;
+                next = block.instructions.len();
+            }
+        }
         let mut entered = None;
         {
             let regs = match calls.last_mut() {
@@ -1898,7 +1948,7 @@ impl Registers {
         })
     }
 
-    fn get(&self, id: RegisterId) -> Result<&SIRValue, InterpError> {
+    pub(crate) fn get(&self, id: RegisterId) -> Result<&SIRValue, InterpError> {
         self.initialized_value(id)
             .map(RegisterValue::as_sir)
             .ok_or(InterpError::MissingRegister(id))
@@ -1916,7 +1966,7 @@ impl Registers {
             .ok_or(InterpError::MissingRegister(id))
     }
 
-    fn set(&mut self, id: RegisterId, value: SIRValue) {
+    pub(crate) fn set(&mut self, id: RegisterId, value: SIRValue) {
         if let Some(slot) = self.slots.get_mut(id.0) {
             let small = if self.small_enabled && slot.width <= 64 && value.mask.is_zero() {
                 value.payload.to_u64()

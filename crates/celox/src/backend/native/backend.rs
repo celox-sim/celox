@@ -1156,6 +1156,81 @@ pub(super) struct CompiledNativeFunction {
     pub(super) required_native_features: u8,
 }
 
+/// An independently owned complete entry using the program's existing state ABI.
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+pub(crate) struct HotspotCode {
+    code: jit_mem::JitCode,
+    pub(crate) required_state_size: usize,
+    pub(crate) code_size: usize,
+}
+
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+impl HotspotCode {
+    pub(crate) fn compile(
+        units: &[crate::ir::ExecutionUnit<RegionedAbsoluteAddr>],
+        layout: &MemoryLayout,
+        options: &SimulatorOptions,
+        cancel: &CompileCancel,
+    ) -> Result<Self, SimulatorError> {
+        // Calls need a linked function table and disjoint nested scratch. Keep
+        // them interpreted until incremental linking implements that contract.
+        if units
+            .iter()
+            .flat_map(|unit| unit.blocks.values())
+            .any(|block| {
+                block
+                    .instructions
+                    .iter()
+                    .any(|inst| matches!(inst, SIRInstruction::Call { .. }))
+            })
+        {
+            return Err(codegen_message(
+                "hotspot entry requires an unlinked function",
+            ));
+        }
+        let mut native = options.x86_options.clone();
+        native.baseline = false;
+        native.native_tick_loop = false;
+        let refs = units.iter().collect::<Vec<_>>();
+        let compiled = compile_unit_refs(
+            &refs,
+            layout,
+            options.four_state,
+            "hotspot",
+            NativeMergeKind::Partial,
+            None,
+            &native,
+            false,
+            &options.optimize_options.diagnostics,
+            Some(cancel),
+        )?;
+        let code_size = compiled.code.len();
+        let code = jit_mem::JitCode::new_named_with_symbols_profiled(
+            &compiled.code,
+            "celox_hotspot",
+            &compiled.symbols,
+            native.diagnostics.perf_map,
+        )
+        .map_err(|error| codegen_message(format!("hotspot executable allocation: {error}")))?;
+        Ok(Self {
+            code,
+            required_state_size: compiled.required_state_size,
+            code_size,
+        })
+    }
+
+    /// The entry was emitted in this process for the caller's immutable layout.
+    pub(crate) fn run(&self, memory: &mut [u64]) -> Result<(), SimulatorErrorCode> {
+        if memory.len().saturating_mul(8) < self.required_state_size {
+            return Err(SimulatorErrorCode::InternalError);
+        }
+        // The mapping owns the generated entry and the checked image covers
+        // all semantic storage and private scratch. The simulation owner holds
+        // exclusive access for the entire call.
+        NativeBackend::call_func(memory, self.code.fn_ptr)
+    }
+}
+
 #[cfg_attr(
     any(
         all(feature = "arm64-codegen", not(target_arch = "aarch64")),
