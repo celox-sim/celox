@@ -2153,13 +2153,6 @@ fn read_index_value(
 
 /// Whether native expression `id` is the element of a dynamic container
 /// whose select is being bound against a local.
-fn is_element_select(id: ExprId, native: &Declarations, dimensions: &PackedDimensions) -> bool {
-    dimensions
-        .element_select
-        .as_ref()
-        .is_some_and(|(element, _)| *element == ungroup(id, native))
-}
-
 pub(super) fn path(
     mut root: ExprId,
     native: &Declarations,
@@ -2182,17 +2175,6 @@ pub(super) fn path(
     // A static class property is a variable of the module.
     if let Some(variable) = objects::static_property(tree, session, root, native, dimensions)? {
         return Ok((vec![variable], None));
-    }
-    if let Some((_, local)) = &dimensions.element_select
-        && is_element_select(root, native, dimensions)
-    {
-        return Ok((vec![local.clone()], None));
-    }
-    // The property whose select is being bound is bound as its template.
-    if dimensions.property_select_base == Some(ungroup(root, native))
-        && let Some((property, _)) = objects::property(tree, session, root, native, dimensions)?
-    {
-        return Ok((vec![objects::select_template(&property)], None));
     }
     let mut parts = Vec::new();
     let mut qualified = None;
@@ -2287,10 +2269,8 @@ fn selected_value(
     {
         return Err(unsupported("bit-select or part-select of a real variable"));
     }
-    // A select of a class property is bound as a select of its template,
-    // a variable of the property's type, which the property's value then
-    // replaces: the select keeps the semantics of a variable select
-    // (IEEE 1800-2023 11.5.1).
+    // A select of a class property selects its value, read through its
+    // handle, as a select of a variable of its type (IEEE 1800-2023 11.5.1).
     if !suffix.is_empty()
         && let Some((property, receiver)) =
             objects::property(tree, session, base, native, dimensions)?
@@ -2298,35 +2278,31 @@ fn selected_value(
         && property.r#type.container.is_none()
         && property.r#type.unpacked_struct().is_none()
     {
-        let base = ungroup(base, native);
-        let template = objects::select_template(&property);
-        if dimensions.property_select_base != Some(base) {
-            // The value replaces the template as a `[N-1:0]` vector.
-            if !zero_based_vector(&property.r#type, tree, dimensions) {
-                return Err(unsupported(
-                    "read of a select of a class property that is not declared [N-1:0]",
-                ));
-            }
-            let mut scope = dimensions.clone();
-            scope.insert(
-                template.clone(),
-                procedural::dimensions_from_type(&property.r#type),
-            );
-            scope.property_select_base = Some(base);
-            let selected = selected_value(root, native, tree, session, &scope)?;
-            let handle = objects::receiver(tree, session, receiver, native, dimensions)?;
-            return Ok(crate::ast::inlining::substitute_expr_idents(
-                selected,
-                &HashMap::from_iter([(template, objects::load(&property, handle))]),
+        // The value has the positions of a `[N-1:0]` vector.
+        if !zero_based_vector(&property.r#type, tree, dimensions) {
+            return Err(unsupported(
+                "read of a select of a class property that is not declared [N-1:0]",
             ));
         }
+        let steps = value_selects::steps(root, base, native).ok_or_else(disagreement)?;
+        let handle = objects::receiver(tree, session, receiver, native, dimensions)?;
+        return value_selects::read(
+            objects::load(&property, handle),
+            &property.r#type,
+            &steps,
+            native,
+            tree,
+            session,
+            dimensions,
+        );
     }
     // A select of the iterator of a locator over elements kept in records,
     // such as `item[31:0]`, selects the element's value.
     if !suffix.is_empty()
         && let ExprKind::Name(name) = &native.expression(base).kind
-        && let name = instances::normalize_identifier(&name.spelling)
-        && dimensions.get(&name).is_none()
+        && dimensions
+            .get(&instances::normalize_identifier(&name.spelling))
+            .is_none()
         && let Some((container, handle)) = locators::record_iterator(base, native, dimensions)
         && container.element.unpacked_struct().is_none()
     {
@@ -2335,19 +2311,16 @@ fn selected_value(
                 "select of an element wider than 64 bits that is not declared [N-1:0]",
             ));
         }
-        let mut scope = dimensions.clone();
-        scope.insert(
-            name.clone(),
-            procedural::dimensions_from_type(&container.element),
+        let steps = value_selects::steps(root, base, native).ok_or_else(disagreement)?;
+        return value_selects::read(
+            containers::element_read(&container, handle),
+            &container.element,
+            &steps,
+            native,
+            tree,
+            session,
+            dimensions,
         );
-        scope
-            .expression_signedness
-            .insert(name.clone(), container.element.is_signed());
-        let selected = selected_value(root, native, tree, session, &scope)?;
-        return Ok(crate::ast::inlining::substitute_expr_idents(
-            selected,
-            &HashMap::from_iter([(name, containers::element_read(&container, handle))]),
-        ));
     }
     // An element wider than 64 bits is held in a record, whose packed
     // selects, such as `q[0][129]`, are not bound yet.
@@ -2530,10 +2503,6 @@ pub(in crate::ast) fn selected_lvalue(
         dimension,
     } = &native.expression(base).kind
     {
-        // The selected element of a dynamic container is its local.
-        if is_element_select(base, native, dimensions) {
-            break;
-        }
         suffix.push(&dimension.kind);
         base = *expression;
     }
@@ -2562,102 +2531,8 @@ pub(in crate::ast) fn selected_lvalue(
     if suffix.is_empty() && parts.len() > 1 {
         return packed_structs::whole_member(tree, parts, qualified, dimensions);
     }
-    let mut finish = |name: String,
-                      context: &PackedDimensions,
-                      strict: bool|
-     -> Converted<LValue> {
-        if context.get(&name).is_some_and(|ty| {
-            ty.members
-                .first()
-                .is_some_and(packed_structs::PackedMember::is_tagged)
-                && suffix.len() >= ty.unpacked.len() + ty.packed.len()
-        }) {
-            return Err(unsupported("bit-select or part-select of a tagged union"));
-        }
-        if context
-            .get(&name)
-            .is_some_and(|ty| ty.chandle && suffix.len() > ty.unpacked.len())
-        {
-            return Err(chandles::packed_select());
-        }
-        if context
-            .get(&name)
-            .is_some_and(|ty| ty.real && suffix.len() > ty.unpacked.len())
-        {
-            return Err(unsupported("bit-select or part-select of a real variable"));
-        }
-        let mut indices = Vec::new();
-        let mut range = None;
-        let mut ranged = false;
-        for dimension in &suffix {
-            if ranged {
-                return Err(unsupported("select following a part-select"));
-            }
-            ranged = !matches!(dimension, DimensionKind::Index(_));
-            match dimension {
-                DimensionKind::Index(id) => {
-                    let index = index_value(*id, native, tree, session, context)?;
-                    indices.push(selects::self_determined_index(tree, index, context))
-                }
-                DimensionKind::Range { left, right } => {
-                    range = Some((
-                        index_value(*left, native, tree, session, context)?,
-                        index_value(*right, native, tree, session, context)?,
-                        false,
-                    ))
-                }
-                DimensionKind::Indexed {
-                    base,
-                    operator,
-                    width,
-                } => {
-                    let start = index_value(*base, native, tree, session, context)?;
-                    let width = index_value(*width, native, tree, session, context)?;
-                    let ((msb, lsb), dynamic) = if net {
-                        let width =
-                            eval_ast_const_expr(&tree.functions, &width, &context.const_env)
-                                .ok_or_else(|| {
-                                    unsupported("indexed part-select width that is not constant")
-                                })?;
-                        (
-                            selects::indexed_select_bounds_values(
-                                tree,
-                                start,
-                                operator == "+:",
-                                width,
-                                (Some(&name), indices.len()),
-                                context,
-                            )?,
-                            false,
-                        )
-                    } else {
-                        selects::indexed_range_values(
-                            tree,
-                            &name,
-                            start,
-                            width,
-                            operator == "+:",
-                            indices.len(),
-                            context,
-                        )?
-                    };
-                    range = Some((msb, lsb, dynamic));
-                }
-                _ => return Err(unsupported("select dimension")),
-            }
-        }
-        if strict
-            && !selects::constant_packed_indices_in_range(&tree.functions, &name, &indices, context)
-        {
-            return Err(unsupported(format!(
-                "constant select of `{name}` outside its declared range"
-            )));
-        }
-        if let Some((msb, lsb, dynamic)) = range {
-            selects::lvalue_from_range(tree, name, indices, msb, lsb, dynamic, context)
-        } else {
-            selects::lvalue_from_indices(tree, name, indices, context)
-        }
+    let mut finish = |name: String, context: &PackedDimensions, strict: bool| {
+        select_suffix(name, &suffix, native, tree, session, context, strict, net)
     };
     let lvalue = if let Some((element, indices)) = element {
         packed_structs::select_element_member(
@@ -2678,6 +2553,113 @@ pub(in crate::ast) fn selected_lvalue(
         )?
     };
     Ok(lvalue)
+}
+
+/// The selection that `suffix`, the selects of a native expression, make of
+/// variable `name`, whose layout `context` holds; `strict` rejects constant
+/// indices outside it, and `net` selects of a net.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn select_suffix(
+    name: String,
+    suffix: &[&DimensionKind],
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    context: &PackedDimensions,
+    strict: bool,
+    net: bool,
+) -> Converted<LValue> {
+    if context.get(&name).is_some_and(|ty| {
+        ty.members
+            .first()
+            .is_some_and(packed_structs::PackedMember::is_tagged)
+            && suffix.len() >= ty.unpacked.len() + ty.packed.len()
+    }) {
+        return Err(unsupported("bit-select or part-select of a tagged union"));
+    }
+    if context
+        .get(&name)
+        .is_some_and(|ty| ty.chandle && suffix.len() > ty.unpacked.len())
+    {
+        return Err(chandles::packed_select());
+    }
+    if context
+        .get(&name)
+        .is_some_and(|ty| ty.real && suffix.len() > ty.unpacked.len())
+    {
+        return Err(unsupported("bit-select or part-select of a real variable"));
+    }
+    let mut indices = Vec::new();
+    let mut range = None;
+    let mut ranged = false;
+    for dimension in suffix {
+        if ranged {
+            return Err(unsupported("select following a part-select"));
+        }
+        ranged = !matches!(dimension, DimensionKind::Index(_));
+        match dimension {
+            DimensionKind::Index(id) => {
+                let index = index_value(*id, native, tree, session, context)?;
+                indices.push(selects::self_determined_index(tree, index, context))
+            }
+            DimensionKind::Range { left, right } => {
+                range = Some((
+                    index_value(*left, native, tree, session, context)?,
+                    index_value(*right, native, tree, session, context)?,
+                    false,
+                ))
+            }
+            DimensionKind::Indexed {
+                base,
+                operator,
+                width,
+            } => {
+                let start = index_value(*base, native, tree, session, context)?;
+                let width = index_value(*width, native, tree, session, context)?;
+                let ((msb, lsb), dynamic) = if net {
+                    let width = eval_ast_const_expr(&tree.functions, &width, &context.const_env)
+                        .ok_or_else(|| {
+                            unsupported("indexed part-select width that is not constant")
+                        })?;
+                    (
+                        selects::indexed_select_bounds_values(
+                            tree,
+                            start,
+                            operator == "+:",
+                            width,
+                            (Some(&name), indices.len()),
+                            context,
+                        )?,
+                        false,
+                    )
+                } else {
+                    selects::indexed_range_values(
+                        tree,
+                        &name,
+                        start,
+                        width,
+                        operator == "+:",
+                        indices.len(),
+                        context,
+                    )?
+                };
+                range = Some((msb, lsb, dynamic));
+            }
+            _ => return Err(unsupported("select dimension")),
+        }
+    }
+    if strict
+        && !selects::constant_packed_indices_in_range(&tree.functions, &name, &indices, context)
+    {
+        return Err(unsupported(format!(
+            "constant select of `{name}` outside its declared range"
+        )));
+    }
+    if let Some((msb, lsb, dynamic)) = range {
+        selects::lvalue_from_range(tree, name, indices, msb, lsb, dynamic, context)
+    } else {
+        selects::lvalue_from_indices(tree, name, indices, context)
+    }
 }
 
 /// The actuals of `$sformatf` (IEEE 1800-2023 21.3.3): a format followed by

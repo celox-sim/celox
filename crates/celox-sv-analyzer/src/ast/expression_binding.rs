@@ -15,6 +15,7 @@ mod references;
 mod selected;
 mod streams;
 mod strings;
+pub(super) mod value_selects;
 pub(super) use calls::{statement as call_statement, statement_root as call_statement_root};
 pub(super) use chandles::{
     check_assignment as check_chandle_assignment, check_equality as check_chandle_equality,
@@ -42,7 +43,7 @@ pub(super) use objects::{
     method as object_method, method_result as object_method_result, named_class,
     native_class as object_native_class, property as object_property,
     rand_mode_call as object_rand_mode_call, receiver as object_receiver,
-    select_template as object_select_template, static_property as object_static_property,
+    static_property as object_static_property,
     static_property_declaration as object_static_property_declaration, this as object_this,
 };
 pub(super) use streams::{

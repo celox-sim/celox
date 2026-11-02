@@ -193,14 +193,28 @@ pub(super) fn expr_from_lvalue(
     lhs: &LValue,
     packed_dimensions: &PackedDimensions,
 ) -> Expr {
+    let name = match lhs {
+        LValue::Ident(name) | LValue::Select { name, .. } => name,
+    };
+    expr_from_selection(tree, Expr::Ident(name.clone()), lhs, packed_dimensions)
+}
+
+/// The value of selection `lhs` of a variable, applied to `base`, the value
+/// of that variable: a value of the variable's type, whose layout
+/// `packed_dimensions` holds under the variable's name.
+pub(in crate::ast) fn expr_from_selection(
+    tree: &AnalysisContext<'_>,
+    variable: Expr,
+    lhs: &LValue,
+    packed_dimensions: &PackedDimensions,
+) -> Expr {
     let functions = &tree.functions;
     if let Some(value) = selects::invalid_unpacked_read(tree, lhs, packed_dimensions) {
         return value;
     }
     let (base, array_slice_width, array_slice_reversed, signed) = match lhs {
-        LValue::Ident(name) => return Expr::Ident(name.clone()),
+        LValue::Ident(_) => return variable,
         LValue::Select {
-            name,
             msb,
             lsb,
             signed,
@@ -209,7 +223,7 @@ pub(super) fn expr_from_lvalue(
             ..
         } => (
             Expr::Select {
-                expr: Box::new(Expr::Ident(name.clone())),
+                expr: Box::new(variable),
                 msb: msb.clone(),
                 lsb: lsb.clone(),
                 signed: *signed,
