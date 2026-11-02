@@ -502,6 +502,17 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 134; see <case>/build.log\nivl: eval_vec4.c:1359: draw_eval_vec4: Assertion `ivl_expr_value(expr) == IVL_VT_BOOL || ivl_expr_value(expr) == IVL_VT_VECTOR' failed.\nAborted (core dumped)\n",
+      "expectation": "Simulation",
+      "name": "containers::four_state_container_equality",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

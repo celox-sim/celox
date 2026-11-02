@@ -1576,6 +1576,16 @@ follows; its exact compile diagnostic remains an executed failure in
 [the Icarus containers report](verification/sv/icarus/containers.json).
 No assertions or exclusions are weakened.
 
+### Four-state container equality
+
+`containers::four_state_container_equality` compares dynamic arrays holding
+unknown bits: their equality is x (IEEE 1800-2023 11.4.5, 7.6), their case
+equality 1, and equalities of differing and empty arrays 0 and 1. xezim 0.11.3
+evaluates the equality as 0 (`sv_container_equality_unknown_elements`, see the
+[probe](verification/repros/sv_container_equality_unknown_elements_xezim.json)).
+Icarus 13.0 aborts on an internal assertion compiling the case; Verilator 5.052
+does not run four-state cases. No assertions or exclusions are weakened.
+
 ### Array items in concatenations
 
 `containers::array_items_in_concatenations` assigns unpacked array
