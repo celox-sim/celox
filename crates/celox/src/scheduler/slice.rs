@@ -31,6 +31,56 @@ struct Indexed {
     control: HashMap<BlockId, Vec<(BlockId, RegisterId)>>,
 }
 
+/// Selected instruction positions and pruned control flow. Keep the original
+/// instructions and register types borrowed until an executable slice is needed.
+struct Selection<'a> {
+    source: &'a Unit,
+    blocks: HashMap<BlockId, SelectedBlock>,
+}
+
+struct SelectedBlock {
+    params: Vec<RegisterId>,
+    instructions: Vec<usize>,
+    terminator: SIRTerminator,
+}
+
+impl Selection<'_> {
+    fn loads(&self) -> impl Iterator<Item = AbsoluteAddr> + '_ {
+        self.blocks.iter().flat_map(|(id, block)| {
+            block.instructions.iter().filter_map(|&position| {
+                loaded_address(&self.source.blocks[id].instructions[position])
+            })
+        })
+    }
+
+    fn materialize(self) -> Unit {
+        Unit {
+            entry_block_id: self.source.entry_block_id,
+            register_map: self.source.register_map.clone(),
+            blocks: self
+                .blocks
+                .into_iter()
+                .map(|(id, block)| {
+                    let source = &self.source.blocks[&id];
+                    (
+                        id,
+                        celox_sir::BasicBlock {
+                            id: source.id,
+                            params: block.params,
+                            instructions: block
+                                .instructions
+                                .into_iter()
+                                .map(|position| source.instructions[position].clone())
+                                .collect(),
+                            terminator: block.terminator,
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
 pub(crate) struct CombSlicer<'a> {
     units: &'a [Unit],
     storage: HashMap<AbsoluteAddr, AbsoluteAddr>,
@@ -329,6 +379,9 @@ impl<'a> CombSlicer<'a> {
     ) -> Vec<Unit> {
         let affected = self.affected_storage(inputs);
         self.slice_selected(affected.iter().copied(), true, Some(&affected))
+            .into_iter()
+            .map(Selection::materialize)
+            .collect()
     }
 
     /// The part of the settle that computes `reads`: every store of storage
@@ -336,6 +389,18 @@ impl<'a> CombSlicer<'a> {
     /// need, and the settle's other effects, are left to the settle.
     pub(crate) fn slice(&self, reads: impl IntoIterator<Item = AbsoluteAddr>) -> Vec<Unit> {
         self.slice_with_control(reads, false)
+    }
+
+    /// The same loads as `slice(reads)`, including operands of control flow
+    /// that cannot fold away, without cloning executable IR to inspect it.
+    pub(crate) fn input_signals(
+        &self,
+        reads: impl IntoIterator<Item = AbsoluteAddr>,
+    ) -> HashSet<AbsoluteAddr> {
+        self.slice_selected(reads, false, None)
+            .iter()
+            .flat_map(Selection::loads)
+            .collect()
     }
 
     /// Even without a mutable-state sink, an eager activation must retain
@@ -350,6 +415,9 @@ impl<'a> CombSlicer<'a> {
         preserve_control: bool,
     ) -> Vec<Unit> {
         self.slice_selected(reads, preserve_control, None)
+            .into_iter()
+            .map(Selection::materialize)
+            .collect()
     }
 
     fn slice_selected(
@@ -357,7 +425,7 @@ impl<'a> CombSlicer<'a> {
         reads: impl IntoIterator<Item = AbsoluteAddr>,
         preserve_control: bool,
         allowed: Option<&HashSet<AbsoluteAddr>>,
-    ) -> Vec<Unit> {
+    ) -> Vec<Selection<'_>> {
         let mut kept: Vec<HashSet<(BlockId, usize)>> = vec![HashSet::default(); self.units.len()];
         let mut seen: HashSet<Need> = HashSet::default();
         let mut work: Vec<Need> = reads
@@ -371,7 +439,7 @@ impl<'a> CombSlicer<'a> {
         if work.is_empty() && !preserve_control {
             return Vec::new();
         }
-        let mut units: Vec<Unit>;
+        let mut units;
         loop {
             self.walk(&mut work, &mut seen, &mut kept, allowed);
             units = self.build(&kept, &seen);
@@ -464,35 +532,35 @@ impl<'a> CombSlicer<'a> {
         }
     }
 
-    fn build(&self, kept: &[HashSet<(BlockId, usize)>], seen: &HashSet<Need>) -> Vec<Unit> {
+    fn build(
+        &self,
+        kept: &[HashSet<(BlockId, usize)>],
+        seen: &HashSet<Need>,
+    ) -> Vec<Selection<'_>> {
         self.units
             .iter()
             .enumerate()
             .map(|(unit_index, unit)| {
-                // A dependency cone can keep only a handful of instructions
-                // from a large settle. Do not deep-clone every instruction
-                // (including constants and argument vectors) just to drop it.
-                let mut unit = Unit {
-                    entry_block_id: unit.entry_block_id,
-                    register_map: unit.register_map.clone(),
+                // Visit only selected instructions, rather than scanning the
+                // whole settle for every cone and every control-flow iteration.
+                let mut positions: HashMap<BlockId, Vec<usize>> = HashMap::default();
+                for &(block, position) in &kept[unit_index] {
+                    positions.entry(block).or_default().push(position);
+                }
+                for positions in positions.values_mut() {
+                    positions.sort_unstable();
+                }
+                let mut unit = Selection {
+                    source: unit,
                     blocks: unit
                         .blocks
                         .iter()
                         .map(|(&id, block)| {
                             (
                                 id,
-                                celox_sir::BasicBlock {
-                                    id: block.id,
+                                SelectedBlock {
                                     params: block.params.clone(),
-                                    instructions: block
-                                        .instructions
-                                        .iter()
-                                        .enumerate()
-                                        .filter(|(position, _)| {
-                                            kept[unit_index].contains(&(id, *position))
-                                        })
-                                        .map(|(_, instruction)| instruction.clone())
-                                        .collect(),
+                                    instructions: positions.remove(&id).unwrap_or_default(),
                                     terminator: block.terminator.clone(),
                                 },
                             )
@@ -544,9 +612,9 @@ impl<'a> CombSlicer<'a> {
 
 /// Replace branches whose arms run nothing on the way to one block (with
 /// the same arguments) by a jump there, and drop unreachable blocks.
-fn fold_empty_branches(unit: &mut Unit) {
+fn fold_empty_branches(unit: &mut Selection<'_>) {
     // Where an empty, parameterless block chain ends, with its arguments.
-    let forward = |unit: &Unit, mut block: BlockId| -> (BlockId, Vec<RegisterId>) {
+    let forward = |unit: &Selection<'_>, mut block: BlockId| -> (BlockId, Vec<RegisterId>) {
         let mut arguments = Vec::new();
         let mut seen = HashSet::default();
         while seen.insert(block) {
@@ -596,7 +664,7 @@ fn fold_empty_branches(unit: &mut Unit) {
         }
     }
     let mut reachable = HashSet::default();
-    let mut work = vec![unit.entry_block_id];
+    let mut work = vec![unit.source.entry_block_id];
     while let Some(id) = work.pop() {
         if reachable.insert(id) {
             work.extend(
@@ -1034,6 +1102,58 @@ mod tests {
             entry_block_id: BlockId(0),
             blocks,
             register_map,
+        }
+    }
+
+    #[test]
+    fn input_signals_preserve_control_and_storage_aliases() {
+        let units = [settle()];
+        let slicer = CombSlicer::new(&units, [(address(5), address(2))].into_iter().collect());
+        assert_eq!(
+            slicer.input_signals([address(5)]),
+            [address(0), address(1)].into_iter().collect(),
+            "a conditional store reads its selector as well as its value"
+        );
+        assert_eq!(
+            slicer.input_signals([address(4)]),
+            [address(1)].into_iter().collect(),
+            "a folded branch must not introduce a false scheduler dependency"
+        );
+        assert!(slicer.input_signals([address(9)]).is_empty());
+
+        let units = [looping_settle()];
+        let slicer = CombSlicer::new(&units, HashMap::default());
+        assert_eq!(
+            slicer.input_signals([address(4)]),
+            [address(0), address(1)].into_iter().collect(),
+            "a loop retains its bound and the carried block arguments"
+        );
+    }
+
+    #[test]
+    fn input_signals_match_materialized_slices_for_sink_combinations() {
+        for units in [
+            vec![settle()],
+            vec![looping_settle()],
+            vec![settle(), looping_settle()],
+        ] {
+            let slicer = CombSlicer::new(&units, HashMap::default());
+            for mask in 0..32 {
+                let sinks: Vec<_> = (0..5)
+                    .filter(|bit| mask & (1 << bit) != 0)
+                    .map(address)
+                    .collect();
+                let slice = slicer.slice(sinks.iter().copied());
+                for unit in &slice {
+                    unit.verify();
+                }
+                assert_eq!(
+                    slicer.input_signals(sinks),
+                    slice.iter().flat_map(loads).collect(),
+                    "sink mask {mask:05b}, {} units",
+                    units.len()
+                );
+            }
         }
     }
 
