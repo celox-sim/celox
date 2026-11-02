@@ -134,3 +134,21 @@ fn assignment_values_are_evaluated_before_target_addresses() {
     assert_eq!(sim.get(first), BigUint::from(1u8));
     assert_eq!(sim.get(i), BigUint::from(2u8));
 }
+
+/// An increment evaluates the address of its operand once, before it reads
+/// it, as an assignment operator does (IEEE 1800-2023 11.4.2, 11.4.1).
+#[test]
+fn increments_evaluate_place_addresses_once() {
+    let source = "module Top(output bit [7:0] first, output int calls); bit [7:0] q[$]; \
+        function automatic int next_index(); calls++; return 0; endfunction \
+        initial begin q = '{8'h0f, 8'h00}; calls = 0; q[next_index()][3:0]++; \
+        first = q[0]; end endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("order.sv"))], "Top")
+        .build()
+        .unwrap();
+    let first = sim.signal("first");
+    let calls = sim.signal("calls");
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(first), BigUint::from(0x00u8));
+    assert_eq!(sim.get(calls), BigUint::from(1u8));
+}

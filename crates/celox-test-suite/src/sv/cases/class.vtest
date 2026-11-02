@@ -4230,7 +4230,8 @@ endmodule
 
 (case nested_value_selects
   (source "class.sv" #"
-module Top(output bit [3:0] by_property, output bit [7:0] written, output bit [7:0] element);
+module Top(output bit [3:0] by_property, output bit [7:0] written, output bit [7:0] element,
+           output bit [3:0] by_element, output bit [7:0] copied);
     class Info;
         bit [15:0] bits = 16'h1234;
         bit [7:0] low = 8'h02;
@@ -4250,11 +4251,17 @@ module Top(output bit [3:0] by_property, output bit [7:0] written, output bit [7
         written = info.bits[7:0];
         q[info.low[0]][7:4] = other.bits[3:0];
         element = q[0];
+        // A select of a container element in the index of a select of a
+        // property, and on both sides of an assignment.
+        by_element = info.bits[4*q[0][1:0]+:4];
+        q[1][3:0] = q[0][3:0];
+        copied = q[1];
     end
 endmodule
 "#)
   (top Top) (run_until 0)
-  (assert_eq by_property 2) (assert_eq written 0x3f) (assert_eq element 0x41))
+  (assert_eq by_property 2) (assert_eq written 0x3f) (assert_eq element 0x41)
+  (assert_eq by_element 3) (assert_eq copied 1))
 
 (case property_assignment_sites
   (source "class.sv" #"

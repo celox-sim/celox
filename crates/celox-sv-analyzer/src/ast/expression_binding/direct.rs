@@ -2274,6 +2274,15 @@ fn selected_value(
             dimensions,
         );
     }
+    // A select of an element of a container, or of a member of one, such
+    // as `d[i][8*j+:8]` or `q[i].m[k]`, selects the element's value.
+    if let Some((element, r#type)) =
+        selected_container_element(root, native, tree, session, dimensions)?
+    {
+        let steps = value_selects::steps(root, element, native).ok_or_else(disagreement)?;
+        let value = bind_value(element, native, tree, session, dimensions, None)?;
+        return value_selects::read(value, &r#type, &steps, native, tree, session, dimensions);
+    }
     let mut base = root;
     let mut suffix = Vec::new();
     while let ExprKind::Select {
@@ -3359,6 +3368,61 @@ fn scheduler_call(
 
 /// `r#type` is a vector with one `[N-1:0]` range, whose select indices are
 /// offsets from bit 0.
+/// The element of a container, or the member of one, that native select
+/// `root` selects bits of, `d[i]` of `d[i][8*j+:8]` or `q[i].m` of
+/// `q[i].m[k]`, with its type: an integral `[N-1:0]` vector of at most 64
+/// bits, which the element holds by value.
+fn selected_container_element(
+    root: ExprId,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<(ExprId, Type)>> {
+    let mut chain = Vec::new();
+    let mut base = ungroup(root, native);
+    while let ExprKind::Select { expression, .. } = &native.expression(base).kind {
+        chain.push(base);
+        base = ungroup(*expression, native);
+    }
+    if chain.is_empty() {
+        return Ok(None);
+    }
+    chain.reverse();
+    // A member of an element, selected after the member.
+    if let Some((r#type, _)) = containers::element_member(base, native, tree, session, dimensions)?
+    {
+        return Ok(zero_based_vector(&r#type, tree, dimensions).then_some((base, r#type)));
+    }
+    let ExprKind::Name(name) = &native.expression(base).kind else {
+        return Ok(None);
+    };
+    let Some(shape) = dimensions.get(&instances::normalize_identifier(&name.spelling)) else {
+        return Ok(None);
+    };
+    let Some(mut container) = shape.container.as_deref() else {
+        return Ok(None);
+    };
+    let mut levels = shape.unpacked.len() + 1;
+    while let Some(inner) = container.element.container.as_deref() {
+        container = inner;
+        levels += 1;
+    }
+    if chain.len() <= levels
+        || container.record.is_some()
+        || !zero_based_vector(&container.element, tree, dimensions)
+    {
+        return Ok(None);
+    }
+    // Each container level is selected by an element index, `[i]` or the
+    // last element `[$]`, not a slice.
+    let indexed = chain[..levels].iter().all(|&id| {
+        matches!(&native.expression(id).kind, ExprKind::Select { dimension, .. }
+            if matches!(dimension.kind, DimensionKind::Index(_) | DimensionKind::Queue(None)))
+    });
+    Ok(indexed.then(|| (chain[levels - 1], container.element.clone())))
+}
+
 /// The class property of packed structure type that native member path
 /// `root` selects a member of, `h.p` of `h.p.m` or `h.p.m[1:0]`, with the
 /// receiver as [`objects::property`] returns it.

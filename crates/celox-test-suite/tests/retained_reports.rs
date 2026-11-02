@@ -1022,6 +1022,9 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "execute",
                             "native testbench exited without reaching $finish",
                         ),
+                        ("icarus", "containers::element_part_selects") => {
+                            ("compile_error", "compile", "Unpacked structs not supported")
+                        }
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

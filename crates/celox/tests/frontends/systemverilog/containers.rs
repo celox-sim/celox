@@ -72,6 +72,7 @@ sv_backends! {
     fn string_indices_from_calls(sim) { @case "containers::string_indices_from_calls"; }
     fn array_items_in_concatenations(sim) { @case "containers::array_items_in_concatenations"; }
     fn foreach_enumeration_index_methods(sim) { @case "containers::foreach_enumeration_index_methods"; }
+    fn element_part_selects(sim) { @case "containers::element_part_selects"; }
 }
 
 sv_backends! {
