@@ -1339,6 +1339,8 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     ) {
         let (SystemTask::Display(radix)
         | SystemTask::Strobe(radix)
+        | SystemTask::Monitor(radix)
+        | SystemTask::Fmonitor(radix)
         | SystemTask::Fstrobe(radix)
         | SystemTask::Write(radix)
         | SystemTask::Fdisplay(radix)
@@ -3176,15 +3178,19 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         {
             expression_binding::check_chandle_memory(memory, self.tree, &self.dims, self.session)?;
         }
-        if matches!(task, SystemTask::Strobe(_) | SystemTask::Fstrobe(_))
-            && effects::has_updates(
-                declarations,
-                &arguments
-                    .iter()
-                    .filter_map(|arg| arg.value)
-                    .collect::<Vec<_>>(),
-            )
-        {
+        if matches!(
+            task,
+            SystemTask::Strobe(_)
+                | SystemTask::Fstrobe(_)
+                | SystemTask::Monitor(_)
+                | SystemTask::Fmonitor(_)
+        ) && effects::has_updates(
+            declarations,
+            &arguments
+                .iter()
+                .filter_map(|arg| arg.value)
+                .collect::<Vec<_>>(),
+        ) {
             return Err(unsupported(format!(
                 "`{task}` with an assignment, increment or decrement argument"
             )));
@@ -6137,11 +6143,13 @@ fn template_index(task: SystemTask, args: &[SystemTaskArg<Expr>]) -> Option<usiz
     Some(match task {
         SystemTask::Display(_)
         | SystemTask::Strobe(_)
+        | SystemTask::Monitor(_)
         | SystemTask::Write(_)
         | SystemTask::Severity(_) => 0,
         SystemTask::Fatal => usize::from(matches!(args.first(), Some(SystemTaskArg::Expr(_)))),
         SystemTask::Fdisplay(_)
         | SystemTask::Fstrobe(_)
+        | SystemTask::Fmonitor(_)
         | SystemTask::Fwrite(_)
         | SystemTask::Assert
         | SystemTask::AssertContinue => 1,

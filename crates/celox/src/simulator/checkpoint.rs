@@ -102,6 +102,7 @@ pub struct Checkpoint {
     /// Whether the design had finished a timed simulation.
     frozen: bool,
     strobes: Vec<super::host::StrobeCall>,
+    monitors: super::host::MonitorState,
 }
 
 impl Checkpoint {
@@ -167,6 +168,7 @@ impl<B: SimBackend> Simulator<B> {
             comb_observer_initial_eval: self.comb_observer_initial_eval,
             frozen: self.frozen,
             strobes: self.strobe_calls(),
+            monitors: self.monitor_state(),
         })
     }
 
@@ -193,6 +195,7 @@ impl<B: SimBackend> Simulator<B> {
             .restore_into(&mut self.backend, fingerprint)?;
         self.replace_deferred_execution();
         self.restore_strobe_calls(&checkpoint.strobes);
+        self.restore_monitor_state(&checkpoint.monitors);
         self.comb_observer_snapshots
             .clone_from(&checkpoint.comb_observer_snapshots);
         self.comb_observer_initial_eval = checkpoint.comb_observer_initial_eval;
@@ -224,7 +227,8 @@ impl<B: SimBackend> Simulator<B> {
     }
 
     pub(crate) fn check_host_restore_support(&self) -> Result<(), CheckpointError> {
-        if !self.strobe_calls().is_empty()
+        if self.monitor_state().active()
+            || !self.strobe_calls().is_empty()
             || self
                 .program
                 .runtime_schema
@@ -267,6 +271,8 @@ pub(crate) struct PersistedCheckpoint {
     frozen: bool,
     #[serde(default)]
     strobes: Vec<super::host::StrobeCall>,
+    #[serde(default)]
+    monitors: super::host::MonitorState,
 }
 impl Checkpoint {
     pub(crate) fn persisted(&self) -> PersistedCheckpoint {
@@ -278,6 +284,7 @@ impl Checkpoint {
             initial_eval: self.comb_observer_initial_eval,
             frozen: self.frozen,
             strobes: self.strobes.clone(),
+            monitors: self.monitors.clone(),
         }
     }
 }
@@ -286,7 +293,8 @@ impl PersistedCheckpoint {
         self,
         simulator: &Simulator<B>,
     ) -> Result<Checkpoint, CheckpointError> {
-        if !simulator.valid_strobe_calls(&self.strobes)
+        if !simulator.valid_monitor_state(&self.monitors)
+            || !simulator.valid_strobe_calls(&self.strobes)
             || self.fingerprint != simulator.state_fingerprint()
             || self.bytes.len() != state_range(&simulator.backend).len()
             || self.observers.len() != simulator.comb_observer_snapshots.len()
@@ -303,6 +311,7 @@ impl PersistedCheckpoint {
             comb_observer_initial_eval: self.initial_eval,
             frozen: self.frozen,
             strobes: self.strobes,
+            monitors: self.monitors,
         })
     }
 }

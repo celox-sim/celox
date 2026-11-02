@@ -4779,5 +4779,119 @@
         "file_io::strobe_reads_after_reactive_program"
       ]
     }
+  },
+  {
+    "id": "sv_verilator_fmonitor_is_independent_of_console_monitor_off",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 2026-09-05 rev v5.052 suppresses file monitoring after $monitoroff. IEEE 1800-2023 21.3.2 gives file monitors independent lists and no on/off counterparts. The standalone FileMonitor probe prints no file lines; Icarus and Celox print file=0 and file=1.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/monitor-verilator.json",
+      "verification/repros/sv_monitor_slot.sv",
+      "verification/repros/sv_monitor_slot.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "file_io::fmonitor_is_independent_of_console_monitor_off"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_monitor_replacement_and_on_off",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 2026-09-05 rev v5.052 omits displays forced by $monitoron without another variable change. IEEE 1800-2023 21.2.3 requires redisplay. The standalone Controls probe prints only new=0; Icarus, xezim and Celox also print new=1 twice.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/monitor-verilator.json",
+      "verification/repros/sv_monitor_slot.sv",
+      "verification/repros/sv_monitor_slot.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "file_io::monitor_replacement_and_on_off"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_monitor_reports_transient_changes",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 2026-09-05 rev v5.052 misses a monitor display after a variable changes and returns to its previous value within one slot. IEEE 1800-2023 21.2.3 requires output when an argument changes. The standalone Transient probe prints one line instead of two; Icarus and Celox print both.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/monitor-verilator.json",
+      "verification/repros/sv_monitor_slot.sv",
+      "verification/repros/sv_monitor_slot.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "file_io::monitor_reports_transient_changes"
+      ]
+    }
+  },
+  {
+    "id": "sv_xezim_fmonitor_is_independent_of_console_monitor_off",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "xezim version 0.11.4",
+    "reason": "xezim version 0.11.4 suppresses file monitoring after $monitoroff. IEEE 1800-2023 21.3.2 gives file monitors independent lists and no on/off counterparts. The standalone FileMonitor probe prints no file lines; Icarus and Celox print file=0 and file=1.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/monitor-xezim.json",
+      "verification/repros/sv_monitor_slot.sv",
+      "verification/repros/sv_monitor_slot.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "xezim": [
+        "file_io::fmonitor_is_independent_of_console_monitor_off"
+      ]
+    }
+  },
+  {
+    "id": "sv_xezim_monitor_reports_transient_changes",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "xezim version 0.11.4",
+    "reason": "xezim version 0.11.4 misses a monitor display after a variable changes and returns to its previous value within one slot. IEEE 1800-2023 21.2.3 requires output when an argument changes. The standalone Transient probe prints one line instead of two; Icarus and Celox print both.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/monitor-xezim.json",
+      "verification/repros/sv_monitor_slot.sv",
+      "verification/repros/sv_monitor_slot.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "xezim": [
+        "file_io::monitor_reports_transient_changes"
+      ]
+    }
+  },
+  {
+    "id": "sv_xezim_monitor_time_queries_do_not_trigger_output",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "xezim version 0.11.4",
+    "reason": "xezim 0.11.4 in the configured suite prints t=2000 at 2ns for a monitored $time in the 1ns source scope, where IEEE 1800-2023 20.3.1 requires t=2. The standalone TimeQueryBench probe prints t=2 correctly; this exclusion is specific to the suite configuration, which stages timescale/source/testbench as separate files. The unchanged case still requires direct time queries not to trigger output.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/monitor-xezim.json",
+      "verification/repros/sv_monitor_slot.sv",
+      "verification/repros/sv_monitor_slot.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "xezim": [
+        "file_io::monitor_time_queries_do_not_trigger_output"
+      ]
+    }
   }
 ]

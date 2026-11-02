@@ -47,6 +47,81 @@
           "LIMITATIONS.md#systemverilog-suite"
         ]
       }
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 2026-09-05 rev v5.052 suppresses file monitoring after $monitoroff. IEEE 1800-2023 21.3.2 gives file monitors independent lists and no on/off counterparts. The standalone FileMonitor probe prints no file lines; Icarus and Celox print file=0 and file=1.",
+      "expectation": "Simulation",
+      "name": "file_io::fmonitor_is_independent_of_console_monitor_off",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_verilator_fmonitor_is_independent_of_console_monitor_off",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "reason": "Verilator 5.052 2026-09-05 rev v5.052 suppresses file monitoring after $monitoroff. IEEE 1800-2023 21.3.2 gives file monitors independent lists and no on/off counterparts. The standalone FileMonitor probe prints no file lines; Icarus and Celox print file=0 and file=1.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/monitor-verilator.json",
+          "verification/repros/sv_monitor_slot.sv",
+          "verification/repros/sv_monitor_slot.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 2026-09-05 rev v5.052 omits displays forced by $monitoron without another variable change. IEEE 1800-2023 21.2.3 requires redisplay. The standalone Controls probe prints only new=0; Icarus, xezim and Celox also print new=1 twice.",
+      "expectation": "Simulation",
+      "name": "file_io::monitor_replacement_and_on_off",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_verilator_monitor_replacement_and_on_off",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "reason": "Verilator 5.052 2026-09-05 rev v5.052 omits displays forced by $monitoron without another variable change. IEEE 1800-2023 21.2.3 requires redisplay. The standalone Controls probe prints only new=0; Icarus, xezim and Celox also print new=1 twice.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/monitor-verilator.json",
+          "verification/repros/sv_monitor_slot.sv",
+          "verification/repros/sv_monitor_slot.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 2026-09-05 rev v5.052 misses a monitor display after a variable changes and returns to its previous value within one slot. IEEE 1800-2023 21.2.3 requires output when an argument changes. The standalone Transient probe prints one line instead of two; Icarus and Celox print both.",
+      "expectation": "Simulation",
+      "name": "file_io::monitor_reports_transient_changes",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_verilator_monitor_reports_transient_changes",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "reason": "Verilator 5.052 2026-09-05 rev v5.052 misses a monitor display after a variable changes and returns to its previous value within one slot. IEEE 1800-2023 21.2.3 requires output when an argument changes. The standalone Transient probe prints one line instead of two; Icarus and Celox print both.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/monitor-verilator.json",
+          "verification/repros/sv_monitor_slot.sv",
+          "verification/repros/sv_monitor_slot.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
     }
   ]
 }
