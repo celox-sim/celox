@@ -1,0 +1,1 @@
+Codex round 1: transitive CallEffects per function shared by its calls (SLF/StateSSA barriers, working-region passes, trigger snapshots, working-region allocation read them; calls always kept); interpreter runs calls on an explicit activation stack (depth limit 65,536); frame accesses must be static (verifier) and are bounds-checked (interpreter).
