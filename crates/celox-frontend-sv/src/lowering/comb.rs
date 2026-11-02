@@ -8,6 +8,8 @@
 //! loops with run-time bounds become [`SLTNode::ForFold`] folds. Subroutine
 //! calls are inlined: their arguments and locals are hidden variables.
 
+use std::borrow::Cow;
+
 use super::procedural::*;
 use super::*;
 use celox_slt::{
@@ -497,7 +499,7 @@ impl<'p, 'a> Comb<'p, 'a> {
 
     /// Replace each local whose value is a known constant by a literal, so
     /// selects and loop conditions over it fold.
-    fn propagate(&mut self, store: &Store, expr: &sv::ir::Expr) -> sv::ir::Expr {
+    fn propagate<'e>(&mut self, store: &Store, expr: &'e sv::ir::Expr) -> Cow<'e, sv::ir::Expr> {
         let mut names = HashSet::default();
         expr_idents(expr, &mut names);
         let mut literals: HashMap<String, (String, i128)> = HashMap::default();
@@ -533,9 +535,9 @@ impl<'p, 'a> Comb<'p, 'a> {
             literals.insert(name, (typed_literal(&value, width, signed), numeric));
         }
         if literals.is_empty() {
-            return expr.clone();
+            return Cow::Borrowed(expr);
         }
-        substitute_literals(expr, &literals)
+        Cow::Owned(substitute_literals(expr, &literals))
     }
 
     fn propagate_lvalue(&mut self, store: &Store, lvalue: &sv::ir::LValue) -> sv::ir::LValue {
@@ -554,7 +556,9 @@ impl<'p, 'a> Comb<'p, 'a> {
                     lsb: lsb.clone(),
                     signed: false,
                 };
-                let sv::ir::Expr::Select { msb, lsb, .. } = self.propagate(store, &probe) else {
+                let sv::ir::Expr::Select { msb, lsb, .. } =
+                    self.propagate(store, &probe).into_owned()
+                else {
                     unreachable!()
                 };
                 keep_element_window(
@@ -596,12 +600,13 @@ impl<'p, 'a> Comb<'p, 'a> {
     ) -> Result<Value, sv::AnalyzerError> {
         let expr = expr_for_state_mode(expr, self.m.four_state || preserve_literals);
         let expr = if self.m.calls(&expr) {
-            self.hoist(store, frames, &expr)?
+            Cow::Owned(self.hoist(store, frames, &expr)?)
         } else {
             expr
         };
         let expr = self.propagate(store, &expr);
-        let (node, _) = if let (sv::ir::Expr::Literal(literal), Some((width, _))) = (&expr, context)
+        let (node, _) = if let (sv::ir::Expr::Literal(literal), Some((width, _))) =
+            (expr.as_ref(), context)
             && let Some(fill) = unbased_fill_literal(literal)
         {
             (
@@ -1652,13 +1657,18 @@ impl<'p, 'a> Comb<'p, 'a> {
         lhs: &sv::ir::LValue,
         rhs: &sv::ir::Expr,
     ) -> Result<(), sv::AnalyzerError> {
-        let owned_rhs = if self.m.calls(rhs) {
-            self.hoist(store, frames, rhs)?
+        let prepared_rhs = if self.m.calls(rhs) {
+            Cow::Owned(self.hoist(store, frames, rhs)?)
         } else {
-            rhs.clone()
+            Cow::Borrowed(rhs)
         };
-        let rhs = &owned_rhs;
-        let lhs = &self.hoist_lvalue(store, frames, lhs)?;
+        let rhs = prepared_rhs.as_ref();
+        let prepared_lhs = if self.m.lvalue_calls(lhs) {
+            Cow::Owned(self.hoist_lvalue(store, frames, lhs)?)
+        } else {
+            Cow::Borrowed(lhs)
+        };
+        let lhs = prepared_lhs.as_ref();
         let target = self.lvalue_target(store, lhs)?;
         let width = match &target {
             Target::Static { width, .. } | Target::Dynamic { width, .. } => *width,
