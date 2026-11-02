@@ -658,3 +658,72 @@
   (modify (set b (fourstate 1 1))) (assert_eq y 2)
   (modify (set b (fourstate 0 1))) (assert_eq y 2)
   (modify (set b 0)) (assert_eq y 0))
+
+; IEEE 1800-2023 10.4.1: t retains the value copied before cnt is overwritten.
+(case blocking_write_preserves_extracted_snapshot
+
+  (source "blocking_write_snapshot.sv" #"
+    module Top(input logic clk, ld, input logic [31:0] d,
+               output logic [7:0] y, output logic [11:0] z,
+               output logic [7:0] shifted);
+      logic [31:0] cnt, t;
+      always_ff @(posedge clk) begin
+        if (ld) cnt = d;
+        else begin
+          t = cnt;
+          cnt = 32'hdeadbeef;
+          y <= t[15:8];
+          z <= {t[11:8], t[7:4], t[3:0]};
+          shifted <= (t >> 8) & 32'hff;
+        end
+      end
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0x12345678 0xabcdef01 0 0xffffffff)
+    (modify (set ld 1) (set d value))
+    (tick clk)
+    (modify (set ld 0))
+    (tick clk)
+    (assert_eq y (& (>> value 8) 0xff))
+    (assert_eq z (& value 0xfff))
+    (assert_eq shifted (& (>> value 8) 0xff))))
+
+; IEEE 1800-2023 10.4.1: t retains the value copied before cnt is overwritten.
+(case blocking_write_preserves_extracted_snapshot_four_state
+  (four_state)
+
+  (source "blocking_write_snapshot.sv" #"
+    module Top(input logic clk, ld, input logic [31:0] d,
+               output logic [7:0] y, output logic [11:0] z,
+               output logic [7:0] shifted);
+      logic [31:0] cnt, t;
+      always_ff @(posedge clk) begin
+        if (ld) cnt = d;
+        else begin
+          t = cnt;
+          cnt = 32'hdeadbeef;
+          y <= t[15:8];
+          z <= {t[11:8], t[7:4], t[3:0]};
+          shifted <= (t >> 8) & 32'hff;
+        end
+      end
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0x12345678 0xabcdef01 0 0xffffffff)
+    (modify (set ld 1) (set d value))
+    (tick clk)
+    (modify (set ld 0))
+    (tick clk)
+    (assert_eq y (& (>> value 8) 0xff))
+    (assert_eq z (& value 0xfff))
+    (assert_eq shifted (& (>> value 8) 0xff)))
+  (for value (list 0 0xffffffff)
+    (modify (set ld 1) (set d (fourstate value 0xffffffff)))
+    (tick clk)
+    (modify (set ld 0))
+    (tick clk)
+    (assert_eq y (fourstate (& (>> value 8) 0xff) 0xff))
+    (assert_eq z (fourstate (& value 0xfff) 0xfff))
+    (assert_eq shifted (fourstate 0xff 0xff))))
