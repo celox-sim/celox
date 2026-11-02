@@ -91,6 +91,55 @@ macro_rules! four_state_scheduler {
                 assert_eq!(value(&mut sim, "waited"), (4, 0));
             }
 
+            /// Exercise both polarities and every Table 9-2 transition across
+            /// word boundaries in the compiled scheduler's edge bitmaps.
+            #[test]
+            fn many_mixed_edges_follow_table_9_2() {
+                const CLOCKS: usize = 70;
+                let literals = ["1'b0", "1'b1", "1'bx", "1'bz"];
+                let mut body = String::from(";\n");
+                for i in 0..CLOCKS {
+                    let edge = if i % 2 == 0 { "posedge" } else { "negedge" };
+                    body += &format!(
+                        "logic c{i} = 0; logic [7:0] n{i} = 0;\n\
+                         always_ff @({edge} c{i}) n{i} <= n{i} + 1;\n"
+                    );
+                }
+                let mut before = [0usize; CLOCKS];
+                let mut expected = [0u64; CLOCKS];
+                body += "initial begin\n";
+                for old in 0..4 {
+                    for new in 0..4 {
+                        for state in [old, new] {
+                            body += "#1 begin\n";
+                            for i in 0..CLOCKS {
+                                let after = (state + i) % 4;
+                                let from = before[i];
+                                let edge = if i % 2 == 0 {
+                                    (from == 0 && after != 0) || (from >= 2 && after == 1)
+                                } else {
+                                    (from == 1 && after != 1) || (from >= 2 && after == 0)
+                                };
+                                expected[i] += u64::from(edge);
+                                before[i] = after;
+                                body += &format!("c{i} = {};\n", literals[after]);
+                            }
+                            body += "end\n";
+                        }
+                    }
+                }
+                body += "end\n";
+                let mut sim = simulation(&body);
+                run(&mut sim, 40);
+                for (i, expected) in expected.into_iter().enumerate() {
+                    assert_eq!(
+                        value(&mut sim, &format!("n{i}")),
+                        (expected, 0),
+                        "clock {i}"
+                    );
+                }
+            }
+
             /// Asynchronous resets that become x or z: a move to x is an
             /// edge of either polarity, and the flip-flop's condition is
             /// then unknown.
