@@ -739,6 +739,8 @@ impl TieredBackend {
             if let Phase::Interpreting(Some(interp)) = &mut backend.phase {
                 if let Err(error) = interp.enable_hotspots(options) {
                     backend.promotion = Promotion::Failed(error);
+                } else {
+                    interp.prepare_hotspot_scheduler(laid_out);
                 }
             }
             return backend;
@@ -1529,7 +1531,11 @@ impl SimBackend for TieredBackend {
     /// Only generated code runs the scheduler unit faster than the
     /// runtime's loop.
     fn runs_compiled_scheduler(&self) -> bool {
-        matches!(self.phase, Phase::Compiled(_))
+        match &self.phase {
+            Phase::Compiled(_) => true,
+            Phase::Interpreting(Some(interp)) => interp.runs_compiled_scheduler(),
+            _ => false,
+        }
     }
 
     fn compiled_scheduler_budget(&self) -> u64 {
