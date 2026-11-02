@@ -23,11 +23,10 @@ pub(super) use chandles::{
     native_chandle, read as check_chandle_read, type_holds_chandle,
 };
 pub(super) use direct::bind_argument;
-pub(super) use direct::object_place;
 pub(super) use direct::{
     arguments, bind_chandle_value, bind_value, call_name as native_name, callable_name,
     cast_target_native, formal_arguments, format_arguments, member_context, real_value,
-    remove_real_division_guards, string_literal_bytes, ungroup,
+    remove_real_division_guards, string_literal_bytes, targets_tagged_union, ungroup,
 };
 pub(super) use enums::{domain as enum_domain, membership as enum_membership};
 pub(super) use format_patterns::{
@@ -92,7 +91,12 @@ pub(super) fn selected_pattern(
         )?;
     }
     let native = tree.declarations();
-    if !matches!(lhs, LValue::Select { .. })
+    let selected = match lhs {
+        LValue::Select { .. } => true,
+        LValue::Object { select, .. } => matches!(**select, LValue::Select { .. }),
+        LValue::Ident(_) => false,
+    };
+    if !selected
         || !matches!(
             native.expression(ungroup(right, native)).kind,
             ExprKind::Pattern { target: None, .. }
@@ -100,9 +104,11 @@ pub(super) fn selected_pattern(
     {
         return Ok(None);
     }
-    let Some(shape) = dimensions::operand_shape(left, tree, session, dimensions)? else {
+    // A selected target's type is the select typing's (`target_type`).
+    let Some(ty) = direct::target_type(left, native, tree, session, dimensions)? else {
         return Ok(None);
     };
+    let shape = procedural::dimensions_from_type(&ty);
     bind_value(right, native, tree, session, dimensions, Some(&shape)).map(Some)
 }
 
