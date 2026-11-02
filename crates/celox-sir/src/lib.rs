@@ -511,6 +511,15 @@ impl<EventAddr, StateAddr> SirProgram<EventAddr, StateAddr> {
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BlockId(pub usize);
 
+/// The bytes of the stack that the frames of [`SIRInstruction::Call`]s live
+/// on.
+pub const STACK_SIZE: usize = 1 << 20;
+
+/// How deep [`SIRInstruction::Call`]s may nest: a unit run by the runtime
+/// starts at depth zero, and each call it makes, directly or through its
+/// callees, is one deeper.
+pub const MAX_CALL_DEPTH: usize = 4096;
+
 /// A function unit of [`SirProgram::functions`].
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct FunctionId(pub u32);
@@ -928,6 +937,12 @@ pub enum SIRInstruction<Addr> {
     /// functions (itself too) and make extern calls. When it ends with a
     /// nonzero status (an [`SIRTerminator::Error`]), the calling unit ends at
     /// once with that status, as if it had raised it.
+    ///
+    /// The stack holds [`STACK_SIZE`] bytes: a call requires `frame` plus the
+    /// callee's [`FrameLayout::size`] to be at most that, and calls nest at
+    /// most [`MAX_CALL_DEPTH`] deep. The producer of the call keeps within
+    /// both and reports its own runtime error before it would not; a backend
+    /// only guards them, and the compiled code traps when either is exceeded.
     Call {
         function: FunctionId,
         frame: RegisterId,

@@ -183,6 +183,7 @@ pub fn compile(recover: bool) -> CompiledUpdate {
         runtime_event_slot_size: 0,
         runtime_event_buffer_size: 0,
         runtime_event_site_layouts: vec![],
+        call_stack: None,
     };
     eu.verify();
     celox_sir_opt::optimizer::optimize_merged_chain(

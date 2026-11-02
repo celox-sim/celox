@@ -27,6 +27,18 @@ fn define_simulation_function(module: &mut JITModule, ctx: &mut Context) {
 pub struct JitEngine {
     module: JITModule,
     pub(super) translator: SIRTranslator,
+    /// The compiled function units, by [`crate::FunctionId`].
+    functions: Vec<FuncId>,
+}
+
+/// The signature of a compiled function unit: `(mem_ptr, frame_ptr) -> i64`.
+fn function_signature(module: &JITModule) -> Signature {
+    let ptr_type = module.target_config().pointer_type();
+    let mut signature = module.make_signature();
+    signature.params.push(AbiParam::new(ptr_type));
+    signature.params.push(AbiParam::new(ptr_type));
+    signature.returns.push(AbiParam::new(types::I64));
+    signature
 }
 
 impl JitEngine {
@@ -84,8 +96,86 @@ impl JitEngine {
                 layout,
                 options: options.clone(),
                 target_config,
+                callees: Default::default(),
             },
+            functions: Vec::new(),
         })
+    }
+
+    /// Compile the program's function units, which the units compiled after
+    /// this may call. Every function is declared before any is defined, so
+    /// that functions can call each other and themselves.
+    pub fn compile_functions(
+        &mut self,
+        functions: &[crate::FunctionUnit<RegionedAbsoluteAddr>],
+    ) -> Result<(), CraneliftError> {
+        if functions.is_empty() {
+            return Ok(());
+        }
+        let signature = function_signature(&self.module);
+        self.functions = functions
+            .iter()
+            .map(|_| {
+                self.module
+                    .declare_anonymous_function(&signature)
+                    .map_err(|source| {
+                        CraneliftError::module("failed to declare a function unit", source)
+                    })
+            })
+            .collect::<Result<_, _>>()?;
+        self.translator.callees.frames = functions
+            .iter()
+            .map(|function| function.frame.clone())
+            .collect();
+        self.translator.callees.slots = functions
+            .iter()
+            .flat_map(|function| &function.frame.slots)
+            .map(|slot| (slot.addr, slot.clone()))
+            .collect();
+        let mut builder_ctx = FunctionBuilderContext::new();
+        for (index, function) in functions.iter().enumerate() {
+            let mut ctx = self.module.make_context();
+            ctx.func.signature = signature.clone();
+            self.declare_callees(&mut ctx.func, std::iter::once(&function.unit));
+            {
+                let builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
+                self.translator.translate_function(&function.unit, builder);
+            }
+            self.optimize_and_define(
+                &mut ctx,
+                self.functions[index],
+                &format!("=== fn{index} ==="),
+                None,
+                None,
+                None,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Declare in `func` the function units that `units` call, where the
+    /// translator finds them.
+    fn declare_callees<'u>(
+        &mut self,
+        func: &mut cranelift::codegen::ir::Function,
+        units: impl IntoIterator<Item = &'u crate::ExecutionUnit<RegionedAbsoluteAddr>>,
+    ) {
+        let refs = &mut self.translator.callees.refs;
+        refs.clear();
+        if self.functions.is_empty() {
+            return;
+        }
+        for instruction in units
+            .into_iter()
+            .flat_map(|unit| unit.blocks.values())
+            .flat_map(|block| &block.instructions)
+        {
+            if let crate::SIRInstruction::Call { function, .. } = instruction {
+                let id = self.functions[function.0 as usize];
+                refs.entry(*function)
+                    .or_insert_with(|| self.module.declare_func_in_func(id, func));
+            }
+        }
     }
 
     pub fn layout(&self) -> &MemoryLayout {
@@ -252,6 +342,7 @@ impl JitEngine {
         let mut builder_ctx = FunctionBuilderContext::new();
 
         define_simulation_function(&mut self.module, &mut ctx);
+        self.declare_callees(&mut ctx.func, units);
 
         {
             let builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
@@ -370,6 +461,7 @@ impl JitEngine {
 
             let mut ctx = self.module.make_context();
             define_simulation_function(&mut self.module, &mut ctx);
+            self.declare_callees(&mut ctx.func, &batch_units);
 
             {
                 let builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
@@ -534,6 +626,7 @@ impl JitEngine {
                 None
             };
 
+            self.declare_callees(&mut ctx.func, &chunk.units);
             let mut builder_ctx = FunctionBuilderContext::new();
             {
                 let builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
@@ -606,6 +699,7 @@ impl JitEngine {
                 .map(|&fid| self.module.declare_func_in_func(fid, &mut ctx.func))
                 .collect();
 
+            self.declare_callees(&mut ctx.func, std::iter::once(&chunk.eu));
             let mut builder_ctx = FunctionBuilderContext::new();
             {
                 let builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
@@ -678,6 +772,7 @@ mod frame_tests {
                 runtime_event_sites: vec![],
                 lane_writers: Default::default(),
                 access_rank: Default::default(),
+                call_stack: None,
             }
         }
     }

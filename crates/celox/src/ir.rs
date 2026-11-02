@@ -669,9 +669,32 @@ pub struct LaidOutProgram {
 }
 
 impl LaidOutProgram {
+    /// Fail when a function unit stores with triggers, which `backend`
+    /// cannot compile yet: compiled code would compare a store inside a
+    /// callee with the value its object had at the callee's entry, not at
+    /// the entry of the caller's unit group as the interpreter does.
+    #[cfg(any(feature = "cranelift", feature = "wasm-runtime"))]
+    pub(crate) fn reject_triggered_calls(
+        &self,
+        backend: &str,
+    ) -> Result<(), crate::SimulatorError> {
+        if self
+            .sir
+            .functions
+            .iter()
+            .any(|function| !function.effects.triggers.is_empty())
+        {
+            return Err(crate::CodegenError::message(format!(
+                "the {backend} backend does not run triggered stores in function units yet"
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
     /// Fail when the program calls function units, which `backend` cannot
-    /// compile yet; only the interpreter runs them. Every compiled backend
-    /// needs `host-runtime`.
+    /// compile yet. The interpreter, Cranelift and wasm run them; the native
+    /// backends do not, and need `host-runtime` like every compiled backend.
     #[cfg(feature = "host-runtime")]
     pub(crate) fn reject_function_calls(&self, backend: &str) -> Result<(), crate::SimulatorError> {
         let calls = !self.sir.functions.is_empty()

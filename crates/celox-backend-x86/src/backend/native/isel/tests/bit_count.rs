@@ -227,6 +227,7 @@ fn compile_bit_count(op: UnaryOp, source_width: usize, four_state: bool) -> Comp
         runtime_event_slot_size: 0,
         runtime_event_buffer_size: 0,
         runtime_event_site_layouts: vec![],
+        call_stack: None,
     };
 
     let mut function = lower_execution_unit(&eu, &layout, four_state);

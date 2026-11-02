@@ -507,6 +507,7 @@ dependencies = [
  "cranelift-module 0.137.1",
  "cranelift-native 0.137.1",
  "fxhash",
+ "libc",
  "num-bigint",
  "thiserror",
  "tracing",

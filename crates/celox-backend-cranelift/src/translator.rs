@@ -1,4 +1,5 @@
 mod arith;
+pub(crate) mod call;
 mod control;
 pub(super) mod core;
 mod memory;

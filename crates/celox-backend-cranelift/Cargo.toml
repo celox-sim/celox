@@ -28,3 +28,6 @@ workspace = true
 
 [dev-dependencies]
 num-bigint = { workspace = true }
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = { workspace = true }
