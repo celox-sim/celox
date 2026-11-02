@@ -187,7 +187,7 @@ impl WasmBackend {
         laid_out: &crate::ir::LaidOutProgram,
         options: &SimulatorOptions,
     ) -> Result<Self, crate::SimulatorError> {
-        laid_out.reject_triggered_calls("wasm")?;
+        laid_out.reject_unsupported_callee_stores("wasm", false)?;
         let engine = Engine::default();
         let sir = laid_out;
         let layout = laid_out.layout().clone();

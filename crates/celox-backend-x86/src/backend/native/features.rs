@@ -101,6 +101,12 @@ impl X86Features {
         self.avx
     }
 
+    #[cfg(test)]
+    pub(crate) const fn with_avx(mut self, enabled: bool) -> Self {
+        self.avx = enabled;
+        self
+    }
+
     pub(crate) const fn popcnt(self) -> bool {
         self.popcnt
     }

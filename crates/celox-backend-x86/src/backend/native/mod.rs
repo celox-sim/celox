@@ -4,6 +4,12 @@
 pub mod emit;
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub mod features;
+// Used by x86-64 emission only.
+#[cfg_attr(
+    not(any(target_arch = "x86_64", feature = "cross-codegen")),
+    allow(dead_code)
+)]
+pub mod function_unit;
 pub mod isel;
 #[cfg(any(target_arch = "x86_64", feature = "cross-codegen"))]
 pub mod jit_mem;
