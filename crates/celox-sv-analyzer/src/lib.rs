@@ -90,6 +90,11 @@ pub enum AnalyzerError {
     /// IEEE 1800-2023 Table 10-1: a procedural assignment needs a variable.
     #[error("procedural assignment to net `{name}`")]
     ProceduralNetAssignment { name: String },
+    /// A constant class property is written only by the initializer of its
+    /// declaration or, without one, in the constructor of its class
+    /// (IEEE 1800-2023 8.19).
+    #[error("assignment to const class property `{owner}::{name}`")]
+    ConstPropertyAssignment { owner: String, name: String },
     /// A class member is inaccessible from the lexical scope (IEEE 1800-2023 8.18).
     #[error("{visibility} class member `{owner}::{name}` is not accessible from this scope")]
     InaccessibleClassMember {

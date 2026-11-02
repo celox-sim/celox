@@ -2,12 +2,37 @@
 
 use super::*;
 
+/// The lvalue of a variable that `lhs` assigns, with a scope that declares
+/// it: an object place is assigned as its selection of `OBJECT_VALUE`, a
+/// variable of the value's type, which the place's value holds.
+pub(in crate::ast) fn variable_view<'a>(
+    lhs: &'a LValue,
+    packed_dimensions: &'a PackedDimensions,
+) -> (&'a LValue, std::borrow::Cow<'a, PackedDimensions>) {
+    match lhs {
+        LValue::Object { place, select, .. } => {
+            let mut scope = packed_dimensions.clone();
+            scope.insert(
+                OBJECT_VALUE.to_owned(),
+                procedural::dimensions_from_type(place.value_type()),
+            );
+            scope
+                .expression_signedness
+                .insert(OBJECT_VALUE.to_owned(), place.value_type().is_signed());
+            (select, std::borrow::Cow::Owned(scope))
+        }
+        _ => (lhs, std::borrow::Cow::Borrowed(packed_dimensions)),
+    }
+}
+
 pub(super) fn coerce_procedural_assignment_rhs(
     tree: &AnalysisContext<'_>,
     rhs: Expr,
     lhs: &LValue,
     packed_dimensions: &PackedDimensions,
 ) -> Expr {
+    let (lhs, scope) = variable_view(lhs, packed_dimensions);
+    let packed_dimensions = &*scope;
     let functions = &tree.functions;
     let Some(target_type) = lvalue_expr_type(functions, lhs, packed_dimensions) else {
         return rhs;
@@ -36,9 +61,7 @@ pub(super) fn coerce_procedural_assignment_rhs(
             signed: target_type.signed,
         }
     };
-    let name = match lhs {
-        LValue::Ident(name) | LValue::Select { name, .. } => name,
-    };
+    let name = lhs.name();
     if matches!(
         lhs,
         LValue::Select {
@@ -64,6 +87,10 @@ pub(super) fn lvalue_expr_type(
     packed_dimensions: &PackedDimensions,
 ) -> Option<ExprType> {
     match value {
+        LValue::Object { .. } => {
+            let (value, scope) = variable_view(value, packed_dimensions);
+            lvalue_expr_type(functions, value, &scope)
+        }
         LValue::Ident(name) => {
             let dimensions = packed_dimensions.get(name)?;
             let width = dimensions
@@ -193,10 +220,19 @@ pub(super) fn expr_from_lvalue(
     lhs: &LValue,
     packed_dimensions: &PackedDimensions,
 ) -> Expr {
-    let name = match lhs {
-        LValue::Ident(name) | LValue::Select { name, .. } => name,
-    };
-    expr_from_selection(tree, Expr::Ident(name.clone()), lhs, packed_dimensions)
+    match lhs {
+        // The value at the place, selected.
+        LValue::Object { place, .. } => {
+            let (select, scope) = variable_view(lhs, packed_dimensions);
+            expr_from_selection(tree, place.load(), select, &scope)
+        }
+        _ => expr_from_selection(
+            tree,
+            Expr::Ident(lhs.name().to_owned()),
+            lhs,
+            packed_dimensions,
+        ),
+    }
 }
 
 /// The value of selection `lhs` of a variable, applied to `base`, the value
@@ -214,6 +250,7 @@ pub(in crate::ast) fn expr_from_selection(
     }
     let (base, array_slice_width, array_slice_reversed, signed) = match lhs {
         LValue::Ident(_) => return variable,
+        LValue::Object { .. } => return expr_from_lvalue(tree, lhs, packed_dimensions),
         LValue::Select {
             msb,
             lsb,

@@ -990,6 +990,19 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "compile",
                             "Index expressions don't apply to this type of property",
                         ),
+                        ("icarus", "class::property_assignment_sites") => {
+                            ("compile_error", "compile", "source_0.sv:19: syntax error")
+                        }
+                        ("icarus", "class::property_place_addresses") => (
+                            "compile_error",
+                            "compile",
+                            "sorry: Streaming concatenation not supported.",
+                        ),
+                        ("icarus", "class::formatting_task_place_outputs") => (
+                            "runtime_error",
+                            "execute",
+                            "native testbench exited without reaching $finish",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }
