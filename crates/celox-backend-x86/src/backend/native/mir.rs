@@ -2297,6 +2297,8 @@ pub struct MFunction {
     /// The frame window of a function unit, which addresses the frame its
     /// caller passes from a reserved register; `None` for other functions.
     pub(crate) frame_window: Option<super::function_unit::FrameWindow>,
+    /// Physical settle-flag bytes, used only to cluster clean guard paths.
+    pub(crate) settle_flags: Option<std::ops::Range<i32>>,
 }
 
 impl MFunction {
@@ -2310,6 +2312,7 @@ impl MFunction {
             target_features: super::features::X86Features::detect(),
             call_stack: None,
             frame_window: None,
+            settle_flags: None,
         }
     }
 

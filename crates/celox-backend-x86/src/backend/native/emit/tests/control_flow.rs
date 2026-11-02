@@ -275,3 +275,88 @@ fn materialized_compare_branch_preserves_condition_used_after_the_branch() {
     assert_eq!(unsafe { jit.call(&mut state) }, 0);
     assert_eq!(u64::from_le_bytes(state), 1);
 }
+
+#[test]
+fn settle_guard_layout_clusters_clean_paths_and_preserves_dirty_paths() {
+    // The same diamond shape appears when skipping a clean partition and
+    // when skipping publication by an unchanged writer.
+    for publication in [false, true] {
+        let mut vregs = VRegAllocator::new();
+        let a = vregs.alloc();
+        let b = vregs.alloc();
+        let value = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 3]);
+        func.settle_flags = Some(if publication { 8..24 } else { 0..2 });
+        let mut first = MBlock::new(BlockId(0));
+        first.push(MInst::Load {
+            dst: a,
+            base: BaseReg::SimState,
+            offset: 0,
+            size: OpSize::S8,
+        });
+        first.push(MInst::LoadImm {
+            dst: value,
+            value: 42,
+        });
+        first.push(MInst::Branch {
+            cond: a,
+            true_bb: BlockId(2),
+            false_bb: BlockId(1),
+        });
+        let mut first_work = MBlock::new(BlockId(2));
+        first_work.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 8,
+            src: value,
+            size: OpSize::S64,
+        });
+        first_work.push(MInst::Jump { target: BlockId(1) });
+        let mut second = MBlock::new(BlockId(1));
+        second.push(MInst::Load {
+            dst: b,
+            base: BaseReg::SimState,
+            offset: 1,
+            size: OpSize::S8,
+        });
+        second.push(MInst::Branch {
+            cond: b,
+            true_bb: BlockId(3),
+            false_bb: BlockId(4),
+        });
+        let mut second_work = MBlock::new(BlockId(3));
+        second_work.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 16,
+            src: value,
+            size: OpSize::S64,
+        });
+        second_work.push(MInst::Jump { target: BlockId(4) });
+        let mut done = MBlock::new(BlockId(4));
+        done.push(MInst::Return);
+        func.blocks = vec![first, first_work, second, second_work, done];
+        assert_eq!(
+            emission_block_order(&func)
+                .into_iter()
+                .map(|i| func.blocks[i].id)
+                .collect::<Vec<_>>(),
+            vec![BlockId(0), BlockId(1), BlockId(4), BlockId(2), BlockId(3)]
+        );
+        let allocation = crate::native::regalloc::run_regalloc(&mut func).unwrap();
+        let code = emit(&func, &allocation.assignment, allocation.spill_frame_size).unwrap();
+        let jit = JitCode::new(&code.code).unwrap();
+        for flags in 0..4 {
+            let mut state = vec![0u8; (code.required_state_size as usize).max(24)];
+            state[0] = flags & 1;
+            state[1] = flags >> 1;
+            assert_eq!(unsafe { jit.call(&mut state) }, 0);
+            assert_eq!(
+                u64::from_le_bytes(state[8..16].try_into().unwrap()),
+                if flags & 1 != 0 { 42 } else { 0 }
+            );
+            assert_eq!(
+                u64::from_le_bytes(state[16..24].try_into().unwrap()),
+                if flags & 2 != 0 { 42 } else { 0 }
+            );
+        }
+    }
+}

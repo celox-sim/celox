@@ -21,6 +21,7 @@ mod instruction;
 mod memory;
 mod operands;
 mod pipeline;
+mod settle_layout;
 
 use arithmetic::{
     BinOp, DivOp, ShiftOp, emit_and_imm, emit_and_memory_imm, emit_binop_memory, emit_binop_rr,
