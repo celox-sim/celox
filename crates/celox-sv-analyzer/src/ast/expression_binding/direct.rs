@@ -270,7 +270,7 @@ pub(in crate::ast) fn cast_target_native(
 }
 
 enum Finish {
-    ScopeRandomize(Vec<Option<Vec<crate::ast::enums::MemberValue>>>),
+    ScopeRandomize(Vec<Option<Arc<crate::ast::enums::EnumDomain>>>),
     Tagged(packed_structs::Construction),
     Unary(String),
     Binary(String),
@@ -1025,8 +1025,7 @@ fn bind_value_in(
                                         "scope randomize requires a packed variable with a supported enum domain",
                                     ));
                                 }
-                                domains
-                                    .push(shape.enum_domain.as_ref().map(|domain| domain.values()));
+                                domains.push(shape.enum_domain.clone());
                                 if !expressions::query_actual_is_writable(
                                     &Expr::Ident(name),
                                     dimensions,
@@ -1729,13 +1728,13 @@ fn bind_value_in(
                             let mut calls =
                                 operands.into_iter().zip(domains).map(|(operand, domain)| {
                                     let mut args = vec![Some(operand)];
-                                    let function = if let Some(values) = domain {
-                                        args.extend(values.into_iter().map(|value| {
-                                            let negative = matches!(
-                                                value,
-                                                crate::ast::enums::MemberValue::Negative(_)
-                                            );
-                                            Some(Expr::Literal(value.literal(64, negative)))
+                                    let function = if let Some(domain) = domain {
+                                        // Each member at its base type's width
+                                        // and signing, as the variable holds it.
+                                        args.extend(domain.values().into_iter().map(|value| {
+                                            Some(Expr::Literal(
+                                                value.literal(domain.width, domain.signed),
+                                            ))
                                         }));
                                         SystemFunction::ScopeRandomizeEnum
                                     } else {
