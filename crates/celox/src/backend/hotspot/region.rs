@@ -1,6 +1,6 @@
-//! Native block bodies with an explicit value/mask frame. The interpreter
-//! executes the original terminator, so branch arguments and cold successors
-//! retain their existing parallel-transfer semantics.
+//! Native chains and profiled traces with an explicit value/mask frame.
+//! Each exit exports its executed prefix and resumes before the original
+//! terminator, preserving cold paths and parallel branch arguments.
 
 use crate::backend::{
     MemoryLayout, SimulatorErrorCode, compile_cancel::CompileCancel, native::backend::HotspotCode,
@@ -16,6 +16,9 @@ use celox_sir::{
     BasicBlock, BlockId, RegisterId, RegisterType, SIRInstruction, SIROffset, SIRTerminator,
     SIRValue,
 };
+mod trace;
+use trace::TraceRequest;
+
 use num_bigint::BigUint;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -44,6 +47,15 @@ mod tests {
 
     #[test]
     fn hotspot_chain_keeps_invariants_when_exiting_to_an_inner_loop() {
+        check_inner_loop_exit(false);
+    }
+
+    #[test]
+    fn hotspot_trace_keeps_invariants_when_exiting_to_an_inner_loop() {
+        check_inner_loop_exit(true);
+    }
+
+    fn check_inner_loop_exit(branching: bool) {
         let sim = crate::SimulatorBuilder::<crate::Simulator>::new(
             "module Top (q: output logic<130>) { assign q = 130'd0; }",
             "Top",
@@ -56,7 +68,18 @@ mod tests {
         let value = SIRValue::new_four_state(BigUint::from(1u8) << 129usize, 3u8);
         b.emit(SIRInstruction::Imm(invariant, value.clone()));
         let header = b.new_block();
-        b.seal_block(SIRTerminator::Jump(header, vec![]));
+        let cold = branching.then(|| b.new_block());
+        if let Some(cold) = cold {
+            let cond = b.alloc_bit(1, false);
+            b.emit(SIRInstruction::Imm(cond, SIRValue::new(1u8)));
+            b.seal_block(SIRTerminator::Branch {
+                cond,
+                true_block: (header, vec![]),
+                false_block: (cold, vec![]),
+            });
+        } else {
+            b.seal_block(SIRTerminator::Jump(header, vec![]));
+        }
         b.switch_to_block(header);
         for _ in 0..16 {
             let used = b.alloc_logic(130);
@@ -75,6 +98,10 @@ mod tests {
             vec![],
         ));
         b.seal_block(SIRTerminator::Jump(header, vec![]));
+        if let Some(cold) = cold {
+            b.switch_to_block(cold);
+            b.seal_block(SIRTerminator::Return);
+        }
         let (blocks, register_map, _) = b.drain();
         let unit = Arc::new(ExecutionUnit {
             entry_block_id: BlockId(0),
@@ -86,11 +113,12 @@ mod tests {
             four_state: true,
             ..Default::default()
         };
-        let code = BlockRequest::new(&source, BlockId(0))
+        let code = BlockRequest::profiled(&source, BlockId(0), |_| Some(header))
             .unwrap()
             .compile(sim.backend.layout(), &options, &CompileCancel::new())
             .unwrap();
-        let resumed = BlockRequest::new(&source, header)
+        assert_eq!(code.is_trace(), branching);
+        let resumed = ChainRequest::new(&source, header)
             .unwrap()
             .compile(sim.backend.layout(), &options, &CompileCancel::new())
             .unwrap();
@@ -106,7 +134,7 @@ mod tests {
             if stale {
                 regs.set(invariant, SIRValue::new(42u8));
             }
-            code.run(&mut memory, &mut regs).unwrap();
+            assert_eq!(code.run(&mut memory, &mut regs).unwrap().0, header);
             assert_eq!(regs.get(invariant).unwrap(), &value);
             // Reenter the body, without rerunning the preheader definition.
             resumed.run(&mut memory, &mut regs).unwrap();
@@ -163,7 +191,7 @@ mod tests {
             register_map,
         });
         let source = Arc::new(RegionSource::new(Arc::clone(&unit)));
-        let request = BlockRequest::new(&source, BlockId(0)).unwrap();
+        let request = ChainRequest::new(&source, BlockId(0)).unwrap();
         assert_eq!(request.tail, next);
         let options = SimulatorOptions {
             four_state: true,
@@ -339,7 +367,7 @@ impl RegionSource {
     }
 }
 
-pub(super) struct BlockRequest {
+pub(super) struct ChainRequest {
     instructions: Vec<SIRInstruction<RegionedAbsoluteAddr>>,
     types: HashMap<RegisterId, RegisterType>,
     inputs: BTreeSet<RegisterId>,
@@ -365,7 +393,7 @@ fn eligible(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
     }
 }
 
-impl BlockRequest {
+impl ChainRequest {
     pub(super) fn new(source: &Arc<RegionSource>, start: BlockId) -> Option<Self> {
         let unit = &source.unit;
         let mut instructions = Vec::new();
@@ -467,63 +495,12 @@ impl BlockRequest {
             let total = global.get(reg).copied().unwrap_or(0);
             total == usize::MAX || total > self.consumed.get(reg).copied().unwrap_or(0)
         });
-        let error = |message| SimulatorError::from(crate::CodegenError::message(message));
-        let mut layout = layout.clone();
-        let frame_start = layout
-            .merged_total_size
-            .checked_add(layout.triggered_bits_total_size)
-            .and_then(|size| size.checked_add(7))
-            .map(|size| size & !7)
-            .ok_or_else(|| error("hotspot frame offset overflow"))?;
-        let instance = layout
-            .offsets
-            .keys()
-            .map(|addr| addr.instance_id.0)
-            .max()
-            .unwrap_or(0)
-            .checked_add(1)
-            .ok_or_else(|| error("hotspot private address overflow"))?;
-        let mut cursor = frame_start;
-        let mut slots = BTreeMap::new();
-        for (index, &reg) in self.inputs.union(&self.outputs).enumerate() {
-            let ty = &self.types[&reg];
-            let bytes = ty.width().div_ceil(8);
-            let four_state = options.four_state && matches!(ty, RegisterType::Logic { .. });
-            let size = bytes
-                .checked_mul(if four_state { 2 } else { 1 })
-                .and_then(|size| size.checked_add(celox_state_layout::MAX_ACCESS_OVERREACH + 7))
-                .map(|size| size & !7)
-                .ok_or_else(|| error("hotspot frame size overflow"))?;
-            let addr = AbsoluteAddr {
-                instance_id: InstanceId(instance),
-                var_id: celox_design::StateObjectId(
-                    u32::try_from(index).map_err(|_| error("too many hotspot frame slots"))?,
-                ),
-            };
-            layout.offsets.insert(addr, cursor);
-            layout.widths.insert(addr, ty.width());
-            layout.is_4states.insert(addr, four_state);
-            slots.insert(
-                reg,
-                Slot {
-                    addr: RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, addr),
-                    offset: cursor,
-                    bytes,
-                    width: ty.width(),
-                    four_state,
-                },
-            );
-            cursor = cursor
-                .checked_add(size)
-                .ok_or_else(|| error("hotspot frame size overflow"))?;
-            if cursor - frame_start > MAX_FRAME_BYTES {
-                return Err(error("hotspot frame exceeds budget"));
-            }
-        }
-        // These addresses exist only in this compilation's view. They follow
-        // every byte of the live image; existing semantic addresses and region
-        // bases are unchanged. The emitter places scratch after this frame.
-        layout.merged_total_size = cursor;
+        let (layout, slots) = frame_layout(
+            self.inputs.union(&self.outputs).copied(),
+            &self.types,
+            layout,
+            options.four_state,
+        )?;
         let mut instructions = Vec::new();
         for &reg in &self.inputs {
             instructions.push(SIRInstruction::Load(
@@ -569,14 +546,15 @@ impl BlockRequest {
         let transferred_bytes = inputs
             .iter()
             .chain(&outputs)
-            .map(|(_, slot): &(RegisterId, Slot)| slot.bytes * if slot.four_state { 2 } else { 1 })
+            .map(|(_, slot)| slot.transfer_bytes())
             .sum();
         Ok(BlockCode {
             code,
             inputs,
             outputs,
-            tail: self.tail,
             transferred_bytes,
+            tail: self.tail,
+            exits: None,
         })
     }
 }
@@ -590,20 +568,37 @@ struct Slot {
     four_state: bool,
 }
 
+impl Slot {
+    fn transfer_bytes(&self) -> usize {
+        self.bytes * if self.four_state { 2 } else { 1 }
+    }
+}
+
 pub(super) struct BlockCode {
     pub(super) code: HotspotCode,
     inputs: Vec<(RegisterId, Slot)>,
     outputs: Vec<(RegisterId, Slot)>,
     pub(super) tail: BlockId,
-    pub(super) transferred_bytes: usize,
+    transferred_bytes: usize,
+    exits: Option<(Slot, Vec<TraceExit>)>,
+}
+
+struct TraceExit {
+    tail: BlockId,
+    transferred_bytes: usize,
+    outputs: Vec<(RegisterId, Slot)>,
 }
 
 impl BlockCode {
+    pub(super) fn is_trace(&self) -> bool {
+        self.exits.is_some()
+    }
+
     pub(super) fn run(
         &self,
         memory: &mut [u64],
         registers: &mut Registers,
-    ) -> Result<(), InterpError> {
+    ) -> Result<(BlockId, usize), InterpError> {
         if self.code.required_state_size > memory.len().saturating_mul(8) {
             return Err(InterpError::Machine(
                 "hotspot frame exceeds live allocation".into(),
@@ -643,7 +638,21 @@ impl BlockCode {
         let bytes = unsafe {
             std::slice::from_raw_parts_mut(memory.as_mut_ptr().cast::<u8>(), memory.len() * 8)
         };
-        for (reg, slot) in &self.outputs {
+        let (tail, outputs, transferred_bytes) = if let Some((selector, exits)) = &self.exits {
+            let index = u64::from_le_bytes(
+                bytes[selector.offset..selector.offset + 8]
+                    .try_into()
+                    .unwrap(),
+            );
+            let exit = usize::try_from(index)
+                .ok()
+                .and_then(|index| exits.get(index))
+                .ok_or_else(|| InterpError::Machine("invalid hotspot continuation".into()))?;
+            (exit.tail, &exit.outputs, exit.transferred_bytes)
+        } else {
+            (self.tail, &self.outputs, self.transferred_bytes)
+        };
+        for (reg, slot) in outputs {
             // Native partial stores preserve padding from the previous frame.
             // Strip it from both planes before exporting interpreter values.
             if !slot.width.is_multiple_of(8) {
@@ -663,6 +672,105 @@ impl BlockCode {
             };
             registers.set(*reg, SIRValue { payload, mask });
         }
-        Ok(())
+        Ok((tail, transferred_bytes))
+    }
+}
+
+fn frame_layout(
+    registers: impl IntoIterator<Item = RegisterId>,
+    types: &HashMap<RegisterId, RegisterType>,
+    layout: &MemoryLayout,
+    four_state: bool,
+) -> Result<(MemoryLayout, BTreeMap<RegisterId, Slot>), SimulatorError> {
+    let error = |message| SimulatorError::from(crate::CodegenError::message(message));
+    let mut layout = layout.clone();
+    let frame_start = layout
+        .merged_total_size
+        .checked_add(layout.triggered_bits_total_size)
+        .and_then(|size| size.checked_add(7))
+        .map(|size| size & !7)
+        .ok_or_else(|| error("hotspot frame offset overflow"))?;
+    let instance = layout
+        .offsets
+        .keys()
+        .map(|addr| addr.instance_id.0)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| error("hotspot private address overflow"))?;
+    let mut cursor = frame_start;
+    let mut slots = BTreeMap::new();
+    for (index, reg) in registers.into_iter().enumerate() {
+        let ty = &types[&reg];
+        let bytes = ty.width().div_ceil(8);
+        let four_state = four_state && matches!(ty, RegisterType::Logic { .. });
+        let size = bytes
+            .checked_mul(if four_state { 2 } else { 1 })
+            .and_then(|size| size.checked_add(celox_state_layout::MAX_ACCESS_OVERREACH + 7))
+            .map(|size| size & !7)
+            .ok_or_else(|| error("hotspot frame size overflow"))?;
+        let addr = AbsoluteAddr {
+            instance_id: InstanceId(instance),
+            var_id: celox_design::StateObjectId(
+                u32::try_from(index).map_err(|_| error("too many hotspot frame slots"))?,
+            ),
+        };
+        layout.offsets.insert(addr, cursor);
+        layout.widths.insert(addr, ty.width());
+        layout.is_4states.insert(addr, four_state);
+        slots.insert(
+            reg,
+            Slot {
+                addr: RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, addr),
+                offset: cursor,
+                bytes,
+                width: ty.width(),
+                four_state,
+            },
+        );
+        cursor = cursor
+            .checked_add(size)
+            .ok_or_else(|| error("hotspot frame size overflow"))?;
+        if cursor - frame_start > MAX_FRAME_BYTES {
+            return Err(error("hotspot frame exceeds budget"));
+        }
+    }
+    // These addresses exist only in this compilation's view. They follow
+    // every byte of the live image; existing semantic addresses and region
+    // bases are unchanged. The emitter places scratch after this frame.
+    layout.merged_total_size = cursor;
+    Ok((layout, slots))
+}
+
+pub(super) enum BlockRequest {
+    Chain(ChainRequest),
+    Trace(TraceRequest),
+}
+
+impl BlockRequest {
+    pub(super) fn new(source: &Arc<RegionSource>, start: BlockId) -> Option<Self> {
+        ChainRequest::new(source, start).map(Self::Chain)
+    }
+
+    pub(super) fn profiled(
+        source: &Arc<RegionSource>,
+        start: BlockId,
+        successor: impl FnMut(BlockId) -> Option<BlockId>,
+    ) -> Option<Self> {
+        TraceRequest::new(source, start, successor)
+            .map(Self::Trace)
+            .or_else(|| Self::new(source, start))
+    }
+
+    pub(super) fn compile(
+        self,
+        layout: &MemoryLayout,
+        options: &SimulatorOptions,
+        cancel: &CompileCancel,
+    ) -> Result<BlockCode, SimulatorError> {
+        match self {
+            Self::Chain(chain) => chain.compile(layout, options, cancel),
+            Self::Trace(trace) => trace.compile(layout, options, cancel),
+        }
     }
 }

@@ -1464,6 +1464,7 @@ fn run_units<'u>(
             // a region request take its worker slot before finish queues it.
             .filter(|runtime| compile_units.is_none() && runtime.has_regions(hotspots.1))
         {
+            let mut previous = None;
             crate::interpreter::execute_prepared_unit_with_hook(
                 &prepared.unit,
                 &mut machine,
@@ -1472,14 +1473,24 @@ fn run_units<'u>(
                 &mut prepared.registers,
                 functions,
                 &mut |_unit, block, registers, machine| {
-                    runtime.try_block(
+                    runtime.observe_edge(hotspots.1, _unit_index, previous, block);
+                    let tail = runtime.try_block(
                         hotspots.1,
                         _unit_index,
                         &prepared.region_source,
                         block,
                         registers,
                         machine.memory,
-                    )
+                    )?;
+                    // Unconditional targets are already known statically.
+                    previous = Some(tail.unwrap_or(block)).filter(|id| {
+                        matches!(
+                            _unit.blocks[id].terminator,
+                            celox_sir::SIRTerminator::Branch { .. }
+                                | celox_sir::SIRTerminator::Switch { .. }
+                        )
+                    });
+                    Ok(tail)
                 },
             )
             .map_err(error_code)?;
@@ -2490,6 +2501,119 @@ impl SimBackend for InterpBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    #[test]
+    fn hotspot_trace_resumes_after_stores_and_preserves_error_status() {
+        use celox_sir::{BinaryOp, BlockId, SIRBuilder, SIRInstruction, SIRTerminator};
+        let mut sim = crate::SimulatorBuilder::<crate::Simulator>::new(
+            "module Top (q: output bit<64>) { assign q = 64'd0; }",
+            "Top",
+        )
+        .four_state(true)
+        .build_interpreter()
+        .unwrap();
+        let addr = RegionedAbsoluteAddr::from_absolute_addr(
+            STABLE_REGION,
+            *sim.backend.layout.offsets.keys().next().unwrap(),
+        );
+        let offset = sim.backend.layout.region_base_offset(&addr);
+        let mut b = SIRBuilder::new();
+        let value = b.alloc_bit(64, false);
+        let one = b.alloc_bit(64, false);
+        let next = b.alloc_bit(64, false);
+        let cond = b.alloc_bit(5, false);
+        let hot = b.new_block();
+        let cold = b.new_block();
+        b.emit(SIRInstruction::Load(value, addr, SIROffset::Static(0), 64));
+        b.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+        b.emit(SIRInstruction::Binary(next, value, BinaryOp::Add, one));
+        b.emit(SIRInstruction::Store(
+            addr,
+            SIROffset::Static(0),
+            64,
+            next,
+            vec![],
+            vec![],
+        ));
+        b.emit(SIRInstruction::Slice(cond, value, 0, 5));
+        for _ in 0..16 {
+            let dead = b.alloc_bit(64, false);
+            b.emit(SIRInstruction::Concat(dead, vec![value]));
+        }
+        b.seal_block(SIRTerminator::Branch {
+            cond,
+            true_block: (hot, vec![]),
+            false_block: (cold, vec![]),
+        });
+        b.switch_to_block(hot);
+        b.seal_block(SIRTerminator::Return);
+        b.switch_to_block(cold);
+        b.seal_block(SIRTerminator::Error(42));
+        let (blocks, register_map, _) = b.drain();
+        sim.backend.eval_comb_units = vec![PreparedUnit::new(
+            ExecutionUnit {
+                entry_block_id: BlockId(0),
+                blocks,
+                register_map,
+            },
+            true,
+        )];
+        sim.backend
+            .enable_hotspots(&SimulatorOptions {
+                four_state: true,
+                ..Default::default()
+            })
+            .unwrap();
+        let runtime = sim.backend.hotspots.as_mut().unwrap();
+        runtime.begin(EntryKey::Comb);
+        let mut oversized = usize::MAX;
+        runtime.collect(
+            EntryKey::Comb,
+            &mut Some(vec![]),
+            &sim.backend.eval_comb_units[0].unit,
+            &mut oversized,
+        );
+        sim.backend.write_memory(offset, &1u64.to_le_bytes());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let mut compiled_at = None;
+        for iteration in 1u64.. {
+            let result = sim.backend.eval_comb();
+            if iteration.is_multiple_of(32) {
+                assert!(matches!(
+                    result,
+                    Err(SimulatorErrorCode::DetectedTrueLoopCode(42))
+                ));
+            } else {
+                result.unwrap();
+            }
+            assert_eq!(
+                unsafe { read_word(sim.backend.memory.as_mut_slice(), offset) },
+                iteration + 1,
+                "store replay at {iteration}"
+            );
+            let stats = sim.backend.hotspot_stats().unwrap();
+            assert_eq!(stats.failed_entries, 0, "{stats:?}");
+            if sim
+                .backend
+                .hotspots
+                .as_ref()
+                .unwrap()
+                .compiled_trace_calls()
+                > 0
+            {
+                let first = *compiled_at.get_or_insert(iteration);
+                if iteration - first >= 64 {
+                    break;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no trace publication: {stats:?}"
+            );
+            std::thread::yield_now();
+        }
+    }
 
     #[cfg(all(
         feature = "systemverilog",
