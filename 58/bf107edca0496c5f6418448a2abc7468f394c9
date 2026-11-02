@@ -1,0 +1,1 @@
+Update obsolete ambiguous-event rejection tests: event ordering and signal names do not establish clock/reset roles; retain coverage for zero or multiple clock candidates
