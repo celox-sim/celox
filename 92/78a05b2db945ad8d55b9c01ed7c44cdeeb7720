@@ -1,0 +1,6 @@
+Revision history for #3032:
+
+rev 2 (content) 2026-11-02 14:41 UTC — Update obsolete ambiguous-event rejection tests: event ordering and signal names do not establish clock/reset roles; retain coverage for zero or multiple clock candidates
+rev 1 (initial) 2026-11-02 14:41 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3032,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"b0b88ecf1337e7dc9a70b5ebd347cc9f2f7353d8","timestamp_iso":"2026-11-02T14:41:21Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"b0b88ecf1337e7dc9a70b5ebd347cc9f2f7353d8","new_sha":"58bf107edca0496c5f6418448a2abc7468f394c9","timestamp_iso":"2026-11-02T14:41:21Z","reason":"Update obsolete ambiguous-event rejection tests: event ordering and signal names do not establish clock/reset roles; retain coverage for zero or multiple clock candidates","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/b0b88ecf1337e7dc9a70b5ebd347cc9f2f7353d8...58bf107edca0496c5f6418448a2abc7468f394c9"}]} -->
