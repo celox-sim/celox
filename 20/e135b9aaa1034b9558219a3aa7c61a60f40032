@@ -1,0 +1,1 @@
+Codex: stream targets lowered as places, each call in a select position evaluated once (no structural dedup), concatenation values extended by their signedness; whole container elements are places; $cast addresses its destination after the source (4.9.3); rebase onto #2847
