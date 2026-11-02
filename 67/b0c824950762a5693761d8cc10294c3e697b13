@@ -1,0 +1,1 @@
+Build the call graph from the executable Ff/Comb lowering itself (Codex review): constant-folded branches add no edge, defaults are attributed to the call site using them, and calls in timing controls are recorded where the control is lowered.
