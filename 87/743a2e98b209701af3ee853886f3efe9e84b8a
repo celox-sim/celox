@@ -1,1 +1,3 @@
 Rebase #2936 and #2937 after new master changes caused a conflict
+
+Keep exact latch limitations beside related entries instead of the shared append point to avoid repeated rebase conflicts
