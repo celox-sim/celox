@@ -1,0 +1,1 @@
+Codex round 1: bit-extract peephole kept out of the function pipeline (its reload ignores ordinary stores; test fails with it in); capture-site stores count as host in call effects (lane footprint keeps CaptureFlags).
