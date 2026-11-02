@@ -1018,6 +1018,10 @@
     "sv_container_equality_unknown_elements": {
       "title": "The equality of two dynamic arrays whose elements hold unknown bits gives 0 instead of x: with logic a[], b[] and a[0] = 1'bx, b = a, a == b is 0, as is c == d for logic [3:0] c[], d[] holding 4'b10xz",
       "standard": "IEEE 1800-2023 11.4.5, 7.6"
+    },
+    "sv_wide_enum_domains": {
+      "title": "An enumerated type whose base is wider than 64 bits loses the members above bit 63: with enum logic [127:0] {ZERO = 0, HIGH = 128'h8000_0000_0000_0000_0000_0000_0000_0000} E, e = HIGH gives e.name() ZERO although e == HIGH is 1, and $cast(e, 128'h8000...) returns 1 and assigns ZERO",
+      "standard": "IEEE 1800-2023 6.19, 6.19.5, 6.24.2"
     }
   },
   "cases": [
@@ -5523,6 +5527,14 @@
       "classification": "xezim_bug",
       "bug": "sv_container_equality_unknown_elements",
       "note": "The equality of unpacked arrays compares their elements (7.6, 11.4.5), so with an element 1'bx in both a == b is x, which is no member of Bit, and $cast(flag, a == b) returns 0 and keeps ON. The pinned xezim evaluates a == b as 0, assigns OFF and returns 1; the other casts of the case agree. The adapter-free source prints [x 0 10xz 0] where x x is required for the equalities; see verification/repros/sv_container_equality_unknown_elements_xezim.json. Celox prints [x x 10xz x]; Verilator 5.052 does not run four-state cases."
+    },
+    {
+      "suite": "sv",
+      "name": "system_functions::wide_enumerated_types",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_wide_enum_domains",
+      "note": "An enumerated type may have any integral base (6.19), so HIGH = 128'h8000_0000_0000_0000_0000_0000_0000_0000 is a member of enum logic [127:0] {ZERO, ONE, HIGH}, $cast to it of that value assigns HIGH (6.24.2) and name, next and prev give HIGH's neighbours (6.19.5); the signed 100-bit base keeps MINUS = -5. The pinned xezim loses the member bits above bit 63, so HIGH reads as ZERO, $cast(s, -5) to the signed 100-bit enumeration returns 0, and the randc and std::randomize draws of a 128-bit enumeration never give its high member. The adapter-free source prints [ZERO 1] and [1 ZERO] where [HIGH 1] and [1 HIGH] are required; see verification/repros/sv_wide_enum_domains_xezim.json. Celox prints [HIGH 1] [1 HIGH]; Verilator 5.052 rejects the methods of an enumeration wider than 64 bits as unsupported."
     }
   ]
 }

@@ -1,0 +1,28 @@
+{
+  "case": "system_functions::wide_enumerated_types",
+  "source": "src/sv/cases/system_functions.vtest",
+  "standard": "IEEE 1800-2023 6.19: an enumerated type may have any integral base type, and its members keep their whole values; 6.24.2: $cast to it of a member's value assigns that member; 6.19.5: name gives the member's name.",
+  "method": "The shared case runs unchanged in verify-sv-verilator, verify-sv-icarus and verify-sv-xezim; the reduced source below runs without the adapters (verilator --binary, iverilog -g2012 -s Top, xezim -s Top, and the Celox sv_tests driver in simulation mode).",
+  "reduced_source": "module Top;\n typedef enum logic [127:0] {ZERO = 128'd0, HIGH = 128'h80000000000000000000000000000000} E;\n E e;\n initial begin\n  e = HIGH;\n  $display(\"[%s %0d]\", e.name(), e == HIGH);\n  e = ZERO;\n  $display(\"[%0d %s]\", $cast(e, 128'h80000000000000000000000000000000), e.name());\n end\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "stderr": "%Error: w.sv:2:52: Value too wide for 64-bits expected in this context 128'h80000000000000000000000000000000\n%Error-UNSUPPORTED: w.sv:6:24: Unsupported: enum next/prev/name method on enum with > 64 bits\n%Error-UNSUPPORTED: w.sv:8:33: Unsupported: enum next/prev/name method on enum with > 64 bits\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "stderr": "w.sv:8: Error: System task/function $cast() is not defined by any module.\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "[ZERO 1]\n[1 ZERO]\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "[HIGH 1]\n[1 HIGH]\n"
+    }
+  ]
+}
