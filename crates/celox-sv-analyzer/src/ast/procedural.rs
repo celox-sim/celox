@@ -2123,30 +2123,13 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     }
 
     fn reject_tagged_integral_target(&mut self, root: celox_sv_syntax::ExprId) -> Converted<()> {
-        // A place is a tagged union when its whole value is one.
-        if let Some(LValue::Object { place, select, .. }) = expression_binding::object_place(
+        if expression_binding::targets_tagged_union(
             root,
             self.tree.declarations(),
             self.tree,
             self.session,
             &self.dims,
         )? {
-            if matches!(*select, LValue::Ident(_))
-                && place
-                    .value_type()
-                    .members
-                    .first()
-                    .is_some_and(packed_structs::PackedMember::is_tagged)
-            {
-                return Err(unsupported("integral update of a tagged union"));
-            }
-            return Ok(());
-        }
-        if dimensions::operand_shape(root, self.tree, self.session, &self.dims)?.is_some_and(|ty| {
-            ty.members
-                .first()
-                .is_some_and(packed_structs::PackedMember::is_tagged)
-        }) {
             return Err(unsupported("integral update of a tagged union"));
         }
         Ok(())
@@ -6410,7 +6393,7 @@ fn dump_selection_name(
 }
 
 /// A `logic` vector of `width` bits.
-fn vector_type(width: usize, signed: bool) -> Type {
+pub(in crate::ast) fn vector_type(width: usize, signed: bool) -> Type {
     let mut r#type = Type::new(TypeKind::Logic);
     r#type.is_signed = signed;
     if width > 1 {
