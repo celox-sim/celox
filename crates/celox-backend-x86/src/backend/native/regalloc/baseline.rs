@@ -839,7 +839,7 @@ pub(super) fn allocate(
     let phase = timing.then(crate::timing::now);
     let values = &analysis.values;
     let value_count = func.vregs.count();
-    let register_count = func.target_features.allocatable_register_count();
+    let register_count = func.allocatable_register_count();
     let registers = &ALLOCATABLE_REGS[..register_count];
     let mut allocator = Allocator {
         values,

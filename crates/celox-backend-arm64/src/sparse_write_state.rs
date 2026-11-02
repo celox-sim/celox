@@ -320,8 +320,15 @@ fn find_dead_zero_definitions(
     dead
 }
 
-fn is_sparse_origin_zero_fill_region(region: u32) -> bool {
-    region == crate::SPARSE_WORKING_REGION || region == crate::STABLE_REGION
+/// Whether whole-object zero stores to `address` may become one fill.
+///
+/// A fill addresses its object from the state base, and the emitter of a
+/// function unit addresses frame slots from the frame register only for the
+/// accesses it can redirect one by one, which a fill is not. A frame slot's
+/// zero stores therefore stay ordinary stores.
+fn is_sparse_origin_zero_fill_object(address: &RegionedAbsoluteAddr) -> bool {
+    (address.region == crate::SPARSE_WORKING_REGION || address.region == crate::STABLE_REGION)
+        && !crate::function_unit::is_frame_slot(address)
 }
 
 /// Find a whole-object zero overwrite before lowering expands every logical
@@ -341,7 +348,7 @@ fn find_sparse_zero_fills(
         .flat_map(|block| &block.instructions)
         .filter_map(|instruction| match instruction {
             SIRInstruction::Store(address, offset, width, source, triggers, capture_sites)
-                if is_sparse_origin_zero_fill_region(address.region)
+                if is_sparse_origin_zero_fill_object(address)
                     && offset.constant_bit_offset().is_some()
                     && (address.region == crate::STABLE_REGION
                         || layout.sparse_layouts.contains_key(&address.absolute_addr()))
@@ -363,7 +370,7 @@ fn find_sparse_zero_fills(
         for (instruction, inst) in block.instructions.iter().enumerate() {
             match inst {
                 SIRInstruction::Store(address, offset, width, source, triggers, capture_sites)
-                    if is_sparse_origin_zero_fill_region(address.region)
+                    if is_sparse_origin_zero_fill_object(address)
                         && offset.constant_bit_offset().is_some()
                         && (address.region == crate::STABLE_REGION
                             || layout.sparse_layouts.contains_key(&address.absolute_addr()))

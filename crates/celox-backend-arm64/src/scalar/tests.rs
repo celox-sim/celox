@@ -87,10 +87,29 @@ fn direct_conditional_branches_preserve_both_outcomes() {
     for predicate in [false, true] {
         let (function, assignment) = branch_range_function(predicate, 1);
         let plan = EdgeCopyPlan::default();
-        let compact = emit_function(&function, &assignment, 0, 16, &plan, false, false).unwrap();
-        let stubs =
-            emit_function_with_branches(&function, &assignment, 0, 16, &plan, false, false, false)
-                .unwrap();
+        let compact = emit_function(
+            &function,
+            &assignment,
+            0,
+            16,
+            &plan,
+            false,
+            false,
+            FunctionFrame::default(),
+        )
+        .unwrap();
+        let stubs = emit_function_with_branches(
+            &function,
+            &assignment,
+            0,
+            16,
+            &plan,
+            false,
+            false,
+            FunctionFrame::default(),
+            false,
+        )
+        .unwrap();
         assert!(compact.text_size < stubs.text_size);
         check_branch_outcomes(&compact);
     }
@@ -102,10 +121,30 @@ fn far_conditional_branches_fall_back_to_copy_stubs() {
         let (function, assignment) = branch_range_function(predicate, 262_144);
         let plan = EdgeCopyPlan::default();
         assert!(matches!(
-            emit_function_with_branches(&function, &assignment, 0, 16, &plan, false, false, true,),
+            emit_function_with_branches(
+                &function,
+                &assignment,
+                0,
+                16,
+                &plan,
+                false,
+                false,
+                FunctionFrame::default(),
+                true,
+            ),
             Err(EmitError::Assembly(DynasmError::ImpossibleRelocation(_))),
         ));
-        let emitted = emit_function(&function, &assignment, 0, 16, &plan, false, false).unwrap();
+        let emitted = emit_function(
+            &function,
+            &assignment,
+            0,
+            16,
+            &plan,
+            false,
+            false,
+            FunctionFrame::default(),
+        )
+        .unwrap();
         check_branch_outcomes(&emitted);
     }
 }
@@ -175,6 +214,7 @@ fn forwarded_jump_chains_preserve_incoming_and_outgoing_edge_copies() {
                     &plan,
                     false,
                     false,
+                    FunctionFrame::default(),
                     direct,
                 )
                 .unwrap();
@@ -200,6 +240,7 @@ fn compile(mut function: MFunction, state_size: usize) -> (JitCode, Vec<u8>) {
         &allocation.allocated.edge_copies,
         false,
         false,
+        FunctionFrame::default(),
     )
     .unwrap();
     (
@@ -435,6 +476,7 @@ fn shared_phi_inputs_preserve_values_and_localize_loop_constants() {
             &allocated.edge_copies,
             false,
             false,
+            FunctionFrame::default(),
         )
         .unwrap();
         let jit = JitCode::new(&emitted.code).unwrap();
