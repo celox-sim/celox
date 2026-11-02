@@ -384,6 +384,10 @@ fn emit_prepared_eu_inner(
     } else {
         &[]
     };
+    mfunc.settle_flags = layout.settle.as_ref().and_then(|settle| {
+        let flags = settle.flags();
+        Some(i32::try_from(flags.start).ok()?..i32::try_from(flags.end).ok()?)
+    });
     let result = if label == "eval_comb_apply_ff" && options.native_tick_loop {
         emit_with_plan_tick_loop(
             &mfunc,

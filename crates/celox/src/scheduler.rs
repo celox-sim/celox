@@ -2316,7 +2316,15 @@ impl Plan {
                 false_block: (pick, Vec::new()),
             });
             g.b.switch_to_block(check);
-            g.check_waits(&checks);
+            if self.service_processes.contains(&index) {
+                g.check_waits(&checks);
+            } else {
+                g.check_waits_after_unit(
+                    &checks,
+                    &program.sir.processes[index],
+                    &schema.time_slots,
+                );
+            }
             g.b.seal_block(SIRTerminator::Jump(pick, Vec::new()));
         }
 
@@ -3766,6 +3774,44 @@ impl Generator<'_> {
         }
     }
 
+    /// The preceding check established every active wait's baseline. Between
+    /// it and this boundary only this unit ran, apart from the time slots
+    /// updated at slot entry. Host writes are observed before native entry.
+    /// Opaque calls and host-service processes keep a full scan. Buffered
+    /// event notifications do not change simulation state at this boundary;
+    /// cyclic SCHEDULER_RUN calls only charge the work budget.
+    fn check_waits_after_unit(
+        &mut self,
+        waits: &[WaitCheck],
+        unit: &Unit,
+        time_slots: &[AbsoluteAddr],
+    ) {
+        if instructions(unit).any(|inst| matches!(inst, SIRInstruction::ExternCall { .. })) {
+            self.check_waits(waits);
+            return;
+        }
+        let storage = |address| self.shared.get(&address).copied().unwrap_or(address);
+        let writes: HashSet<_> = instructions(unit)
+            .filter_map(SIRInstruction::memory_write)
+            .filter(|write| write.addr.region == STABLE_REGION)
+            .map(|write| storage(write.addr.absolute_addr()))
+            .chain(time_slots.iter().copied().map(storage))
+            .collect();
+        let affected: Vec<_> = waits
+            .iter()
+            .copied()
+            .filter(|check| {
+                check
+                    .wait
+                    .terms
+                    .iter()
+                    .any(|(signal, _)| writes.contains(&storage(*signal)))
+            })
+            .collect();
+        tracing::debug!(target: "celox::scheduler", total=waits.len(), affected=affected.len(), "filtered post-kernel wait checks");
+        self.check_waits(&affected);
+    }
+
     /// Test the waits of `waits` against their signals now
     /// (`check_waits`): a wait whose edge occurred since its baseline wakes
     /// its kernel; every changed signal becomes the baseline.
@@ -3934,6 +3980,17 @@ impl Generator<'_> {
     /// Inline `unit` as [`Self::inline`] does, and record a change of what
     /// combinational logic reads after it when it may write any.
     fn inline_writer(&mut self, unit: &Unit, finish_exit: celox_sir::BlockId) {
+        if self.partitioned_glue.is_some() {
+            // Partition instrumentation already compares every external
+            // write to tracked state and publishes that same predicate to
+            // slots.dirty. Preserve intermediate changes as well as X/Z-only
+            // changes; do not snapshot its notification flags again.
+            self.inline(unit, finish_exit);
+            if instructions(unit).any(|inst| matches!(inst, SIRInstruction::ExternCall { .. })) {
+                self.mark_dirty();
+            }
+            return;
+        }
         // Keep small stable write sets precise. Reading a bounded number of
         // words is much cheaper than repeating the whole comb settle when a
         // process merely rewrites the value already present in its outputs.
@@ -4348,6 +4405,7 @@ impl Generator<'_> {
 }
 
 /// A kernel's wait as `Generator::check_waits` tests it.
+#[derive(Clone, Copy)]
 struct WaitCheck<'a> {
     index: usize,
     /// Its bit in the ready mask.
@@ -5313,9 +5371,75 @@ impl Generator<'_> {
         }
     }
 
+    /// A change-only OR wait can stop at its first changed expression.
+    /// If none changed, its snapshot already equals the current state. If
+    /// any changed, the wait is consumed and capture_raw_wait replaces the
+    /// entire snapshot when the process next suspends. Edge-sensitive waits
+    /// cannot do this: non-triggering changes must advance their baselines.
+    fn check_change_wait(
+        &mut self,
+        process: usize,
+        wait: &Wait,
+        waiting: RegisterId,
+    ) -> RegisterId {
+        let zero = self.constant(0, 1);
+        let one = self.constant(1, 1);
+        let result = self.b.alloc_bit(1, false);
+        let done = self.b.new_block_with(vec![result]);
+        let body = self.b.new_block();
+        self.b.seal_block(SIRTerminator::Branch {
+            cond: waiting,
+            true_block: (body, Vec::new()),
+            false_block: (done, vec![zero]),
+        });
+        self.b.switch_to_block(body);
+        let raw = wait.raw.as_ref().unwrap();
+        // A small batch amortizes branches without extending the lifetime of
+        // every expression in a large sensitivity list.
+        for (signals, terms) in wait.terms.chunks(4).zip(raw.terms.chunks(4)) {
+            let mut differences = zero;
+            let mut difference_width = 1;
+            for (&(signal, _), term) in signals.iter().zip(terms) {
+                let width = if term.mask_offset.is_some() {
+                    term.plane_bits * 2
+                } else {
+                    term.width
+                };
+                let previous = self.load_at(self.slots.baseline[process], term.value_offset, width);
+                let current = self.raw_wait_planes(signal, term);
+                // These are raw, two-state planes. Merge differing bits
+                // before reducing to a boolean, instead of materializing a
+                // comparison result for every value and mask chunk.
+                let different = self.binary(width, previous, BinaryOp::Xor, current);
+                difference_width = difference_width.max(width);
+                differences = self.binary(difference_width, differences, BinaryOp::Or, different);
+            }
+            let no_difference = self.constant(0, difference_width);
+            let changed = self.binary(1, differences, BinaryOp::Ne, no_difference);
+            let next = self.b.new_block();
+            self.b.seal_block(SIRTerminator::Branch {
+                cond: changed,
+                true_block: (done, vec![one]),
+                false_block: (next, Vec::new()),
+            });
+            self.b.switch_to_block(next);
+        }
+        self.b.seal_block(SIRTerminator::Jump(done, vec![zero]));
+        self.b.switch_to_block(done);
+        result
+    }
+
     /// Test every expression in an OR event list against its own snapshot,
     /// before publishing one ready bit and clearing the process's wait flag.
     fn check_raw_wait(&mut self, process: usize, wait: &Wait, waiting: RegisterId) -> RegisterId {
+        if wait.terms.len() >= 4
+            && wait
+                .terms
+                .iter()
+                .all(|(_, kind)| *kind == CounterKind::Changes)
+        {
+            return self.check_change_wait(process, wait, waiting);
+        }
         let mut occurred = self.constant(0, 1);
         for (&(signal, kind), term) in wait.terms.iter().zip(&wait.raw.as_ref().unwrap().terms) {
             let width = if term.mask_offset.is_some() {

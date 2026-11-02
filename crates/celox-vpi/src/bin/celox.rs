@@ -248,6 +248,7 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
         .map(|(text, path)| (text.as_str(), path.as_path()))
         .collect();
     let builder = celox::Simulation::from_sv_sources(source_refs, &arguments.design.top)
+        .diagnostics_from_env()
         .four_state(arguments.design.four_state.unwrap_or(false))
         .threads(arguments.execution.threads as usize)
         .opt_level(arguments.opt_level)
