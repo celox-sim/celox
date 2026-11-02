@@ -868,7 +868,7 @@ pub(in crate::ast) fn check_assignment(
 }
 
 /// Whether class `class_name` derives from or implements `ancestor`.
-fn derives_from(
+pub(in crate::ast) fn derives_from(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     dimensions: &PackedDimensions,

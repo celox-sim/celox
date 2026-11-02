@@ -1800,6 +1800,127 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:32: sorry: Method name nesting is not supported yet.\n<case>/source_0.sv:32:      : method path: level.name\n<case>/source_0.sv:32: error: Object celox_suite_tb.dut.h has no method \"level.name(...)\".\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "system_functions::casts_to_enumerated_types",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 134; see <case>/build.log\nivl: eval_vec4.c:1359: draw_eval_vec4: Assertion `ivl_expr_value(expr) == IVL_VT_BOOL || ivl_expr_value(expr) == IVL_VT_VECTOR' failed.\nAborted (core dumped)\n",
+      "expectation": "Simulation",
+      "name": "system_functions::casts_to_enumerated_types_reject_unknown_bits",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:26: sorry: \"inside\" expressions not supported yet.\n",
+      "expectation": "Simulation",
+      "name": "system_functions::casts_to_enumerated_types_check_whole_values",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:19: syntax error\n<case>/source_0.sv:19: error: Invalid module item.\n<case>/source_0.sv:21: syntax error\n<case>/source_0.sv:21: error: Invalid module item.\n",
+      "expectation": "Simulation",
+      "name": "system_functions::casts_to_enumerated_types_reject_class_handles",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "native testbench failed: exit status: 2; see runtime.log and protocol.log\n<case>/source_0.sv:8: Error: System task/function $cast() is not defined by any module.\n<case>/source_0.sv:10: Error: System task/function $cast() is not defined by any module.\n",
+      "expectation": "Simulation",
+      "name": "system_functions::casts_to_enumerated_types_size_sources_by_themselves",
+      "phase": "execute",
+      "status": "runtime_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 134; see <case>/build.log\n<case>/source_0.sv:12: error: Type names are not valid expressions here.\n<case>/source_0.sv:12: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:12:               : Expression is: <type>\n<case>/source_0.sv:12:               : Expression type: 10PETypename\n<case>/source_0.sv:12: error: Dimensions must be constant.\n<case>/source_0.sv:12       : This size expression violates the rule: <type>\n<case>/source_0.sv:39: sorry: Nested member path not yet supported for class properties.\n<case>/source_0.sv:40: sorry: Nested member path not yet supported for class properties.\n<case>/source_0.sv:40: sorry: Method name nesting is not supported yet.\n<case>/source_0.sv:40:      : method path: holder.level.name\n<case>/source_0.sv:40: error: Object celox_suite_tb.dut.m has no method \"holder.level.name(...)\".\n<case>/source_0.sv:42: sorry: Nested member path not yet supported for class properties.\n<case>/source_0.sv:43: sorry: Method name nesting is not supported yet.\n<case>/source_0.sv:43:      : method path: holder.dogs.exists\n<case>/source_0.sv:43: error: Object celox_suite_tb.dut.m has no method \"holder.dogs.exists(...)\".\n<case>/source_0.sv:43: sorry: Method name nesting is not supported yet.\n<case>/source_0.sv:43:      : method path: holder.dogs.num\n<case>/source_0.sv:43: error: Object celox_suite_tb.dut.m has no method \"holder.dogs.num(...)\".\n<case>/source_0.sv:44: sorry: Nested member path not yet supported for class properties.\n<case>/source_0.sv:45: sorry: Method name nesting is not supported yet.\n<case>/source_0.sv:45:      : method path: holder.dogs.num\n<case>/source_0.sv:45: error: Object celox_suite_tb.dut.m has no method \"holder.dogs.num(...)\".\n<case>/source_0.sv:47: assert: elab_expr.cc:2677: failed assertion base_index.size()+1 == net->packed_dimensions()\nAborted (core dumped)\n",
+      "expectation": "Simulation",
+      "name": "system_functions::casts_evaluate_destination_operands_once",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 8; see <case>/build.log\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: error: Invalid module item.\n<case>/source_0.sv:16: syntax error\n<case>/source_0.sv:17: error: Invalid module item.\n<case>/source_0.sv:22: syntax error\n<case>/source_0.sv:22: error: Invalid module instantiation\n<case>/source_0.sv:31: syntax error\n<case>/source_0.sv:31: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "system_functions::casts_of_constants_to_enumerated_types",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "native testbench failed: exit status: 5; see runtime.log and protocol.log\n<case>/source_0.sv:12: Error: System task/function $cast() is not defined by any module.\n<case>/source_0.sv:14: Error: System task/function $cast() is not defined by any module.\n<case>/source_0.sv:16: Error: System task/function $cast() is not defined by any module.\n<case>/source_0.sv:18: Error: System task/function $cast() is not defined by any module.\n<case>/source_0.sv:18: Error: System task/function $cast() is not defined by any module.\n",
+      "expectation": "Simulation",
+      "name": "system_functions::casts_of_comparisons_and_cast_results",
+      "phase": "execute",
+      "status": "runtime_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 5; see <case>/build.log\n<case>/source_0.sv:8: sorry: Unpacked structs not supported.\n<case>/source_0.sv:21: syntax error\n<case>/source_0.sv:21: error: Invalid module item.\n<case>/source_0.sv:35: syntax error\n<case>/source_0.sv:35: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "system_functions::casts_through_struct_members_and_string_keys",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:63: sorry: Streaming concatenation not supported.\n",
+      "expectation": "Simulation",
+      "name": "system_functions::casts_address_destinations_as_assignments",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:5: sorry: Unpacked structs not supported.\n",
+      "expectation": "Simulation",
+      "name": "system_functions::casts_of_members_of_specialized_structures",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

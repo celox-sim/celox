@@ -3208,3 +3208,448 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1) (assert_eq local_int 1)
   (expect_output "bit[3:0]|byte\nshortint|shortint\nbit[3:0][1:0]|logic[2:0]|0\ntypename_scope_pkg::Sized#(4)|1\nenum bit{OFF=1'd0,ON=1'd1}Top.mode_t|struct packed{bit a;}Top.one_t\nbit[3:0]|int|$unit::Counted#(3)\n1 3 1 byte!\n"))
+
+(case casts_to_enumerated_types
+  (source "cast.sv" #"
+module Top(output int ok, output bit done);
+    typedef enum {red, green, blue, yellow, white, black} Colors;
+    typedef enum logic [3:0] {LOW = 4'd1, MID = 4'd4, HIGH = 4'd9} Level;
+    class Holder;
+        Level level = LOW;
+        int raw = 9;
+        function int take(int v);
+            Level l;
+            if ($cast(l, v))
+                return int'(l);
+            return -1;
+        endfunction
+    endclass
+    Colors col;
+    Level lv;
+    Holder h;
+    int n = 2;
+    initial begin
+        $cast(col, n + 3);
+        $display("%s", col.name());
+        if (!$cast(col, n + 8))
+            $display("invalid %s", col.name());
+        ok = $cast(lv, 4);
+        $display("%0d %s", ok, lv.name());
+        ok = $cast(lv, 5) + 10 * $cast(col, 1);
+        $display("%0d %s %s", ok, lv.name(), col.name());
+        void'($cast(lv, 9));
+        $display("%s", lv.name());
+        h = new;
+        $display("%0d %0d", h.take(4), h.take(3));
+        $display("%0d %s", $cast(h.level, h.raw), h.level.name());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq ok 10)
+  (expect_output "black\ninvalid black\n1 MID\n10 MID green\nHIGH\n4 -1\n1 HIGH\n"))
+
+(case casts_to_enumerated_types_reject_unknown_bits
+  (four_state)
+  (source "cast.sv" #"
+module Top(output bit done);
+    typedef enum logic [3:0] {LOW = 4'd1, MID = 4'd4, HIGH = 4'd9} Level;
+    Level lv;
+    logic [3:0] unknown;
+    typedef enum bit [1:0] {OFF = 2'd0, ON = 2'd1} Bit;
+    Bit flag;
+    logic a[], b[];
+
+    initial begin
+        lv = MID;
+        unknown = 4'b10x1;
+        $display("%0d %s", $cast(lv, unknown), lv.name());
+        unknown = 4'b1001;
+        $display("%0d %s", $cast(lv, unknown), lv.name());
+        a = new[1];
+        a[0] = 1'bx;
+        b = a;
+        flag = ON;
+        $display("%0d %s", $cast(flag, a == b), flag.name());
+
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "0 MID\n1 HIGH\n0 ON\n"))
+
+(case casts_to_enumerated_types_check_whole_values
+  (source "cast.sv" #"
+module Top(output bit done);
+    typedef enum logic [3:0] {ONE = 4'd1, NINE = 4'd9} Small;
+    typedef enum logic signed [7:0] {LOW = -8'sd2, HIGH = 8'sd100} Signed;
+    Small e;
+    Signed s;
+    logic [126:0] big = 1;
+    int wide = 17;
+    byte narrow = 9;
+    shortint negative = -2;
+    initial begin
+        e = NINE;
+        $display("%0d %s", $cast(e, wide), e.name());
+        wide = 25;
+        $display("%0d %s", $cast(e, wide), e.name());
+        e = NINE;
+        $display("%0d %s", $cast(e, 32'd1), e.name());
+        $display("%0d %s", $cast(e, narrow), e.name());
+        s = HIGH;
+        $display("%0d %s", $cast(s, negative), s.name());
+        e = NINE;
+        $display("%0d %s", $cast(e, big), e.name());
+        e = NINE;
+        $display("%0d %s", $cast(e, int'(1)), e.name());
+        e = NINE;
+        $display("%0d %s", $cast(e, narrow inside {9, 10}), e.name());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "0 NINE\n0 NINE\n1 ONE\n1 NINE\n1 LOW\n1 ONE\n1 ONE\n1 ONE\n"))
+
+(case casts_to_enumerated_types_size_sources_by_themselves
+  (source "cast.sv" #"
+module Top(output bit done);
+    typedef enum logic [7:0] {UNIT = 8'd1, FIVE = 8'd5} Wide;
+    Wide w;
+    logic [1:0] a = 3, b = 2;
+    initial begin
+        w = FIVE;
+        $display("%0d %s", $cast(w, a + b), w.name());
+        w = FIVE;
+        $display("%0d %s", $cast(w, '1), w.name());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "1 UNIT\n1 UNIT\n"))
+
+(case casts_to_enumerated_types_reject_class_handles
+  (source "cast.sv" #"
+interface bus_if;
+endinterface
+module Top(output bit done);
+    typedef enum logic [3:0] {ZERO = 4'd0, ONE = 4'd1} Bit;
+    class Item;
+    endclass
+    class Maker;
+        int made;
+        function Item make();
+            Item item;
+            item = new;
+            made++;
+            return item;
+        endfunction
+    endclass
+    Item h;
+    Maker m;
+    virtual bus_if v;
+    Item h1, h2;
+    chandle c;
+    bit choose = 1;
+    Bit b;
+    initial begin
+        b = ONE;
+        $display("%0d %s", $cast(b, h), b.name());
+        h = new;
+        $display("%0d %s", $cast(b, h), b.name());
+        $display("%0d %s", $cast(b, null), b.name());
+        m = new;
+        $display("%0d %s %0d", $cast(b, m.make), b.name(), m.made);
+        $display("%0d %s", $cast(b, v), b.name());
+        $display("%0d %s", $cast(b, choose ? h1 : h2), b.name());
+        $display("%0d %s", $cast(b, choose ? h1 : null), b.name());
+        $display("%0d %s", $cast(b, c), b.name());
+        $display("%0d %s", $cast(b, choose ? 4'd0 : 4'd5), b.name());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "0 ONE\n0 ONE\n0 ONE\n0 ONE 1\n0 ONE\n0 ONE\n0 ONE\n0 ONE\n1 ZERO\n"))
+
+(case casts_evaluate_destination_operands_once
+  (source "cast.sv" #"
+module Top(output bit done);
+    typedef enum logic [3:0] {LOW = 4'd1, HIGH = 4'd9} Level;
+    class Animal;
+    endclass
+    class Dog extends Animal;
+    endclass
+    class Rock;
+    endclass
+    class Holder;
+        Level level = LOW;
+        Dog dogs[int];
+    endclass
+    class Maker;
+        int made;
+        Holder holder;
+        function Holder get();
+            made++;
+            if (holder == null)
+                holder = new;
+            return holder;
+        endfunction
+    endclass
+    typedef struct packed {
+        Level level;
+        logic [3:0] pad;
+    } Entry;
+    Entry items[4];
+    int picked;
+    function automatic int pick();
+        picked++;
+        return picked;
+    endfunction
+    Maker m;
+    Animal animal;
+    Rock rock;
+    initial begin
+        m = new;
+        $display("%0d %0d", $cast(m.get.level, 2), m.made);
+        $display("%0d %0d %s", $cast(m.get.level, 9), m.made, m.holder.level.name());
+        animal = Dog::new;
+        $display("%0d %0d %0d", $cast(m.get.dogs[pick()], animal), m.made, picked);
+        $display("%0d %0d", m.holder.dogs.exists(1), m.holder.dogs.num());
+        $display("%0d %0d", $cast(m.get.dogs[pick()], rock), picked);
+        $display("%0d", m.holder.dogs.num());
+        picked = 0;
+        $display("%0d %0d %s", $cast(items[pick()].level, 9), picked, items[1].level.name());
+        $display("%0d %0d %s", $cast(items[pick()].level, 3), picked, items[2].level.name());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "0 1\n1 2 HIGH\n1 3 1\n1 1\n0 2\n1\n1 1 HIGH\n0 2 \n"))
+
+(case casts_of_constants_to_enumerated_types
+  (source "cast.sv" #"
+package casts_pkg;
+    typedef enum logic [3:0] {PA = 4'd2, PB = 4'd4} pkg_t;
+    localparam int PQ = 9;
+endpackage
+module Top(output int gen_result, output bit done);
+    typedef enum logic [3:0] {ONE = 4'd1, NINE = 9, TEN = 10} Small;
+    class Kind;
+        typedef enum logic [3:0] {KA = 4'd9, KB = 4'd5} k_t;
+    endclass
+    class Holder #(type T = int, T P = 10);
+        function int take();
+            Small s;
+            return $cast(s, P) ? int'(s) : -1;
+        endfunction
+    endclass
+    localparam logic [3:0] TYPED = 9;
+    localparam UNTYPED = 1;
+    localparam SIZED = 8'd10;
+    localparam BIG = 17;
+    Small e;
+    Holder #() h;
+    int pair[2] = '{0, 1};
+    initial begin
+        e = TEN;
+        $display("%0d %s", $cast(e, ONE), e.name());
+        $display("%0d %s", $cast(e, (NINE)), e.name());
+        $display("%0d %s", $cast(e, ONE + 8), e.name());
+        $display("%0d %s", $cast(e, casts_pkg::PQ), e.name());
+        $display("%0d %s", $cast(e, casts_pkg::PA), e.name());
+        $display("%0d %s", $cast(e, Kind::KB), e.name());
+        $display("%0d %s", $cast(e, TYPED), e.name());
+        $display("%0d %s", $cast(e, UNTYPED), e.name());
+        $display("%0d %s", $cast(e, SIZED), e.name());
+        $display("%0d %s", $cast(e, BIG), e.name());
+        h = new;
+        $display("%0d", h.take());
+        $display("%0d %s", $cast(e, pair.sum()), e.name());
+        begin : shadow
+            localparam ONE = 17;
+            $display("%0d %s", $cast(e, ONE), e.name());
+        end
+        done = 1;
+    end
+    for (genvar g = 9; g < 10; g++) begin : gen
+        Small s;
+        initial gen_result = $cast(s, g) ? int'(s) : -1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq gen_result 9)
+  (expect_output "1 ONE\n1 NINE\n1 NINE\n1 NINE\n0 NINE\n0 NINE\n1 NINE\n1 ONE\n1 TEN\n0 TEN\n10\n1 ONE\n0 ONE\n"))
+
+(case casts_of_comparisons_and_cast_results
+  (source "cast.sv" #"
+module Top(output bit done);
+    typedef enum logic [3:0] {ZERO = 4'd0, ONE = 4'd1} Bit;
+    class Item;
+    endclass
+    Item a, b;
+    string s = "x", t = "x";
+    real r = 0.5;
+    Bit e;
+    initial begin
+        e = ZERO;
+        $display("%0d %s", $cast(e, s == t), e.name());
+        e = ONE;
+        $display("%0d %s", $cast(e, a != null), e.name());
+        e = ZERO;
+        $display("%0d %s", $cast(e, r < 1.0), e.name());
+        e = ZERO;
+        $display("%0d %s", $cast(e, $cast(a, b)), e.name());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "1 ONE\n1 ZERO\n1 ONE\n1 ONE\n"))
+
+(case casts_through_struct_members_and_string_keys
+  (source "cast.sv" #"
+interface cast_bus;
+    logic [3:0] sig;
+endinterface
+module Top(output bit done);
+    typedef enum logic [3:0] {ZERO = 4'd0, ONE = 4'd1, NINE = 4'd9} Small;
+    typedef struct packed { logic [3:0] value; } S;
+    typedef struct { S inner; } U;
+    class Keys;
+        static int made = 0;
+        static function string key();
+            made++;
+            return "key";
+        endfunction
+    endclass
+    S s;
+    U u;
+    Small entries[string];
+    Small e;
+    cast_bus bus();
+    virtual cast_bus v;
+    initial begin
+        v = bus;
+        bus.sig = 1;
+        s.value = 1;
+        u.inner.value = 9;
+        e = ZERO;
+        $display("%0d %s", $cast(e, s.value), e.name());
+        $display("%0d %s", $cast(e, u.inner.value), e.name());
+        $display("%0d %s", $cast(e, v.sig), e.name());
+        e = NINE;
+        $display("%0d %s", $cast(e, e[0]), e.name());
+        e = ZERO;
+        $display("%0d %s", $cast(e, s[3:0]), e.name());
+        $display("%0d %0d", $cast(entries[Keys::key()], 9), Keys::made);
+        $display("%0d %0d %s", entries.num(), entries.exists("key"), entries["key"].name());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "1 ONE\n1 NINE\n1 ONE\n1 ONE\n1 ONE\n1 1\n1 1 NINE\n"))
+
+(case casts_address_destinations_as_assignments
+  (source "cast.sv" #"
+module Top(output bit done);
+    typedef enum bit [3:0] {ZERO = 4'd0, ONE = 4'd1} E;
+    class Box;
+        E v;
+    endclass
+    E entries[2];
+    E e;
+    int i;
+    E a0, a1, x1, x2;
+    Box b, b1, b2;
+    Box boxes[2];
+    function automatic E next();
+        i = 1;
+        return ONE;
+    endfunction
+    function automatic E swap();
+        b = b2;
+        return ONE;
+    endfunction
+    initial begin
+        // An index the source changes: the cast writes the element that
+        // the assignment does.
+        i = 0;
+        entries[0] = ZERO;
+        entries[1] = ZERO;
+        entries[i] = next();
+        a0 = entries[0];
+        a1 = entries[1];
+        i = 0;
+        entries[0] = ZERO;
+        entries[1] = ZERO;
+        void'($cast(entries[i], next()));
+        $display("%0d", entries[0] == a0 && entries[1] == a1);
+        // A handle the source reassigns: the cast writes the object that
+        // the assignment does.
+        b1 = new;
+        b2 = new;
+        b = b1;
+        b.v = swap();
+        x1 = b1.v;
+        x2 = b2.v;
+        b1 = new;
+        b2 = new;
+        b = b1;
+        void'($cast(b.v, swap()));
+        $display("%0d", b1.v == x1 && b2.v == x2);
+        // An index the source's hoisted update changes: the cast writes the
+        // element that the assignment does.
+        boxes[0] = new;
+        boxes[1] = new;
+        i = 0;
+        boxes[i].v = E'(i++ + 1);
+        x1 = boxes[0].v;
+        x2 = boxes[1].v;
+        boxes[0] = new;
+        boxes[1] = new;
+        i = 0;
+        void'($cast(boxes[i].v, i++ + 1));
+        $display("%0d", boxes[0].v == x1 && boxes[1].v == x2);
+        // A cast to a declared type, of a streaming concatenation.
+        e = ZERO;
+        $display("%0d %s", $cast(e, int'({>>{32'd1}})), e.name());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "1\n1\n1\n1 ONE\n"))
+
+(case casts_of_members_of_specialized_structures
+  (source "cast.sv" #"
+module Leaf #(parameter int W = 1) (output int packed_member, output int unpacked_member);
+    typedef enum logic [3:0] {ZERO = 4'd0, ONE = 4'd1, FIFTEEN = 4'd15} E;
+    typedef struct packed { logic [W-1:0] v; } S;
+    typedef struct { logic [W-1:0] v; } U;
+    S s;
+    U u;
+    E e;
+    initial begin
+        s.v = '1;
+        u.v = '1;
+        e = ZERO;
+        packed_member = $cast(e, s.v) ? int'(e) : -1;
+        e = ZERO;
+        unpacked_member = $cast(e, u.v) ? int'(e) : -1;
+    end
+endmodule
+module Top(output int narrow_packed, output int wide_packed,
+           output int narrow_unpacked, output int wide_unpacked);
+    Leaf #(.W(1)) narrow(.packed_member(narrow_packed), .unpacked_member(narrow_unpacked));
+    Leaf #(.W(4)) wide(.packed_member(wide_packed), .unpacked_member(wide_unpacked));
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq narrow_packed 1) (assert_eq wide_packed 15)
+  (assert_eq narrow_unpacked 1) (assert_eq wide_unpacked 15))

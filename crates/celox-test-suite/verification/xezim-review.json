@@ -991,6 +991,30 @@
       "title": "In a module instantiated below the top, a function that builds a queue, dynamic array or associative array in an automatic local and returns it returns a container that has lost elements: a queue_t of three pushes comes back with one element, an associative array with none, while the same functions with the module as the top return every element",
       "standard": "IEEE 1800-2023 13.4.1, 7.5, 7.8, 7.10"
     },
+    "sv_enum_casts_in_instance_functions": {
+      "title": "In a module instantiated below the top, $cast to an enumerated type inside a function (a class method or a module function) assigns and accepts a value that is no member of the type: $cast(l, 3) to enum logic [3:0] {LOW = 1, MID = 4, HIGH = 9} returns 1 and sets l to 3, while the same $cast at module scope, or with the module as the top, fails",
+      "standard": "IEEE 1800-2023 6.24.2"
+    },
+    "sv_enum_casts_of_wider_signed_values": {
+      "title": "$cast of a signed value wider than an enumerated type's signed base to the type fails for a negative value that is a member: $cast(s, shortint'(-2)) to enum logic signed [7:0] {LOW = -2, HIGH = 100} returns 0 and leaves s unchanged, while the same value as a byte succeeds",
+      "standard": "IEEE 1800-2023 6.24.2"
+    },
+    "sv_enum_casts_of_class_handles": {
+      "title": "$cast of a class handle, null or a virtual interface to an enumerated type succeeds and assigns the handle's representation: $cast(b, h) with a null handle h, $cast(b, null) and $cast(b, v) with an unset virtual interface v set b to the member of value 0 and return 1, and with an object return 1, although none of these is cast compatible with an enumerated type",
+      "standard": "IEEE 1800-2023 6.22.4, 6.24.2"
+    },
+    "sv_casts_through_method_results": {
+      "title": "$cast to a property or associative-array element reached through a class-returning method called without parentheses, $cast(m.get.level, 2) or $cast(m.get.dogs[pick()], a), assigns a value that is no member of the enumerated type, evaluates the method and the index the wrong number of times and leaves the element unwritten",
+      "standard": "IEEE 1800-2023 6.24.2, 8.16, 13.4"
+    },
+    "sv_enum_casts_of_fill_literals": {
+      "title": "$cast of the unbased unsized literal '1 to an enumerated type returns 1 and assigns 255, a value that is no member, to enum logic [7:0] {UNIT = 1, FIVE = 5}: the cast neither rejects the filled value nor assigns the one-bit value 1",
+      "standard": "IEEE 1800-2023 5.7.1, 6.24.2"
+    },
+    "sv_class_value_parameters_of_type_parameters": {
+      "title": "A class value parameter declared with a preceding type parameter as its type, `class Holder #(type T = int, T P = 10)`, does not parse (\"expected RParen, found Identifier 'P'\")",
+      "standard": "IEEE 1800-2023 8.25, A.1.3"
+    },
     "sv_container_equality_unknown_elements": {
       "title": "The equality of two dynamic arrays whose elements hold unknown bits gives 0 instead of x: with logic a[], b[] and a[0] = 1'bx, b = a, a == b is 0, as is c == d for logic [3:0] c[], d[] holding 4'b10xz",
       "standard": "IEEE 1800-2023 11.4.5, 7.6"
@@ -5435,6 +5459,70 @@
       "classification": "xezim_bug",
       "bug": "sv_container_equality_unknown_elements",
       "note": "The equality of unpacked arrays compares their elements (7.6, 11.4.5), so a == b of two dynamic arrays holding 4'b10xz is x and flags[1] = (a == b) === 1'bx is 1; flags is 15. The pinned xezim evaluates the equality as 0, so flags is 13; the case equality and the equalities of differing and empty arrays agree. See verification/repros/sv_container_equality_unknown_elements_xezim.json; Celox gives x."
+    },
+    {
+      "suite": "sv",
+      "name": "system_functions::casts_to_enumerated_types",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_enum_casts_in_instance_functions",
+      "note": "$cast as a function assigns only a value that is a member of the destination's enumerated type and otherwise returns 0 and leaves it unchanged (6.24.2), so Holder::take(3), whose local Level l has no member of value 3, returns -1. The pinned xezim returns 3 when Top runs under the suite testbench; the other casts of the case agree. The adapter-free source prints [4 3 3 0] with Wrapped as the top and [4 -1 -1 0] with Top; see verification/repros/sv_enum_casts_in_instance_functions_xezim.json. Celox prints [4 -1 -1 0] for both tops, as does Verilator 5.052 with Wrapped."
+    },
+    {
+      "suite": "sv",
+      "name": "system_functions::casts_to_enumerated_types_check_whole_values",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_enum_casts_of_wider_signed_values",
+      "note": "$cast as a function checks whether the source expression lies within the enumeration values (6.24.2), so the shortint -2 is the value of LOW of enum logic signed [7:0] {LOW = -2, HIGH = 100}; the case prints 1 LOW. The pinned xezim returns 0 and leaves HIGH; the other casts of the case agree. The adapter-free source prints [0 1] for the shortint and byte -2; see verification/repros/sv_enum_casts_of_wider_signed_values_xezim.json. Verilator 5.052 passes the shared case and Celox prints [1 1]."
+    },
+    {
+      "suite": "sv",
+      "name": "system_functions::casts_to_enumerated_types_reject_class_handles",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_enum_casts_of_class_handles",
+      "note": "Neither a class handle, null, a virtual interface, a chandle nor a conditional of class handles is cast compatible with an enumerated type (6.22.4, 11.4.11), so $cast as a function returns 0 and leaves the destination ONE (6.24.2), for a null handle, an object, the literal null, a class-returning method called without parentheses (which still runs), an unset virtual interface, two conditionals of handles and a chandle; a conditional of integral arms casts its value. The pinned xezim returns 1 and assigns ZERO for each incompatible source but the object and the method; see verification/repros/sv_enum_casts_of_class_handles_xezim.json. Verilator 5.052 rejects the cast as unsupported, Icarus 13.0 does not parse the virtual interface and chandle declarations, and Celox prints 0 ONE for each incompatible source."
+    },
+    {
+      "suite": "sv",
+      "name": "system_functions::casts_evaluate_destination_operands_once",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_casts_through_method_results",
+      "note": "$cast evaluates its destination, a method call and an index included, once whether or not it assigns it (6.24.2, 8.16), and assigns to an enumerated destination only a member's value, so the case prints 0 1, 1 2 HIGH, 1 3 1, 1 1, 0 2, 1, and through an element of a packed structure array 1 1 HIGH and 0 2. The pinned xezim prints 1 1, 1 2 HIGH, 1 2 3, 0 0, 1 6, 0, 1 4, 1 8: it accepts 2 for Level, runs pick() three times for one cast, does not store the element, and reports the failing cast of a Rock as successful; see verification/repros/sv_casts_through_method_results_xezim.json. Celox prints the case's output for Top and Wrapped tops. Verilator 5.052 skips the destination when the cast fails (retained)."
+    },
+    {
+      "suite": "sv",
+      "name": "system_functions::casts_to_enumerated_types_size_sources_by_themselves",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_enum_casts_of_fill_literals",
+      "note": "An unbased unsized literal is one bit wide in a self-determined context (5.7.1), so $cast(w, '1) assigns the member of value 1, UNIT; and $cast assigns only a member's value (6.24.2). The pinned xezim assigns 255, which is no member, and returns 1; the cast of a + b agrees. The adapter-free source prints [1 255]; see verification/repros/sv_enum_casts_of_fill_literals_xezim.json. Celox prints [1 1]; Verilator 5.052 fills the literal to 8 bits and rejects the cast ([0 5]), and rejects the shared case's other cast at compile time (retained)."
+    },
+    {
+      "suite": "sv",
+      "name": "system_functions::casts_of_constants_to_enumerated_types",
+      "status": "compile_error",
+      "classification": "xezim_bug",
+      "bug": "sv_class_value_parameters_of_type_parameters",
+      "note": "A parameter port may be declared with any data type, a type parameter declared before it included (8.25; A.1.3 parameter_port_declaration). The pinned xezim rejects `class Holder #(type T = int, T P = 10);` while parsing; see verification/repros/sv_class_value_parameters_of_type_parameters_xezim.json. Verilator 5.052 passes the shared case and prints [10] for the reduced source, as Celox does."
+    },
+    {
+      "suite": "sv",
+      "name": "system_functions::casts_through_struct_members_and_string_keys",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_casts_through_method_results",
+      "note": "$cast evaluates its destination once whether or not it assigns it (6.24.2, 8.16), so Keys::key() in the string index of `$cast(entries[Keys::key()], 9)` runs once and creates one entry; the packed and unpacked structure members and the virtual interface member as sources agree. The pinned xezim runs the index twice and leaves three entries, as it evaluates other cast destinations the wrong number of times (see the bug's probe). Verilator 5.052 passes the shared case."
+    },
+    {
+      "suite": "sv",
+      "name": "system_functions::casts_to_enumerated_types_reject_unknown_bits",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_container_equality_unknown_elements",
+      "note": "The equality of unpacked arrays compares their elements (7.6, 11.4.5), so with an element 1'bx in both a == b is x, which is no member of Bit, and $cast(flag, a == b) returns 0 and keeps ON. The pinned xezim evaluates a == b as 0, assigns OFF and returns 1; the other casts of the case agree. The adapter-free source prints [x 0 10xz 0] where x x is required for the equalities; see verification/repros/sv_container_equality_unknown_elements_xezim.json. Celox prints [x x 10xz x]; Verilator 5.052 does not run four-state cases."
     }
   ]
 }

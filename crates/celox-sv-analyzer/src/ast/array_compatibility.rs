@@ -40,7 +40,7 @@ fn element_identity(shape: &VariableDimensions) -> Option<String> {
             domain
                 .members
                 .iter()
-                .map(|member| format!("{}={}", member.name, member.value))
+                .map(|member| format!("{}={}", member.name, domain.value_of(member)))
                 .collect::<Vec<_>>()
                 .join(",")
         ),

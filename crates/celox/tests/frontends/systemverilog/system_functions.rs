@@ -167,6 +167,50 @@ sv_backends! {
         assert!(bare(sim.drain_runtime_events()).is_empty());
     }
 
+    fn casts_evaluate_destination_operands_once(sim) {
+        @case "system_functions::casts_evaluate_destination_operands_once";
+    }
+
+    fn casts_of_constants_to_enumerated_types(sim) {
+        @case "system_functions::casts_of_constants_to_enumerated_types";
+    }
+
+    fn casts_of_comparisons_and_cast_results(sim) {
+        @case "system_functions::casts_of_comparisons_and_cast_results";
+    }
+
+    fn casts_through_struct_members_and_string_keys(sim) {
+        @case "system_functions::casts_through_struct_members_and_string_keys";
+    }
+
+    fn casts_address_destinations_as_assignments(sim) {
+        @case "system_functions::casts_address_destinations_as_assignments";
+    }
+
+    fn casts_of_members_of_specialized_structures(sim) {
+        @case "system_functions::casts_of_members_of_specialized_structures";
+    }
+
+    fn casts_to_enumerated_types(sim) {
+        @case "system_functions::casts_to_enumerated_types";
+    }
+
+    fn casts_to_enumerated_types_reject_unknown_bits(sim) {
+        @case "system_functions::casts_to_enumerated_types_reject_unknown_bits";
+    }
+
+    fn casts_to_enumerated_types_check_whole_values(sim) {
+        @case "system_functions::casts_to_enumerated_types_check_whole_values";
+    }
+
+    fn casts_to_enumerated_types_size_sources_by_themselves(sim) {
+        @case "system_functions::casts_to_enumerated_types_size_sources_by_themselves";
+    }
+
+    fn casts_to_enumerated_types_reject_class_handles(sim) {
+        @case "system_functions::casts_to_enumerated_types_reject_class_handles";
+    }
+
     fn scope_randomize_fills_arbitrary_packed_widths(sim) {
         @case "system_functions::scope_randomize_fills_arbitrary_packed_widths";
     }

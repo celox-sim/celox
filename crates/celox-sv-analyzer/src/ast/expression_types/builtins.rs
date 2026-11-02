@@ -11,20 +11,22 @@ pub(super) fn result(
     native: &Declarations,
     dims: &PackedDimensions,
 ) -> Option<TyId> {
-    let id = match &native.expression(id).kind {
-        ExprKind::ArrayMethodWith { expression, .. } => ungroup(*expression, native),
-        _ => id,
+    let (id, predicate) = match &native.expression(id).kind {
+        ExprKind::ArrayMethodWith {
+            expression,
+            predicate,
+        } => (ungroup(*expression, native), Some(*predicate)),
+        _ => (id, None),
     };
     let callee = match &native.expression(id).kind {
         ExprKind::Call { expression, .. } => ungroup(*expression, native),
         ExprKind::Member { .. } => id,
+        // A system function called without parentheses, such as `$time`.
+        ExprKind::Name(name) if name.spelling.starts_with('$') => id,
         _ => return None,
     };
     if let ExprKind::Name(name) = &native.expression(callee).kind {
-        // 20.6.1 and 21.3.3: the result is a string, independently of its
-        // contents or the formatting arguments.
-        return matches!(name.spelling.as_str(), "$typename" | "$sformatf")
-            .then(|| session.types.intern(TyData::String));
+        return system_function(tree, session, id, &name.spelling, native, dims);
     }
     let ExprKind::Member {
         expression: receiver,
@@ -44,9 +46,11 @@ pub(super) fn result(
     let method = name.spelling.strip_prefix('\\').unwrap_or(&name.spelling);
     let locator = LocatorMethod::from_name(method);
     let string = StringOp::method(method).map(|(op, _)| op);
+    let reduction = array_reductions::reduction_op(method);
     // Do not traverse a receiver for arbitrary property/method names.
     if locator.is_none()
         && string.is_none()
+        && reduction.is_none()
         && !matches!(
             method,
             "pop_front"
@@ -81,6 +85,14 @@ pub(super) fn result(
                     kind: ArrayKind::Queue { bound: None },
                     element,
                 }));
+            }
+            // 7.12.3: a reduction gives a value of the element type, or of
+            // the type of its `with` expression.
+            if reduction.is_some() {
+                return match predicate {
+                    Some(predicate) => type_of(tree, session, predicate, native, dims).ok(),
+                    None => Some(element),
+                };
             }
             match (&kind, method) {
                 // 7.10.2.4–5: removing an element does not change its type.
@@ -144,4 +156,167 @@ fn int(tree: &AnalysisContext<'_>, session: &mut Session, dims: &PackedDimension
         &procedural::int_type(),
         &dims.const_env,
     )
+}
+
+/// The result of a system function, by its declaration in IEEE 1800-2023
+/// clauses 20 and 21 and Annex D, whatever its arguments' kinds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SystemResult {
+    Integral {
+        width: u128,
+        signed: bool,
+        four_state: bool,
+    },
+    Real,
+    Shortreal,
+    String,
+    /// The first argument's type with this signing (11.7).
+    Signing(bool),
+    /// The first argument's type (16.9.3).
+    Operand,
+    /// No value of a self-determined type: a clocking event or a pattern
+    /// sized by its context.
+    Untyped,
+}
+
+/// The result of system function `name`; `None` for a name that is not a
+/// system function.
+pub(super) fn system_result(name: &str) -> Option<SystemResult> {
+    use SystemResult::*;
+    const INTEGER: SystemResult = Integral {
+        width: 32,
+        signed: true,
+        four_state: true,
+    };
+    const INT: SystemResult = Integral {
+        width: 32,
+        signed: true,
+        four_state: false,
+    };
+    const BIT: SystemResult = Integral {
+        width: 1,
+        signed: false,
+        four_state: false,
+    };
+    Some(match name {
+        // 20.3
+        "$time" => Integral {
+            width: 64,
+            signed: false,
+            four_state: true,
+        },
+        "$stime" => Integral {
+            width: 32,
+            signed: false,
+            four_state: true,
+        },
+        "$realtime" => Real,
+        // 20.4, 20.6, 20.7, 20.8.1
+        "$timeunit"
+        | "$timeprecision"
+        | "$bits"
+        | "$dimensions"
+        | "$unpacked_dimensions"
+        | "$left"
+        | "$right"
+        | "$low"
+        | "$high"
+        | "$increment"
+        | "$size"
+        | "$clog2" => INTEGER,
+        // 20.5
+        "$rtoi" => INTEGER,
+        "$itor" | "$bitstoreal" => Real,
+        "$bitstoshortreal" => Shortreal,
+        "$realtobits" => Integral {
+            width: 64,
+            signed: false,
+            four_state: false,
+        },
+        "$shortrealtobits" => Integral {
+            width: 32,
+            signed: false,
+            four_state: false,
+        },
+        // 11.7
+        "$signed" => Signing(true),
+        "$unsigned" => Signing(false),
+        // 6.24.2: as a function, $cast returns int.
+        "$cast" => INT,
+        // 20.6.1, 21.3.3
+        "$typename" | "$sformatf" => String,
+        "$isunbounded" => BIT,
+        // 20.8.2
+        "$ln" | "$log10" | "$exp" | "$sqrt" | "$pow" | "$floor" | "$ceil" | "$sin" | "$cos"
+        | "$tan" | "$asin" | "$acos" | "$atan" | "$atan2" | "$hypot" | "$sinh" | "$cosh"
+        | "$tanh" | "$asinh" | "$acosh" | "$atanh" => Real,
+        // 20.9
+        "$countbits" | "$countones" => INT,
+        "$onehot" | "$onehot0" | "$isunknown" => BIT,
+        // 16.9.3, 16.9.4
+        "$sampled" | "$past" | "$past_gclk" | "$future_gclk" => Operand,
+        "$rose" | "$fell" | "$stable" | "$changed" | "$rose_gclk" | "$fell_gclk"
+        | "$stable_gclk" | "$changed_gclk" | "$rising_gclk" | "$falling_gclk" | "$steady_gclk"
+        | "$changing_gclk" => BIT,
+        // 14.14, 16.14.7: clocking events, no values.
+        "$global_clock" | "$inferred_clock" | "$inferred_disable" => Untyped,
+        // 20.14
+        "$coverage_control" | "$coverage_get_max" | "$coverage_get" | "$coverage_merge"
+        | "$coverage_save" => INTEGER,
+        "$get_coverage" => Real,
+        // 20.15, 20.16, 18.13
+        "$random" | "$dist_uniform" | "$dist_normal" | "$dist_exponential" | "$dist_poisson"
+        | "$dist_chi_square" | "$dist_t" | "$dist_erlang" | "$q_full" => INTEGER,
+        "$urandom" | "$urandom_range" => Integral {
+            width: 32,
+            signed: false,
+            four_state: false,
+        },
+        // 20.18, 20.17: $system returns int, $stacktrace as a function a
+        // string.
+        "$system" => INT,
+        "$stacktrace" => String,
+        // 21.3, 21.6
+        "$fopen" | "$fgetc" | "$ungetc" | "$fgets" | "$fscanf" | "$sscanf" | "$fread"
+        | "$ftell" | "$fseek" | "$rewind" | "$ferror" | "$feof" | "$test$plusargs"
+        | "$value$plusargs" => INTEGER,
+        // Annex D
+        "$countdrivers" | "$reset_count" | "$reset_value" => INTEGER,
+        "$getpattern" | "$scale" => Untyped,
+        _ => return None,
+    })
+}
+
+/// The result type of a call `id` of system function `name`.
+fn system_function(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    name: &str,
+    native: &Declarations,
+    dims: &PackedDimensions,
+) -> Option<TyId> {
+    let first = match &native.expression(id).kind {
+        ExprKind::Call { arguments, .. } => arguments.first().and_then(|argument| argument.value),
+        _ => None,
+    };
+    match system_result(name)? {
+        SystemResult::Integral {
+            width,
+            signed,
+            four_state,
+        } => values::integral(&mut session.types, width, signed, four_state),
+        SystemResult::Real => Some(session.types.intern(TyData::Real)),
+        SystemResult::Shortreal => Some(session.types.intern(TyData::Shortreal)),
+        SystemResult::String => Some(session.types.intern(TyData::String)),
+        SystemResult::Signing(signed) => {
+            let operand = type_of(tree, session, first?, native, dims).ok()?;
+            let TyData::Packed(packed) = session.types.data(operand).clone() else {
+                return None;
+            };
+            values::integral(&mut session.types, packed.bits(), signed, packed.four_state)
+        }
+        SystemResult::Operand => type_of(tree, session, first?, native, dims).ok(),
+        SystemResult::Untyped => None,
+    }
 }

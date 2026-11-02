@@ -413,6 +413,46 @@ static properties through such a typedef with unknown bits
 (`sv_class_scoped_typedef_static_properties`, see the
 [probe](verification/repros/sv_class_scoped_typedef_static_properties_xezim.json)).
 
+`$cast` to an enumerated type as a task, as a function in an expression, under
+`void'`, into a local of a class method and into a class property, and its
+rejection of a source with unknown bits, are checked against IEEE 1800-2023
+6.24.2. Verilator 5.052 rejects a `$cast` to an enumeration of `int` base at
+compile time (ENUMVALUE, "Implicit conversion to enum"), although 6.24.2 uses
+that cast as its example, and does not run the four-state case. Icarus 13.0 does
+not implement `$cast`. xezim 0.11.3, in a module instantiated below the top,
+accepts a value that is no member of the type in a `$cast` inside a function
+(`sv_enum_casts_in_instance_functions`, see the
+[probe](verification/repros/sv_enum_casts_in_instance_functions_xezim.json)).
+The source's whole value at its self-determined width is checked, not the value
+narrowed or widened to the base type, and a class handle source is not cast
+compatible (6.22.4); an unbased unsized `'1` is one bit (5.7.1), and a cast
+`int'(1)` has its target type. Verilator 5.052 rejects `$cast` of a class
+handle to an enumerated type as unsupported, and of a context-determined source
+such as `a + b` with ENUMVALUE. xezim 0.11.3 assigns 255 for `'1` to an 8-bit
+enumeration (`sv_enum_casts_of_fill_literals`, see the
+[probe](verification/repros/sv_enum_casts_of_fill_literals_xezim.json)).
+Constant sources (enum members, package and class-scoped constants,
+parameters, genvars and a class parameter typed by a type parameter) have their
+declared types; Verilator 5.052 passes that case, Icarus 13.0 does not parse
+it, and xezim 0.11.3 does not parse the class parameter
+(`sv_class_value_parameters_of_type_parameters`, see the
+[probe](verification/repros/sv_class_value_parameters_of_type_parameters_xezim.json)).
+An equality of arrays with unknown element bits is x and so no member;
+xezim 0.11.3 gives 0 (`sv_container_equality_unknown_elements`, see the
+[probe](verification/repros/sv_container_equality_unknown_elements_xezim.json)). xezim
+0.11.3 rejects a negative member's value given in a wider signed type
+(`sv_enum_casts_of_wider_signed_values`, see the
+[probe](verification/repros/sv_enum_casts_of_wider_signed_values_xezim.json))
+and assigns the representation of a class handle, `null` or a virtual interface
+(`sv_enum_casts_of_class_handles`, see the
+[probe](verification/repros/sv_enum_casts_of_class_handles_xezim.json)).
+A `$cast` evaluates its destination once whether or not it assigns it, a
+receiver called without parentheses and an index included (6.24.2, 8.16).
+Verilator 5.052 skips the destination of a failing cast; xezim 0.11.3 assigns a
+non-member and evaluates such a destination the wrong number of times
+(`sv_casts_through_method_results`, see the
+[probe](verification/repros/sv_casts_through_method_results_xezim.json)).
+
 The new `$dist_uniform` seed-width case is excluded for Verilator 5.052 and
 Icarus 13.0. Verilator generates an invalid C++ reference binding for converted
 seed arguments; Icarus rejects the `shortint` seed at startup. IEEE 1800-2023

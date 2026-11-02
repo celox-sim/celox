@@ -270,7 +270,7 @@ pub(in crate::ast) fn cast_target_native(
 }
 
 enum Finish {
-    ScopeRandomize(Vec<Option<Vec<i128>>>),
+    ScopeRandomize(Vec<Option<Vec<crate::ast::enums::MemberValue>>>),
     Tagged(packed_structs::Construction),
     Unary(String),
     Binary(String),
@@ -1731,11 +1731,11 @@ fn bind_value_in(
                                     let mut args = vec![Some(operand)];
                                     let function = if let Some(values) = domain {
                                         args.extend(values.into_iter().map(|value| {
-                                            Some(Expr::Literal(format_typed_parameter_literal(
+                                            let negative = matches!(
                                                 value,
-                                                64,
-                                                value < 0,
-                                            )))
+                                                crate::ast::enums::MemberValue::Negative(_)
+                                            );
+                                            Some(Expr::Literal(value.literal(64, negative)))
                                         }));
                                         SystemFunction::ScopeRandomizeEnum
                                     } else {

@@ -18,7 +18,9 @@
 //! handle that the property takes when the cast succeeds (8.16). So does a
 //! `$cast` whose classes make it fail whatever its source's value, when
 //! evaluating the source may call a subroutine: the source is still
-//! evaluated.
+//! evaluated. A `$cast` to an enumerated type runs the same way: it
+//! assigns the source only when its value is one of the type's members
+//! (6.24.2).
 use super::*;
 use celox_sv_syntax::{Declarations, DimensionKind, ExprId, ExprKind};
 
@@ -199,6 +201,21 @@ fn updating(
     updating
 }
 
+/// What kind of value the source of a `$cast` to an enumerated type is.
+enum CastSource {
+    /// An integral value of its self-determined width and signing, which
+    /// may be a member's (6.24.2).
+    Integral {
+        width: usize,
+        signed: bool,
+    },
+    /// A class handle, of the class when known, or another value that is not
+    /// cast compatible: a virtual interface, an unpacked structure or array.
+    Handle(Option<String>),
+    Chandle,
+    Null,
+}
+
 fn unsupported_context() -> AnalyzerError {
     unsupported("assignment, increment or decrement expression in this context")
 }
@@ -360,11 +377,14 @@ impl BodyBuilder<'_, '_, '_> {
         if let Some(operands) = self.property_cast(id)? {
             return Ok(Some(operands));
         }
+        if let Some((destination, source, _)) = self.enum_cast(id)? {
+            return Ok(Some((destination, source)));
+        }
         let native = self.tree.declarations();
         let Some((destination, source)) = cast_operands(native, id) else {
             return Ok(None);
         };
-        if !calls(native, source) && !calls(native, destination) {
+        if !self.effectful(source) && !self.effectful(destination) {
             return Ok(None);
         }
         let cast = expression_binding::object_cast_to(
@@ -377,6 +397,26 @@ impl BodyBuilder<'_, '_, '_> {
         )?;
         Ok(matches!(cast, Some(expression_binding::ObjectCast::Fails))
             .then_some((destination, source)))
+    }
+
+    /// The destination, source and destination type of `id` when it is a
+    /// `$cast` to a variable of an enumerated type (6.24.2).
+    fn enum_cast(
+        &mut self,
+        id: ExprId,
+    ) -> Converted<Option<(ExprId, ExprId, Arc<enums::EnumDomain>)>> {
+        let native = self.tree.declarations();
+        let Some((destination, source)) = cast_operands(native, id) else {
+            return Ok(None);
+        };
+        Ok(expression_binding::enum_domain(
+            self.tree,
+            self.session,
+            destination,
+            native,
+            &self.dims,
+        )?
+        .map(|domain| (destination, source, domain)))
     }
 
     /// The destination and source of `id` when it is a `$cast` to a class
@@ -421,6 +461,92 @@ impl BodyBuilder<'_, '_, '_> {
         }
     }
 
+    /// Whether evaluating native expression `id` has an effect: it calls a
+    /// subroutine, also a method named without parentheses, as its bound
+    /// value shows.
+    fn effectful(&mut self, id: ExprId) -> bool {
+        let native = self.tree.declarations();
+        calls(native, id)
+            || expression_binding::value(id, native, self.tree, self.session, &self.dims)
+                .is_ok_and(|value| inlining::effectful(&value))
+    }
+
+    /// The operands of target `destination` that a `$cast` captures, outside
+    /// in: the class-handle receivers its write goes through, which an
+    /// assignment reads before its value (a saved receiver covers the
+    /// operands inside it), and the indices with an effect, which it
+    /// evaluates once whether or not it writes (8.16, 6.24.2). A pure index
+    /// is read where the destination is written, as an assignment reads it.
+    fn destination_operands(&mut self, destination: ExprId) -> (Vec<ExprId>, Vec<ExprId>) {
+        let native = self.tree.declarations();
+        let (mut receivers, mut indices) = (Vec::new(), Vec::new());
+        let mut id = expression_binding::ungroup(destination, native);
+        loop {
+            match &native.expression(id).kind {
+                ExprKind::Member {
+                    expression,
+                    separator,
+                    ..
+                } if separator == "." => {
+                    let receiver = *expression;
+                    if expression_binding::object_native_class(
+                        self.tree,
+                        self.session,
+                        receiver,
+                        native,
+                        &self.dims,
+                    )
+                    .is_some()
+                    {
+                        receivers.push(receiver);
+                        break;
+                    }
+                    id = expression_binding::ungroup(receiver, native);
+                }
+                ExprKind::Select {
+                    expression,
+                    dimension,
+                } => {
+                    let (base, selects) = match &dimension.kind {
+                        DimensionKind::Index(index) | DimensionKind::Queue(Some(index)) => {
+                            (*expression, vec![*index])
+                        }
+                        DimensionKind::Range { left, right } => (*expression, vec![*right, *left]),
+                        DimensionKind::Indexed { base, .. } => (*expression, vec![*base]),
+                        _ => (*expression, Vec::new()),
+                    };
+                    for index in selects {
+                        if self.effectful(index) {
+                            indices.push(index);
+                        }
+                    }
+                    id = expression_binding::ungroup(base, native);
+                }
+                _ => break,
+            }
+        }
+        (receivers, indices)
+    }
+
+    /// Evaluate `operands`, found outside in, left to right into hidden
+    /// locals of their types, which every later binding of them reads.
+    fn save_operands(&mut self, operands: Vec<ExprId>, stmts: &mut Vec<Stmt>) -> Converted<()> {
+        let native = self.tree.declarations();
+        for operand in operands.into_iter().rev() {
+            let mut value =
+                expression_binding::value(operand, native, self.tree, self.session, &self.dims)?;
+            let (source, unique) = self.hidden_of(operand)?;
+            self.rename_expr(&mut value);
+            stmts.push(Stmt::Assign {
+                lhs: LValue::Ident(unique),
+                rhs: value,
+                nonblocking: false,
+            });
+            self.bind_effect(operand, Expr::Ident(source));
+        }
+        Ok(())
+    }
+
     /// `$cast(destination, source)` `id` to a class property or an element
     /// of one: the cast is to a hidden handle, which the destination takes
     /// only when the cast succeeds, as a failed cast leaves the destination
@@ -434,12 +560,13 @@ impl BodyBuilder<'_, '_, '_> {
         stmts: &mut Vec<Stmt>,
     ) -> Converted<()> {
         let native = self.tree.declarations();
-        // The destination is evaluated whether or not the cast succeeds,
-        // but only written when it does.
-        if calls(native, destination) {
-            return Err(unsupported(
-                "`$cast` destination selected with a side effect",
-            ));
+        // The destination is addressed as an assignment to it is: its
+        // receivers before the source, its indices after; it is evaluated
+        // whether or not the cast succeeds, but only written when it does.
+        let (receivers, indices) = self.destination_operands(destination);
+        self.save_operands(receivers, stmts)?;
+        if let Some((_, _, domain)) = self.enum_cast(id)? {
+            return self.cast_to_enum(id, destination, source, &domain, indices, stmts);
         }
         let (succeeded_source, succeeded) = self.hidden(int_type());
         let cast = expression_binding::object_cast_to(
@@ -453,8 +580,8 @@ impl BodyBuilder<'_, '_, '_> {
         let Some(expression_binding::ObjectCast::Call { name, .. }) = cast else {
             // The source is evaluated although the cast fails, into a
             // hidden handle of its class, which a failing cast knows.
-            if calls(native, source)
-                && let Some(class) = expression_binding::object_native_class(
+            if self.effectful(source)
+                && let Some(_) = expression_binding::object_native_class(
                     self.tree,
                     self.session,
                     source,
@@ -462,9 +589,7 @@ impl BodyBuilder<'_, '_, '_> {
                     &self.dims,
                 )
             {
-                let ty = classes::handle_type(self.tree, self.session, &class)
-                    .ok_or_else(|| unsupported(format!("class `{class}`")))?;
-                let (_, handle) = self.hidden(ty);
+                let (_, handle) = self.hidden_of(source)?;
                 let mut value =
                     expression_binding::value(source, native, self.tree, self.session, &self.dims)?;
                 self.rename_expr(&mut value);
@@ -474,6 +599,7 @@ impl BodyBuilder<'_, '_, '_> {
                     nonblocking: false,
                 });
             }
+            self.save_operands(indices, stmts)?;
             stmts.push(Stmt::Assign {
                 lhs: LValue::Ident(succeeded),
                 rhs: Expr::Literal("0".into()),
@@ -482,17 +608,9 @@ impl BodyBuilder<'_, '_, '_> {
             self.bind_effect(id, Expr::Ident(succeeded_source));
             return Ok(());
         };
-        let target = expression_binding::object_native_class(
-            self.tree,
-            self.session,
-            destination,
-            native,
-            &self.dims,
-        )
-        .expect("checked by `property_cast`");
-        let ty = classes::handle_type(self.tree, self.session, &target)
-            .ok_or_else(|| unsupported(format!("class `{target}`")))?;
-        let (handle_source, _) = self.hidden(ty);
+        // The cast's subroutine writes a hidden handle of the destination's
+        // type.
+        let (handle_source, _) = self.hidden_of(destination)?;
         let value = expression_binding::value(source, native, self.tree, self.session, &self.dims)?;
         let mut call = Expr::Call {
             callee: Callee::Subroutine(name),
@@ -505,9 +623,208 @@ impl BodyBuilder<'_, '_, '_> {
             rhs: call,
             nonblocking: false,
         });
+        self.save_operands(indices, stmts)?;
         // The destination is written as `destination = id`, with `id` bound
         // to the handle for the write.
         self.bind_effect(id, Expr::Ident(handle_source));
+        let mut write = Vec::new();
+        self.write_update(destination, id, &mut write)?;
+        let mut condition = Expr::Ident(succeeded_source.clone());
+        self.rename_expr(&mut condition);
+        stmts.push(Stmt::If {
+            condition,
+            then_body: write,
+            else_body: Vec::new(),
+        });
+        self.bind_effect(id, Expr::Ident(succeeded_source));
+        Ok(())
+    }
+
+    /// What kind of value source `id` of a `$cast` to an enumerated type is,
+    /// from its self-determined type (6.22.4, 6.24.2). A source whose type
+    /// is not resolved is unsupported rather than read as a number.
+    fn cast_source_kind(&mut self, id: ExprId) -> Converted<CastSource> {
+        let native = self.tree.declarations();
+        if expression_binding::native_chandle(self.tree, id, native, &self.dims, self.session) {
+            return Ok(CastSource::Chandle);
+        }
+        let semantic = expression_types::type_of(self.tree, self.session, id, native, &self.dims)
+            .ok()
+            .map(|ty| self.session.types.data(ty).clone());
+        match semantic {
+            Some(semantic_types::TyData::Packed(packed)) => Ok(CastSource::Integral {
+                width: usize::try_from(packed.bits())
+                    .map_err(|_| unsupported("`$cast` source width"))?,
+                signed: packed.signed,
+            }),
+            Some(semantic_types::TyData::Class(semantic_types::Decl::Class(name))) => {
+                Ok(CastSource::Handle(Some(name.to_string())))
+            }
+            Some(
+                semantic_types::TyData::Class(_)
+                | semantic_types::TyData::VirtualInterface { .. }
+                | semantic_types::TyData::UnpackedStruct(_)
+                | semantic_types::TyData::Array { .. },
+            ) => Ok(CastSource::Handle(None)),
+            Some(semantic_types::TyData::Real | semantic_types::TyData::Shortreal) => {
+                Err(unsupported("`$cast` of a real value to an enumerated type"))
+            }
+            Some(semantic_types::TyData::String) => {
+                Err(unsupported("`$cast` of a string to an enumerated type"))
+            }
+            // `null` is a handle literal, no integral value (6.24.2).
+            Some(semantic_types::TyData::Null) => Ok(CastSource::Null),
+            None => Err(unsupported(
+                "`$cast` source of an unresolved type to an enumerated type",
+            )),
+        }
+    }
+
+    /// `$cast(destination, source)` `id` to a variable of enumerated type
+    /// `domain`: an integral source is assigned only when its value is that
+    /// of a member, and a value of another type (a class handle, virtual
+    /// interface, chandle, `null` or aggregate), which is not cast
+    /// compatible with the type, never is; otherwise the destination is left
+    /// unchanged (6.24.2). `id` binds to whether it was assigned.
+    fn cast_to_enum(
+        &mut self,
+        id: ExprId,
+        destination: ExprId,
+        source: ExprId,
+        domain: &enums::EnumDomain,
+        indices: Vec<ExprId>,
+        stmts: &mut Vec<Stmt>,
+    ) -> Converted<()> {
+        let native = self.tree.declarations();
+        let (succeeded_source, succeeded) = self.hidden(int_type());
+        // Whether the source is cast compatible follows from its type,
+        // whatever form of expression gives it (6.22.4): only an integral
+        // value can be one of the type's members.
+        let kind = self.cast_source_kind(source)?;
+        let (source_width, source_signed) = match kind {
+            CastSource::Integral { width, signed } => (width, signed),
+            kind => {
+                // The source is evaluated although the cast fails, by the
+                // binder of its own type: a call, also of a method named
+                // without parentheses, still runs; a source without an effect
+                // is not bound.
+                match kind {
+                    CastSource::Handle(Some(_)) => {
+                        let mut value = expression_binding::value(
+                            source,
+                            native,
+                            self.tree,
+                            self.session,
+                            &self.dims,
+                        )?;
+                        if inlining::effectful(&value) {
+                            let (_, handle) = self.hidden_of(source)?;
+                            self.rename_expr(&mut value);
+                            stmts.push(Stmt::Assign {
+                                lhs: LValue::Ident(handle),
+                                rhs: value,
+                                nonblocking: false,
+                            });
+                        }
+                    }
+                    CastSource::Chandle => {
+                        let value = expression_binding::bind_chandle_value(
+                            source,
+                            native,
+                            self.tree,
+                            self.session,
+                            &self.dims,
+                            None,
+                        )?;
+                        if inlining::effectful(&value) {
+                            return Err(unsupported(
+                                "`$cast` of a chandle with a side effect to an enumerated type",
+                            ));
+                        }
+                    }
+                    CastSource::Handle(None) => {
+                        if calls(native, source)
+                            || expression_binding::value(
+                                source,
+                                native,
+                                self.tree,
+                                self.session,
+                                &self.dims,
+                            )
+                            .is_ok_and(|value| inlining::effectful(&value))
+                        {
+                            return Err(unsupported(
+                                "`$cast` of a value with a side effect that is not cast compatible with an enumerated type",
+                            ));
+                        }
+                    }
+                    CastSource::Null | CastSource::Integral { .. } => {}
+                }
+                self.save_operands(indices, stmts)?;
+                stmts.push(Stmt::Assign {
+                    lhs: LValue::Ident(succeeded),
+                    rhs: Expr::Literal("0".into()),
+                    nonblocking: false,
+                });
+                self.bind_effect(id, Expr::Ident(succeeded_source));
+                return Ok(());
+            }
+        };
+        let mut rhs =
+            expression_binding::value(source, native, self.tree, self.session, &self.dims)?;
+        let source_type = ExprType {
+            width: source_width,
+            signed: source_signed,
+        };
+        // The source keeps its own value until it is known to be a member's:
+        // a local wide enough for every member's value (one more bit for a
+        // signed source) and 4-state, so that unknown bits make the cast
+        // invalid. The write converts it to the destination.
+        let width = source_type
+            .width
+            .max(domain.width + usize::from(source_type.signed));
+        let logic = |width: usize| {
+            let mut ty = Type::new(TypeKind::Logic);
+            ty.is_signed = source_type.signed;
+            if width > 1 {
+                ty.packed_ranges = vec![PackedRange::new(
+                    ConstExpr::Literal((width - 1).to_string()),
+                    ConstExpr::Literal("0".into()),
+                )];
+            }
+            ty
+        };
+        // The source is evaluated at its self-determined width first, so
+        // that the wider local does not size a context-determined source.
+        let (own_source, own) = self.hidden_of(source)?;
+        self.rename_expr(&mut rhs);
+        stmts.push(Stmt::Assign {
+            lhs: LValue::Ident(own),
+            rhs,
+            nonblocking: false,
+        });
+        let (value_source, value) = self.hidden(logic(width));
+        let mut widened = Expr::Ident(own_source);
+        self.rename_expr(&mut widened);
+        stmts.push(Stmt::Assign {
+            lhs: LValue::Ident(value),
+            rhs: widened,
+            nonblocking: false,
+        });
+        self.save_operands(indices, stmts)?;
+        let mut test = expression_binding::enum_membership(
+            domain,
+            Expr::Ident(value_source.clone()),
+            width,
+            source_type.signed,
+        );
+        self.rename_expr(&mut test);
+        stmts.push(Stmt::Assign {
+            lhs: LValue::Ident(succeeded),
+            rhs: test,
+            nonblocking: false,
+        });
+        self.bind_effect(id, Expr::Ident(value_source));
         let mut write = Vec::new();
         self.write_update(destination, id, &mut write)?;
         let mut condition = Expr::Ident(succeeded_source.clone());
@@ -538,7 +855,7 @@ impl BodyBuilder<'_, '_, '_> {
                 "assignment expression target selected with a side effect",
             ));
         }
-        let bits = dimensions::bound_bits_type(self.tree, &current, &self.dims)
+        dimensions::bound_bits_type(self.tree, &current, &self.dims)
             .ok_or_else(|| unsupported("assignment expression target type"))?;
         let shape = dimensions::operand_shape(left, self.tree, self.session, &self.dims)?;
         if shape.as_ref().is_some_and(|shape| {
@@ -563,43 +880,6 @@ impl BodyBuilder<'_, '_, '_> {
                 "assignment expression to this selected target type",
             ));
         }
-        let ty = shape
-            .as_ref()
-            .filter(|_| matches!(current, Expr::Ident(_)))
-            .and_then(type_names::declared_type)
-            .cloned()
-            .unwrap_or_else(|| {
-                if expression_binding::real_value(&current, &self.dims) {
-                    return type_binding::builtin_type(
-                        if bits.width == 32 {
-                            "shortreal"
-                        } else {
-                            "real"
-                        },
-                        None,
-                    )
-                    .expect("a builtin type");
-                }
-                let mut ty = Type::new(
-                    if if matches!(current, Expr::Concat(_)) {
-                        expr_is_two_state(self.tree, self.session, &current, &self.dims)
-                    } else {
-                        shape.as_ref().is_some_and(|shape| shape.is_2state)
-                    } {
-                        TypeKind::Bit
-                    } else {
-                        TypeKind::Logic
-                    },
-                );
-                ty.is_signed = bits.signed;
-                if bits.width > 1 {
-                    ty.packed_ranges = vec![PackedRange::new(
-                        ConstExpr::Literal((bits.width - 1).to_string()),
-                        ConstExpr::Literal("0".into()),
-                    )];
-                }
-                ty
-            });
         let mut assignment = self.assignment_value(operator, false, (left, right))?;
         let rhs = match &mut assignment {
             Stmt::Assign { rhs, .. } | Stmt::AssignConcat { rhs, .. } => rhs,
@@ -612,7 +892,8 @@ impl BodyBuilder<'_, '_, '_> {
                 "assignment expression with an effectful RHS and a selected target",
             ));
         }
-        let (source, unique) = self.hidden(ty);
+        // The value is stacked in a local of the target's type.
+        let (source, unique) = self.hidden_of(left)?;
         let value = std::mem::replace(rhs, Expr::Ident(unique.clone()));
         stmts.push(Stmt::Assign {
             lhs: LValue::Ident(unique),
@@ -645,6 +926,59 @@ impl BodyBuilder<'_, '_, '_> {
         let source = format!("update%{}", *self.state.counter);
         let unique = self.declare(&source, ty);
         (source, unique)
+    }
+
+    /// Declare a hidden local that saves the value of native expression
+    /// `id`, of the expression's own type: a variable's declared type, or
+    /// the self-determined semantic type of any other expression (a string,
+    /// a class handle, a real or an integral vector), and return its source
+    /// and unique names. Every saved operand is declared through this.
+    pub(super) fn hidden_of(&mut self, id: ExprId) -> Converted<(String, String)> {
+        let native = self.tree.declarations();
+        if let Some(name) = expression_binding::native_name(self.tree, id, native)
+            && let Some(ty) = self
+                .dims
+                .get(&name)
+                .and_then(type_names::declared_type)
+                .cloned()
+        {
+            return Ok(self.hidden(ty));
+        }
+        let semantic = expression_types::type_of(self.tree, self.session, id, native, &self.dims)?;
+        let ty = match self.session.types.data(semantic).clone() {
+            semantic_types::TyData::Packed(packed) => {
+                let width = usize::try_from(packed.bits())
+                    .map_err(|_| unsupported("a saved value of this width"))?;
+                let mut ty = Type::new(if packed.four_state {
+                    TypeKind::Logic
+                } else {
+                    TypeKind::Bit
+                });
+                ty.is_signed = packed.signed;
+                if width > 1 {
+                    ty.packed_ranges = vec![PackedRange::new(
+                        ConstExpr::Literal((width - 1).to_string()),
+                        ConstExpr::Literal("0".into()),
+                    )];
+                }
+                ty
+            }
+            semantic_types::TyData::Real => {
+                type_binding::builtin_type("real", None).expect("a builtin type")
+            }
+            semantic_types::TyData::Shortreal => {
+                type_binding::builtin_type("shortreal", None).expect("a builtin type")
+            }
+            semantic_types::TyData::String => {
+                type_binding::builtin_type("string", None).expect("a builtin type")
+            }
+            semantic_types::TyData::Class(semantic_types::Decl::Class(class)) => {
+                classes::handle_type(self.tree, self.session, &class)
+                    .ok_or_else(|| unsupported(format!("class `{class}`")))?
+            }
+            _ => return Err(unsupported("a saved value of this type")),
+        };
+        Ok(self.hidden(ty))
     }
 
     /// Evaluate the truth of `id` into a hidden 1-bit local, which `id`
@@ -743,25 +1077,9 @@ impl BodyBuilder<'_, '_, '_> {
             self.write_update(operand, id, stmts)?;
             return Ok(());
         };
-        let ty = dimensions::bound_bits_type(self.tree, &current, &self.dims)
-            .ok_or_else(|| unsupported("increment or decrement of this operand"))?;
         // The local is of the operand's type, so a prefix result is the value
         // the update stores.
-        let ty = if expression_binding::real_value(&current, &self.dims) {
-            type_binding::builtin_type(if ty.width == 32 { "shortreal" } else { "real" }, None)
-                .expect("a builtin type")
-        } else {
-            let mut r#type = Type::new(TypeKind::Logic);
-            r#type.is_signed = ty.signed;
-            if ty.width > 1 {
-                r#type.packed_ranges = vec![PackedRange::new(
-                    ConstExpr::Literal((ty.width - 1).to_string()),
-                    ConstExpr::Literal("0".into()),
-                )];
-            }
-            r#type
-        };
-        let (source, unique) = self.hidden(ty);
+        let (source, unique) = self.hidden_of(operand)?;
         let local = Expr::Ident(source);
         let read = |this: &mut Self, value: Expr, stmts: &mut Vec<Stmt>| {
             let mut rhs = value;
@@ -862,18 +1180,6 @@ mod tests {
             (
                 "int a[4], i; initial case (i) i++: a[0] = 1; endcase",
                 "increment or decrement expression",
-            ),
-            (
-                "class D; endclass class K; D a[int]; endclass K k; D d; int n; \
-                 function int f(); n++; return n; endfunction \
-                 initial begin k = new; void'($cast(k.a[f()], d)); end",
-                "`$cast` destination selected with a side effect",
-            ),
-            (
-                "class D; endclass class R; endclass D a[4]; R r; int n; \
-                 function int f(); n++; return n; endfunction \
-                 initial void'($cast(a[f()], r));",
-                "`$cast` destination selected with a side effect",
             ),
             (
                 "int a[4], n; function int f(); n++; return n; endfunction initial a[f()]++;",
