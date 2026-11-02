@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "standard": "IEEE 1800-2023 23.6 permits hierarchical names through generate instances; 6.16.1 requires len() to return the number of characters, including zero for an empty string.",
+  "adapter_free": true,
+  "case": "hierarchy::generated_string_array_element_methods",
+  "source": "verification/repros/generated_string_array_element_methods.sv",
+  "expected": "Print lengths=6,0 and finish successfully.",
+  "icarus": {
+    "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+    "compile_command": "iverilog -g2012 -s Top -o <output> verification/repros/generated_string_array_element_methods.sv",
+    "compile_exit_code": 0,
+    "compile_output": "",
+    "runtime_command": "vvp <output>",
+    "runtime_exit_code": 1,
+    "runtime_output": "lengths=2,2\nFATAL: verification/repros/generated_string_array_element_methods.sv:13: generated instance string array element methods\n       Time: 1  Scope: Top\n"
+  }
+}

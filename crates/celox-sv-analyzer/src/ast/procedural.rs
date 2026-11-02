@@ -2050,7 +2050,13 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             self.rename_expr(&mut store);
             return Ok(Stmt::Eval(store));
         }
-        if expression_binding::fixed_string_array_element(self.tree, string, native, &self.dims) {
+        if expression_binding::fixed_string_array_element(
+            self.tree,
+            self.session,
+            string,
+            native,
+            &self.dims,
+        ) {
             if nonblocking {
                 return Err(unsupported(
                     "nonblocking assignment to a string array character",

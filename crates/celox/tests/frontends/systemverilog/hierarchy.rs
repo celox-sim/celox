@@ -1,6 +1,16 @@
 use super::*;
 
 sv_backends! {
+    fn generated_string_array_element_methods(sim) {
+        @case "hierarchy::generated_string_array_element_methods";
+    }
+    fn hierarchical_string_variables(sim) {
+        @case "hierarchy::hierarchical_string_variables";
+    }
+    fn hierarchical_string_mutating_methods(sim) {
+        @case "hierarchy::hierarchical_string_mutating_methods";
+    }
+
     fn coalesces_repeated_literal_net_drivers(sim) {
         @case "hierarchy::coalesces_repeated_literal_net_drivers";
     }

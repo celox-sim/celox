@@ -539,6 +539,10 @@ string, and an integral value assigned or cast to a string contributes its
 bytes from the most significant one. A character read as `s[i]` or `s.getc(i)` is a `byte`,
 which is signed (6.16, 6.11): a code above 127 reads as a negative value.
 
+String variables can be read and written through hierarchical names such as
+`memory.test_file`. String methods use the referenced instance's variable,
+including when the instance is in a generate block; copies retain their prior text.
+
 Fixed unpacked arrays of strings support assignment patterns, whole-array and
 subarray copies, indexed reads and assignments, and string methods that do not
 modify the receiver. A full element selection yields a string; a further index

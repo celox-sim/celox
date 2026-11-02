@@ -471,3 +471,29 @@ endmodule
   (top Top) (run_until 0)
   (assert_eq words_seen 2) (assert_eq queued 3) (assert_eq empty_seen 0) (assert_eq before_b 2)
   (assert_eq dots 1) (assert_eq grown 7))
+
+(case local_bindings_shadow_imported_string_types
+  (source "string_import_shadowing.sv" #"
+package StringValues;
+  string s="package";
+  bit [15:0] t=16'h1234;
+endpackage
+module Top;
+  import StringValues::s;
+  import StringValues::t;
+  initial begin
+    #1;
+    begin : local_scope
+      bit [15:0] s;
+      string t;
+      s=16'habcd;
+      t="local";
+      if (s[7:0] !== 8'hcd || s[15:8] !== 8'hab) $fatal(1,"local packed type wins");
+      if (t.len() != 5) $fatal(1,"local string type wins");
+    end
+    if (s.len() != 7 || t[7:0] !== 8'h34) $fatal(1,"imported bindings restored");
+    $finish;
+  end
+endmodule
+"#)
+  (top Top) (run_to_finish))
