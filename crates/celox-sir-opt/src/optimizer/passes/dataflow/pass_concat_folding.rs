@@ -2,7 +2,7 @@
 //! wider operations, reducing ISel's shl+or expansion.
 
 use super::pass_manager::ExecutionUnitPass;
-use super::shared::{collect_all_used_registers, is_unused_definition};
+use super::shared::{OpaqueWrites, collect_all_used_registers, is_unused_definition};
 use crate::HashMap;
 use crate::PassOptions;
 use crate::ir::*;
@@ -53,6 +53,10 @@ impl ExecutionUnitPass for ConcatFoldingPass {
         "concat_folding"
     }
 
+    fn handles_calls(&self) -> bool {
+        true
+    }
+
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
         let mut max_reg = eu.register_map.keys().map(|r| r.0).max().unwrap_or(0);
         let mut changed = fold_slices_of_concat(eu);
@@ -60,11 +64,17 @@ impl ExecutionUnitPass for ConcatFoldingPass {
         // Build extract def map: RegisterId → (base, static_offset, width).
         // A Slice over a known base composes offsets, so Concat can merge
         // direct slices and slices of loads with the same code path.
+        //
+        // A merged load is placed at the Concat, so loads of an object that a
+        // call may write are not merged: the call can sit between them.
+        let opaque_writes = OpaqueWrites::of(eu);
         let mut extract_defs: HashMap<RegisterId, BitSource> = HashMap::default();
         for block in eu.blocks.values() {
             for inst in &block.instructions {
                 match inst {
-                    SIRInstruction::Load(dst, addr, SIROffset::Static(off), width) => {
+                    SIRInstruction::Load(dst, addr, SIROffset::Static(off), width)
+                        if !opaque_writes.may_write(addr) =>
+                    {
                         extract_defs.insert(
                             *dst,
                             BitSource {

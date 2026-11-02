@@ -11,6 +11,10 @@ impl ExecutionUnitPass for EliminateDeadWorkingStoresPass {
         "eliminate_dead_working_stores"
     }
 
+    fn handles_calls(&self) -> bool {
+        true
+    }
+
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
         eliminate_dead_working_stores(eu);
     }

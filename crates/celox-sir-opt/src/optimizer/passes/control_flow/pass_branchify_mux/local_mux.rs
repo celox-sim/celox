@@ -242,6 +242,9 @@ fn has_intervening_memory_conflict(
     block.instructions[start..end].iter().any(|inst| {
         is_memory_barrier(inst)
             || memory_write(inst).is_some_and(|write| mem_may_alias(read, write))
+            || inst
+                .opaque_written_objects()
+                .is_none_or(|mut objects| objects.any(|object| object == read.addr))
     })
 }
 
@@ -249,6 +252,13 @@ pub(super) fn is_memory_barrier(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> 
     // State accesses are not moved across host interactions, so the host
     // observes them in program order.
     inst.is_host_interaction()
+}
+
+/// Whether `inst` may write state other than through a Store or Commit: a
+/// call whose effects write some object, or a native kernel.
+pub(super) fn writes_state_opaquely(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
+    inst.opaque_written_objects()
+        .is_none_or(|mut objects| objects.next().is_some())
 }
 
 fn mem_may_alias(a: MemAccess<'_>, b: MemAccess<'_>) -> bool {

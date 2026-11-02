@@ -96,7 +96,7 @@ pub struct CallEffects<A> {
     /// once.
     pub triggers: Vec<A>,
     /// Whether it may interact with the host: an extern call, a runtime event
-    /// or a comb capture.
+    /// or a comb capture, a store that feeds one included.
     pub host: bool,
     /// Whether it may call a native kernel, which can read and write any
     /// state: the lists above are then incomplete.

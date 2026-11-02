@@ -218,6 +218,10 @@ impl ExecutionUnitPass for GuardedRegionSinkingPass {
         "guarded_region_sinking"
     }
 
+    fn handles_calls(&self) -> bool {
+        true
+    }
+
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions) {
         // A four-state Mux bitwise-merges its arms for an X/Z condition, while
         // control flow selects one edge. No structural proof below authorizes
