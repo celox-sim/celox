@@ -2298,6 +2298,10 @@ pub struct MFunction {
     /// caller passes from a reserved register; `None` for other functions.
     pub(crate) frame_window: Option<super::function_unit::FrameWindow>,
     /// Physical settle-flag bytes, used only to cluster clean guard paths.
+    #[cfg_attr(
+        not(any(target_arch = "x86_64", feature = "cross-codegen")),
+        allow(dead_code)
+    )]
     pub(crate) settle_flags: Option<std::ops::Range<i32>>,
 }
 
