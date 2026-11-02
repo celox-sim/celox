@@ -594,13 +594,17 @@ impl Plan {
             .copied()
             .chain(events.iter().map(|event| storage(event.signal)))
             .collect();
-        let wait_slicer =
-            (!model.waited.is_empty()).then(|| CombSlicer::new(&sir.eval_comb, shared.clone()));
-        let observed_cone = wait_slicer
+        // All dependency and settle slices inspect the same immutable units.
+        // Index their definitions and control dependencies only once per plan,
+        // and only if one of these consumers actually needs a slice.
+        let comb_slicer =
+            std::cell::LazyCell::new(|| CombSlicer::new(&sir.eval_comb, shared.clone()));
+        let wait_slicer = (!model.waited.is_empty()).then(|| &*comb_slicer);
+        let observed_inputs = wait_slicer
             .as_ref()
-            .map(|slicer| slicer.slice(model.waited.iter().copied()))
+            .map(|slicer| slicer.input_signals(model.waited.iter().copied()))
             .unwrap_or_default();
-        active_observers.extend(observed_cone.iter().flat_map(loads).map(storage));
+        active_observers.extend(observed_inputs.into_iter().map(storage));
         // A stateful combinational consumer can retain an intermediate
         // blocking result even when no waiter or clock reads it. Include all
         // combinational inputs so indirect cones are covered too. Missing
@@ -1030,8 +1034,8 @@ impl Plan {
         // kernel stores the expression itself.
         // Several process kernels commonly wait on the same clock or signal
         // set. Their dependency cones are identical within this immutable
-        // plan; materialize each distinct set once instead of walking and
-        // cloning the combinational IR again for every waiter.
+        // plan; analyze each distinct set once without materializing an
+        // executable slice just to inspect its loads.
         let mut wait_dependencies = HashMap::default();
         let dependencies: Vec<(HashSet<AbsoluteAddr>, HashSet<AbsoluteAddr>)> = kernels
             .iter()
@@ -1045,13 +1049,12 @@ impl Plan {
                 wait_dependencies
                     .entry(signals)
                     .or_insert_with_key(|signals| {
-                        let cone = wait_slicer
+                        let inputs = wait_slicer
                             .as_ref()
-                            .map(|slicer| slicer.slice(signals.iter().copied()))
+                            .map(|slicer| slicer.input_signals(signals.iter().copied()))
                             .unwrap_or_default();
-                        let comb: HashSet<_> = cone
-                            .iter()
-                            .flat_map(loads)
+                        let comb: HashSet<_> = inputs
+                            .into_iter()
                             .map(storage)
                             .filter(|input| !control_slots.contains(input))
                             .collect();
@@ -1209,7 +1212,7 @@ impl Plan {
                     if stateful.is_empty() && watched_comb.is_empty() {
                         return Some(Vec::new());
                     }
-                    let slicer = CombSlicer::new(&sir.eval_comb, shared.clone());
+                    let slicer = &*comb_slicer;
                     let targets = stateful
                         .iter()
                         .map(|target| target.absolute_addr())
@@ -1362,7 +1365,7 @@ impl Plan {
                                 .collect()
                         },
                     );
-                    let slicer = CombSlicer::new(&sir.eval_comb, shared.clone());
+                    let slicer = &*comb_slicer;
                     let inputs = sources
                         .iter()
                         .copied()
@@ -4634,12 +4637,16 @@ fn homes_overlap_only_whole(layout: &crate::backend::MemoryLayout) -> bool {
 
 /// The storage `unit` reads.
 fn loads(unit: &Unit) -> impl Iterator<Item = AbsoluteAddr> + '_ {
-    instructions(unit).filter_map(|inst| match inst {
+    instructions(unit).filter_map(loaded_address)
+}
+
+fn loaded_address(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<AbsoluteAddr> {
+    match inst {
         SIRInstruction::Load(_, source, ..) | SIRInstruction::Commit(source, ..) => {
             Some(source.absolute_addr())
         }
         _ => None,
-    })
+    }
 }
 
 /// Whether a settle of `units` may read what an earlier settle left: a load
