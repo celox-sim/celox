@@ -95,9 +95,9 @@ pub struct CallEffects<A> {
     /// The state objects it may store or commit with triggers, each listed
     /// once.
     pub triggers: Vec<A>,
-    /// Whether it may interact with the host: an extern call, a runtime event
-    /// or a comb capture.
-    pub host: bool,
+    /// The host-side resources it may use, the union of
+    /// [`SIRInstruction::host_effects`] over its body and its calls.
+    pub host: HostEffects,
     /// Whether it may call a native kernel, which can read and write any
     /// state: the lists above are then incomplete.
     pub kernel: bool,
@@ -109,9 +109,50 @@ impl<A> Default for CallEffects<A> {
             reads: Vec::new(),
             writes: Vec::new(),
             triggers: Vec::new(),
-            host: false,
+            host: HostEffects::default(),
             kernel: false,
         }
+    }
+}
+
+/// What an instruction does outside the simulation state, which code that
+/// orders or summarizes instructions must keep: see
+/// [`SIRInstruction::host_effects`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct HostEffects {
+    /// It appends to the runtime-event ring.
+    pub runtime_events: bool,
+    /// It reads or updates comb-capture enable flags.
+    pub capture_flags: bool,
+    /// It calls an external function, in program order.
+    pub extern_calls: bool,
+    /// It marks trigger bits.
+    pub triggers: bool,
+}
+
+impl HostEffects {
+    /// Every resource.
+    pub const ALL: HostEffects = HostEffects {
+        runtime_events: true,
+        capture_flags: true,
+        extern_calls: true,
+        triggers: true,
+    };
+
+    /// The resources of both.
+    pub fn union(self, other: HostEffects) -> HostEffects {
+        HostEffects {
+            runtime_events: self.runtime_events || other.runtime_events,
+            capture_flags: self.capture_flags || other.capture_flags,
+            extern_calls: self.extern_calls || other.extern_calls,
+            triggers: self.triggers || other.triggers,
+        }
+    }
+
+    /// Whether it hands data or control to the host: runtime events, comb
+    /// captures or extern calls (triggers stay in the state image).
+    pub fn interacts_with_host(self) -> bool {
+        self.runtime_events || self.capture_flags || self.extern_calls
     }
 }
 

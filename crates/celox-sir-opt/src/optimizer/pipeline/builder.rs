@@ -274,6 +274,53 @@ impl<'a> PipelineBuilder<'a> {
         passes
     }
 
+    /// The body of a function unit. Its accesses of state happen while its
+    /// caller runs, so its own end is no point at which staged state is dead
+    /// or published, and its frame slots may share their identity with state
+    /// objects: only passes that need neither the unit's phase nor per-object
+    /// design facts run here, and the pass manager keeps every pass that
+    /// does not handle calls away from it.
+    pub(super) fn function(&self) -> ExecutionUnitPassManager {
+        let mut passes = self.manager();
+        if self.on(SirPass::StoreLoadForwarding) {
+            passes.add_pass(StoreLoadForwardingPass);
+        }
+        if self.on(SirPass::ControlFlowSimplify) {
+            passes.add_pass(ControlFlowSimplifyPass);
+        }
+        if self.on(SirPass::Gvn) {
+            passes.add_pass(GvnPass);
+            if self.on(SirPass::ControlFlowSimplify) {
+                passes.add_pass(PostGvnCfgCleanupPass);
+            }
+        }
+        if self.on(SirPass::XorChainFolding) {
+            passes.add_pass(XorChainFoldingPass);
+        }
+        if self.on(SirPass::HoistCommonBranchLoads) {
+            passes.add_pass(HoistCommonBranchLoadsPass);
+        }
+        // Not the bit-extract peephole: it reissues a load at its user
+        // without checking for ordinary stores in between, which function
+        // bodies (writing and rereading frame slots) would reach.
+        if self.on(SirPass::OptimizeBlocks) {
+            passes.add_pass(OptimizeBlocksPass {
+                skip_final_schedule: self.on(SirPass::Reschedule),
+                element_widths: Arc::clone(&self.element_widths),
+            });
+        }
+        if self.on(SirPass::CoalesceStores) {
+            passes.add_pass(CoalesceStoresPass {
+                element_widths: Arc::clone(&self.element_widths),
+                max_store_width: self.max_native_memory_width,
+            });
+        }
+        if self.on(SirPass::Reschedule) {
+            passes.add_pass(ReschedulePass);
+        }
+        passes
+    }
+
     pub(super) fn combinational(
         &self,
         program: &OptimizationContext<'_>,

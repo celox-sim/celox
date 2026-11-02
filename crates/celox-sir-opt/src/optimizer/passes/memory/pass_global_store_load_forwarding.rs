@@ -1159,6 +1159,10 @@ fn instruction_blocks_writeback_motion(
             .into_iter()
             .flatten()
             .any(|access| aliases(access.addr, access.offset, access.width))
+        // A call may access any part of the objects its effects list.
+        || instruction.opaque_accessed_objects().is_none_or(|mut objects| {
+            objects.any(|object| object.absolute_addr() == address.absolute_addr())
+        })
 }
 
 /// A writeback whose only operand is a merge value does not need an actual

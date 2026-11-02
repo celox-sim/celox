@@ -54,6 +54,10 @@ impl ExecutionUnitPass for ConcatFoldingPass {
         "concat_folding"
     }
 
+    fn handles_calls(&self) -> bool {
+        true
+    }
+
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
         let mut max_reg = eu.register_map.keys().map(|r| r.0).max().unwrap_or(0);
         let mut changed = fold_slices_of_concat(eu);

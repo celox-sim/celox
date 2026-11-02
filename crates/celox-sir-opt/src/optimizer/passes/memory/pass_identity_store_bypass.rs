@@ -47,6 +47,10 @@ struct GlobalIdentityFacts {
     /// In a partitioned settle, where each address is loaded and the
     /// immediate dominators of every unit (see [`reads_follow_store`]).
     settle_loads: Option<SettleLoads>,
+    /// Whether a unit reaches a native kernel, which may read and write any
+    /// address: then no access count above is complete, and nothing is
+    /// proved.
+    unknown_accesses: bool,
 }
 
 struct SettleLoads {
@@ -67,7 +71,9 @@ pub(in crate::optimizer) fn optimize_program_identity_stores(
     // Without a phase-correct StateSSA proof, both FF reads and writes require
     // a distinct persistent home. The split FF forms contain the exact FF
     // accesses without misclassifying the fused unit's complete comb graph.
-    let mut blocked_aliases = ff_referenced_addresses(program);
+    let Some(mut blocked_aliases) = ff_referenced_addresses(program) else {
+        return HashMap::default();
+    };
     blocked_aliases.extend(
         program
             .runtime_schema
@@ -291,7 +297,10 @@ pub(crate) fn redirect_final_alias_accesses(
                 .iter_mut()
                 .flat_map(|parallel| parallel.units_mut().map(|unit| &mut unit.unit)),
         );
-    for unit in units {
+    // A function's accesses are redirected like its callers'; its calls'
+    // effects are then recomputed from the redirected bodies.
+    let functions = sir.functions.iter_mut().map(|function| &mut function.unit);
+    for unit in units.chain(functions) {
         for block in unit.blocks.values_mut() {
             for instruction in &mut block.instructions {
                 match instruction {
@@ -307,6 +316,7 @@ pub(crate) fn redirect_final_alias_accesses(
             }
         }
     }
+    sir.summarize_calls();
 }
 
 fn retain_aliases_valid_for_units(
@@ -333,6 +343,9 @@ fn proven_alias_store(
     alias: AbsoluteAddr,
     canonical: AbsoluteAddr,
 ) -> Option<Option<StoreCandidate>> {
+    if facts.unknown_accesses {
+        return None;
+    }
     match facts.accesses.get(&alias).map_or(0, |access| access.writes) {
         0 => return Some(None),
         1 => {}
@@ -456,6 +469,7 @@ fn collect_global_facts(
 ) -> GlobalIdentityFacts {
     let mut accesses = HashMap::<AbsoluteAddr, AddressFacts>::default();
     let mut stores = Vec::new();
+    let mut unknown_accesses = false;
     let mut settle_loads = settle_flags.map(|_| SettleLoads {
         sites: HashMap::default(),
         immediate_dominators: units.iter().map(immediate_dominators).collect(),
@@ -566,6 +580,38 @@ fn collect_global_facts(
                                 .writes,
                         );
                     }
+                    // A call reads and writes the objects its effects list,
+                    // at no point a proof here can place.
+                    other if other.has_opaque_state_access() => {
+                        match (other.state_reads(), other.state_writes()) {
+                            (StateAccess::Objects(reads), StateAccess::Objects(writes)) => {
+                                for object in reads {
+                                    increment_saturating(
+                                        &mut accesses
+                                            .entry(object.absolute_addr())
+                                            .or_default()
+                                            .reads,
+                                    );
+                                    if let Some(loads) = &mut settle_loads {
+                                        loads
+                                            .sites
+                                            .entry(object.absolute_addr())
+                                            .or_default()
+                                            .push((usize::MAX, block.id, instruction_index));
+                                    }
+                                }
+                                for object in writes {
+                                    increment_saturating(
+                                        &mut accesses
+                                            .entry(object.absolute_addr())
+                                            .or_default()
+                                            .writes,
+                                    );
+                                }
+                            }
+                            _ => unknown_accesses = true,
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -584,6 +630,7 @@ fn collect_global_facts(
         accesses,
         stores,
         settle_loads,
+        unknown_accesses,
     }
 }
 
@@ -814,6 +861,9 @@ fn select_aliases(
     four_state: bool,
 ) -> HashMap<AbsoluteAddr, AbsoluteAddr> {
     let mut aliases = HashMap::default();
+    if facts.unknown_accesses {
+        return aliases;
+    }
 
     // Store(B, identity_copy(A)): B must be globally unread and uniquely
     // written, while A must remain stable throughout eval_comb.
@@ -915,6 +965,9 @@ fn select_identity_commits(
     // A Commit must not participate in either an already-established alias or
     // one selected above. In particular, the removable alias Store keeps its
     // old form until MemoryLayout validates and removes it.
+    if facts.unknown_accesses {
+        return Vec::new();
+    }
     let alias_addresses = existing_aliases
         .iter()
         .chain(selected_aliases)
@@ -1046,7 +1099,9 @@ fn increment_saturating(value: &mut usize) {
     *value = value.saturating_add(1);
 }
 
-fn ff_referenced_addresses(program: &OptimizationContext) -> HashSet<AbsoluteAddr> {
+/// The addresses the FF and process units access, or `None` when one of
+/// them may access any state.
+fn ff_referenced_addresses(program: &OptimizationContext) -> Option<HashSet<AbsoluteAddr>> {
     let mut addresses = HashSet::default();
     // Do not scan eval_comb_apply_ffs here.  Those units contain the complete
     // combinational graph as well as FF actions, so treating every address in
@@ -1087,12 +1142,21 @@ fn ff_referenced_addresses(program: &OptimizationContext) -> HashSet<AbsoluteAdd
                         addresses.insert(source.absolute_addr());
                         addresses.insert(destination.absolute_addr());
                     }
-                    _ => {}
+                    // What an FF unit's call accesses is FF state too; a
+                    // native kernel there may access any state, which the
+                    // caller treats as blocking every alias.
+                    other => {
+                        addresses.extend(
+                            other
+                                .opaque_accessed_objects()?
+                                .map(RegionedAbsoluteAddr::absolute_addr),
+                        );
+                    }
                 }
             }
         }
     }
-    addresses
+    Some(addresses)
 }
 
 /// Return the blocks that every terminating path from the entry executes.
@@ -2646,5 +2710,112 @@ mod tests {
             proven_alias_store(&facts, destination.absolute_addr(), source.absolute_addr())
                 .is_none()
         );
+    }
+
+    fn call(
+        reads: Vec<RegionedAbsoluteAddr>,
+        writes: Vec<RegionedAbsoluteAddr>,
+    ) -> SIRInstruction<RegionedAbsoluteAddr> {
+        SIRInstruction::Call {
+            function: celox_sir::FunctionId(0),
+            frame: RegisterId(0),
+            args: Vec::new(),
+            outputs: Vec::new(),
+            dst: None,
+            effects: std::sync::Arc::new(celox_sir::CallEffects {
+                reads,
+                writes,
+                ..Default::default()
+            }),
+        }
+    }
+
+    /// A call reading the copy reads it like a load, and one writing either
+    /// side writes it like a store: each keeps the copy distinct. A call
+    /// touching neither does not.
+    #[test]
+    fn a_call_reading_the_copy_or_writing_either_side_blocks_the_alias() {
+        let source = address(0);
+        let destination = address(1);
+        let other = address(2);
+        let metadata = metadata(&[(source, 8), (destination, 8), (other, 8)]);
+        let with_call = |call: SIRInstruction<RegionedAbsoluteAddr>| {
+            let unit = single_block_unit(
+                vec![load(0, source, 8), store(destination, 0, 8), call],
+                &[(0, 8)],
+            );
+            aliases(&[unit], &metadata)
+        };
+        assert!(with_call(call(vec![destination], Vec::new())).is_empty());
+        assert!(with_call(call(Vec::new(), vec![destination])).is_empty());
+        assert!(with_call(call(Vec::new(), vec![source])).is_empty());
+        assert_eq!(
+            with_call(call(vec![other], vec![other])),
+            [(destination.absolute_addr(), source.absolute_addr())]
+                .into_iter()
+                .collect()
+        );
+    }
+
+    /// Redirected accesses include those of function units, and calls'
+    /// effects follow their callees' redirected bodies.
+    #[test]
+    fn final_alias_redirection_rewrites_functions_and_call_effects() {
+        let canonical = address(0);
+        let alias = address(1);
+        let caller = single_block_unit(
+            vec![
+                SIRInstruction::Imm(RegisterId(0), SIRValue::new(0u8)),
+                call(vec![alias], Vec::new()),
+            ],
+            &[(0, 32)],
+        );
+        let callee = single_block_unit(vec![load(0, alias, 8)], &[(0, 8)]);
+        let mut sir = SirProgram {
+            eval_comb: vec![caller],
+            eval_apply_ffs: HashMap::default(),
+            eval_comb_apply_ffs: HashMap::default(),
+            merge_comb_apply: false,
+            eval_comb_stateful: None,
+            eval_only_ffs: HashMap::default(),
+            apply_ffs: HashMap::default(),
+            parallel: None,
+            processes: Vec::new(),
+            functions: vec![celox_sir::FunctionUnit {
+                unit: callee,
+                frame: celox_sir::FrameLayout {
+                    size: 0,
+                    slots: Vec::new(),
+                },
+                effects: Default::default(),
+            }],
+        };
+        sir.summarize_calls();
+        let design = celox_design::ElaboratedDesign::default();
+        let runtime_schema = celox_design::RuntimeSchema::default();
+        let mut layout_requirements = celox_state_layout::LayoutRequirements::default();
+        let mut program = OptimizationContext {
+            sir: &mut sir,
+            design: &design,
+            runtime_schema: &runtime_schema,
+            layout_requirements: &mut layout_requirements,
+        };
+        redirect_final_alias_accesses(
+            &mut program,
+            &[(alias.absolute_addr(), canonical.absolute_addr())]
+                .into_iter()
+                .collect(),
+        );
+        assert_eq!(
+            sir.functions[0].unit.blocks[&BlockId(0)].instructions,
+            [load(0, canonical, 8)]
+        );
+        let SIRInstruction::Call { effects, .. } =
+            &sir.eval_comb[0].blocks[&BlockId(0)].instructions[1]
+        else {
+            unreachable!()
+        };
+        assert_eq!(effects.reads, [canonical]);
+        assert!(sir.calls_summarized());
     }
 }

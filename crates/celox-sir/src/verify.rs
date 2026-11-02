@@ -1533,7 +1533,7 @@ mod tests {
                 };
                 *effects = Default::default();
                 program.functions[0].effects = std::sync::Arc::new(crate::CallEffects {
-                    host: true,
+                    host: crate::HostEffects::ALL,
                     ..Default::default()
                 });
             })),

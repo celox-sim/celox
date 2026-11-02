@@ -50,6 +50,10 @@ impl ExecutionUnitPass for PhiOutcomeCompressionPass {
         "phi_outcome_compression"
     }
 
+    fn handles_calls(&self) -> bool {
+        true
+    }
+
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _: &PassOptions) {
         for plan in find_compressions(eu) {
             apply_compression(eu, plan.merge, &plan.incoming, &plan.candidates);

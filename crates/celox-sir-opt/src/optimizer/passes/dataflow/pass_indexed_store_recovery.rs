@@ -69,6 +69,10 @@ impl ExecutionUnitPass for IndexedStoreRecoveryPass {
         "indexed_store_recovery"
     }
 
+    fn handles_calls(&self) -> bool {
+        true
+    }
+
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions) {
         // In four-state mode an X/Z selector makes every procedural equality
         // false, whereas a raw dynamic element offset has no such no-op value.

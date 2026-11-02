@@ -25,13 +25,11 @@ pub(crate) fn run(program: &mut OptimizationContext<'_>, options: &PassOptions) 
 }
 
 fn run_passes(program: &mut OptimizationContext<'_>, options: &PassOptions) {
-    // The optional passes, unit and whole-program ones alike, do not handle
-    // calls yet (each opts in, see `ExecutionUnitPass::handles_calls`), so a
-    // program with calls gets only the required canonicalization.
-    if program.sir.has_calls() {
-        runner::canonicalize_required(program);
-        return;
-    }
+    // A program with calls runs the same pipeline: the whole-program passes
+    // read calls' effects, and a unit pass sees a unit with calls, or a
+    // function unit, only if it handles calls (see
+    // `ExecutionUnitPass::handles_calls`).
+    //
     // TailCallSplit is a backend selector, not a SIR transform. Skip the
     // optional hashing/cloning pipeline when no actual SIR pass is active,
     // but retain correctness-required canonicalization.

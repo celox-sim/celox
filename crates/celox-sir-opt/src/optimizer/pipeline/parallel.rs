@@ -83,6 +83,16 @@ fn publish_kernel_directly(kernel: &mut celox_sir::ParallelFfKernel<RegionedAbso
     if kernel.evaluations.len() != kernel.applications.len() {
         return;
     }
+    // A native kernel may access any state, so no unit's accesses are known.
+    if kernel.units().any(|unit| {
+        unit.unit
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .any(|instruction| instruction.opaque_accessed_objects().is_none())
+    }) {
+        return;
+    }
     let accessed = |unit: &ExecutionUnit<RegionedAbsoluteAddr>| {
         let mut objects = crate::HashSet::<AbsoluteAddr>::default();
         for instruction in unit.blocks.values().flat_map(|block| &block.instructions) {
@@ -94,7 +104,14 @@ fn publish_kernel_directly(kernel: &mut celox_sir::ParallelFfKernel<RegionedAbso
                     objects.insert(source.absolute_addr());
                     objects.insert(destination.absolute_addr());
                 }
-                _ => {}
+                // A call accesses the objects its effects list.
+                other => objects.extend(
+                    other
+                        .opaque_accessed_objects()
+                        .into_iter()
+                        .flatten()
+                        .map(RegionedAbsoluteAddr::absolute_addr),
+                ),
             }
         }
         objects
@@ -122,8 +139,11 @@ fn publish_kernel_directly(kernel: &mut celox_sir::ParallelFfKernel<RegionedAbso
             *application_count.entry(object).or_default() += 1;
         }
     }
-    // Units touching each object's staged (WORKING or sparse) storage.
+    // Units touching each object's staged (WORKING or sparse) storage, and
+    // the objects whose staged storage a call touches: the call's function
+    // keeps accessing that storage, so it cannot be redirected to STABLE.
     let mut staged_users = crate::HashMap::<AbsoluteAddr, usize>::default();
+    let mut called_staged = crate::HashSet::<AbsoluteAddr>::default();
     for unit in kernel.units() {
         let mut staged = crate::HashSet::<AbsoluteAddr>::default();
         for instruction in unit
@@ -139,7 +159,19 @@ fn publish_kernel_directly(kernel: &mut celox_sir::ParallelFfKernel<RegionedAbso
                 SIRInstruction::Commit(source, destination, ..) => {
                     [Some(source), Some(destination)]
                 }
-                _ => [None, None],
+                other => {
+                    called_staged.extend(
+                        other
+                            .opaque_accessed_objects()
+                            .into_iter()
+                            .flatten()
+                            .filter(|address| {
+                                matches!(address.region, WORKING_REGION | SPARSE_WORKING_REGION)
+                            })
+                            .map(RegionedAbsoluteAddr::absolute_addr),
+                    );
+                    [None, None]
+                }
             };
             for address in addresses.into_iter().flatten() {
                 if matches!(address.region, WORKING_REGION | SPARSE_WORKING_REGION) {
@@ -175,6 +207,7 @@ fn publish_kernel_directly(kernel: &mut celox_sir::ParallelFfKernel<RegionedAbso
             .filter(|object| {
                 last_evaluation.get(object) == Some(&index)
                     && application_count.get(object) == Some(&1)
+                    && !called_staged.contains(object)
                     && staged_users.get(object).is_some_and(|&users| users <= 2)
             })
             .collect::<crate::HashSet<_>>();
@@ -270,30 +303,39 @@ pub(super) fn optimize_late_parallel_comb(
     for LaneUnit { unit, .. } in &mut parallel.eval_comb {
         let watermark = unit.blocks.keys().map(|block| block.0).max().unwrap_or(0);
         if on(SirPass::LoopIdiom) {
-            pass_manager::ExecutionUnitPass::run(&LoopIdiomPass, unit, options);
+            pass_manager::run_pass(&LoopIdiomPass, unit, options);
         }
         if let Some(pass) = &packed_scatter_store {
-            pass_manager::ExecutionUnitPass::run(pass, unit, options);
+            pass_manager::run_pass(pass, unit, options);
         }
         if let Some(pass) = &indexed_store_recovery {
-            pass_manager::ExecutionUnitPass::run(pass, unit, options);
+            pass_manager::run_pass(pass, unit, options);
         }
         if on(SirPass::GuardedRegionSinking) {
-            pass_manager::ExecutionUnitPass::run(&GuardedRegionSinkingPass, unit, options);
+            pass_manager::run_pass(&GuardedRegionSinkingPass, unit, options);
         }
         if let Some(pass) = &sparse_case_dispatch {
-            pass_manager::ExecutionUnitPass::run(pass, unit, options);
+            pass_manager::run_pass(pass, unit, options);
         }
         if on(SirPass::BranchifyMux) {
-            pass_branchify_mux::run_late_branchify_mux(unit, options, watermark);
-            pass_guarded_region_sinking::sink_pure_values_with_predicate_repair(unit);
-            pass_manager::ExecutionUnitPass::run(&PhiOutcomeCompressionPass, unit, options);
+            // These stages follow the opt-in of the passes they belong to.
+            if pass_manager::ExecutionUnitPass::handles_calls(&BranchifyMuxPass)
+                || !pass_manager::makes_calls(unit)
+            {
+                pass_branchify_mux::run_late_branchify_mux(unit, options, watermark);
+            }
+            if pass_manager::ExecutionUnitPass::handles_calls(&GuardedRegionSinkingPass)
+                || !pass_manager::makes_calls(unit)
+            {
+                pass_guarded_region_sinking::sink_pure_values_with_predicate_repair(unit);
+            }
+            pass_manager::run_pass(&PhiOutcomeCompressionPass, unit, options);
         }
         if on(SirPass::Gvn) {
-            pass_manager::ExecutionUnitPass::run(&GvnPass, unit, options);
+            pass_manager::run_pass(&GvnPass, unit, options);
         }
         if on(SirPass::ControlFlowSimplify) {
-            pass_manager::ExecutionUnitPass::run(&ControlFlowSimplifyPass, unit, options);
+            pass_manager::run_pass(&ControlFlowSimplifyPass, unit, options);
         }
     }
 }
@@ -424,5 +466,48 @@ mod tests {
             [load(STABLE_REGION, 0), store(STABLE_REGION, 1)]
         );
         assert!(instructions(&kernel.applications[1]).is_empty());
+    }
+
+    /// A call touching a target's staged storage keeps accessing it in its
+    /// function, so that target stays staged; the other part's target is
+    /// still published directly.
+    #[test]
+    fn a_target_whose_staged_storage_a_call_touches_stays_staged() {
+        let mut kernel = kernel(false);
+        let call = SIRInstruction::Call {
+            function: celox_sir::FunctionId(0),
+            frame: RegisterId(0),
+            args: Vec::new(),
+            outputs: Vec::new(),
+            dst: None,
+            effects: std::sync::Arc::new(celox_sir::CallEffects {
+                reads: vec![address(WORKING_REGION, 0)],
+                ..Default::default()
+            }),
+        };
+        kernel.evaluations[0]
+            .unit
+            .blocks
+            .get_mut(&BlockId(0))
+            .unwrap()
+            .instructions
+            .push(call.clone());
+        publish_kernel_directly(&mut kernel);
+        assert_eq!(
+            instructions(&kernel.evaluations[0]),
+            [
+                commit(STABLE_REGION, WORKING_REGION, 0),
+                store(WORKING_REGION, 0),
+                call
+            ]
+        );
+        assert_eq!(
+            instructions(&kernel.applications[0]),
+            [commit(WORKING_REGION, STABLE_REGION, 0)]
+        );
+        assert_eq!(
+            instructions(&kernel.evaluations[1]),
+            [store(STABLE_REGION, 1)]
+        );
     }
 }

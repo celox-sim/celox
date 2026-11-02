@@ -359,13 +359,9 @@ pub(in crate::optimizer) fn hoist_common_branch_loads(
                     if inst.is_host_interaction() {
                         return None;
                     }
-                    if let Some(write) = inst.memory_write()
-                        && *write.addr == c.addr
-                        && write.offset.constant_bit_offset().is_none_or(|offset| {
-                            offset < c.offset.saturating_add(c.bits)
-                                && c.offset < offset.saturating_add(write.width)
-                        })
-                    {
+                    // A write of the range since the earlier load, a
+                    // call's included, means it no longer holds the value.
+                    if inst.state_writes().overlaps(&c.addr, c.offset, c.bits) {
                         return None;
                     }
                     if let SIRInstruction::Load(dst, addr, SIROffset::Static(off), bits) = inst

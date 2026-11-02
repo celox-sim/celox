@@ -42,6 +42,10 @@ impl ExecutionUnitPass for VectorizeConcatPass {
         "vectorize_concat"
     }
 
+    fn handles_calls(&self) -> bool {
+        true
+    }
+
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions) {
         // This pass rewrites Concat into bitwise/arithmetic operations. In
         // 4-state mode those operations normalize Z to X, while Concat must
@@ -57,17 +61,35 @@ impl ExecutionUnitPass for VectorizeConcatPass {
         // loads it replaces.  That is only the same memory version when this
         // execution unit never writes the source address.  Register-based
         // packs do not need this restriction because SSA already fixes their
-        // value.
-        let written_addresses = eu
-            .blocks
-            .values()
-            .flat_map(|block| &block.instructions)
-            .filter_map(|inst| match inst {
-                SIRInstruction::Store(address, ..) => Some(*address),
-                SIRInstruction::Commit(_, destination, ..) => Some(*destination),
-                _ => None,
-            })
-            .collect::<HashSet<_>>();
+        // value. A call writes the objects its effects list, and a native
+        // kernel any object, which then counts every loaded one.
+        let mut written_addresses = HashSet::default();
+        let mut writes_everything = false;
+        for inst in eu.blocks.values().flat_map(|block| &block.instructions) {
+            match inst {
+                SIRInstruction::Store(address, ..) => {
+                    written_addresses.insert(*address);
+                }
+                SIRInstruction::Commit(_, destination, ..) => {
+                    written_addresses.insert(*destination);
+                }
+                other => match other.opaque_written_objects() {
+                    Some(objects) => written_addresses.extend(objects.copied()),
+                    None => writes_everything = true,
+                },
+            }
+        }
+        if writes_everything {
+            written_addresses.extend(
+                eu.blocks
+                    .values()
+                    .flat_map(|block| &block.instructions)
+                    .filter_map(|inst| match inst {
+                        SIRInstruction::Load(_, address, ..) => Some(*address),
+                        _ => None,
+                    }),
+            );
+        }
 
         // Each tuple analyzed by recursive lane packing must consume one
         // distinct definition from the input SIR. Credits are shared across

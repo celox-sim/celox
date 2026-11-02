@@ -152,12 +152,7 @@ pub(crate) fn may_raise_runtime_events(unit: &ExecutionUnit<RegionedAbsoluteAddr
         block
             .instructions
             .iter()
-            .any(|instruction| match instruction {
-                crate::SIRInstruction::RuntimeEvent { .. }
-                | crate::SIRInstruction::CombCaptureEvent { .. } => true,
-                crate::SIRInstruction::Call { effects, .. } => effects.host || effects.kernel,
-                _ => false,
-            })
+            .any(|instruction| instruction.host_effects().runtime_events)
     })
 }
 
@@ -250,7 +245,8 @@ mod tests {
         }
     }
 
-    fn call(host: bool, kernel: bool) -> SIRInstruction<RegionedAbsoluteAddr> {
+    /// A call whose callee raises runtime events when `events`.
+    fn call(events: bool, kernel: bool) -> SIRInstruction<RegionedAbsoluteAddr> {
         SIRInstruction::Call {
             function: FunctionId(0),
             frame: RegisterId(0),
@@ -258,7 +254,10 @@ mod tests {
             outputs: vec![],
             dst: None,
             effects: Arc::new(CallEffects {
-                host,
+                host: celox_sir::HostEffects {
+                    runtime_events: events,
+                    ..Default::default()
+                },
                 kernel,
                 ..CallEffects::default()
             }),
