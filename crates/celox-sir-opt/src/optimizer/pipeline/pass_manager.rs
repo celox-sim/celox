@@ -6,6 +6,24 @@ use std::sync::Arc;
 pub(in crate::optimizer) trait ExecutionUnitPass: Send + Sync {
     fn name(&self) -> &'static str;
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions);
+
+    /// Whether the pass handles [`SIRInstruction::Call`]s: it reads every
+    /// instruction's state accesses through `state_reads`/`state_writes`
+    /// rather than assuming instructions other than Load, Store and Commit
+    /// touch no state. A pass that does not is never run on a unit with a
+    /// call; a pass opts in once a test with a writing call between two of
+    /// its accesses shows it handles them.
+    fn handles_calls(&self) -> bool {
+        false
+    }
+}
+
+/// Whether `eu` makes a function call.
+fn makes_calls(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> bool {
+    eu.blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+        .any(|instruction| matches!(instruction, SIRInstruction::Call { .. }))
 }
 
 #[derive(Default)]
@@ -54,7 +72,11 @@ impl ExecutionUnitPassManager {
         {
             panic!("before SIR pass pipeline: {error}");
         }
+        let calls = makes_calls(eu);
         for pass in &self.passes {
+            if calls && !pass.handles_calls() {
+                continue;
+            }
             let start = timing.then(crate::timing::now);
             pass.run(eu, options);
             if verify_passes {
@@ -200,4 +222,90 @@ pub(super) fn verify_unpacked_element_boundaries(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{BasicBlock, BlockId, RegisterId, RegisterType, SIRTerminator, SIRValue};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A pass that counts the units it runs on.
+    struct Counting<'a> {
+        runs: &'a AtomicUsize,
+        handles_calls: bool,
+    }
+
+    impl ExecutionUnitPass for Counting<'static> {
+        fn name(&self) -> &'static str {
+            "counting"
+        }
+
+        fn run(&self, _: &mut ExecutionUnit<RegionedAbsoluteAddr>, _: &PassOptions) {
+            self.runs.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn handles_calls(&self) -> bool {
+            self.handles_calls
+        }
+    }
+
+    fn unit(calls: bool) -> ExecutionUnit<RegionedAbsoluteAddr> {
+        let mut instructions = vec![SIRInstruction::Imm(RegisterId(0), SIRValue::new(0u8))];
+        if calls {
+            instructions.push(SIRInstruction::Call {
+                function: celox_sir::FunctionId(0),
+                frame: RegisterId(0),
+                args: Vec::new(),
+                outputs: Vec::new(),
+                dst: None,
+                effects: Default::default(),
+            });
+        }
+        ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [(
+                BlockId(0),
+                BasicBlock {
+                    id: BlockId(0),
+                    params: Vec::new(),
+                    instructions,
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: [(
+                RegisterId(0),
+                RegisterType::Bit {
+                    width: 32,
+                    signed: false,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        }
+    }
+
+    #[test]
+    fn a_pass_that_does_not_opt_in_never_sees_a_call() {
+        static PLAIN: AtomicUsize = AtomicUsize::new(0);
+        static OPTED: AtomicUsize = AtomicUsize::new(0);
+        let mut manager = ExecutionUnitPassManager::new();
+        manager.add_pass(Counting {
+            runs: &PLAIN,
+            handles_calls: false,
+        });
+        manager.add_pass(Counting {
+            runs: &OPTED,
+            handles_calls: true,
+        });
+        let options = PassOptions::default();
+        manager.run(&mut unit(true), &options);
+        assert_eq!(PLAIN.load(Ordering::Relaxed), 0);
+        assert_eq!(OPTED.load(Ordering::Relaxed), 1);
+        manager.run(&mut unit(false), &options);
+        assert_eq!(PLAIN.load(Ordering::Relaxed), 1);
+        assert_eq!(OPTED.load(Ordering::Relaxed), 2);
+    }
 }

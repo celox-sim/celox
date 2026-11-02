@@ -15,6 +15,23 @@ mod runner;
 use pass_manager::ExecutionUnitPassManager;
 
 pub(crate) fn run(program: &mut OptimizationContext<'_>, options: &PassOptions) {
+    debug_assert!(
+        program.sir.calls_summarized(),
+        "the program's call effects are stale"
+    );
+    run_passes(program, options);
+    // The passes may have changed function bodies.
+    program.sir.summarize_calls();
+}
+
+fn run_passes(program: &mut OptimizationContext<'_>, options: &PassOptions) {
+    // The optional passes, unit and whole-program ones alike, do not handle
+    // calls yet (each opts in, see `ExecutionUnitPass::handles_calls`), so a
+    // program with calls gets only the required canonicalization.
+    if program.sir.has_calls() {
+        runner::canonicalize_required(program);
+        return;
+    }
     // TailCallSplit is a backend selector, not a SIR transform. Skip the
     // optional hashing/cloning pipeline when no actual SIR pass is active,
     // but retain correctness-required canonicalization.
@@ -78,6 +95,7 @@ mod tests {
             apply_ffs: crate::HashMap::default(),
             parallel: None,
             processes: Vec::new(),
+            functions: Vec::new(),
         };
         let design = celox_design::ElaboratedDesign::default();
         let runtime_schema = celox_design::RuntimeSchema::default();
