@@ -1,0 +1,1 @@
+Coordinator: property outputs lowered by the frontend's scan lowering (capture_system_actual accepts object places); the analyzer prelude is removed
