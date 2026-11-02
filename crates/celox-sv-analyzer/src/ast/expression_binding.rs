@@ -27,6 +27,7 @@ pub(super) use direct::{
     cast_target_native, formal_arguments, format_arguments, member_context, real_value,
     remove_real_division_guards, string_literal_bytes, ungroup,
 };
+pub(super) use enums::{domain as enum_domain, membership as enum_membership};
 pub(super) use format_patterns::{
     aggregate_text as format_aggregate_text, bytes_literal, format as format_call, has_pattern,
     pattern as format_pattern, pattern_argument as format_pattern_argument, rewrite_format,

@@ -1479,8 +1479,8 @@ chapter-8/8.15--super-default-new.sv	2state	pass
 chapter-8/8.15--super-default-new.sv	4state	pass
 chapter-8/8.15--super.sv	2state	pass
 chapter-8/8.15--super.sv	4state	pass
-chapter-8/8.16--cast_func.sv	2state	fail
-chapter-8/8.16--cast_func.sv	4state	fail
+chapter-8/8.16--cast_func.sv	2state	pass
+chapter-8/8.16--cast_func.sv	4state	pass
 chapter-8/8.17--constructor_const_arg.sv	2state	pass
 chapter-8/8.17--constructor_const_arg.sv	4state	pass
 chapter-8/8.18--var_local.sv	2state	pass

@@ -121,14 +121,6 @@ fn resolve(
     {
         return binding.type_id(&mut session.types);
     }
-    // A member of an unpacked structure variable.
-    if let Some(name) = unpacked_structs::native_member(id, native, dims) {
-        return of_shape(session, dims.get(&name)?);
-    }
-    // A member of a container element of unpacked structure type.
-    if let Ok(Some((ty, _))) = containers::element_member(id, native, tree, session, dims) {
-        return of_type(session, &ty);
-    }
     if let Some(name) = expression_binding::callable_name(tree, id, native)
         && let Some(shape) = dims.get(&name)
     {
@@ -145,6 +137,31 @@ fn resolve(
                 return Some(class(session, &base));
             }
             property_type(tree, session, id, native, dims)
+                .or_else(|| enum_constant(tree, session, id, native, dims))
+                .or_else(|| named_constant(session, &name, dims))
+        }
+        // A member of a structure, packed or unpacked (7.2), or of the
+        // interface a virtual interface refers to (25.9), has its declared
+        // type, whatever gives the base: a variable, an element, a property
+        // or a call result.
+        ExprKind::Member {
+            expression: receiver,
+            separator,
+            name,
+        } if separator == "."
+            && let Some(ty) = type_of(tree, session, *receiver, native, dims)
+                .ok()
+                .and_then(|base| {
+                    member_of(
+                        tree,
+                        session,
+                        base,
+                        &instances::normalize_identifier(&name.spelling),
+                        dims,
+                    )
+                }) =>
+        {
+            Some(ty)
         }
         // The receiver of `h.p` is resolved once for both kinds of property,
         // so a chain `a.b.c` takes one walk.
@@ -184,12 +201,68 @@ fn resolve(
         // A static property `C::p`, or a static method called without
         // parentheses (13.5.5).
         ExprKind::Member { separator, .. } if separator == "::" => {
-            property_type(tree, session, id, native, dims).or_else(|| {
-                let (name, ..) = objects::method(tree, session, id, native, dims).ok()??;
-                named_function_result(&name, dims)
-            })
+            property_type(tree, session, id, native, dims)
+                .or_else(|| {
+                    let (name, ..) = objects::method(tree, session, id, native, dims).ok()??;
+                    named_function_result(&name, dims)
+                })
+                // A package-qualified constant.
+                .or_else(|| enum_constant(tree, session, id, native, dims))
+                .or_else(|| {
+                    let name = expression_binding::native_name(tree, id, native)?;
+                    named_constant(session, &name, dims)
+                })
+                // A parameter or enum member of a class scope, by the typed
+                // value its specialization holds (8.25, 6.19).
+                .or_else(|| {
+                    match objects::class_parameter(tree, session, id, native, dims).ok()?? {
+                        Expr::Literal(text) => values::literal(&mut session.types, &text),
+                        _ => None,
+                    }
+                })
         }
-        _ => property_type(tree, session, id, native, dims),
+        ExprKind::Concatenation(items) => values::concatenation(tree, session, items, native, dims),
+        ExprKind::Replication { count, expressions } => {
+            values::replication(tree, session, *count, expressions, native, dims)
+        }
+        // A min:typ:max expression has the type of the value it selects
+        // (11.11).
+        ExprKind::MinTypMax { typical, .. } => type_of(tree, session, *typical, native, dims).ok(),
+        // A member of a property of unpacked structure type, or of another
+        // scope.
+        ExprKind::Member { .. } => property_type(tree, session, id, native, dims),
+        // `randomize() with {...}` returns int (18.7).
+        ExprKind::RandomizeWith { .. } => values::integral(&mut session.types, 32, true, false),
+        // A typed assignment pattern has its type (10.9).
+        ExprKind::Pattern {
+            target: Some(target),
+            ..
+        } => values::pattern_type(tree, session, *target, native, dims),
+        // Resolved before this match, by the operator, the select chain,
+        // the builtin or the subroutine they name.
+        ExprKind::Literal(_)
+        | ExprKind::Unary { .. }
+        | ExprKind::Binary { .. }
+        | ExprKind::Conditional { .. }
+        | ExprKind::Cast { .. }
+        | ExprKind::Copy(_)
+        | ExprKind::Assignment { .. }
+        | ExprKind::Select { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Group(_)
+        | ExprKind::ArrayMethodWith { .. } => None,
+        // No self-determined type of their own: a type; a set, a tagged
+        // union value and an untyped assignment pattern take their context's
+        // (11.4.13, 11.9, 10.9); a streaming concatenation and its select
+        // are operands of assignments and casts only (11.4.14); a class
+        // specialization names a scope.
+        ExprKind::Type(_)
+        | ExprKind::Set(_)
+        | ExprKind::Tagged { .. }
+        | ExprKind::Pattern { target: None, .. }
+        | ExprKind::Streaming { .. }
+        | ExprKind::StreamSelect { .. }
+        | ExprKind::Parameterized { .. } => None,
     };
     resolved.or_else(|| {
         enums::constant_binding(tree, session, id, native, dims)
@@ -265,24 +338,31 @@ fn select(
                 &dims.const_env,
             ),
             TyData::Packed(mut packed) if !packed.dims.is_empty() => {
-                // The legacy packed representation has no named-element
-                // boundary. Do not guess where an enum/aggregate element ends.
-                if !matches!(packed.element, PackedElement::Bits) {
-                    return None;
+                // 11.5.1, 11.8.1: a bit-select of any packed integral value,
+                // an enum or a packed structure or union included, is one
+                // unsigned bit, 4-state iff the value is. Only an index of a
+                // packed-array dimension gives that dimension's element:
+                // the outer ranges of a packed array of enums or of packed
+                // structures or unions, whose own ranges come last.
+                let array_dimension = packed.dims.len() > 1
+                    && match &packed.element {
+                        PackedElement::Enum { array, .. } => *array,
+                        PackedElement::Aggregate(_) | PackedElement::Bits => true,
+                    };
+                if !array_dimension {
+                    return values::integral(&mut session.types, 1, false, packed.four_state);
                 }
-                if packed.dims.len() == 1 {
-                    packed.element = PackedElement::Bits;
-                    packed.dims = Box::new([]);
-                    packed.signed = false;
-                    packed.signed_element_depth = None;
-                } else {
-                    packed.dims = packed.dims[1..].into();
-                    packed.signed = packed.signed_element_depth == Some(1);
-                    packed.signed_element_depth = packed
-                        .signed_element_depth
-                        .and_then(|depth| depth.checked_sub(1))
-                        .filter(|depth| *depth != 0);
+                if let PackedElement::Enum { array, .. } = &mut packed.element {
+                    // The enum's own range remains once the array's are
+                    // selected.
+                    *array = packed.dims.len() > 2;
                 }
+                packed.dims = packed.dims[1..].into();
+                packed.signed = packed.signed_element_depth == Some(1);
+                packed.signed_element_depth = packed
+                    .signed_element_depth
+                    .and_then(|depth| depth.checked_sub(1))
+                    .filter(|depth| *depth != 0);
                 packed.keyword = None;
                 Some(session.types.intern(TyData::Packed(packed)))
             }
@@ -344,8 +424,17 @@ fn select(
             element,
         })),
         TyData::Packed(mut packed) if !packed.dims.is_empty() => {
-            if packed.dims.len() == 1 {
-                packed.element = PackedElement::Bits;
+            // 11.5.1, 11.8.1: a part-select of the bits of any packed
+            // integral value is an unsigned vector of the selected width,
+            // 4-state iff the value is; a slice of a packed-array dimension
+            // keeps its elements.
+            let array_dimension = packed.dims.len() > 1
+                && match &packed.element {
+                    PackedElement::Enum { array, .. } => *array,
+                    PackedElement::Aggregate(_) | PackedElement::Bits => true,
+                };
+            if !array_dimension {
+                return values::integral(&mut session.types, count, false, packed.four_state);
             }
             packed.dims[0] = Range {
                 left: last,
@@ -403,4 +492,71 @@ fn constant_session(session: &Session) -> Session {
         types: session.types.clone(),
         ..Session::default()
     }
+}
+
+/// The type of an enum constant `id` names, by the declaration it binds to
+/// (6.19.3).
+fn enum_constant(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    native: &Declarations,
+    dims: &PackedDimensions,
+) -> Option<TyId> {
+    enums::constant_binding(tree, session, id, native, dims)
+        .ok()??
+        .type_id(&mut session.types)
+}
+
+/// The type of constant `name` that is no enum constant, resolved as
+/// binding resolves its value, so that a nearer declaration shadows a
+/// farther one alike: of a parameter, genvar or other constant the type it
+/// is declared with, as its width and signing record it, a real value's
+/// real, and of one recorded without a type, integer (6.20.2).
+fn named_constant(session: &mut Session, name: &str, dims: &PackedDimensions) -> Option<TyId> {
+    if let Some(value) = dims.parameter_values.get(name)
+        && expression_binding::real_value(value, dims)
+    {
+        return Some(session.types.intern(TyData::Real));
+    }
+    if let Some(ty) = dimensions::parameter_type_from_const_env(&dims.const_env, name) {
+        return values::integral(&mut session.types, ty.width as u128, ty.signed, true);
+    }
+    dims.const_env
+        .contains_key(name)
+        .then(|| values::integral(&mut session.types, 32, true, true))
+        .flatten()
+}
+
+/// The type of member `member` of a value of type `base`: of a structure,
+/// packed or unpacked (7.2), or of the interface a virtual interface refers
+/// to (25.9).
+fn member_of(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    base: TyId,
+    member: &str,
+    dims: &PackedDimensions,
+) -> Option<TyId> {
+    if let Some(ty) = session.types.member(base, member) {
+        return Some(ty);
+    }
+    let TyData::VirtualInterface {
+        interface: Decl::Interface(interface),
+        ..
+    } = session.types.data(base).clone()
+    else {
+        return None;
+    };
+    let ty = session
+        .virtual_interfaces
+        .as_ref()?
+        .interfaces
+        .get(interface.as_ref())?
+        .members
+        .iter()
+        .find(|candidate| candidate.name == member)?
+        .r#type
+        .clone();
+    semantic_types::of_type(&mut session.types, &tree.functions, &ty, &dims.const_env)
 }

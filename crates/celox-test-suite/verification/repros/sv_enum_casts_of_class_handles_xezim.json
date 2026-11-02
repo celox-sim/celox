@@ -1,0 +1,28 @@
+{
+  "case": "system_functions::casts_to_enumerated_types_reject_class_handles",
+  "source": "src/sv/cases/system_functions.vtest",
+  "standard": "IEEE 1800-2023 6.22.4, 6.24.2: neither a class handle nor null is cast compatible with an enumerated type, so $cast as a function returns 0 and makes no assignment.",
+  "method": "The shared case runs unchanged in verify-sv-verilator, verify-sv-icarus and verify-sv-xezim; the reduced source below runs without the adapters (verilator --binary, iverilog -g2012 -s Top, xezim -s Top, and the Celox sv_tests driver in simulation mode).",
+  "reduced_source": "module Top;\n typedef enum logic [3:0] {ZERO = 4'd0, ONE = 4'd1} Bit;\n class Item;\n endclass\n Item h;\n Bit b;\n initial begin\n  b = ONE;\n  $display(\"[%0d %s]\", $cast(b, h), b.name());\n  h = new;\n  $display(\"[%0d %s]\", $cast(b, h), b.name());\n  $display(\"[%0d %s]\", $cast(b, null), b.name());\n end\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "stderr": "%Error-UNSUPPORTED: c.sv:9:24: Unsupported: $cast to 'enum{}Top.Bit' from 'class{}Item'\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "stderr": "c.sv:9: Error: System task/function $cast() is not defined by any module.\nc.sv:11: Error: System task/function $cast() is not defined by any module.\nc.sv:12: Error: System task/function $cast() is not defined by any module.\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "[1 ZERO]\n[1 ONE]\n[1 ZERO]\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "[0 ONE]\n[0 ONE]\n[0 ONE]\n"
+    }
+  ]
+}
