@@ -4,6 +4,9 @@ use super::*;
 mod port_connections;
 
 sv_backends! {
+fn packed_struct_array_unknown_indices(sim) { @case "packed_structs::packed_struct_array_unknown_indices"; }
+fn packed_struct_array_dynamic_members(sim) { @case "packed_structs::packed_struct_array_dynamic_members"; }
+fn packed_struct_array_ascending_members(sim) { @case "packed_structs::packed_struct_array_ascending_members"; }
     fn packed_struct_layout_and_nested_fields(sim) {
         @case "packed_structs::packed_struct_layout_and_nested_fields";
     }

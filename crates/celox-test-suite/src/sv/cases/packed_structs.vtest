@@ -260,3 +260,54 @@
     (assert_eq signed_member (trunc 16 (>> (sext 8 value) 4))))
   (modify (set raw (fourstate 0xff 0xf0)))
   (assert_eq known 15))
+
+(case packed_struct_array_dynamic_members
+  (source "packed_struct_array_dynamic.sv" #"
+    module Top(input bit clk, write_en, input bit [2:0] index,
+               input bit [7:0] data, output logic [7:0] q, output logic [31:0] whole);
+      typedef struct packed { logic [3:0] high, low; } item_t;
+      item_t [3:0] items = 32'h12345678;
+      assign q = {items[index].high, items[index].low};
+      assign whole = items;
+      always_ff @(posedge clk) if (write_en) begin
+        items[index].high <= data[7:4];
+        items[index].low <= data[3:0];
+      end
+    endmodule
+  "#)
+  (top Top) (set clk 0) (set write_en 0) (set index 0) (set data 0) (eval)
+  (assert_eq q 0x78)
+  (set index 3) (eval) (assert_eq q 0x12)
+  (set index 1) (set data 0xab) (set write_en 1) (tick clk)
+  (assert_eq q 0xab) (assert_eq whole 0x1234ab78)
+  (set index 4) (set data 0xff) (tick clk)
+  (assert_eq whole 0x1234ab78))
+
+(case packed_struct_array_ascending_members
+  (source "packed_struct_array_ascending.sv" #"
+    module Top(input bit [2:0] index, output logic [3:0] q);
+      typedef struct packed { logic [3:0] high, low; } item_t;
+      item_t [1:2][4:5] items = 32'h12345678;
+      assign q = items[1][index].high;
+    endmodule
+  "#)
+  (top Top) (set index 4) (eval) (assert_eq q 1)
+  (set index 5) (eval) (assert_eq q 3))
+
+(case packed_struct_array_unknown_indices
+  (source "packed_struct_array_unknown.sv" #"
+    module Top(input bit clk, input logic [2:0] index,
+               output logic [3:0] q, output logic [7:0] whole);
+      typedef struct packed { logic [3:0] value; } item_t;
+      item_t [1:0] items = 8'h35;
+      assign q = items[index].value;
+      assign whole = items;
+      always_ff @(posedge clk) items[index].value <= 4'ha;
+    endmodule
+  "#)
+  (four_state) (top Top) (set clk 0) (set index 0) (eval) (assert_eq q 5)
+  (set index (fourstate 0 1)) (eval)
+  (assert_eq q (fourstate 15 15))
+  (tick clk) (assert_eq whole 0x35)
+  (set index 2) (eval) (assert_eq q (fourstate 15 15))
+  (tick clk) (assert_eq whole 0x35))
