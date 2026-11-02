@@ -196,6 +196,16 @@ impl<'a> ProcModule<'a> {
                 self.expr_float_precision(then_expr),
                 self.expr_float_precision(else_expr),
             ),
+            // A `real` or `shortreal` class property (6.12).
+            Expr::Call {
+                callee: sv::ir::Callee::Object(op),
+                ..
+            } => match &**op {
+                sv::ir::ObjectOp::Load(field) if field.real => {
+                    Some(if field.width == 32 { P::F32 } else { P::F64 })
+                }
+                _ => None,
+            },
             _ => floating::precision(expr, self.variables, self.name_to_id),
         }
     }
