@@ -1,0 +1,6 @@
+Revision history for #3026:
+
+rev 2 (content) 2026-11-02 13:48 UTC — Fix review findings: exclude private frame slots from waveform notifications and truncate exported values; repair test lint.
+rev 1 (initial) 2026-11-02 13:48 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3026,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"0b7e4bf5f902816f293c76459acad98061290151","timestamp_iso":"2026-11-02T13:48:01Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"0b7e4bf5f902816f293c76459acad98061290151","new_sha":"8b8b31cde2d6ef021255871b4460a45f944d389f","timestamp_iso":"2026-11-02T13:48:01Z","reason":"Fix review findings: exclude private frame slots from waveform notifications and truncate exported values; repair test lint.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/0b7e4bf5f902816f293c76459acad98061290151...8b8b31cde2d6ef021255871b4460a45f944d389f"}]} -->
