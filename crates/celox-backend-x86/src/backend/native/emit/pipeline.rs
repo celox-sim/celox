@@ -83,6 +83,33 @@ fn emit_prepared_eu_inner(
         }
     };
 
+    // A function unit's slots become state objects in its frame window.
+    let functions = options.functions.as_deref();
+    let mut function_layout = None;
+    let mut frame_window = None;
+    let sir_eu = match options.function {
+        Some(function) => {
+            let frame = &functions
+                .expect("a function unit is compiled with the program's functions")
+                .frames[function.0 as usize];
+            let (unit, layout, window) = crate::native::function_unit::prepare(
+                &sir_eu, layout, frame,
+            )
+            .map_err(|message| ChainedEmitError::Analysis {
+                phase: "function unit frame window",
+                message,
+            })?;
+            function_layout = Some(layout);
+            frame_window = Some(window);
+            std::borrow::Cow::Owned(unit)
+        }
+        None => sir_eu,
+    };
+    let layout = function_layout.as_ref().unwrap_or(layout);
+    let sir_eu = match crate::native::function_unit::split_at_calls(&sir_eu) {
+        Some(unit) => std::borrow::Cow::Owned(unit),
+        None => sir_eu,
+    };
     if cfg!(debug_assertions) || diagnostics.verify_sir {
         sir_eu
             .verify_result()
@@ -109,8 +136,15 @@ fn emit_prepared_eu_inner(
 
     // Single ISel + optimize + regalloc + emit
     let isel_start = timing.then(crate::timing::now);
-    let mut mfunc =
-        isel::lower_execution_unit_with_diagnostics(&sir_eu, layout, four_state, diagnostics);
+    let mut mfunc = isel::lower_execution_unit_with_functions(
+        &sir_eu,
+        layout,
+        four_state,
+        diagnostics,
+        functions,
+    );
+    mfunc.call_stack = layout.call_stack;
+    mfunc.frame_window = frame_window;
     if let Some(start) = isel_start {
         tracing::debug!(
             "[native-timing] emit_chained isel mir_blocks={} mir_insts={} vregs={} elapsed={:?}",

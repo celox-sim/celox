@@ -50,7 +50,9 @@ mod host {
         feature = "arm64-codegen",
         target_arch = "aarch64"
     ))]
-    pub use celox_backend_x86::{NativeDiagnostics, NativeDumpOptions, X86BackendOptions};
+    pub use celox_backend_x86::{
+        NativeDiagnostics, NativeDumpOptions, NativeFunctions, X86BackendOptions,
+    };
 }
 
 #[cfg(feature = "host-runtime")]

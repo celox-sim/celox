@@ -42,7 +42,22 @@ pub struct NativeDiagnostics {
     pub isel_trace_regs: Vec<usize>,
 }
 
+/// The function units of a program, as the code that calls them sees them.
+#[derive(Debug, Clone, Copy)]
+pub struct FunctionCalls<'a> {
+    /// Each function's frame, by `FunctionId`.
+    pub frames: &'a [celox_sir::FrameLayout<RegionedAbsoluteAddr>],
+    /// The extern address table slot of function 0; function `n` is in slot
+    /// `first_slot + n`.
+    pub first_slot: u32,
+    /// The function unit being compiled, when it is one: its frame slots are
+    /// addressed from the frame its caller passes, and its spills live on the
+    /// machine stack, one copy per activation.
+    pub function: Option<celox_sir::FunctionId>,
+}
+
 mod allocation;
+mod function_unit;
 mod isel;
 pub mod jit_mem;
 pub mod mir;

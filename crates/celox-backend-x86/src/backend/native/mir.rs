@@ -2287,6 +2287,12 @@ pub struct MFunction {
     constant_tables: Vec<Vec<u64>>,
     /// Target facts shared by optimization, register allocation, and emission.
     pub(crate) target_features: super::features::X86Features,
+    /// The call stack that the function's calls of function units use, when
+    /// it makes any.
+    pub(crate) call_stack: Option<celox_state_layout::CallStackLayout>,
+    /// The frame window of a function unit, which addresses the frame its
+    /// caller passes from a reserved register; `None` for other functions.
+    pub(crate) frame_window: Option<super::function_unit::FrameWindow>,
 }
 
 impl MFunction {
@@ -2298,7 +2304,16 @@ impl MFunction {
             x86_vec_count: 0,
             constant_tables: Vec::new(),
             target_features: super::features::X86Features::detect(),
+            call_stack: None,
+            frame_window: None,
         }
+    }
+
+    /// The general-purpose registers the allocator may assign: a prefix of
+    /// `ALLOCATABLE_REGS`, which leaves out the frame register of a function
+    /// unit.
+    pub(crate) fn allocatable_register_count(&self) -> usize {
+        self.target_features.allocatable_register_count() - usize::from(self.frame_window.is_some())
     }
 
     pub fn alloc_x86_vec(&mut self) -> X86VecReg {

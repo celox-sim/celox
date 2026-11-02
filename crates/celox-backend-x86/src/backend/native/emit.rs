@@ -463,6 +463,12 @@ struct EmissionContext {
     call_area: Option<i32>,
     caller_segment: extern_call::CallerSegment,
     pinned_xmms: u16,
+    /// A function unit's frame window and the register holding its frame's
+    /// address. Its arena (spills, scratch, call area) is then on the
+    /// machine stack at RSP, one per activation, instead of in the state.
+    frame: Option<(crate::native::function_unit::FrameWindow, AsmRegister64)>,
+    /// The call stack of the function's calls of function units.
+    call_stack: Option<celox_state_layout::CallStackLayout>,
 }
 
 impl EmitAssembler {
@@ -476,6 +482,8 @@ impl EmitAssembler {
                 call_area: None,
                 caller_segment: extern_call::CallerSegment::None,
                 pinned_xmms: 0,
+                frame: None,
+                call_stack: None,
             },
         })
     }
@@ -526,6 +534,11 @@ fn used_callee_saved(
     }
     if reserve_r15_state_base {
         used.insert(PhysReg::R15);
+    }
+    // A function unit sets the frame register for itself; its caller keeps
+    // its own frame there.
+    if let Some(register) = crate::native::regalloc::assignment::frame_register(func) {
+        used.insert(register);
     }
     CALLEE_SAVED
         .iter()
@@ -1034,6 +1047,78 @@ fn verify_emission_inputs(
     Ok(())
 }
 
+/// Check what emission relies on in a function unit: it runs no tick loop,
+/// only the call of a function unit (whose callee restores it) changes the
+/// frame register, and only accesses whose operand the emitter redirects to
+/// the frame register reach the frame window.
+fn verify_function_unit(func: &MFunction, tick_loop: bool) -> Result<(), EmitError> {
+    let error = |block, instruction, message: &str| {
+        EmitError::from(EmitInputError::new(
+            "EMIT.FUNCTION_UNIT",
+            block,
+            instruction,
+            None,
+            message,
+        ))
+    };
+    if tick_loop {
+        return Err(error(None, None, "a function unit runs no tick loop"));
+    }
+    let (Some(window), Some(register)) = (
+        func.frame_window,
+        crate::native::regalloc::assignment::frame_register(func),
+    ) else {
+        return Ok(());
+    };
+    for block in &func.blocks {
+        for (index, inst) in block.insts.iter().enumerate() {
+            let function_call = matches!(inst, MInst::CallExtern { func, .. }
+                if celox_sir::extern_abi::native_function_slot(*func).is_some());
+            if !function_call && clobbers(inst).contains(&register) {
+                return Err(error(
+                    Some(block.id),
+                    Some(index),
+                    "an instruction of a function unit changes its frame register",
+                ));
+            }
+            let redirected = matches!(
+                inst,
+                MInst::Load { .. }
+                    | MInst::Store { .. }
+                    | MInst::AndStoreImm { .. }
+                    | MInst::OrStoreImm { .. }
+                    | MInst::LoadIndexed { .. }
+                    | MInst::StoreIndexed { .. }
+                    | MInst::OrStoreIndexed { .. }
+                    | MInst::BranchPred {
+                        predicate: BranchPredicate::MemoryNonZero { .. },
+                        ..
+                    }
+                    | MInst::X86Simd(X86SimdInst::Load128 { .. } | X86SimdInst::Store128 { .. })
+            );
+            let in_window = [
+                super::memory_effect::reads(inst),
+                super::memory_effect::writes(inst),
+            ]
+            .iter()
+            .flat_map(|effects| effects.ranges().collect::<Vec<_>>())
+            .any(|range| {
+                range.base == BaseReg::SimState
+                    && range.offset < i64::from(window.base) + i64::from(window.size)
+                    && range.end().is_none_or(|end| end > i64::from(window.base))
+            });
+            if in_window && !redirected {
+                return Err(error(
+                    Some(block.id),
+                    Some(index),
+                    "a frame slot access has no operand the frame register can address",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn verify_stack_frame_access(
     block: BlockId,
     instruction: usize,
@@ -1165,14 +1250,37 @@ fn emit_planned_with_callees(
     }
 
     let state_base = func.target_features.state_base();
+    let frame_register = crate::native::regalloc::assignment::frame_register(func);
+    if frame_register.is_some() {
+        verify_function_unit(func, tick_loop)?;
+    }
+    // A function unit may be running more than once at a time, so its arena
+    // is on the machine stack, from offset 0 at RSP, one per activation.
     let arena = NativeArenaLayout::build(
         func,
         assignment,
-        state_size,
+        if frame_register.is_some() {
+            0
+        } else {
+            state_size
+        },
         spill_frame_size,
         state_base,
         tick_loop,
     )?;
+    let stack_arena = if frame_register.is_some() {
+        i32::try_from(arena.total_size.next_multiple_of(16)).map_err(|_| {
+            EmitInputError::new(
+                "EMIT.NATIVE_ARENA_RANGE",
+                None,
+                None,
+                None,
+                "a function unit's arena exceeds i32",
+            )
+        })?
+    } else {
+        0
+    };
     debug_assert!(arena.scratch_size >= 4 * 8);
     asm.context.spill_base = arena.spill_base;
     asm.context.scratch_base = arena.scratch_base;
@@ -1200,7 +1308,15 @@ fn emit_planned_with_callees(
         pinned_xmms,
     );
     asm.context.state_base = state_base;
+    asm.context.frame = func
+        .frame_window
+        .zip(frame_register)
+        .map(|(window, register)| (window, preg_to_reg64(register)));
+    asm.context.call_stack = func.call_stack;
     let context = asm.context;
+    // Every guard of a function call that fails traps here.
+    let mut call_trap = asm.create_label();
+    let mut call_trap_used = false;
 
     let mut epilogue_label = asm.create_label();
     let mut tick_loop_success_label = tick_loop.then(|| asm.create_label());
@@ -1260,6 +1376,12 @@ fn emit_planned_with_callees(
             StateBaseStrategy::Fs => asm.wrfsbase(rdi)?,
             StateBaseStrategy::Gs => asm.wrgsbase(rdi)?,
             StateBaseStrategy::R15 => asm.mov(r15, rdi)?,
+        }
+        if let Some((_, register)) = context.frame {
+            // A function unit takes its frame's address after the state
+            // pointer. RSP stays 8 modulo 16 below the arena.
+            asm.mov(register, rsi)?;
+            asm.sub(rsp, stack_arena)?;
         }
         if tick_loop {
             let mut count_ready = asm.create_label();
@@ -1366,10 +1488,24 @@ fn emit_planned_with_callees(
                         asm.jmp(epilogue_label)?;
                     }
                 }
+                MInst::CallExtern { func, .. }
+                    if celox_sir::extern_abi::native_function_guard(*func).is_some() =>
+                {
+                    let frame_size = celox_sir::extern_abi::native_function_guard(*func)
+                        .expect("matched a function guard");
+                    extern_call::emit_call_guard(&mut asm, frame_size, call_trap)?;
+                    call_trap_used = true;
+                }
                 MInst::CallExtern { func, arg_count }
-                    if celox_sir::extern_abi::native_kernel_index(*func).is_some() =>
+                    if celox_sir::extern_abi::native_kernel_index(*func).is_some()
+                        || celox_sir::extern_abi::native_function_slot(*func).is_some() =>
                 {
                     extern_call::emit_call_extern(&mut asm, *func, *arg_count)?;
+                    if celox_sir::extern_abi::native_function_slot(*func).is_some() {
+                        // The callee left the depth where its guard put it,
+                        // whatever its status.
+                        extern_call::emit_call_return(&mut asm)?;
+                    }
                     // The call restored our state base and pinned registers.
                     // RAX still holds the complete signed callee status.
                     asm.test(rax, rax)?;
@@ -1611,7 +1747,16 @@ fn emit_planned_with_callees(
         }
         (false, StateBaseStrategy::R15) => {}
     }
+    if context.frame.is_some() {
+        asm.add(rsp, stack_arena)?;
+    }
     asm.ret()?;
+    if call_trap_used {
+        // A broken call-stack contract is a defect of the producer, not a
+        // simulation error: stop as Cranelift's trap does.
+        asm.set_label(&mut call_trap)?;
+        asm.ud2()?;
+    }
 
     // Keep immutable lookup and dispatch data out of every control-flow path.
     // Jump tables contain signed offsets from their own table base, preserving
@@ -1729,7 +1874,20 @@ fn emit_planned_with_callees(
         code: result.inner.code_buffer,
         text_size,
         frame_size: spill_frame_size,
-        required_state_size: arena.total_size,
+        // A function unit's arena is on the machine stack.
+        required_state_size: if context.frame.is_some() {
+            u32::try_from(state_size).map_err(|_| {
+                EmitInputError::new(
+                    "EMIT.NATIVE_ARENA_RANGE",
+                    None,
+                    None,
+                    None,
+                    "simulation-state size exceeds u32",
+                )
+            })?
+        } else {
+            arena.total_size
+        },
         block_offsets,
         required_image_features,
     })
