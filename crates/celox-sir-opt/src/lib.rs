@@ -14,7 +14,7 @@ pub type HashSet<K> = fxhash::FxHashSet<K>;
 /// addresses. It deliberately exposes no frontend or physical-layout type.
 pub mod ir {
     pub use celox_design::{
-        BinaryOp, DomainKind, InstanceId, RegionedAbsoluteAddrBase, RuntimeSchema,
+        BinaryOp, DomainKind, FRAME_REGION, InstanceId, RegionedAbsoluteAddrBase, RuntimeSchema,
         SPARSE_WORKING_REGION, STABLE_REGION, StateAddr, StateObjectId, TriggerIdWithKind, UnaryOp,
         VarAtomBase, WORKING_REGION,
     };

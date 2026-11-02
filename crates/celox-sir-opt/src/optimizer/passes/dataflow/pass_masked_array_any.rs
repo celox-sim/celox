@@ -112,6 +112,10 @@ impl ExecutionUnitPass for MaskedArrayAnyPass {
         "masked_array_any"
     }
 
+    fn handles_calls(&self) -> bool {
+        true
+    }
+
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions) {
         if options.four_state || self.unpacked_arrays.is_empty() {
             return;
@@ -521,7 +525,12 @@ fn writes_range(
     let (write_address, offset, width) = match instruction {
         SIRInstruction::Store(write_address, offset, width, ..) => (*write_address, offset, *width),
         SIRInstruction::Commit(_, destination, offset, width, _) => (*destination, offset, *width),
-        _ => return false,
+        // A call may write any part of the objects its effects list.
+        other => {
+            return other
+                .opaque_written_objects()
+                .is_none_or(|mut objects| objects.any(|object| *object == address));
+        }
     };
     if write_address != address || width == 0 {
         return false;

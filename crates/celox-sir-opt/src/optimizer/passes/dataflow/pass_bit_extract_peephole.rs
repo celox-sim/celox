@@ -11,6 +11,10 @@ impl ExecutionUnitPass for BitExtractPeepholePass {
         "bit_extract_peephole"
     }
 
+    fn handles_calls(&self) -> bool {
+        true
+    }
+
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
         let block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
         let global_use_count = collect_global_use_counts(eu);
@@ -23,6 +27,51 @@ impl ExecutionUnitPass for BitExtractPeepholePass {
                 );
             }
         }
+    }
+}
+
+/// For each instruction of a block, how many writes of its objects other
+/// than through a Store or Commit (calls, or native kernels, which write
+/// every object) precede it. Both rewrites below load again where the
+/// extraction is, which reads the value the original load did only when the
+/// two counts agree.
+struct OpaqueWriteEpochs {
+    /// Native kernels before each instruction.
+    everything: Vec<usize>,
+    /// Per object, the instruction indices of the calls writing it.
+    objects: HashMap<RegionedAbsoluteAddr, Vec<usize>>,
+}
+
+impl OpaqueWriteEpochs {
+    fn of(instructions: &[SIRInstruction<RegionedAbsoluteAddr>]) -> Self {
+        let mut everything = Vec::with_capacity(instructions.len());
+        let mut objects: HashMap<RegionedAbsoluteAddr, Vec<usize>> = HashMap::default();
+        let mut kernels = 0;
+        for (index, instruction) in instructions.iter().enumerate() {
+            everything.push(kernels);
+            match instruction.opaque_written_objects() {
+                Some(written) => {
+                    for object in written {
+                        objects.entry(*object).or_default().push(index);
+                    }
+                }
+                None => kernels += 1,
+            }
+        }
+        Self {
+            everything,
+            objects,
+        }
+    }
+
+    /// Whether `addr` may be written other than by a Store or Commit after
+    /// instruction `from` and before instruction `to`.
+    fn written_between(&self, addr: &RegionedAbsoluteAddr, from: usize, to: usize) -> bool {
+        self.everything[from] != self.everything[to]
+            || self.objects.get(addr).is_some_and(|writes| {
+                let first = writes.partition_point(|&index| index <= from);
+                writes.get(first).is_some_and(|&index| index < to)
+            })
     }
 }
 
@@ -49,6 +98,7 @@ fn optimize_bit_extracts(
     }
 
     optimize_slice_loads(instructions, register_map, global_use_count);
+    let epochs = OpaqueWriteEpochs::of(instructions);
 
     // Build def map: register -> instruction index
     let mut def_map: HashMap<RegisterId, usize> = HashMap::default();
@@ -133,7 +183,7 @@ fn optimize_bit_extracts(
         };
 
         // Bounds check: base + k + w <= base + n (i.e., k + w <= n)
-        if k + w > n {
+        if k + w > n || epochs.written_between(addr, src_def_idx, idx) {
             continue;
         }
 
@@ -289,6 +339,7 @@ fn optimize_slice_loads(
         }
     }
 
+    let epochs = OpaqueWriteEpochs::of(instructions);
     let mut replacements = Vec::new();
     for (idx, inst) in instructions.iter().enumerate() {
         let SIRInstruction::Slice(dst, src, bit_offset, width) = inst else {
@@ -302,7 +353,7 @@ fn optimize_slice_loads(
         else {
             continue;
         };
-        if bit_offset + width > load_width {
+        if bit_offset + width > load_width || epochs.written_between(&addr, load_idx, idx) {
             continue;
         }
         replacements.push((

@@ -86,7 +86,13 @@ fn own_effects<A: Ord + Clone + Hash>(
                 }
             }
             collected.kernel |= instruction.accesses_unknown_state();
-            collected.host |= instruction.is_host_interaction();
+            // A store that feeds comb captures updates their enable flags,
+            // outside the simulation state, as a host interaction does.
+            let captures = matches!(
+                instruction,
+                SIRInstruction::Store(_, _, _, _, _, sites) if !sites.is_empty()
+            );
+            collected.host |= instruction.is_host_interaction() || captures;
         }
     }
     collected
@@ -345,5 +351,32 @@ mod tests {
         program.eval_comb.clear();
         program.processes.clear();
         assert!(!program.has_calls() && program.calls_summarized());
+    }
+
+    #[test]
+    fn a_store_feeding_comb_captures_interacts_with_the_host() {
+        let captured = SIRInstruction::Store(
+            1,
+            SIROffset::Static(0),
+            32,
+            RegisterId(0),
+            Vec::new(),
+            vec![0],
+        );
+        let mut program = SirProgram::<u32, u32> {
+            eval_comb: vec![unit(vec![call(0)])],
+            eval_apply_ffs: HashMap::default(),
+            eval_comb_apply_ffs: HashMap::default(),
+            merge_comb_apply: false,
+            eval_comb_stateful: None,
+            eval_only_ffs: HashMap::default(),
+            apply_ffs: HashMap::default(),
+            parallel: None,
+            processes: Vec::new(),
+            functions: vec![function(vec![captured], 100)],
+        };
+        program.summarize_calls();
+        assert!(program.functions[0].effects.host);
+        assert_eq!(program.functions[0].effects.writes, [1]);
     }
 }

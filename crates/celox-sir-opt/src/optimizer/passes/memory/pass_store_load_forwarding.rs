@@ -12,6 +12,10 @@ impl ExecutionUnitPass for StoreLoadForwardingPass {
         "store_load_forwarding"
     }
 
+    fn handles_calls(&self) -> bool {
+        true
+    }
+
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions) {
         let register_map = &eu.register_map;
         let mut aliases = HashMap::default();

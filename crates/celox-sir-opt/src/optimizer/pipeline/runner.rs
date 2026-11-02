@@ -290,6 +290,20 @@ pub(super) fn optimize_with_options(
         tracing::debug!("[phase] processes ({count} EUs): {:?}", s.elapsed());
     }
 
+    // Function units: their callers' effects are recomputed from the
+    // optimized bodies once the pipeline ends.
+    if !program.sir.functions.is_empty() {
+        let phase_start = timing.then(crate::timing::now);
+        let function_passes = pipeline_builder.function();
+        for function in &mut program.sir.functions {
+            function_passes.run_function(&mut function.unit, &options);
+        }
+        if let Some(s) = phase_start {
+            let count = program.sir.functions.len();
+            tracing::debug!("[phase] functions ({count} EUs): {:?}", s.elapsed());
+        }
+    }
+
     // Lane-partitioned kernels reuse the per-unit pipelines above. Their
     // program-wide facts (identity aliases) come from the sequential kernel.
     super::parallel::optimize_parallel_units(

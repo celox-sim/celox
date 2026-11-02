@@ -61,6 +61,37 @@ pub(in crate::optimizer) fn def_reg<A>(inst: &SIRInstruction<A>) -> Option<Regis
     inst.defined_register()
 }
 
+/// The state objects that instructions of a unit may write other than
+/// through a Store or Commit: those a call's effects list, or every object
+/// when the unit reaches a native kernel.
+///
+/// A pass that reasons about Loads and Stores without following the order
+/// of a call between them leaves these objects alone: a call can change
+/// them between any two of their accesses.
+#[derive(Default)]
+pub(in crate::optimizer) struct OpaqueWrites {
+    everything: bool,
+    objects: HashSet<RegionedAbsoluteAddr>,
+}
+
+impl OpaqueWrites {
+    pub(in crate::optimizer) fn of(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> Self {
+        let mut writes = Self::default();
+        for instruction in eu.blocks.values().flat_map(|block| &block.instructions) {
+            match instruction.opaque_written_objects() {
+                Some(objects) => writes.objects.extend(objects.copied()),
+                None => writes.everything = true,
+            }
+        }
+        writes
+    }
+
+    /// Whether some instruction may write `addr` that way.
+    pub(in crate::optimizer) fn may_write(&self, addr: &RegionedAbsoluteAddr) -> bool {
+        self.everything || self.objects.contains(addr)
+    }
+}
+
 /// Whether an instruction can be removed because nothing uses the register it
 /// defines and it has no side effect.
 pub(in crate::optimizer) fn is_unused_definition<A>(
@@ -311,13 +342,9 @@ pub(in crate::optimizer) fn hoist_common_branch_loads(
                     if inst.is_host_interaction() {
                         return None;
                     }
-                    if let Some(write) = inst.memory_write()
-                        && *write.addr == c.addr
-                        && write.offset.constant_bit_offset().is_none_or(|offset| {
-                            offset < c.offset.saturating_add(c.bits)
-                                && c.offset < offset.saturating_add(write.width)
-                        })
-                    {
+                    // A write of the range since the earlier load, a
+                    // call's included, means it no longer holds the value.
+                    if inst.state_writes().overlaps(&c.addr, c.offset, c.bits) {
                         return None;
                     }
                     if let SIRInstruction::Load(dst, addr, SIROffset::Static(off), bits) = inst
