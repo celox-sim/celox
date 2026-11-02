@@ -1,0 +1,1 @@
+Coordinator invariants: target_type/selected_type over the full type incl. unpacked dims for every target; tagged-union rejection from the target type
