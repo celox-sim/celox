@@ -9,6 +9,7 @@
 //! Runtime event writes and capture notifications live in `runtime_events`.
 
 mod bit_count;
+mod call;
 mod concat;
 mod dynamic_load_cache;
 mod extern_call;
@@ -1002,7 +1003,28 @@ fn lower_execution_unit_counting_verifications(
         four_state,
         diagnostics,
         super::features::X86Features::detect(),
+        None,
     )
+}
+
+/// Lower like [`lower_execution_unit_with_diagnostics`] a unit that may call
+/// the function units `functions`.
+pub fn lower_execution_unit_with_functions(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    layout: &MemoryLayout,
+    four_state: bool,
+    diagnostics: &crate::NativeDiagnostics,
+    functions: Option<&crate::NativeFunctions>,
+) -> MFunction {
+    lower_execution_unit_for_target(
+        eu,
+        layout,
+        four_state,
+        diagnostics,
+        super::features::X86Features::detect(),
+        functions,
+    )
+    .0
 }
 
 fn lower_execution_unit_for_target(
@@ -1011,6 +1033,7 @@ fn lower_execution_unit_for_target(
     four_state: bool,
     diagnostics: &crate::NativeDiagnostics,
     features: super::features::X86Features,
+    functions: Option<&crate::NativeFunctions>,
 ) -> (MFunction, usize) {
     let expanded = strided::expand_strided_accesses(eu, layout);
     let eu = expanded.as_ref();
@@ -1144,6 +1167,7 @@ fn lower_execution_unit_for_target(
         sparse_descriptor_table,
         trace_regs,
         wide_value_verifications: 0,
+        functions,
     };
     // Pre-seed wide block params so instructions in those blocks can read the
     // full chunked value before phi nodes are materialized in a later pass.
@@ -1278,7 +1302,11 @@ fn lower_execution_unit_for_target(
                 }
                 _ => None,
             };
-            if let Some(offsets) = target.and_then(|addr| layout.trace_notification_offsets(addr)) {
+            // A frame slot is no signal, and the waveform has no flag for it.
+            if let Some(offsets) = target
+                .filter(|addr| !super::function_unit::is_frame_slot(addr))
+                .and_then(|addr| layout.trace_notification_offsets(addr))
+            {
                 for offset in offsets {
                     if trace_marks.insert(offset) {
                         let one = ctx.alloc_vreg(SpillDesc::remat(1));
@@ -1841,6 +1869,8 @@ struct ISelContext<'a> {
     trace_regs: HashSet<RegisterId>,
     /// Wide values the debug invariant checks have verified.
     wide_value_verifications: usize,
+    /// The program's function units, which `Call`s run.
+    functions: Option<&'a crate::NativeFunctions>,
 }
 
 impl<'a> ISelContext<'a> {

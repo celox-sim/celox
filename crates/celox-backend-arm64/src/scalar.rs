@@ -22,6 +22,8 @@ use crate::{Arm64Reg, HashMap};
 
 const STATE_REG: u8 = 0;
 
+#[cfg(test)]
+mod function_call_tests;
 #[cfg(all(test, target_arch = "aarch64"))]
 mod tests;
 
@@ -40,10 +42,40 @@ const MAX_SECONDARY_STATE_PAGES: usize = 4;
 const MIN_STATE_PAGE_BENEFIT: usize = 8;
 const TEMPORARY_BYTES: usize = 16;
 
+// x29 holds a function unit's frame address, which has neither a tick loop
+// nor a primary state page.
+const FRAME_REG: u8 = STATE_PAGE_REG;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct StatePageBases {
     primary: Option<i64>,
     secondary: [Option<(u8, i64)>; MAX_SECONDARY_STATE_PAGES],
+    /// A function unit's frame window, addressed from [`FRAME_REG`].
+    frame: Option<crate::function_unit::FrameWindow>,
+}
+
+impl StatePageBases {
+    /// The frame register and offset that address state offset `offset`
+    /// when it lies in a function unit's frame window.
+    fn frame_base(self, base: BaseReg, offset: i64) -> Option<(u8, i64)> {
+        let window = self.frame?;
+        if base != BaseReg::SimState {
+            return None;
+        }
+        let offset = i32::try_from(offset).ok()?;
+        Some((FRAME_REG, i64::from(window.frame_offset(offset)?)))
+    }
+}
+
+/// What the emitter of a function needs to know about function calls.
+#[derive(Clone, Copy, Debug, Default)]
+struct FunctionFrame {
+    /// The frame window of a function unit: its frame address is in
+    /// [`FRAME_REG`], and its spills and temporaries live on the machine
+    /// stack, one copy per activation.
+    window: Option<crate::function_unit::FrameWindow>,
+    /// The call stack of the function's calls of function units.
+    call_stack: Option<celox_state_layout::CallStackLayout>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -220,9 +252,58 @@ pub fn emit_prepared_eu_with_arena(
     label: &str,
     native_tick_loop: bool,
     arena_base: Option<usize>,
+    trace: Option<&mut NativeFunctionTrace>,
+    is_cancelled: impl Fn() -> bool,
+) -> Result<EmitResult, ChainedEmitError> {
+    emit_prepared_eu_with_functions(
+        sir_eu,
+        layout,
+        four_state,
+        label,
+        native_tick_loop,
+        arena_base,
+        None,
+        trace,
+        is_cancelled,
+    )
+}
+
+/// Like [`emit_prepared_eu_with_arena`], for a unit of a program with the
+/// function units `functions`, which may be one of them.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_prepared_eu_with_functions(
+    sir_eu: &crate::ExecutionUnit<crate::RegionedAbsoluteAddr>,
+    layout: &crate::MemoryLayout,
+    four_state: bool,
+    label: &str,
+    native_tick_loop: bool,
+    arena_base: Option<usize>,
+    functions: Option<crate::FunctionCalls<'_>>,
     mut trace: Option<&mut NativeFunctionTrace>,
     is_cancelled: impl Fn() -> bool,
 ) -> Result<EmitResult, ChainedEmitError> {
+    // A function unit's slots become state objects in its frame window.
+    let mut function_layout = None;
+    let mut window = None;
+    let mut prepared = None;
+    if let Some(function) = functions.and_then(|functions| functions.function) {
+        let frame = &functions
+            .expect("a function unit is compiled with the program's functions")
+            .frames[function.0 as usize];
+        let (unit, unit_layout, unit_window) = crate::function_unit::prepare(sir_eu, layout, frame)
+            .map_err(|message| ChainedEmitError::Emit(EmitError::Lowering(message)))?;
+        function_layout = Some(unit_layout);
+        window = Some(unit_window);
+        prepared = Some(unit);
+    }
+    let layout = function_layout.as_ref().unwrap_or(layout);
+    let sir_eu = prepared.as_ref().unwrap_or(sir_eu);
+    let split = crate::function_unit::split_at_calls(sir_eu);
+    let sir_eu = split.as_ref().unwrap_or(sir_eu);
+    let frame = FunctionFrame {
+        window,
+        call_stack: layout.call_stack,
+    };
     // Shared borrow so the checkpoint closure and downstream callees observe
     // the same predicate without moving it.
     let is_cancelled = &is_cancelled;
@@ -256,7 +337,13 @@ pub fn emit_prepared_eu_with_arena(
         .checked_add(layout.triggered_bits_total_size)
         .ok_or(PrepareError::StateSizeOverflow)?;
     let state_size = arena_base.map_or(semantic_size, |base| base.max(semantic_size));
-    let mut function = crate::isel::lower_execution_unit(sir_eu, layout, four_state);
+    let mut function = crate::isel::lower_execution_unit_with_functions(
+        sir_eu,
+        layout,
+        four_state,
+        &crate::NativeDiagnostics::default(),
+        functions,
+    );
     crate::mir_opt::optimize(&mut function);
     crate::mir_legalize::legalize_variable_shift_counts(&mut function);
     checkpoint()?;
@@ -295,6 +382,7 @@ pub fn emit_prepared_eu_with_arena(
         &allocation.allocated.edge_copies,
         tick_loop,
         check_runtime_events,
+        frame,
     )?;
     if let Some(trace) = trace {
         trace.disassembly = disassemble(&result.code[..result.text_size], 0);
@@ -317,7 +405,61 @@ pub fn emit_empty(state_size: usize) -> Result<EmitResult, EmitError> {
         &allocation.allocated.edge_copies,
         false,
         false,
+        FunctionFrame::default(),
     )
+}
+
+/// Move SP down (`release` false) or back up by `bytes`, a multiple of 16
+/// below 16 MiB. Register 31 of ADD/SUB (immediate) is SP.
+fn emit_stack_adjust(ops: &mut VecAssembler<Aarch64Relocation>, bytes: u32, release: bool) {
+    let sign = if release { 1 } else { -1 };
+    for part in [i64::from(bytes & !0xfff), i64::from(bytes & 0xfff)] {
+        if part != 0 {
+            let emitted = emit_add_sub_immediate(ops, 31, 31, sign * part);
+            debug_assert!(emitted, "the arena size is checked");
+        }
+    }
+}
+
+/// Check what emission relies on in a function unit: it runs no tick loop,
+/// and only accesses whose base the emitter selects (and so redirects to the
+/// frame register) reach its frame window.
+fn verify_function_unit(
+    function: &MFunction,
+    window: crate::function_unit::FrameWindow,
+    tick_loop: bool,
+) -> Result<(), EmitError> {
+    if tick_loop {
+        return Err(EmitError::Unsupported("a tick loop in a function unit"));
+    }
+    let start = i64::from(window.base);
+    let end = start + i64::from(window.size);
+    let overlaps = |offset: i32, bytes: usize| {
+        let offset = i64::from(offset);
+        offset < end && offset + bytes as i64 > start
+    };
+    for instruction in function.blocks.iter().flat_map(|block| &block.insts) {
+        let direct = match instruction {
+            MInst::MemCopy {
+                src_offset,
+                dst_offset,
+                byte_len,
+            } => overlaps(*src_offset, *byte_len) || overlaps(*dst_offset, *byte_len),
+            MInst::MemFill {
+                dst_offset,
+                byte_len,
+                ..
+            } => overlaps(*dst_offset, *byte_len),
+            MInst::PackedLaneCompare { offset, .. } => overlaps(*offset, 1),
+            _ => false,
+        };
+        if direct {
+            return Err(EmitError::Unsupported(
+                "a frame slot access the frame register cannot address",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn resolve(assignment: &Assignment<VReg>, value: VReg) -> Result<u8, EmitError> {
@@ -342,7 +484,11 @@ fn emit_function(
     plan: &EdgeCopyPlan<BlockId>,
     tick_loop: bool,
     check_runtime_events: bool,
+    frame: FunctionFrame,
 ) -> Result<EmitResult, EmitError> {
+    if let Some(window) = frame.window {
+        verify_function_unit(function, window, tick_loop)?;
+    }
     let emit = |direct_branches| {
         emit_function_with_branches(
             function,
@@ -352,6 +498,7 @@ fn emit_function(
             plan,
             tick_loop,
             check_runtime_events,
+            frame,
             direct_branches,
         )
     };
@@ -372,17 +519,37 @@ fn emit_function_with_branches(
     plan: &EdgeCopyPlan<BlockId>,
     tick_loop: bool,
     check_runtime_events: bool,
+    frame: FunctionFrame,
     direct_branches: bool,
 ) -> Result<EmitResult, EmitError> {
-    let spill_base = align16(state_size)?;
+    // A function unit may be running more than once at a time, so its arena
+    // is on the machine stack, from offset 0 at SP, one per activation.
+    let spill_base = if frame.window.is_some() {
+        0
+    } else {
+        align16(state_size)?
+    };
     let temporary_offset = spill_base
         .checked_add(spill_frame_size as usize)
         .and_then(|value| value.checked_add(15))
         .map(|value| value & !15)
         .ok_or(EmitError::Range("spill arena overflow"))?;
-    let required_state_size = temporary_offset
+    let arena_end = temporary_offset
         .checked_add(TEMPORARY_BYTES)
         .ok_or(EmitError::Range("native arena size overflow"))?;
+    let stack_arena = if frame.window.is_some() {
+        u32::try_from(arena_end)
+            .ok()
+            .filter(|&bytes| bytes < 1 << 24)
+            .ok_or(EmitError::Range("a function unit's arena exceeds 16 MiB"))?
+    } else {
+        0
+    };
+    let required_state_size = if frame.window.is_some() {
+        state_size
+    } else {
+        arena_end
+    };
     let required_state_size = u32::try_from(required_state_size)
         .map_err(|_| EmitError::Range("native arena exceeds u32"))?;
 
@@ -412,7 +579,12 @@ fn emit_function_with_branches(
             .iter()
             .any(|(_, value)| value.number() == *register)
     });
-    let state_pages = select_state_base_pages(function, secondary_page_registers);
+    let mut state_pages = select_state_base_pages(function, secondary_page_registers);
+    if frame.window.is_some() {
+        // x29 holds the frame address instead.
+        state_pages.primary = None;
+        state_pages.frame = frame.window;
+    }
     let tick_counter_in_fp = tick_loop && state_pages.primary.is_some();
     let table_labels = function
         .constant_tables()
@@ -428,9 +600,10 @@ fn emit_function_with_branches(
         .map(|(_, register)| register.number())
         .filter(|register| (19..=27).contains(register))
         .collect::<Vec<_>>();
-    if tick_loop || state_pages.primary.is_some() {
-        // x29 is reserved for either the native-loop counter or the cached
-        // state-page base, so preserve the host value across the JIT call.
+    if tick_loop || state_pages.primary.is_some() || frame.window.is_some() {
+        // x29 is reserved for the native-loop counter, the cached state-page
+        // base or a function unit's frame, so preserve the caller's value
+        // across the call.
         callee_saved.push(STATE_PAGE_REG);
     }
     for &(register, _) in state_pages.secondary.iter().flatten() {
@@ -505,7 +678,19 @@ fn emit_function_with_branches(
             emit_store(&mut ops, 30, SCRATCH0, OpSize::S64);
         }
     }
-    emit_address_to(&mut ops, SPILL_REG, STATE_REG, spill_base as i64);
+    if frame.window.is_some() {
+        // A function unit takes its frame's address after the state pointer.
+        dynasm!(ops
+            ; .arch aarch64
+            ; mov X(FRAME_REG), x1
+        );
+        emit_stack_adjust(&mut ops, stack_arena, false);
+        // ADD (immediate) reads register 31 as SP: x28 = SP.
+        let moved = emit_add_sub_immediate(&mut ops, SPILL_REG, 31, 0);
+        debug_assert!(moved);
+    } else {
+        emit_address_to(&mut ops, SPILL_REG, STATE_REG, spill_base as i64);
+    }
     if let Some(page) = state_pages.primary {
         emit_address_to(&mut ops, STATE_PAGE_REG, STATE_REG, page);
     }
@@ -513,6 +698,9 @@ fn emit_function_with_branches(
         emit_address_to(&mut ops, register, STATE_REG, page);
     }
     let call_saves = extern_call::call_saves(function, assignment)?;
+    // Every guard of a function call that fails traps here.
+    let call_trap = ops.new_dynamic_label();
+    let mut call_trap_used = false;
     // d29 holds the state pointer and d31 the tick count in a tick loop.
     let pinned_fp: &[u8] = match (tick_loop, tick_counter_in_fp) {
         (false, _) => &[],
@@ -529,6 +717,19 @@ fn emit_function_with_branches(
         );
         for (index, instruction) in block.insts.iter().enumerate() {
             if let MInst::CallExtern { dst, func, args } = instruction {
+                if let Some(frame_size) = celox_sir::extern_abi::native_function_guard(*func) {
+                    extern_call::emit_call_guard(
+                        &mut ops,
+                        resolve(assignment, args[0])?,
+                        frame_size,
+                        frame
+                            .call_stack
+                            .ok_or(EmitError::Unsupported("a call without a call stack"))?,
+                        call_trap,
+                    );
+                    call_trap_used = true;
+                    continue;
+                }
                 extern_call::emit_call_extern(
                     &mut ops,
                     assignment,
@@ -537,7 +738,32 @@ fn emit_function_with_branches(
                     args,
                     &call_saves[&(block.id, index)],
                     pinned_fp,
+                    frame.call_stack,
                 )?;
+                if celox_sir::extern_abi::native_function_slot(*func).is_some() {
+                    // A nonzero status of the callee, which the call left in
+                    // x16, ends this function with it, as `ReturnError` does.
+                    let returned = ops.new_dynamic_label();
+                    dynasm!(ops ; .arch aarch64 ; cbz x16, =>returned);
+                    if tick_loop {
+                        if tick_counter_in_fp {
+                            dynasm!(ops
+                                ; .arch aarch64
+                                ; fmov x17, d31
+                                ; sub x17, x17, #1
+                                ; fmov d31, x17
+                            );
+                        } else {
+                            dynasm!(ops ; .arch aarch64 ; sub x29, x29, #1);
+                        }
+                    }
+                    dynasm!(ops
+                        ; .arch aarch64
+                        ; mov x0, x16
+                        ; b =>epilogue
+                        ; =>returned
+                    );
+                }
                 continue;
             }
             emit_instruction(
@@ -583,6 +809,9 @@ fn emit_function_with_branches(
         );
         dynasm!(ops ; .arch aarch64 ; add x17, x17, x30 ; str x16, [x17]);
     }
+    if frame.window.is_some() {
+        emit_stack_adjust(&mut ops, stack_arena, true);
+    }
     if callee_saved.is_empty() {
         dynasm!(ops ; .arch aarch64 ; ldr x30, [sp], #16);
     } else {
@@ -601,6 +830,11 @@ fn emit_function_with_branches(
         dynasm!(ops ; .arch aarch64 ; ldp x30, X(callee_saved[0]), [sp], #16);
     }
     dynasm!(ops ; .arch aarch64 ; ret);
+    if call_trap_used {
+        // A broken call-stack contract is a defect of the producer, not a
+        // simulation error: stop as Cranelift's trap does.
+        dynasm!(ops ; .arch aarch64 ; =>call_trap ; brk #1);
+    }
     let text_size = ops.offset().0;
     for (index, table) in function.constant_tables().iter().enumerate() {
         let label = table_labels[index];
@@ -2729,6 +2963,7 @@ fn select_state_base_pages(
     StatePageBases {
         primary: selected.first().copied(),
         secondary,
+        frame: None,
     }
 }
 
@@ -2989,6 +3224,9 @@ fn select_memory_base(
     store: bool,
     state_pages: StatePageBases,
 ) -> (u8, i64) {
+    if let Some(frame) = state_pages.frame_base(base, offset) {
+        return frame;
+    }
     let normal = (base_register(base), offset);
     if base != BaseReg::SimState {
         return normal;
@@ -3018,6 +3256,9 @@ fn select_indexed_memory_base(
     store: bool,
     state_pages: StatePageBases,
 ) -> (u8, i64) {
+    if let Some(frame) = state_pages.frame_base(base, offset) {
+        return frame;
+    }
     let normal = (base_register(base), offset);
     if base != BaseReg::SimState {
         return normal;
@@ -3041,6 +3282,9 @@ fn select_indexed_memory_base(
 }
 
 fn select_vector_memory_base(base: BaseReg, offset: i64, state_pages: StatePageBases) -> (u8, i64) {
+    if let Some(frame) = state_pages.frame_base(base, offset) {
+        return frame;
+    }
     let normal = (base_register(base), offset);
     if base != BaseReg::SimState {
         return normal;

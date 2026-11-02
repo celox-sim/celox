@@ -63,7 +63,24 @@ pub struct X86BackendOptions {
     /// need disjoint arenas. Kernel callers must reserve at least every
     /// callee's complete `required_state_size`; use `with_native_callees`.
     pub arena_base: Option<usize>,
+    /// The function units of the program, which `SIRInstruction::Call`s
+    /// call; `None` when the program has none.
+    pub functions: Option<std::sync::Arc<NativeFunctions>>,
+    /// The function unit being compiled, when it is one: its frame slots are
+    /// addressed from the frame its caller passes, and its spills and
+    /// scratch live on the machine stack, one copy per activation.
+    pub function: Option<FunctionId>,
     pub diagnostics: NativeDiagnostics,
+}
+
+/// The function units a native image holds, as their callers see them.
+#[derive(Debug, Clone)]
+pub struct NativeFunctions {
+    /// Each function's frame, by [`FunctionId`].
+    pub frames: Vec<FrameLayout<RegionedAbsoluteAddr>>,
+    /// The extern address table slot of function 0; function `n` is in slot
+    /// `first_slot + n`.
+    pub first_slot: u32,
 }
 
 impl X86BackendOptions {
@@ -85,6 +102,8 @@ impl Default for X86BackendOptions {
             native_tick_loop: true,
             baseline: false,
             arena_base: None,
+            functions: None,
+            function: None,
             diagnostics: NativeDiagnostics::default(),
         }
     }

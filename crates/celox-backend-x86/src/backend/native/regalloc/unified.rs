@@ -487,7 +487,7 @@ pub fn unified_alloc_with_label_and_diagnostics(
     diagnostics: &crate::NativeDiagnostics,
 ) -> (AssignmentMap, u32) {
     let num_blocks = func.blocks.len();
-    let k = func.target_features.allocatable_register_count();
+    let k = func.allocatable_register_count();
     let mut result = AssignmentMap::default();
     let mut slots = SpillSlotAllocator::new();
     let mut trace = RegallocTrace::new_if_enabled(label, func);

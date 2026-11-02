@@ -669,48 +669,50 @@ pub struct LaidOutProgram {
 }
 
 impl LaidOutProgram {
-    /// Fail when a function unit stores with triggers, which `backend`
-    /// cannot compile yet: compiled code would compare a store inside a
-    /// callee with the value its object had at the callee's entry, not at
-    /// the entry of the caller's unit group as the interpreter does.
-    #[cfg(any(feature = "cranelift", feature = "wasm-runtime"))]
-    pub(crate) fn reject_triggered_calls(
+    /// Fail when a function unit makes a store that `backend` cannot compile
+    /// in a callee yet:
+    ///
+    /// - a store with triggers, which compiled code would compare with the
+    ///   value its object had at the callee's entry, not at the entry of the
+    ///   caller's unit group as the interpreter does;
+    /// - with `sparse`, a store to the sparse working region, whose dirty
+    ///   state the native caller tracks only for its own stores.
+    #[cfg(any(
+        feature = "cranelift",
+        feature = "wasm-runtime",
+        all(
+            feature = "host-runtime",
+            any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            )
+        )
+    ))]
+    pub(crate) fn reject_unsupported_callee_stores(
         &self,
         backend: &str,
+        sparse: bool,
     ) -> Result<(), crate::SimulatorError> {
-        if self
-            .sir
-            .functions
-            .iter()
-            .any(|function| !function.effects.triggers.is_empty())
-        {
-            return Err(crate::CodegenError::message(format!(
-                "the {backend} backend does not run triggered stores in function units yet"
+        let reject = |what: &str| {
+            Err(crate::CodegenError::message(format!(
+                "the {backend} backend does not run {what} in function units yet"
             ))
-            .into());
-        }
-        Ok(())
-    }
-
-    /// Fail when the program calls function units, which `backend` cannot
-    /// compile yet. The interpreter, Cranelift and wasm run them; the native
-    /// backends do not, and need `host-runtime` like every compiled backend.
-    #[cfg(feature = "host-runtime")]
-    pub(crate) fn reject_function_calls(&self, backend: &str) -> Result<(), crate::SimulatorError> {
-        let calls = !self.sir.functions.is_empty()
-            || self.sir.units().any(|unit| {
-                unit.blocks.values().any(|block| {
-                    block
-                        .instructions
-                        .iter()
-                        .any(|instruction| matches!(instruction, SIRInstruction::Call { .. }))
-                })
-            });
-        if calls {
-            return Err(crate::CodegenError::message(format!(
-                "the {backend} backend does not run SIR function calls yet"
-            ))
-            .into());
+            .into())
+        };
+        for function in &self.sir.functions {
+            if !function.effects.triggers.is_empty() {
+                return reject("triggered stores");
+            }
+            if sparse
+                && function
+                    .effects
+                    .writes
+                    .iter()
+                    .any(|addr| addr.region == crate::ir::SPARSE_WORKING_REGION)
+            {
+                return reject("sparse working stores");
+            }
         }
         Ok(())
     }

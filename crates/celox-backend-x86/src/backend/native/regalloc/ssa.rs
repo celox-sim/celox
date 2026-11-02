@@ -38,7 +38,7 @@ pub(super) fn allocate(
             Ok(())
         }
     };
-    let register_count = func.target_features.allocatable_register_count();
+    let register_count = func.allocatable_register_count();
     let phase = timing.then(crate::timing::now);
     let mut plan = super::spill_plan::plan_with_integrated_schedule(
         func,

@@ -91,6 +91,7 @@ fn tiled_transpose_preserves_each_value_and_mask_bit() {
                 four_state,
                 &Default::default(),
                 features.with_bmi2(bmi2),
+                None,
             );
             function.verify();
             assert!(

@@ -283,8 +283,7 @@ impl PermModel {
                         "Perm row must have exactly one source from its predecessor",
                     ));
                 }
-                let mut allowed_colors =
-                    allocatable_color_bits(func.target_features.allocatable_register_count());
+                let mut allowed_colors = allocatable_color_bits(func.allocatable_register_count());
                 if let Some(&required) = fixed.get(&phi.dst) {
                     allowed_colors &= color_bit(required);
                 }

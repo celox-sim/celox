@@ -32,6 +32,59 @@ pub const fn native_kernel_index(function: u32) -> Option<u32> {
     }
 }
 
+/// Native-only call of a function unit ([`crate::FunctionUnit`]) compiled
+/// into the same image, which a backend selects for a
+/// [`SIRInstruction::Call`](crate::SIRInstruction::Call); SIR never holds it.
+/// The low 29 bits index the extern address table. Its one argument is the
+/// frame's offset into the call stack; the callee receives the state pointer
+/// and the frame's address, and a nonzero status propagates to the caller.
+pub const NATIVE_FUNCTION_CALL_TAG: u32 = 0x4000_0000;
+
+/// Native-only guard before a [`NATIVE_FUNCTION_CALL_TAG`] call: it traps
+/// when the frame given as its one argument, of the size in the low 29 bits,
+/// does not fit in the call stack or the calls already nest
+/// [`crate::MAX_CALL_DEPTH`] deep, and otherwise enters one call deeper. The
+/// call that follows it returns to the depth before the guard.
+pub const NATIVE_FUNCTION_GUARD_TAG: u32 = 0x6000_0000;
+
+const NATIVE_FUNCTION_TAG_MASK: u32 = 0xe000_0000;
+const NATIVE_FUNCTION_PAYLOAD: u32 = !NATIVE_FUNCTION_TAG_MASK;
+
+/// Decode a native function call into its extern address table slot.
+pub const fn native_function_slot(function: u32) -> Option<u32> {
+    if function & NATIVE_FUNCTION_TAG_MASK == NATIVE_FUNCTION_CALL_TAG {
+        Some(function & NATIVE_FUNCTION_PAYLOAD)
+    } else {
+        None
+    }
+}
+
+/// Encode a native function call of the function at extern table `slot`.
+pub fn native_function_call(slot: u32) -> u32 {
+    assert!(
+        slot <= NATIVE_FUNCTION_PAYLOAD,
+        "native function slot {slot} exceeds its tag"
+    );
+    NATIVE_FUNCTION_CALL_TAG | slot
+}
+
+/// Decode a native function guard into the callee's frame size, saturated at
+/// the largest the tag holds, which is far beyond [`crate::STACK_SIZE`].
+pub const fn native_function_guard(function: u32) -> Option<usize> {
+    if function & NATIVE_FUNCTION_TAG_MASK == NATIVE_FUNCTION_GUARD_TAG {
+        Some((function & NATIVE_FUNCTION_PAYLOAD) as usize)
+    } else {
+        None
+    }
+}
+
+/// Encode the guard of a call of a function whose frame is `frame_size`
+/// bytes.
+pub fn native_function_guard_for(frame_size: usize) -> u32 {
+    const _: () = assert!(crate::STACK_SIZE < NATIVE_FUNCTION_PAYLOAD as usize);
+    NATIVE_FUNCTION_GUARD_TAG | frame_size.min(NATIVE_FUNCTION_PAYLOAD as usize) as u32
+}
+
 /// The number of arguments of an extern call to [`HEAP_HELPER_ID`].
 pub const HEAP_HELPER_ARGUMENTS: usize = 4;
 
@@ -147,6 +200,30 @@ mod tests {
             RegisterType::Logic { width: 8 },
         ] {
             assert_eq!(ExternValue::of(&ty), None);
+        }
+    }
+
+    #[test]
+    fn native_function_tags_are_distinct() {
+        let call = native_function_call(5);
+        assert_eq!(native_function_slot(call), Some(5));
+        assert_eq!(native_function_guard(call), None);
+        assert_eq!(native_kernel_index(call), None);
+        let guard = native_function_guard_for(24);
+        assert_eq!(native_function_guard(guard), Some(24));
+        assert_eq!(native_function_slot(guard), None);
+        assert_eq!(native_kernel_index(guard), None);
+        // A frame too large for the tag still does not fit in the stack.
+        let huge = native_function_guard(native_function_guard_for(usize::MAX)).unwrap();
+        assert!(huge > crate::STACK_SIZE);
+        for helper in [
+            HEAP_HELPER_ID,
+            crate::float::FLOAT_HELPER_ID,
+            0,
+            NATIVE_KERNEL_CALL_TAG,
+        ] {
+            assert_eq!(native_function_slot(helper), None);
+            assert_eq!(native_function_guard(helper), None);
         }
     }
 

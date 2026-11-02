@@ -14,7 +14,7 @@
 //! 128-bit vector instructions, which never leave the upper YMM halves dirty,
 //! so the call needs no `vzeroupper`.
 
-use super::operands::state_base_strategy;
+use super::operands::{arena_operand, state_base_strategy};
 use super::*;
 
 /// Where the caller's FS/GS base is kept while generated code borrows it.
@@ -70,9 +70,9 @@ fn xmm_register(index: usize) -> AsmRegisterXmm {
     ][index]
 }
 
-/// `[state + call area + 8 * slot]` for an argument or the result.
-fn call_slot(context: &EmissionContext, slot: i32) -> AsmMemoryOperand {
-    mem_operand(context, BaseReg::SimState, call_area(context) + 8 * slot)
+/// `[arena + call area + 8 * slot]` for an argument or the result.
+pub(super) fn call_slot(context: &EmissionContext, slot: i32) -> AsmMemoryOperand {
+    arena_operand(context, call_area(context) + 8 * slot)
 }
 
 pub(super) fn emit_extern_arg(
@@ -100,14 +100,28 @@ pub(super) fn emit_call_extern(
     let context = asm.context;
     let area = call_area(&context);
     let strategy = state_base_strategy(&context);
-    let kernel = celox_sir::extern_abi::native_kernel_index(func);
+    let function = celox_sir::extern_abi::native_function_slot(func);
+    // Generated callees: another kernel, or a function unit, which also
+    // takes the address of its frame after the state pointer.
+    let kernel = celox_sir::extern_abi::native_kernel_index(func).or(function);
+    // The call area: in the state, reached from RBX, or on the machine stack
+    // in a function unit, reached from RSP, which moves by `adjust` while the
+    // call's own frame is pushed.
+    let stack_area = context.frame.is_some();
+    let area_at = |offset: i32, adjust: i32| -> AsmMemoryOperand {
+        if stack_area {
+            rsp + (area + offset + adjust)
+        } else {
+            rbx + (area + offset)
+        }
+    };
 
     // RBX is callee-saved in every C ABI and free here: it holds the state
     // pointer while the segment base belongs to C code.
     emit_state_base(asm, rbx)?;
     for index in saved_xmms(&context, kernel.is_some()) {
         asm.movq(
-            qword_ptr(rbx + (area + CALL_AREA_XMM_SAVE + 8 * index as i32)),
+            qword_ptr(area_at(CALL_AREA_XMM_SAVE + 8 * index as i32, 0)),
             xmm_register(index),
         )?;
     }
@@ -139,7 +153,7 @@ pub(super) fn emit_call_extern(
     // C argument `position` comes from call-area slot `position - leading`.
     for position in registers.len()..arg_count {
         let slot = (position - leading) as i32;
-        asm.mov(rax, qword_ptr(rbx + (area + 8 * slot)))?;
+        asm.mov(rax, qword_ptr(area_at(8 * slot, frame)))?;
         asm.mov(
             qword_ptr(rsp + (shadow + 8 * (position - registers.len()) as i32)),
             rax,
@@ -150,8 +164,17 @@ pub(super) fn emit_call_extern(
             asm.mov(register, rbx)?;
         } else {
             let slot = (position - leading) as i32;
-            asm.mov(register, qword_ptr(rbx + (area + 8 * slot)))?;
+            asm.mov(register, qword_ptr(area_at(8 * slot, frame)))?;
         }
+    }
+    if function.is_some() {
+        // The argument is the frame's offset into the call stack; the callee
+        // takes the frame's address.
+        let stack = context
+            .call_stack
+            .expect("a function that calls function units has a call stack");
+        let base = i32::try_from(stack.base_offset).expect("the call stack fits i32");
+        asm.lea(rsi, ptr(rbx + rsi + base))?;
     }
     asm.mov(
         rax,
@@ -167,7 +190,7 @@ pub(super) fn emit_call_extern(
     asm.mov(rax, qword_ptr(rax + offset))?;
     asm.call(rax)?;
     asm.add(rsp, frame)?;
-    asm.mov(qword_ptr(rbx + (area + CALL_AREA_RESULT)), rax)?;
+    asm.mov(qword_ptr(area_at(CALL_AREA_RESULT, 0)), rax)?;
 
     match strategy {
         StateBaseStrategy::Fs => asm.wrfsbase(rbx)?,
@@ -177,8 +200,56 @@ pub(super) fn emit_call_extern(
     for index in saved_xmms(&context, kernel.is_some()) {
         asm.movq(
             xmm_register(index),
-            qword_ptr(rbx + (area + CALL_AREA_XMM_SAVE + 8 * index as i32)),
+            qword_ptr(area_at(CALL_AREA_XMM_SAVE + 8 * index as i32, 0)),
         )?;
     }
     Ok(())
+}
+
+/// Guard the call of a function unit whose frame is `frame_size` bytes: trap
+/// at `trap` when the frame, whose offset into the call stack is call-area
+/// argument 0, does not fit in the stack or the calls already nest
+/// `MAX_CALL_DEPTH` deep, and otherwise enter one call deeper.
+pub(super) fn emit_call_guard(
+    asm: &mut EmitAssembler,
+    frame_size: usize,
+    trap: CodeLabel,
+) -> Result<(), IcedError> {
+    let context = asm.context;
+    let stack = context
+        .call_stack
+        .expect("a function that calls function units has a call stack");
+    match stack.size.checked_sub(frame_size) {
+        Some(limit) => {
+            let limit = i32::try_from(limit).expect("the call stack fits i32");
+            asm.cmp(qword_ptr(call_slot(&context, 0)), limit)?;
+            asm.ja(trap)?;
+        }
+        None => asm.jmp(trap)?,
+    }
+    let depth = mem_operand(
+        &context,
+        BaseReg::SimState,
+        i32::try_from(stack.depth_offset).expect("the call depth fits i32"),
+    );
+    let max_depth = i32::try_from(celox_sir::MAX_CALL_DEPTH).expect("the depth limit fits i32");
+    asm.cmp(qword_ptr(depth), max_depth)?;
+    asm.jae(trap)?;
+    asm.add(qword_ptr(depth), 1)?;
+    Ok(())
+}
+
+/// Return to the call depth before a function unit's guard, after its call
+/// returned with any status.
+pub(super) fn emit_call_return(asm: &mut EmitAssembler) -> Result<(), IcedError> {
+    let context = asm.context;
+    let stack = context
+        .call_stack
+        .expect("a function that calls function units has a call stack");
+    let depth = mem_operand(
+        &context,
+        BaseReg::SimState,
+        i32::try_from(stack.depth_offset).expect("the call depth fits i32"),
+    );
+    asm.sub(qword_ptr(depth), 1)
 }

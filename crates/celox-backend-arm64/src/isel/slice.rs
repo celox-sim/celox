@@ -7,6 +7,10 @@ impl ISelContext<'_> {
         &mut self,
         inst: &SIRInstruction<RegionedAbsoluteAddr>,
     ) {
+        // A function unit may write any state.
+        if matches!(inst, SIRInstruction::Call { .. }) {
+            self.reg_addrs.clear();
+        }
         if let Some(write) = inst.memory_write()
             && write.width != 0
         {
