@@ -231,7 +231,6 @@ impl JitBackend {
         options: &SimulatorOptions,
         mut trace: Option<&mut crate::debug::CompilationTrace>,
     ) -> Result<SharedJitCode, crate::SimulatorError> {
-        laid_out.reject_function_calls("Cranelift")?;
         let sir = laid_out;
 
         // Auto-select SinglePass RA for large designs where Backtracking RA's
@@ -289,6 +288,11 @@ impl JitBackend {
             cranelift: options.cranelift_options,
         };
         let mut engine = JitEngine::new(layout, &compile_options).map_err(SimulatorError::from)?;
+        laid_out.reject_triggered_calls("Cranelift")?;
+        // Every unit below may call the function units, so they come first.
+        engine
+            .compile_functions(&sir.sir.functions)
+            .map_err(SimulatorError::from)?;
 
         let mut pre_clif_buf = String::new();
         let mut post_clif_buf = String::new();

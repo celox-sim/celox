@@ -495,9 +495,10 @@ fn transfer<A>(
     Ok(())
 }
 
-/// The calls an interpreted unit may nest; deeper ones fail instead of
-/// exhausting memory with activations of frames of no size.
-const MAX_CALL_DEPTH: usize = 1 << 16;
+// Calls nest at most `MAX_CALL_DEPTH` deep, as in the compiled backends:
+// deeper ones fail, where compiled code traps, instead of exhausting memory
+// with activations of frames of no size.
+use celox_sir::MAX_CALL_DEPTH;
 
 /// A [`SIRInstruction::Call`] whose callee the interpreter enters next.
 struct CallRequest<'u, A> {
@@ -2521,13 +2522,12 @@ mod tests {
 
     #[test]
     fn nests_calls_without_the_host_stack() {
-        // Fifty thousand activations would overflow a test thread's stack if
-        // each nested on it.
+        // As deep as calls may nest, each activation on the explicit stack.
         let bit = RegisterType::Bit {
             width: 32,
             signed: false,
         };
-        let unit = caller(SIRValue::new(50_000u32), 32, bit.clone());
+        let unit = caller(SIRValue::new(MAX_CALL_DEPTH as u32), 32, bit.clone());
         let mut machine = FakeMachine::default();
         execute_unit_with_functions(&unit, &mut machine, &[], false, &[factorial()]).unwrap();
         assert!(machine.frames.is_empty());

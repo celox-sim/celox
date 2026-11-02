@@ -297,7 +297,21 @@ pub fn estimate_clif_cost(
         // A call saves the caller's live values and moves each argument into
         // its ABI register.
         SIRInstruction::ExternCall { args, .. } => 20 + args.len() * 2,
-        SIRInstruction::Call { args, .. } => 20 + args.len() * 2,
+        // The guards, the depth update and the call itself, then a store of
+        // each argument into its slot and the load of the outputs, as a
+        // static unaligned access each, with the shifts that concatenate
+        // them.
+        SIRInstruction::Call { args, dst, .. } => {
+            let stores: usize = args
+                .iter()
+                .map(|(_, arg)| match reg_width(register_map, arg) {
+                    width if width <= 64 => 6,
+                    width => 8 * num_chunks(width) + 5,
+                })
+                .sum();
+            let loads = dst.map_or(0, |dst| 11 * num_chunks(reg_width(register_map, &dst)) + 5);
+            40 + (stores + loads) * state_mul
+        }
     }
 }
 

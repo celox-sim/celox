@@ -754,6 +754,7 @@ mod tests {
                 runtime_event_sites: Vec::new(),
                 lane_writers: LaneWriters::default(),
                 access_rank: Default::default(),
+                call_stack: None,
             }
         }
     }

@@ -177,6 +177,8 @@ pub struct SIRTranslator {
     pub layout: MemoryLayout,
     pub options: crate::CompileOptions,
     pub target_config: cranelift::codegen::isa::TargetFrontendConfig,
+    /// The function units that calls enter, which the engine fills.
+    pub(crate) callees: super::call::Callees,
 }
 
 /// Temporary state used only during translation
@@ -184,6 +186,8 @@ pub struct TranslationState<'a, 'b, 'c> {
     pub builder: &'a mut FunctionBuilder<'b>,
     pub regs: HashMap<RegisterId, TransValue>,
     pub mem_ptr: Value,
+    /// The base of the running activation's frame, in a function unit.
+    pub frame_ptr: Option<Value>,
     pub register_map: &'c HashMap<RegisterId, RegisterType>,
     /// Pre-loaded trigger signal values (old values captured at function entry).
     /// Key: (AbsoluteAddr, region). Value: i64 SSA value of the full signal.
@@ -465,8 +469,15 @@ impl SIRTranslator {
             SIRInstruction::CombCaptureEnableIfChanged { old, new, sites } => {
                 self.translate_comb_capture_enable_if_changed(state, old, new, sites);
             }
-            SIRInstruction::Call { .. } => {
-                unreachable!("programs with function calls are rejected before code generation")
+            SIRInstruction::Call {
+                function,
+                frame,
+                args,
+                outputs,
+                dst,
+                ..
+            } => {
+                self.translate_call_inst(state, *function, *frame, args, outputs, *dst);
             }
             SIRInstruction::ExternCall { dst, func, args } => {
                 self.translate_extern_call_inst(state, *dst, *func, args);
@@ -1118,7 +1129,7 @@ impl SIRTranslator {
         }
 
         let mem_ptr = builder.block_params(master_entry)[0];
-        self.translate_units_into(units, &mut builder, mem_ptr, None);
+        self.translate_units_into(units, &mut builder, mem_ptr, None, None);
 
         builder.seal_all_blocks();
         builder.finalize(self.target_config);
@@ -1131,12 +1142,15 @@ impl SIRTranslator {
     /// If `continuation` is `Some`, the last unit's `Return` jumps there instead
     /// of emitting a real return. `Error` terminators always return immediately.
     ///
+    /// `frame_ptr` is the frame base when the units are a function unit.
+    ///
     /// The caller is responsible for calling `seal_all_blocks()` and `finalize()`.
     pub fn translate_units_into(
         &self,
         units: &[crate::ExecutionUnit<RegionedAbsoluteAddr>],
         builder: &mut FunctionBuilder,
         mem_ptr: Value,
+        frame_ptr: Option<Value>,
         continuation: Option<Block>,
     ) {
         if units.is_empty() {
@@ -1177,6 +1191,7 @@ impl SIRTranslator {
                 builder: &mut *builder,
                 regs: HashMap::default(),
                 mem_ptr,
+                frame_ptr,
                 register_map: &unit.register_map,
                 trigger_old_values: trigger_old_values.clone(),
                 imm_constants: HashMap::default(),
@@ -1358,6 +1373,7 @@ impl SIRTranslator {
                 builder: &mut builder,
                 regs: HashMap::default(),
                 mem_ptr,
+                frame_ptr: None,
                 register_map: &unit.register_map,
                 trigger_old_values: trigger_old_values.clone(),
                 imm_constants: HashMap::default(),
@@ -1631,6 +1647,7 @@ impl SIRTranslator {
             builder: &mut builder,
             regs: HashMap::default(),
             mem_ptr,
+            frame_ptr: None,
             register_map: &eu.register_map,
             trigger_old_values: trigger_old_values.clone(),
             imm_constants: HashMap::default(),
