@@ -11,6 +11,7 @@ fn compile_raw(function: MFunction, bytes: usize) -> (JitCode, usize) {
         &allocation.allocated.edge_copies,
         false,
         false,
+        FunctionFrame::default(),
     )
     .unwrap();
     (

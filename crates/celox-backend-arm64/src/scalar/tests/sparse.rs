@@ -78,6 +78,7 @@ fn layouts() -> impl Iterator<Item = (usize, StatePageBases)> {
                     None,
                     None,
                 ],
+                frame: None,
             },
         ]
         .into_iter()

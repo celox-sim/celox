@@ -96,6 +96,15 @@ pub const ALLOCATABLE_REGS: &[PhysReg] = &[
     PhysReg::R15,
 ];
 
+/// The register that holds a function unit's frame address: the first one
+/// its smaller allocatable prefix leaves out. It is callee-saved in every C
+/// ABI, so extern calls preserve it, and a function unit's callee saves and
+/// restores it like any callee-saved register it uses.
+pub fn frame_register(func: &MFunction) -> Option<PhysReg> {
+    func.frame_window
+        .map(|_| ALLOCATABLE_REGS[func.allocatable_register_count()])
+}
+
 /// The registers an extern call changes: those a C function need not
 /// preserve, and RBX, which holds the state pointer during the call sequence.
 const NATIVE_KERNEL_CLOBBERS: &[PhysReg] = &[
@@ -229,22 +238,34 @@ pub fn clobbers(inst: &MInst) -> &'static [PhysReg] {
         {
             NATIVE_KERNEL_CLOBBERS
         }
+        // A function unit may run this very function again, so no value
+        // stays in a register across its call: every live value is spilled
+        // to the caller's own storage, which is per activation in a function
+        // unit. The guard before it only reads memory.
+        MInst::CallExtern { func, .. }
+            if celox_sir::extern_abi::native_function_slot(*func).is_some() =>
+        {
+            ALLOCATABLE_REGS
+        }
+        MInst::CallExtern { func, .. }
+            if celox_sir::extern_abi::native_function_guard(*func).is_some() =>
+        {
+            &[]
+        }
         MInst::CallExtern { .. } => EXTERN_CALL_CLOBBERS,
         _ => &[],
     }
 }
 
-/// Reserved state-base registers do not consume allocator capacity. The
-/// worklist caches the same state pointer in R15 on both target strategies;
-/// only the segment-base strategy makes R15 an allocatable value to evict.
+/// Reserved registers (the state base, a function unit's frame register) do
+/// not consume allocator capacity. The worklist caches the same state pointer
+/// in R15 on both target strategies; only the segment-base strategy makes R15
+/// an allocatable value to evict.
 pub(super) fn allocatable_clobber_count(inst: &MInst, func: &MFunction) -> usize {
+    let allocatable = &ALLOCATABLE_REGS[..func.allocatable_register_count()];
     clobbers(inst)
         .iter()
-        .filter(|&&register| {
-            register != PhysReg::R15
-                || func.target_features.state_base()
-                    != crate::native::features::StateBaseStrategy::R15
-        })
+        .filter(|register| allocatable.contains(register))
         .count()
 }
 

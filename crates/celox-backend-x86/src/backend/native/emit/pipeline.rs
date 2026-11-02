@@ -31,6 +31,16 @@ pub fn emit_prepared_eu(
     )
 }
 
+/// The features of the host the code is compiled for.
+fn target_features(options: &crate::X86BackendOptions) -> crate::native::features::X86Features {
+    #[cfg(test)]
+    if let Some(features) = options.target_features {
+        return features;
+    }
+    let _ = options;
+    crate::native::features::X86Features::detect()
+}
+
 /// Consume the prepared SIR so its storage can be released after instruction
 /// selection, before MIR optimization and register allocation allocate analyses.
 pub fn emit_owned_prepared_eu(
@@ -83,6 +93,33 @@ fn emit_prepared_eu_inner(
         }
     };
 
+    // A function unit's slots become state objects in its frame window.
+    let functions = options.functions.as_deref();
+    let mut function_layout = None;
+    let mut frame_window = None;
+    let sir_eu = match options.function {
+        Some(function) => {
+            let frame = &functions
+                .expect("a function unit is compiled with the program's functions")
+                .frames[function.0 as usize];
+            let (unit, layout, window) = crate::native::function_unit::prepare(
+                &sir_eu, layout, frame,
+            )
+            .map_err(|message| ChainedEmitError::Analysis {
+                phase: "function unit frame window",
+                message,
+            })?;
+            function_layout = Some(layout);
+            frame_window = Some(window);
+            std::borrow::Cow::Owned(unit)
+        }
+        None => sir_eu,
+    };
+    let layout = function_layout.as_ref().unwrap_or(layout);
+    let sir_eu = match crate::native::function_unit::split_at_calls(&sir_eu) {
+        Some(unit) => std::borrow::Cow::Owned(unit),
+        None => sir_eu,
+    };
     if cfg!(debug_assertions) || diagnostics.verify_sir {
         sir_eu
             .verify_result()
@@ -109,8 +146,16 @@ fn emit_prepared_eu_inner(
 
     // Single ISel + optimize + regalloc + emit
     let isel_start = timing.then(crate::timing::now);
-    let mut mfunc =
-        isel::lower_execution_unit_with_diagnostics(&sir_eu, layout, four_state, diagnostics);
+    let mut mfunc = isel::lower_execution_unit_with_functions_for_target(
+        &sir_eu,
+        layout,
+        four_state,
+        diagnostics,
+        functions,
+        target_features(options),
+    );
+    mfunc.call_stack = layout.call_stack;
+    mfunc.frame_window = frame_window;
     if let Some(start) = isel_start {
         tracing::debug!(
             "[native-timing] emit_chained isel mir_blocks={} mir_insts={} vregs={} elapsed={:?}",
@@ -123,15 +168,7 @@ fn emit_prepared_eu_inner(
     dump_native_block_context(label, "after_isel", &sir_eu, &mfunc, diagnostics);
     let check_runtime_events = label == "eval_comb_apply_ff"
         && options.native_tick_loop
-        && sir_eu.blocks.values().any(|block| {
-            block.instructions.iter().any(|instruction| {
-                matches!(
-                    instruction,
-                    crate::SIRInstruction::RuntimeEvent { .. }
-                        | crate::SIRInstruction::CombCaptureEvent { .. }
-                )
-            })
-        });
+        && crate::native::function_unit::may_raise_runtime_events(&sir_eu);
     // Later SIR access is only for an explicitly requested block dump. Traces
     // already own their textual SIR, and runtime-event presence is captured above.
     let sir_eu = if diagnostics.dump.is_some() {

@@ -3534,4 +3534,214 @@ module Top (
         );
         assert!(backend.promotion_error().is_none());
     }
+
+    /// `y = a` with a unit appended to the settle by [`call_factorial`].
+    const FACTORIAL: &str = r#"
+module Top (
+    a: input logic<32>,
+    y: output logic<32>,
+) {
+    assign y = a;
+}
+"#;
+
+    /// Append the function unit `fact(n, fp)` and a combinational unit that
+    /// stores `fact(a)` to `y`. `fact` gets its own frame's offset `fp` as an
+    /// argument and calls itself in the frame after it.
+    fn call_factorial(sir: &mut crate::ir::SirProgram) {
+        use crate::ir::{BasicBlock, SIRValue};
+        use celox_sir::{
+            BinaryOp, BlockId, ExecutionUnit, FrameLayout, FrameSlot, FunctionId, FunctionUnit,
+            RegisterId, RegisterType, SIRInstruction, SIROffset, SIRTerminator,
+        };
+        let comb = sir.eval_comb.iter().flat_map(|unit| unit.blocks.values());
+        let accesses = comb
+            .flat_map(|block| &block.instructions)
+            .collect::<Vec<_>>();
+        let input = accesses
+            .iter()
+            .find_map(|instruction| match instruction {
+                SIRInstruction::Load(_, addr, ..) => Some(*addr),
+                _ => None,
+            })
+            .expect("the settle reads `a`");
+        let output = accesses
+            .iter()
+            .find_map(|instruction| match instruction {
+                SIRInstruction::Store(addr, ..) => Some(*addr),
+                _ => None,
+            })
+            .expect("the settle writes `y`");
+        let slot = |index: u32| crate::ir::RegionedAbsoluteAddr {
+            region: celox_design::FRAME_REGION,
+            instance_id: celox_design::InstanceId(0),
+            var_id: celox_design::StateObjectId(index),
+        };
+        let reg = RegisterId;
+        let bits = |width| RegisterType::Bit {
+            width,
+            signed: false,
+        };
+        let load = |dst, addr| SIRInstruction::Load(reg(dst), addr, SIROffset::Static(0), 32);
+        let store = |addr, src| {
+            SIRInstruction::Store(addr, SIROffset::Static(0), 32, reg(src), vec![], vec![])
+        };
+        let call = |frame, args: Vec<(usize, usize)>, dst| SIRInstruction::Call {
+            function: FunctionId(0),
+            frame: reg(frame),
+            args: args
+                .into_iter()
+                .map(|(slot, arg)| (slot, reg(arg)))
+                .collect(),
+            outputs: vec![2],
+            dst: Some(reg(dst)),
+            effects: Default::default(),
+        };
+        let block = |id, instructions, terminator| {
+            (
+                BlockId(id),
+                BasicBlock {
+                    id: BlockId(id),
+                    params: vec![],
+                    instructions,
+                    terminator,
+                },
+            )
+        };
+        let unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [
+                block(
+                    0,
+                    vec![
+                        load(0, slot(0)),
+                        SIRInstruction::Imm(reg(1), SIRValue::new(2u8)),
+                        SIRInstruction::Binary(reg(2), reg(0), BinaryOp::LtU, reg(1)),
+                    ],
+                    SIRTerminator::Branch {
+                        cond: reg(2),
+                        true_block: (BlockId(1), vec![]),
+                        false_block: (BlockId(2), vec![]),
+                    },
+                ),
+                block(
+                    1,
+                    vec![
+                        SIRInstruction::Imm(reg(3), SIRValue::new(1u8)),
+                        store(slot(2), 3),
+                    ],
+                    SIRTerminator::Return,
+                ),
+                block(
+                    2,
+                    vec![
+                        load(4, slot(1)),
+                        SIRInstruction::Imm(reg(5), SIRValue::new(12u8)),
+                        SIRInstruction::Binary(reg(6), reg(4), BinaryOp::Add, reg(5)),
+                        SIRInstruction::Imm(reg(7), SIRValue::new(1u8)),
+                        SIRInstruction::Binary(reg(8), reg(0), BinaryOp::Sub, reg(7)),
+                        call(6, vec![(0, 8), (1, 6)], 9),
+                        SIRInstruction::Binary(reg(10), reg(0), BinaryOp::Mul, reg(9)),
+                        store(slot(2), 10),
+                    ],
+                    SIRTerminator::Return,
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            register_map: (0..=10)
+                .map(|id| (reg(id), bits(if id == 2 { 1 } else { 32 })))
+                .collect(),
+        };
+        sir.functions.push(FunctionUnit {
+            unit,
+            frame: FrameLayout {
+                size: 12,
+                slots: (0..3)
+                    .map(|index| FrameSlot {
+                        addr: slot(index),
+                        offset: index as usize * 4,
+                        width: 32,
+                        four_state: false,
+                        handle: false,
+                    })
+                    .collect(),
+            },
+            effects: Default::default(),
+        });
+        sir.eval_comb.push(ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [block(
+                0,
+                vec![
+                    load(0, input),
+                    SIRInstruction::Imm(reg(1), SIRValue::new(0u8)),
+                    call(1, vec![(0, 0), (1, 1)], 2),
+                    store(output, 2),
+                ],
+                SIRTerminator::Return,
+            )]
+            .into_iter()
+            .collect(),
+            register_map: (0..=2).map(|id| (reg(id), bits(32))).collect(),
+        });
+        sir.summarize_calls();
+    }
+
+    #[test]
+    fn native_runs_function_units() {
+        let mut sim = SimulatorBuilder::<Simulator>::new(FACTORIAL, "Top")
+            .transform_sir(call_factorial)
+            .build_native()
+            .unwrap();
+        let a = sim.signal("a");
+        let y = sim.signal("y");
+        for (n, factorial) in [(1u32, 1u32), (5, 120), (10, 3_628_800)] {
+            sim.modify(|io| io.set(a, n)).unwrap();
+            assert_eq!(sim.get_as::<u32>(y), factorial, "fact({n})");
+        }
+    }
+
+    #[test_case::test_case(false; "optimizing")]
+    #[test_case::test_case(true; "baseline")]
+    fn promotes_a_program_with_function_units(baseline: bool) {
+        let gate = Gate::closed();
+        let worker_gate = gate.0.clone();
+        let mut sim: Simulator<TieredBackend> =
+            SimulatorBuilder::<Simulator>::new(FACTORIAL, "Top")
+                .transform_sir(call_factorial)
+                .build_tiered_with_compiler(move |laid_out, options, cancel| {
+                    wait_for_gate_or_cancel(&worker_gate, cancel)?;
+                    let mut options = options.clone();
+                    options.x86_options.baseline = baseline;
+                    options.x86_options.diagnostics.verify_mir_passes = true;
+                    options.x86_options.diagnostics.verify_regalloc = true;
+                    let image = NativeBackend::compile_image(laid_out, &options)?;
+                    let shared = unsafe { SharedNativeCode::from_image(image)? };
+                    Ok(CompiledCode::Native(Arc::new(shared)))
+                })
+                .unwrap();
+        let a = sim.signal("a");
+        let y = sim.signal("y");
+        // Interpreted...
+        sim.modify(|io| io.set(a, 5u32)).unwrap();
+        assert_eq!(sim.get_as::<u32>(y), 120);
+        assert!(!sim.is_compiled());
+        // ...promoted at a settle, where no call runs...
+        gate.open();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut n = 0u32;
+        while !sim.is_compiled() && std::time::Instant::now() < deadline {
+            n = (n + 1) % 8;
+            sim.modify(|io| io.set(a, n)).unwrap();
+            sim.get_as::<u32>(y);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(sim.is_compiled(), "{:?}", sim.backend.promotion_error());
+        // ...and compiled, on the state image the interpreter left.
+        for (n, factorial) in [(6u32, 720u32), (1, 1), (12, 479_001_600)] {
+            sim.modify(|io| io.set(a, n)).unwrap();
+            assert_eq!(sim.get_as::<u32>(y), factorial, "fact({n})");
+        }
+    }
 }

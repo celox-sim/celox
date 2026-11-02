@@ -126,6 +126,7 @@ fn extern_calls_preserve_live_values(tick_loop: bool) {
         &allocation.allocated.edge_copies,
         tick_loop,
         false,
+        FunctionFrame::default(),
     )
     .unwrap();
     let jit = JitCode::new(&emitted.code).unwrap();
