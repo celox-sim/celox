@@ -307,9 +307,14 @@ full coverage on its next push. Unrelated paths may still skip queue jobs.
   PR merges.
 - To cancel an automatic merge request, remove `merge-ready`, then comment
   `@mergifyio dequeue`. Removing the label alone does not remove a queued PR.
-- The release PR requires `merge-ready` from the weekly release workflow and
-  must not carry `release:hold`. Dependency rolls and lane synchronization use
-  the same queue request label.
+- Start a release manually with `gh workflow run release.yml --ref master`
+  (or Actions → Release Management → Run workflow on `master`). This creates
+  or updates the release PR and requests merge queue admission; successful
+  queue checks and release qualification then gate publication. There is no
+  scheduled release. Master pushes keep the release tracker issue up to date.
+- The release PR requires `merge-ready` from the manually dispatched release
+  workflow and must not carry `release:hold`. Dependency rolls and lane
+  synchronization use the same queue request label.
 - Queue draft title checks validate the original PRs and their release impact,
   using the release policy from the exact batch tree.
 - GitHub's strict up-to-date setting must be off for draft-PR queues: Mergify

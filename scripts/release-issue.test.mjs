@@ -27,6 +27,7 @@ test("pushes create one release issue with the planner's version and notes", asy
   assert.ok(f.calls[0][2].startsWith(TRACKER_MARKER));
   assert.match(f.calls[0][2], /release 0\.13\.0/);
   assert.match(f.calls[0][2], /Release notes/);
+  assert.match(f.calls[0][2], /created only by manually running Release Management on master/);
 });
 
 test("subsequent pushes edit the same held tracker and skip unchanged notes", async () => {
@@ -50,7 +51,7 @@ test("does not create an empty release and closes an obsolete tracker", async ()
   assert.equal(f.calls[0][0], "close");
 });
 
-test("weekly PR handoff closes the tracker without invoking the planner", async () => {
+test("manual PR handoff closes the tracker without invoking the planner", async () => {
   const f = fixture([tracker()]);
   f.manifest.buildPullRequests = () => { throw new Error("Must not plan again"); };
   await updateReleaseIssue({ ...f, pullNumber: "2716" });
@@ -79,7 +80,7 @@ test("issue client uses JSON input and PATCH for updates, preserving hold labels
   assert.deepEqual(calls, [[["api", "repos/celox-sim/celox/issues/12", "--method", "PATCH", "--input", "-"], JSON.stringify({ body })]]);
 });
 
-test("push path can only update issues; weekly and manual paths create PRs and honor hold", () => {
+test("push path can only update issues; only manual runs create PRs and honor hold", () => {
   const workflow = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
   const preview = workflow.split("  release-issue:\n")[1].split("  release-please:\n")[0];
   const prepare = workflow.split("  release-please:\n")[1].split("  queue-release:\n")[0];
@@ -88,10 +89,13 @@ test("push path can only update issues; weekly and manual paths create PRs and h
   assert.match(preview, /issues: write/);
   assert.match(preview, /pull-requests: read/);
   assert.doesNotMatch(preview, /release-please-action|release-token|pull-requests: write/);
-  assert.match(prepare, /if: github.event_name == 'schedule' \|\| github.event_name == 'workflow_dispatch'/);
+  assert.doesNotMatch(workflow, /schedule:|event_name == 'schedule'/);
+  assert.match(workflow, /workflow_dispatch:/);
+  assert.match(prepare, /if: github.event_name == 'workflow_dispatch'/);
   assert.match(prepare, /if: steps.release-issue.outputs.held != 'true'/);
   assert.match(prepare, /held="\$\(node scripts\/release-issue.mjs held\)"/);
   assert.match(prepare, /if: steps.release.outputs.prs_created == 'true'/);
   assert.match(prepare, /fromJSON\(steps.release.outputs.pr\).number/);
-  assert.match(workflow.split("  queue-release:\n")[1], /needs.release-please.outputs.held != 'true'/);
+  const queue = workflow.split("  queue-release:\n")[1];
+  assert.match(queue, /needs.release-please.outputs.held != 'true' && github.event_name == 'workflow_dispatch'/);
 });
