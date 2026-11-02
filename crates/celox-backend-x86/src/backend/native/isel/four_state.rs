@@ -68,6 +68,263 @@ fn equality_result_mask(
     result
 }
 
+fn scalar_bitwise(
+    ctx: &ISelContext,
+    instruction: &SIRInstruction<RegionedAbsoluteAddr>,
+) -> Option<(RegisterId, RegisterId, BinaryOp, RegisterId, usize)> {
+    let SIRInstruction::Binary(dst, lhs, op, rhs) = *instruction else {
+        return None;
+    };
+    let width = ctx.sir_width(&dst);
+    if width > 64 || ctx.sir_width(&lhs) != width || ctx.sir_width(&rhs) != width {
+        return None;
+    }
+    let op = match op {
+        BinaryOp::LogicAnd if width == 1 => BinaryOp::And,
+        BinaryOp::LogicOr if width == 1 => BinaryOp::Or,
+        BinaryOp::And | BinaryOp::Or | BinaryOp::Xor => op,
+        _ => return None,
+    };
+    Some((dst, lhs, op, rhs, width))
+}
+
+/// Only maximal scalar trees need expansion. Their children are still lowered
+/// normally so other ISel patterns can use their captured SSA values.
+pub(super) fn associative_children(
+    ctx: &ISelContext,
+    block: &BasicBlock<RegionedAbsoluteAddr>,
+    definitions: &HashMap<RegisterId, usize>,
+) -> HashSet<RegisterId> {
+    let mut children = HashSet::default();
+    if !ctx.four_state {
+        return children;
+    }
+    for instruction in &block.instructions {
+        let Some((_, lhs, op, rhs, width)) = scalar_bitwise(ctx, instruction) else {
+            continue;
+        };
+        for source in [lhs, rhs] {
+            if ctx.single_use_registers.contains(&source)
+                && let Some(&index) = definitions.get(&source)
+                && let Some((_, _, child_op, _, child_width)) =
+                    scalar_bitwise(ctx, &block.instructions[index])
+                && child_op == op
+                && child_width == width
+            {
+                children.insert(source);
+            }
+        }
+    }
+    children
+}
+
+pub(super) fn try_lower_associative_binary(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    instruction: &SIRInstruction<RegionedAbsoluteAddr>,
+    sir_block: &BasicBlock<RegionedAbsoluteAddr>,
+    definitions: &HashMap<RegisterId, usize>,
+) -> bool {
+    if !ctx.four_state {
+        return false;
+    }
+    let Some((dst, lhs, op, rhs, width)) = scalar_bitwise(ctx, instruction) else {
+        return false;
+    };
+    if ctx.associative_children.contains(&dst)
+        || (ctx.const_mask_value(lhs) == Some(0) && ctx.const_mask_value(rhs) == Some(0))
+    {
+        return false;
+    }
+    let mut pending = vec![rhs, lhs];
+    let mut leaves = Vec::new();
+    // Bound extra lowering work even for adversarially large expressions.
+    let mut remaining = 16;
+    while let Some(source) = pending.pop() {
+        if remaining > 0
+            && ctx.single_use_registers.contains(&source)
+            && let Some(&index) = definitions.get(&source)
+            && let Some((_, left, child_op, right, child_width)) =
+                scalar_bitwise(ctx, &sir_block.instructions[index])
+            && child_op == op
+            && child_width == width
+        {
+            remaining -= 1;
+            pending.push(right);
+            pending.push(left);
+        } else {
+            leaves.push(source);
+        }
+    }
+    if leaves.len() < 3 {
+        return false;
+    }
+    let operands: Vec<_> = leaves
+        .into_iter()
+        .map(|source| {
+            let value = ctx.reg_map.get(source);
+            let mask = ctx.get_mask(source, block);
+            (value, mask)
+        })
+        .collect();
+    let (value, mask) = lower_bitwise_planes(ctx, block, op, &operands, width);
+    ctx.reg_map.set(dst, value);
+    ctx.set_mask(dst, mask);
+    true
+}
+
+/// Reduce equal-width associative bitwise operands in four-state logic.
+/// AND collects possible ones and OR collects definite ones; both collect
+/// unknown inputs separately. Apply dominance once at the root, rather than
+/// materializing a normalized mask after every intermediate operation.
+/// IEEE 1800-2023 Tables 11-11 through 11-13 include Z as unknown here.
+pub(super) fn lower_bitwise_planes(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    operation: BinaryOp,
+    operands: &[(VReg, VReg)],
+    width: usize,
+) -> (VReg, VReg) {
+    let join = |ctx: &mut ISelContext,
+                block: &mut MBlock,
+                (left, lm): (VReg, VReg),
+                (right, rm): (VReg, VReg)| {
+        let value = ctx.alloc_vreg(SpillDesc::transient());
+        let mask = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(match operation {
+            BinaryOp::And => MInst::And {
+                dst: value,
+                lhs: left,
+                rhs: right,
+            },
+            BinaryOp::Or => MInst::Or {
+                dst: value,
+                lhs: left,
+                rhs: right,
+            },
+            BinaryOp::Xor => MInst::Xor {
+                dst: value,
+                lhs: left,
+                rhs: right,
+            },
+            _ => unreachable!(),
+        });
+        block.push(MInst::Or {
+            dst: mask,
+            lhs: lm,
+            rhs: rm,
+        });
+        (value, mask)
+    };
+    // Binary-carry reduction balances dependency chains while keeping only
+    // logarithmically many partial results live, rather than all operands.
+    let mut levels: Vec<Option<(VReg, VReg)>> = Vec::new();
+    for &(value, mask) in operands {
+        let term = match operation {
+            BinaryOp::And => {
+                let possible = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Or {
+                    dst: possible,
+                    lhs: value,
+                    rhs: mask,
+                });
+                possible
+            }
+            BinaryOp::Or => {
+                let known = ctx.alloc_vreg(SpillDesc::transient());
+                let definite = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::BitNot {
+                    dst: known,
+                    src: mask,
+                });
+                block.push(MInst::And {
+                    dst: definite,
+                    lhs: value,
+                    rhs: known,
+                });
+                definite
+            }
+            BinaryOp::Xor => value,
+            _ => unreachable!(),
+        };
+        let mut pair = (term, mask);
+        let mut level = 0;
+        while level < levels.len() {
+            let Some(previous) = levels[level].take() else {
+                break;
+            };
+            pair = join(ctx, block, previous, pair);
+            level += 1;
+        }
+        if level == levels.len() {
+            levels.push(Some(pair));
+        } else {
+            levels[level] = Some(pair);
+        }
+    }
+    let mut combined = None;
+    for part in levels.into_iter().flatten() {
+        combined = Some(match combined {
+            None => part,
+            Some(previous) => join(ctx, block, part, previous),
+        });
+    }
+    let (combined, unknown) = combined.expect("a bitwise reduction has operands");
+    let (value, mask) = match operation {
+        BinaryOp::And => {
+            let mask = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::And {
+                dst: mask,
+                lhs: combined,
+                rhs: unknown,
+            });
+            (combined, mask)
+        }
+        BinaryOp::Or => {
+            let value = ctx.alloc_vreg(SpillDesc::transient());
+            let no_one = ctx.alloc_vreg(SpillDesc::transient());
+            let mask = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Or {
+                dst: value,
+                lhs: combined,
+                rhs: unknown,
+            });
+            block.push(MInst::BitNot {
+                dst: no_one,
+                src: combined,
+            });
+            block.push(MInst::And {
+                dst: mask,
+                lhs: no_one,
+                rhs: unknown,
+            });
+            (value, mask)
+        }
+        BinaryOp::Xor => {
+            let value = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Or {
+                dst: value,
+                lhs: combined,
+                rhs: unknown,
+            });
+            (value, unknown)
+        }
+        _ => unreachable!(),
+    };
+    let (value, mask) = if width < 64 {
+        let bounded_value = ctx.alloc_vreg(SpillDesc::transient());
+        let bounded_mask = ctx.alloc_vreg(SpillDesc::transient());
+        ctx.emit_and_imm(block, bounded_value, value, mask_for_width(width));
+        ctx.emit_and_imm(block, bounded_mask, mask, mask_for_width(width));
+        (bounded_value, bounded_mask)
+    } else {
+        (value, mask)
+    };
+    ctx.known_bits.insert(value, width);
+    ctx.known_bits.insert(mask, width);
+    (value, mask)
+}
+
 /// Compute result mask for a binary operation.
 ///
 /// Mask formulas (from IEEE 1800 / Cranelift backend):
@@ -1890,32 +2147,32 @@ pub(super) fn lower_four_state_mux_chunk(
         lhs: value_diff,
         rhs: mask_diff,
     });
-    let unknown_value = ctx.alloc_vreg(SpillDesc::transient());
-    block.push(MInst::Or {
-        dst: unknown_value,
-        lhs: then_value,
-        rhs: diff,
+    // When the condition is ambiguous, every differing bit becomes X
+    // (value=1, mask=1); equal bits already match either selected arm.
+    // Select the differing bits once and share them between the planes.
+    let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+    block.push(MInst::LoadImm {
+        dst: zero,
+        value: 0,
     });
-    let unknown_mask = ctx.alloc_vreg(SpillDesc::transient());
-    block.push(MInst::Or {
-        dst: unknown_mask,
-        lhs: then_mask,
-        rhs: diff,
-    });
-
-    let value = ctx.alloc_vreg(SpillDesc::transient());
+    let uncertain = ctx.alloc_vreg(SpillDesc::transient());
     block.push(MInst::Select {
-        dst: value,
+        dst: uncertain,
         cond: cond_is_unknown,
-        true_val: unknown_value,
-        false_val: selected_value,
+        true_val: diff,
+        false_val: zero,
+    });
+    let value = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::Or {
+        dst: value,
+        lhs: selected_value,
+        rhs: uncertain,
     });
     let mask = ctx.alloc_vreg(SpillDesc::transient());
-    block.push(MInst::Select {
+    block.push(MInst::Or {
         dst: mask,
-        cond: cond_is_unknown,
-        true_val: unknown_mask,
-        false_val: selected_mask,
+        lhs: selected_mask,
+        rhs: uncertain,
     });
 
     if width < 64 {

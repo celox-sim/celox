@@ -17,6 +17,7 @@ mod four_state;
 mod instruction;
 mod memory;
 mod packed_bit_store;
+mod packed_state;
 mod runtime_events;
 mod slice;
 mod sparse;
@@ -1167,6 +1168,9 @@ fn lower_execution_unit_for_target(
             .filter(|(_, uses)| uses.len() == 1)
             .map(|(register, _)| *register)
             .collect(),
+        associative_children: HashSet::default(),
+        case_compared_values: HashSet::default(),
+        packed_planes: HashMap::default(),
         consts: ConstMap::default(),
         low_zero_bits: crate::HashMap::default(),
         four_state,
@@ -1293,6 +1297,8 @@ fn lower_execution_unit_for_target(
         let mut lookup_emit_cache = DenseLookupEmitCache::default();
         let mut packed_field_load_cache = PackedFieldLoadCache::default();
         let sir_defs = collect_sir_defs(sir_block);
+        ctx.associative_children = four_state::associative_children(&ctx, sir_block, &sir_defs);
+        ctx.case_compared_values = packed_state::compared_values(&ctx, sir_block, &sir_defs);
         ctx.transpose_tiles = transpose::plan_tiles(sir_block, &sir_defs, &eu.register_map);
 
         // Waveform observers share Store/Commit notification sites with clock
@@ -1853,6 +1859,9 @@ struct ISelContext<'a> {
     /// Block-local SSA tile results shared by bit-transpose Concat columns.
     transpose_tiles: transpose::TileCache,
     single_use_registers: HashSet<RegisterId>,
+    associative_children: HashSet<RegisterId>,
+    case_compared_values: HashSet<RegisterId>,
+    packed_planes: HashMap<RegisterId, packed_state::PackedPlanes>,
     /// Conservative lower bound for the number of low zero bits in a SIR value.
     /// This lets dynamic bit offsets that are known byte-aligned use indexed
     /// byte addressing without a dynamic intra-byte shift.

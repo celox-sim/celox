@@ -1,5 +1,6 @@
 //! Concatenation, guarded selections, and mux chunk blending.
 
+use super::four_state::lower_bitwise_planes;
 use super::*;
 
 pub(super) fn match_guarded_cmp_select_cond(
@@ -730,8 +731,8 @@ fn lower_mux_chunk_blend(
 }
 
 /// Lift independently computed bitwise lanes before assembling their result.
-/// Every lifted operation performs its original four-state normalization;
-/// packing the captured operands themselves preserves raw Z encodings.
+/// Homogeneous chains share their mask calculation. Packing the captured
+/// operands preserves raw Z until the bitwise operation normalizes it to X.
 pub(super) fn try_lower_concat_of_bitwise_lanes(
     ctx: &mut ISelContext,
     block: &mut MBlock,
@@ -855,49 +856,30 @@ fn lower_bitwise_lanes(
     definitions: &HashMap<RegisterId, usize>,
     depth: usize,
 ) -> (VReg, VReg) {
-    let (lhs, lm) = lower_bitwise_lane_operands(
-        ctx,
-        block,
-        &lanes.left,
-        width,
-        sir_block,
-        definitions,
-        depth,
-    );
-    let (rhs, rm) = lower_bitwise_lane_operands(
-        ctx,
-        block,
-        &lanes.right,
-        width,
-        sir_block,
-        definitions,
-        depth,
-    );
-    let mask = lower_binary_mask(ctx, block, &lanes.operation, lhs, rhs, lm, rm, width);
-    let value = ctx.alloc_vreg(SpillDesc::transient());
-    block.push(match lanes.operation {
-        BinaryOp::And => MInst::And {
-            dst: value,
-            lhs,
-            rhs,
-        },
-        BinaryOp::Or => MInst::Or {
-            dst: value,
-            lhs,
-            rhs,
-        },
-        BinaryOp::Xor => MInst::Xor {
-            dst: value,
-            lhs,
-            rhs,
-        },
-        _ => unreachable!(),
-    });
-    let normalized = ctx.alloc_vreg(SpillDesc::transient());
-    block.push(MInst::Or {
-        dst: normalized,
-        lhs: value,
-        rhs: mask,
-    });
-    (normalized, mask)
+    // Flatten only homogeneous, single-use trees of equal-width lanes. A
+    // different operator is a normalization boundary, and the depth bound
+    // preserves the existing limit on compiler recursion.
+    let operation = lanes.operation;
+    let mut pending = vec![(lanes.right, depth), (lanes.left, depth)];
+    let mut operands = Vec::new();
+    while let Some((parts, depth)) = pending.pop() {
+        if depth < 16
+            && let Some(child) = match_bitwise_lanes(ctx, &parts, sir_block, definitions)
+            && child.operation == operation
+        {
+            pending.push((child.right, depth + 1));
+            pending.push((child.left, depth + 1));
+        } else {
+            operands.push(lower_bitwise_lane_operands(
+                ctx,
+                block,
+                &parts,
+                width,
+                sir_block,
+                definitions,
+                depth,
+            ));
+        }
+    }
+    lower_bitwise_planes(ctx, block, operation, &operands, width)
 }
