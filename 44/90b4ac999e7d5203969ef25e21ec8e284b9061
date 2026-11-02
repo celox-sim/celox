@@ -1,1 +1,6 @@
-Rebase PR #2976 onto current master to resolve conflicts with the assignment-place refactor and newer conformance evidence.
+Revision history for #2976:
+
+rev 2 (content) 2026-11-02 10:09 UTC — Rebase PR #2976 onto current master to resolve conflicts with the assignment-place refactor and newer conformance evidence.
+rev 1 (initial) 2026-11-02 10:09 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2976,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"912c17f76a9fd2955435e28095fa25560ed972a9","timestamp_iso":"2026-11-02T10:09:23Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"912c17f76a9fd2955435e28095fa25560ed972a9","new_sha":"4490b4ac999e7d5203969ef25e21ec8e284b9061","timestamp_iso":"2026-11-02T10:09:23Z","reason":"Rebase PR #2976 onto current master to resolve conflicts with the assignment-place refactor and newer conformance evidence.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/912c17f76a9fd2955435e28095fa25560ed972a9...4490b4ac999e7d5203969ef25e21ec8e284b9061"}]} -->
