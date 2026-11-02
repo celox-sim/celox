@@ -2,6 +2,17 @@
   "cases": [
     {
       "category": "Sequential",
+      "detail": "scan::sscanf_inputs_before_property_outputs at 198:20: assert_eq a1: expected 0x5, got 0x3",
+      "expectation": "Simulation",
+      "name": "scan::sscanf_inputs_before_property_outputs",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "scan::sscanf_integral_fields_and_failure_counts at 24:3: assert_eq ok: expected 0x1, got 0x0",
       "expectation": "Simulation",
       "name": "scan::sscanf_integral_fields_and_failure_counts",

@@ -468,6 +468,7 @@ fn const_property_writes_are_rejected() {
         "c.h = null;",
         "c.fixed = 8'h1;",
         "c.p.x = 4'hf;",
+        "void'($sscanf(\"5\", \"%d\", c.k));",
     ];
     for write in writes {
         let source = format!(

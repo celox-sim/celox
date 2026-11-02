@@ -87,10 +87,7 @@ impl Ff<'_, '_> {
             ],
         )?;
         self.check_tagged_guards(&guards)?;
-        match lvalues.as_slice() {
-            [target] => self.assign(target, &data)?,
-            targets => self.assign_concat(targets, &data)?,
-        }
+        self.write_system_actual(&lvalues, &data)?;
         Ok(sv::ir::Expr::Ident(result_name))
     }
 }
