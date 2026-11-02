@@ -1,5 +1,10 @@
 #![allow(clippy::disallowed_methods)] // This binary is the process environment boundary.
 
+// Frontend trees and background JIT passes allocate many short-lived objects.
+// Keep this choice at the CLI boundary so library/VPI hosts own their allocator.
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::{
     env,
     ffi::OsStr,
