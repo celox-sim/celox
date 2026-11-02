@@ -176,6 +176,7 @@ fn compile_raw(mut function: MFunction) -> (JitCode, usize) {
         &allocation.allocated.edge_copies,
         false,
         false,
+        FunctionFrame::default(),
     )
     .unwrap();
     (

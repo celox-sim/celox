@@ -288,7 +288,7 @@ impl JitBackend {
             cranelift: options.cranelift_options,
         };
         let mut engine = JitEngine::new(layout, &compile_options).map_err(SimulatorError::from)?;
-        laid_out.reject_triggered_calls("Cranelift")?;
+        laid_out.reject_unsupported_callee_stores("Cranelift", false)?;
         // Every unit below may call the function units, so they come first.
         engine
             .compile_functions(&sir.sir.functions)
