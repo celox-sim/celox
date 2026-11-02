@@ -1,0 +1,1 @@
+Coordinator invariants: scan output carries the place's checks (place_output), float precision from the shared expr_float_precision; Codex: real/shortreal and tagged-member outputs
