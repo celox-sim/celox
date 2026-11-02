@@ -80,6 +80,20 @@ impl Uses {
     pub fn as_slice(&self) -> &[VReg] {
         &self.buf[..usize::from(self.len)]
     }
+
+    /// Unique operands in register order without allocating a temporary vector.
+    pub(crate) fn sorted_unique(mut self) -> Self {
+        self.buf[..usize::from(self.len)].sort_unstable();
+        let mut len = 0;
+        for index in 0..usize::from(self.len) {
+            if len == 0 || self.buf[index] != self.buf[len - 1] {
+                self.buf[len] = self.buf[index];
+                len += 1;
+            }
+        }
+        self.len = len as u8;
+        self
+    }
 }
 
 impl std::ops::Deref for Uses {
