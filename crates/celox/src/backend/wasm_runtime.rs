@@ -187,6 +187,7 @@ impl WasmBackend {
         laid_out: &crate::ir::LaidOutProgram,
         options: &SimulatorOptions,
     ) -> Result<Self, crate::SimulatorError> {
+        laid_out.reject_function_calls("wasm")?;
         let engine = Engine::default();
         let sir = laid_out;
         let layout = laid_out.layout().clone();

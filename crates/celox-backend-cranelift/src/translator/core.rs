@@ -465,6 +465,9 @@ impl SIRTranslator {
             SIRInstruction::CombCaptureEnableIfChanged { old, new, sites } => {
                 self.translate_comb_capture_enable_if_changed(state, old, new, sites);
             }
+            SIRInstruction::Call { .. } => {
+                unreachable!("programs with function calls are rejected before code generation")
+            }
             SIRInstruction::ExternCall { dst, func, args } => {
                 self.translate_extern_call_inst(state, *dst, *func, args);
             }

@@ -22,8 +22,8 @@ use std::fmt;
 
 use celox_sir::extern_abi::ExternValue;
 use celox_sir::{
-    BinaryOp, BlockId, ExecutionUnit, RegisterId, RegisterType, SIRInstruction, SIROffset,
-    SIRTerminator, SIRValue, TriggerIdWithKind, UnaryOp,
+    BinaryOp, BlockId, ExecutionUnit, FunctionId, FunctionUnit, RegisterId, RegisterType,
+    SIRInstruction, SIROffset, SIRTerminator, SIRValue, TriggerIdWithKind, UnaryOp,
 };
 use num_bigint::{BigInt, BigUint};
 use num_traits::{Signed, ToPrimitive, Zero};
@@ -239,6 +239,19 @@ pub trait InterpMachine<A> {
             "call of extern function {func}"
         )))
     }
+
+    /// Enter a frame of `function` based `base` bytes into the stack, which
+    /// the frame slot addresses of `function` name until the matching
+    /// [`Self::pop_frame`].
+    fn push_frame(&mut self, base: usize, function: FunctionId) -> Result<(), InterpError> {
+        let _ = base;
+        Err(InterpError::UnsupportedOperation(format!(
+            "call of {function}"
+        )))
+    }
+
+    /// Leave the frame entered last.
+    fn pop_frame(&mut self) {}
 }
 
 /// Outcome of one interpreted unit invocation.
@@ -263,8 +276,20 @@ pub fn execute_unit<A, M: InterpMachine<A>>(
     entry_args: &[SIRValue],
     four_state: bool,
 ) -> Result<UnitExit, InterpError> {
+    execute_unit_with_functions(unit, machine, entry_args, four_state, &[])
+}
+
+/// [`execute_unit`] for a unit of a program with function units, which its
+/// [`SIRInstruction::Call`]s run.
+pub fn execute_unit_with_functions<A, M: InterpMachine<A>>(
+    unit: &ExecutionUnit<A>,
+    machine: &mut M,
+    entry_args: &[SIRValue],
+    four_state: bool,
+    functions: &[FunctionUnit<A>],
+) -> Result<UnitExit, InterpError> {
     let mut regs = Registers::new(&unit.register_map, four_state);
-    execute_prepared_unit(unit, machine, entry_args, four_state, &mut regs)
+    execute_prepared_unit(unit, machine, entry_args, four_state, &mut regs, functions)
 }
 
 /// Execute a unit whose register types were prepared when the interpreter
@@ -277,9 +302,10 @@ pub(crate) fn execute_prepared_unit<A, M: InterpMachine<A>>(
     entry_args: &[SIRValue],
     four_state: bool,
     regs: &mut Registers,
+    functions: &[FunctionUnit<A>],
 ) -> Result<UnitExit, InterpError> {
     regs.begin_execution();
-    execute_unit_inner(unit, machine, entry_args, four_state, regs)
+    execute_unit_inner(unit, machine, entry_args, four_state, regs, functions)
 }
 
 fn execute_unit_inner<A, M: InterpMachine<A>>(
@@ -288,6 +314,7 @@ fn execute_unit_inner<A, M: InterpMachine<A>>(
     entry_args: &[SIRValue],
     four_state: bool,
     regs: &mut Registers,
+    functions: &[FunctionUnit<A>],
 ) -> Result<UnitExit, InterpError> {
     let entry = unit
         .blocks
@@ -302,21 +329,105 @@ fn execute_unit_inner<A, M: InterpMachine<A>>(
     for (param, value) in entry.params.iter().zip(entry_args) {
         regs.set(*param, value.clone());
     }
+    let mut calls = Vec::new();
+    let result = run_activations(unit, machine, four_state, regs, functions, &mut calls);
+    // A failing call leaves the frames it entered.
+    for _ in &calls {
+        machine.pop_frame();
+    }
+    result
+}
 
+/// Run `unit` and the calls it makes, each in an activation of its own on
+/// `calls` rather than on the host stack.
+fn run_activations<'u, A, M: InterpMachine<A>>(
+    unit: &'u ExecutionUnit<A>,
+    machine: &mut M,
+    four_state: bool,
+    regs: &mut Registers,
+    functions: &'u [FunctionUnit<A>],
+    calls: &mut Vec<(Activation<'u, A>, Registers)>,
+) -> Result<UnitExit, InterpError> {
+    let mut running = unit;
     let mut current = unit.entry_block_id;
+    let mut next = 0;
     loop {
-        let block = unit
+        let block = running
             .blocks
             .get(&current)
             .ok_or(InterpError::UnknownBlock(current))?;
-        for instruction in &block.instructions {
-            exec_instruction(instruction, regs, machine, four_state)?;
+        let mut entered = None;
+        {
+            let regs = match calls.last_mut() {
+                Some((_, callee)) => callee,
+                None => &mut *regs,
+            };
+            while let Some(instruction) = block.instructions.get(next) {
+                next += 1;
+                if let Some(call) =
+                    exec_instruction(instruction, regs, machine, four_state, functions)?
+                {
+                    entered = Some(call);
+                    break;
+                }
+            }
         }
+        if let Some(call) = entered {
+            if calls.len() >= MAX_CALL_DEPTH {
+                return Err(InterpError::Machine(format!(
+                    "calls nested deeper than {MAX_CALL_DEPTH}"
+                )));
+            }
+            machine.push_frame(call.base, call.id)?;
+            let mut callee = Registers::new(&call.function.unit.register_map, four_state);
+            callee.begin_execution();
+            calls.push((
+                Activation {
+                    unit: running,
+                    block: current,
+                    next,
+                    function: call.function,
+                    outputs: call.outputs,
+                    dst: call.dst,
+                },
+                callee,
+            ));
+            store_arguments(&call, machine)?;
+            running = &call.function.unit;
+            current = running.entry_block_id;
+            next = 0;
+            continue;
+        }
+        next = 0;
+        if let SIRTerminator::Return = &block.terminator {
+            let Some((activation, _)) = calls.last() else {
+                return Ok(UnitExit::Return);
+            };
+            let value = call_outputs(activation.function, activation.outputs, machine)?;
+            let (activation, _) = calls.pop().expect("the call returning");
+            machine.pop_frame();
+            running = activation.unit;
+            current = activation.block;
+            next = activation.next;
+            if let Some(dst) = activation.dst {
+                let caller = match calls.last_mut() {
+                    Some((_, caller)) => caller,
+                    None => &mut *regs,
+                };
+                let width = caller.width(dst);
+                caller.set(dst, truncate(value, width));
+            }
+            continue;
+        }
+        let regs = match calls.last_mut() {
+            Some((_, callee)) => callee,
+            None => &mut *regs,
+        };
         match &block.terminator {
-            SIRTerminator::Return => return Ok(UnitExit::Return),
+            SIRTerminator::Return => unreachable!("handled above"),
             SIRTerminator::Error(code) => return Err(InterpError::Fatal(*code)),
             SIRTerminator::Jump(target, args) => {
-                transfer(regs, unit, *target, args)?;
+                transfer(regs, running, *target, args)?;
                 current = *target;
             }
             SIRTerminator::Branch {
@@ -332,7 +443,7 @@ fn execute_unit_inner<A, M: InterpMachine<A>>(
                     None => branch_condition_holds(regs.get(*cond)?),
                 };
                 let target = if holds { true_block } else { false_block };
-                transfer(regs, unit, target.0, &target.1)?;
+                transfer(regs, running, target.0, &target.1)?;
                 current = target.0;
             }
             SIRTerminator::Switch {
@@ -349,7 +460,7 @@ fn execute_unit_inner<A, M: InterpMachine<A>>(
                     .find(|case| case.value == selector)
                     .map(|case| case.target)
                     .unwrap_or(*default);
-                transfer(regs, unit, target, &[])?;
+                transfer(regs, running, target, &[])?;
                 current = target;
             }
         }
@@ -384,19 +495,129 @@ fn transfer<A>(
     Ok(())
 }
 
-fn exec_instruction<A, M: InterpMachine<A>>(
-    instruction: &SIRInstruction<A>,
+/// The calls an interpreted unit may nest; deeper ones fail instead of
+/// exhausting memory with activations of frames of no size.
+const MAX_CALL_DEPTH: usize = 1 << 16;
+
+/// A [`SIRInstruction::Call`] whose callee the interpreter enters next.
+struct CallRequest<'u, A> {
+    function: &'u FunctionUnit<A>,
+    id: FunctionId,
+    base: usize,
+    /// The argument values, by callee slot.
+    args: Vec<(usize, SIRValue)>,
+    outputs: &'u [usize],
+    dst: Option<RegisterId>,
+}
+
+/// A call being run: where its caller continues, and what it returns.
+struct Activation<'u, A> {
+    unit: &'u ExecutionUnit<A>,
+    block: BlockId,
+    next: usize,
+    function: &'u FunctionUnit<A>,
+    outputs: &'u [usize],
+    dst: Option<RegisterId>,
+}
+
+/// The access of a whole frame slot.
+fn whole_slot() -> ResolvedAccess<'static> {
+    ResolvedAccess {
+        offset: &SIROffset::Static(0),
+        dynamics: [None, None],
+    }
+}
+
+/// Store the arguments of `call` into their slots of the frame just entered.
+fn store_arguments<A, M: InterpMachine<A>>(
+    call: &CallRequest<'_, A>,
+    machine: &mut M,
+) -> Result<(), InterpError> {
+    for (position, value) in &call.args {
+        let slot = call
+            .function
+            .frame
+            .slots
+            .get(*position)
+            .ok_or_else(|| InterpError::Machine(format!("missing frame slot {position}")))?;
+        machine.store(&slot.addr, whole_slot(), slot.width, value)?;
+    }
+    Ok(())
+}
+
+/// The concatenation of the `outputs` slots of the innermost frame, the
+/// first in the least significant bits.
+fn call_outputs<A, M: InterpMachine<A>>(
+    function: &FunctionUnit<A>,
+    outputs: &[usize],
+    machine: &mut M,
+) -> Result<SIRValue, InterpError> {
+    let mut payload = BigUint::zero();
+    let mut mask = BigUint::zero();
+    let mut shift = 0;
+    for &position in outputs {
+        let slot = function
+            .frame
+            .slots
+            .get(position)
+            .ok_or_else(|| InterpError::Machine(format!("missing frame slot {position}")))?;
+        let value = machine.load(&slot.addr, whole_slot(), slot.width)?;
+        payload |= &value.payload << shift;
+        mask |= &value.mask << shift;
+        shift += slot.width;
+    }
+    Ok(SIRValue { payload, mask })
+}
+
+/// Execute one instruction. A [`SIRInstruction::Call`] is not run here: it
+/// is returned for the unit loop to enter, so calls do not nest on the host
+/// stack.
+fn exec_instruction<'u, A, M: InterpMachine<A>>(
+    instruction: &'u SIRInstruction<A>,
     regs: &mut Registers,
     machine: &mut M,
     four_state: bool,
-) -> Result<(), InterpError> {
+    functions: &'u [FunctionUnit<A>],
+) -> Result<Option<CallRequest<'u, A>>, InterpError> {
     match instruction {
+        SIRInstruction::Call {
+            function,
+            frame,
+            args,
+            outputs,
+            dst,
+            ..
+        } => {
+            let callee = functions.get(function.0 as usize).ok_or_else(|| {
+                InterpError::Machine(format!("call of missing function {function}"))
+            })?;
+            let base = match regs.get_small(*frame)? {
+                Some(base) => base,
+                None => regs.get(*frame)?.payload.to_u64().ok_or_else(|| {
+                    InterpError::Machine("frame base does not fit in u64".to_string())
+                })?,
+            };
+            let base = usize::try_from(base)
+                .map_err(|_| InterpError::Machine("frame base out of range".to_string()))?;
+            let args = args
+                .iter()
+                .map(|&(slot, arg)| Ok((slot, regs.get(arg)?.clone())))
+                .collect::<Result<Vec<_>, InterpError>>()?;
+            return Ok(Some(CallRequest {
+                function: callee,
+                id: *function,
+                base,
+                args,
+                outputs,
+                dst: *dst,
+            }));
+        }
         SIRInstruction::Imm(dst, value) => {
             if regs.accepts_small(*dst)
                 && let Some(value) = value.payload.to_u64()
             {
                 regs.set_small(*dst, value);
-                return Ok(());
+                return Ok(None);
             }
             // Two-state translation drops unknown-bit masks entirely; keep
             // only the payload so X constants behave as their payload bits.
@@ -422,7 +643,7 @@ fn exec_instruction<A, M: InterpMachine<A>>(
                     regs.is_signed(*lhs),
                 );
                 regs.set_small(*dst, out);
-                return Ok(());
+                return Ok(None);
             }
             let lhs_value = regs.get(*lhs)?.clone();
             let rhs_value = regs.get(*rhs)?.clone();
@@ -452,7 +673,7 @@ fn exec_instruction<A, M: InterpMachine<A>>(
                     regs.width(*dst),
                 );
                 regs.set_small(*dst, out);
-                return Ok(());
+                return Ok(None);
             }
             let src_value = regs.get(*src)?.clone();
             let out = alu_unary(
@@ -487,7 +708,7 @@ fn exec_instruction<A, M: InterpMachine<A>>(
                 if !triggers.is_empty() {
                     machine.notify_trigger_only_store(addr, triggers)?;
                 }
-                return Ok(());
+                return Ok(None);
             }
             let access = resolve_access(offset, regs)?;
             machine.prepare_store(addr, access, *bits)?;
@@ -551,7 +772,7 @@ fn exec_instruction<A, M: InterpMachine<A>>(
                 }
                 if all_small {
                     regs.set_small(*dst, value);
-                    return Ok(());
+                    return Ok(None);
                 }
             }
             let mut payload = BigUint::zero();
@@ -572,7 +793,7 @@ fn exec_instruction<A, M: InterpMachine<A>>(
             {
                 let value = if *offset >= 64 { 0 } else { value >> offset };
                 regs.set_small(*dst, value & mask_u64(*width));
-                return Ok(());
+                return Ok(None);
             }
             let value = regs.get(*src)?;
             let payload = extract_bits(&value.payload, *offset, *width);
@@ -588,7 +809,7 @@ fn exec_instruction<A, M: InterpMachine<A>>(
                 )
             {
                 regs.set_small(*dst, if cond != 0 { then_value } else { else_value });
-                return Ok(());
+                return Ok(None);
             }
             let cond_width = regs.width(*cond);
             let cond = regs.get(*cond)?.clone();
@@ -642,7 +863,7 @@ fn exec_instruction<A, M: InterpMachine<A>>(
             }
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 /// The C integer passed for an extern call argument.
@@ -1762,9 +1983,21 @@ mod tests {
         runtime_events: Vec<(u32, Vec<SIRValue>)>,
         comb_captures: Vec<usize>,
         trigger_notifications: Vec<usize>,
+        /// The bases of the frames entered, innermost last.
+        frames: Vec<usize>,
+        /// Frame slot cells, by frame base.
+        frame_cells: HashMap<(usize, u32, usize, usize), SIRValue>,
     }
 
+    /// Addresses from this one on are frame slots, kept per frame.
+    const FRAME_SLOTS: u32 = 1000;
+
     impl FakeMachine {
+        /// The frame base of `addr` when it is a frame slot.
+        fn frame_of(&self, addr: u32) -> Option<usize> {
+            self.frames.last().copied().filter(|_| addr >= FRAME_SLOTS)
+        }
+
         fn stored(&self, addr: u32, offset: usize, bits: usize) -> &SIRValue {
             self.cells.get(&(addr, offset, bits)).unwrap()
         }
@@ -1785,11 +2018,22 @@ mod tests {
                     )));
                 }
             };
-            Ok(self
-                .cells
-                .get(&(*addr, offset, bits))
+            let value = match self.frame_of(*addr) {
+                Some(base) => self.frame_cells.get(&(base, *addr, offset, bits)),
+                None => self.cells.get(&(*addr, offset, bits)),
+            };
+            Ok(value
                 .cloned()
                 .unwrap_or_else(|| SIRValue::new(BigUint::zero())))
+        }
+
+        fn push_frame(&mut self, base: usize, _function: FunctionId) -> Result<(), InterpError> {
+            self.frames.push(base);
+            Ok(())
+        }
+
+        fn pop_frame(&mut self) {
+            self.frames.pop();
         }
 
         fn store(
@@ -1807,7 +2051,15 @@ mod tests {
                     )));
                 }
             };
-            self.cells.insert((*addr, offset, bits), value.clone());
+            match self.frame_of(*addr) {
+                Some(base) => {
+                    self.frame_cells
+                        .insert((base, *addr, offset, bits), value.clone());
+                }
+                None => {
+                    self.cells.insert((*addr, offset, bits), value.clone());
+                }
+            }
             Ok(())
         }
 
@@ -2100,6 +2352,262 @@ mod tests {
         )
     }
 
+    const SP: u32 = 1;
+    const N: u32 = FRAME_SLOTS;
+    const RESULT: u32 = FRAME_SLOTS + 1;
+
+    fn reg(id: usize) -> RegisterId {
+        RegisterId(id)
+    }
+
+    fn store(addr: u32, bits: usize, src: usize) -> SIRInstruction<u32> {
+        SIRInstruction::Store(
+            addr,
+            SIROffset::Static(0),
+            bits,
+            reg(src),
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+
+    fn load(dst: usize, addr: u32, bits: usize) -> SIRInstruction<u32> {
+        SIRInstruction::Load(reg(dst), addr, SIROffset::Static(0), bits)
+    }
+
+    /// `fact(n)`: its frame holds `n` and the result, 32 bits each, and it
+    /// calls itself in a frame at the stack pointer `SP`, as an out-of-line
+    /// call site does.
+    fn factorial() -> FunctionUnit<u32> {
+        let unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [
+                block(
+                    0,
+                    vec![],
+                    vec![
+                        load(0, N, 32),
+                        SIRInstruction::Imm(reg(1), SIRValue::new(2u8)),
+                        SIRInstruction::Binary(reg(2), reg(0), BinaryOp::LtU, reg(1)),
+                    ],
+                    SIRTerminator::Branch {
+                        cond: reg(2),
+                        true_block: (BlockId(1), vec![]),
+                        false_block: (BlockId(2), vec![]),
+                    },
+                ),
+                block(
+                    1,
+                    vec![],
+                    vec![
+                        SIRInstruction::Imm(reg(3), SIRValue::new(1u8)),
+                        store(RESULT, 32, 3),
+                    ],
+                    SIRTerminator::Return,
+                ),
+                block(
+                    2,
+                    vec![],
+                    vec![
+                        load(4, SP, 32),
+                        SIRInstruction::Imm(reg(5), SIRValue::new(8u8)),
+                        SIRInstruction::Binary(reg(6), reg(4), BinaryOp::Add, reg(5)),
+                        store(SP, 32, 6),
+                        SIRInstruction::Imm(reg(7), SIRValue::new(1u8)),
+                        SIRInstruction::Binary(reg(8), reg(0), BinaryOp::Sub, reg(7)),
+                        SIRInstruction::Call {
+                            function: FunctionId(0),
+                            frame: reg(4),
+                            args: vec![(0, reg(8))],
+                            outputs: vec![1],
+                            dst: Some(reg(9)),
+                            effects: Default::default(),
+                        },
+                        store(SP, 32, 4),
+                        // `n` keeps its value across the call.
+                        SIRInstruction::Binary(reg(10), reg(0), BinaryOp::Mul, reg(9)),
+                        store(RESULT, 32, 10),
+                    ],
+                    SIRTerminator::Return,
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            register_map: bit_regs(&[
+                (0, 32),
+                (1, 32),
+                (2, 1),
+                (3, 32),
+                (4, 32),
+                (5, 32),
+                (6, 32),
+                (7, 32),
+                (8, 32),
+                (9, 32),
+                (10, 32),
+            ]),
+        };
+        FunctionUnit {
+            unit,
+            effects: Default::default(),
+            frame: celox_sir::FrameLayout {
+                size: 8,
+                slots: [N, RESULT]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, addr)| celox_sir::FrameSlot {
+                        addr,
+                        offset: index * 4,
+                        width: 32,
+                        four_state: false,
+                        handle: false,
+                    })
+                    .collect(),
+            },
+        }
+    }
+
+    /// A unit that calls function 0 with `arg` in slot 0 and stores its
+    /// output slot 1 to address 7, in a frame at `SP`.
+    fn caller(arg: SIRValue, width: usize, register: RegisterType) -> ExecutionUnit<u32> {
+        let mut register_map = bit_regs(&[(0, 32), (1, 32), (2, 32)]);
+        register_map.insert(reg(3), register.clone());
+        register_map.insert(reg(4), register);
+        ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [block(
+                0,
+                vec![],
+                vec![
+                    load(0, SP, 32),
+                    SIRInstruction::Imm(reg(1), SIRValue::new(8u8)),
+                    SIRInstruction::Binary(reg(2), reg(0), BinaryOp::Add, reg(1)),
+                    store(SP, 32, 2),
+                    SIRInstruction::Imm(reg(3), arg),
+                    SIRInstruction::Call {
+                        function: FunctionId(0),
+                        frame: reg(0),
+                        args: vec![(0, reg(3))],
+                        outputs: vec![1],
+                        dst: Some(reg(4)),
+                        effects: Default::default(),
+                    },
+                    store(SP, 32, 0),
+                    store(7, width, 4),
+                ],
+                SIRTerminator::Return,
+            )]
+            .into_iter()
+            .collect(),
+            register_map,
+        }
+    }
+
+    #[test]
+    fn calls_a_recursive_function() {
+        let unit = caller(
+            SIRValue::new(6u8),
+            32,
+            RegisterType::Bit {
+                width: 32,
+                signed: false,
+            },
+        );
+        let mut machine = FakeMachine::default();
+        execute_unit_with_functions(&unit, &mut machine, &[], false, &[factorial()]).unwrap();
+        assert_eq!(machine.stored(7, 0, 32).payload, BigUint::from(720u32));
+        assert!(machine.frames.is_empty());
+    }
+
+    #[test]
+    fn nests_calls_without_the_host_stack() {
+        // Fifty thousand activations would overflow a test thread's stack if
+        // each nested on it.
+        let bit = RegisterType::Bit {
+            width: 32,
+            signed: false,
+        };
+        let unit = caller(SIRValue::new(50_000u32), 32, bit.clone());
+        let mut machine = FakeMachine::default();
+        execute_unit_with_functions(&unit, &mut machine, &[], false, &[factorial()]).unwrap();
+        assert!(machine.frames.is_empty());
+        // Deeper than the limit fails, leaving no frame entered.
+        let unit = caller(SIRValue::new((MAX_CALL_DEPTH + 10) as u32), 32, bit);
+        let mut machine = FakeMachine::default();
+        let error = execute_unit_with_functions(&unit, &mut machine, &[], false, &[factorial()])
+            .unwrap_err();
+        assert!(matches!(error, InterpError::Machine(_)), "{error:?}");
+        assert!(machine.frames.is_empty());
+    }
+
+    #[test]
+    fn a_callee_error_ends_the_caller() {
+        let mut function = factorial();
+        function
+            .unit
+            .blocks
+            .get_mut(&BlockId(1))
+            .unwrap()
+            .terminator = SIRTerminator::Error(7);
+        let unit = caller(
+            SIRValue::new(4u8),
+            32,
+            RegisterType::Bit {
+                width: 32,
+                signed: false,
+            },
+        );
+        let mut machine = FakeMachine::default();
+        let error =
+            execute_unit_with_functions(&unit, &mut machine, &[], false, &[function]).unwrap_err();
+        assert!(matches!(error, InterpError::Fatal(7)), "{error:?}");
+        assert!(machine.frames.is_empty());
+        assert!(!machine.cells.contains_key(&(7, 0, 32)));
+    }
+
+    #[test]
+    fn passes_wide_four_state_values_through_a_frame() {
+        // `id(x)` copies its 100-bit four-state slot 0 to slot 1.
+        let logic = RegisterType::Logic { width: 100 };
+        let identity = FunctionUnit {
+            effects: Default::default(),
+            unit: ExecutionUnit {
+                entry_block_id: BlockId(0),
+                blocks: [block(
+                    0,
+                    vec![],
+                    vec![load(0, N, 100), store(RESULT, 100, 0)],
+                    SIRTerminator::Return,
+                )]
+                .into_iter()
+                .collect(),
+                register_map: [(reg(0), logic.clone())].into_iter().collect(),
+            },
+            frame: celox_sir::FrameLayout {
+                size: 52,
+                slots: [N, RESULT]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, addr)| celox_sir::FrameSlot {
+                        addr,
+                        offset: index * 26,
+                        width: 100,
+                        four_state: true,
+                        handle: false,
+                    })
+                    .collect(),
+            },
+        };
+        let value = SIRValue::new_four_state(
+            (BigUint::from(1u8) << 99u32) | BigUint::from(5u8),
+            BigUint::from(1u8) << 70u32,
+        );
+        let unit = caller(value.clone(), 100, logic);
+        let mut machine = FakeMachine::default();
+        execute_unit_with_functions(&unit, &mut machine, &[], true, &[identity]).unwrap();
+        assert_eq!(machine.stored(7, 0, 100), &value);
+    }
+
     #[test]
     fn executes_straight_line_arithmetic_and_store() {
         let unit = ExecutionUnit {
@@ -2173,9 +2681,9 @@ mod tests {
 
         let mut machine = FakeMachine::default();
         let mut registers = Registers::new(&producer.register_map, true);
-        execute_prepared_unit(&producer, &mut machine, &[], true, &mut registers).unwrap();
-        let error =
-            execute_prepared_unit(&consumer, &mut machine, &[], true, &mut registers).unwrap_err();
+        execute_prepared_unit(&producer, &mut machine, &[], true, &mut registers, &[]).unwrap();
+        let error = execute_prepared_unit(&consumer, &mut machine, &[], true, &mut registers, &[])
+            .unwrap_err();
         assert_eq!(error, InterpError::MissingRegister(RegisterId(0)));
     }
 

@@ -369,7 +369,7 @@ fn format_instruction(
                 old.0, new.0, sites
             )
         }
-        SIRInstruction::ExternCall { .. } => inst.to_string(),
+        SIRInstruction::ExternCall { .. } | SIRInstruction::Call { .. } => inst.to_string(),
     }
 }
 

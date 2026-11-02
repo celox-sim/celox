@@ -198,7 +198,20 @@ fn verify_program_sir(
                 .iter()
                 .enumerate()
                 .map(|(unit, eu)| ("processes", unit, eu)),
+        )
+        .chain(
+            sir.functions
+                .iter()
+                .enumerate()
+                .map(|(unit, function)| ("functions", unit, &function.unit)),
         );
+    sir.verify_functions()
+        .map_err(|error| ParserError::SirVerify {
+            phase,
+            group: "functions",
+            unit: 0,
+            error,
+        })?;
     for (group, unit, eu) in units {
         verify_memory_offset_contract(program, eu).map_err(|error| ParserError::SirVerify {
             phase,
@@ -238,6 +251,10 @@ fn verify_region_contract(
     for block in eu.blocks.values() {
         for (index, inst) in block.instructions.iter().enumerate() {
             match inst {
+                // The frame slots of a function unit.
+                SIRInstruction::Load(_, addr, _, _)
+                | SIRInstruction::Store(addr, _, _, _, _, _)
+                    if addr.region == crate::ir::FRAME_REGION && group == "functions" => {}
                 SIRInstruction::Load(_, addr, _, _)
                 | SIRInstruction::Store(addr, _, _, _, _, _)
                     if addr.region > SPARSE_WORKING_REGION =>
@@ -459,6 +476,10 @@ pub(crate) fn optimize_scheduled_program(
     }
 
     let mut program = UnoptimizedSir::new(sir, runtime);
+    debug_assert!(
+        program.sir.calls_summarized(),
+        "the program's call effects are stale"
+    );
     if let Some(t) = trace.as_deref_mut()
         && trace_opts.pre_optimized_sir
     {
@@ -1183,6 +1204,7 @@ mod fused_hint_tests {
                 apply_ffs: Default::default(),
                 parallel: None,
                 processes: Vec::new(),
+                functions: Vec::new(),
             },
             design: Default::default(),
             frontend_lookup: Default::default(),

@@ -140,10 +140,15 @@ fn forward_and_simplify(
         // are always inserted after this rewrite, so one lookup is sufficient.
         apply_aliases_to_inst(inst, &aliases);
         match inst {
-            SIRInstruction::ExternCall { func, .. }
-                if celox_sir::extern_abi::native_kernel_index(*func).is_some() =>
-            {
+            // An outlined native kernel can change any state.
+            _ if inst.accesses_unknown_state() => {
                 known_stores.clear();
+            }
+            // A function call changes what its effects write.
+            SIRInstruction::Call { effects, .. } => {
+                for addr in &effects.writes {
+                    known_stores.remove(addr);
+                }
             }
             SIRInstruction::Store(addr, offset, width, src, _triggers, _)
                 if offset.constant_bit_offset().is_some() =>
@@ -472,6 +477,74 @@ mod tests {
             width,
             signed: false,
         }
+    }
+
+    /// Whether the load after `Store(address, 42); Call; Load(address)`
+    /// survives store-load forwarding, for a call whose callee writes
+    /// `written`.
+    fn load_survives_call_writing(written: Vec<RegionedAbsoluteAddr>) -> bool {
+        let mut builder = celox_sir::SIRBuilder::new();
+        let before = builder.alloc_bit(8, false);
+        let after = builder.alloc_bit(8, false);
+        let frame = builder.alloc_bit(32, false);
+        builder.emit(SIRInstruction::Imm(before, SIRValue::new(42u8)));
+        builder.emit(SIRInstruction::Imm(frame, SIRValue::new(0u8)));
+        builder.emit(SIRInstruction::Store(
+            address(),
+            SIROffset::Static(0),
+            8,
+            before,
+            Vec::new(),
+            Vec::new(),
+        ));
+        builder.emit(SIRInstruction::Call {
+            function: celox_sir::FunctionId(0),
+            frame,
+            args: Vec::new(),
+            outputs: Vec::new(),
+            dst: None,
+            effects: std::sync::Arc::new(celox_sir::CallEffects {
+                writes: written,
+                ..Default::default()
+            }),
+        });
+        builder.emit(SIRInstruction::Load(
+            after,
+            address(),
+            SIROffset::Static(0),
+            8,
+        ));
+        builder.emit(SIRInstruction::Store(
+            address(),
+            SIROffset::Static(8),
+            8,
+            after,
+            Vec::new(),
+            Vec::new(),
+        ));
+        builder.seal_block(SIRTerminator::Return);
+        let (blocks, register_map, _) = builder.drain();
+        let mut unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        };
+        StoreLoadForwardingPass.run(&mut unit, &PassOptions::default());
+        unit.verify_result().unwrap();
+        unit.blocks
+            .values()
+            .flat_map(|b| &b.instructions)
+            .any(|inst| matches!(inst, SIRInstruction::Load(dst, ..) if *dst == after))
+    }
+
+    #[test]
+    fn a_call_invalidates_the_stores_its_callee_writes() {
+        assert!(load_survives_call_writing(vec![address()]));
+        let other = RegionedAbsoluteAddr {
+            var_id: VarId(1),
+            ..address()
+        };
+        assert!(!load_survives_call_writing(vec![other]));
     }
 
     #[test]

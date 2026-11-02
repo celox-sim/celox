@@ -2418,6 +2418,7 @@ fn compile_program_with_outlining_threshold(
     cancel: Option<&CompileCancel>,
     outline_threshold: usize,
 ) -> Result<(NativeProgramImage, Option<NativeCodegenTrace>), SimulatorError> {
+    laid_out.reject_function_calls("native")?;
     let sir = laid_out;
     let layout = laid_out.layout();
     let force_bindings =

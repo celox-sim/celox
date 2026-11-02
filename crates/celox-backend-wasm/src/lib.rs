@@ -654,6 +654,9 @@ fn compile_instruction(
         SIRInstruction::CombCaptureEnableIfChanged { old, new, sites } => {
             compile_comb_capture_enable_if_changed(old, new, sites, four_state, locals, instrs);
         }
+        SIRInstruction::Call { .. } => {
+            unreachable!("programs with function calls are rejected before code generation")
+        }
         SIRInstruction::ExternCall { dst, func, args } => {
             compile_extern_call(
                 *dst,

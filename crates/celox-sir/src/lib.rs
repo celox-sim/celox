@@ -4,7 +4,7 @@ use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use num_bigint::BigUint;
 use num_traits::Zero;
 use serde::{Deserialize, Serialize};
-use std::{fmt, fmt::Display};
+use std::{fmt, fmt::Display, sync::Arc};
 
 pub use celox_design::{
     BinaryOp, DomainKind, FloatBinaryOp, FloatPrecision, FloatUnaryOp, TriggerIdWithKind, UnaryOp,
@@ -12,6 +12,7 @@ pub use celox_design::{
 
 pub mod analysis;
 pub mod builder;
+mod calls;
 pub mod cfg;
 pub mod effects;
 pub mod extern_abi;
@@ -22,7 +23,7 @@ pub mod two_state;
 pub mod verify;
 
 pub use builder::{BuiltCode, SIRBuilder};
-pub use effects::MemoryAccess;
+pub use effects::{MemoryAccess, StateAccess};
 pub use transform::{
     SirMergeProvenance, inline_single_predecessor_jumps, merge_sir_eu_refs,
     merge_sir_eu_refs_with_provenance, merge_sir_eus,
@@ -60,6 +61,152 @@ pub struct SirProgram<EventAddr, StateAddr> {
     /// Each kernel is exactly one unit: a `Return` hands control back to the
     /// runtime, so kernels are never merged with each other or with a phase.
     pub processes: Vec<ExecutionUnit<StateAddr>>,
+    /// Units entered only through [`SIRInstruction::Call`], indexed by
+    /// [`FunctionId`]. Empty unless the frontend lowered a subroutine out of
+    /// line.
+    pub functions: Vec<FunctionUnit<StateAddr>>,
+}
+
+/// A unit entered only through [`SIRInstruction::Call`], with the layout of
+/// the frame each of its activations gets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound(serialize = "A: Serialize", deserialize = "A: Deserialize<'de>"))]
+pub struct FunctionUnit<A> {
+    pub unit: ExecutionUnit<A>,
+    pub frame: FrameLayout<A>,
+    /// What a call of the function may do, computed by
+    /// [`SirProgram::summarize_calls`] and shared with every
+    /// [`SIRInstruction::Call`] of it.
+    pub effects: Arc<CallEffects<A>>,
+}
+
+/// What a call of a function may do, the calls it makes included, which
+/// analyses read instead of the callee's body.
+///
+/// The state is named by whole objects: an object listed may be read or
+/// written in any part. Frame slots are not state and are not listed.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(bound(serialize = "A: Serialize", deserialize = "A: Deserialize<'de>"))]
+pub struct CallEffects<A> {
+    /// The state objects it may read, each listed once.
+    pub reads: Vec<A>,
+    /// The state objects it may write, each listed once.
+    pub writes: Vec<A>,
+    /// The state objects it may store or commit with triggers, each listed
+    /// once.
+    pub triggers: Vec<A>,
+    /// Whether it may interact with the host: an extern call, a runtime event
+    /// or a comb capture.
+    pub host: bool,
+    /// Whether it may call a native kernel, which can read and write any
+    /// state: the lists above are then incomplete.
+    pub kernel: bool,
+}
+
+impl<A> Default for CallEffects<A> {
+    fn default() -> Self {
+        Self {
+            reads: Vec::new(),
+            writes: Vec::new(),
+            triggers: Vec::new(),
+            host: false,
+            kernel: false,
+        }
+    }
+}
+
+impl<A: PartialEq> CallEffects<A> {
+    /// Whether the call may read `addr`.
+    pub fn may_read(&self, addr: &A) -> bool {
+        self.kernel || self.reads.contains(addr)
+    }
+
+    /// Whether the call may write `addr`.
+    pub fn may_write(&self, addr: &A) -> bool {
+        self.kernel || self.writes.contains(addr)
+    }
+}
+
+impl<A> CallEffects<A> {
+    pub fn map_addr<B>(&self, mut map: impl FnMut(&A) -> B) -> CallEffects<B> {
+        CallEffects {
+            reads: self.reads.iter().map(&mut map).collect(),
+            writes: self.writes.iter().map(&mut map).collect(),
+            triggers: self.triggers.iter().map(&mut map).collect(),
+            host: self.host,
+            kernel: self.kernel,
+        }
+    }
+}
+
+/// The slots of a function's frame: its automatic formals, locals and
+/// result, and later its resume point and the temporaries that live across
+/// a suspension.
+///
+/// The unit reads and writes a slot with `Load` and `Store` of the slot's
+/// address, whose region is [`celox_design::FRAME_REGION`], at offsets within
+/// the slot, as it would a state object. The address names the slot of the
+/// running activation's frame: the frame base is implicit in a function unit,
+/// the `frame` of the [`SIRInstruction::Call`] that entered it. Slot
+/// addresses are unique in the program and appear in no other unit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound(serialize = "A: Serialize", deserialize = "A: Deserialize<'de>"))]
+pub struct FrameLayout<A> {
+    /// Bytes from the frame base that the frame occupies.
+    pub size: usize,
+    pub slots: Vec<FrameSlot<A>>,
+}
+
+/// One slot of a [`FrameLayout`], laid out as a state object: a value plane
+/// of `width` bits, followed by a mask plane of the same size when it is
+/// four-state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound(serialize = "A: Serialize", deserialize = "A: Deserialize<'de>"))]
+pub struct FrameSlot<A> {
+    pub addr: A,
+    /// Bytes from the frame base to the value plane.
+    pub offset: usize,
+    pub width: usize,
+    pub four_state: bool,
+    /// Whether the slot holds a heap handle, which the collector scans.
+    pub handle: bool,
+}
+
+impl<A> FrameSlot<A> {
+    /// The bytes of one plane.
+    pub fn plane_size(&self) -> usize {
+        self.width.div_ceil(8)
+    }
+
+    /// The bytes the slot occupies, its planes together.
+    pub fn size(&self) -> usize {
+        self.plane_size() * if self.four_state { 2 } else { 1 }
+    }
+}
+
+impl<A: Clone> FunctionUnit<A> {
+    pub fn into_map_addr<B>(self, mut map: impl FnMut(A) -> B) -> FunctionUnit<B> {
+        let effects = Arc::new(self.effects.map_addr(|addr| map(addr.clone())));
+        FunctionUnit {
+            effects,
+            unit: self.unit.into_map_addr(&mut map),
+            frame: FrameLayout {
+                size: self.frame.size,
+                slots: self
+                    .frame
+                    .slots
+                    .into_iter()
+                    .map(|slot| FrameSlot {
+                        addr: map(slot.addr),
+                        offset: slot.offset,
+                        width: slot.width,
+                        four_state: slot.four_state,
+                        handle: slot.handle,
+                    })
+                    .collect(),
+            },
+        }
+    }
 }
 
 /// One execution unit of a lane-partitioned kernel.
@@ -76,7 +223,10 @@ impl<A> LaneUnit<A> {
         Self { lane, unit }
     }
 
-    fn into_map_addr<B>(self, map: &mut impl FnMut(A) -> B) -> LaneUnit<B> {
+    fn into_map_addr<B>(self, map: &mut impl FnMut(A) -> B) -> LaneUnit<B>
+    where
+        A: Clone,
+    {
         LaneUnit {
             lane: self.lane,
             unit: self.unit.into_map_addr(map),
@@ -175,7 +325,10 @@ impl<EventAddr: Eq + std::hash::Hash, StateAddr> SirProgram<EventAddr, StateAddr
 
 impl<A> ExecutionUnit<A> {
     /// Consume the unit while replacing its address identities.
-    pub fn into_map_addr<B>(self, map: &mut impl FnMut(A) -> B) -> ExecutionUnit<B> {
+    pub fn into_map_addr<B>(self, map: &mut impl FnMut(A) -> B) -> ExecutionUnit<B>
+    where
+        A: Clone,
+    {
         ExecutionUnit {
             entry_block_id: self.entry_block_id,
             blocks: self
@@ -203,6 +356,54 @@ impl<A> ExecutionUnit<A> {
 }
 
 impl<EventAddr, StateAddr> SirProgram<EventAddr, StateAddr> {
+    /// Every unit the runtime runs: the phases, the process kernels and the
+    /// lane-partitioned alternatives. The [`Self::functions`] they call are
+    /// not among them.
+    pub fn units(&self) -> impl Iterator<Item = &ExecutionUnit<StateAddr>> {
+        let groups = [
+            &self.eval_apply_ffs,
+            &self.eval_comb_apply_ffs,
+            &self.eval_only_ffs,
+            &self.apply_ffs,
+        ];
+        self.eval_comb
+            .iter()
+            .chain(
+                groups
+                    .into_iter()
+                    .flat_map(|group| group.values().flatten()),
+            )
+            .chain(&self.processes)
+            .chain(
+                self.parallel
+                    .iter()
+                    .flat_map(|parallel| parallel.units().map(|lane| &lane.unit)),
+            )
+    }
+
+    /// [`Self::units`], mutably.
+    pub fn units_mut(&mut self) -> impl Iterator<Item = &mut ExecutionUnit<StateAddr>> {
+        let groups = [
+            &mut self.eval_apply_ffs,
+            &mut self.eval_comb_apply_ffs,
+            &mut self.eval_only_ffs,
+            &mut self.apply_ffs,
+        ];
+        self.eval_comb
+            .iter_mut()
+            .chain(
+                groups
+                    .into_iter()
+                    .flat_map(|group| group.values_mut().flatten()),
+            )
+            .chain(&mut self.processes)
+            .chain(
+                self.parallel
+                    .iter_mut()
+                    .flat_map(|parallel| parallel.units_mut().map(|lane| &mut lane.unit)),
+            )
+    }
+
     /// Consume the program while replacing frontend address identities.
     ///
     /// This is the explicit projection used when a frontend-owned symbolic
@@ -214,15 +415,16 @@ impl<EventAddr, StateAddr> SirProgram<EventAddr, StateAddr> {
     ) -> SirProgram<NewEventAddr, NewStateAddr>
     where
         NewEventAddr: Eq + std::hash::Hash,
+        StateAddr: Clone,
     {
-        fn map_unit<A, B>(
+        fn map_unit<A: Clone, B>(
             unit: ExecutionUnit<A>,
             map: &mut impl FnMut(A) -> B,
         ) -> ExecutionUnit<B> {
             unit.into_map_addr(map)
         }
 
-        fn map_groups<E, NE, A, B>(
+        fn map_groups<E, NE, A: Clone, B>(
             groups: HashMap<E, Vec<ExecutionUnit<A>>>,
             map_event: &mut impl FnMut(E) -> NE,
             map_state: &mut impl FnMut(A) -> B,
@@ -267,6 +469,11 @@ impl<EventAddr, StateAddr> SirProgram<EventAddr, StateAddr> {
                 .into_iter()
                 .map(|unit| map_unit(unit, &mut map_state))
                 .collect(),
+            functions: self
+                .functions
+                .into_iter()
+                .map(|function| function.into_map_addr(&mut map_state))
+                .collect(),
             parallel: self.parallel.map(|parallel| ParallelSirProgram {
                 lanes: parallel.lanes,
                 eval_comb: parallel
@@ -303,6 +510,16 @@ impl<EventAddr, StateAddr> SirProgram<EventAddr, StateAddr> {
 /// Block identifier
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BlockId(pub usize);
+
+/// A function unit of [`SirProgram::functions`].
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct FunctionId(pub u32);
+
+impl fmt::Display for FunctionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "fn{}", self.0)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound(serialize = "A: Serialize", deserialize = "A: Deserialize<'de>"))]
@@ -700,6 +917,26 @@ pub enum SIRInstruction<Addr> {
         func: u32,
         args: Vec<RegisterId>,
     },
+    /// Runs function unit `function` in a new frame based `frame` bytes into
+    /// the stack, then continues with the next instruction.
+    ///
+    /// Each `(slot, register)` of `args` stores the register into that slot
+    /// of the callee's [`FrameLayout`] first. When the callee returns, `dst`
+    /// receives the concatenation of its `outputs` slots, the first in the
+    /// least significant bits. The caller's registers keep their values. The
+    /// callee may read and write any simulation state, call further
+    /// functions (itself too) and make extern calls. When it ends with a
+    /// nonzero status (an [`SIRTerminator::Error`]), the calling unit ends at
+    /// once with that status, as if it had raised it.
+    Call {
+        function: FunctionId,
+        frame: RegisterId,
+        args: Vec<(usize, RegisterId)>,
+        outputs: Vec<usize>,
+        dst: Option<RegisterId>,
+        /// The callee's [`FunctionUnit::effects`].
+        effects: Arc<CallEffects<Addr>>,
+    },
 }
 
 impl<A: Display> fmt::Display for SIRInstruction<A> {
@@ -741,6 +978,23 @@ impl<A: Display> fmt::Display for SIRInstruction<A> {
                     "Commit(src={}, dst={}, offset={}, bits={}, triggers={:?})",
                     src, dst, offset, bits, triggers
                 )
+            }
+            SIRInstruction::Call {
+                function,
+                frame,
+                args,
+                outputs,
+                dst,
+                ..
+            } => {
+                if let Some(dst) = dst {
+                    write!(f, "r{} = ", dst.0)?;
+                }
+                write!(f, "Call({function}, frame r{}", frame.0)?;
+                for (slot, arg) in args {
+                    write!(f, ", s{slot} = r{}", arg.0)?;
+                }
+                write!(f, ") -> {outputs:?}")
             }
             SIRInstruction::Concat(dst, args) => {
                 write!(f, "r{} = Concat([", dst.0)?;
@@ -821,7 +1075,10 @@ impl<A: Display> fmt::Display for SIRInstruction<A> {
     }
 }
 impl<A> SIRInstruction<A> {
-    pub fn into_map_addr<B>(self, mut f: impl FnMut(A) -> B) -> SIRInstruction<B> {
+    pub fn into_map_addr<B>(self, mut f: impl FnMut(A) -> B) -> SIRInstruction<B>
+    where
+        A: Clone,
+    {
         match self {
             SIRInstruction::Imm(register_id, value) => SIRInstruction::Imm(register_id, value),
             SIRInstruction::Binary(rd, rs1, op, rs2) => SIRInstruction::Binary(rd, rs1, op, rs2),
@@ -862,6 +1119,21 @@ impl<A> SIRInstruction<A> {
             SIRInstruction::ExternCall { dst, func, args } => {
                 SIRInstruction::ExternCall { dst, func, args }
             }
+            SIRInstruction::Call {
+                function,
+                frame,
+                args,
+                outputs,
+                dst,
+                effects,
+            } => SIRInstruction::Call {
+                function,
+                frame,
+                args,
+                outputs,
+                dst,
+                effects: Arc::new(effects.map_addr(|addr| f(addr.clone()))),
+            },
         }
     }
     pub fn map_addr<B>(&self, mut f: impl FnMut(&A) -> B) -> SIRInstruction<B> {
@@ -922,6 +1194,21 @@ impl<A> SIRInstruction<A> {
                 dst: *dst,
                 func: *func,
                 args: args.clone(),
+            },
+            SIRInstruction::Call {
+                function,
+                frame,
+                args,
+                outputs,
+                dst,
+                effects,
+            } => SIRInstruction::Call {
+                function: *function,
+                frame: *frame,
+                args: args.clone(),
+                outputs: outputs.clone(),
+                dst: *dst,
+                effects: Arc::new(effects.map_addr(&mut f)),
             },
         }
     }
@@ -1155,6 +1442,7 @@ mod program_mapping_tests {
             apply_ffs: HashMap::default(),
             parallel: None,
             processes: Vec::new(),
+            functions: Vec::new(),
         };
 
         let mapped = program.into_map_addr(|event| event + 100, |state| state + 1000);
