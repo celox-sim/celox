@@ -10,7 +10,7 @@
 //! live memory image across without any translation because both tiers run
 //! against the same finalized layout.
 //!
-//! Promotion is whole-program. On x86-64, a baseline native image is prepared
+//! By default, promotion is whole-program. On x86-64, a baseline native image is prepared
 //! first, followed by an optimizing image which replaces it at a safe point.
 //! Single-edge derived kernels are compiled only after a host requests them;
 //! coincident-edge hosts can adopt an optimized core without those kernels.
@@ -21,6 +21,11 @@
 //! [`TierPromotion::AfterSteps`] keeps compiling eagerly but delays adoption
 //! until the interpreter has executed a minimum number of evaluation steps,
 //! protecting short simulations from the promotion cost.
+//!
+//! The experimental `SimulatorOptions::hotspot_jit` option instead retains a
+//! mixed interpreter/native executor on supported single-lane x86-64 builds.
+//! Its independently published entries are reported by `hotspot_stats`; they
+//! do not change the whole-image meaning of `is_compiled`.
 //!
 //! Adoption never moves the live memory image: tiered builds reserve arena
 //! headroom up front and grow within that allocation, so views handed out
@@ -717,6 +722,27 @@ impl TieredBackend {
     /// [`TieredBackend::cancel_background_compilation`]); the Cranelift tier
     /// runs to completion once started.
     pub fn new(laid_out: &LaidOutProgram, options: &SimulatorOptions) -> Self {
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        if options.hotspot_jit
+            && matches!(options.tier_promotion, crate::TierPromotion::Always)
+            && !options.trace.native
+            && !options.trace.mir
+            && options.optimize_options.parallel_lanes() == 1
+            && !options.native_force_support
+            && options.signal_access.force_signals.is_empty()
+        {
+            let mut interpreting = options.clone();
+            interpreting.tier_promotion = crate::TierPromotion::Never;
+            let mut backend = Self::with_compiler(laid_out, &interpreting, |_, _, _| {
+                unreachable!("incremental execution does not start a whole-image compiler")
+            });
+            if let Phase::Interpreting(Some(interp)) = &mut backend.phase {
+                if let Err(error) = interp.enable_hotspots(options) {
+                    backend.promotion = Promotion::Failed(error);
+                }
+            }
+            return backend;
+        }
         if native_is_default_target() {
             #[cfg(any(
                 target_arch = "x86_64",
@@ -1155,6 +1181,16 @@ impl TieredBackend {
         matches!(self.phase, Phase::Compiled(_))
     }
 
+    /// Incremental entry counts. Whole-image promotion statistics describe the
+    /// owning interpreter and do not count native calls inside mixed execution.
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    pub fn hotspot_stats(&self) -> Option<super::HotspotStats> {
+        match &self.phase {
+            Phase::Interpreting(Some(interp)) => interp.hotspot_stats(),
+            _ => None,
+        }
+    }
+
     /// Return deterministic lifecycle and execution measurements.
     pub fn execution_stats(&self) -> TieredExecutionStats {
         TieredExecutionStats {
@@ -1248,6 +1284,12 @@ impl TieredBackend {
     /// compilation was still pending, so callers that only want to reclaim
     /// a finished worker can ignore the call cheaply.
     pub fn cancel_background_compilation(&mut self) -> bool {
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        if let Phase::Interpreting(Some(interp)) = &mut self.phase {
+            if interp.cancel_hotspots() {
+                return true;
+            }
+        }
         let promotion_pending = matches!(self.promotion, Promotion::Pending(_));
         let upgrade_pending = self.upgrade_receiver.take().is_some();
         self.cancel.cancel();

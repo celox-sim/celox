@@ -1732,6 +1732,9 @@ mod host {
         pub dead_store_policy: DeadStorePolicy,
         /// When the tiered backend adopts background-compiled code.
         pub tier_promotion: TierPromotion,
+        /// Experimentally compile hot execution groups independently on x86-64.
+        /// The default remains whole-image tiered compilation.
+        pub hotspot_jit: bool,
         /// Allow Celox to lower function side effects that Veryl rejects in
         /// `always_ff` for SystemVerilog compatibility.
         pub allow_always_ff_function_effects: bool,
@@ -2049,6 +2052,7 @@ mod host {
                 signal_access: crate::SignalAccessOptions::default(),
                 dead_store_policy: DeadStorePolicy::Off,
                 tier_promotion: TierPromotion::Always,
+                hotspot_jit: false,
                 allow_always_ff_function_effects: false,
                 allow_inferred_latches: false,
                 dpi: crate::DpiSymbols::default(),
@@ -2563,6 +2567,13 @@ mod host {
         /// Set when the tiered backend adopts background-compiled code.
         pub fn tier_promotion(mut self, policy: TierPromotion) -> Self {
             self.options.tier_promotion = policy;
+            self
+        }
+
+        /// Enable experimental incremental compilation on the tiered backend.
+        /// Unsupported hosts retain the ordinary tiered execution policy.
+        pub fn hotspot_jit(mut self, enabled: bool) -> Self {
+            self.options.hotspot_jit = enabled;
             self
         }
 

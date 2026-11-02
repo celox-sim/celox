@@ -19,6 +19,9 @@
 
 #![cfg(feature = "host-runtime")]
 
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+use super::hotspot::{EntryKey, HotspotRuntime, HotspotStats, RegionSource};
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1326,14 +1329,22 @@ impl UnitGroup {
 /// construction. Keeping register storage with the unit removes per-tick
 /// HashMap walks and slot clearing from the interpreter dispatch path.
 struct PreparedUnit {
-    unit: ExecutionUnit<RegionedAbsoluteAddr>,
+    unit: Arc<ExecutionUnit<RegionedAbsoluteAddr>>,
     registers: Registers,
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    region_source: Arc<RegionSource>,
 }
 
 impl PreparedUnit {
     fn new(unit: ExecutionUnit<RegionedAbsoluteAddr>, four_state: bool) -> Self {
         let registers = Registers::new(&unit.register_map, four_state);
-        Self { unit, registers }
+        let unit = Arc::new(unit);
+        Self {
+            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+            region_source: Arc::new(RegionSource::new(Arc::clone(&unit))),
+            unit,
+            registers,
+        }
     }
 }
 
@@ -1362,7 +1373,19 @@ fn run_units<'u>(
     trigger_snapshots: &mut Vec<((AbsoluteAddr, u32), u64)>,
     emit_triggers: bool,
     calls: &mut Calls,
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))] hotspots: (
+        &mut Option<HotspotRuntime>,
+        EntryKey,
+    ),
 ) -> Result<(), SimulatorErrorCode> {
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    let (mut sample_start, mut compile_units) = if let Some(runtime) = hotspots.0 {
+        runtime.begin(hotspots.1)
+    } else {
+        (None, None)
+    };
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    let mut compile_instructions = 0;
     let Calls {
         functions,
         slots,
@@ -1402,7 +1425,16 @@ fn run_units<'u>(
         }
     }
 
-    for prepared in units {
+    for (_unit_index, prepared) in units.into_iter().enumerate() {
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        if let Some(runtime) = hotspots.0 {
+            runtime.collect(
+                hotspots.1,
+                &mut compile_units,
+                &prepared.unit,
+                &mut compile_instructions,
+            );
+        }
         let mut machine = Machine {
             // Reborrow through the mutable references so a fresh Machine can
             // be constructed for every execution unit in the loop.
@@ -1424,6 +1456,35 @@ fn run_units<'u>(
         // Entry blocks of top-level execution units take no parameters: the
         // compiled ABI passes only the memory pointer, so all inputs arrive
         // through loads.
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        if let Some(runtime) = hotspots
+            .0
+            .as_mut()
+            // This invocation has reserved a group compilation. Do not let
+            // a region request take its worker slot before finish queues it.
+            .filter(|runtime| compile_units.is_none() && runtime.has_regions(hotspots.1))
+        {
+            crate::interpreter::execute_prepared_unit_with_hook(
+                &prepared.unit,
+                &mut machine,
+                &[],
+                four_state,
+                &mut prepared.registers,
+                functions,
+                &mut |_unit, block, registers, machine| {
+                    runtime.try_block(
+                        hotspots.1,
+                        _unit_index,
+                        &prepared.region_source,
+                        block,
+                        registers,
+                        machine.memory,
+                    )
+                },
+            )
+            .map_err(error_code)?;
+            continue;
+        }
         execute_prepared_unit(
             &prepared.unit,
             &mut machine,
@@ -1433,6 +1494,10 @@ fn run_units<'u>(
             functions,
         )
         .map_err(error_code)?;
+    }
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    if let Some(runtime) = hotspots.0 {
+        runtime.finish(hotspots.1, sample_start.take(), compile_units);
     }
     Ok(())
 }
@@ -1493,6 +1558,8 @@ pub struct InterpBackend {
     emit_triggers: bool,
     /// The function units the units call.
     calls: Calls,
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    hotspots: Option<HotspotRuntime>,
 }
 
 impl InterpBackend {
@@ -1671,12 +1738,49 @@ impl InterpBackend {
             trigger_snapshots: Vec::new(),
             emit_triggers: options.emit_triggers,
             calls: Calls::new(&laid_out.sir.functions),
+            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+            hotspots: None,
             extern_functions: options
                 .dpi
                 .resolve(&laid_out.runtime().runtime_schema.extern_functions)?,
         };
         backend.install_event_buffers();
         Ok(backend)
+    }
+
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    pub(crate) fn enable_hotspots(
+        &mut self,
+        options: &SimulatorOptions,
+    ) -> Result<(), SimulatorError> {
+        let words = self.memory.len_words() + super::hotspot::SCRATCH_BYTES / 8;
+        self.memory.reserve_total(words);
+        self.memory.resize_zeroed_within_capacity(words);
+        self.hotspots =
+            Some(HotspotRuntime::new(&self.layout, options).map_err(|error| {
+                crate::CodegenError::message(format!("hotspot worker: {error}"))
+            })?);
+        Ok(())
+    }
+
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    pub(crate) fn hotspot_stats(&self) -> Option<HotspotStats> {
+        self.hotspots.as_ref().map(HotspotRuntime::stats)
+    }
+
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    pub(crate) fn cancel_hotspots(&mut self) -> bool {
+        self.hotspots.as_mut().is_some_and(HotspotRuntime::cancel)
+    }
+
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    fn run_hotspot(&mut self, key: EntryKey) -> Option<Result<(), SimulatorErrorCode>> {
+        // Do not borrow heap or capture storage here. Native code accesses
+        // those allocations through state-header pointers; run_units borrows
+        // them exclusively for the interpreter and must not contain this call.
+        self.hotspots
+            .as_mut()?
+            .try_run(key, self.memory.as_mut_slice())
     }
 
     fn install_event_buffers(&mut self) {
@@ -1758,6 +1862,10 @@ impl SimBackend for InterpBackend {
     type Event = InterpEventRef;
 
     fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode> {
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        if let Some(result) = self.run_hotspot(EntryKey::Comb) {
+            return result;
+        }
         run_units(
             self.memory.as_mut_slice(),
             &self.layout,
@@ -1773,10 +1881,16 @@ impl SimBackend for InterpBackend {
             &mut self.trigger_snapshots,
             self.emit_triggers,
             &mut self.calls,
+            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+            (&mut self.hotspots, EntryKey::Comb),
         )
     }
 
     fn eval_apply_ff_at(&mut self, event: InterpEventRef) -> Result<(), SimulatorErrorCode> {
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        if let Some(result) = self.run_hotspot(EntryKey::EvalApply(event.id())) {
+            return result;
+        }
         let UnitGroup {
             units,
             trigger_addrs,
@@ -1799,10 +1913,16 @@ impl SimBackend for InterpBackend {
             &mut self.trigger_snapshots,
             self.emit_triggers,
             &mut self.calls,
+            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+            (&mut self.hotspots, EntryKey::EvalApply(event.id())),
         )
     }
 
     fn eval_comb_apply_ff_at(&mut self, event: InterpEventRef) -> Result<(), SimulatorErrorCode> {
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        if let Some(result) = self.run_hotspot(EntryKey::CombApply(event.id())) {
+            return result;
+        }
         let (first, second, trigger_addrs): (&mut [PreparedUnit], &mut [PreparedUnit], _) =
             if let Some(fused) = self.fused_comb_apply_units.get_mut(&event.addr()) {
                 (
@@ -1839,10 +1959,16 @@ impl SimBackend for InterpBackend {
             &mut self.trigger_snapshots,
             self.emit_triggers,
             &mut self.calls,
+            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+            (&mut self.hotspots, EntryKey::CombApply(event.id())),
         )
     }
 
     fn eval_only_ff_at(&mut self, event: InterpEventRef) -> Result<(), SimulatorErrorCode> {
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        if let Some(result) = self.run_hotspot(EntryKey::EvalOnly(event.id())) {
+            return result;
+        }
         let UnitGroup {
             units,
             trigger_addrs,
@@ -1865,10 +1991,16 @@ impl SimBackend for InterpBackend {
             &mut self.trigger_snapshots,
             self.emit_triggers,
             &mut self.calls,
+            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+            (&mut self.hotspots, EntryKey::EvalOnly(event.id())),
         )
     }
 
     fn apply_ff_at(&mut self, event: InterpEventRef) -> Result<(), SimulatorErrorCode> {
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        if let Some(result) = self.run_hotspot(EntryKey::Apply(event.id())) {
+            return result;
+        }
         let UnitGroup {
             units,
             trigger_addrs,
@@ -1891,10 +2023,16 @@ impl SimBackend for InterpBackend {
             &mut self.trigger_snapshots,
             self.emit_triggers,
             &mut self.calls,
+            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+            (&mut self.hotspots, EntryKey::Apply(event.id())),
         )
     }
 
     fn run_process(&mut self, index: usize) -> Result<(), SimulatorErrorCode> {
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        if let Some(result) = self.run_hotspot(EntryKey::Process(index)) {
+            return result;
+        }
         let unit = self
             .process_units
             .get_mut(index)
@@ -1913,6 +2051,8 @@ impl SimBackend for InterpBackend {
             &mut self.trigger_snapshots,
             false,
             &mut self.calls,
+            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+            (&mut self.hotspots, EntryKey::Process(index)),
         )
     }
 
@@ -2335,6 +2475,219 @@ impl SimBackend for InterpBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(all(
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    #[test]
+    fn hotspot_block_frames_preserve_values_across_native_and_interpreted_branches() {
+        let mut source = String::from(
+            "module Top(input logic [129:0] d, a, input logic sel, output logic [129:0] q); always_comb begin logic [129:0] v; v = d;\n",
+        );
+        for shift in 0..24 {
+            source.push_str(&format!("v = (v ^ a) + (d << {shift});\n"));
+        }
+        source.push_str("if (sel) q = v; else q = (v | a) ^ d; end endmodule");
+        let build = || {
+            crate::Simulator::from_sv_sources(
+                vec![(source.as_str(), std::path::Path::new("region.sv"))],
+                "Top",
+            )
+            .four_state(true)
+            .opt_level(crate::OptLevel::O0)
+            .build_interpreter()
+            .unwrap()
+        };
+        let mut mixed = build();
+        let mut reference = build();
+        let options = SimulatorOptions {
+            four_state: true,
+            ..Default::default()
+        };
+        mixed.backend.enable_hotspots(&options).unwrap();
+        // Force the oversized-group path on this small fixture. The same
+        // admission path is used when a real group exceeds the compile budget.
+        let runtime = mixed.backend.hotspots.as_mut().unwrap();
+        runtime.begin(EntryKey::Comb);
+        let mut oversized = usize::MAX;
+        runtime.collect(
+            EntryKey::Comb,
+            &mut Some(Vec::new()),
+            &mixed.backend.eval_comb_units[0].unit,
+            &mut oversized,
+        );
+        assert!(runtime.has_regions(EntryKey::Comb));
+        let (d, a, sel, q) = (
+            mixed.signal("d"),
+            mixed.signal("a"),
+            mixed.signal("sel"),
+            mixed.signal("q"),
+        );
+        let (rd, ra, rs, rq) = (
+            reference.signal("d"),
+            reference.signal("a"),
+            reference.signal("sel"),
+            reference.signal("q"),
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let mut iteration = 0u32;
+        loop {
+            let value = (BigUint::from(1u8) << 129usize) | BigUint::from(iteration + 1);
+            let mask = if iteration.is_multiple_of(3) {
+                BigUint::from(1u8) << 128usize
+            } else {
+                BigUint::default()
+            };
+            mixed
+                .modify(|io| {
+                    io.set_four_state(d, value.clone(), mask.clone());
+                    io.set_four_state(a, (iteration + 7).into(), (iteration & 1).into());
+                    io.set(sel, (iteration & 1) as u8);
+                })
+                .unwrap();
+            reference
+                .modify(|io| {
+                    io.set_four_state(rd, value, mask);
+                    io.set_four_state(ra, (iteration + 7).into(), (iteration & 1).into());
+                    io.set(rs, (iteration & 1) as u8);
+                })
+                .unwrap();
+            assert_eq!(
+                mixed.get_four_state(q),
+                reference.get_four_state(rq),
+                "iteration={iteration}"
+            );
+            let stats = mixed.backend.hotspot_stats().unwrap();
+            assert_eq!(stats.failed_entries, 0, "{stats:?}");
+            if stats.compiled_block_calls >= 64 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no block publication: {stats:?}"
+            );
+            iteration += 1;
+            std::thread::yield_now();
+        }
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    #[test]
+    fn hotspot_split_groups_share_pending_writes_and_trigger_snapshots() {
+        const SOURCE: &str = r#"`timescale 1ns/1ns
+module Top;
+  logic clk = 0, en = 0;
+  logic gclk;
+  logic [129:0] q = 0, g = 0;
+  logic [7:0] seen = 0;
+  logic [7:0] mem [0:1023];
+  wire [7:0] m = mem[3];
+  assign gclk = clk & en;
+  always #5 clk = ~clk;
+  always #37 en = ~en;
+  always_ff @(posedge clk) begin
+    q <= {2'bxz, q[127:0] + 128'd1};
+    mem[q[5:0]] <= q[7:0];
+  end
+  always_ff @(posedge gclk) g <= {q[129:128], g[127:0] + q[127:0]};
+  always @(posedge gclk) seen = seen + 8'd1;
+endmodule
+"#;
+        let build = || {
+            crate::Simulation::from_sv_sources(
+                vec![(SOURCE, std::path::Path::new("mixed.sv"))],
+                "Top",
+            )
+            .four_state(true)
+            .build_interpreter()
+            .unwrap()
+        };
+        for (native_eval, native_apply) in [(true, false), (false, true), (true, true)] {
+            let mut reference = build();
+            let mut mixed = build();
+            let options = SimulatorOptions {
+                four_state: true,
+                emit_triggers: true,
+                ..Default::default()
+            };
+            let backend = &mut mixed.simulator.backend;
+            backend.enable_hotspots(&options).unwrap();
+            let mut runtime = backend.hotspots.take().unwrap();
+            let mut jobs = Vec::new();
+            if native_eval {
+                for (addr, group) in &backend.eval_only_units {
+                    jobs.push((
+                        EntryKey::EvalOnly(backend.eval_only_event_map[addr].id()),
+                        group
+                            .units
+                            .iter()
+                            .map(|prepared| prepared.unit.as_ref().clone())
+                            .collect(),
+                    ));
+                }
+            }
+            if native_apply {
+                for (addr, group) in &backend.apply_units {
+                    jobs.push((
+                        EntryKey::Apply(backend.apply_event_map[addr].id()),
+                        group
+                            .units
+                            .iter()
+                            .map(|prepared| prepared.unit.as_ref().clone())
+                            .collect(),
+                    ));
+                }
+            }
+            assert!(!jobs.is_empty());
+            // Publish each selected group before driving the design. Poll
+            // through an absent entry so setup executes no simulation effects.
+            for (key, units) in jobs {
+                let count = runtime.stats().compiled_entries;
+                runtime.begin(key);
+                runtime.finish(key, None, Some(units));
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+                while runtime.stats().compiled_entries == count {
+                    assert!(
+                        runtime
+                            .try_run(EntryKey::Process(usize::MAX), backend.memory.as_mut_slice())
+                            .is_none()
+                    );
+                    assert_eq!(runtime.stats().failed_entries, 0, "{key:?}");
+                    assert!(std::time::Instant::now() < deadline, "{key:?}");
+                    std::thread::yield_now();
+                }
+            }
+            // Hold this exact mixed configuration throughout the comparison.
+            runtime.cancel();
+            backend.hotspots = Some(runtime);
+            for time in (0..1000).step_by(3) {
+                mixed.run_until(time).unwrap();
+                reference.run_until(time).unwrap();
+                for name in ["q", "g", "seen", "m"] {
+                    assert_eq!(
+                        mixed.get_four_state(mixed.signal(name)),
+                        reference.get_four_state(reference.signal(name)),
+                        "time={time}, signal={name}, native_eval={native_eval}, native_apply={native_apply}"
+                    );
+                }
+            }
+            assert!(
+                mixed
+                    .simulator
+                    .backend
+                    .hotspot_stats()
+                    .unwrap()
+                    .compiled_calls
+                    > 0
+            );
+        }
+    }
 
     #[test]
     fn snapshots_the_triggers_of_called_functions() {

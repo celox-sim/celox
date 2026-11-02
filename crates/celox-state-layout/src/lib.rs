@@ -689,7 +689,11 @@ where
             return None;
         }
         let trace = self.trace.as_ref()?;
-        Some(trace.notification_offsets(self.offsets[&address.absolute_address()]))
+        let offset = self.offsets[&address.absolute_address()];
+        // Compilation-local addresses may name private frame storage beyond
+        // semantic state. They have no observer flags, even though native
+        // loads/stores use the stable addressing mode for them.
+        (offset < self.total_size).then(|| trace.notification_offsets(offset))
     }
 
     pub fn plane_size(&self, address: &A) -> usize {
