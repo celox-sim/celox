@@ -75,6 +75,9 @@ pub(super) struct ProcModule<'a> {
     /// Where the warnings found while lowering go. A process lowered more
     /// than once repeats its warnings; the frontend reports each once.
     warnings: &'a mut Vec<crate::warning::PendingWarning>,
+    /// Where the calls that the lowering inlines are recorded, for the
+    /// recursion report (see [`super::recursion`]).
+    pub calls: Option<&'a mut super::recursion::CallGraph>,
     /// Whether a call of each subroutine asked about can make a host
     /// request, by name.
     requesting_subroutines: HashMap<String, bool>,
@@ -287,6 +290,7 @@ impl<'a> ProcModule<'a> {
             event_assignments: Vec::new(),
             unpacked_bounds,
             warnings,
+            calls: None,
             requesting_subroutines: Default::default(),
         }
     }

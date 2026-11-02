@@ -295,7 +295,10 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
             Simulation::from_sv_sources(sources, &design.top)
                 .scheduler_mode(scheduler_mode())
                 .four_state(design.four_state)
-                .allow_inferred_latches(design.allow_inferred_latches),
+                .allow_inferred_latches(design.allow_inferred_latches)
+                // The runner is an application boundary for diagnostics
+                // such as `CELOX_SV_RECURSION_REPORT`.
+                .diagnostics_from_env(),
             |builder, (name, value)| builder.param(name, *value),
         );
         return Ok(match backend {
@@ -336,7 +339,8 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
     let builder = design.parameters.iter().fold(
         Simulator::from_sv_sources(sources, &design.top)
             .four_state(design.four_state)
-            .allow_inferred_latches(design.allow_inferred_latches),
+            .allow_inferred_latches(design.allow_inferred_latches)
+            .diagnostics_from_env(),
         |builder, (name, value)| builder.param(name, *value),
     );
     // Only language errors satisfy a rejection case; an unsupported construct

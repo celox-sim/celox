@@ -653,7 +653,13 @@ pub fn parse_sv(
             trace.is_some().then_some(&mut frontend_trace),
             config.allow_inferred_latches,
             warnings,
-            diagnostic_policy.sv_options(sv_timescale, legacy_empty_reductions),
+            celox_frontend_sv::AnalysisOptions {
+                recursion_report: diagnostics
+                    .sv_recursion_report
+                    .as_deref()
+                    .map(std::sync::Arc::from),
+                ..diagnostic_policy.sv_options(sv_timescale, legacy_empty_reductions)
+            },
             force_signals,
         )
         .map_err(|error| match error {

@@ -11,6 +11,16 @@ pub struct SIRBuilder<Addr> {
     current_block_id: Option<BlockId>,
     blocks: HashMap<BlockId, BasicBlock<Addr>>,
     next_block_id: usize,
+    /// The instructions and blocks this builder has built, kept across
+    /// flushes: a measure of the code built between two points.
+    built: BuiltCode,
+}
+
+/// How much code a [`SIRBuilder`] has built.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BuiltCode {
+    pub instructions: usize,
+    pub blocks: usize,
 }
 
 impl<Addr> Default for SIRBuilder<Addr> {
@@ -40,7 +50,14 @@ impl<Addr> SIRBuilder<Addr> {
             current_block_id: Some(BlockId(0)),
             next_block_id: 1,
             blocks,
+            built: BuiltCode::default(),
         }
+    }
+
+    /// The code built so far; the difference of two of these is the code
+    /// built between them.
+    pub fn built(&self) -> BuiltCode {
+        self.built
     }
     /// Issue a register with a specific type explicitly
     pub fn alloc_reg(&mut self, ty: RegisterType) -> RegisterId {
@@ -88,6 +105,7 @@ impl<Addr> SIRBuilder<Addr> {
     pub fn new_block_with(&mut self, params: Vec<RegisterId>) -> BlockId {
         let id = BlockId(self.next_block_id);
         self.next_block_id += 1;
+        self.built.blocks += 1;
         let bb = BasicBlock {
             id,
             instructions: vec![],
@@ -165,6 +183,7 @@ impl<Addr> SIRBuilder<Addr> {
             .unwrap()
             .instructions
             .push(inst);
+        self.built.instructions += 1;
     }
 
     /// Backend shift instructions consume one count word. Saturate rather than
@@ -230,6 +249,12 @@ impl<Addr> SIRBuilder<Addr> {
         for (id, ty) in &unit.register_map {
             self.registers.insert(r(*id), ty.clone());
         }
+        self.built.blocks += unit.blocks.len();
+        self.built.instructions += unit
+            .blocks
+            .values()
+            .map(|block| block.instructions.len())
+            .sum::<usize>();
         for (id, block) in &unit.blocks {
             let terminator = match &block.terminator {
                 SIRTerminator::Return => SIRTerminator::Jump(done, vec![]),
