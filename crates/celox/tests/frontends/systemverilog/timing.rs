@@ -59,6 +59,9 @@ macro_rules! timed_cases {
 }
 
 timed_cases! {
+    fn always_ff_event_order = "timing::always_ff_event_order";
+    fn always_ff_falling_clock_reset_first = "timing::always_ff_falling_clock_reset_first";
+    fn always_ff_reset_first_four_state = "timing::always_ff_reset_first_four_state";
     fn wildcard_blocks_with_crossing_output_dependencies = "timing::wildcard_blocks_with_crossing_output_dependencies";
     fn wildcard_blocks_in_a_converging_feedback_loop = "timing::wildcard_blocks_in_a_converging_feedback_loop";
     fn nonblocking_intra_assignment_delays = "timing::nonblocking_intra_assignment_delays";

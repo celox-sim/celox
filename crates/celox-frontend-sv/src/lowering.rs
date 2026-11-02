@@ -11315,16 +11315,19 @@ fn runs_as_process(
 }
 
 fn clock_event_from_ff_process(process: &sv::ir::FfProcess) -> Option<&sv::ir::FfEvent> {
-    let clock = process.events().first()?;
-    if process.events().len() == 1 {
+    if let [clock] = process.events() {
         return Some(clock);
     }
 
-    (!ff_event_used_as_condition(process, clock)
-        && process.events()[1..]
-            .iter()
-            .all(|event| ff_event_used_as_condition(process, event)))
-    .then_some(clock)
+    // Event OR has no ordering (IEEE 1800-2023 9.4.2.1). For this
+    // optimized FF path, resets are the events used as conditions in the
+    // body; require exactly one remaining clock candidate.
+    let mut clocks = process
+        .events()
+        .iter()
+        .filter(|event| !ff_event_used_as_condition(process, event));
+    let clock = clocks.next()?;
+    clocks.next().is_none().then_some(clock)
 }
 
 fn ff_event_used_as_condition(process: &sv::ir::FfProcess, event: &sv::ir::FfEvent) -> bool {

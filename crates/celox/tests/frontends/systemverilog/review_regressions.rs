@@ -2164,13 +2164,13 @@ fn rejects_ambiguous_multi_event_always_ff_roles() {
         r#"
         module Top(input logic clk, input logic rst, input logic d, output logic q);
             always_ff @(posedge rst or posedge clk)
-                if (rst) q <= 1'b0; else q <= d;
+                q <= d;
         endmodule
         "#,
         r#"
         module Top(input logic clk, input logic rst_n, input logic d, output logic q);
             always_ff @(posedge clk or negedge rst_n)
-                if (clk) q <= d; else q <= 1'b0;
+                if (clk) q <= d; else if (!rst_n) q <= 1'b0;
         endmodule
         "#,
     ] {
