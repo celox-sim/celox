@@ -338,6 +338,7 @@ test("every retained baseline accepts only its existing failures", () => {
                 "container_formals::selects_of_reference_container_elements",
                 "containers::array_items_in_concatenations",
                 "containers::compound_element_assignments",
+                "containers::element_part_selects",
                 "containers::foreach_enumeration_index_methods",
                 "containers::four_state_container_equality",
                 "containers::functions_returning_containers",
