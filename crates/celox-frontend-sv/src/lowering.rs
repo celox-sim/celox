@@ -5789,6 +5789,23 @@ pub(crate) fn attach_instance_glue(
         })
         .collect();
     candidates.retain(|signal| !probe_results.contains(signal));
+    // Monitors observe the entire time slot, not just the interval between
+    // process suspensions. Even single writes therefore require counters.
+    candidates.extend(
+        module
+            .host_request_sites
+            .iter()
+            .filter(|site| {
+                site.kind == celox_design::HostRequestKind::FileIo
+                    && matches!(site.operation, 17 | 18)
+            })
+            .flat_map(|site| {
+                site.args
+                    .iter()
+                    .skip(usize::from(site.operation == 18))
+                    .map(|arg| arg.id)
+            }),
+    );
     module.counter_slots =
         celox_frontend_core::watch::declare_counter_slots(&mut module.variables, candidates);
     if waits {

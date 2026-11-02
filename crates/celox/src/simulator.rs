@@ -44,9 +44,11 @@ mod host {
     mod file_io;
     mod format;
     mod fread;
+    mod monitor;
     pub(crate) mod native_io;
     mod scan;
     mod strobe;
+    pub(crate) use monitor::MonitorState;
     mod system;
     use super::*;
     use std::sync::Arc;
@@ -545,6 +547,7 @@ mod host {
         deferred_owners: DeferredOwnerContext,
         next_deferred_owner: u64,
         strobes: Vec<StrobeCall>,
+        monitors: MonitorState,
     }
 
     #[derive(Clone)]
@@ -1370,7 +1373,8 @@ mod host {
                 .host_request_sites
                 .iter()
                 .any(|site| {
-                    site.kind == celox_design::HostRequestKind::FileIo && site.operation == 16
+                    site.kind == celox_design::HostRequestKind::FileIo
+                        && (16..=20).contains(&site.operation)
                 });
             let mut sim = Self {
                 backend,
@@ -1401,7 +1405,9 @@ mod host {
                 deferred_assertions: !deferred_sites.is_empty(),
                 comb_deferred_groups,
                 timed: false,
-                host_slot_work: !deferred_sites.is_empty() || !sample_shadows.is_empty(),
+                host_slot_work: postponed_output
+                    || !deferred_sites.is_empty()
+                    || !sample_shadows.is_empty(),
                 timestamped_reports,
                 sample_shadows,
                 components: Default::default(),
@@ -2081,7 +2087,9 @@ mod host {
 
         pub(super) fn replace_deferred_execution(&mut self) {
             if self.postponed_output {
-                self.pending_host_events.lock().unwrap().strobes.clear();
+                let mut pending = self.pending_host_events.lock().unwrap();
+                pending.strobes.clear();
+                pending.monitors = MonitorState::default();
             }
             if self.deferred_assertions {
                 self.stash_runtime_events();

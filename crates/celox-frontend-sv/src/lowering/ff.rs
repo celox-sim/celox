@@ -4287,7 +4287,12 @@ impl<'p, 'a> Ff<'p, 'a> {
     ) -> Result<bool, sv::AnalyzerError> {
         if matches!(
             task,
-            sv::ir::SystemTask::Strobe(_) | sv::ir::SystemTask::Fstrobe(_)
+            sv::ir::SystemTask::Strobe(_)
+                | sv::ir::SystemTask::Fstrobe(_)
+                | sv::ir::SystemTask::Monitor(_)
+                | sv::ir::SystemTask::Fmonitor(_)
+                | sv::ir::SystemTask::MonitorOn
+                | sv::ir::SystemTask::MonitorOff
         ) {
             return self.strobe(task, args, site);
         }

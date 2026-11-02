@@ -1567,7 +1567,11 @@ pub(super) fn system_task_kind(task: sv::ir::SystemTask) -> Option<SystemTaskKin
         SystemTask::AssertContinue => {
             SystemTaskKind::Assertion(RuntimeEventKind::Report(Severity::Error))
         }
-        SystemTask::Strobe(_)
+        SystemTask::Monitor(_)
+        | SystemTask::Fmonitor(_)
+        | SystemTask::MonitorOn
+        | SystemTask::MonitorOff
+        | SystemTask::Strobe(_)
         | SystemTask::Fstrobe(_)
         | SystemTask::Readmem(_)
         | SystemTask::Writemem(_)

@@ -1,0 +1,45 @@
+{
+  "exclude_stronger_than_sv": false,
+  "include_ignored": true,
+  "schema_version": 3,
+  "suite": "sv",
+  "suite_version": "0.13.0",
+  "tool": "xezim",
+  "version": "xezim version 0.11.4",
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "file_io::fmonitor_is_independent_of_console_monitor_off at 187:3: expect_output: expected [102, 105, 108, 101, 61, 48, 10, 102, 105, 108, 101, 61, 49, 10], got []",
+      "expectation": "Simulation",
+      "name": "file_io::fmonitor_is_independent_of_console_monitor_off",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "file_io::monitor_reports_transient_changes at 158:3: expect_output: expected [118, 97, 108, 117, 101, 61, 48, 10, 118, 97, 108, 117, 101, 61, 48, 10], got [118, 97, 108, 117, 101, 61, 48, 10]",
+      "expectation": "Simulation",
+      "name": "file_io::monitor_reports_transient_changes",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "file_io::monitor_time_queries_do_not_trigger_output at 201:3: expect_output: expected [116, 61, 48, 32, 118, 97, 108, 117, 101, 61, 48, 10, 116, 61, 50, 32, 118, 97, 108, 117, 101, 61, 49, 10], got [116, 61, 48, 32, 118, 97, 108, 117, 101, 61, 48, 10, 116, 61, 50, 48, 48, 48, 32, 118, 97, 108, 117, 101, 61, 49, 10]",
+      "expectation": "Simulation",
+      "name": "file_io::monitor_time_queries_do_not_trigger_output",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "scope": "Focused continuous-monitor run; only observed failures retained, with unchanged standard expectations."
+}

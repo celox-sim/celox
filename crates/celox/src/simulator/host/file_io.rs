@@ -104,6 +104,9 @@ impl<B: SimBackend> Simulator<B> {
         site: &HostRequestSite<SignalRef>,
         timestamp: u64,
     ) -> Result<(), Halt> {
+        if (17..=20).contains(&site.operation) {
+            return self.monitor_request(site);
+        }
         if site.operation == 16 {
             return self.queue_strobe(site);
         }
