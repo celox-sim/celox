@@ -972,6 +972,19 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "xezim",
                             "system_functions::casts_to_enumerated_types_reject_unknown_bits",
                         ) => ("mismatch", "execute", "49, 32, 79, 70, 70, 10]"),
+                        ("verilator", "system_functions::wide_enumerated_types") => (
+                            "compile_error",
+                            "compile",
+                            "Unsupported: enum next/prev/name method on enum with > 64 bits",
+                        ),
+                        ("icarus", "system_functions::wide_enumerated_types") => {
+                            ("compile_error", "compile", "source_0.sv:26: syntax error")
+                        }
+                        ("xezim", "system_functions::wide_enumerated_types") => (
+                            "mismatch",
+                            "execute",
+                            "90, 69, 82, 79, 10, 48, 32, 48, 32, 49, 10]",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

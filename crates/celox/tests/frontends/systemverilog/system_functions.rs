@@ -191,6 +191,10 @@ sv_backends! {
         @case "system_functions::casts_of_members_of_specialized_structures";
     }
 
+    fn wide_enumerated_types(sim) {
+        @case "system_functions::wide_enumerated_types";
+    }
+
     fn casts_to_enumerated_types(sim) {
         @case "system_functions::casts_to_enumerated_types";
     }

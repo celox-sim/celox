@@ -452,6 +452,12 @@ Verilator 5.052 skips the destination of a failing cast; xezim 0.11.3 assigns a
 non-member and evaluates such a destination the wrong number of times
 (`sv_casts_through_method_results`, see the
 [probe](verification/repros/sv_casts_through_method_results_xezim.json)).
+An enumerated type may have a base wider than 64 bits (6.19); its members up
+to 128 bits keep their whole values through `$cast`, the enumeration methods
+and randomization. Verilator 5.052 rejects the methods of such a type as
+unsupported, Icarus 13.0 does not parse the case, and xezim 0.11.3 loses the
+member bits above bit 63 (`sv_wide_enum_domains`, see the
+[probe](verification/repros/sv_wide_enum_domains_xezim.json)).
 
 The new `$dist_uniform` seed-width case is excluded for Verilator 5.052 and
 Icarus 13.0. Verilator generates an invalid C++ reference binding for converted

@@ -864,7 +864,9 @@ fn enum_values(
         return None;
     };
     let shape = casts::expr_type_from_type(&tree.functions, ty, &context.const_env)?;
-    if shape.width > 64 {
+    // Member values are held as the bits of their base type (6.19), in two's
+    // complement in an `i128`; `MemberValue` interprets them.
+    if shape.width > 128 {
         return None;
     }
     let mut env = context.const_env.clone();
