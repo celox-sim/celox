@@ -1068,12 +1068,21 @@ impl<'p, 'a> Ff<'p, 'a> {
     ) -> Result<NodeId, sv::AnalyzerError> {
         let expr = expr_for_state_mode(expr, self.m.four_state);
         let expr = if self.m.calls(&expr) {
-            self.hoist(&expr)?
+            std::borrow::Cow::Owned(self.hoist(&expr)?)
         } else {
             expr
         };
-        let expr = force_reads(&self.propagate(&expr), self.m);
-        if let (sv::ir::Expr::Literal(literal), Some((width, _))) = (&expr, context)
+        let expr = if self.overlay.is_empty() {
+            expr
+        } else {
+            std::borrow::Cow::Owned(self.propagate(&expr))
+        };
+        let expr = if self.m.forceable.is_empty() {
+            expr
+        } else {
+            std::borrow::Cow::Owned(force_reads(&expr, self.m))
+        };
+        if let (sv::ir::Expr::Literal(literal), Some((width, _))) = (expr.as_ref(), context)
             && let Some(fill) = unbased_fill_literal(literal)
         {
             return lower_unbased_fill_literal_slt(arena, fill, width)
