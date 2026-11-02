@@ -56,6 +56,33 @@ use crate::{
 type Unit = ExecutionUnit<RegionedAbsoluteAddr>;
 type Builder = SIRBuilder<RegionedAbsoluteAddr>;
 
+/// A compact native scheduler whose large bodies are separately compiled.
+/// Analyze the original units before outlining, so call opacity cannot change
+/// dirty tracking, finish handling, or event accounting.
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+pub(crate) fn hotspot_scheduler(program: &LaidOutProgram) -> Result<(Unit, Vec<Unit>), String> {
+    let schema = program
+        .runtime
+        .runtime_schema
+        .scheduler
+        .as_ref()
+        .ok_or("no scheduler schema")?;
+    schema.unit.ok_or("no scheduler unit")?;
+    let mut plan = Plan::new(program, &schema.slots, true)?;
+    if let Some(lazy) = &mut plan.lazy {
+        for domain in &mut lazy.domains {
+            if matches!(domain, DomainSettle::Fused(_)) {
+                *domain = DomainSettle::Settled;
+            }
+        }
+    }
+    let base = u32::try_from(program.runtime.runtime_schema.extern_functions.len())
+        .map_err(|_| "too many extern functions")?;
+    let mut callees = Vec::new();
+    let unit = plan.generate_with_outlines(program, &schema.slots, Some(&mut callees), base);
+    Ok((unit, callees))
+}
+
 /// The narrowest event mask: one 64-bit word, which every design with at
 /// most 64 events uses. A design with more uses as many words as its events
 /// need.
@@ -1710,12 +1737,24 @@ impl Plan {
     }
 
     fn generate(&self, program: &LaidOutProgram, slots: &SchedulerSlots<AbsoluteAddr>) -> Unit {
+        self.generate_with_outlines(program, slots, None, 0)
+    }
+
+    fn generate_with_outlines(
+        &self,
+        program: &LaidOutProgram,
+        slots: &SchedulerSlots<AbsoluteAddr>,
+        outlined: Option<&mut Vec<Unit>>,
+        outline_base: u32,
+    ) -> Unit {
         let schema = &program.runtime.runtime_schema;
         let edged = self.edged();
         let tracked = self.tracked();
         let mut b = Builder::new();
         let comb = b.new_block();
         let mut g = Generator {
+            outlined,
+            outline_base,
             b,
             slots,
             finish_sites: &self.finish_sites,
@@ -3253,6 +3292,8 @@ enum Phase {
 }
 
 struct Generator<'a> {
+    outlined: Option<&'a mut Vec<Unit>>,
+    outline_base: u32,
     b: Builder,
     slots: &'a SchedulerSlots<AbsoluteAddr>,
     finish_sites: &'a HashSet<u32>,
@@ -4378,11 +4419,11 @@ impl Generator<'_> {
         let counts = self.event_batch.is_some()
             && instructions(unit).any(|inst| matches!(inst, SIRInstruction::RuntimeEvent { .. }));
         if !finishes && !counts {
-            self.b.inline_execution_unit(unit);
+            self.inline_body(unit);
             return;
         }
         let instrumented = self.instrument(unit, counts);
-        self.b.inline_execution_unit(&instrumented);
+        self.inline_body(&instrumented);
         if !finishes {
             return;
         }
@@ -4396,6 +4437,28 @@ impl Generator<'_> {
             false_block: (next, Vec::new()),
         });
         self.b.switch_to_block(next);
+    }
+
+    fn inline_body(&mut self, unit: &Unit) {
+        if let Some(outlined) = &mut self.outlined
+            && instructions(unit).take(32_769).count() > 32_768
+        {
+            let index = match outlined.iter().position(|previous| previous == unit) {
+                Some(index) => index,
+                None => {
+                    outlined.push(unit.clone());
+                    outlined.len() - 1
+                }
+            };
+            self.b.emit(SIRInstruction::ExternCall {
+                dst: None,
+                func: celox_sir::extern_abi::NATIVE_KERNEL_CALL_TAG
+                    | (self.outline_base + index as u32),
+                args: Vec::new(),
+            });
+        } else {
+            self.b.inline_execution_unit(unit);
+        }
     }
 
     /// A copy of `unit` that sets the finish slot after every `$finish`

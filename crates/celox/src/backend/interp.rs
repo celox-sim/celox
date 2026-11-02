@@ -1769,6 +1769,13 @@ impl InterpBackend {
     }
 
     #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    pub(crate) fn prepare_hotspot_scheduler(&mut self, program: &LaidOutProgram) {
+        if let Some(runtime) = &mut self.hotspots {
+            runtime.prepare_scheduler(program);
+        }
+    }
+
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
     pub(crate) fn cancel_hotspots(&mut self) -> bool {
         self.hotspots.as_mut().is_some_and(HotspotRuntime::cancel)
     }
@@ -1856,6 +1863,14 @@ impl SimBackend for InterpBackend {
     /// Interpreting the scheduler unit costs more than the runtime's loop
     /// (sched_bench (d): about 9% more per cycle).
     fn runs_compiled_scheduler(&self) -> bool {
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        if self
+            .hotspots
+            .as_ref()
+            .is_some_and(HotspotRuntime::has_compiled_scheduler)
+        {
+            return true;
+        }
         false
     }
 

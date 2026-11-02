@@ -95,6 +95,7 @@ struct Request {
     key: EntryKey,
     units: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
     block: Option<BlockRequest>,
+    scheduler: Option<(Arc<crate::ir::LaidOutProgram>, Arc<HotspotCode>)>,
 }
 
 struct Completed {
@@ -112,6 +113,8 @@ pub(crate) struct HotspotRuntime {
     busy: bool,
     polls: u64,
     stats: HotspotStats,
+    scheduler: Option<Arc<crate::ir::LaidOutProgram>>,
+    scheduler_index: Option<usize>,
 }
 
 impl HotspotRuntime {
@@ -133,14 +136,23 @@ impl HotspotRuntime {
                         break;
                     }
                     let start = Instant::now();
-                    let code = match request.block {
-                        Some(block) => block
-                            .compile(&layout, &options, &worker_cancel)
-                            .map(EntryCode::Block),
-                        None => {
-                            HotspotCode::compile(&request.units, &layout, &options, &worker_cancel)
-                                .map(Arc::new)
-                                .map(EntryCode::Group)
+                    let code = if let Some((program, comb)) = request.scheduler {
+                        HotspotCode::compile_scheduler(&program, comb, &options, &worker_cancel)
+                            .map(Arc::new)
+                            .map(EntryCode::Group)
+                    } else {
+                        match request.block {
+                            Some(block) => block
+                                .compile(&layout, &options, &worker_cancel)
+                                .map(EntryCode::Block),
+                            None => HotspotCode::compile(
+                                &request.units,
+                                &layout,
+                                &options,
+                                &worker_cancel,
+                            )
+                            .map(Arc::new)
+                            .map(EntryCode::Group),
                         }
                     }
                     .map_err(|error| error.to_string());
@@ -168,7 +180,55 @@ impl HotspotRuntime {
             busy: false,
             polls: 0,
             stats: HotspotStats::default(),
+            scheduler: None,
+            scheduler_index: None,
         })
+    }
+
+    pub(crate) fn prepare_scheduler(&mut self, program: &crate::ir::LaidOutProgram) {
+        self.scheduler_index = program
+            .runtime()
+            .runtime_schema
+            .scheduler
+            .as_ref()
+            .and_then(|s| s.unit);
+        if self.scheduler_index.is_some() {
+            self.scheduler = Some(Arc::new(program.clone()));
+        }
+    }
+
+    pub(crate) fn has_compiled_scheduler(&self) -> bool {
+        self.scheduler_index.is_some_and(|index| {
+            self.entries
+                .get(&EntryKey::Process(index))
+                .is_some_and(|entry| entry.code.is_some())
+        })
+    }
+
+    fn request_scheduler(&mut self) {
+        if self.busy || self.cancel.is_cancelled() || self.scheduler.is_none() {
+            return;
+        }
+        let Some(EntryCode::Group(comb)) = self
+            .entries
+            .get(&EntryKey::Comb)
+            .and_then(|entry| entry.code.as_ref())
+        else {
+            return;
+        };
+        let Some(sender) = &self.requests else {
+            return;
+        };
+        let program = self.scheduler.take().unwrap();
+        let request = Request {
+            key: EntryKey::Process(self.scheduler_index.unwrap()),
+            units: Vec::new(),
+            block: None,
+            scheduler: Some((program, Arc::clone(comb))),
+        };
+        if sender.try_send(request).is_ok() {
+            self.busy = true;
+        }
     }
 
     pub(crate) fn stats(&self) -> HotspotStats {
@@ -179,6 +239,7 @@ impl HotspotRuntime {
         let active = !self.cancel.is_cancelled();
         self.cancel.cancel();
         self.requests.take();
+        self.scheduler = None;
         self.busy = false;
         active
     }
@@ -232,6 +293,7 @@ impl HotspotRuntime {
                 Err(mpsc::TryRecvError::Empty) => {}
             }
         }
+        self.request_scheduler();
         if let Some(EntryCode::Group(code)) =
             self.entries.get(&key).and_then(|entry| entry.code.as_ref())
         {
@@ -334,6 +396,7 @@ impl HotspotRuntime {
                     key,
                     units,
                     block: None,
+                    scheduler: None,
                 }) {
                     Ok(()) => self.busy = true,
                     Err(mpsc::TrySendError::Disconnected(_)) => {
@@ -393,6 +456,7 @@ impl HotspotRuntime {
                         key,
                         units: Vec::new(),
                         block: Some(block),
+                        scheduler: None,
                     }) {
                         Ok(()) => self.busy = true,
                         Err(mpsc::TrySendError::Disconnected(_)) => {
@@ -434,6 +498,66 @@ module Top (
     always_ff (clk) { q = d; }
 }
 "#;
+
+    #[cfg(feature = "systemverilog")]
+    #[test]
+    fn hotspot_scheduler_preserves_wide_unknowns_and_derived_edges() {
+        const SOURCE: &str = r#"`timescale 1ns/1ns
+module Top;
+  logic clk = 0, en = 0;
+  wire gclk = clk & en;
+  logic [129:0] q = 0, g = 0;
+  logic [7:0] seen = 0;
+  always #5 clk = ~clk;
+  always #37 en = ~en;
+  always_ff @(posedge clk) q <= {2'bxz, q[127:0] + 128'd1};
+  always_ff @(posedge gclk) g <= {q[129:128], g[127:0] + q[127:0]};
+  always @(posedge gclk) seen = seen + 8'd1;
+endmodule
+"#;
+        let builder = || {
+            crate::Simulation::from_sv_sources(
+                vec![(SOURCE, std::path::Path::new("hotspot-scheduler.sv"))],
+                "Top",
+            )
+            .four_state(true)
+            .settle_partition(crate::SettlePartition::Always)
+        };
+        let mut mixed = builder().hotspot_jit(true).build_tiered().unwrap();
+        let mut reference = builder().build_interpreter().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut time = 0;
+        loop {
+            time += 43;
+            mixed.run_until(time).unwrap();
+            reference.run_until(time).unwrap();
+            for name in ["q", "g", "seen"] {
+                assert_eq!(
+                    mixed.get_four_state(mixed.signal(name)),
+                    reference.get_four_state(reference.signal(name)),
+                    "{name} at {time}"
+                );
+            }
+            let stats = mixed.simulator.backend.hotspot_stats().unwrap();
+            assert_eq!(stats.failed_entries, 0, "{stats:?}");
+            if mixed.scheduler_stats().compiled_slots >= 256 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no scheduler publication: {stats:?}"
+            );
+            std::thread::yield_now();
+        }
+        // Cancelling future work must not invalidate already linked code.
+        mixed.simulator.backend.cancel_background_compilation();
+        mixed.run_until(time + 10_000).unwrap();
+        reference.run_until(time + 10_000).unwrap();
+        assert_eq!(
+            mixed.get_four_state(mixed.signal("g")),
+            reference.get_four_state(reference.signal("g"))
+        );
+    }
 
     #[test]
     fn mixed_entries_preserve_wide_unknowns_and_state_address() {

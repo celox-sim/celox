@@ -250,6 +250,7 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
     let builder = celox::Simulation::from_sv_sources(source_refs, &arguments.design.top)
         .diagnostics_from_env()
         .four_state(arguments.design.four_state.unwrap_or(false))
+        .hotspot_jit(arguments.execution.hotspot_jit)
         .threads(arguments.execution.threads as usize)
         .opt_level(arguments.opt_level)
         .diagnostic_policy(arguments.design.diagnostics.clone())

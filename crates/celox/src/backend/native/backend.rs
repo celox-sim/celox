@@ -1160,6 +1160,10 @@ pub(super) struct CompiledNativeFunction {
 #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
 pub(crate) struct HotspotCode {
     code: jit_mem::JitCode,
+    // Keep every linked mapping and its immutable address table alive until
+    // the caller is retired. Nested code uses a disjoint compiler arena.
+    callees: Vec<Arc<HotspotCode>>,
+    extern_functions: Option<crate::dpi::ExternFunctionTable>,
     pub(crate) required_state_size: usize,
     pub(crate) code_size: usize,
 }
@@ -1214,9 +1218,49 @@ impl HotspotCode {
         .map_err(|error| codegen_message(format!("hotspot executable allocation: {error}")))?;
         Ok(Self {
             code,
+            callees: Vec::new(),
+            extern_functions: None,
             required_state_size: compiled.required_state_size,
             code_size,
         })
+    }
+
+    pub(crate) fn compile_scheduler(
+        program: &LaidOutProgram,
+        comb: Arc<HotspotCode>,
+        options: &SimulatorOptions,
+        cancel: &CompileCancel,
+    ) -> Result<Self, SimulatorError> {
+        let (unit, outlined) =
+            crate::scheduler::hotspot_scheduler(program).map_err(codegen_message)?;
+        let mut callees = Vec::new();
+        let mut additional_bytes = 0usize;
+        for body in outlined {
+            if cancel.is_cancelled() {
+                return Err(crate::backend::compile_cancel::cancelled_error());
+            }
+            let code = if program.sir.eval_comb.len() == 1 && body == program.sir.eval_comb[0] {
+                Arc::clone(&comb)
+            } else {
+                let code = Self::compile(&[body], program.layout(), options, cancel)?;
+                additional_bytes = additional_bytes.saturating_add(code.code_size);
+                Arc::new(code)
+            };
+            callees.push(code);
+        }
+        let mut caller_options = options.clone();
+        caller_options.x86_options = caller_options
+            .x86_options
+            .with_native_callees(callees.iter().map(|code| code.required_state_size));
+        let mut caller = Self::compile(&[unit], program.layout(), &caller_options, cancel)?;
+        let mut table = options
+            .dpi
+            .resolve(&program.runtime().runtime_schema.extern_functions)?;
+        table.append_native_kernels(callees.iter().map(|code| code.code.fn_ptr as usize));
+        caller.code_size = caller.code_size.saturating_add(additional_bytes);
+        caller.callees = callees;
+        caller.extern_functions = Some(table);
+        Ok(caller)
     }
 
     /// The entry was emitted in this process for the caller's immutable layout.
@@ -1227,7 +1271,14 @@ impl HotspotCode {
         // The mapping owns the generated entry and the checked image covers
         // all semantic storage and private scratch. The simulation owner holds
         // exclusive access for the entire call.
-        NativeBackend::call_func(memory, self.code.fn_ptr)
+        let header = celox_state_layout::STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET / 8;
+        let previous = memory[header];
+        if let Some(table) = &self.extern_functions {
+            memory[header] = table.as_ptr() as u64;
+        }
+        let result = NativeBackend::call_func(memory, self.code.fn_ptr);
+        memory[header] = previous;
+        result
     }
 }
 
