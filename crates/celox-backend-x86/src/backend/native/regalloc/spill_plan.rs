@@ -2455,7 +2455,7 @@ impl FutureUses for LinearFutureUses<'_> {
 
 #[derive(Default)]
 struct RemainingUses {
-    points: Vec<(usize, usize)>,
+    points: std::ops::Range<usize>,
     next: usize,
     count: usize,
 }
@@ -2464,6 +2464,9 @@ struct RemainingBlockUses<'a> {
     block: BlockId,
     preferred_rank: Vec<usize>,
     remaining: HashMap<LogicalValue, RemainingUses>,
+    /// All use positions of this block, partitioned into one range per value.
+    /// One allocation replaces a separate growable vector for every register.
+    points: Vec<(usize, usize)>,
     exit: &'a DistanceMap,
     exit_reload_costs: &'a mut dyn ExitReloadCosts,
     emitted: Vec<bool>,
@@ -2516,22 +2519,34 @@ impl<'a> RemainingBlockUses<'a> {
             (0..instructions).collect::<Vec<_>>()
         };
         let mut remaining = HashMap::<LogicalValue, RemainingUses>::default();
+        let mut point_count = 0;
         for (source, inst) in func.blocks[block].insts.iter().enumerate() {
-            let mut uses = inst.uses().to_vec();
-            uses.sort_unstable();
-            uses.dedup();
-            for value in uses {
+            for value in inst.uses().sorted_unique() {
                 let value = logical.checked_of(value, Some(func.blocks[block].id), Some(source))?;
-                remaining
-                    .entry(value)
-                    .or_default()
-                    .points
-                    .push((preferred_rank[source], source));
+                remaining.entry(value).or_default().count += 1;
+                point_count += 1;
+            }
+        }
+        // Count, reserve disjoint ranges, then fill the block-local arena.
+        // Range placement is independent of scheduling; each range keeps the
+        // exact (preferred rank, source instruction) ordering used previously.
+        let mut points = vec![(0, 0); point_count];
+        let mut start = 0;
+        for uses in remaining.values_mut() {
+            uses.points = start..start + uses.count;
+            start = uses.points.end;
+        }
+        for (source, inst) in func.blocks[block].insts.iter().enumerate() {
+            for value in inst.uses().sorted_unique() {
+                let value = logical.checked_of(value, Some(func.blocks[block].id), Some(source))?;
+                let uses = remaining.get_mut(&value).expect("counted use");
+                points[uses.points.start + uses.next] = (preferred_rank[source], source);
+                uses.next += 1;
             }
         }
         for uses in remaining.values_mut() {
-            uses.points.sort_unstable();
-            uses.count = uses.points.len();
+            points[uses.points.clone()].sort_unstable();
+            uses.next = 0;
         }
         if let Some(value) = next_use.exit[block].first_out_of_range(logical.count) {
             logical.checked_of(value, Some(func.blocks[block].id), Some(instructions))?;
@@ -2540,6 +2555,7 @@ impl<'a> RemainingBlockUses<'a> {
             block: func.blocks[block].id,
             preferred_rank,
             remaining,
+            points,
             exit: &next_use.exit[block],
             exit_reload_costs,
             emitted: vec![false; instructions],
@@ -2563,9 +2579,7 @@ impl<'a> RemainingBlockUses<'a> {
             ));
         }
         self.emitted_count += 1;
-        let mut uses = inst.uses().to_vec();
-        uses.sort_unstable();
-        uses.dedup();
+        let uses = inst.uses().sorted_unique();
         let mut changed = Vec::with_capacity(uses.len());
         for value in uses {
             let value = logical.checked_of(value, Some(self.block), Some(source))?;
@@ -2579,7 +2593,8 @@ impl<'a> RemainingBlockUses<'a> {
                 )
             })?;
             let point = (self.preferred_rank[source], source);
-            if uses.points.binary_search(&point).is_err() || uses.count == 0 {
+            let points = &self.points[uses.points.clone()];
+            if points.binary_search(&point).is_err() || uses.count == 0 {
                 return Err(SpillPlanError::new(
                     "SPILL_PLAN.SCHEDULE_ORDER",
                     Some(self.block),
@@ -2589,8 +2604,7 @@ impl<'a> RemainingBlockUses<'a> {
                 ));
             }
             uses.count -= 1;
-            while uses
-                .points
+            while points
                 .get(uses.next)
                 .is_some_and(|&(_, instruction)| self.emitted[instruction])
             {
@@ -2621,7 +2635,7 @@ impl<'a> RemainingBlockUses<'a> {
         if let Some((rank, _)) = self
             .remaining
             .get(&value)
-            .and_then(|uses| uses.points.get(uses.next))
+            .and_then(|uses| self.points[uses.points.clone()].get(uses.next))
             .copied()
         {
             return NextUseDistance::Finite {
@@ -2644,7 +2658,7 @@ impl<'a> RemainingBlockUses<'a> {
 
     fn next_point(&self, value: LogicalValue) -> Option<PointUse> {
         let uses = self.remaining.get(&value)?;
-        let &(_, instruction) = uses.points.get(uses.next)?;
+        let &(_, instruction) = self.points[uses.points.clone()].get(uses.next)?;
         Some(PointUse {
             block: self.block,
             instruction,
@@ -3837,6 +3851,72 @@ mod tests {
     }
 
     #[test]
+    fn remaining_use_arena_preserves_preferred_order_and_duplicate_operands() {
+        let mut vregs = VRegAllocator::new();
+        let root = vregs.alloc();
+        let x = vregs.alloc();
+        let y = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 3]);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm {
+            dst: root,
+            value: 9,
+        });
+        block.push(MInst::Add {
+            dst: x,
+            lhs: root,
+            rhs: root,
+        });
+        block.push(MInst::AddImm {
+            dst: y,
+            src: root,
+            imm: 1,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 0,
+            src: root,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
+        let logical = LogicalValues::build(&func);
+        let value = logical.checked_of(root, Some(BlockId(0)), None).unwrap();
+        let mut costs = HashMap::default();
+        let mut remaining = RemainingBlockUses::build(
+            &func,
+            &next_use,
+            &logical,
+            0,
+            &mut costs,
+            Some(&[0, 3, 2, 1, 4]),
+        )
+        .unwrap();
+        assert_eq!(remaining.points.len(), 3);
+        assert_eq!(remaining.remaining_uses(value), 3);
+        assert_eq!(remaining.next_point(value).unwrap().instruction, 3);
+        for (source, count, next) in [
+            (0, 3, Some(3)),
+            (2, 2, Some(3)),
+            (3, 1, Some(1)),
+            (1, 0, None),
+            (4, 0, None),
+        ] {
+            remaining
+                .emit(source, &func.blocks[0].insts[source], &logical)
+                .unwrap();
+            assert_eq!(remaining.remaining_uses(value), count);
+            assert_eq!(
+                remaining.next_point(value).map(|point| point.instruction),
+                next
+            );
+        }
+        assert_eq!(remaining.distance(value), NextUseDistance::Dead);
+    }
+
+    #[test]
     fn remaining_use_score_invalidations_are_bounded_for_shared_operands() {
         for lanes in [1usize, 2, 128, 4096] {
             for live_out in [false, true] {
@@ -3910,7 +3990,9 @@ mod tests {
                     assert_eq!(remaining.remaining_uses(value), pending.len());
                     let uses = &remaining.remaining[&value];
                     assert_eq!(
-                        uses.points.get(uses.next).map(|&(_, source)| source),
+                        remaining.points[uses.points.clone()]
+                            .get(uses.next)
+                            .map(|&(_, source)| source),
                         pending.first().copied()
                     );
                 }
