@@ -1,0 +1,6 @@
+Revision history for #2988:
+
+rev 2 (content) 2026-11-02 03:57 UTC — Codex round 1: call-stack guard = MAX_ACCESS_OVERREACH (shared documented overreach, also the lane-segment guard), boundary test on an image ending at a PROT_NONE page (faults with 8 bytes); identity of CLIF/wasm/layout on 10 real designs x 2 state modes recorded.
+rev 1 (initial) 2026-11-02 03:57 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2988,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"b1eb466be9454caa2b5b9c13a4f6111006d5ede7","timestamp_iso":"2026-11-02T03:57:00Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"b1eb466be9454caa2b5b9c13a4f6111006d5ede7","new_sha":"11b3a69ed0485f3b4e3fb7c11944a99c8aff0049","timestamp_iso":"2026-11-02T03:57:00Z","reason":"Codex round 1: call-stack guard = MAX_ACCESS_OVERREACH (shared documented overreach, also the lane-segment guard), boundary test on an image ending at a PROT_NONE page (faults with 8 bytes); identity of CLIF/wasm/layout on 10 real designs x 2 state modes recorded.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/b1eb466be9454caa2b5b9c13a4f6111006d5ede7...11b3a69ed0485f3b4e3fb7c11944a99c8aff0049"}]} -->
