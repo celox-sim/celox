@@ -1,0 +1,1 @@
+Codex: destination tag checks applied at the write, value checks stay with the value; a selected member gives its select's type
