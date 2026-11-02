@@ -150,14 +150,8 @@ fn validate_procedure(
             // rejects the assignment in one that stays combinational.
             StatementKind::Assignment {
                 nonblocking: true, ..
-            } if kind == AlwaysKind::Comb && procedure.kind != ProcedureKind::Always => {
-                return Err(unsupported(
-                    if procedure.kind == ProcedureKind::AlwaysLatch {
-                        "nonblocking assignment inside always_latch"
-                    } else {
-                        "nonblocking assignment inside always_comb"
-                    },
-                ));
+            } if kind == AlwaysKind::Comb && procedure.kind == ProcedureKind::AlwaysComb => {
+                return Err(unsupported("nonblocking assignment inside always_comb"));
             }
             StatementKind::Timing { control, .. }
             | StatementKind::Assignment {
@@ -1210,10 +1204,11 @@ mod traversal_tests {
                 "logic visible; if (0) begin : hidden always_latch visible <= 1; end",
                 true,
             ),
-            ("logic visible; always_latch visible <= 1;", false),
+            ("logic visible; always_latch visible <= 1;", true),
+            ("logic visible; always_comb visible <= 1;", false),
             (
                 "logic visible; if (1) begin : active always_latch visible <= 1; end",
-                false,
+                true,
             ),
         ] {
             let source = format!("module Top; {body} endmodule");
@@ -1234,7 +1229,7 @@ mod traversal_tests {
                 result.unwrap();
             } else {
                 assert!(
-                    matches!(result, Err(AnalyzerError::Unsupported(ref reason)) if reason == "nonblocking assignment inside always_latch")
+                    matches!(result, Err(AnalyzerError::Unsupported(ref reason)) if reason == "nonblocking assignment inside always_comb")
                 );
             }
         }

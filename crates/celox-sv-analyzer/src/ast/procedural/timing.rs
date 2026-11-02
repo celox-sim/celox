@@ -342,14 +342,20 @@ impl BodyBuilder<'_, '_, '_> {
 /// a combinational `always @*` its sensitivity, so both count the same
 /// reads, the defaults of omitted subroutine arguments included.
 pub(super) fn implicit_event(body: &[Stmt], removed: &[Stmt]) -> Stmt {
+    implicit_event_kind(body, removed, false)
+}
+
+pub(super) fn implicit_event_kind(body: &[Stmt], removed: &[Stmt], always_comb: bool) -> Stmt {
     // The reads of a nested event control through a virtual interface are
     // its timing, not reads of the statements.
-    Stmt::WaitImplicit(
-        body.iter()
+    Stmt::WaitImplicit {
+        reads: body
+            .iter()
             .chain(removed)
             .map(virtual_interfaces::without_event_blocks)
             .collect(),
-    )
+        always_comb,
+    }
 }
 
 /// A wait through a virtual interface that is not a static variable.
