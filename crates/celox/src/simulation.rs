@@ -902,7 +902,17 @@ impl<B: SimBackend> Simulation<B> {
         } else {
             Ok(())
         };
-        if let Err(error) = result.and_then(|()| self.simulator.mature_deferred_assertions()) {
+        if let Err(error) = result
+            .and_then(|()| self.simulator.mature_deferred_assertions())
+            .and_then(|()| {
+                self.simulator
+                    .run_strobes(self.state.time())
+                    .map_err(|halt| match halt {
+                        Halt::Error(error) => error,
+                        _ => RuntimeErrorCode::InternalError,
+                    })
+            })
+        {
             self.finalize_fatal(&error);
             self.flush_error_output();
             return Err(error);

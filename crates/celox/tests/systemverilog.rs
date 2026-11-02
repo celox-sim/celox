@@ -304,3 +304,6 @@ mod file_errors;
 
 #[path = "frontends/systemverilog/strobe.rs"]
 mod strobe;
+
+#[path = "frontends/systemverilog/monitor.rs"]
+mod monitor;

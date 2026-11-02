@@ -1468,9 +1468,31 @@ Reopening the same descriptor does not revive cancelled output.
 The current subset uses module/static expressions in scheduled processes.
 Calls inside subroutines, procedural locals, unrolled loop-variable references,
 updates and user/effectful calls in arguments are rejected explicitly. Core
-checkpoints include pending output (internal checkpoint format v4). Portable
+checkpoints include pending output (internal checkpoint format v5). Portable
 state files require a boundary without pending output. External file state for
 `$fstrobe` remains the host's separate snapshot responsibility.
+
+### Continuous monitoring
+
+`$monitor` / `$fmonitor` and their `b`, `o`, `h` variants observe changes to
+whole static scalar variables (IEEE 1800-2023 21.2.3, 21.3.2). They print once
+at the end of a changed time slot, including a slot where a value changes and
+returns to its previous value. Direct `$time`, `$stime` and `$realtime` arguments
+are evaluated for display but do not trigger output.
+
+A new `$monitor` replaces the global console list. `$monitoroff` disables that
+list; `$monitoron` enables it and forces a display. Each `$fmonitor` registers
+an independent list, unaffected by console on/off control. Its FD/MCD is captured
+at registration; closing a file cancels its monitoring, including across descriptor
+reuse. Partial MCD closure preserves the remaining channels.
+
+The current subset accepts constants, whole static numeric variables, console
+`string` variables and direct time queries. Array elements, slices, general
+expressions, file-monitor string variables and the unsupported strobe call
+contexts above are rejected explicitly. Core checkpoints preserve monitor lists,
+change baselines and the console flag (internal format v5). Portable state files
+can capture HDL values but cannot resume designs containing monitor tasks.
+External file contents still require a separate host snapshot.
 
 ### File error status
 

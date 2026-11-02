@@ -5,17 +5,47 @@ use celox_runtime::Halt;
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct StrobeCall {
-    site: usize,
-    descriptor: Option<u32>,
+    pub(super) site: usize,
+    pub(super) descriptor: Option<u32>,
+}
+
+impl StrobeCall {
+    pub(super) fn cancel_file(&mut self, descriptor: u32) -> bool {
+        let Some(fd) = self.descriptor else {
+            return true;
+        };
+        if descriptor & 0x8000_0000 != 0 {
+            if fd == descriptor || descriptor == 0x8000_0001 && fd & 0x8000_0000 == 0 {
+                self.descriptor = Some(if fd == descriptor { 0 } else { fd & !1 });
+            }
+        } else if fd & 0x8000_0000 == 0 {
+            self.descriptor = Some(fd & !descriptor);
+        } else if fd == 0x8000_0001 && descriptor & 1 != 0 {
+            self.descriptor = Some(0);
+        }
+        self.descriptor != Some(0)
+    }
 }
 
 impl<B: SimBackend> Simulator<B> {
-    pub(crate) fn queue_strobe(&mut self, site: &HostRequestSite<SignalRef>) -> Result<(), Halt> {
-        let descriptor = if let Some(arg) = site.args.first() {
+    pub(super) fn postponed_call(
+        &self,
+        site: &HostRequestSite<SignalRef>,
+    ) -> Result<StrobeCall, Halt> {
+        let descriptor = if (site.operation == 18 || site.operation == 16 && !site.args.is_empty())
+            && let Some(arg) = site.args.first()
+        {
             let (value, mask) = self.backend.get_four_state(arg.id);
             if mask != BigUint::default() {
                 return Err(RuntimeErrorCode::Runtime {
-                    message: "$fstrobe descriptor contains X or Z".into(),
+                    message: format!(
+                        "{} descriptor contains X or Z",
+                        if site.operation == 18 {
+                            "$fmonitor"
+                        } else {
+                            "$fstrobe"
+                        }
+                    ),
                     signals: Vec::new(),
                 }
                 .into());
@@ -32,20 +62,19 @@ impl<B: SimBackend> Simulator<B> {
             .position(|candidate| {
                 candidate.process == site.process
                     && candidate.kind == site.kind
-                    && candidate.operation == 16
+                    && candidate.operation == site.operation
                     && candidate.strings == site.strings
             })
             .ok_or(RuntimeErrorCode::InternalError)?;
-        // The scheduler charges each registration to its process-return
-        // budget. Diagnostic ring capacity must not drop real file writes.
-        self.pending_host_events
-            .lock()
-            .unwrap()
-            .strobes
-            .push(StrobeCall {
-                site: index,
-                descriptor,
-            });
+        Ok(StrobeCall {
+            site: index,
+            descriptor,
+        })
+    }
+
+    pub(crate) fn queue_strobe(&mut self, site: &HostRequestSite<SignalRef>) -> Result<(), Halt> {
+        let call = self.postponed_call(site)?;
+        self.pending_host_events.lock().unwrap().strobes.push(call);
         Ok(())
     }
 
@@ -78,25 +107,14 @@ impl<B: SimBackend> Simulator<B> {
     }
 
     pub(crate) fn cancel_file_strobes(&mut self, descriptor: u32) {
-        self.pending_host_events
-            .lock()
-            .unwrap()
+        let mut pending = self.pending_host_events.lock().unwrap();
+        pending
             .strobes
-            .retain_mut(|call| {
-                let Some(fd) = call.descriptor else {
-                    return true;
-                };
-                if descriptor & 0x8000_0000 != 0 {
-                    if fd == descriptor || descriptor == 0x8000_0001 && fd & 0x8000_0000 == 0 {
-                        call.descriptor = Some(if fd == descriptor { 0 } else { fd & !1 });
-                    }
-                } else if fd & 0x8000_0000 == 0 {
-                    call.descriptor = Some(fd & !descriptor);
-                } else if fd == 0x8000_0001 && descriptor & 1 != 0 {
-                    call.descriptor = Some(0);
-                }
-                call.descriptor != Some(0)
-            });
+            .retain_mut(|call| call.cancel_file(descriptor));
+        pending
+            .monitors
+            .files
+            .retain_mut(|monitor| monitor.call.cancel_file(descriptor));
     }
 
     pub(crate) fn run_strobes(&mut self, timestamp: u64) -> Result<(), Halt> {
@@ -105,80 +123,83 @@ impl<B: SimBackend> Simulator<B> {
         }
         let calls = std::mem::take(&mut self.pending_host_events.lock().unwrap().strobes);
         for call in calls {
-            let site = self.program.runtime_schema.host_request_sites[call.site].clone();
-            let process = site.process;
-            let slots = self.program.runtime_schema.processes[process]
-                .map(|address| self.backend.resolve_signal(&address));
-            let saved: Vec<_> = slots
-                .iter()
-                .map(|signal| (*signal, self.backend.get_four_state(*signal)))
-                .collect();
-            let fd = site
-                .args
-                .first()
-                .map(|arg| self.backend.resolve_signal(&arg.id));
-            let saved_fd = fd.map(|signal| (signal, self.backend.get_four_state(signal)));
-            if let (Some(signal), Some(value)) = (fd, call.descriptor) {
-                self.backend.set(signal, value);
-            }
-            let resume: u32 = site.strings[0]
-                .parse()
-                .map_err(|_| RuntimeErrorCode::InternalError)?;
-            self.backend.set(slots.resume, resume);
-            let dirty = self.dirty;
-            let result: Result<(), Halt> = (|| {
-                loop {
-                    self.run_process_checked(process)?;
-                    match ProcessStatus::from_code(
-                        self.backend
-                            .get(slots.status)
-                            .to_u32_digits()
+            self.run_postponed_call(call, timestamp)?;
+        }
+        self.run_monitors(timestamp)
+    }
+
+    pub(super) fn run_postponed_call(
+        &mut self,
+        call: StrobeCall,
+        timestamp: u64,
+    ) -> Result<(), Halt> {
+        let site = self.program.runtime_schema.host_request_sites[call.site].clone();
+        let process = site.process;
+        let slots = self.program.runtime_schema.processes[process]
+            .map(|address| self.backend.resolve_signal(&address));
+        let saved: Vec<_> = slots
+            .iter()
+            .map(|signal| (*signal, self.backend.get_four_state(*signal)))
+            .collect();
+        let fd = call
+            .descriptor
+            .and_then(|_| site.args.first())
+            .map(|arg| self.backend.resolve_signal(&arg.id));
+        let saved_fd = fd.map(|signal| (signal, self.backend.get_four_state(signal)));
+        if let (Some(signal), Some(value)) = (fd, call.descriptor) {
+            self.backend.set(signal, value);
+        }
+        let resume: u32 = site.strings[0]
+            .parse()
+            .map_err(|_| RuntimeErrorCode::InternalError)?;
+        self.backend.set(slots.resume, resume);
+        let dirty = self.dirty;
+        let result: Result<(), Halt> = (|| {
+            loop {
+                self.run_process_checked(process)?;
+                match ProcessStatus::from_code(
+                    self.backend
+                        .get(slots.status)
+                        .to_u32_digits()
+                        .first()
+                        .copied()
+                        .unwrap_or(0) as u8,
+                ) {
+                    Some(ProcessStatus::EventProbe) => return Ok(()),
+                    Some(ProcessStatus::HostRequest) => {
+                        let word = self
+                            .backend
+                            .get(slots.delay)
+                            .to_u64_digits()
                             .first()
                             .copied()
-                            .unwrap_or(0) as u8,
-                    ) {
-                        Some(ProcessStatus::EventProbe) => return Ok(()),
-                        Some(ProcessStatus::HostRequest) => {
-                            let word = self
-                                .backend
-                                .get(slots.delay)
-                                .to_u64_digits()
-                                .first()
-                                .copied()
-                                .unwrap_or(0);
-                            let (kind, index) = HostRequestKind::decode(word)
-                                .ok_or(RuntimeErrorCode::InternalError)?;
-                            let request = self
-                                .program
-                                .runtime_schema
-                                .host_request_sites
-                                .iter()
-                                .filter(|request| {
-                                    request.process == process && request.kind == kind
-                                })
-                                .nth(index as usize)
-                                .cloned()
-                                .ok_or(RuntimeErrorCode::InternalError)?;
-                            if kind != HostRequestKind::FileIo
-                                || !matches!(request.operation, 2 | 3)
-                            {
-                                return Err(RuntimeErrorCode::InternalError.into());
-                            }
-                            let request =
-                                request.map(|address| self.backend.resolve_signal(&address));
-                            self.run_file_io_request(&request, timestamp)?;
+                            .unwrap_or(0);
+                        let (kind, index) =
+                            HostRequestKind::decode(word).ok_or(RuntimeErrorCode::InternalError)?;
+                        let request = self
+                            .program
+                            .runtime_schema
+                            .host_request_sites
+                            .iter()
+                            .filter(|request| request.process == process && request.kind == kind)
+                            .nth(index as usize)
+                            .cloned()
+                            .ok_or(RuntimeErrorCode::InternalError)?;
+                        if kind != HostRequestKind::FileIo || !matches!(request.operation, 2 | 3) {
+                            return Err(RuntimeErrorCode::InternalError.into());
                         }
-                        _ => return Err(RuntimeErrorCode::InternalError.into()),
+                        let request = request.map(|address| self.backend.resolve_signal(&address));
+                        self.run_file_io_request(&request, timestamp)?;
                     }
+                    _ => return Err(RuntimeErrorCode::InternalError.into()),
                 }
-            })();
-            for (signal, (value, mask)) in saved.into_iter().chain(saved_fd) {
-                self.backend.set_four_state(signal, value, mask);
             }
-            self.dirty = dirty;
-            result?;
+        })();
+        for (signal, (value, mask)) in saved.into_iter().chain(saved_fd) {
+            self.backend.set_four_state(signal, value, mask);
         }
-        Ok(())
+        self.dirty = dirty;
+        result
     }
 }
 

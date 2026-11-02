@@ -2086,3 +2086,29 @@ close/reopen cancellation, native-image execution, differential scheduling,
 core checkpoint bytes and portable state files at quiescent boundaries.
 User subroutine calls, side-effecting arguments and procedural local references
 remain outside the current strobed-output subset and are rejected explicitly.
+
+### Continuous monitoring
+
+Five shared cases cover slot coalescing, transient writes, replacement and
+on/off control, independent file monitoring, and time-query arguments.
+Icarus 13.0 passes all five. Verilator 5.052 misses transient changes and forced
+`$monitoron` redisplays, and suppresses `$fmonitor` after `$monitoroff`.
+xezim 0.11.4 also misses transient changes and suppresses file monitoring;
+its configured suite run additionally prints `$time` as 2000 instead of 2 at
+2ns in the 1ns source scope. The standalone time-query probe passes, so that
+exclusion is specific to the suite configuration.
+IEEE 1800-2023 21.2.3, 21.3.2 and 20.3.1 define the retained expectations.
+The [standalone probes](verification/repros/sv_monitor_slot.sv) and their
+[outputs](verification/repros/sv_monitor_slot.json) reproduce the monitoring differences and distinguish the time-query configuration.
+Only the three failing cases per tool are excluded, with exact evidence for
+[Verilator](verification/sv/limitations/monitor-verilator.json) and
+[xezim](verification/sv/limitations/monitor-xezim.json).
+
+Celox API tests additionally cover host writes during idle slots, X/Z mask
+changes, captured descriptors, multiple file lists, partial MCD closure,
+close/reopen cancellation, string handles and core checkpoint replay across
+execution backends, native images and differential scheduling. The current
+monitor subset accepts whole static scalar variables, constants and direct
+time queries. General expressions, selected values, file-monitor string variables
+and unsupported strobe call contexts are rejected explicitly. Portable state
+files capture values but cannot resume designs containing monitor tasks.
