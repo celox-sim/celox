@@ -5,6 +5,10 @@ pub(in crate::optimizer) mod control_flow;
 pub(in crate::optimizer) mod dataflow;
 pub(in crate::optimizer) mod memory;
 
+#[cfg(test)]
+#[path = "passes/load_motion_tests.rs"]
+mod load_motion_tests;
+
 pub use analysis::cost_model;
 pub use memory::{commit_ops, pass_eliminate_working_round_trip};
 
