@@ -27,6 +27,10 @@ impl ExecutionUnitPass for CoalesceStoresPass {
         "coalesce_stores"
     }
 
+    fn handles_calls(&self) -> bool {
+        true
+    }
+
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
         let mut reg_counter = eu.register_map.keys().map(|r| r.0).max().unwrap_or(0);
 
@@ -122,7 +126,22 @@ fn coalesce_block(
             SIRInstruction::Store(addr, ..) => {
                 seal_group(&mut groups, addr, &mut sealed_groups);
             }
-            _ => {}
+            // A call may read or overwrite any part of the objects its
+            // effects list, so their open runs end before it.
+            other => match other.opaque_accessed_objects() {
+                Some(objects) => {
+                    for object in objects {
+                        seal_group(&mut groups, object, &mut sealed_groups);
+                    }
+                }
+                None => {
+                    for (_, group) in groups.drain() {
+                        if group.candidates.len() >= 2 {
+                            sealed_groups.push(group.candidates);
+                        }
+                    }
+                }
+            },
         }
     }
 

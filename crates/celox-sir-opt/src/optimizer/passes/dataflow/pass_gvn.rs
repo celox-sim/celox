@@ -23,6 +23,10 @@ impl ExecutionUnitPass for GvnPass {
         "gvn"
     }
 
+    fn handles_calls(&self) -> bool {
+        true
+    }
+
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions) {
         let candidates = structural_load_candidates(eu);
         let load_versions = if candidates.is_empty() {

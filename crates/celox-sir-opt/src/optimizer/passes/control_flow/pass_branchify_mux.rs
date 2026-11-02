@@ -29,7 +29,7 @@ use cross_block::{
 use diagnostics::{trace_reg_branchify_plan, trace_reg_in_new_block, trace_reg_in_original};
 use local_mux::{
     apply_branchify_mux, find_branchify_mux_in_block, is_memory_barrier, memory_write,
-    removable_defs_after_head_restore,
+    removable_defs_after_head_restore, writes_state_opaquely,
 };
 use path_facts::{
     facts_on_edge, indexed_incoming_edges, known_condition_truth, predicate_key,
@@ -412,6 +412,10 @@ struct UseLocation {
 impl ExecutionUnitPass for BranchifyMuxPass {
     fn name(&self) -> &'static str {
         "branchify_mux"
+    }
+
+    fn handles_calls(&self) -> bool {
+        true
     }
 
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions) {
