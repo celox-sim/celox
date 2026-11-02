@@ -5632,7 +5632,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "nonblocking assignment inside always_latch",
+            "build a Simulation instead",
             r#"
             module Top(input logic a, output logic y); always_latch y <= a; endmodule
         "#,

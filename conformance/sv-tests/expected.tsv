@@ -1575,8 +1575,8 @@ chapter-9/9.2.2.1--always.sv	2state	pass
 chapter-9/9.2.2.1--always.sv	4state	pass
 chapter-9/9.2.2.2--always_comb.sv	2state	pass
 chapter-9/9.2.2.2--always_comb.sv	4state	pass
-chapter-9/9.2.2.3--always_latch.sv	2state	fail
-chapter-9/9.2.2.3--always_latch.sv	4state	fail
+chapter-9/9.2.2.3--always_latch.sv	2state	pass
+chapter-9/9.2.2.3--always_latch.sv	4state	pass
 chapter-9/9.2.2.4--always_ff.sv	2state	pass
 chapter-9/9.2.2.4--always_ff.sv	4state	pass
 chapter-9/9.2.3--final.sv	2state	pass
