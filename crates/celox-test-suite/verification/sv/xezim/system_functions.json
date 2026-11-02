@@ -1275,6 +1275,17 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "system_functions::wide_enumerated_types at 3709:3: expect_output: expected [49, 32, 72, 73, 71, 72, 10, 49, 32, 72, 73, 71, 72, 10, 48, 32, 72, 73, 71, 72, 10, 72, 73, 71, 72, 32, 90, 69, 82, 79, 32, 72, 73, 71, 72, 10, 49, 32, 77, 73, 78, 85, 83, 10, 48, 32, 77, 73, 78, 85, 83, 32, 45, 53, 10, 72, 73, 71, 72, 10, 49, 32, 49, 32, 49, 10], got [49, 32, 90, 69, 82, 79, 10, 49, 32, 90, 69, 82, 79, 10, 49, 32, 79, 78, 69, 10, 90, 69, 82, 79, 32, 90, 69, 82, 79, 32, 90, 69, 82, 79, 10, 48, 32, 80, 76, 85, 83, 10, 48, 32, 80, 76, 85, 83, 32, 55, 10, 90, 69, 82, 79, 10, 48, 32, 48, 32, 49, 10]",
+      "expectation": "Simulation",
+      "name": "system_functions::wide_enumerated_types",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

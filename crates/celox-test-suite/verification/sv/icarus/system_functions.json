@@ -1921,6 +1921,17 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 7; see <case>/build.log\n<case>/source_0.sv:26: syntax error\n<case>/source_0.sv:26: error: Malformed statement\n<case>/source_0.sv:33: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_0.sv:34: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_0.sv:41: syntax error\n<case>/source_0.sv:41: error: Malformed statement\n<case>/source_0.sv:43: sorry: \"inside\" expressions not supported yet.\n",
+      "expectation": "Simulation",
+      "name": "system_functions::wide_enumerated_types",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }
