@@ -9202,3 +9202,12 @@ fn rejects_hierarchical_unpacked_arrays_of_nonequivalent_elements() {
     );
     assert!(error.contains("is not assignment compatible"), "{error}");
 }
+
+sv_backends! {
+    fn blocking_write_preserves_extracted_snapshot(sim) {
+        @case "review_regressions::blocking_write_preserves_extracted_snapshot";
+    }
+    fn blocking_write_preserves_extracted_snapshot_four_state(sim) {
+        @case "review_regressions::blocking_write_preserves_extracted_snapshot_four_state";
+    }
+}
