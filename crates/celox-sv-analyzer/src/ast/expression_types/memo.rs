@@ -35,8 +35,6 @@ impl Context {
             && self.dims.locator_locals == dims.locator_locals
             && Arc::ptr_eq(&self.dims.locator_iterators, &dims.locator_iterators)
             && Arc::ptr_eq(&self.dims.effect_values, &dims.effect_values)
-            && self.dims.property_select_base == dims.property_select_base
-            && self.dims.element_select == dims.element_select
             && Arc::ptr_eq(&self.imported, &tree.imported)
             && self.functions.same(&tree.functions)
             && self.overrides == *tree.parameter_overrides

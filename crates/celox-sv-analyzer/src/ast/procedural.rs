@@ -4994,6 +4994,92 @@ impl BodyBuilder<'_, '_, '_> {
         Ok(Some(stmts))
     }
 
+    /// The selection that native target `left` makes of the value of its
+    /// subexpression `base`, of type `ty`, as a selection of the local
+    /// `SELECTED_VALUE` that holds it (see `expression_binding::value_selects`).
+    fn value_selection(
+        &mut self,
+        left: celox_sv_syntax::ExprId,
+        base: celox_sv_syntax::ExprId,
+        ty: &Type,
+    ) -> Converted<(LValue, Vec<Expr>)> {
+        let native = self.tree.declarations();
+        let steps = expression_binding::value_selects::steps(left, base, native)
+            .ok_or_else(|| AnalyzerError::Parse("invalid select target".into()))?;
+        // The tags are those of the value in the local when it is assigned.
+        expression_binding::value_selects::selection(
+            SELECTED_VALUE,
+            Expr::Ident(SELECTED_VALUE.into()),
+            ty,
+            &steps,
+            native,
+            self.tree,
+            self.session,
+            &self.dims,
+        )
+        .map(|selection| (selection.lvalue, selection.guards))
+    }
+
+    /// The value that assignment `op` with value `right` stores into
+    /// selection `lhs`, converted as for any assignment to it: to its width
+    /// and signedness, and to two states for a two-state member of a
+    /// four-state value (IEEE 1800-2023 10.6, 7.2.1).
+    /// `checked` is whether the selection crosses tags, which the caller
+    /// checks when it assigns the value (`checked_assignment`).
+    fn selection_value(
+        &mut self,
+        op: &str,
+        lhs: &LValue,
+        right: celox_sv_syntax::ExprId,
+        checked: bool,
+    ) -> Converted<Expr> {
+        let native = self.tree.declarations();
+        let rhs = if op == "=" {
+            expression_binding::expression(right, native, lhs, self.tree, self.session, &self.dims)?
+        } else {
+            let value =
+                expression_binding::value(right, native, self.tree, self.session, &self.dims)?;
+            assignment_op_expr(self.tree, self.session, lhs, op, value, &self.dims)?
+        };
+        let rhs = if matches!(
+            lhs,
+            LValue::Select {
+                is_2state: true,
+                ..
+            }
+        ) || checked
+        {
+            coerce_procedural_assignment_rhs(self.tree, rhs, lhs, &self.dims)
+        } else {
+            rhs
+        };
+        Ok(rhs)
+    }
+
+    /// The assignment of `rhs` to selection `lhs` of the local that holds a
+    /// value, made only when each of `guards`, the checks of the tags the
+    /// selection crosses, holds against the local as it is then; all are
+    /// renamed, and `ty` is the selection's width and signedness.
+    fn checked_assignment(
+        &mut self,
+        lhs: LValue,
+        rhs: Expr,
+        guards: Vec<Expr>,
+        ty: Option<ExprType>,
+    ) -> Converted<Stmt> {
+        let rhs = if guards.is_empty() {
+            rhs
+        } else {
+            let ty = ty.ok_or_else(|| unsupported("tagged access width"))?;
+            packed_structs::checked_typed_value(guards, rhs, ty.width, ty.signed)
+        };
+        Ok(Stmt::Assign {
+            lhs,
+            rhs,
+            nonblocking: false,
+        })
+    }
+
     /// An assignment to a whole class property of unpacked structure type,
     /// `h.p = v`: a store of each of its leaf properties.
     /// `h.p[i] op value`: property `p` is read into a local, the select
@@ -5059,49 +5145,38 @@ impl BodyBuilder<'_, '_, '_> {
         } else {
             handle
         };
-        // Only the target is bound against the template; every other read
-        // of the property, the value's included, reads its object.
+        // The target is the selection of a local that holds the property's
+        // value, which the property then takes; every other read of the
+        // property, the value's included, reads its object.
         self.push_scope();
-        let local = self.declare(
-            &expression_binding::object_select_template(&property),
-            property.r#type.clone(),
-        );
-        self.dims.property_select_base = Some(base);
-        let lhs = expression_binding::variable_lvalue(
-            left,
-            native,
-            self.tree,
-            self.session,
-            &self.dims,
-            false,
-        );
-        self.dims.property_select_base = None;
+        let local = self.declare(SELECTED_VALUE, property.r#type.clone());
+        let selected = self.value_selection(left, base, &property.r#type);
+        let (lhs, mut guards) = match selected {
+            Ok((lhs, guards)) => (Ok(lhs), guards),
+            Err(error) => (Err(error), Vec::new()),
+        };
+        // The checks read the local, named as it is while declared.
+        for guard in &mut guards {
+            self.rename_expr(guard);
+        }
+        let checked = !guards.is_empty();
+        let selected_type = lhs
+            .as_ref()
+            .ok()
+            .and_then(|lhs| statements::lvalue_expr_type(&self.tree.functions, lhs, &self.dims));
         let lhs = lhs.and_then(|lhs| self.hoist_index_calls(lhs, op != "=", &mut body));
         // The width of the selection, which a runtime position leaves unknown
         // to a constant evaluation, is that of its value.
-        let width = lhs.as_ref().ok().and_then(|_| {
-            self.dims.property_select_base = Some(base);
-            let target =
-                expression_binding::value(left, native, self.tree, self.session, &self.dims);
-            self.dims.property_select_base = None;
-            dimensions::bound_bits_type(self.tree, &target.ok()?, &self.dims).map(|ty| ty.width)
+        let width = lhs.as_ref().ok().and_then(|lhs| {
+            statements::lvalue_expr_type(&self.tree.functions, lhs, &self.dims)
+                .or_else(|| {
+                    let value = statements::expr_from_lvalue(self.tree, lhs, &self.dims);
+                    dimensions::bound_bits_type(self.tree, &value, &self.dims)
+                })
+                .map(|ty| ty.width)
         });
         let rhs = lhs.and_then(|lhs| {
-            let rhs = if op == "=" {
-                expression_binding::expression(
-                    right,
-                    native,
-                    &lhs,
-                    self.tree,
-                    self.session,
-                    &self.dims,
-                )
-            } else {
-                expression_binding::value(right, native, self.tree, self.session, &self.dims)
-                    .and_then(|value| {
-                        assignment_op_expr(self.tree, self.session, &lhs, op, value, &self.dims)
-                    })
-            };
+            let rhs = self.selection_value(op, &lhs, right, checked);
             let mut lhs = lhs;
             self.rename_lvalue(&mut lhs);
             rhs.map(|mut rhs| {
@@ -5135,13 +5210,10 @@ impl BodyBuilder<'_, '_, '_> {
             });
             rhs = Expr::Ident(value);
         }
+        let assignment = self.checked_assignment(lhs, rhs, guards, selected_type)?;
         body.extend([
             load,
-            Stmt::Assign {
-                lhs,
-                rhs,
-                nonblocking: false,
-            },
+            assignment,
             Stmt::Eval(classes::object_call(
                 system_functions::ObjectOp::Store(property.field),
                 vec![handle, Expr::Ident(local)],
@@ -5188,19 +5260,24 @@ impl BodyBuilder<'_, '_, '_> {
         self.rename_expr(&mut index);
         let native = self.tree.declarations();
         let mut body = Vec::new();
-        // Only the target is bound against the local; the value reads the
-        // container.
+        // The target is the selection of a local that holds the element,
+        // which the element then takes; the value reads the container.
         self.push_scope();
-        let local = self.declare(ELEMENT_SELECT, target.element.clone());
-        self.dims.element_select = Some((element, ELEMENT_SELECT.to_owned()));
-        let lhs = expression_binding::variable_lvalue(
-            left,
-            native,
-            self.tree,
-            self.session,
-            &self.dims,
-            false,
-        );
+        let local = self.declare(SELECTED_VALUE, target.element.clone());
+        let selected = self.value_selection(left, element, &target.element);
+        let (lhs, mut guards) = match selected {
+            Ok((lhs, guards)) => (Ok(lhs), guards),
+            Err(error) => (Err(error), Vec::new()),
+        };
+        // The checks read the local, named as it is while declared.
+        for guard in &mut guards {
+            self.rename_expr(guard);
+        }
+        let checked = !guards.is_empty();
+        let selected_type = lhs
+            .as_ref()
+            .ok()
+            .and_then(|lhs| statements::lvalue_expr_type(&self.tree.functions, lhs, &self.dims));
         let lhs = lhs.and_then(|lhs| self.hoist_index_calls(lhs, op != "=", &mut body));
         // A position that changes the container, such as `q[0][q.pop_front()]`,
         // would be evaluated after the element is read.
@@ -5261,21 +5338,7 @@ impl BodyBuilder<'_, '_, '_> {
                 }
             });
         let rhs = lhs.and_then(|lhs| {
-            let rhs = if op == "=" {
-                expression_binding::expression(
-                    right,
-                    native,
-                    &lhs,
-                    self.tree,
-                    self.session,
-                    &self.dims,
-                )
-            } else {
-                expression_binding::value(right, native, self.tree, self.session, &self.dims)
-                    .and_then(|value| {
-                        assignment_op_expr(self.tree, self.session, &lhs, op, value, &self.dims)
-                    })
-            };
+            let rhs = self.selection_value(op, &lhs, right, checked);
             let mut lhs = lhs;
             self.rename_lvalue(&mut lhs);
             rhs.map(|mut rhs| {
@@ -5283,7 +5346,6 @@ impl BodyBuilder<'_, '_, '_> {
                 (lhs, rhs)
             })
         });
-        self.dims.element_select = None;
         self.pop_scope();
         let (lhs, rhs) = rhs?;
         // A value with effects, a call or a container method, may write the
@@ -5336,13 +5398,10 @@ impl BodyBuilder<'_, '_, '_> {
         } else {
             rhs
         };
+        let assignment = self.checked_assignment(lhs, rhs, guards, selected_type)?;
         body.extend([
             load,
-            Stmt::Assign {
-                lhs,
-                rhs,
-                nonblocking: false,
-            },
+            assignment,
             Stmt::Eval(containers::call(
                 system_functions::ContainerOp::Set,
                 target.layout,
@@ -5783,7 +5842,8 @@ fn lower_class(
 pub(super) const CAST_DESTINATION: &str = "destination";
 pub(super) const CAST_SOURCE: &str = "source";
 /// The local that a select of a dynamic container element is assigned in.
-const ELEMENT_SELECT: &str = "$element_select";
+/// The local that holds a value of which a selection is assigned.
+const SELECTED_VALUE: &str = "$selected_value";
 
 /// The subroutine `$cast` to a variable of class `name` calls: it assigns
 /// the source handle to the destination and returns 1 when the source is
