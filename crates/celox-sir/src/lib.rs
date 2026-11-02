@@ -21,7 +21,7 @@ pub mod transform;
 pub mod two_state;
 pub mod verify;
 
-pub use builder::SIRBuilder;
+pub use builder::{BuiltCode, SIRBuilder};
 pub use effects::MemoryAccess;
 pub use transform::{
     SirMergeProvenance, inline_single_predecessor_jumps, merge_sir_eu_refs,
