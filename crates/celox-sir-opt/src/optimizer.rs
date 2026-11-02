@@ -4,6 +4,8 @@ use crate::ir::*;
 use crate::{OptimizationContext, PassOptions, SirPass};
 
 mod api;
+#[cfg(test)]
+mod call_tests;
 mod native;
 mod passes;
 mod pipeline;

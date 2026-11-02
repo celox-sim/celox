@@ -11,6 +11,10 @@ impl ExecutionUnitPass for ReschedulePass {
         "reschedule"
     }
 
+    fn handles_calls(&self) -> bool {
+        true
+    }
+
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions) {
         for block in eu.blocks.values_mut() {
             schedule_instructions(&mut block.instructions, options.max_inflight_loads);

@@ -59,9 +59,30 @@ impl<A: PartialEq> StateAccess<'_, A> {
         }
     }
 
+    /// Whether it may touch any of bits `start..start + width` of the object
+    /// `addr`. An access at a dynamic offset may touch any bit of its object.
+    pub fn overlaps(&self, addr: &A, start: usize, width: usize) -> bool {
+        match self {
+            StateAccess::Access(access) => {
+                access.addr == addr
+                    && access.offset.constant_bit_offset().is_none_or(|offset| {
+                        offset < start.saturating_add(width)
+                            && start < offset.saturating_add(access.width)
+                    })
+            }
+            _ => self.touches(addr),
+        }
+    }
+}
+
+impl<A> StateAccess<'_, A> {
     /// Whether it touches no state.
     pub fn is_none(&self) -> bool {
-        matches!(self, StateAccess::None)
+        match self {
+            StateAccess::None => true,
+            StateAccess::Objects(objects) => objects.is_empty(),
+            StateAccess::Access(_) | StateAccess::Everything => false,
+        }
     }
 }
 
@@ -287,6 +308,54 @@ impl<A> SIRInstruction<A> {
         }
     }
 
+    /// Whether the instruction reaches state other than through the one
+    /// access of a Load, Store or Commit: a call whose effects read or write
+    /// state, or a native kernel. A pass that models those three exactly asks
+    /// this of every other instruction, and treats one that does as a barrier
+    /// for the objects its [`Self::state_reads`] and [`Self::state_writes`]
+    /// touch.
+    ///
+    /// A call is a barrier for those objects only: a store to another object
+    /// may move across it. A call can end its caller with the callee's
+    /// status, so the state left at such an Error exit is not ordered
+    /// against stores to objects the call does not touch, which is the
+    /// contract an [`crate::SIRTerminator::Error`] has for the objects the
+    /// path to it does not touch.
+    pub fn has_opaque_state_access(&self) -> bool {
+        self.memory_read().is_none()
+            && self.memory_write().is_none()
+            && (!self.state_reads().is_none() || !self.state_writes().is_none())
+    }
+
+    /// The objects the instruction may read or write other than through the
+    /// one access of a Load, Store or Commit (see
+    /// [`Self::has_opaque_state_access`]), each whole; `None` when it may
+    /// access any state. An object both read and written is listed twice.
+    pub fn opaque_accessed_objects(&self) -> Option<impl Iterator<Item = &A>> {
+        if self.accesses_unknown_state() {
+            return None;
+        }
+        Some(
+            self.call_effects()
+                .into_iter()
+                .flat_map(|effects| effects.reads.iter().chain(&effects.writes)),
+        )
+    }
+
+    /// The objects the instruction may write other than through the one
+    /// access of a Store or Commit, each whole; `None` when it may write any
+    /// state.
+    pub fn opaque_written_objects(&self) -> Option<impl Iterator<Item = &A>> {
+        if self.accesses_unknown_state() {
+            return None;
+        }
+        Some(
+            self.call_effects()
+                .into_iter()
+                .flat_map(|effects| &effects.writes),
+        )
+    }
+
     /// The simulation state the instruction writes.
     pub fn memory_write(&self) -> Option<MemoryAccess<'_, A>> {
         match self {
@@ -334,7 +403,9 @@ impl<A> SIRInstruction<A> {
             | SIRInstruction::CombCaptureEvent { .. }
             | SIRInstruction::CombCaptureEnableIfChanged { .. }
             | SIRInstruction::ExternCall { .. } => true,
-            SIRInstruction::Call { effects, .. } => effects.host || effects.kernel,
+            SIRInstruction::Call { effects, .. } => {
+                effects.host.interacts_with_host() || effects.kernel
+            }
             SIRInstruction::Imm(..)
             | SIRInstruction::Binary(..)
             | SIRInstruction::Unary(..)
@@ -344,6 +415,53 @@ impl<A> SIRInstruction<A> {
             | SIRInstruction::Concat(..)
             | SIRInstruction::Slice(..)
             | SIRInstruction::Mux(..) => false,
+        }
+    }
+
+    /// What the instruction does outside the simulation state: the one
+    /// classification that call summaries ([`crate::CallEffects::host`]) and
+    /// the lane footprint both read, so they cannot disagree. A call answers
+    /// for its callee; one that reaches a native kernel may use every
+    /// resource. A native kernel's own state accesses are
+    /// [`Self::state_reads`] and [`Self::state_writes`].
+    pub fn host_effects(&self) -> crate::HostEffects {
+        let none = crate::HostEffects::default();
+        match self {
+            SIRInstruction::Store(_, _, _, _, triggers, capture_sites) => crate::HostEffects {
+                triggers: !triggers.is_empty(),
+                capture_flags: !capture_sites.is_empty(),
+                ..none
+            },
+            SIRInstruction::Commit(_, _, _, _, triggers) => crate::HostEffects {
+                triggers: !triggers.is_empty(),
+                ..none
+            },
+            SIRInstruction::RuntimeEvent { .. } => crate::HostEffects {
+                runtime_events: true,
+                ..none
+            },
+            SIRInstruction::CombCaptureEvent { .. } => crate::HostEffects {
+                runtime_events: true,
+                capture_flags: true,
+                ..none
+            },
+            SIRInstruction::CombCaptureEnableIfChanged { .. } => crate::HostEffects {
+                capture_flags: true,
+                ..none
+            },
+            SIRInstruction::ExternCall { .. } => crate::HostEffects {
+                extern_calls: true,
+                ..none
+            },
+            SIRInstruction::Call { effects, .. } if effects.kernel => crate::HostEffects::ALL,
+            SIRInstruction::Call { effects, .. } => effects.host,
+            SIRInstruction::Imm(..)
+            | SIRInstruction::Binary(..)
+            | SIRInstruction::Unary(..)
+            | SIRInstruction::Load(..)
+            | SIRInstruction::Concat(..)
+            | SIRInstruction::Slice(..)
+            | SIRInstruction::Mux(..) => none,
         }
     }
 
@@ -459,7 +577,10 @@ mod tests {
             dst: Some(RegisterId(4)),
             effects: std::sync::Arc::new(crate::CallEffects {
                 writes: vec![7],
-                host: true,
+                host: crate::HostEffects {
+                    extern_calls: true,
+                    ..Default::default()
+                },
                 ..Default::default()
             }),
         };
@@ -475,5 +596,60 @@ mod tests {
         assert!(!call.accesses_unknown_state());
         // A call is kept whatever its effects: it can end its caller.
         assert!(call.has_side_effects() && !call.is_pure());
+    }
+
+    #[test]
+    fn opaque_accesses_are_those_of_calls_and_native_kernels() {
+        let call = |reads: Vec<u32>, writes: Vec<u32>| SIRInstruction::<u32>::Call {
+            function: FunctionId(0),
+            frame: RegisterId(0),
+            args: Vec::new(),
+            outputs: Vec::new(),
+            dst: None,
+            effects: std::sync::Arc::new(crate::CallEffects {
+                reads,
+                writes,
+                ..Default::default()
+            }),
+        };
+        let store = SIRInstruction::<u32>::Store(
+            7,
+            crate::SIROffset::Static(8),
+            8,
+            RegisterId(0),
+            Vec::new(),
+            Vec::new(),
+        );
+        // A Store's one access is exact, not opaque.
+        assert!(!store.has_opaque_state_access());
+        assert!(store.opaque_written_objects().unwrap().next().is_none());
+        assert!(store.state_writes().overlaps(&7, 12, 8));
+        assert!(!store.state_writes().overlaps(&7, 0, 8));
+        // A call touching nothing is no barrier.
+        assert!(!call(Vec::new(), Vec::new()).has_opaque_state_access());
+        assert!(call(Vec::new(), Vec::new()).state_writes().is_none());
+        let writer = call(vec![1], vec![2]);
+        assert!(writer.has_opaque_state_access());
+        assert_eq!(
+            writer.opaque_written_objects().unwrap().collect::<Vec<_>>(),
+            [&2]
+        );
+        assert_eq!(
+            writer
+                .opaque_accessed_objects()
+                .unwrap()
+                .collect::<Vec<_>>(),
+            [&1, &2]
+        );
+        // A whole object overlaps any range of it.
+        assert!(writer.state_writes().overlaps(&2, 100, 1));
+        // A native kernel may touch anything.
+        let kernel = SIRInstruction::<u32>::ExternCall {
+            dst: None,
+            func: crate::extern_abi::NATIVE_KERNEL_CALL_TAG,
+            args: Vec::new(),
+        };
+        assert!(kernel.has_opaque_state_access());
+        assert!(kernel.opaque_written_objects().is_none());
     }
 }

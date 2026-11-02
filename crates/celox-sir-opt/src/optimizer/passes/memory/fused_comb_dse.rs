@@ -168,7 +168,18 @@ fn eliminate_candidates(
                 SIRInstruction::Commit(source, _, _, _, _) if source.region == STABLE_REGION => {
                     dynamic_reads.insert(*source);
                 }
-                _ => {}
+                // A call reads any part of the objects its effects list.
+                other => match other.state_reads() {
+                    StateAccess::Objects(objects) => dynamic_reads.extend(
+                        objects
+                            .iter()
+                            .filter(|object| object.region == STABLE_REGION)
+                            .copied(),
+                    ),
+                    // A native kernel may read any state: keep every store.
+                    StateAccess::Everything => return Ok(0),
+                    StateAccess::None | StateAccess::Access(_) => {}
+                },
             }
         }
     }

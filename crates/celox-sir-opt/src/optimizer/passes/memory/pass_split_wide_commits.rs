@@ -11,6 +11,10 @@ impl ExecutionUnitPass for SplitWideCommitsPass {
         "split_wide_commits"
     }
 
+    fn handles_calls(&self) -> bool {
+        true
+    }
+
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
         split_wide_commits(eu);
     }

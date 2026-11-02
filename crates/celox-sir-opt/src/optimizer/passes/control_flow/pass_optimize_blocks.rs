@@ -22,6 +22,10 @@ impl ExecutionUnitPass for OptimizeBlocksPass {
         "optimize_blocks"
     }
 
+    fn handles_calls(&self) -> bool {
+        true
+    }
+
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions) {
         let skip_final_schedule = self.skip_final_schedule;
 

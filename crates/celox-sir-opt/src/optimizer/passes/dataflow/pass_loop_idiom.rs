@@ -17,6 +17,10 @@ impl ExecutionUnitPass for LoopIdiomPass {
         "loop_idiom"
     }
 
+    fn handles_calls(&self) -> bool {
+        true
+    }
+
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions) {
         // The recovered predicates are two-state booleans.  Four-state mux
         // merging has additional X/Z semantics and is deliberately left

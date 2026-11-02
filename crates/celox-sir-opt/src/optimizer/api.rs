@@ -80,6 +80,15 @@ pub fn optimize_rooted_comb_memory(
         ..PassOptions::default()
     };
     for eu in &mut program.sir.eval_comb {
+        // The control-region stages follow the opt-in of guarded-region
+        // sinking, which they belong to.
+        if pass_manager::makes_calls(eu)
+            && !pass_manager::ExecutionUnitPass::handles_calls(&GuardedRegionSinkingPass)
+        {
+            pass_vectorize_concat::remove_dead_definitions(eu);
+            pass_manager::run_pass(&ControlFlowSimplifyPass, eu, &options);
+            continue;
+        }
         pass_vectorize_concat::remove_dead_definitions(eu);
         pass_guarded_region_sinking::eliminate_dead_control_regions(eu);
         pass_manager::ExecutionUnitPass::run(&ControlFlowSimplifyPass, eu, &options);

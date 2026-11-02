@@ -17,7 +17,7 @@ struct Collected<A> {
     reads: BTreeSet<A>,
     writes: BTreeSet<A>,
     triggers: BTreeSet<A>,
-    host: bool,
+    host: crate::HostEffects,
     kernel: bool,
 }
 
@@ -27,7 +27,7 @@ impl<A: Ord> Default for Collected<A> {
             reads: BTreeSet::new(),
             writes: BTreeSet::new(),
             triggers: BTreeSet::new(),
-            host: false,
+            host: crate::HostEffects::default(),
             kernel: false,
         }
     }
@@ -38,7 +38,7 @@ impl<A: Ord + Clone> Collected<A> {
         self.reads.extend(other.reads.iter().cloned());
         self.writes.extend(other.writes.iter().cloned());
         self.triggers.extend(other.triggers.iter().cloned());
-        self.host |= other.host;
+        self.host = self.host.union(other.host);
         self.kernel |= other.kernel;
     }
 
@@ -86,7 +86,7 @@ fn own_effects<A: Ord + Clone + Hash>(
                 }
             }
             collected.kernel |= instruction.accesses_unknown_state();
-            collected.host |= instruction.is_host_interaction();
+            collected.host = collected.host.union(instruction.host_effects());
         }
     }
     collected
@@ -324,12 +324,16 @@ mod tests {
             reads: vec![2],
             writes: vec![1, 3],
             triggers: vec![3],
-            host: false,
+            // The triggered store of 3 marks trigger bits.
+            host: crate::HostEffects {
+                triggers: true,
+                ..Default::default()
+            },
             kernel: false,
         };
         assert_eq!(*program.functions[0].effects, recursive);
         assert_eq!(*program.functions[1].effects, recursive);
-        assert!(program.functions[2].effects.host);
+        assert!(program.functions[2].effects.host.runtime_events);
         // Each call shares its callee's effects.
         let SIRInstruction::Call { effects, .. } =
             &program.eval_comb[0].blocks[&BlockId(0)].instructions[0]
@@ -345,5 +349,85 @@ mod tests {
         program.eval_comb.clear();
         program.processes.clear();
         assert!(!program.has_calls() && program.calls_summarized());
+    }
+
+    #[test]
+    fn a_store_feeding_comb_captures_interacts_with_the_host() {
+        let captured = SIRInstruction::Store(
+            1,
+            SIROffset::Static(0),
+            32,
+            RegisterId(0),
+            Vec::new(),
+            vec![0],
+        );
+        let mut program = SirProgram::<u32, u32> {
+            eval_comb: vec![unit(vec![call(0)])],
+            eval_apply_ffs: HashMap::default(),
+            eval_comb_apply_ffs: HashMap::default(),
+            merge_comb_apply: false,
+            eval_comb_stateful: None,
+            eval_only_ffs: HashMap::default(),
+            apply_ffs: HashMap::default(),
+            parallel: None,
+            processes: Vec::new(),
+            functions: vec![function(vec![captured], 100)],
+        };
+        program.summarize_calls();
+        assert!(program.functions[0].effects.host.capture_flags);
+        assert_eq!(program.functions[0].effects.writes, [1]);
+    }
+
+    /// A call's host effects are its body's, from the same per-instruction
+    /// query as everything else that reads them.
+    #[test]
+    fn a_call_summarizes_its_body_by_host_effects() {
+        let store = |triggers: Vec<TriggerIdWithKind>, sites: Vec<u32>| {
+            SIRInstruction::Store(1, SIROffset::Static(0), 32, RegisterId(0), triggers, sites)
+        };
+        let trigger = TriggerIdWithKind {
+            id: 0,
+            kind: celox_design::DomainKind::Other,
+        };
+        let cases = [
+            store(vec![trigger], Vec::new()),
+            store(Vec::new(), vec![0]),
+            SIRInstruction::Commit(1, 2, SIROffset::Static(0), 32, vec![trigger]),
+            SIRInstruction::RuntimeEvent {
+                site_id: 0,
+                args: Vec::new(),
+            },
+            SIRInstruction::ExternCall {
+                dst: None,
+                func: 0,
+                args: Vec::new(),
+            },
+        ];
+        for instruction in cases {
+            let expected = instruction.host_effects();
+            let mut program = SirProgram::<u32, u32> {
+                eval_comb: vec![unit(vec![call(0)])],
+                eval_apply_ffs: HashMap::default(),
+                eval_comb_apply_ffs: HashMap::default(),
+                merge_comb_apply: false,
+                eval_comb_stateful: None,
+                eval_only_ffs: HashMap::default(),
+                apply_ffs: HashMap::default(),
+                parallel: None,
+                processes: Vec::new(),
+                functions: vec![function(vec![instruction], 100)],
+            };
+            program.summarize_calls();
+            assert_eq!(program.functions[0].effects.host, expected);
+            let SIRInstruction::Call { .. } =
+                &program.eval_comb[0].blocks[&BlockId(0)].instructions[0]
+            else {
+                unreachable!()
+            };
+            assert_eq!(
+                program.eval_comb[0].blocks[&BlockId(0)].instructions[0].host_effects(),
+                expected
+            );
+        }
     }
 }

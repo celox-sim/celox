@@ -11,6 +11,10 @@ impl ExecutionUnitPass for BitExtractPeepholePass {
         "bit_extract_peephole"
     }
 
+    fn handles_calls(&self) -> bool {
+        true
+    }
+
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
         let block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
         let global_use_count = collect_global_use_counts(eu);

@@ -19,11 +19,23 @@ pub(in crate::optimizer) trait ExecutionUnitPass: Send + Sync {
 }
 
 /// Whether `eu` makes a function call.
-fn makes_calls(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> bool {
+pub(in crate::optimizer) fn makes_calls(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> bool {
     eu.blocks
         .values()
         .flat_map(|block| &block.instructions)
         .any(|instruction| matches!(instruction, SIRInstruction::Call { .. }))
+}
+
+/// Run one pass outside a manager, as the program-wide stages do, unless it
+/// does not handle the calls `eu` makes.
+pub(in crate::optimizer) fn run_pass(
+    pass: &dyn ExecutionUnitPass,
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    options: &PassOptions,
+) {
+    if pass.handles_calls() || !makes_calls(eu) {
+        pass.run(eu, options);
+    }
 }
 
 #[derive(Default)]
@@ -57,6 +69,29 @@ impl ExecutionUnitPassManager {
         eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
         options: &PassOptions,
     ) {
+        let calls = makes_calls(eu);
+        self.run_passes(eu, options, calls);
+    }
+
+    /// Run the pipeline over the body of a function unit. Only passes that
+    /// handle calls see it, whether or not it makes one: its frame slots
+    /// live only during its activation, and the caller's state accesses
+    /// surround it, which a pass that does not handle calls may not assume
+    /// away.
+    pub(in crate::optimizer) fn run_function(
+        &self,
+        eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+        options: &PassOptions,
+    ) {
+        self.run_passes(eu, options, true);
+    }
+
+    fn run_passes(
+        &self,
+        eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+        options: &PassOptions,
+        calls: bool,
+    ) {
         let diagnostics = &options.optimize_options.diagnostics;
         let timing = diagnostics.pass_timing;
         let verify_boundaries = cfg!(debug_assertions) || diagnostics.verify_boundaries;
@@ -72,7 +107,6 @@ impl ExecutionUnitPassManager {
         {
             panic!("before SIR pass pipeline: {error}");
         }
-        let calls = makes_calls(eu);
         for pass in &self.passes {
             if calls && !pass.handles_calls() {
                 continue;
@@ -198,6 +232,11 @@ pub(super) fn verify_unpacked_element_boundaries(
             let SIROffset::Static(start) = offset else {
                 continue;
             };
+            // A frame slot may share its object identity with a state object,
+            // but not that object's elements.
+            if address.region == crate::ir::FRAME_REGION {
+                continue;
+            }
             let Some(&element_width) = unpacked_element_widths.get(&address.absolute_addr()) else {
                 continue;
             };
