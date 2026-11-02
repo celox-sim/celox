@@ -177,13 +177,21 @@ fn preserves_packed_dimensions_on_struct_aliases() {
 }
 
 #[test]
-fn rejects_member_access_on_packed_struct_array_aliases() {
-    for access in ["value.a", "value[0].a", "outer.pairs.a", "outer.pairs[0].a"] {
+fn checks_member_access_on_packed_struct_array_aliases() {
+    for (access, supported) in [
+        ("value.a", false),
+        ("value[0].a", true),
+        ("outer.pairs.a", false),
+        // Selecting an array held inside another packed member remains
+        // outside the current element-member lowering path.
+        ("outer.pairs[0].a", false),
+    ] {
         let source = format!(
             "module Top(output logic [3:0] y); typedef struct packed {{ logic [3:0] a, b; }} t; typedef t [1:0] pair_t; pair_t value; struct packed {{ pair_t pairs; logic flag; }} outer; assign y = {access}; endmodule"
         );
-        assert!(
-            analyze_source(&source, Path::new("struct_array_alias_member.sv")).is_err(),
+        assert_eq!(
+            analyze_source(&source, Path::new("struct_array_alias_member.sv")).is_ok(),
+            supported,
             "{access}"
         );
     }
