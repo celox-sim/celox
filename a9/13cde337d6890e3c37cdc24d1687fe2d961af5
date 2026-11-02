@@ -1,0 +1,6 @@
+Revision history for #3031:
+
+rev 2 (content) 2026-11-02 14:41 UTC — Address review 5738056346: resolve generated-instance string array elements and honor local bindings before import aliases
+rev 1 (initial) 2026-11-02 14:41 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3031,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"81e320533a1dbf50b04bb99103d2719e73ede221","timestamp_iso":"2026-11-02T14:41:21Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"81e320533a1dbf50b04bb99103d2719e73ede221","new_sha":"29cad82d22209bfad8853318bd6503ea38cb676e","timestamp_iso":"2026-11-02T14:41:21Z","reason":"Address review 5738056346: resolve generated-instance string array elements and honor local bindings before import aliases","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/81e320533a1dbf50b04bb99103d2719e73ede221...29cad82d22209bfad8853318bd6503ea38cb676e"}]} -->
