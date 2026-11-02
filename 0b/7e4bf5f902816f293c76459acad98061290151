@@ -1,0 +1,1 @@
+Fix review findings: exclude private frame slots from waveform notifications and truncate exported values; repair test lint.
