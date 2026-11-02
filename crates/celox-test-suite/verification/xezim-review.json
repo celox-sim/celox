@@ -1022,6 +1022,10 @@
     "sv_wide_enum_domains": {
       "title": "An enumerated type whose base is wider than 64 bits loses the members above bit 63: with enum logic [127:0] {ZERO = 0, HIGH = 128'h8000_0000_0000_0000_0000_0000_0000_0000} E, e = HIGH gives e.name() ZERO although e == HIGH is 1, and $cast(e, 128'h8000...) returns 1 and assigns ZERO",
       "standard": "IEEE 1800-2023 6.19, 6.19.5, 6.24.2"
+    },
+    "sv_property_member_part_select_patterns": {
+      "title": "An assignment pattern assigned to a part-select of a packed multidimensional member of a class property, info.n.data[2:1] = '{4'hc, 4'hd} with logic [3:0][3:0] data, writes 4'h2 into the member's low bits instead of the two selected elements",
+      "standard": "IEEE 1800-2023 7.4.6, 10.9"
     }
   },
   "cases": [
@@ -4204,6 +4208,14 @@
     },
     {
       "suite": "sv",
+      "name": "class::tagged_members_of_structure_properties",
+      "status": "compile_error",
+      "classification": "xezim_bug",
+      "bug": "sv_new-X9",
+      "note": "xezim rejects the design at `tagged <member> <primary>` with an unparenthesized literal payload (\"expected Semicolon, found IntegerLiteral\"), `value.item = tagged Full 8'h12` on line 10."
+    },
+    {
+      "suite": "sv",
       "name": "tagged_unions::constructors_and_checked_members",
       "status": "compile_error",
       "classification": "xezim_bug",
@@ -5535,6 +5547,14 @@
       "classification": "xezim_bug",
       "bug": "sv_wide_enum_domains",
       "note": "An enumerated type may have any integral base (6.19), so HIGH = 128'h8000_0000_0000_0000_0000_0000_0000_0000 is a member of enum logic [127:0] {ZERO, ONE, HIGH}, $cast to it of that value assigns HIGH (6.24.2) and name, next and prev give HIGH's neighbours (6.19.5); the signed 100-bit base keeps MINUS = -5. The pinned xezim loses the member bits above bit 63, so HIGH reads as ZERO, $cast(s, -5) to the signed 100-bit enumeration returns 0, and the randc and std::randomize draws of a 128-bit enumeration never give its high member. The adapter-free source prints [ZERO 1] and [1 ZERO] where [HIGH 1] and [1 HIGH] are required; see verification/repros/sv_wide_enum_domains_xezim.json. Celox prints [HIGH 1] [1 HIGH]; Verilator 5.052 rejects the methods of an enumeration wider than 64 bits as unsupported."
+    },
+    {
+      "suite": "sv",
+      "name": "class::property_member_place_addresses",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_property_member_part_select_patterns",
+      "note": "A part-select of a packed array keeps the dimensions after it (7.4.6), so the pattern assigned to `info.n.data[2:1]` has two four-bit items and the member becomes 16'h0cd0. xezim leaves 16'h0002; it assigns the same pattern to a part-select of a member of a variable, `n.data[1:0]`, correctly."
     }
   ]
 }

@@ -898,6 +898,17 @@
     },
     {
       "category": "Types",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-UNSUPPORTED: <case>/source_0.sv:3:35: Unsupported: void (for tagged unions)\n    3 |     typedef union tagged packed { void Empty; bit [7:0] Full; } item_t;\n      |                                   ^~~~\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.052\n%Error-UNSUPPORTED: <case>/source_0.sv:10:22: Unsupported: tagged union\n   10 |         value.item = tagged Full 8'h12;\n      |                      ^~~~~~\n%Error: Exiting due to 2 error(s)\n",
+      "expectation": "Simulation",
+      "name": "class::tagged_members_of_structure_properties",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "",
       "expectation": "Simulation",
       "name": "class::typedefs_of_interface_classes",

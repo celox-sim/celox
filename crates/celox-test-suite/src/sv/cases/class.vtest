@@ -4371,3 +4371,143 @@ endmodule
 "#)
   (top Top) (run_until 0)
   (assert_eq bits 0xff41) (assert_eq whole 0x37) (assert_eq element 0x42))
+
+(case property_member_place_addresses
+  (source "class.sv" #"
+module Top(output bit [7:0] variable_bits, output bit [7:0] property_bits,
+           output bit [7:0] aliased, output bit [7:0] swapped, output bit [15:0] nibbles,
+           output bit [15:0] property_nibbles);
+    typedef struct packed { bit [7:0] data; } word_t;
+    typedef struct packed { logic [3:0][3:0] data; } nibbles_t;
+    typedef struct packed { bit [3:0] x; bit [3:0] y; } pair_t;
+    class Info;
+        word_t word;
+        pair_t pair;
+        nibbles_t n;
+    endclass
+    Info info;
+    word_t word;
+    nibbles_t n;
+    initial begin
+        info = new;
+        // A pattern assigned to a select of a member has the select's type
+        // (IEEE 1800-2023 10.9, 11.5.1).
+        word.data = 8'hff;
+        word.data[3:0] = '{1'b1, 1'b0, 1'b1, 1'b0};
+        variable_bits = word.data;
+        info.word.data = 8'hff;
+        info.word.data[3:0] = '{1'b1, 1'b0, 1'b1, 1'b0};
+        property_bits = info.word.data;
+        // A part-select of a member keeps the dimensions after it, so its
+        // pattern has two four-bit items (7.4.6, 10.9).
+        n.data = 16'h0000;
+        n.data[1:0] = '{4'ha, 4'hb};
+        nibbles = n.data;
+        info.n.data = 16'h0000;
+        info.n.data[2:1] = '{4'hc, 4'hd};
+        property_nibbles = info.n.data;
+        // A member written from another member of the same property, and
+        // two members swapped through a concatenation (10.10.1).
+        info.pair = 8'h12;
+        info.pair.x = info.pair.y;
+        aliased = info.pair;
+        info.pair = 8'h12;
+        {info.pair.x, info.pair.y} = {info.pair.y, info.pair.x};
+        swapped = info.pair;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq variable_bits 0xfa) (assert_eq property_bits 0xfa)
+  (assert_eq aliased 0x22) (assert_eq swapped 0x21) (assert_eq nibbles 0x00ab)
+  (assert_eq property_nibbles 0x0cd0))
+
+(case packed_structure_property_members
+  (source "class.sv" #"
+module Top(output int stride, output int twice, output bit [15:0] low, output bit [7:0] high,
+           output bit [7:0] inner, output bit indexed);
+    typedef struct packed { bit [15:0] min; bit [15:0] max; int unsigned stride; } range_t;
+    typedef struct packed { bit [3:0] x; bit [3:0] y; } inner_t;
+    typedef struct packed { inner_t inner; bit [7:0] z; } record_t;
+    class Info;
+        range_t mem_range;
+        record_t record;
+        bit [15:0] bits = 16'h12;
+        // A member of a packed structure property is a select of its bits
+        // (IEEE 1800-2023 7.2.1), read and written inside a method...
+        function new(); mem_range.stride = 4; mem_range.min[7:0] = 8'h12; endfunction
+        function int twice_stride(); return mem_range.stride * 2; endfunction
+    endclass
+    Info info, other;
+    initial begin
+        info = new;
+        other = new;
+        // ...and through a handle.
+        info.mem_range.max = 16'h0304;
+        info.mem_range.stride += 1;
+        stride = info.mem_range.stride;
+        twice = info.twice_stride();
+        low = info.mem_range.min;
+        high = info.mem_range.max[15:8];
+        info.record.inner = '{x: 4'h1, y: 4'h2};
+        inner = info.record.inner;
+        // Bit 4 of 16'h12, selected by the stride of another object.
+        indexed = info.bits[other.mem_range.stride];
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq stride 5) (assert_eq twice 10) (assert_eq low 18) (assert_eq high 3)
+  (assert_eq inner 0x12) (assert_eq indexed 1))
+
+(case tagged_members_of_structure_properties
+  (source "class.sv" #"
+module Top(output bit [7:0] full, output bit [7:0] written, output bit [3:0] n);
+    typedef union tagged packed { void Empty; bit [7:0] Full; } item_t;
+    typedef struct packed { item_t item; bit [3:0] n; } record_t;
+    class Info; record_t record; endclass
+    Info info;
+    record_t value;
+    initial begin
+        info = new;
+        value.item = tagged Full 8'h12;
+        value.n = 4'h5;
+        info.record = value;
+        // A member of the active member of a tagged union in a packed
+        // structure property is read and written (IEEE 1800-2023 7.3.2).
+        full = info.record.item.Full;
+        info.record.item.Full = 8'h34;
+        written = info.record.item.Full;
+        n = info.record.n;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq full 0x12) (assert_eq written 0x34) (assert_eq n 5))
+
+(case property_member_assignment_sites
+  (source "class.sv" #"
+module Top(output bit [7:0] chosen, output bit [7:0] record);
+    typedef struct packed { bit [3:0] x; bit [3:0] y; } pair_t;
+    typedef struct packed { pair_t inner; bit [7:0] z; } record_t;
+    class Info;
+        pair_t pair;
+        record_t rec;
+    endclass
+    Info info;
+    bit pick = 0;
+    initial begin
+        info = new;
+        info.pair.x = 4'h4;
+        // An assignment pattern in either branch of a conditional assigned
+        // to a member of a property takes the member's type (IEEE
+        // 1800-2023 10.9).
+        info.rec.inner = pick ? '{x: 4'h1, y: 4'h2} : '{x: 4'h3, y: 4'h4};
+        info.pair.y = 4'h7;
+        chosen = info.pair;
+        record = info.rec.inner;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq chosen 0x47) (assert_eq record 0x34))
