@@ -362,6 +362,7 @@ mod tests {
             apply_ffs: FxHashMap::default(),
             parallel: None,
             processes: Vec::new(),
+            functions: Vec::new(),
         }
     }
 

@@ -231,6 +231,7 @@ impl JitBackend {
         options: &SimulatorOptions,
         mut trace: Option<&mut crate::debug::CompilationTrace>,
     ) -> Result<SharedJitCode, crate::SimulatorError> {
+        laid_out.reject_function_calls("Cranelift")?;
         let sir = laid_out;
 
         // Auto-select SinglePass RA for large designs where Backtracking RA's

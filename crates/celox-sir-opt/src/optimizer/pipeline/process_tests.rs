@@ -150,6 +150,7 @@ fn optimize_process(
 ) -> ExecutionUnit<RegionedAbsoluteAddr> {
     let mut sir = SirProgram {
         processes: vec![process],
+        functions: Vec::new(),
         eval_comb: Vec::new(),
         eval_apply_ffs: crate::HashMap::default(),
         eval_comb_apply_ffs: crate::HashMap::default(),

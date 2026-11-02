@@ -480,6 +480,20 @@ impl<'a> UnitEffects<'a> {
                     SIRInstruction::ExternCall { .. } => {
                         self.resource(Storage::ExternCalls);
                     }
+                    // A function can read and write anything.
+                    SIRInstruction::Call { .. } => {
+                        for storage in [
+                            Storage::StateBits,
+                            Storage::WriteEnvelope,
+                            Storage::RuntimeEvents,
+                            Storage::CaptureFlags,
+                            Storage::Triggers,
+                            Storage::ExternCalls,
+                        ] {
+                            self.reads.push(MemoryEffect::UnknownObject(storage));
+                            self.resource(storage);
+                        }
+                    }
                     SIRInstruction::Imm(..)
                     | SIRInstruction::Binary(..)
                     | SIRInstruction::Unary(..)

@@ -7659,7 +7659,8 @@ impl Ff<'_, '_> {
                 | SIRInstruction::RuntimeEvent { .. }
                 | SIRInstruction::CombCaptureEvent { .. }
                 | SIRInstruction::CombCaptureEnableIfChanged { .. }
-                | SIRInstruction::ExternCall { .. } => {
+                | SIRInstruction::ExternCall { .. }
+                | SIRInstruction::Call { .. } => {
                     return Err(unsupported("event expression with runtime effects"));
                 }
                 SIRInstruction::Imm(..)

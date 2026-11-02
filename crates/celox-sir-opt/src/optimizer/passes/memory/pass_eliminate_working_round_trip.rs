@@ -35,9 +35,15 @@ fn eliminate_working_round_trip_impl(eu: &mut ExecutionUnit<RegionedAbsoluteAddr
         .blocks
         .values()
         .flat_map(|block| &block.instructions)
-        .any(|inst| {
-            matches!(inst, SIRInstruction::ExternCall { func, .. }
-            if celox_sir::extern_abi::native_kernel_index(*func).is_some())
+        .any(|instruction| {
+            instruction.accesses_unknown_state()
+                || instruction.call_effects().is_some_and(|effects| {
+                    effects
+                        .reads
+                        .iter()
+                        .chain(&effects.writes)
+                        .any(|addr| addr.region != celox_design::STABLE_REGION)
+                })
         })
     {
         return;

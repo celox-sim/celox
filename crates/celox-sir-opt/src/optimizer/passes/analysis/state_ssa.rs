@@ -578,9 +578,8 @@ impl StateSsa {
             for (instruction_index, instruction) in block.instructions.iter().enumerate() {
                 let mut instruction_effects = InstructionEffects::default();
                 match instruction {
-                    SIRInstruction::ExternCall { func, .. }
-                        if celox_sir::extern_abi::native_kernel_index(*func).is_some() =>
-                    {
+                    // An outlined native kernel or a function call.
+                    _ if instruction.accesses_unknown_state() => {
                         // An outlined native callee observes the old state and
                         // may replace every slot, including pending FF state.
                         for (slot, fact) in facts.iter_mut().enumerate() {
@@ -595,6 +594,38 @@ impl StateSsa {
                                 slot,
                                 destination: None,
                             });
+                            instruction_effects.defs.push(DefEffect {
+                                slot,
+                                kind: DefEffectKind::Kill,
+                            });
+                        }
+                    }
+                    // A function call observes the slots its effects read,
+                    // and may replace those they write.
+                    SIRInstruction::Call { effects, .. } => {
+                        let slots = |addrs: &[RegionedAbsoluteAddr]| {
+                            addrs
+                                .iter()
+                                .filter_map(|addr| locations_by_address.get(addr))
+                                .flatten()
+                                .map(|&(_, slot)| slot)
+                                .collect::<Vec<_>>()
+                        };
+                        for slot in slots(&effects.reads) {
+                            facts[slot].escapes = true;
+                            if !defined.contains(&slot) {
+                                facts[slot].upward_use_blocks.insert(block_id);
+                            }
+                            instruction_effects.uses.push(UseEffect {
+                                slot,
+                                destination: None,
+                            });
+                        }
+                        for slot in slots(&effects.writes) {
+                            facts[slot].escapes = true;
+                            facts[slot].has_kill = true;
+                            facts[slot].def_blocks.insert(block_id);
+                            defined.insert(slot);
                             instruction_effects.defs.push(DefEffect {
                                 slot,
                                 kind: DefEffectKind::Kill,
@@ -1401,6 +1432,67 @@ mod tests {
                         ))
             );
         }
+    }
+
+    #[test]
+    fn a_call_observes_and_kills_only_what_its_callee_touches() {
+        let addr = address(STABLE_REGION, 0);
+        // Whether the load after a call that reads and writes `touched` sees
+        // a new version.
+        let killed = |touched: RegionedAbsoluteAddr| {
+            let eu = unit(
+                vec![block(
+                    0,
+                    vec![
+                        SIRInstruction::Imm(RegisterId(0), SIRValue::new(3u8)),
+                        SIRInstruction::Imm(RegisterId(3), SIRValue::new(0u8)),
+                        SIRInstruction::Store(
+                            addr,
+                            SIROffset::Static(0),
+                            8,
+                            RegisterId(0),
+                            Vec::new(),
+                            Vec::new(),
+                        ),
+                        SIRInstruction::Load(RegisterId(1), addr, SIROffset::Static(0), 8),
+                        SIRInstruction::Call {
+                            function: celox_sir::FunctionId(0),
+                            frame: RegisterId(3),
+                            args: Vec::new(),
+                            outputs: Vec::new(),
+                            dst: None,
+                            effects: std::sync::Arc::new(celox_sir::CallEffects {
+                                reads: vec![touched],
+                                writes: vec![touched],
+                                ..Default::default()
+                            }),
+                        },
+                        SIRInstruction::Load(RegisterId(2), addr, SIROffset::Static(0), 8),
+                    ],
+                    SIRTerminator::Return,
+                )],
+                (0..4).map(|i| (RegisterId(i), bit(8))),
+            );
+            eu.verify_result().unwrap();
+            let cfg = SirCfg::analyze(&eu).unwrap();
+            let state = StateSsa::analyze_all_loads(&eu, &cfg, STABLE_REGION).unwrap();
+            let reaching = |register| match use_access(&state, register).kind {
+                MemoryAccessKind::Use { reaching, .. } => reaching,
+                _ => panic!("load"),
+            };
+            let (before, after) = (reaching(RegisterId(1)), reaching(RegisterId(2)));
+            if before == after {
+                return false;
+            }
+            assert!(matches!(
+                state.accesses[after.0].kind,
+                MemoryAccessKind::Kill { .. }
+            ));
+            assert!(state.slots[0].escapes);
+            true
+        };
+        assert!(killed(addr));
+        assert!(!killed(address(STABLE_REGION, 1)));
     }
 
     #[test]

@@ -941,6 +941,13 @@ fn propagate_comb_unit(
                         changed |= extend_register_taint(&mut registers, *dst, taint);
                     }
                     SIRInstruction::ExternCall { dst: None, .. } => {}
+                    // A function may read any state, so its outputs may
+                    // depend on anything.
+                    SIRInstruction::Call { dst: Some(dst), .. } => {
+                        let taint = whole_register_taint(unit, *dst);
+                        changed |= extend_register_taint(&mut registers, *dst, taint);
+                    }
+                    SIRInstruction::Call { dst: None, .. } => {}
                 }
             }
 

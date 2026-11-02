@@ -719,8 +719,187 @@ fn verify_instruction_types<A>(
                 }
             }
         }
+        // The callee's frame is checked against the program, see
+        // `SirProgram::verify_functions`.
+        SIRInstruction::Call {
+            frame, args, dst, ..
+        } => {
+            if !matches!(ty(*frame)?, RegisterType::Bit { width, .. } if *width <= 64) {
+                return Err(SirVerifyError::instruction(
+                    "CALL.FRAME_BIT",
+                    block,
+                    index,
+                    format!("frame r{} is not a Bit of at most 64 bits", frame.0),
+                ));
+            }
+            for &(_, reg) in args {
+                ty(reg)?;
+            }
+            if let Some(dst) = dst {
+                ty(*dst)?;
+            }
+        }
     }
     Ok(())
+}
+
+impl<EventAddr, StateAddr: Ord + Clone + std::hash::Hash> crate::SirProgram<EventAddr, StateAddr> {
+    /// Verify the program's function units and their calls:
+    ///
+    /// - each frame slot lies within its frame, and no two slots of the
+    ///   program share an address;
+    /// - a frame slot is accessed only by its own function's unit, within the
+    ///   slot (static offsets), and never committed;
+    /// - a frame slot is accessed at a static offset;
+    /// - every [`SIRInstruction::Call`] names a function of the program,
+    ///   stores each argument into a slot of the callee of the argument's
+    ///   width, and has a `dst` exactly as wide as the outputs it reads;
+    /// - the effects of each function and of each call of it are the current
+    ///   ones (see [`crate::SirProgram::summarize_calls`]).
+    pub fn verify_functions(&self) -> Result<(), SirVerifyError> {
+        let mut owners: crate::HashMap<&StateAddr, (usize, &crate::FrameSlot<StateAddr>)> =
+            crate::HashMap::default();
+        for (function, unit) in self.functions.iter().enumerate() {
+            for slot in &unit.frame.slots {
+                if slot.offset + slot.size() > unit.frame.size {
+                    return Err(SirVerifyError::function(
+                        "FRAME.SLOT_IN_FRAME",
+                        format!(
+                            "a slot of fn{function} ends at byte {}, past its frame of {}",
+                            slot.offset + slot.size(),
+                            unit.frame.size
+                        ),
+                    ));
+                }
+                if owners.insert(&slot.addr, (function, slot)).is_some() {
+                    return Err(SirVerifyError::function(
+                        "FRAME.SLOT_ADDRESS_UNIQUE",
+                        format!("a slot address of fn{function} names another slot too"),
+                    ));
+                }
+            }
+        }
+        let effects = self.call_effects();
+        for (function, (unit, current)) in self.functions.iter().zip(&effects).enumerate() {
+            if *unit.effects != *current {
+                return Err(SirVerifyError::function(
+                    "CALL.EFFECTS_CURRENT",
+                    format!("the effects of fn{function} are not its current ones"),
+                ));
+            }
+        }
+        let check = |unit: &ExecutionUnit<StateAddr>,
+                     own: Option<usize>|
+         -> Result<(), SirVerifyError> {
+            for block in unit.blocks.values() {
+                for (index, inst) in block.instructions.iter().enumerate() {
+                    let accesses = [inst.memory_read(), inst.memory_write()];
+                    for access in accesses.into_iter().flatten() {
+                        let Some(&(owner, slot)) = owners.get(access.addr) else {
+                            continue;
+                        };
+                        if own != Some(owner) || matches!(inst, SIRInstruction::Commit(..)) {
+                            return Err(SirVerifyError::instruction(
+                                "FRAME.SLOT_OWN_FUNCTION",
+                                block.id,
+                                index,
+                                format!("accesses a frame slot of fn{owner} outside fn{owner}"),
+                            ));
+                        }
+                        let crate::SIROffset::Static(offset) = access.offset else {
+                            return Err(SirVerifyError::instruction(
+                                "FRAME.STATIC_OFFSET",
+                                block.id,
+                                index,
+                                format!("accesses a frame slot at offset {}", access.offset),
+                            ));
+                        };
+                        if offset + access.width > slot.width {
+                            return Err(SirVerifyError::instruction(
+                                "FRAME.ACCESS_IN_SLOT",
+                                block.id,
+                                index,
+                                format!(
+                                    "accesses bits [{offset}..{}) of a {}-bit frame slot",
+                                    offset + access.width,
+                                    slot.width
+                                ),
+                            ));
+                        }
+                    }
+                    let SIRInstruction::Call {
+                        function,
+                        args,
+                        outputs,
+                        dst,
+                        effects: call_effects,
+                        ..
+                    } = inst
+                    else {
+                        continue;
+                    };
+                    let error = |invariant, message: String| {
+                        SirVerifyError::instruction(invariant, block.id, index, message)
+                    };
+                    let Some(callee) = self.functions.get(function.0 as usize) else {
+                        return Err(error(
+                            "CALL.FUNCTION_EXISTS",
+                            format!("{function} is not a function of the program"),
+                        ));
+                    };
+                    if **call_effects != effects[function.0 as usize] {
+                        return Err(error(
+                            "CALL.EFFECTS_CURRENT",
+                            format!("the call's effects are not those of {function}"),
+                        ));
+                    }
+                    let slot = |position: usize| {
+                        callee.frame.slots.get(position).ok_or_else(|| {
+                            error(
+                                "CALL.SLOT_EXISTS",
+                                format!("{function} has no frame slot {position}"),
+                            )
+                        })
+                    };
+                    for &(position, arg) in args {
+                        let slot = slot(position)?;
+                        let width = unit.register_map.get(&arg).map(RegisterType::width);
+                        if width != Some(slot.width) {
+                            return Err(error(
+                                "CALL.ARGUMENT_WIDTH",
+                                format!(
+                                    "r{} of {width:?} bits is stored into a {}-bit slot",
+                                    arg.0, slot.width
+                                ),
+                            ));
+                        }
+                    }
+                    let mut width = 0;
+                    for &position in outputs {
+                        width += slot(position)?.width;
+                    }
+                    let dst_width = dst
+                        .and_then(|dst| unit.register_map.get(&dst))
+                        .map(RegisterType::width);
+                    let expected = (!outputs.is_empty()).then_some(width);
+                    if dst_width != expected {
+                        return Err(error(
+                            "CALL.OUTPUT_WIDTH",
+                            format!(
+                                "the outputs are {expected:?} bits, the destination {dst_width:?}"
+                            ),
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        };
+        self.units().try_for_each(|unit| check(unit, None))?;
+        self.functions
+            .iter()
+            .enumerate()
+            .try_for_each(|(function, unit)| check(&unit.unit, Some(function)))
+    }
 }
 
 fn verify_offset<A>(
@@ -1132,6 +1311,234 @@ mod tests {
             blocks: blocks.into_iter().map(|b| (b.id, b)).collect(),
             register_map: registers.into_iter().collect::<HashMap<_, _>>(),
         }
+    }
+
+    /// A program whose process stores 32-bit `r0` into slot 0 of function
+    /// 0 and reads its slot 1, and whose function copies slot 0 to slot 1
+    /// through its frame slot addresses 100 and 101. `edit` changes it
+    /// before it is verified.
+    fn calls(
+        edit: impl FnOnce(&mut crate::SirProgram<usize, usize>),
+    ) -> Result<(), SirVerifyError> {
+        let call = SIRInstruction::Call {
+            function: crate::FunctionId(0),
+            frame: RegisterId(1),
+            args: vec![(0, RegisterId(0))],
+            outputs: vec![1],
+            dst: Some(RegisterId(2)),
+            effects: Default::default(),
+        };
+        let process = unit(
+            [BasicBlock {
+                id: BlockId(0),
+                params: vec![],
+                instructions: vec![
+                    SIRInstruction::Imm(RegisterId(0), SIRValue::new(3u8)),
+                    SIRInstruction::Imm(RegisterId(1), SIRValue::new(0u8)),
+                    call,
+                ],
+                terminator: SIRTerminator::Return,
+            }],
+            [
+                (RegisterId(0), bit(32)),
+                (RegisterId(1), bit(32)),
+                (RegisterId(2), bit(32)),
+            ],
+        );
+        let body = unit(
+            [BasicBlock {
+                id: BlockId(0),
+                params: vec![],
+                instructions: vec![
+                    SIRInstruction::Load(RegisterId(0), 100, SIROffset::Static(0), 32),
+                    SIRInstruction::Store(
+                        101,
+                        SIROffset::Static(0),
+                        32,
+                        RegisterId(0),
+                        Vec::new(),
+                        Vec::new(),
+                    ),
+                ],
+                terminator: SIRTerminator::Return,
+            }],
+            [(RegisterId(0), bit(32))],
+        );
+        let slot = |addr, offset| crate::FrameSlot {
+            addr,
+            offset,
+            width: 32,
+            four_state: false,
+            handle: false,
+        };
+        let mut program = crate::SirProgram {
+            eval_comb: Vec::new(),
+            eval_apply_ffs: HashMap::default(),
+            eval_comb_apply_ffs: HashMap::default(),
+            merge_comb_apply: false,
+            eval_comb_stateful: None,
+            eval_only_ffs: HashMap::default(),
+            apply_ffs: HashMap::default(),
+            parallel: None,
+            processes: vec![process],
+            functions: vec![crate::FunctionUnit {
+                unit: body,
+                frame: crate::FrameLayout {
+                    size: 8,
+                    slots: vec![slot(100, 0), slot(101, 4)],
+                },
+                effects: Default::default(),
+            }],
+        };
+        program.summarize_calls();
+        edit(&mut program);
+        program.verify_functions()
+    }
+
+    fn invariant(result: Result<(), SirVerifyError>) -> &'static str {
+        result.expect_err("an invalid program").invariant
+    }
+
+    fn process_call(program: &mut crate::SirProgram<usize, usize>) -> &mut SIRInstruction<usize> {
+        &mut program.processes[0]
+            .blocks
+            .get_mut(&BlockId(0))
+            .unwrap()
+            .instructions[2]
+    }
+
+    #[test]
+    fn accepts_a_call_that_fills_its_callee_frame() {
+        calls(|_| {}).unwrap();
+    }
+
+    #[test]
+    fn rejects_calls_that_do_not_match_the_callee_frame() {
+        assert_eq!(
+            invariant(calls(|program| {
+                let SIRInstruction::Call { function, .. } = process_call(program) else {
+                    unreachable!()
+                };
+                *function = crate::FunctionId(1);
+            })),
+            "CALL.FUNCTION_EXISTS"
+        );
+        assert_eq!(
+            invariant(calls(|program| {
+                let SIRInstruction::Call { args, .. } = process_call(program) else {
+                    unreachable!()
+                };
+                args[0].0 = 2;
+            })),
+            "CALL.SLOT_EXISTS"
+        );
+        assert_eq!(
+            invariant(calls(|program| {
+                program.processes[0]
+                    .register_map
+                    .insert(RegisterId(0), bit(16));
+            })),
+            "CALL.ARGUMENT_WIDTH"
+        );
+        assert_eq!(
+            invariant(calls(|program| {
+                let SIRInstruction::Call { outputs, .. } = process_call(program) else {
+                    unreachable!()
+                };
+                outputs.push(0);
+            })),
+            "CALL.OUTPUT_WIDTH"
+        );
+    }
+
+    #[test]
+    fn keeps_frame_slots_in_their_frame_and_function() {
+        assert_eq!(
+            invariant(calls(|program| program.functions[0].frame.size = 6)),
+            "FRAME.SLOT_IN_FRAME"
+        );
+        assert_eq!(
+            invariant(calls(
+                |program| program.functions[0].frame.slots[1].addr = 100
+            )),
+            "FRAME.SLOT_ADDRESS_UNIQUE"
+        );
+        assert_eq!(
+            invariant(calls(|program| {
+                program.processes[0]
+                    .blocks
+                    .get_mut(&BlockId(0))
+                    .unwrap()
+                    .instructions
+                    .push(SIRInstruction::Load(
+                        RegisterId(2),
+                        100,
+                        SIROffset::Static(0),
+                        32,
+                    ));
+            })),
+            "FRAME.SLOT_OWN_FUNCTION"
+        );
+        assert_eq!(
+            invariant(calls(|program| {
+                let body = program.functions[0]
+                    .unit
+                    .blocks
+                    .get_mut(&BlockId(0))
+                    .unwrap();
+                body.instructions[0] =
+                    SIRInstruction::Load(RegisterId(0), 100, SIROffset::Static(8), 32);
+            })),
+            "FRAME.ACCESS_IN_SLOT"
+        );
+        assert_eq!(
+            invariant(calls(|program| {
+                let body = program.functions[0]
+                    .unit
+                    .blocks
+                    .get_mut(&BlockId(0))
+                    .unwrap();
+                body.instructions[0] =
+                    SIRInstruction::Load(RegisterId(0), 100, SIROffset::Dynamic(RegisterId(0)), 32);
+            })),
+            "FRAME.STATIC_OFFSET"
+        );
+    }
+
+    #[test]
+    fn rejects_call_effects_that_are_not_current() {
+        // A store the callee gained since its effects were computed.
+        assert_eq!(
+            invariant(calls(|program| {
+                let body = program.functions[0]
+                    .unit
+                    .blocks
+                    .get_mut(&BlockId(0))
+                    .unwrap();
+                body.instructions.push(SIRInstruction::Store(
+                    5,
+                    SIROffset::Static(0),
+                    32,
+                    RegisterId(0),
+                    Vec::new(),
+                    Vec::new(),
+                ));
+            })),
+            "CALL.EFFECTS_CURRENT"
+        );
+        assert_eq!(
+            invariant(calls(|program| {
+                let SIRInstruction::Call { effects, .. } = process_call(program) else {
+                    unreachable!()
+                };
+                *effects = Default::default();
+                program.functions[0].effects = std::sync::Arc::new(crate::CallEffects {
+                    host: true,
+                    ..Default::default()
+                });
+            })),
+            "CALL.EFFECTS_CURRENT"
+        );
     }
 
     #[test]

@@ -32,6 +32,9 @@ pub(super) fn lower_instruction(
         return;
     }
     match inst {
+        SIRInstruction::Call { .. } => {
+            unreachable!("programs with function calls are rejected before code generation")
+        }
         SIRInstruction::ExternCall { dst, func, args } => {
             extern_call::lower_extern_call(ctx, block, *dst, *func, args);
         }

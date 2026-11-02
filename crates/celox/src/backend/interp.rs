@@ -23,7 +23,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use celox_design::RegionedAbsoluteAddrBase;
-use celox_sir::{ExecutionUnit, SIROffset, SIRValue, TriggerIdWithKind};
+use celox_sir::{
+    ExecutionUnit, FrameSlot, FunctionId, FunctionUnit, SIROffset, SIRValue, TriggerIdWithKind,
+};
 use num_bigint::BigUint;
 use num_traits::{ToPrimitive, Zero};
 
@@ -40,7 +42,7 @@ use crate::dpi::ExternFunctionTable;
 use crate::interpreter::{
     InterpError, InterpMachine, Registers, ResolvedAccess, StoreSnapshot, execute_prepared_unit,
 };
-use crate::ir::{SPARSE_WORKING_REGION, STABLE_REGION, WORKING_REGION};
+use crate::ir::{FRAME_REGION, SPARSE_WORKING_REGION, STABLE_REGION, WORKING_REGION};
 use crate::{
     HashMap, SimulatorError, SimulatorOptions,
     ir::{AbsoluteAddr, LaidOutProgram, RegionedAbsoluteAddr, SignalArrayLayout, SignalRef},
@@ -179,6 +181,131 @@ struct Machine<'a> {
     /// Whether trigger detection may mark bits; mirrors the compiled
     /// `emit_triggers` codegen flag.
     emit_triggers: bool,
+    /// The frames of the function calls being run.
+    frames: Frames<'a>,
+}
+
+/// The program's function units and the stack their frames live on.
+#[derive(Default)]
+struct Calls {
+    functions: Vec<FunctionUnit<RegionedAbsoluteAddr>>,
+    /// Each frame slot, by its address.
+    slots: HashMap<RegionedAbsoluteAddr, FrameSlot<RegionedAbsoluteAddr>>,
+    stack: Vec<u8>,
+}
+
+/// The largest stack the interpreter gives function frames.
+const STACK_LIMIT: usize = 64 << 20;
+
+impl Calls {
+    fn new(functions: &[FunctionUnit<RegionedAbsoluteAddr>]) -> Self {
+        Self {
+            functions: functions.to_vec(),
+            slots: functions
+                .iter()
+                .flat_map(|function| &function.frame.slots)
+                .map(|slot| (slot.addr, slot.clone()))
+                .collect(),
+            stack: Vec::new(),
+        }
+    }
+}
+
+/// The frames entered by the calls a unit is running, innermost last.
+struct Frames<'a> {
+    functions: &'a [FunctionUnit<RegionedAbsoluteAddr>],
+    slots: &'a HashMap<RegionedAbsoluteAddr, FrameSlot<RegionedAbsoluteAddr>>,
+    stack: &'a mut Vec<u8>,
+    bases: Vec<usize>,
+}
+
+impl Frames<'_> {
+    /// The slot that `addr` names and the byte offset of its value plane in
+    /// the stack, in the innermost frame.
+    fn slot(
+        &self,
+        addr: &RegionedAbsoluteAddr,
+    ) -> Result<(&FrameSlot<RegionedAbsoluteAddr>, usize), InterpError> {
+        let slot = self.slots.get(addr).ok_or_else(|| {
+            InterpError::Machine(format!("no frame slot {}", addr.absolute_addr()))
+        })?;
+        let base = self.bases.last().ok_or_else(|| {
+            InterpError::Machine("frame slot accessed outside a function".to_string())
+        })?;
+        Ok((slot, base + slot.offset))
+    }
+
+    /// The static bit offset of an access of `slot`, which the verifier
+    /// requires and which must lie within the slot.
+    fn bit_offset(
+        slot: &FrameSlot<RegionedAbsoluteAddr>,
+        access: &ResolvedAccess<'_>,
+        bits: usize,
+    ) -> Result<usize, InterpError> {
+        match access.offset {
+            SIROffset::Static(offset) if offset + bits <= slot.width => Ok(*offset),
+            offset => Err(InterpError::Machine(format!(
+                "{bits}-bit frame slot access at {offset} outside its {}-bit slot",
+                slot.width
+            ))),
+        }
+    }
+
+    fn read(&self, start: usize, bit_offset: usize, bits: usize) -> BigUint {
+        let first = start + bit_offset / 8;
+        let last = (start + (bit_offset + bits).div_ceil(8)).min(self.stack.len());
+        let bytes = self.stack.get(first..last.max(first)).unwrap_or(&[]);
+        (BigUint::from_bytes_le(bytes) >> (bit_offset % 8)) & low_mask(bits)
+    }
+
+    fn write(&mut self, start: usize, bit_offset: usize, bits: usize, value: &BigUint) {
+        let first = start + bit_offset / 8;
+        let last = start + (bit_offset + bits).div_ceil(8);
+        let shift = bit_offset % 8;
+        let bytes = &mut self.stack[first..last];
+        let old = BigUint::from_bytes_le(bytes);
+        let mask = low_mask(bits) << shift;
+        let new = (&old ^ (&old & &mask)) | ((value & low_mask(bits)) << shift);
+        let mut encoded = new.to_bytes_le();
+        encoded.resize(bytes.len(), 0);
+        bytes.copy_from_slice(&encoded);
+    }
+
+    fn load(
+        &self,
+        addr: &RegionedAbsoluteAddr,
+        access: &ResolvedAccess<'_>,
+        bits: usize,
+    ) -> Result<SIRValue, InterpError> {
+        let (slot, start) = self.slot(addr)?;
+        let bit_offset = Self::bit_offset(slot, access, bits)?;
+        let payload = self.read(start, bit_offset, bits);
+        Ok(if slot.four_state {
+            SIRValue::new_four_state(
+                payload,
+                self.read(start + slot.plane_size(), bit_offset, bits),
+            )
+        } else {
+            SIRValue::new(payload)
+        })
+    }
+
+    fn store(
+        &mut self,
+        addr: &RegionedAbsoluteAddr,
+        access: &ResolvedAccess<'_>,
+        bits: usize,
+        value: &SIRValue,
+    ) -> Result<(), InterpError> {
+        let (slot, start) = self.slot(addr)?;
+        let (four_state, plane) = (slot.four_state, slot.plane_size());
+        let bit_offset = Self::bit_offset(slot, access, bits)?;
+        self.write(start, bit_offset, bits, &value.payload);
+        if four_state {
+            self.write(start + plane, bit_offset, bits, &value.mask);
+        }
+        Ok(())
+    }
 }
 
 impl Machine<'_> {
@@ -656,12 +783,37 @@ impl Machine<'_> {
 }
 
 impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
+    fn push_frame(&mut self, base: usize, function: FunctionId) -> Result<(), InterpError> {
+        let size = self
+            .frames
+            .functions
+            .get(function.0 as usize)
+            .map(|function| function.frame.size)
+            .ok_or_else(|| InterpError::Machine(format!("call of missing {function}")))?;
+        let end = base
+            .checked_add(size)
+            .filter(|&end| end <= STACK_LIMIT)
+            .ok_or_else(|| InterpError::Machine("stack overflow".to_string()))?;
+        if self.frames.stack.len() < end {
+            self.frames.stack.resize(end, 0);
+        }
+        self.frames.bases.push(base);
+        Ok(())
+    }
+
+    fn pop_frame(&mut self) {
+        self.frames.bases.pop();
+    }
+
     fn load(
         &mut self,
         addr: &RegionedAbsoluteAddr,
         access: ResolvedAccess<'_>,
         bits: usize,
     ) -> Result<SIRValue, InterpError> {
+        if addr.region == FRAME_REGION {
+            return self.frames.load(addr, &access, bits);
+        }
         let object = self.object_offset(addr)?;
         let absolute_addr_ref = addr.absolute_addr();
         let bit_offset =
@@ -684,6 +836,16 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
         bits: usize,
     ) -> Result<u64, InterpError> {
         debug_assert!(bits <= 64);
+        if addr.region == FRAME_REGION {
+            return self
+                .frames
+                .load(addr, &access, bits)?
+                .payload
+                .to_u64()
+                .ok_or_else(|| {
+                    InterpError::Machine("narrow frame load did not fit in u64".to_string())
+                });
+        }
         let object = self.object_offset(addr)?;
         let absolute = addr.absolute_addr();
         debug_assert!(!self.is_4state_object(&absolute));
@@ -720,6 +882,9 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
         bits: usize,
         value: &SIRValue,
     ) -> Result<(), InterpError> {
+        if addr.region == FRAME_REGION {
+            return self.frames.store(addr, &access, bits, value);
+        }
         if bits != 0
             && let Some(offsets) = self.layout.trace_notification_offsets(addr)
         {
@@ -760,6 +925,11 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
         bits: usize,
         value: u64,
     ) -> Result<(), InterpError> {
+        if addr.region == FRAME_REGION {
+            return self
+                .frames
+                .store(addr, &access, bits, &SIRValue::new(BigUint::from(value)));
+        }
         if bits != 0
             && let Some(offsets) = self.layout.trace_notification_offsets(addr)
         {
@@ -1067,6 +1237,8 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
 /// Collect the addresses of objects whose stores carry triggers. Their
 /// first 64-bit word is snapshotted at group entry so trigger marking can
 /// detect actual changes, mirroring the compiled backends.
+/// The trigger-bearing addresses that `units` store, the functions they call
+/// included (through the calls' effects).
 fn collect_trigger_addrs(
     units: &[ExecutionUnit<RegionedAbsoluteAddr>],
 ) -> Vec<(AbsoluteAddr, u32)> {
@@ -1075,6 +1247,14 @@ fn collect_trigger_addrs(
         for block in unit.blocks.values() {
             for inst in &block.instructions {
                 match inst {
+                    celox_sir::SIRInstruction::Call { effects, .. } => {
+                        addrs.extend(
+                            effects
+                                .triggers
+                                .iter()
+                                .map(|addr| (addr.absolute_addr(), addr.region)),
+                        );
+                    }
                     celox_sir::SIRInstruction::Store(addr, _, _, _, triggers, _)
                         if !triggers.is_empty() =>
                     {
@@ -1184,7 +1364,13 @@ fn run_units<'u>(
     trigger_addrs: TriggerAddrs<'_>,
     trigger_snapshots: &mut Vec<((AbsoluteAddr, u32), u64)>,
     emit_triggers: bool,
+    calls: &mut Calls,
 ) -> Result<(), SimulatorErrorCode> {
+    let Calls {
+        functions,
+        slots,
+        stack,
+    } = calls;
     // Snapshot the first word of every trigger-bearing object at group
     // entry; trigger detection compares the stored range against it. The
     // trigger-bearing addresses are precomputed per group so a tick only
@@ -1203,6 +1389,12 @@ fn run_units<'u>(
                 heap: &mut *heap,
                 trigger_snapshots,
                 emit_triggers,
+                frames: Frames {
+                    functions,
+                    slots,
+                    stack: &mut *stack,
+                    bases: Vec::new(),
+                },
             };
             if let Ok(base) = machine.object_offset(&addr) {
                 // Snapshot the raw first word; trigger detection extracts the
@@ -1225,6 +1417,12 @@ fn run_units<'u>(
             heap: &mut *heap,
             trigger_snapshots,
             emit_triggers,
+            frames: Frames {
+                functions,
+                slots,
+                stack: &mut *stack,
+                bases: Vec::new(),
+            },
         };
         // Entry blocks of top-level execution units take no parameters: the
         // compiled ABI passes only the memory pointer, so all inputs arrive
@@ -1235,6 +1433,7 @@ fn run_units<'u>(
             &[],
             four_state,
             &mut prepared.registers,
+            functions,
         )
         .map_err(error_code)?;
     }
@@ -1295,6 +1494,8 @@ pub struct InterpBackend {
     /// Whether trigger detection marks bits; matches the compiled
     /// `emit_triggers` codegen flag.
     emit_triggers: bool,
+    /// The function units the units call.
+    calls: Calls,
 }
 
 impl InterpBackend {
@@ -1415,6 +1616,10 @@ impl InterpBackend {
         // program; executing independently scheduled comb and FF units can
         // observe a different pre-edge snapshot around reset and NBA regions,
         // exactly as with the compiled backends.
+        debug_assert!(
+            laid_out.sir.calls_summarized(),
+            "the program's call effects are stale"
+        );
         let comb_trigger_addrs = collect_trigger_addrs(&laid_out.sir.eval_comb);
         let groups = |ffs: &HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>| {
             ffs.iter()
@@ -1468,6 +1673,7 @@ impl InterpBackend {
             comb_trigger_addrs,
             trigger_snapshots: Vec::new(),
             emit_triggers: options.emit_triggers,
+            calls: Calls::new(&laid_out.sir.functions),
             extern_functions: options
                 .dpi
                 .resolve(&laid_out.runtime().runtime_schema.extern_functions)?,
@@ -1569,6 +1775,7 @@ impl SimBackend for InterpBackend {
             },
             &mut self.trigger_snapshots,
             self.emit_triggers,
+            &mut self.calls,
         )
     }
 
@@ -1594,6 +1801,7 @@ impl SimBackend for InterpBackend {
             },
             &mut self.trigger_snapshots,
             self.emit_triggers,
+            &mut self.calls,
         )
     }
 
@@ -1633,6 +1841,7 @@ impl SimBackend for InterpBackend {
             trigger_addrs,
             &mut self.trigger_snapshots,
             self.emit_triggers,
+            &mut self.calls,
         )
     }
 
@@ -1658,6 +1867,7 @@ impl SimBackend for InterpBackend {
             },
             &mut self.trigger_snapshots,
             self.emit_triggers,
+            &mut self.calls,
         )
     }
 
@@ -1683,6 +1893,7 @@ impl SimBackend for InterpBackend {
             },
             &mut self.trigger_snapshots,
             self.emit_triggers,
+            &mut self.calls,
         )
     }
 
@@ -1704,6 +1915,7 @@ impl SimBackend for InterpBackend {
             TriggerAddrs::default(),
             &mut self.trigger_snapshots,
             false,
+            &mut self.calls,
         )
     }
 
@@ -2126,6 +2338,105 @@ impl SimBackend for InterpBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshots_the_triggers_of_called_functions() {
+        let addr = |var| RegionedAbsoluteAddrBase {
+            region: STABLE_REGION,
+            instance_id: crate::ir::InstanceId(0),
+            var_id: celox_design::StateObjectId(var),
+        };
+        let call = celox_sir::SIRInstruction::Call {
+            function: FunctionId(0),
+            frame: celox_sir::RegisterId(0),
+            args: Vec::new(),
+            outputs: Vec::new(),
+            dst: None,
+            effects: Arc::new(celox_sir::CallEffects {
+                writes: vec![addr(3)],
+                triggers: vec![addr(3)],
+                ..Default::default()
+            }),
+        };
+        let unit = ExecutionUnit {
+            entry_block_id: celox_sir::BlockId(0),
+            blocks: [(
+                celox_sir::BlockId(0),
+                celox_sir::BasicBlock {
+                    id: celox_sir::BlockId(0),
+                    params: Vec::new(),
+                    instructions: vec![call],
+                    terminator: celox_sir::SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: Default::default(),
+        };
+        assert_eq!(
+            collect_trigger_addrs(&[unit]),
+            [(addr(3).absolute_addr(), STABLE_REGION)]
+        );
+    }
+
+    #[test]
+    fn frames_keep_slot_planes_apart_in_each_frame() {
+        let addr = |var| RegionedAbsoluteAddrBase {
+            region: FRAME_REGION,
+            instance_id: crate::ir::InstanceId(0),
+            var_id: celox_design::StateObjectId(var),
+        };
+        // A 4-state 12-bit slot at byte 1 of each 8-byte frame.
+        let slot = FrameSlot {
+            addr: addr(0),
+            offset: 1,
+            width: 12,
+            four_state: true,
+            handle: false,
+        };
+        let slots = [(slot.addr, slot.clone())].into_iter().collect();
+        let mut stack = vec![0xffu8; 16];
+        let mut frames = Frames {
+            functions: &[],
+            slots: &slots,
+            stack: &mut stack,
+            bases: vec![0],
+        };
+        let whole = SIROffset::Static(0);
+        fn at(offset: &SIROffset) -> ResolvedAccess<'_> {
+            ResolvedAccess {
+                offset,
+                dynamics: [None, None],
+            }
+        }
+        let value = SIRValue::new_four_state(BigUint::from(0xabcu32), BigUint::from(0x00fu32));
+        frames.store(&slot.addr, &at(&whole), 12, &value).unwrap();
+        frames.bases.push(8);
+        frames
+            .store(
+                &slot.addr,
+                &at(&whole),
+                12,
+                &SIRValue::new(BigUint::from(1u8)),
+            )
+            .unwrap();
+        // Bits 4..8 of the inner frame's slot.
+        let upper = SIROffset::Static(4);
+        assert_eq!(
+            frames.load(&slot.addr, &at(&upper), 4).unwrap(),
+            SIRValue::new_four_state(BigUint::zero(), BigUint::zero())
+        );
+        frames.bases.pop();
+        assert_eq!(frames.load(&slot.addr, &at(&whole), 12).unwrap(), value);
+        // An access past the slot fails instead of reaching its neighbours.
+        let past = SIROffset::Static(8);
+        assert!(frames.load(&slot.addr, &at(&past), 8).is_err());
+        assert!(frames.store(&slot.addr, &at(&past), 8, &value).is_err());
+        // The bytes around the slot's planes keep their contents.
+        assert_eq!(stack[0], 0xff);
+        assert_eq!(stack[5], 0xff);
+        assert_eq!(stack[2] >> 4, 0xf);
+    }
 
     #[test]
     fn narrow_packed_access_matches_biguint_reference() {
