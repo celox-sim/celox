@@ -1306,6 +1306,17 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:27: syntax error\n<case>/source_0.sv:27: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::packed_structure_property_members",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus 13.0 does not parse a parameter port list of a class (class Box #(int N = 4); is a syntax error), which IEEE 1800-2023 8.25 defines; each case declares a parameterized class. Verilator passes all but two cases, see sv_verilator_class_specialization_identity and sv_verilator_untyped_class_parameters.",
       "expectation": "Simulation",
       "known_issue": {
@@ -1354,6 +1365,28 @@
       "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:19: syntax error\n<case>/source_0.sv:19: error: Malformed statement\n",
       "expectation": "Simulation",
       "name": "class::property_assignment_sites",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::property_member_assignment_sites",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 134; see <case>/build.log\n<case>/source_0.sv:17: sorry: I do not know how to elaborate assignment patterns using old method.\n<case>/source_0.sv:17:      : Expression is: '{1'd1, 1'd0, 1'd1, 1'd0}\n<case>/source_0.sv:17: assert: elab_expr.cc:461: failed assertion 0\nAborted (core dumped)\n",
+      "expectation": "Simulation",
+      "name": "class::property_member_place_addresses",
       "phase": "compile",
       "status": "compile_error",
       "stronger_than_sv": false,
@@ -1939,6 +1972,17 @@
       "name": "class::string_methods_on_properties",
       "phase": "skip",
       "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 8; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Syntax error in typedef clause.\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module item.\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Error in struct/union member.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::tagged_members_of_structure_properties",
+      "phase": "compile",
+      "status": "compile_error",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
