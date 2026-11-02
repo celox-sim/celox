@@ -1432,7 +1432,7 @@ fn bind_value_in(
                     ExprKind::Member { .. } | ExprKind::Select { .. } => {
                         let value = selected_value(id, native, tree, session, dimensions)?;
                         values.push(
-                            if strings::fixed_array_element(tree, id, native, dimensions) {
+                            if strings::fixed_array_element(tree, session, id, native, dimensions) {
                                 strings::call(StringOp::FromHandle, vec![value])
                             } else {
                                 value
@@ -1896,6 +1896,7 @@ fn bind_value_in(
                                 && let Some(Some(destination)) = args.get(output)
                                 && strings::fixed_array_element(
                                     tree,
+                                    session,
                                     *destination,
                                     native,
                                     dimensions,

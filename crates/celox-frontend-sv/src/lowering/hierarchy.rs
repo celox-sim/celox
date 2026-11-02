@@ -640,6 +640,7 @@ fn resolved_type(module: &ElaboratedModule, r#type: &sv::ir::Type) -> Option<sv:
         sv::ir::TypeKind::Logic => sv::ast::TypeKind::Logic,
         sv::ir::TypeKind::Reg => sv::ast::TypeKind::Reg,
         sv::ir::TypeKind::Implicit => sv::ast::TypeKind::Implicit,
+        sv::ir::TypeKind::String => sv::ast::TypeKind::String,
         _ => return None,
     };
     let eval = |expr| {

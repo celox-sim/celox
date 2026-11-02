@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "standard": "IEEE 1800-2023 23.6 permits hierarchical references to named objects; 6.16.2 defines str.putc(i,c) as a character update of that string variable.",
+  "adapter_free": true,
+  "case": "hierarchy::hierarchical_string_mutating_methods",
+  "source": "verification/repros/hierarchical_string_mutating_methods.sv",
+  "expected": "Finish successfully with a.filename equal to Seed.",
+  "verilator": {
+    "version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "compile_command": "verilator --lint-only --timing -Wno-fatal --top-module Top verification/repros/hierarchical_string_mutating_methods.sv",
+    "compile_exit_code": 1,
+    "compile_output": "%Error: Internal Error: verification/repros/hierarchical_string_mutating_methods.sv:8:7: ../V3Ast.h:1113: AstNode is not of expected type, but instead has type 'VARXREF'\n    8 |     a.filename.putc(0, 8'h53);\n      |       ^~~~~~~~\n                        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n"
+  },
+  "icarus": {
+    "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+    "compile_command": "iverilog -g2012 -s Top -o <output> verification/repros/hierarchical_string_mutating_methods.sv",
+    "compile_exit_code": 1,
+    "compile_output": "verification/repros/hierarchical_string_mutating_methods.sv:8: error: Enable of unknown task ``a.filename.putc''.\n1 error(s) during elaboration.\n"
+  }
+}

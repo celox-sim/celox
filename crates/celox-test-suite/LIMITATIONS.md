@@ -1946,6 +1946,28 @@ Focused raw failures are retained for
 Only the exact observed failures are excluded; passing cases add no historical
 baseline rows.
 
+### Hierarchical string method receivers
+
+`hierarchy::hierarchical_string_mutating_methods` checks `putc` on module and
+generate-instance string variables while preserving copies and other instances.
+IEEE 1800-2023 23.6 permits these hierarchical names, and 6.16.2 makes `putc`
+equivalent to a character assignment. Verilator 5.052 raises an internal VARXREF
+type error; Icarus 13.0 reports an unknown task. Both failures reproduce in the
+[standalone source](verification/repros/hierarchical_string_mutating_methods.sv),
+with [diagnostics retained here](verification/repros/hierarchical_string_mutating_methods.json).
+Only this case is excluded for those two tools. The separate
+`hierarchy::hierarchical_string_variables` case keeps reads, assignments, copies,
+array elements and nonmutating methods executable.
+
+`hierarchy::generated_string_array_element_methods` separately checks `len()`
+on string-array elements beneath an indexed generate instance. Verilator 5.052
+passes. Icarus 13.0 returns `2` for both the six-character string and its empty
+neighbor, where 6.16.1 requires `6` and `0`. The
+[standalone source](verification/repros/generated_string_array_element_methods.sv)
+and [captured output](verification/repros/generated_string_array_element_methods.json)
+reproduce this disagreement without an adapter. Only this additional case is
+excluded for Icarus; the existing read/write case remains executable.
+
 ### Dynamic-array and queue shuffle
 
 Five `containers::shuffle_*` cases check element multiplicities and preservation
