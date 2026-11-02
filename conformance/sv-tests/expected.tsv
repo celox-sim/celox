@@ -771,8 +771,8 @@ chapter-21/21.2--display.sv	2state	pass
 chapter-21/21.2--display.sv	4state	pass
 chapter-21/21.2--monitor.sv	2state	fail
 chapter-21/21.2--monitor.sv	4state	fail
-chapter-21/21.2--strobe.sv	2state	fail
-chapter-21/21.2--strobe.sv	4state	fail
+chapter-21/21.2--strobe.sv	2state	pass
+chapter-21/21.2--strobe.sv	4state	pass
 chapter-21/21.2--write-boh.sv	2state	pass
 chapter-21/21.2--write-boh.sv	4state	pass
 chapter-21/21.2--write.sv	2state	pass
@@ -801,8 +801,8 @@ chapter-21/21.3--fread.sv	2state	pass
 chapter-21/21.3--fread.sv	4state	pass
 chapter-21/21.3--fscanf.sv	2state	pass
 chapter-21/21.3--fscanf.sv	4state	pass
-chapter-21/21.3--fstrobe.sv	2state	fail
-chapter-21/21.3--fstrobe.sv	4state	fail
+chapter-21/21.3--fstrobe.sv	2state	pass
+chapter-21/21.3--fstrobe.sv	4state	pass
 chapter-21/21.3--fwrite-boh.sv	2state	pass
 chapter-21/21.3--fwrite-boh.sv	4state	pass
 chapter-21/21.3--fwrite.sv	2state	pass
