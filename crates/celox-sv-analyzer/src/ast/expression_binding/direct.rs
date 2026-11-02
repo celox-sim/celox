@@ -2257,6 +2257,23 @@ fn selected_value(
     session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
+    // A member of a class property of packed structure type, such as
+    // `h.p.m` or `h.p.m[1:0]`, selects the property's value.
+    if let Some((base, property, receiver)) =
+        property_member_base(root, native, tree, session, dimensions)?
+    {
+        let steps = value_selects::steps(root, base, native).ok_or_else(disagreement)?;
+        let handle = objects::receiver(tree, session, receiver, native, dimensions)?;
+        return value_selects::read(
+            objects::load(&property, handle),
+            &property.r#type,
+            &steps,
+            native,
+            tree,
+            session,
+            dimensions,
+        );
+    }
     let mut base = root;
     let mut suffix = Vec::new();
     while let ExprKind::Select {
@@ -2535,7 +2552,12 @@ pub(in crate::ast) fn object_place(
     while let ExprKind::Select { expression, .. } = &native.expression(base).kind {
         base = ungroup(*expression, native);
     }
-    let (place, base) = if let Some((property, receiver)) =
+    // A member of a property of packed structure type, `h.p.m[1:0]`.
+    let member = property_member_base(root, native, tree, session, dimensions)?;
+    let (place, base) = if let Some((base, property, receiver)) = member {
+        let place = property_place(property, receiver, native, tree, session, dimensions)?;
+        (place, base)
+    } else if let Some((property, receiver)) =
         objects::property(tree, session, base, native, dimensions)?
         && property.field.handle.is_none()
         && property.r#type.container.is_none()
@@ -2987,23 +3009,239 @@ pub(in crate::ast) fn remove_real_division_guards(expr: Expr, dims: &PackedDimen
     }
 }
 
-/// Preserve the native member path before flattening it to bit coordinates.
+/// Preserve the native member path before flattening it to bit coordinates:
+/// the checks of the tags the path crosses, and the type of the target, a
+/// selection of the member when the path is selected (IEEE 1800-2023
+/// 10.9, 11.5.1).
 pub(in crate::ast) fn member_context(
-    mut root: ExprId,
+    authored: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Option<(Vec<Expr>, Type)>> {
-    let authored = root;
+    let mut root = authored;
     while let ExprKind::Select { expression, .. } = native.expression(root).kind {
         root = expression;
     }
+    path_context(authored, root, native, tree, session, dims)
+}
+
+/// The variable, member, class property or container element that
+/// assignment target `root` selects, and its declared type.
+fn target_base(
+    root: ExprId,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<Option<(ExprId, Type)>> {
+    let mut base = ungroup(root, native);
+    while let ExprKind::Select { expression, .. } = &native.expression(base).kind {
+        base = ungroup(*expression, native);
+    }
+    // An element of a container, which a property may hold, before the
+    // property.
+    if let Some((element, target, ..)) = containers::selected_element(root, tree, session, dims)? {
+        return Ok(Some((element, target.element.clone())));
+    }
+    if let Some((property, _)) = objects::property(tree, session, base, native, dims)? {
+        return Ok(Some((base, property.r#type)));
+    }
+    Ok(dimensions::operand_shape(base, tree, session, dims)?
+        .as_ref()
+        .and_then(type_names::declared_type)
+        .cloned()
+        .map(|ty| (base, ty)))
+}
+
+/// The type of assignment target `root`, of any form: the type that its
+/// selection gives the member, variable, class property or container
+/// element it selects ([`selected_type`]), which is the context of the
+/// value assigned to it (IEEE 1800-2023 10.9, 11.5.1).
+pub(in crate::ast) fn target_type(
+    root: ExprId,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<Option<Type>> {
+    if let Some((_, ty)) = member_context(root, native, tree, session, dims)? {
+        return Ok(Some(ty));
+    }
+    let Some((base, whole)) = target_base(root, native, tree, session, dims)? else {
+        return Ok(None);
+    };
+    selected_type(root, base, whole, native, tree, session, dims).map(Some)
+}
+
+/// Whether a value of type `ty` holds a tagged union, at any depth.
+fn holds_tagged(ty: &Type) -> bool {
+    ty.members
+        .iter()
+        .any(|member| member.is_tagged() || holds_tagged(member.r#type()))
+}
+
+/// Whether assignment target `root`, of any form, is a whole tagged union,
+/// whose tag an integral update would change with its bits (IEEE 1800-2023
+/// 7.3.2, 11.9): its type is [`target_type`]'s.
+pub(in crate::ast) fn targets_tagged_union(
+    root: ExprId,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<bool> {
+    // Only a type that holds a tagged union has one to select.
+    if !target_base(root, native, tree, session, dims)?
+        .is_some_and(|(_, whole)| holds_tagged(&whole))
+        && member_context(root, native, tree, session, dims)?.is_none()
+    {
+        return Ok(false);
+    }
+    Ok(
+        target_type(root, native, tree, session, dims)?.is_some_and(|ty| {
+            ty.members
+                .first()
+                .is_some_and(packed_structs::PackedMember::is_tagged)
+        }),
+    )
+}
+
+/// The type of target `authored`, a selection of `root` of type `whole`,
+/// as the select typing of expressions gives it (IEEE 1800-2023 7.4.6,
+/// 11.5.1): an index of a packed dimension selects the element type, and a
+/// part-select keeps the dimensions after it, so `s.data[1:0]` of a
+/// `logic [3:0][3:0] data` is `logic [1:0][3:0]`. The element of `whole`, an
+/// enumeration or a structure, is kept with the dimensions that remain.
+pub(in crate::ast) fn selected_type(
+    authored: ExprId,
+    root: ExprId,
+    whole: Type,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<Type> {
+    use semantic_types::{PackedElement, TyData};
+    if authored == root {
+        return Ok(whole);
+    }
+    use semantic_types::ArrayKind;
+    let selected = expression_types::type_of(tree, session, authored, native, dims)?;
+    let complete = expression_types::type_of(tree, session, root, native, dims)?;
+    // The unpacked dimensions of each, outermost first, and its element.
+    let layers = |session: &Session, mut id| {
+        let mut kinds = Vec::new();
+        while let TyData::Array { kind, element } = session.types.data(id) {
+            kinds.push(kind.clone());
+            id = *element;
+        }
+        (kinds, session.types.data(id).clone())
+    };
+    let (complete_layers, complete) = layers(session, complete);
+    let (selected_layers, selected) = layers(session, selected);
+    let mut whole = whole;
+    let consumed = complete_layers
+        .len()
+        .checked_sub(selected_layers.len())
+        .filter(|consumed| *consumed <= whole.unpacked_ranges.len())
+        .ok_or_else(|| unsupported("type of a selected target"))?;
+    // A selection of unpacked dimensions has the element type of `whole`,
+    // with the dimensions that remain, the first a slice's.
+    if !selected_layers.is_empty() || !matches!(selected, TyData::Packed(_)) {
+        whole.unpacked_ranges.drain(..consumed);
+        if let (Some(ArrayKind::Fixed(range)), Some(first)) =
+            (selected_layers.first(), whole.unpacked_ranges.first_mut())
+        {
+            *first = UnpackedRange::new(
+                ConstExpr::Literal(range.left.to_string()),
+                ConstExpr::Literal(range.right.to_string()),
+            );
+        }
+        return Ok(whole);
+    }
+    let (TyData::Packed(complete), TyData::Packed(selected)) = (complete, selected) else {
+        return Err(unsupported("type of a selected target"));
+    };
+    whole.unpacked_ranges.clear();
+    let ranges = |dims: &[semantic_types::Range]| {
+        dims.iter()
+            .map(|range| {
+                PackedRange::new(
+                    ConstExpr::Literal(range.left.to_string()),
+                    ConstExpr::Literal(range.right.to_string()),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut ty = match selected.element {
+        PackedElement::Bits => {
+            let mut ty = Type::new(if selected.four_state {
+                TypeKind::Logic
+            } else {
+                TypeKind::Bit
+            });
+            ty.packed_ranges = ranges(&selected.dims);
+            ty
+        }
+        // The dimensions of `whole` precede those of its element.
+        _ => {
+            let dropped = complete
+                .dims
+                .len()
+                .checked_sub(selected.dims.len())
+                .filter(|dropped| *dropped <= whole.packed_ranges.len())
+                .ok_or_else(|| unsupported("type of a selected target"))?;
+            let mut ty = whole;
+            let kept = ty.packed_ranges.len() - dropped;
+            ty.packed_ranges = ranges(&selected.dims[..kept]);
+            ty
+        }
+    };
+    ty.is_signed = selected.signed;
+    Ok(ty)
+}
+
+/// [`member_context`] of member path `root`, selected as `authored`.
+fn path_context(
+    authored: ExprId,
+    root: ExprId,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<Option<(Vec<Expr>, Type)>> {
     if !matches!(native.expression(root).kind, ExprKind::Member { .. }) {
         return Ok(None);
     }
-    // A class property is a place, whose members are those of its value
-    // (see `object_place`).
+    // A member of a class property is one of the property's value, read
+    // through `OBJECT_VALUE` (see `object_place`).
+    if let Some((base, property, _)) = property_member_base(root, native, tree, session, dims)? {
+        let steps = value_selects::steps(root, base, native).ok_or_else(disagreement)?;
+        let selection = value_selects::selection(
+            OBJECT_VALUE,
+            Expr::Ident(OBJECT_VALUE.into()),
+            &property.r#type,
+            &steps,
+            native,
+            tree,
+            session,
+            dims,
+        )?;
+        let mut r#type = property.r#type.clone();
+        for step in &steps {
+            let value_selects::Step::Member(name) = step else {
+                return Ok(None);
+            };
+            let Some(member) = r#type.members.iter().find(|member| member.name() == name) else {
+                return Ok(None);
+            };
+            r#type = member.r#type().clone();
+        }
+        let r#type = selected_type(authored, root, r#type, native, tree, session, dims)?;
+        return Ok(Some((selection.guards, r#type)));
+    }
     if objects::property(tree, session, root, native, dims)?.is_some() {
         return Ok(None);
     }
@@ -3022,7 +3260,11 @@ pub(in crate::ast) fn member_context(
     if let Some(name) = qualified {
         parts[0] = name;
     }
-    packed_structs::member_access(parts, dims, tree)
+    let Some((guards, member)) = packed_structs::member_access(parts, dims, tree)? else {
+        return Ok(None);
+    };
+    let member = selected_type(authored, root, member, native, tree, session, dims)?;
+    Ok(Some((guards, member)))
 }
 
 fn cast_shape(
@@ -3117,6 +3359,51 @@ fn scheduler_call(
 
 /// `r#type` is a vector with one `[N-1:0]` range, whose select indices are
 /// offsets from bit 0.
+/// The class property of packed structure type that native member path
+/// `root` selects a member of, `h.p` of `h.p.m` or `h.p.m[1:0]`, with the
+/// receiver as [`objects::property`] returns it.
+pub(in crate::ast) fn property_member_base(
+    root: ExprId,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<(ExprId, classes::Property, Option<ExprId>)>> {
+    let mut id = ungroup(root, native);
+    loop {
+        match &native.expression(id).kind {
+            ExprKind::Select { expression, .. } => id = ungroup(*expression, native),
+            ExprKind::Member {
+                expression,
+                separator,
+                ..
+            } if separator == "." => {
+                let inner = ungroup(*expression, native);
+                if let Some((property, receiver)) =
+                    objects::property(tree, session, inner, native, dimensions)?
+                {
+                    let packed = property.field.handle.is_none()
+                        && property.r#type.container.is_none()
+                        && !property.r#type.members.is_empty()
+                        && match property.r#type.packed_ranges() {
+                            [range] => {
+                                eval_ast_const_expr(
+                                    &tree.functions,
+                                    range.right(),
+                                    &dimensions.const_env,
+                                ) == Some(0)
+                            }
+                            _ => false,
+                        };
+                    return Ok(packed.then_some((inner, property, receiver)));
+                }
+                id = inner;
+            }
+            _ => return Ok(None),
+        }
+    }
+}
+
 fn zero_based_vector(
     r#type: &Type,
     tree: &AnalysisContext<'_>,

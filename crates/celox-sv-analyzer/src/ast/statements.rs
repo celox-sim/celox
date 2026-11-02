@@ -221,10 +221,34 @@ pub(super) fn expr_from_lvalue(
     packed_dimensions: &PackedDimensions,
 ) -> Expr {
     match lhs {
-        // The value at the place, selected.
-        LValue::Object { place, .. } => {
+        // The value at the place, selected, read under the place's checks of
+        // the tags its selection crosses, which read the value at the place
+        // (IEEE 1800-2023 7.3.2).
+        LValue::Object { place, guards, .. } => {
             let (select, scope) = variable_view(lhs, packed_dimensions);
-            expr_from_selection(tree, place.load(), select, &scope)
+            let load = place.load();
+            let value = expr_from_selection(tree, load.clone(), select, &scope);
+            if guards.is_empty() {
+                return value;
+            }
+            fn substitute(expr: Expr, value: &Expr) -> Expr {
+                match expr {
+                    Expr::Ident(name) if name == OBJECT_VALUE => value.clone(),
+                    expr => virtual_interfaces::map_children(expr, &mut |child| {
+                        substitute(child, value)
+                    }),
+                }
+            }
+            let ty = lvalue_expr_type(&tree.functions, select, &scope);
+            packed_structs::checked_typed_value(
+                guards
+                    .iter()
+                    .map(|guard| substitute(guard.clone(), &load))
+                    .collect(),
+                value,
+                ty.as_ref().map_or(1, |ty| ty.width),
+                ty.is_some_and(|ty| ty.signed),
+            )
         }
         _ => expr_from_selection(
             tree,

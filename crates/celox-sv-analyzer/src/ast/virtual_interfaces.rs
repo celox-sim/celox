@@ -1433,7 +1433,7 @@ fn children(expr: &Expr) -> Vec<&Expr> {
 
 /// `expr` with `map` applied to its operands (not those of its constant
 /// selects).
-fn map_children(expr: Expr, map: &mut dyn FnMut(Expr) -> Expr) -> Expr {
+pub(super) fn map_children(expr: Expr, map: &mut dyn FnMut(Expr) -> Expr) -> Expr {
     let mut boxed = |expr: Box<Expr>| Box::new(map(*expr));
     match expr {
         Expr::Ident(_) | Expr::Literal(_) => expr,
