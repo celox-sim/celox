@@ -5555,6 +5555,13 @@
       "classification": "xezim_bug",
       "bug": "sv_property_member_part_select_patterns",
       "note": "A part-select of a packed array keeps the dimensions after it (7.4.6), so the pattern assigned to `info.n.data[2:1]` has two four-bit items and the member becomes 16'h0cd0. xezim leaves 16'h0002; it assigns the same pattern to a part-select of a member of a variable, `n.data[1:0]`, correctly."
+    },
+    {
+      "suite": "sv",
+      "name": "scan::sscanf_inputs_before_property_outputs",
+      "status": "mismatch",
+      "classification": "lrm_ambiguous",
+      "note": "In `$sscanf(next_text(), \"%d %d\", settings[i].offset, settings[i].level)`, where `next_text()` sets `i = 1`, xezim writes `settings[0]`: it takes the outputs' objects before it evaluates the text. Celox and Verilator evaluate the inputs first and write `settings[1]`, as for outputs that are variables. 21.3.4.3 does not say when the outputs of `$sscanf` are evaluated relative to its inputs."
     }
   ]
 }

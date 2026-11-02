@@ -240,7 +240,7 @@ impl Ff<'_, '_> {
                         }
                         message => {
                             let (lvalues, _, guards) = self.capture_system_actual(message)?;
-                            Destination::Variable(lvalues, message_value, guards)
+                            Destination::Variable(Box::new(lvalues), message_value, guards)
                         }
                     });
                 }
@@ -296,10 +296,7 @@ impl Ff<'_, '_> {
             match destination {
                 Destination::Variable(lvalues, message, guards) => {
                     self.check_tagged_guards(&guards)?;
-                    match lvalues.as_slice() {
-                        [one] => self.assign(one, &message)?,
-                        parts => self.assign_concat(parts, &message)?,
-                    };
+                    self.write_system_actual(&lvalues, &message)?;
                 }
                 Destination::Property(store) => {
                     self.eval(&store, None)?;
@@ -316,7 +313,7 @@ impl Ff<'_, '_> {
 enum Destination {
     /// Variables, as an output actual of a system function: the parts, the
     /// message and the guards of tagged members.
-    Variable(Vec<sv::ir::LValue>, sv::ir::Expr, Vec<sv::ir::Expr>),
+    Variable(Box<SystemActual>, sv::ir::Expr, Vec<sv::ir::Expr>),
     /// The store of the message into a class property.
     Property(sv::ir::Expr),
 }

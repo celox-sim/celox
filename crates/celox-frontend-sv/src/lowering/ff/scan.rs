@@ -75,7 +75,7 @@ impl Ff<'_, '_> {
                 .as_ref()
                 .ok_or_else(|| unsupported("omitted scan destination"))?;
             let (lvalues, _, guards) = self.capture_system_actual(argument)?;
-            let precision = match lvalues.as_slice() {
+            let precision = match lvalues.parts.as_slice() {
                 [one] => self.m.id(one.name()).and_then(|id| self.m.var(id).float),
                 _ => None,
             };
@@ -131,10 +131,7 @@ impl Ff<'_, '_> {
             });
             self.b.switch_to_block(write);
             self.check_tagged_guards(&guards)?;
-            match lvalues.as_slice() {
-                [one] => self.assign(one, &value)?,
-                parts => self.assign_concat(parts, &value)?,
-            };
+            self.write_system_actual(&lvalues, &value)?;
             self.jump(join);
             self.b.switch_to_block(join);
         }

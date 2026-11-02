@@ -3,6 +3,12 @@
 use crate::{ast, symbol::ModuleId, typecheck};
 
 pub use crate::ast::warnings::AnalyzerWarning;
+
+/// The variable that the checks of the tags a written place's selection
+/// crosses read the place's value as: a system function output that is a
+/// class property or container element comes with checks over it, which
+/// its write applies to the value at the place it captured.
+pub const PLACE_VALUE: &str = "$object_value";
 pub use crate::procedural::{
     CaseKind, CaseLabel, EventEdge, LoopKind, ParamDirection, ProcessSite, SourceSpan, StmtBase,
     SystemTaskArg,

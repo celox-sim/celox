@@ -2,6 +2,28 @@
   "cases": [
     {
       "category": "Sequential",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:7: error: Function celox_suite_tb.dut.Setting.parse port extra is not an input port.\n<case>/source_0.sv:7:      : Function arguments must be input ports.\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "scan::sscanf_class_property_outputs",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "native testbench failed: exit status: 10; see runtime.log and protocol.log\nunresolved functor reference: v0x555555953990_0\nunresolved functor reference: v0x555555953990_0\nunresolved functor reference: v0x555555953990_0\nunresolved functor reference: v0x555555953990_0\nunresolved functor reference: v0x555555953990_0\nunresolved functor reference: v0x555555953990_0\nunresolved functor reference: v0x555555953990_0\nunresolved functor reference: v0x555555953990_0\nunresolved functor reference: v0x555555953990_0\nunresolved functor reference: v0x555555953990_0\ncompile_cleanup: 10 unresolved items\n",
+      "expectation": "Simulation",
+      "name": "scan::sscanf_inputs_before_property_outputs",
+      "phase": "execute",
+      "status": "runtime_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "IEEE 1800-2023 21.3.4.3 permits a string expression as the scan format. Icarus 13.0 compiles this case but vvp terminates with SIGSEGV. A reduced source using only a string format variable, without a method expression, also crashes. The string-source case with a literal format remains enabled.",
       "expectation": "Simulation",
       "known_issue": {

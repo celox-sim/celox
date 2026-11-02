@@ -1994,6 +1994,7 @@ fn bind_value_in(
                                     | SystemFunction::UrandomRange
                                     | SystemFunction::ScopeRandomize
                             ) {
+                                let mut places = Vec::new();
                                 for (position, arg) in operands.iter().enumerate() {
                                     let real_output = matches!(
                                         function,
@@ -2017,7 +2018,31 @@ fn bind_value_in(
                                             "integral argument of `{name}`"
                                         )));
                                     }
+                                    // An output of a scan may be a class property or
+                                    // a container element, a place that the scan
+                                    // writes as an assignment does (21.3.4.3).
+                                    // The scan writes it through the place, with the
+                                    // place's checks (see `place_output`).
+                                    let place = match args.get(position).copied().flatten() {
+                                        Some(id)
+                                            if matches!(
+                                                function,
+                                                SystemFunction::Sscanf | SystemFunction::Fscanf
+                                            ) && position >= 2 =>
+                                        {
+                                            object_place(id, native, tree, session, dimensions)?
+                                        }
+                                        _ => None,
+                                    };
+                                    if let Some(place) = &place {
+                                        places.push((
+                                            position,
+                                            place_output(place, tree, dimensions)?,
+                                        ));
+                                    }
+                                    let place = place.is_some();
                                     if function.writes_argument(position)
+                                        && !place
                                         && !expressions::query_actual_is_writable(arg, dimensions)
                                     {
                                         return Err(AnalyzerError::InvalidSystemTfCall {
@@ -2039,6 +2064,10 @@ fn bind_value_in(
                                             },
                                         });
                                     }
+                                }
+                                let mut operands = operands;
+                                for (position, output) in places {
+                                    operands[position] = output;
                                 }
                                 Expr::Call {
                                     callee: Callee::System(function),
@@ -2518,6 +2547,46 @@ fn selected_value(
         .map(|(guards, _)| guards)
         .unwrap_or_default();
     packed_structs::checked_value(guards, value, tree, dimensions)
+}
+
+/// The output actual of a system function that writes place `place`, an
+/// [`LValue::Object`]: the bits of the value at the place that its
+/// selection names, under the place's checks of the tags its selection
+/// crosses, which read the place's value as [`crate::ir::PLACE_VALUE`]: the
+/// write captures the place and applies them to the value at the place it
+/// captured (IEEE 1800-2023 7.3.2).
+fn place_output(
+    place: &LValue,
+    tree: &AnalysisContext<'_>,
+    dimensions: &PackedDimensions,
+) -> Converted<Expr> {
+    let LValue::Object {
+        place: object,
+        select,
+        guards,
+        ..
+    } = place
+    else {
+        unreachable!("a place is an object place");
+    };
+    let load = object.load();
+    // The bits the place's selection names, as a variable's are named.
+    let value = match &**select {
+        LValue::Ident(_) => load,
+        LValue::Select {
+            msb,
+            lsb,
+            array_slice_width: None,
+            ..
+        } => Expr::Select {
+            expr: Box::new(load),
+            msb: msb.clone(),
+            lsb: lsb.clone(),
+            signed: false,
+        },
+        _ => return Err(unsupported("output actual of a slice of a place")),
+    };
+    packed_structs::checked_value(guards.clone(), value, tree, dimensions)
 }
 
 /// The place of property `property` of the object that native expression
