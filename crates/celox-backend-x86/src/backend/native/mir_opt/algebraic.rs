@@ -303,6 +303,7 @@ pub(super) fn algebraic_simplify(func: &mut MFunction) {
     let mut consts: HashMap<VReg, u64> = HashMap::default();
     let mut and_immediates: HashMap<VReg, (VReg, u64)> = HashMap::default();
     let mut and_immediates32: HashMap<VReg, (VReg, u32)> = HashMap::default();
+    let mut and_operands: HashMap<VReg, (VReg, VReg)> = HashMap::default();
     for block in &func.blocks {
         for inst in &block.insts {
             match inst {
@@ -315,11 +316,28 @@ pub(super) fn algebraic_simplify(func: &mut MFunction) {
                 MInst::AndImm32 { dst, src, imm } => {
                     and_immediates32.insert(*dst, (*src, *imm));
                 }
+                MInst::And { dst, lhs, rhs } | MInst::And32 { dst, lhs, rhs } => {
+                    and_operands.insert(*dst, (*lhs, *rhs));
+                }
                 _ => {}
             }
         }
     }
 
+    // A normalized four-state AND has mask = value & unknown. Reusing it
+    // must not normalize value again: x | (x & y) = x. The narrower AND
+    // still produces a subset of x, including when x has nonzero high bits.
+    let subset_of = |subset: &VReg, value: &VReg| {
+        and_operands
+            .get(subset)
+            .is_some_and(|(a, b)| a == value || b == value)
+            || and_immediates
+                .get(subset)
+                .is_some_and(|(src, _)| src == value)
+            || and_immediates32
+                .get(subset)
+                .is_some_and(|(src, _)| src == value)
+    };
     for block in &mut func.blocks {
         for inst in &mut block.insts {
             let replacement = match inst {
@@ -408,9 +426,9 @@ pub(super) fn algebraic_simplify(func: &mut MFunction) {
                 }
                 // Identity: or x, 0 → x; self: or x, x → x
                 MInst::Or { dst, lhs, rhs } => {
-                    if consts.get(rhs) == Some(&0) {
+                    if consts.get(rhs) == Some(&0) || subset_of(rhs, lhs) {
                         Some(Simplification::Mov(*dst, *lhs))
-                    } else if consts.get(lhs) == Some(&0) {
+                    } else if consts.get(lhs) == Some(&0) || subset_of(lhs, rhs) {
                         Some(Simplification::Mov(*dst, *rhs))
                     } else if lhs == rhs {
                         Some(Simplification::Mov(*dst, *lhs))
@@ -419,9 +437,9 @@ pub(super) fn algebraic_simplify(func: &mut MFunction) {
                     }
                 }
                 MInst::Or32 { dst, lhs, rhs } => {
-                    if const32(&consts, *rhs) == Some(0) {
+                    if const32(&consts, *rhs) == Some(0) || subset_of(rhs, lhs) {
                         Some(Simplification::Mov32(*dst, *lhs))
-                    } else if const32(&consts, *lhs) == Some(0) {
+                    } else if const32(&consts, *lhs) == Some(0) || subset_of(lhs, rhs) {
                         Some(Simplification::Mov32(*dst, *rhs))
                     } else if lhs == rhs {
                         Some(Simplification::Mov32(*dst, *lhs))

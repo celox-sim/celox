@@ -93,3 +93,5 @@ fn assert_indexed_state_accesses_have_alias_ranges(function: &MFunction) {
 }
 
 mod packed_muxes;
+
+mod packed_state;
