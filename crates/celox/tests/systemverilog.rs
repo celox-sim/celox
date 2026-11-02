@@ -301,3 +301,6 @@ mod logic_gates;
 
 #[path = "frontends/systemverilog/file_errors.rs"]
 mod file_errors;
+
+#[path = "frontends/systemverilog/strobe.rs"]
+mod strobe;
