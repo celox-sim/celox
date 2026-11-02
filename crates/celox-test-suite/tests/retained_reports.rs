@@ -993,10 +993,29 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                         ("icarus", "class::property_assignment_sites") => {
                             ("compile_error", "compile", "source_0.sv:19: syntax error")
                         }
+                        ("icarus", "class::packed_structure_property_members") => {
+                            ("compile_error", "compile", "source_0.sv:27: syntax error")
+                        }
+                        ("verilator", "class::tagged_members_of_structure_properties") => (
+                            "compile_error",
+                            "compile",
+                            "Unsupported: void (for tagged unions)",
+                        ),
+                        ("icarus", "class::tagged_members_of_structure_properties") => {
+                            ("compile_error", "compile", "source_0.sv:3: syntax error")
+                        }
+                        ("icarus", "class::property_member_assignment_sites") => {
+                            ("compile_error", "compile", "source_0.sv:17: syntax error")
+                        }
                         ("icarus", "class::property_place_addresses") => (
                             "compile_error",
                             "compile",
                             "sorry: Streaming concatenation not supported.",
+                        ),
+                        ("icarus", "class::property_member_place_addresses") => (
+                            "compile_error",
+                            "compile",
+                            "sorry: I do not know how to elaborate assignment patterns using old method.",
                         ),
                         ("icarus", "class::formatting_task_place_outputs") => (
                             "runtime_error",

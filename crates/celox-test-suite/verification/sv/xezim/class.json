@@ -486,6 +486,17 @@
     },
     {
       "category": "Types",
+      "detail": "class::property_member_place_addresses at 4402:3: assert_eq property_nibbles: expected 0xcd0, got 0x2",
+      "expectation": "Simulation",
+      "name": "class::property_member_place_addresses",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "class::randomization_cyclic_controls at 1564:46: assert_eq errors: expected 0x0, got 0x1",
       "expectation": "Simulation",
       "name": "class::randomization_cyclic_controls",
@@ -744,6 +755,17 @@
       "name": "class::string_methods_on_properties",
       "phase": "execute",
       "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "xezim build exit status: 1; see <case>/build.log\n<case>/source_0.sv:10:34: error: expected Semicolon, found IntegerLiteral '8'h12'\n    10 |         value.item = tagged Full 8'h12;\n       |                                  ^~~~~\nParsed 3 file(s): 3 descriptions, 1 errors, 0 warnings\n",
+      "expectation": "Simulation",
+      "name": "class::tagged_members_of_structure_properties",
+      "phase": "compile",
+      "status": "compile_error",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
