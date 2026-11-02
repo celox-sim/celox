@@ -164,6 +164,30 @@ fn verify_address(
                 ));
             }
         }
+        SIROffset::ElementRun { element_width, .. } => {
+            let Some(declared_element_width) = declared_element_width else {
+                return Err(celox_sir::verify::SirVerifyError::instruction(
+                    "MEMORY.ELEMENT_RUN_REQUIRES_UNPACKED_ARRAY",
+                    block,
+                    index,
+                    format!("{operation} uses element-run addressing on a non-array state"),
+                ));
+            };
+            let valid = *element_width == declared_element_width
+                && width.is_multiple_of(declared_element_width)
+                && width <= info.width;
+            if !valid {
+                return Err(celox_sir::verify::SirVerifyError::instruction(
+                    "MEMORY.ELEMENT_RUN_MATCHES_DECLARATION",
+                    block,
+                    index,
+                    format!(
+                        "{operation} element run of width {width} with element width {element_width} does not match declared element width {declared_element_width} and total width {}",
+                        info.width
+                    ),
+                ));
+            }
+        }
         SIROffset::Static(start)
             if !explicit_memory_copy
                 && let Some(element_width) = declared_element_width

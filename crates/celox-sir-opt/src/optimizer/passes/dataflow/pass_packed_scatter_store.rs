@@ -1684,6 +1684,10 @@ mod tests {
                                 bit_offset: offset, ..
                             } => *offset,
                             SIROffset::Dynamic(offset) => registers[offset].to_usize().unwrap(),
+                            SIROffset::ElementRun {
+                                index,
+                                element_width,
+                            } => registers[index].to_usize().unwrap() * element_width,
                             SIROffset::Element {
                                 index,
                                 element_width,

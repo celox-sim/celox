@@ -780,6 +780,20 @@ impl Lifter {
                     eq(x.clone(), bv(width(&x), at as u64))
                 })
             }
+            // A run's logical offset is that of its first element.
+            SIROffset::ElementRun {
+                index,
+                element_width,
+            } => Self::access_guard(
+                &SIROffset::Element {
+                    index: *index,
+                    element_width: *element_width,
+                    bit_offset: 0,
+                    dynamic_bit_offset: None,
+                },
+                regs,
+                at,
+            ),
             SIROffset::Element {
                 index,
                 element_width: ew,

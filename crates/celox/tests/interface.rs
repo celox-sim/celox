@@ -119,11 +119,8 @@ all_backends! {
     }
 
     fn test_generic_interface_port(sim) {
-        // Generic `interface` and `interface::client` ports are not lowered from
-        // the Veryl IR: Celox reports `Unsupported ... generic interface port
-        // [tracking issue #1088]`; veryl-simulator: `build_ir failed:
-        // UnsupportedDescription`. The `sv` arm binds them in the emitted SV.
-        @ignore_on(native, cranelift, wasm, interp, veryl);
+        // Unqualified generic interface ports still have AbstractInterface IR.
+        @ignore_on(native, cranelift, wasm, interp);
         @case "interface::test_generic_interface_port";
     }
 

@@ -35,7 +35,9 @@ fn physical_offset(layout: &MemoryLayout, address: &AbsoluteAddr, offset: &SIROf
             bit_offset: *bit_offset,
             dynamic_bit_offset: *dynamic_bit_offset,
         },
-        SIROffset::Dynamic(_) => unreachable!("dynamic packed access to strided array"),
+        SIROffset::Dynamic(_) | SIROffset::ElementRun { .. } => {
+            unreachable!("dynamic packed access to strided array")
+        }
     }
 }
 
@@ -88,6 +90,13 @@ fn max_bit_shift(offset: &SIROffset) -> usize {
             bit_offset & 7
         }
         SIROffset::Dynamic(_) => 7,
+        SIROffset::ElementRun { element_width, .. } => {
+            if element_width % 8 == 0 {
+                0
+            } else {
+                7
+            }
+        }
         SIROffset::Element {
             element_width,
             bit_offset,
@@ -118,6 +127,13 @@ fn logical_bit_offset(state: &mut TranslationState, offset: &SIROffset) -> Value
             bit_offset: value, ..
         } => state.builder.ins().iconst(types::I64, *value as i64),
         SIROffset::Dynamic(reg) => register_value(state, reg),
+        SIROffset::ElementRun {
+            index,
+            element_width,
+        } => {
+            let index = register_value(state, index);
+            state.builder.ins().imul_imm_s(index, *element_width as i64)
+        }
         SIROffset::Element {
             index,
             element_width,
@@ -1751,7 +1767,7 @@ impl SIRTranslator {
                     state.builder.ins().band_imm_s(shifted, mask as i64)
                 }
             }
-            SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+            SIROffset::Dynamic(_) | SIROffset::Element { .. } | SIROffset::ElementRun { .. } => {
                 let total_bit_offset = logical_bit_offset(state, offset);
                 let shifted = state.builder.ins().ushr(pre_loaded, total_bit_offset);
                 let mask_val = state.builder.ins().iconst(types::I64, mask as i64);

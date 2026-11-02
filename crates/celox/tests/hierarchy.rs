@@ -66,6 +66,147 @@ o_data: top_out[i],
         @case "hierarchy::test_instance_unpacked_array_slice_input";
     }
 
+    fn test_instance_unpacked_array_slice_input_minus_colon(sim) {
+        @setup { let code = r#"
+module Child (
+i_data: input  logic<8>[2],
+o_data: output logic<16>
+) {
+assign o_data = {i_data[1], i_data[0]};
+}
+module Top (
+o_data: output logic<16>
+) {
+var data: logic<8>[4];
+assign data[0] = 8'h01;
+assign data[1] = 8'h12;
+assign data[2] = 8'h34;
+assign data[3] = 8'h80;
+inst child: Child (
+i_data: data[2-:2],
+o_data,
+);
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let o_data = sim.signal("o_data");
+
+    assert_eq!(sim.get(o_data), 0x3412u16.into());
+
+    }
+
+    fn test_instance_unpacked_array_slice_input_colon(sim) {
+        @setup { let code = r#"
+module Child (
+i_data: input  logic<8>[2],
+o_data: output logic<16>
+) {
+assign o_data = {i_data[1], i_data[0]};
+}
+module Top (
+o_data: output logic<16>
+) {
+var data: logic<8>[4];
+assign data[0] = 8'h01;
+assign data[1] = 8'h12;
+assign data[2] = 8'h34;
+assign data[3] = 8'h80;
+inst child: Child (
+i_data: data[1:2],
+o_data,
+);
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let o_data = sim.signal("o_data");
+
+    assert_eq!(sim.get(o_data), 0x3412u16.into());
+
+    }
+
+    fn test_instance_unpacked_array_slice_input_step(sim) {
+        @setup { let code = r#"
+module Child (
+i_data: input  logic<8>[2],
+o_data: output logic<16>
+) {
+assign o_data = {i_data[1], i_data[0]};
+}
+module Top (
+o_data: output logic<16>
+) {
+var data: logic<8>[4];
+assign data[0] = 8'h01;
+assign data[1] = 8'h12;
+assign data[2] = 8'h34;
+assign data[3] = 8'h80;
+inst child: Child (
+i_data: data[1 step 2],
+o_data,
+);
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let o_data = sim.signal("o_data");
+
+    assert_eq!(sim.get(o_data), 0x8034u16.into());
+
+    }
+
+    fn test_instance_unpacked_array_slice_input_inner_dimension(sim) {
+        @setup { let code = r#"
+module Child (
+i_data: input  logic<8>[2],
+o_data: output logic<16>
+) {
+assign o_data = {i_data[1], i_data[0]};
+}
+module Top (
+o_data: output logic<16>
+) {
+var data: logic<8>[2, 4];
+always_comb {
+for i in 0..2 {
+for j in 0..4 {
+data[i][j] = (i * 16 + j) as 8;
+}
+}
+}
+inst child: Child (
+i_data: data[1][1+:2],
+o_data,
+);
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let o_data = sim.signal("o_data");
+
+    assert_eq!(sim.get(o_data), 0x1211u16.into());
+
+    }
+
+    fn test_unpacked_array_slice_assignment(sim) {
+        @setup { let code = r#"
+module Top (
+o_data: output logic<16>
+) {
+var data: logic<8>[4];
+assign data[0] = 8'h01;
+assign data[1] = 8'h12;
+assign data[2] = 8'h34;
+assign data[3] = 8'h80;
+var part: logic<8>[2];
+assign part = data[2-:2];
+assign o_data = {part[1], part[0]};
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let o_data = sim.signal("o_data");
+
+    assert_eq!(sim.get(o_data), 0x3412u16.into());
+
+    }
+
     fn test_instance_unpacked_array_slice_output(sim) {
         @case "hierarchy::test_instance_unpacked_array_slice_output";
     }
@@ -75,84 +216,6 @@ o_data: top_out[i],
         // arrays; the emitted SystemVerilog does.
         @ignore_on(native, cranelift, wasm, interp, veryl);
         @case "hierarchy::test_instance_array_broadcast_and_unpacked_array_connection";
-    }
-
-    fn test_instance_input_function_output_writeback(sim) {
-        // Veryl emits a call with an output argument in an input port connection, which IEEE
-        // 1800 13.4 forbids outside procedural code; the SV frontend rejects it
-        // ("systemverilog input port connection", #88).
-        @ignore_on(sv);
-        @case "hierarchy::test_instance_input_function_output_writeback";
-    }
-
-    fn test_instance_input_function_output_concat_dynamic_writeback(sim) {
-        // SV arm: Veryl emits a call with an output argument in an input port connection, which
-        // IEEE 1800 13.4 forbids outside procedural code; the SV frontend rejects it
-        // ("systemverilog input port connection", #88).
-        @ignore_on(veryl, sv);
-        @case "hierarchy::test_instance_input_function_output_concat_dynamic_writeback";
-    }
-
-fn test_inactive_instance_input_output_call_adds_no_parent_driver(sim) {
-    // Veryl emits a call with an output argument in an input port connection, which IEEE 1800
-    // 13.4 forbids outside procedural code; the SV frontend rejects it
-    // ("systemverilog input port connection", #88).
-    @ignore_on(sv);
-    @case "hierarchy::test_inactive_instance_input_output_call_adds_no_parent_driver";
-}
-
-    fn test_instance_input_function_output_preserves_runtime_display(sim) {
-        // veryl-simulator does not write the connection's function output
-        // actual back.
-        @omit_veryl;
-        // Veryl emits a call with an output argument in an input port connection, which IEEE
-        // 1800 13.4 forbids outside procedural code; the SV frontend rejects it
-        // ("systemverilog input port connection", #88).
-        @ignore_on(sv);
-        @setup { let code = r#"
-module Child (
-i: input logic,
-o: output logic
-) {
-assign o = i;
-}
-module Top (
-a: input logic,
-child_o: output logic,
-seen_o: output logic
-) {
-function write_seen (
-x: input logic,
-seen: output logic
-) -> logic {
-seen = x;
-$display("seen=%0d", seen);
-return x;
-}
-var seen: logic;
-inst child: Child (
-i: write_seen(a, seen),
-o: child_o
-);
-assign seen_o = seen;
-}
-"#; }
-        @build Simulator::builder(code, "Top");
-    let a = sim.signal("a");
-    let child_o = sim.signal("child_o");
-    let seen_o = sim.signal("seen_o");
-    sim.drain_runtime_events();
-
-    sim.modify(|io| io.set(a, 1u8)).unwrap();
-    assert_eq!(sim.get(child_o), 1u8.into());
-    assert_eq!(sim.get(seen_o), 1u8.into());
-    assert_eq!(
-        sim.drain_runtime_events(),
-        vec![celox::RuntimeEvent::Display {
-            message: b"seen=1".to_vec(),
-        }],
-    );
-
     }
 
     fn test_instance_output_dynamic_index_function_output_writeback(sim) {
@@ -658,4 +721,33 @@ assign mem_o = mem;
 }
 "#;
     assert_nonconstant_output_rejected(code);
+}
+
+#[test]
+fn test_instance_input_function_output_call_is_rejected() {
+    // A function call with an output argument in a port connection is not
+    // procedural code (IEEE 1800-2023 13.4.1); Veryl rejects it.
+    let code = r#"
+        module Child (i: input logic, o: output logic) { assign o = i; }
+        module Top (a: input logic, child_o: output logic, seen_o: output logic) {
+            function write_seen (x: input logic, seen: output logic) -> logic {
+                seen = x;
+                return x;
+            }
+            var seen: logic;
+            inst child: Child (i: write_seen(a, seen), o: child_o);
+            assign seen_o = seen;
+        }
+    "#;
+    let error = Simulator::builder(code, "Top").build().unwrap_err();
+    let celox::SimulatorErrorKind::Analyzer(errors) = error.kind() else {
+        panic!("expected analyzer rejection, got: {error:?}");
+    };
+    assert!(
+        errors.iter().any(|error| matches!(
+            error,
+            veryl_analyzer::AnalyzerError::FunctionOutputInPortConnection { .. }
+        )),
+        "{errors:?}"
+    );
 }

@@ -50,12 +50,19 @@ fn read_working_key(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<Worki
 
 fn is_dynamic_working_read(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
     match inst {
-        SIRInstruction::Load(_, addr, SIROffset::Dynamic(_) | SIROffset::Element { .. }, _) => {
-            addr.region == WORKING_REGION
-        }
-        SIRInstruction::Commit(src, _, SIROffset::Dynamic(_) | SIROffset::Element { .. }, _, _) => {
-            src.region == WORKING_REGION
-        }
+        SIRInstruction::Load(
+            _,
+            addr,
+            SIROffset::Dynamic(_) | SIROffset::Element { .. } | SIROffset::ElementRun { .. },
+            _,
+        ) => addr.region == WORKING_REGION,
+        SIRInstruction::Commit(
+            src,
+            _,
+            SIROffset::Dynamic(_) | SIROffset::Element { .. } | SIROffset::ElementRun { .. },
+            _,
+            _,
+        ) => src.region == WORKING_REGION,
         _ => false,
     }
 }
