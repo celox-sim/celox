@@ -1652,6 +1652,11 @@ pub fn schedule_symbolic_rtl_reporting_loops(
 
     let settle_flags = settle_flags.filter(|_| !settle_partitions.is_empty());
     if let Some(settle) = &settle_flags {
+        tracing::debug!(
+            partitions = settle_partitions.len(),
+            target_cost = settle.target_cost,
+            "partitioned combinational settle"
+        );
         // The flags carry what changed from one settle to the next.
         persistent_comb_state.insert(settle.flags);
         declare_settle_flags(
@@ -2753,10 +2758,10 @@ pub fn schedule_symbolic_rtl_reporting_loops(
 /// [`SettlePartitionMode::Estimated`] partitions.
 const MIN_PARTITIONED_SETTLE_COST: usize = 20_000;
 /// Expression nodes per partition of an estimated partitioned settle.
-const SETTLE_PARTITION_COST: usize = 16_000;
+const SETTLE_PARTITION_COST: usize = 32;
 /// Bound flag tests, publication checks, and their compiler analyses on large
 /// designs instead of growing the number of partitions with every source node.
-const TARGET_ESTIMATED_SETTLE_PARTITIONS: usize = 64;
+const TARGET_ESTIMATED_SETTLE_PARTITIONS: usize = 4096;
 
 fn estimated_settle_partition_cost(cost: usize) -> usize {
     SETTLE_PARTITION_COST.max(cost.div_ceil(TARGET_ESTIMATED_SETTLE_PARTITIONS))

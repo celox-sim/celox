@@ -11,19 +11,28 @@ use num_bigint::BigUint;
 /// interpreter runs every slot in the reference loop.
 macro_rules! four_state_scheduler {
     ($module:ident, $backend:ident, $compiled:expr) => {
+        four_state_scheduler!($module, $backend, $compiled, false);
+    };
+    ($module:ident, $backend:ident, $compiled:expr, $partitioned:expr) => {
         mod $module {
             use super::*;
 
             fn simulation(body: &str) -> celox::Simulation<impl celox::SimBackend> {
                 let source = format!("`timescale 1ns/1ns\nmodule Top{body}\nendmodule");
-                celox::Simulation::from_sv_sources(
+                let builder = celox::Simulation::from_sv_sources(
                     vec![(source.as_str(), Path::new("four_state.sv"))],
                     "Top",
                 )
                 .four_state(true)
-                .scheduler_mode(celox::SchedulerMode::Differential)
-                .$backend()
-                .unwrap()
+                .scheduler_mode(celox::SchedulerMode::Differential);
+                let builder = if $partitioned {
+                    builder
+                        .settle_partition(celox::SettlePartition::Always)
+                        .settle_check(true)
+                } else {
+                    builder
+                };
+                builder.$backend().unwrap()
             }
 
             /// Run `sim` until `time`, every step checked, with every kernel
@@ -102,6 +111,41 @@ macro_rules! four_state_scheduler {
   always_ff @(posedge clk or posedge rst) if (rst) high <= 0; else high <= high + 1;"#,
                 );
                 run(&mut sim, 120);
+            }
+
+            /// IEEE 1800-2023 9.4.2.1: any changed OR term wakes the
+            /// process. Changes while its body is delayed do not carry into
+            /// its next wait. Include late terms and mask-only transitions.
+            #[test]
+            fn large_change_wait_recaptures_after_delay() {
+                let mut sim = simulation(
+                    r#";
+  logic [7:0] a = 0, b = 0, c = 0, d = 0, e = 0, f = 0, g = 0, h = 0;
+  integer hits = 0;
+  always @(a or b or c or d or e or f or g or h) begin
+    hits = hits + 1;
+    #3;
+  end
+  initial begin
+    #2 a = 8'h80;
+    #1 h = 'x;
+    #1 h = 'z;
+    #2 b = 1;
+    #1 a = 0;
+    #1 h = 0;
+    #2 h = 'x;
+    #4 h = 'z;
+    #4 h = 0;
+    #4 h = 0;
+    #2 c = 1;
+    #4 g = 1;
+    #4 d = 1;
+    #4 e = 1;
+    #4 f = 1;
+  end"#,
+                );
+                run(&mut sim, 45);
+                assert_eq!(value(&mut sim, "hits"), (10, 0));
             }
 
             /// Clocks computed from a clock and an enable that is x or z
@@ -200,3 +244,12 @@ four_state_scheduler!(cranelift, build, true);
 four_state_scheduler!(native, build_native, true);
 #[cfg(feature = "wasm-runtime")]
 four_state_scheduler!(wasm, build_wasm, true);
+
+// Exercise the same event-order and X/Z contracts with selective settling.
+four_state_scheduler!(partitioned_interpreter, build_interpreter, false, true);
+#[cfg(feature = "cranelift")]
+four_state_scheduler!(partitioned_cranelift, build, true, true);
+#[cfg(target_arch = "x86_64")]
+four_state_scheduler!(partitioned_native, build_native, true, true);
+#[cfg(feature = "wasm-runtime")]
+four_state_scheduler!(partitioned_wasm, build_wasm, true, true);

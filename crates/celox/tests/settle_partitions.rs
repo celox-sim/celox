@@ -451,3 +451,107 @@ endmodule
         matches_single_pass(COPY, &["r", "q"], 40);
     }
 }
+
+/// A shared producer marks readers across flag words, with unrelated readers
+/// between them. Mask-only changes must propagate without clearing flags that
+/// another producer already set.
+#[cfg(feature = "systemverilog")]
+#[test]
+fn four_state_fanout_preserves_other_pending_readers() {
+    check_four_state_fanout(false);
+    check_four_state_fanout(true);
+}
+
+#[cfg(feature = "systemverilog")]
+fn check_four_state_fanout(registered: bool) {
+    use std::path::Path;
+    let ports = (0..20)
+        .map(|i| format!("output logic [3:0] q{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let assignments = (0..20)
+        .map(|i| {
+            format!(
+                "assign q{i} = {} + 4'd{};",
+                if i % 3 == 0 { "b" } else { "a" },
+                i % 16
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let producers = if registered {
+        "logic [3:0] a, b; always_ff @(posedge clk) begin a <= x ^ 4'b0011; b <= y ^ 4'b0101; end"
+    } else {
+        "wire [3:0] a = x ^ 4'b0011; wire [3:0] b = y ^ 4'b0101;"
+    };
+    let source = format!(
+        "module Top(input logic clk, input logic [3:0] x, y, {ports});\n{producers}\n{assignments}\nendmodule"
+    );
+    let builder = || {
+        Simulator::from_sv_sources(vec![(source.as_str(), Path::new("fanout.sv"))], "Top")
+            .four_state(true)
+    };
+    macro_rules! trace_fanout {
+        ($sim:expr) => {{
+            let mut sim = $sim;
+            let x = sim.signal("x");
+            let y = sim.signal("y");
+            let outputs: Vec<_> = (0..20).map(|i| sim.signal(&format!("q{i}"))).collect();
+            let mut trace = Vec::new();
+            for (value, mask) in [
+                (0u8, 0u8),
+                (0, 15),
+                (15, 15),
+                (15, 0),
+                (5, 0),
+                (5, 10),
+                (5, 0),
+                (5, 0),
+            ] {
+                sim.modify(|io| {
+                    io.set_four_state(x, value.into(), mask.into());
+                    io.set_four_state(y, (value ^ 9).into(), mask.into());
+                })
+                .unwrap();
+                if registered {
+                    let clk = sim.event("clk");
+                    sim.tick(clk).unwrap();
+                }
+                trace.push(
+                    outputs
+                        .iter()
+                        .map(|&signal| sim.get_four_state(signal))
+                        .collect::<Vec<_>>(),
+                );
+            }
+            trace
+        }};
+    }
+    let expected = trace_fanout!(
+        builder()
+            .disable_pass(SirPass::PartitionedSettle)
+            .build_interpreter()
+            .unwrap()
+    );
+    let partitioned = || {
+        builder()
+            .settle_partition(SettlePartition::Always)
+            .settle_check(true)
+    };
+    assert_eq!(
+        trace_fanout!(partitioned().build_interpreter().unwrap()),
+        expected
+    );
+    #[cfg(feature = "cranelift")]
+    assert_eq!(
+        trace_fanout!(partitioned().build_cranelift().unwrap()),
+        expected
+    );
+    #[cfg(feature = "wasm-runtime")]
+    assert_eq!(trace_fanout!(partitioned().build_wasm().unwrap()), expected);
+    #[cfg(target_arch = "x86_64")]
+    assert_eq!(
+        trace_fanout!(partitioned().build_native().unwrap()),
+        expected
+    );
+}
