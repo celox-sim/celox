@@ -42,6 +42,77 @@ mod tests {
         check_frame(false, true);
     }
 
+    #[test]
+    fn hotspot_chain_keeps_invariants_when_exiting_to_an_inner_loop() {
+        let sim = crate::SimulatorBuilder::<crate::Simulator>::new(
+            "module Top (q: output logic<130>) { assign q = 130'd0; }",
+            "Top",
+        )
+        .four_state(true)
+        .build_interpreter()
+        .unwrap();
+        let mut b = celox_sir::SIRBuilder::<RegionedAbsoluteAddr>::new();
+        let invariant = b.alloc_logic(130);
+        let value = SIRValue::new_four_state(BigUint::from(1u8) << 129usize, 3u8);
+        b.emit(SIRInstruction::Imm(invariant, value.clone()));
+        let header = b.new_block();
+        b.seal_block(SIRTerminator::Jump(header, vec![]));
+        b.switch_to_block(header);
+        for _ in 0..16 {
+            let used = b.alloc_logic(130);
+            b.emit(SIRInstruction::Concat(used, vec![invariant]));
+        }
+        let addr = RegionedAbsoluteAddr::from_absolute_addr(
+            STABLE_REGION,
+            *sim.backend.layout().offsets.keys().next().unwrap(),
+        );
+        b.emit(SIRInstruction::Store(
+            addr,
+            SIROffset::Static(0),
+            130,
+            invariant,
+            vec![],
+            vec![],
+        ));
+        b.seal_block(SIRTerminator::Jump(header, vec![]));
+        let (blocks, register_map, _) = b.drain();
+        let unit = Arc::new(ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        });
+        let source = Arc::new(RegionSource::new(Arc::clone(&unit)));
+        let options = SimulatorOptions {
+            four_state: true,
+            ..Default::default()
+        };
+        let code = BlockRequest::new(&source, BlockId(0))
+            .unwrap()
+            .compile(sim.backend.layout(), &options, &CompileCancel::new())
+            .unwrap();
+        let resumed = BlockRequest::new(&source, header)
+            .unwrap()
+            .compile(sim.backend.layout(), &options, &CompileCancel::new())
+            .unwrap();
+        let mut memory = vec![
+            0;
+            code.code
+                .required_state_size
+                .max(resumed.code.required_state_size)
+                .div_ceil(8)
+        ];
+        for stale in [false, true] {
+            let mut regs = Registers::new(&unit.register_map, true);
+            if stale {
+                regs.set(invariant, SIRValue::new(42u8));
+            }
+            code.run(&mut memory, &mut regs).unwrap();
+            assert_eq!(regs.get(invariant).unwrap(), &value);
+            // Reenter the body, without rerunning the preheader definition.
+            resumed.run(&mut memory, &mut regs).unwrap();
+        }
+    }
+
     fn check_frame(dirty_outputs: bool, tracing: bool) {
         let sim = crate::SimulatorBuilder::<crate::Simulator>::new(
             "module Top (q: output logic<130>) { assign q = 130'd0; }",
@@ -177,6 +248,12 @@ pub(crate) struct RegionSource {
     unit: Arc<ExecutionUnit<RegionedAbsoluteAddr>>,
     uses: OnceLock<HashMap<RegisterId, usize>>,
     next_register: usize,
+    analysis: OnceLock<Option<SourceAnalysis>>,
+}
+
+struct SourceAnalysis {
+    cfg: celox_sir::cfg::SirCfg,
+    definitions: HashMap<RegisterId, Option<BlockId>>,
 }
 
 impl RegionSource {
@@ -192,7 +269,31 @@ impl RegionSource {
             unit,
             uses: OnceLock::new(),
             next_register,
+            analysis: OnceLock::new(),
         }
+    }
+
+    fn analysis(&self) -> Option<&SourceAnalysis> {
+        self.analysis
+            .get_or_init(|| {
+                let cfg = celox_sir::cfg::SirCfg::analyze_forward_structure(&self.unit).ok()?;
+                let mut definitions = HashMap::default();
+                for block in self.unit.blocks.values() {
+                    for reg in block.params.iter().copied().chain(
+                        block
+                            .instructions
+                            .iter()
+                            .filter_map(SIRInstruction::defined_register),
+                    ) {
+                        definitions
+                            .entry(reg)
+                            .and_modify(|def| *def = None)
+                            .or_insert(Some(block.id));
+                    }
+                }
+                Some(SourceAnalysis { cfg, definitions })
+            })
+            .as_ref()
     }
 
     fn uses(&self) -> &HashMap<RegisterId, usize> {
@@ -207,6 +308,31 @@ impl RegionSource {
                     inst.for_each_use(&mut count);
                 }
                 block.terminator.for_each_use(&mut count);
+            }
+            // A consumed use can run again after an exit into an inner loop,
+            // without reexecuting a definition in the preheader. Preserve
+            // cross-block values used in cyclic blocks, even when every
+            // static use was consumed by this region. Same-block SSA uses
+            // are preceded by their definition on each reentry.
+            if let Some(analysis) = self.analysis() {
+                for component in analysis.cfg.sccs.iter().filter(|scc| scc.cyclic) {
+                    for &index in &component.blocks {
+                        let id = analysis.cfg.block_ids[index];
+                        let block = &self.unit.blocks[&id];
+                        let mut retain = |reg| {
+                            if analysis.definitions.get(&reg) != Some(&Some(id)) {
+                                counts.insert(reg, usize::MAX);
+                            }
+                        };
+                        for inst in &block.instructions {
+                            inst.for_each_use(&mut retain);
+                        }
+                        block.terminator.for_each_use(&mut retain);
+                    }
+                }
+            } else {
+                // Unknown control flow must only make the frame larger.
+                counts.values_mut().for_each(|count| *count = usize::MAX);
             }
             counts
         })
