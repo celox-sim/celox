@@ -200,6 +200,17 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "containers::four_state_container_equality at 852:27: assert_eq flags: expected 0xf, got 0xd",
+      "expectation": "Simulation",
+      "name": "containers::four_state_container_equality",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

@@ -1,0 +1,23 @@
+{
+  "case": "system_functions::casts_to_enumerated_types_reject_unknown_bits",
+  "source": "src/sv/cases/system_functions.vtest",
+  "standard": "IEEE 1800-2023 11.4.5, 7.6: the equality of unpacked arrays is that of their elements, x when an element comparison is x.",
+  "method": "The shared case runs unchanged in verify-sv-verilator, verify-sv-icarus and verify-sv-xezim; the reduced source below runs without the adapters (iverilog -g2012 -s Top, xezim -s Top, and the Celox sv_tests driver in four-state simulation mode).",
+  "reduced_source": "module Top;\n logic a[], b[];\n logic [3:0] c[], d[];\n initial begin\n  a = new[1]; a[0] = 1'bx; b = a;\n  c = '{4'b10xz}; d = c;\n  $display(\"[%b %b %b %b]\", a[0], (a == b), c[0], (c == d));\n end\nendmodule\n",
+  "observations": [
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "stderr": "ivl: eval_vec4.c:1359: draw_eval_vec4: Assertion `ivl_expr_value(expr) == IVL_VT_BOOL || ivl_expr_value(expr) == IVL_VT_VECTOR' failed.\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "[x 0 10xz 0]\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "[x x 10xz x]\n"
+    }
+  ]
+}

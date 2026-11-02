@@ -813,6 +813,14 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "compile",
                             "Type names are not valid expressions here",
                         ),
+                        ("icarus", "containers::four_state_container_equality") => {
+                            ("compile_error", "compile", "draw_eval_vec4: Assertion")
+                        }
+                        ("xezim", "containers::four_state_container_equality") => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq flags: expected 0xf, got 0xd",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

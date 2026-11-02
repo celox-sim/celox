@@ -990,6 +990,10 @@
     "sv_container_returns_in_instance_functions": {
       "title": "In a module instantiated below the top, a function that builds a queue, dynamic array or associative array in an automatic local and returns it returns a container that has lost elements: a queue_t of three pushes comes back with one element, an associative array with none, while the same functions with the module as the top return every element",
       "standard": "IEEE 1800-2023 13.4.1, 7.5, 7.8, 7.10"
+    },
+    "sv_container_equality_unknown_elements": {
+      "title": "The equality of two dynamic arrays whose elements hold unknown bits gives 0 instead of x: with logic a[], b[] and a[0] = 1'bx, b = a, a == b is 0, as is c == d for logic [3:0] c[], d[] holding 4'b10xz",
+      "standard": "IEEE 1800-2023 11.4.5, 7.6"
     }
   },
   "cases": [
@@ -5423,6 +5427,14 @@
       "classification": "xezim_bug",
       "bug": "sv_foreach_string_property",
       "note": "before_b counts the characters of p.m_name (\"a.b.c\") before the first \"b\", which is 2; the body runs once, so it is 1. A foreach over a string variable iterates every character."
+    },
+    {
+      "suite": "sv",
+      "name": "containers::four_state_container_equality",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_container_equality_unknown_elements",
+      "note": "The equality of unpacked arrays compares their elements (7.6, 11.4.5), so a == b of two dynamic arrays holding 4'b10xz is x and flags[1] = (a == b) === 1'bx is 1; flags is 15. The pinned xezim evaluates the equality as 0, so flags is 13; the case equality and the equalities of differing and empty arrays agree. See verification/repros/sv_container_equality_unknown_elements_xezim.json; Celox gives x."
     }
   ]
 }
