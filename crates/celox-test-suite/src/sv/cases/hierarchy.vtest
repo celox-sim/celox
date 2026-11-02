@@ -1835,3 +1835,101 @@
   (assert_eq known_mismatch 0)
   (assert_eq x_value (fourstate 0xd9 0x08))
   (assert_eq z_value (fourstate 0xd1 0x08)))
+
+
+; IEEE 1800-2023 6.16 and 23.6: a hierarchical string denotes the
+; instance's string variable, preserving dynamic length and value semantics.
+(case hierarchical_string_variables
+  (source "hierarchical_string_variables.sv" #"
+module Leaf(input bit edit);
+  string filename = "seed";
+  string files[2:3];
+  always @(posedge edit) begin
+    filename = {filename, ".bin"};
+    files[3] = {files[3], ".rom"};
+  end
+endmodule
+module Top;
+  bit edit_a=0, edit_b=0;
+  string snapshot;
+  Leaf a(edit_a), b(edit_b);
+  for (genvar i=0; i<2; i++) begin : generated
+    Leaf u(1'b0);
+  end
+  initial begin
+    #1;
+    if (a.filename != "seed" || b.filename.len() != 4) $fatal(1,"initial strings");
+    a.filename = "firmware_name_longer_than_a_packed_word.hex";
+    b.filename = a.filename;
+    a.files[2] = "alpha"; a.files[3] = "beta";
+    b.files[2] = a.files[2];
+    a.files[2] = "changed";
+    if (b.files[2] != "alpha" || b.files[3] != "") $fatal(1,"array string isolation");
+    a.filename = "Firmware_name_longer_than_a_packed_word.hex";
+    if (b.filename != "firmware_name_longer_than_a_packed_word.hex") $fatal(1,"string copy");
+    generated[1].u.filename = "generated";
+    if (generated[1].u.filename.len() != 9 || generated[0].u.filename != "seed")
+      $fatal(1,"generated instance strings");
+    generated[1].u.filename = "Generated";
+    if (generated[1].u.filename != "Generated") $fatal(1,"generated string write");
+    edit_a=1;
+    #1;
+    if (a.filename != "Firmware_name_longer_than_a_packed_word.hex.bin") $fatal(1,"child write");
+    if (a.files[3] != "beta.rom") $fatal(1,"array string child write");
+    if (Top.a.filename != a.filename) $fatal(1,"rooted alias");
+    snapshot = b.filename;
+    b.filename = "";
+    if (b.filename.len() != 0 || snapshot != "firmware_name_longer_than_a_packed_word.hex")
+      $fatal(1,"empty and copied strings");
+    if (a.filename.len() != snapshot.len()+4) $fatal(1,"instance isolation");
+    $finish;
+  end
+endmodule
+"#)
+  (top Top) (run_to_finish))
+
+
+(case hierarchical_string_mutating_methods
+  (source "hierarchical_string_mutating_methods.sv" #"
+module Leaf;
+  string filename = "seed";
+endmodule
+module Top;
+  Leaf a(), b();
+  for (genvar i=0; i<2; i++) begin : generated
+    Leaf u();
+  end
+  initial begin
+    #1;
+    b.filename = a.filename;
+    a.filename.putc(0, 8'h53);
+    generated[1].u.filename.putc(0, 8'h53);
+    if (a.filename != "Seed" || b.filename != "seed") $fatal(1,"hierarchical string method copy");
+    if (generated[1].u.filename != "Seed" || generated[0].u.filename != "seed")
+      $fatal(1,"generated hierarchical string method");
+    $finish;
+  end
+endmodule
+"#)
+  (top Top) (run_to_finish))
+
+(case generated_string_array_element_methods
+  (source "generated_string_array_element_methods.sv" #"
+module Leaf;
+  string files[2:3];
+endmodule
+module Top;
+  for (genvar i=0; i<2; i++) begin : generated
+    Leaf u();
+  end
+  initial begin
+    #1;
+    generated[1].u.files[2] = "binary";
+    if (generated[1].u.files[2].len() != 6 || generated[1].u.files[3].len() != 0)
+      $fatal(1,"generated instance string array element methods");
+    if (generated[0].u.files[2] != "") $fatal(1,"generated instance isolation");
+    $finish;
+  end
+endmodule
+"#)
+  (top Top) (run_to_finish))

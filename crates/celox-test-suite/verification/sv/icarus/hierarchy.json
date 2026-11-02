@@ -502,6 +502,54 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Verilator 5.052 raises an internal VARXREF type error on a.filename.putc; Icarus 13.0 reports it as an unknown task. The standalone source reproduces both compilation failures. IEEE 1800-2023 23.6 permits the hierarchical variable name, and 6.16.2 defines putc as a character update of that string. Only this mutating-method case is excluded; hierarchical string reads and assignments remain executable.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_hierarchical_string_mutating_methods",
+        "category": "simulator_unsupported",
+        "phase": "compile",
+        "observed_version": "Verilator 5.052 / Icarus 13.0",
+        "reason": "Verilator 5.052 raises an internal VARXREF type error on a.filename.putc; Icarus 13.0 reports it as an unknown task. The standalone source reproduces both compilation failures. IEEE 1800-2023 23.6 permits the hierarchical variable name, and 6.16.2 defines putc as a character update of that string. Only this mutating-method case is excluded; hierarchical string reads and assignments remain executable.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/hierarchical_string_mutating_methods.json",
+          "verification/repros/hierarchical_string_mutating_methods.sv",
+          "LIMITATIONS.md#hierarchical-string-method-receivers"
+        ]
+      },
+      "name": "hierarchy::hierarchical_string_mutating_methods",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus 13.0 returns 2 for both generated[1].u.files[2].len() after assigning \"binary\" and the empty neighboring files[3].len(), instead of 6 and 0. The standalone source reproduces the failure without an adapter. IEEE 1800-2023 23.6 permits the hierarchical names, and 6.16.1 defines len() as the number of characters. Verilator passes the case; other hierarchical string reads and assignments remain executable.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_generated_string_array_element_methods",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 returns 2 for both generated[1].u.files[2].len() after assigning \"binary\" and the empty neighboring files[3].len(), instead of 6 and 0. The standalone source reproduces the failure without an adapter. IEEE 1800-2023 23.6 permits the hierarchical names, and 6.16.1 defines len() as the number of characters. Verilator passes the case; other hierarchical string reads and assignments remain executable.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/generated_string_array_element_methods.json",
+          "verification/repros/generated_string_array_element_methods.sv",
+          "LIMITATIONS.md#hierarchical-string-method-receivers"
+        ]
+      },
+      "name": "hierarchy::generated_string_array_element_methods",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }
