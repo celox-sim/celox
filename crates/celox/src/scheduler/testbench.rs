@@ -561,6 +561,8 @@ fn generate(
         finish_sites: &finish_sites,
         exits: vec![],
         settle_reads: Some(&reads),
+        incremental: None,
+        partitioned_glue: None,
         shared: program.shared_storage(),
         comb,
         continuations: vec![],

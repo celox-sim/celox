@@ -45,6 +45,8 @@ impl<B: SimBackend> Simulation<B> {
     /// exactly when `state.is_active()` is true. The host chooses its destination;
     /// the writer starts a standalone segment at the restored simulation time,
     /// with saved selections, suspension and a fresh per-file byte-limit budget.
+    /// Restoring inactive source controls preserves an existing host-installed
+    /// writer; an existing source-driven writer is closed.
     ///
     /// # Safety
     /// State must be an unmodified snapshot from this same compiled design and
@@ -62,7 +64,11 @@ impl<B: SimBackend> Simulation<B> {
             ));
         }
         self.simulator.flush_vcd()?;
-        self.simulator.vcd_writer = None;
+        // Source controls own source-driven output. An inactive snapshot must
+        // not disable a writer explicitly configured by the embedding host.
+        if self.simulator.sv_vcd.source_writer || output.is_some() {
+            self.simulator.vcd_writer = None;
+        }
         self.simulator.sv_vcd = state.control;
         let Some((path, output)) = output else {
             return Ok(());

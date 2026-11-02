@@ -21,6 +21,7 @@ mod slice;
 mod sparse;
 mod strided;
 mod target_policy;
+mod transpose;
 mod wide;
 mod wide_unary;
 
@@ -995,6 +996,22 @@ fn lower_execution_unit_counting_verifications(
     four_state: bool,
     diagnostics: &crate::NativeDiagnostics,
 ) -> (MFunction, usize) {
+    lower_execution_unit_for_target(
+        eu,
+        layout,
+        four_state,
+        diagnostics,
+        super::features::X86Features::detect(),
+    )
+}
+
+fn lower_execution_unit_for_target(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    layout: &MemoryLayout,
+    four_state: bool,
+    diagnostics: &crate::NativeDiagnostics,
+    features: super::features::X86Features,
+) -> (MFunction, usize) {
     let expanded = strided::expand_strided_accesses(eu, layout);
     let eu = expanded.as_ref();
     if cfg!(debug_assertions) || diagnostics.verify_sir {
@@ -1028,6 +1045,7 @@ fn lower_execution_unit_counting_verifications(
     }
 
     let mut func = MFunction::new(vregs.clone(), spill_descs);
+    func.target_features = features;
     let target_policy = TargetIselPolicy::for_function(&func, four_state);
     let mut block_ids = ordered_sir_blocks(eu);
     let sparse_worklist_run = find_sparse_worklist_run(eu);
@@ -1042,11 +1060,7 @@ fn lower_execution_unit_counting_verifications(
         .is_some()
         .then(|| func.intern_constant_table(sparse_descriptor_table(layout)));
     let native_priority_encode = !four_state;
-    let sir_use_sites = if native_priority_encode {
-        Some(collect_sir_use_sites(eu))
-    } else {
-        None
-    };
+    let sir_use_sites = Some(collect_sir_use_sites(eu));
     let exact_constants = (!four_state).then(|| collect_exact_sir_constants(eu));
     let selector_branch_table_plans = if !four_state {
         find_selector_branch_table_plans(
@@ -1110,10 +1124,19 @@ fn lower_execution_unit_counting_verifications(
         layout,
         wide_regs: WideRegMap::default(),
         reg_addrs: crate::HashMap::default(),
+        transpose_tiles: transpose::TileCache::default(),
+        single_use_registers: sir_use_sites
+            .as_ref()
+            .unwrap()
+            .iter()
+            .filter(|(_, uses)| uses.len() == 1)
+            .map(|(register, _)| *register)
+            .collect(),
         consts: ConstMap::default(),
         low_zero_bits: crate::HashMap::default(),
         four_state,
         use_popcnt: func.target_features.popcnt(),
+        use_bmi2: func.target_features.bmi2(),
         mask_map,
         known_bits: crate::HashMap::default(),
         wide_masks: WideMaskMap::default(),
@@ -1234,6 +1257,7 @@ fn lower_execution_unit_counting_verifications(
         let mut lookup_emit_cache = DenseLookupEmitCache::default();
         let mut packed_field_load_cache = PackedFieldLoadCache::default();
         let sir_defs = collect_sir_defs(sir_block);
+        ctx.transpose_tiles = transpose::plan_tiles(sir_block, &sir_defs, &eu.register_map);
 
         // Waveform observers share Store/Commit notification sites with clock
         // triggers. Mark before specialized store/commit lowering can absorb a
@@ -1786,6 +1810,9 @@ struct ISelContext<'a> {
     /// RegisterId → (sim-state address, static load bit offset).
     /// Valid while no overlapping state write has followed the load in this block.
     reg_addrs: crate::HashMap<RegisterId, (RegionedAbsoluteAddr, usize)>,
+    /// Block-local SSA tile results shared by bit-transpose Concat columns.
+    transpose_tiles: transpose::TileCache,
+    single_use_registers: HashSet<RegisterId>,
     /// Conservative lower bound for the number of low zero bits in a SIR value.
     /// This lets dynamic bit offsets that are known byte-aligned use indexed
     /// byte addressing without a dynamic intra-byte shift.
@@ -1794,6 +1821,8 @@ struct ISelContext<'a> {
     four_state: bool,
     /// Whether parity reductions can use this target's POPCNT instruction.
     use_popcnt: bool,
+    /// Whether byte-column gathers can use the target's BMI2 PEXT instruction.
+    use_bmi2: bool,
     /// Maps SIR RegisterId → mask VReg (parallel to reg_map).
     mask_map: RegMap,
     /// Known effective bit width per VReg. If a VReg is known to have at most

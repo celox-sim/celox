@@ -75,6 +75,44 @@ impl BindingMode {
     }
 }
 
+// Keep member-array binding temporaries off the recursive type-binding frame.
+fn append_member_dimensions(
+    values: &mut Vec<Type>,
+    dimensions: &[Dimension],
+    native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    context: &PackedDimensions,
+) -> Converted<()> {
+    let mut bound = |id| {
+        constant_binding::expression(
+            id,
+            native,
+            tree,
+            session,
+            &context.const_env,
+            &context.type_aliases,
+        )?
+        .ok_or_else(|| unsupported("unresolved structure member array dimension"))
+    };
+    let ranges = dimensions
+        .iter()
+        .map(|dimension| match dimension.kind {
+            DimensionKind::Range { left, right } => {
+                Ok(UnpackedRange::new(bound(left)?, bound(right)?))
+            }
+            DimensionKind::Index(size) => Ok(UnpackedRange::sized(bound(size)?)),
+            _ => Err(unsupported("non-fixed structure member array dimension")),
+        })
+        .collect::<Converted<Vec<_>>>()?;
+    types::validate_unpacked_dimension_sizes(&tree.functions, &ranges, &context.const_env)?;
+    let ty = values
+        .pop()
+        .ok_or_else(|| unsupported("structure member type"))?;
+    values.push(type_with_unpacked_ranges(ty, ranges)?);
+    Ok(())
+}
+
 fn bind_in_mode(
     root: TypeId,
     native: &celox_sv_syntax::Declarations,
@@ -86,6 +124,7 @@ fn bind_in_mode(
     enum Job {
         Enter(TypeId),
         Void,
+        MemberDimensions(Vec<celox_sv_syntax::Dimension>),
         Enum(TypeId, Vec<PackedRange>),
         Aggregate {
             owner: Arc<str>,
@@ -105,6 +144,9 @@ fn bind_in_mode(
     while let Some(job) = jobs.pop() {
         match job {
             Job::Void => values.push(Type::new(TypeKind::Bit)),
+            Job::MemberDimensions(dimensions) => {
+                append_member_dimensions(&mut values, &dimensions, native, tree, session, context)?;
+            }
             Job::Enter(id) => {
                 let data = native.data_type(id);
                 let ranges = if matches!(data.kind, DataTypeKind::Struct { .. }) {
@@ -308,7 +350,7 @@ fn bind_in_mode(
                         let mut seen = HashSet::default();
                         for field in fields {
                             if field.random.is_some()
-                                || !field.dimensions.is_empty()
+                                || !field.dimensions.is_empty() && (*packed || *soft || *union)
                                 || field.default.is_some() && (*packed || *soft || *union)
                             {
                                 return Ok(None);
@@ -347,13 +389,16 @@ fn bind_in_mode(
                             ranges,
                             packed: *packed || *soft,
                         });
-                        jobs.extend(fields.iter().zip(voids).rev().map(|(field, is_void)| {
+                        for (field, is_void) in fields.iter().zip(voids).rev() {
                             if is_void {
-                                Job::Void
+                                jobs.push(Job::Void);
                             } else {
-                                Job::Enter(field.data_type)
+                                if !field.dimensions.is_empty() {
+                                    jobs.push(Job::MemberDimensions(field.dimensions.clone()));
+                                }
+                                jobs.push(Job::Enter(field.data_type));
                             }
-                        }));
+                        }
                     }
                     DataTypeKind::TypeOf(expression) => {
                         // The existing query kernel recognizes an explicit

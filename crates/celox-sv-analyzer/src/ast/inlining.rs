@@ -168,28 +168,33 @@ fn reads_only(callee: &Callee) -> bool {
     }
 }
 
+/// Whether evaluating select position `expr` calls anything that does not
+/// only read (see [`reads_only`]).
+pub(super) fn effectful_position(expr: &ConstExpr) -> bool {
+    let constant = effectful_position;
+    match expr {
+        ConstExpr::Function { callee, args, .. } => {
+            !reads_only(callee) || args.iter().any(constant)
+        }
+        ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+            constant(expr) || constant(msb) || constant(lsb)
+        }
+        ConstExpr::Select { expr, bit } => constant(expr) || constant(bit),
+        ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => constant(expr),
+        ConstExpr::Binary { left, right, .. } => constant(left) || constant(right),
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => constant(condition) || constant(then_expr) || constant(else_expr),
+        ConstExpr::Literal(_) | ConstExpr::Ident(_) => false,
+    }
+}
+
 /// Whether evaluating `expr` calls anything that does not only read (see
 /// [`reads_only`]), also in the positions of a select.
 pub(super) fn effectful(expr: &Expr) -> bool {
-    fn constant(expr: &ConstExpr) -> bool {
-        match expr {
-            ConstExpr::Function { callee, args, .. } => {
-                !reads_only(callee) || args.iter().any(constant)
-            }
-            ConstExpr::SelectRange { expr, msb, lsb, .. } => {
-                constant(expr) || constant(msb) || constant(lsb)
-            }
-            ConstExpr::Select { expr, bit } => constant(expr) || constant(bit),
-            ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => constant(expr),
-            ConstExpr::Binary { left, right, .. } => constant(left) || constant(right),
-            ConstExpr::Mux {
-                condition,
-                then_expr,
-                else_expr,
-            } => constant(condition) || constant(then_expr) || constant(else_expr),
-            ConstExpr::Literal(_) | ConstExpr::Ident(_) => false,
-        }
-    }
+    let constant = effectful_position;
     let mut pending = vec![expr];
     while let Some(expr) = pending.pop() {
         match expr {

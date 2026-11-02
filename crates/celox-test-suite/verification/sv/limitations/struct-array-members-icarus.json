@@ -1,0 +1,133 @@
+{
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 16; see <case>/build.log\n<case>/source_0.sv:4: sorry: Unpacked structs not supported.\n<case>/source_0.sv:5: sorry: Unpacked structs not supported.\n<case>/source_0.sv:6: sorry: Unpacked structs not supported.\n<case>/source_0.sv:7: sorry: Unpacked structs not supported.\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:14: error: Malformed statement\n<case>/source_0.sv:15: syntax error\n<case>/source_0.sv:15: error: Malformed statement\n<case>/source_0.sv:16: syntax error\n<case>/source_0.sv:16: error: Malformed statement\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: error: Malformed statement\n<case>/source_0.sv:18: syntax error\n<case>/source_0.sv:18: error: Malformed statement\n<case>/source_0.sv:19: syntax error\n<case>/source_0.sv:19: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_member_defaults",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 3; see <case>/build.log\n<case>/source_0.sv:3: sorry: Unpacked structs not supported.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_member_defaults_four_state",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:3: sorry: Unpacked structs not supported.\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_members",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:3: sorry: Unpacked structs not supported.\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_members_four_state",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:3: sorry: Unpacked structs not supported.\n<case>/source_0.sv:5: sorry: Overriding the default variable lifetime is not yet supported.\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_members_local",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:3: sorry: Unpacked structs not supported.\n<case>/source_0.sv:4: sorry: Unpacked structs not supported.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_members_nested",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:3: sorry: Unpacked structs not supported.\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_members_of_arrays",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:3: sorry: Unpacked structs not supported.\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_members_of_arrays_four_state",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 3; see <case>/build.log\n<case>/source_0.sv:5: sorry: Unpacked structs not supported.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_members_parameters",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 6; see <case>/build.log\n<case>/source_0.sv:3: sorry: Unpacked structs not supported.\n<case>/source_0.sv:4: sorry: Unpacked structs not supported.\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:1: error: Syntax error in variable list.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_members_replication",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 3; see <case>/build.log\n<case>/source_0.sv:3: sorry: Unpacked structs not supported.\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:1: error: Syntax error in variable list.\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_members_wide",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "exclude_stronger_than_sv": false,
+  "include_ignored": false,
+  "schema_version": 3,
+  "suite": "sv",
+  "suite_version": "0.12.0",
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+  "scope": "Focused integral array members of unpacked structures before reviewed exclusions; passing and unsupported cases omitted."
+}

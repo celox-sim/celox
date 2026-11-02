@@ -95,10 +95,10 @@ mod tests {
 
     #[test]
     fn array_method_with_semantics_are_explicitly_rejected() {
-        // Locator method values are bound by `locators`; other methods and a
-        // discarded locator call still reject a with clause.
+        // Locator method values are bound by `locators` and the ordering
+        // methods by `procedural::ordering`; other methods and a discarded
+        // locator call still reject a with clause.
         for body in [
-            "initial a.sort with (item);",
             "initial void'(a.find() with (item > 0));",
             "localparam N = 0 && a.sum() with (item); initial q = N;",
         ] {

@@ -5,6 +5,7 @@ mod calls;
 mod chandles;
 mod direct;
 mod element_members;
+pub(in crate::ast) use element_members::element_member as fixed_array_member;
 mod enums;
 mod format_patterns;
 mod lvalues;
@@ -34,7 +35,7 @@ pub(super) use format_patterns::{
 pub(super) use lvalues::{net_lvalue, variable_lvalue};
 pub(super) use objects::{
     Cast as ObjectCast, Receiver as ObjectReceiver,
-    aggregate_property as object_aggregate_property, cast as object_cast,
+    aggregate_property as object_aggregate_property, cast_to as object_cast_to,
     check_access as check_member_access, check_assignment as check_handle_assignment,
     constraint_mode_call as object_constraint_mode_call, constructor as object_constructor,
     method as object_method, method_result as object_method_result, named_class,
@@ -48,8 +49,8 @@ pub(super) use streams::{
     unpack as stream_unpack,
 };
 pub(super) use strings::{
-    call as string_call, method as string_method, native_string, string_value,
-    to_string as string_operand,
+    call as string_call, fixed_array_element as fixed_string_array_element,
+    method as string_method, native_string, string_value, to_string as string_operand,
 };
 fn disagreement() -> AnalyzerError {
     AnalyzerError::Parse("invalid native expression ownership".into())
@@ -74,6 +75,19 @@ pub(super) fn selected_pattern(
     session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<Expr>> {
+    if matches!(lhs, LValue::Select { .. })
+        && let Some(aggregate) =
+            unpacked_structs::native_struct(left, tree.declarations(), tree, session, dimensions)?
+    {
+        unpacked_structs::check_value(
+            &aggregate,
+            right,
+            tree.declarations(),
+            tree,
+            session,
+            dimensions,
+        )?;
+    }
     let native = tree.declarations();
     if !matches!(lhs, LValue::Select { .. })
         || !matches!(

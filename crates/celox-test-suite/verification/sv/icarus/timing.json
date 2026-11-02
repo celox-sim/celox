@@ -1508,6 +1508,17 @@
     },
     {
       "category": "Sequential",
+      "detail": "Icarus build exit status: 134; see <case>/build.log\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:13: error: Malformed statement\n<case>/source_0.sv:19: syntax error\n<case>/source_0.sv:19: error: Malformed statement\n<case>/source_0.sv:20: syntax error\n<case>/source_0.sv:20: error: Invalid module item.\n<case>/source_0.sv:21: syntax error\n<case>/source_0.sv:21: error: Invalid module instantiation\n<case>/source_0.sv:22: error: Invalid module instantiation\n<case>/testbench.sv:11: error: Invalid module item.\n<case>/testbench.sv:24: warning: Static variable initialization requires explicit lifetime in this context.\n<case>/testbench.sv:50: syntax error\n<case>/testbench.sv:50: error: Syntax error in task/function port declaration.\n<case>/testbench.sv:51: syntax error\n<case>/testbench.sv:51: error: Malformed statement\n<case>/source_0.sv:16: assert: pform.cc:1478: failed assertion lexical_scope == cur_module\nAborted (core dumped)\n",
+      "expectation": "Simulation",
+      "name": "timing::static_formals_of_package_tasks",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
       "name": "timing::statically_satisfied_waits_preserve_distinct_activation_times",
@@ -1878,6 +1889,174 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 rejects independent net delays with Net delays not supported in all seven focused cases. IEEE 1800-2023 10.3.3 and 28.16 specify this form separately from net-declaration continuous initializers, which pass. The standalone probe reproduces the compilation diagnostic.",
+      "expectation": "Simulation",
+      "name": "timing::continuous_delay_net_four_state",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_independent_net_delays",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects independent net delays with Net delays not supported in all seven focused cases. IEEE 1800-2023 10.3.3 and 28.16 specify this form separately from net-declaration continuous initializers, which pass. The standalone probe reproduces the compilation diagnostic.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/independent-net-delays-icarus.json",
+          "verification/repros/sv_independent_net_delay.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 rejects independent net delays with Net delays not supported in all seven focused cases. IEEE 1800-2023 10.3.3 and 28.16 specify this form separately from net-declaration continuous initializers, which pass. The standalone probe reproduces the compilation diagnostic.",
+      "expectation": "Simulation",
+      "name": "timing::continuous_delay_net_gate_driver",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_independent_net_delays",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects independent net delays with Net delays not supported in all seven focused cases. IEEE 1800-2023 10.3.3 and 28.16 specify this form separately from net-declaration continuous initializers, which pass. The standalone probe reproduces the compilation diagnostic.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/independent-net-delays-icarus.json",
+          "verification/repros/sv_independent_net_delay.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 rejects independent net delays with Net delays not supported in all seven focused cases. IEEE 1800-2023 10.3.3 and 28.16 specify this form separately from net-declaration continuous initializers, which pass. The standalone probe reproduces the compilation diagnostic.",
+      "expectation": "Simulation",
+      "name": "timing::continuous_delay_net_independent",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_independent_net_delays",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects independent net delays with Net delays not supported in all seven focused cases. IEEE 1800-2023 10.3.3 and 28.16 specify this form separately from net-declaration continuous initializers, which pass. The standalone probe reproduces the compilation diagnostic.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/independent-net-delays-icarus.json",
+          "verification/repros/sv_independent_net_delay.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 rejects independent net delays with Net delays not supported in all seven focused cases. IEEE 1800-2023 10.3.3 and 28.16 specify this form separately from net-declaration continuous initializers, which pass. The standalone probe reproduces the compilation diagnostic.",
+      "expectation": "Simulation",
+      "name": "timing::continuous_delay_net_mixed_generate",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_independent_net_delays",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects independent net delays with Net delays not supported in all seven focused cases. IEEE 1800-2023 10.3.3 and 28.16 specify this form separately from net-declaration continuous initializers, which pass. The standalone probe reproduces the compilation diagnostic.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/independent-net-delays-icarus.json",
+          "verification/repros/sv_independent_net_delay.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 rejects independent net delays with Net delays not supported in all seven focused cases. IEEE 1800-2023 10.3.3 and 28.16 specify this form separately from net-declaration continuous initializers, which pass. The standalone probe reproduces the compilation diagnostic.",
+      "expectation": "Simulation",
+      "name": "timing::continuous_delay_net_partially_undriven",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_independent_net_delays",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects independent net delays with Net delays not supported in all seven focused cases. IEEE 1800-2023 10.3.3 and 28.16 specify this form separately from net-declaration continuous initializers, which pass. The standalone probe reproduces the compilation diagnostic.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/independent-net-delays-icarus.json",
+          "verification/repros/sv_independent_net_delay.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 rejects independent net delays with Net delays not supported in all seven focused cases. IEEE 1800-2023 10.3.3 and 28.16 specify this form separately from net-declaration continuous initializers, which pass. The standalone probe reproduces the compilation diagnostic.",
+      "expectation": "Simulation",
+      "name": "timing::continuous_delay_net_per_bit",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_independent_net_delays",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects independent net delays with Net delays not supported in all seven focused cases. IEEE 1800-2023 10.3.3 and 28.16 specify this form separately from net-declaration continuous initializers, which pass. The standalone probe reproduces the compilation diagnostic.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/independent-net-delays-icarus.json",
+          "verification/repros/sv_independent_net_delay.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 rejects independent net delays with Net delays not supported in all seven focused cases. IEEE 1800-2023 10.3.3 and 28.16 specify this form separately from net-declaration continuous initializers, which pass. The standalone probe reproduces the compilation diagnostic.",
+      "expectation": "Simulation",
+      "name": "timing::continuous_delay_net_selected_drivers",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_independent_net_delays",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects independent net delays with Net delays not supported in all seven focused cases. IEEE 1800-2023 10.3.3 and 28.16 specify this form separately from net-declaration continuous initializers, which pass. The standalone probe reproduces the compilation diagnostic.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/independent-net-delays-icarus.json",
+          "verification/repros/sv_independent_net_delay.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
     }
   ]
 }

@@ -13,6 +13,30 @@
     },
     {
       "category": "Sequential",
+      "detail": "Xezim 0.11.4 returns code zero but writes \"No error\" into the description for a successful file operation, including packed buffers. IEEE 1800-2023 21.3.7 explicitly requires the description to be cleared when the most recent operation did not produce an error. Icarus 13.0 and Celox clear both output forms; the standalone probe prints the difference.",
+      "expectation": "Simulation",
+      "name": "file_io::ferror_success_clears_description",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_xezim_ferror_success_description",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "xezim version 0.11.4",
+        "reason": "Xezim 0.11.4 returns code zero but writes \"No error\" into the description for a successful file operation, including packed buffers. IEEE 1800-2023 21.3.7 explicitly requires the description to be cleared when the most recent operation did not produce an error. Icarus 13.0 and Celox clear both output forms; the standalone probe prints the difference.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/ferror-xezim.json",
+          "verification/repros/sv_ferror_clears_description.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
       "name": "file_io::stdout_preserves_format_and_call_order",

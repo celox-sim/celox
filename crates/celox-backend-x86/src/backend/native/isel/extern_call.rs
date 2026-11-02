@@ -82,17 +82,7 @@ fn define_extern_result(ctx: &mut ISelContext, block: &mut MBlock, dst: Register
         width: ctx.sir_width(&dst),
         signed: false,
     });
-    match ty.result_value_mask() {
-        u64::MAX => block.push(MInst::Mov {
-            dst: value,
-            src: result,
-        }),
-        imm => block.push(MInst::AndImm {
-            dst: value,
-            src: result,
-            imm,
-        }),
-    }
+    ctx.emit_and_imm(block, value, result, ty.result_value_mask());
     if !ctx.four_state {
         return;
     }

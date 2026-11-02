@@ -90,6 +90,17 @@
     },
     {
       "category": "Functions",
+      "detail": "container_formals::selects_of_reference_container_elements at 401:2: assert_eq d: expected 0x12108, got 0x2100",
+      "expectation": "Simulation",
+      "name": "container_formals::selects_of_reference_container_elements",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
       "detail": "",
       "expectation": "Simulation",
       "name": "container_formals::static_subroutine_container_formals",

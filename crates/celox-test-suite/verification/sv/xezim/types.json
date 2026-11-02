@@ -57,6 +57,17 @@
     },
     {
       "category": "Types",
+      "detail": "types::local_typedefs at 697:2: assert_eq b: expected 0xff, got 0xf",
+      "expectation": "Simulation",
+      "name": "types::local_typedefs",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "types::packed_arrays_of_signed_named_types_have_signed_elements at 98:5: assert_eq y0: expected 0xfffa, got 0x1",
       "expectation": "Simulation",
       "name": "types::packed_arrays_of_signed_named_types_have_signed_elements",

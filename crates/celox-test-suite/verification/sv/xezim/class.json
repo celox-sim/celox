@@ -90,6 +90,17 @@
     },
     {
       "category": "Types",
+      "detail": "class::constrained_enumerations_and_randc at 4142:3: assert_eq selected: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "class::constrained_enumerations_and_randc",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "the simulation ended before the script did",
       "expectation": "Simulation",
       "name": "class::constructors_chain_to_base",
@@ -310,6 +321,17 @@
     },
     {
       "category": "Types",
+      "detail": "class::method_defaults_use_the_object at 3765:162: assert_eq m1: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "class::method_defaults_use_the_object",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "class::method_ranges_of_scope_declarations at 2808:27: assert_eq a: expected 0x8, got 0x1",
       "expectation": "Simulation",
       "name": "class::method_ranges_of_scope_declarations",
@@ -326,6 +348,17 @@
       "name": "class::methods_called_through_interface_class_handles",
       "phase": "execute",
       "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "class::methods_called_without_parentheses reads peer_id with unknown bits in a two-state run",
+      "expectation": "Simulation",
+      "name": "class::methods_called_without_parentheses",
+      "phase": "execute",
+      "status": "mismatch",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []

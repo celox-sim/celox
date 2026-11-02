@@ -450,6 +450,7 @@ impl BodyBuilder<'_, '_, '_> {
                             ),
                             celox_sv_syntax::AssertionHeader::Concurrent {
                                 condition,
+                                antecedent,
                                 disable,
                                 module_item,
                                 ..
@@ -460,8 +461,23 @@ impl BodyBuilder<'_, '_, '_> {
                                 if !matches!(keyword.as_str(), "assert" | "assume" | "cover") {
                                     return Err(unsupported("concurrent assertion directive"));
                                 }
-                                let operand = self.native_value(*condition)?;
+                                let mut operand = self.native_value(*condition)?;
                                 assertions::concurrent_operand(&operand)?;
+                                if let Some(antecedent) = antecedent {
+                                    let antecedent = self.native_value(*antecedent)?;
+                                    assertions::concurrent_operand(&antecedent)?;
+                                    // A Boolean sequence matches only when true.
+                                    // X/Z antecedents have no match (16.12.7).
+                                    let matched = procedural_truth_condition(antecedent);
+                                    operand = Expr::Binary {
+                                        left: Box::new(Expr::Unary {
+                                            op: UnaryOp::LogicNot,
+                                            expr: Box::new(matched),
+                                        }),
+                                        op: BinaryOp::LogicOr,
+                                        right: Box::new(operand),
+                                    };
+                                }
                                 let condition = procedural_truth_condition(Expr::Call {
                                     callee: Callee::System(SystemFunction::Sampled),
                                     args: vec![Some(operand)],

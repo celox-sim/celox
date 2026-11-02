@@ -71,6 +71,17 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 7; see <case>/build.log\n<case>/source_0.sv:20: error: Type names are not valid expressions here.\n<case>/source_0.sv:20: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:20:               : Expression is: <type>\n<case>/source_0.sv:20:               : Expression type: 10PETypename\n<case>/source_0.sv:20: error: Dimensions must be constant.\n<case>/source_0.sv:20       : This size expression violates the rule: <type>\n<case>/source_0.sv:25: sorry: Method name nesting is not supported yet.\n<case>/source_0.sv:25:      : method path: dog.legs\n<case>/source_0.sv:25: error: Object celox_suite_tb.dut.Kennel.this has no method \"dog.legs(...)\".\n<case>/source_0.sv:29: sorry: Method name nesting is not supported yet.\n<case>/source_0.sv:29:      : method path: dog.legs\n<case>/source_0.sv:29: error: Object celox_suite_tb.dut.Kennel.this has no method \"dog.legs(...)\".\n<case>/source_0.sv:36: sorry: Nested member path not yet supported for class properties.\n<case>/source_0.sv:36: sorry: Nested member path not yet supported for class properties.\n<case>/source_0.sv:33: sorry: Method name nesting is not supported yet.\n<case>/source_0.sv:33:      : method path: named.exists\n<case>/source_0.sv:33: error: Object celox_suite_tb.dut.Kennel.this has no method \"named.exists(...)\".\n<case>/source_0.sv:48: sorry: Method name nesting is not supported yet.\n<case>/source_0.sv:48:      : method path: dog.legs\n<case>/source_0.sv:48: error: Object celox_suite_tb.dut.kennel has no method \"dog.legs(...)\".\n7 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "class::casts_to_class_properties",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus 13.0 does not parse a parameter port list of a class (class Box #(int N = 4); is a syntax error), which IEEE 1800-2023 8.25 defines; each case declares a parameterized class. Verilator passes all but two cases, see sv_verilator_class_specialization_identity and sv_verilator_untyped_class_parameters.",
       "expectation": "Simulation",
       "known_issue": {
@@ -180,6 +191,17 @@
       "name": "class::classes_of_the_compilation_unit",
       "phase": "skip",
       "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 14; see <case>/build.log\n<case>/source_0.sv:11: sorry: Constraint declarations not supported.\n<case>/source_0.sv:16: sorry: Constraint declarations not supported.\n<case>/source_0.sv:22: sorry: Constraint declarations not supported.\n<case>/source_0.sv:31: sorry: Constraint declarations not supported.\n<case>/source_0.sv:54: sorry: \"inside\" expressions not supported yet.\n<case>/source_0.sv:55: sorry: \"inside\" expressions not supported yet.\n<case>/source_0.sv:79: syntax error\n<case>/source_0.sv:79: error: Malformed statement\n<case>/source_0.sv:79: syntax error\n<case>/source_0.sv:79: error: Malformed statement\n<case>/source_0.sv:81: sorry: \"inside\" expressions not supported yet.\n<case>/source_0.sv:81: sorry: \"inside\" expressions not supported yet.\n<case>/source_0.sv:98: syntax error\n<case>/source_0.sv:98: error: Malformed conditional expression.\n",
+      "expectation": "Simulation",
+      "name": "class::constrained_enumerations_and_randc",
+      "phase": "compile",
+      "status": "compile_error",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
@@ -756,6 +778,17 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 10; see <case>/build.log\n<case>/source_0.sv:23: syntax error\n<case>/source_0.sv:23: error: Malformed statement\n<case>/source_0.sv:24: syntax error\n<case>/source_0.sv:24: error: Malformed statement\n<case>/source_0.sv:25: syntax error\n<case>/source_0.sv:25: error: Operand of unary ! is not a primary expression.\n<case>/source_0.sv:26: error: Malformed statement\n<case>/source_0.sv:25: error: Malformed conditional expression.\n<case>/source_0.sv:27: syntax error\n<case>/source_0.sv:27: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::failing_casts_evaluate_their_sources",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:5: syntax error\nI give up.\n",
       "expectation": "Simulation",
       "name": "class::foreign_generic_constructor_lexical_scope",
@@ -979,11 +1012,45 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:35: error: Object f in celox_suite_tb.dut is not a function.\n<case>/source_0.sv:35: error: Object scale in celox_suite_tb.dut is not a function.\n2 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "class::members_hide_module_names",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus build exit status: 14; see <case>/build.log\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: error: Malformed statement\n<case>/source_0.sv:35: syntax error\n<case>/source_0.sv:35: error: Malformed statement\n<case>/source_1.sv:5: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_1.sv:6: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_1.sv:8: syntax error\n<case>/source_1.sv:8: error: Malformed statement\n<case>/source_1.sv:10: syntax error\n<case>/source_1.sv:11: error: Malformed statement\n<case>/testbench.sv:50: syntax error\n<case>/testbench.sv:50: error: Syntax error in task/function port declaration.\n<case>/testbench.sv:51: syntax error\n<case>/testbench.sv:51: error: Malformed statement\n",
       "expectation": "Simulation",
       "name": "class::members_of_call_results",
       "phase": "compile",
       "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 does not parse a parameter port list of a class (class Box #(int N = 4); is a syntax error), which IEEE 1800-2023 8.25 defines; each case declares a parameterized class. Verilator passes all but two cases, see sv_verilator_class_specialization_identity and sv_verilator_untyped_class_parameters.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_parameterized_classes",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not parse a parameter port list of a class (class Box #(int N = 4); is a syntax error), which IEEE 1800-2023 8.25 defines; each case declares a parameterized class. Verilator passes all but two cases, see sv_verilator_class_specialization_identity and sv_verilator_untyped_class_parameters.",
+        "upstream": []
+      },
+      "name": "class::method_defaults_use_the_object",
+      "phase": "skip",
+      "status": "ignored",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
@@ -1018,6 +1085,17 @@
       "name": "class::methods_called_through_interface_class_handles",
       "phase": "skip",
       "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:27: syntax error\n<case>/source_0.sv:27: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::methods_called_without_parentheses",
+      "phase": "compile",
+      "status": "compile_error",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
@@ -1243,6 +1321,17 @@
       "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:3: syntax error\nI give up.\n",
       "expectation": "Simulation",
       "name": "class::parameter_strings_wider_than_a_constant",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 7; see <case>/build.log\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Invalid class item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Invalid class item.\n<case>/source_0.sv:14: sorry: External methods are not yet supported.\n<case>/source_0.sv:18: syntax error\n<case>/source_0.sv:18: error: I give up on this function definition.\n",
+      "expectation": "Simulation",
+      "name": "class::prototype_formals_inherit_types",
       "phase": "compile",
       "status": "compile_error",
       "stronger_than_sv": false,
@@ -1521,6 +1610,17 @@
       "name": "class::randomize_without_rand_members",
       "phase": "skip",
       "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "native testbench failed: signal: 6 (SIGABRT); see runtime.log and protocol.log\ninternal error: 24vvp_fun_signal_object_sa: recv_real(1.000000) not implemented\nvvp: vvp_net.cc:3346: virtual void vvp_net_fun_t::recv_real(vvp_net_ptr_t, double, vvp_context_t): Assertion `0' failed.\ntimeout: the monitored command dumped core\n",
+      "expectation": "Simulation",
+      "name": "class::real_properties",
+      "phase": "execute",
+      "status": "runtime_error",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
@@ -1932,6 +2032,17 @@
       "name": "class::virtual_methods_dispatch_on_object_class",
       "phase": "skip",
       "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "native testbench failed: exit status: 3; see runtime.log and protocol.log\n<case>/source_0.sv:18: Error: System task/function $cast() is not defined by any module.\n<case>/source_0.sv:22: Error: System task/function $cast() is not defined by any module.\n<case>/source_0.sv:24: Error: System task/function $cast() is not defined by any module.\n",
+      "expectation": "Simulation",
+      "name": "class::void_casts_of_class_handles",
+      "phase": "execute",
+      "status": "runtime_error",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []

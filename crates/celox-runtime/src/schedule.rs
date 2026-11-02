@@ -124,12 +124,16 @@ pub(crate) struct SchedulerRefs {
     pub(crate) levels: SignalRef,
     pub(crate) unknown_levels: SignalRef,
     pub(crate) ready: SignalRef,
-    /// The wake and waiting slots of each kernel the scheduler runs that
-    /// only delays, by process index.
+    /// The wake and waiting slots of each kernel the scheduler runs, by
+    /// process index. A kernel waits for its wake time when its status is
+    /// a delay.
     pub(crate) wake: Vec<Option<(SignalRef, SignalRef)>>,
     /// The waiting and baseline slots of each kernel the scheduler runs that
-    /// waits for an edge, by process index.
-    pub(crate) waits: Vec<Option<(SignalRef, SignalRef)>>,
+    /// waits for edges, by process index, with the index of the edge of
+    /// each of its wait sites (`ProcessModel::wait_terms`).
+    pub(crate) waits: Vec<Option<(SignalRef, SignalRef, Vec<usize>)>>,
+    /// Raw-plane encoding for identical wide or OR event-expression lists.
+    pub(crate) raw_waits: Vec<Option<celox_design::schedule::CompiledWaitLayout>>,
     /// The number of such kernels.
     pub(crate) wait_kernels: usize,
     /// The bit of each kernel the scheduler runs in its ready mask: its
@@ -497,21 +501,50 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                     ready: resolve(&slots.ready),
                     wake: (0..scheduler.fallback.len())
                         .map(|index| {
-                            (scheduler.fallback[index].is_none()
-                                && model.processes[index].waits.is_empty())
-                            .then(|| (resolve(&slots.wake[index]), resolve(&slots.waiting[index])))
+                            scheduler.fallback[index].is_none().then(|| {
+                                (resolve(&slots.wake[index]), resolve(&slots.waiting[index]))
+                            })
                         })
                         .collect(),
                     waits: (0..scheduler.fallback.len())
                         .map(|index| {
-                            (scheduler.fallback[index].is_none()
-                                && !model.processes[index].waits.is_empty())
-                            .then(|| {
-                                (
-                                    resolve(&slots.waiting[index]),
-                                    resolve(&slots.baseline[index]),
-                                )
-                            })
+                            let process = &model.processes[index];
+                            if scheduler.fallback[index].is_some() || process.waits.is_empty() {
+                                return None;
+                            }
+                            let site_terms =
+                                process.wait_terms().map(|(_, sites)| sites).or_else(|| {
+                                    process
+                                        .common_wait_terms()
+                                        .map(|_| vec![0; process.waits.len()])
+                                })?;
+                            Some((
+                                resolve(&slots.waiting[index]),
+                                resolve(&slots.baseline[index]),
+                                site_terms,
+                            ))
+                        })
+                        .collect(),
+                    raw_waits: (0..scheduler.fallback.len())
+                        .map(|index| {
+                            if scheduler.fallback[index].is_some() {
+                                return None;
+                            }
+                            let process = &model.processes[index];
+                            let terms = process.common_wait_terms()?;
+                            let dimensions = terms
+                                .iter()
+                                .map(|term| {
+                                    let signal = resolve(&term.signal);
+                                    (
+                                        signal.width,
+                                        backend.layout().four_state && signal.is_4state,
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            let layout =
+                                celox_design::schedule::CompiledWaitLayout::new(&dimensions)?;
+                            (!layout.scalar_byte).then_some(layout)
                         })
                         .collect(),
                     ordinals: {

@@ -181,6 +181,24 @@ pub(in crate::ast) fn bind_inputs(
                         width,
                         signed,
                     }
+                } else if let Some(&value) = env.get(&name)
+                    && let Some(&width) = env.get(&dimensions::parameter_width_marker(&name))
+                    && let Ok(width) = u32::try_from(width)
+                    && (1..=64).contains(&width)
+                {
+                    // A constant whose type is known, such as an enumeration
+                    // constant (IEEE 1800-2023 6.19), is a literal of it.
+                    let signed = env
+                        .get(&dimensions::parameter_signed_marker(&name))
+                        .is_some_and(|signed| *signed != 0);
+                    Typed {
+                        kind: Kind::Leaf(ConstraintExpr::Literal(
+                            width,
+                            value as u64 & (u64::MAX >> (64 - width)),
+                        )),
+                        width,
+                        signed,
+                    }
                 } else if env.contains_key(&name) {
                     // Parameter type reconstruction belongs to the general expression binder.
                     // Do not guess its width/sign here.
@@ -346,19 +364,40 @@ impl Class {
     pub fn constraint_program(&self) -> Converted<Program> {
         let mut fields = Vec::new();
         for property in &self.properties {
-            if property.randc
-                || property.field.handle.is_some()
-                || property.field.width > 64
-                || property.r#type.is_enum
-            {
+            if property.field.handle.is_some() || property.field.width > 64 {
                 return Err(unsupported(
-                    "constraints currently require scalar non-enum properties without randc",
+                    "constraints currently require scalar integral properties",
                 ));
             }
+            // A randc property draws from the cycle of its whole domain
+            // (IEEE 1800-2023 18.4.2), kept for at most 256 values.
+            if property.randc && property.cyclic_domain_size().is_none() {
+                return Err(unsupported(
+                    "constraints on a randc property of more than 256 values",
+                ));
+            }
+            // A random enumeration takes only the values of its type (18.3).
+            let mask = u64::MAX >> (64 - property.field.width);
+            let domain = property
+                .r#type
+                .enum_domain
+                .as_ref()
+                // `randomize(e)` makes any property random; the solver
+                // applies the domain only while the property is.
+                .map(|domain| {
+                    domain
+                        .values()
+                        .into_iter()
+                        .map(|value| value as u64 & mask)
+                        .collect()
+                })
+                .unwrap_or_default();
             fields.push(Field {
                 offset: property.field.offset,
                 width: property.field.width,
-                random: property.rand,
+                random: property.rand || property.randc,
+                domain,
+                cyclic: property.randc,
             });
         }
         let mut constraints = Vec::new();

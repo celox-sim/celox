@@ -1967,6 +1967,42 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         (HashMap::default(), HashMap::default())
     };
 
+    // Size the declared private variables before building either metadata
+    // projection, so reflection and storage agree on the raw snapshot widths.
+    if let Some(scheduler) = &scheduler_slots {
+        let mut widths = vec![celox_design::SCHEDULER_FLAG_WIDTH; scheduler.baseline.len()];
+        for site in &timing.wait_sites {
+            let terms = site
+                .terms
+                .iter()
+                .map(|(signal, _)| {
+                    let metadata = &modules[&instance_modules[&signal.instance_id]].variables
+                        [&signal.var_id]
+                        .metadata;
+                    metadata
+                        .array_dims
+                        .is_empty()
+                        .then_some((metadata.width, four_state && metadata.is_4state))
+                })
+                .collect::<Option<Vec<_>>>();
+            if let Some(layout) = terms
+                .as_deref()
+                .and_then(celox_design::schedule::CompiledWaitLayout::new)
+            {
+                widths[site.process] = widths[site.process].max(layout.bits);
+            }
+        }
+        for (baseline, width) in scheduler.baseline.iter().zip(widths) {
+            modules
+                .get_mut(&root_id)
+                .unwrap()
+                .variables
+                .get_mut(baseline)
+                .expect("declared scheduler baseline")
+                .metadata
+                .width = width;
+        }
+    }
     let (mod_vars, mod_path_idx) = module_variables(&modules);
     // A variable bound to a package variable has no state object of its own:
     // its initial writes, such as a constant `initial` assignment, go to the
@@ -2307,6 +2343,12 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                     .into_iter()
                     .map(|derived| CombDerivedClock {
                         clock: project(derived.clock),
+                        inputs: derived.inputs.and_then(|inputs| {
+                            inputs
+                                .into_iter()
+                                .map(|address| source_to_state.get(&address).copied())
+                                .collect()
+                        }),
                         // A gate reading an address without a state object
                         // falls back to settling the design.
                         gate: derived.gate.and_then(|gate| {
@@ -2817,11 +2859,14 @@ fn declare_scheduler_slots(
         limit: declare("limit".into(), TIME),
         now: declare("now".into(), TIME),
         exit: declare("exit".into(), FLAG),
-        exit_arg: declare("exit_arg".into(), events),
+        exit_arg: declare("exit_arg".into(), events * 2),
         finish: declare("finish".into(), FLAG),
         cont: declare("cont".into(), FLAG),
         dirty: declare("dirty".into(), FLAG),
-        defer_limit_settle: declare("defer_limit_settle".into(), FLAG),
+        defer_limit_settle: declare(
+            "defer_limit_settle".into(),
+            celox_design::SCHEDULER_CONTROL_WIDTH,
+        ),
         count: declare("count".into(), TIME),
         budget: declare("budget".into(), TIME),
         events: declare("events".into(), TIME),
@@ -5841,6 +5886,7 @@ fn analyze_clock_dependencies(
     // from the event's signal, or from state the event's domain writes.
     let mut trigger_edges: BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>> = BTreeMap::new();
     let mut comb_derived_clocks: BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>> = BTreeMap::new();
+    let combinational_inputs = clock_cone_inputs(comb_blocks, arena, &unique_clocks);
     for target_clock in &unique_clocks {
         let mut sources = BTreeSet::new();
         let mut upstream = BTreeSet::new();
@@ -6148,6 +6194,7 @@ fn analyze_clock_dependencies(
                 .map(|clock| CombDerivedClock {
                     clock,
                     gate: gates.program(event, clock),
+                    inputs: combinational_inputs.get(&clock).cloned(),
                 })
                 .collect();
             (event, clocks)
@@ -6163,6 +6210,68 @@ fn analyze_clock_dependencies(
         combinationally_read,
         level_unread_by_domain,
     }
+}
+
+/// Complete read dependencies for proving a clock unaffected by an update.
+/// Activation dependencies omit reads of a process's own outputs; those reads
+/// still matter here. Include all procedural loads, previous values and local
+/// expressions. An external call makes its outputs opaque.
+fn clock_cone_inputs(
+    paths: &[LogicPath<AbsoluteAddr>],
+    arena: &SLTNodeArena<AbsoluteAddr>,
+    clocks: &BTreeSet<AbsoluteAddr>,
+) -> BTreeMap<AbsoluteAddr, Vec<AbsoluteAddr>> {
+    let mut dependencies: HashMap<AbsoluteAddr, HashSet<AbsoluteAddr>> = HashMap::default();
+    let mut opaque = HashSet::default();
+    for path in paths {
+        let Some(target) = path.target.var() else {
+            continue;
+        };
+        let mut inputs = path.sources.clone();
+        inputs.extend(path.previous_sources.iter().cloned());
+        inputs.extend(path.address_sources.iter().cloned());
+        flattening::collect_inputs(path.expr, arena, &mut inputs);
+        for expression in path
+            .local_inputs
+            .iter()
+            .map(|(_, node)| *node)
+            .chain(path.pre_lower_nodes.iter().copied())
+        {
+            flattening::collect_inputs(expression, arena, &mut inputs);
+        }
+        let reads = dependencies.entry(target.id).or_default();
+        reads.extend(inputs.into_iter().map(|input| input.id));
+        if let LogicPathTarget::Process { unit, .. } = &path.target {
+            for instruction in unit.blocks.values().flat_map(|block| &block.instructions) {
+                match instruction {
+                    SIRInstruction::Load(_, source, ..) | SIRInstruction::Commit(source, ..) => {
+                        reads.insert(*source);
+                    }
+                    SIRInstruction::ExternCall { .. } => {
+                        opaque.insert(target.id);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    clocks
+        .iter()
+        .filter_map(|&clock| {
+            let mut reached = BTreeSet::new();
+            let mut pending = vec![clock];
+            while let Some(address) = pending.pop() {
+                if !reached.insert(address) {
+                    continue;
+                }
+                if opaque.contains(&address) {
+                    return None;
+                }
+                pending.extend(dependencies.get(&address).into_iter().flatten().copied());
+            }
+            Some((clock, reached.into_iter().collect()))
+        })
+        .collect()
 }
 
 /// Builds [`GateOp`] programs: a derived clock's combinational cone with its
@@ -6362,6 +6471,88 @@ impl GateBuilder<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clock_cones_include_procedural_reads_and_reject_opaque_dependencies() {
+        let mut arena = SLTNodeArena::new();
+        let zero = arena
+            .alloc(celox_slt::SLTNode::Constant(
+                0u8.into(),
+                0u8.into(),
+                1,
+                false,
+            ))
+            .unwrap();
+        let input = arena
+            .alloc(celox_slt::SLTNode::Input {
+                variable: addr(2),
+                signed: false,
+                index: Vec::new(),
+                access: BitAccess::new(0, 0),
+            })
+            .unwrap();
+        let mut builder = celox_sir::SIRBuilder::new();
+        let auxiliary = arena
+            .alloc(celox_slt::SLTNode::Input {
+                variable: addr(4),
+                signed: false,
+                index: Vec::new(),
+                access: BitAccess::new(0, 0),
+            })
+            .unwrap();
+        let value = builder.alloc_bit(1, false);
+        builder.emit(SIRInstruction::Load(
+            value,
+            addr(1),
+            SIROffset::Static(0),
+            1,
+        ));
+        let unit = builder.flush_eu().unwrap();
+        let mut path = LogicPath {
+            target: LogicPathTarget::Process {
+                process: addr(0),
+                after_initials: false,
+                sensitivity_counters: Vec::new(),
+                startup: None,
+                target: VarAtomBase::new(addr(0), 0, 0),
+                unit: Box::new(unit),
+            },
+            transparent_copy: false,
+            sources: HashSet::default(),
+            previous_sources: [VarAtomBase::new(addr(3), 0, 0)].into_iter().collect(),
+            address_sources: HashSet::default(),
+            local_inputs: Vec::new(),
+            order_before: HashSet::default(),
+            comb_capture_enable_sites: Vec::new(),
+            comb_capture_enable_always: false,
+            pre_lower_nodes: vec![auxiliary],
+            expr: zero,
+        };
+        let mut upstream = path.clone();
+        upstream.target = LogicPathTarget::Var(VarAtomBase::new(addr(1), 0, 0));
+        upstream.expr = input;
+        upstream.previous_sources.clear();
+        upstream.pre_lower_nodes.clear();
+        let clocks = [addr(0)].into_iter().collect();
+        assert_eq!(
+            clock_cone_inputs(&[path.clone(), upstream.clone()], &arena, &clocks)[&addr(0)],
+            vec![addr(0), addr(1), addr(2), addr(3), addr(4)]
+        );
+        let LogicPathTarget::Process { unit, .. } = &mut path.target else {
+            unreachable!()
+        };
+        unit.blocks
+            .values_mut()
+            .next()
+            .unwrap()
+            .instructions
+            .push(SIRInstruction::ExternCall {
+                dst: None,
+                func: 0,
+                args: Vec::new(),
+            });
+        assert!(clock_cone_inputs(&[path, upstream], &arena, &clocks).is_empty());
+    }
 
     fn addr(var: u32) -> AbsoluteAddr {
         AbsoluteAddr {

@@ -25,6 +25,7 @@ export default defineConfig({
             items: [
               { text: "アーキテクチャ", link: "/internals/architecture" },
               { text: "ベンチマーク", link: "/ja/benchmarks/" },
+              { text: "検証結果", link: "/ja/verification/" },
             ],
           },
           {
@@ -150,6 +151,7 @@ export default defineConfig({
         items: [
           { text: "Architecture", link: "/internals/architecture" },
           { text: "Benchmarks", link: "/benchmarks/" },
+          { text: "Verification", link: "/verification/" },
         ],
       },
       {

@@ -2092,6 +2092,7 @@ mod host {
         injected_components: crate::InjectedComponents,
         frontend_artifact: Option<celox_frontend_sdk::FrontendArtifact>,
         file_dependencies: celox_frontend_veryl::FileDependencyCollector,
+        native_file_calls: bool,
         _marker: std::marker::PhantomData<Target>,
     }
 
@@ -2755,6 +2756,7 @@ mod host {
                 injected_components: Default::default(),
                 frontend_artifact: None,
                 file_dependencies: Default::default(),
+                native_file_calls: false,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2777,6 +2779,7 @@ mod host {
                 injected_components: Default::default(),
                 frontend_artifact: None,
                 file_dependencies: Default::default(),
+                native_file_calls: false,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2800,6 +2803,7 @@ mod host {
                 injected_components: Default::default(),
                 frontend_artifact: None,
                 file_dependencies: Default::default(),
+                native_file_calls: false,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2828,6 +2832,7 @@ mod host {
                 injected_components: Default::default(),
                 frontend_artifact: None,
                 file_dependencies: Default::default(),
+                native_file_calls: false,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2855,6 +2860,7 @@ mod host {
                 injected_components: Default::default(),
                 frontend_artifact: Some(artifact),
                 file_dependencies: Default::default(),
+                native_file_calls: false,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2883,6 +2889,7 @@ mod host {
                 injected_components: Default::default(),
                 frontend_artifact: Some(artifact),
                 file_dependencies: Default::default(),
+                native_file_calls: false,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -3065,6 +3072,9 @@ mod host {
             if (self.options.emit_triggers || laid_out.runtime.testbench.is_some())
                 && self.options.scheduler != crate::SchedulerMode::Reference
             {
+                if self.native_file_calls {
+                    crate::scheduler::enable_native_services(&mut laid_out);
+                }
                 crate::scheduler::attach(
                     &mut laid_out,
                     !self.options.native_force_support
@@ -3860,6 +3870,7 @@ mod host {
                 injected_components: Default::default(),
                 frontend_artifact: None,
                 file_dependencies: Default::default(),
+                native_file_calls: false,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -3882,6 +3893,7 @@ mod host {
                 injected_components: Default::default(),
                 frontend_artifact: None,
                 file_dependencies: Default::default(),
+                native_file_calls: false,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -3906,6 +3918,7 @@ mod host {
                 injected_components: Default::default(),
                 frontend_artifact: Some(artifact),
                 file_dependencies: Default::default(),
+                native_file_calls: false,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -3955,9 +3968,10 @@ mod host {
             all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
         ))]
         pub fn build_native(
-            self,
+            mut self,
         ) -> Result<crate::Simulation<crate::backend::native::NativeBackend>, SimulatorError>
         {
+            self.native_file_calls = true;
             self.build_with_backend(
                 crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
                 true,
@@ -3977,6 +3991,7 @@ mod host {
         pub fn compile_native(
             mut self,
         ) -> Result<NativeCompilation<crate::Simulation>, SimulatorError> {
+            self.native_file_calls = true;
             self.options.emit_triggers = true;
             let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(
@@ -4055,9 +4070,10 @@ mod host {
         /// Builds a timed simulation that starts interpreted and adopts compiled
         /// code at a scheduler safe point once background compilation completes.
         pub fn build_tiered(
-            self,
+            mut self,
         ) -> Result<crate::Simulation<crate::backend::TieredBackend>, SimulatorError> {
             let layout = crate::backend::tiered::tiered_layout_mode(self.vcd_path.is_some());
+            self.native_file_calls = true;
             self.build_with_backend(layout, false, |program, options| {
                 Ok(crate::backend::TieredBackend::new(program, options))
             })
@@ -4888,6 +4904,955 @@ endmodule"#;
         assert!(!by_loads, "the fixture must load stale bits it discards");
     }
 
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn blocking_latch_input_settles_before_nba_closes_the_latch() {
+        let source = r#"`timescale 1ns/1ns
+module Top;
+    bit clk = 0, d = 0, en = 0, q = 0;
+    always #1 clk = !clk;
+    always_latch if (!en) q = d;
+    always @(posedge clk) begin d = 1; en <= 1; end
+    initial begin #2; if (d != 1 || q != 1) $fatal(1, "latch missed Active update"); $finish; end
+endmodule"#;
+        for (fused, statefulness_known) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            for level in [crate::OptLevel::O0, crate::OptLevel::O2] {
+                for four_state in [false, true] {
+                    let mut simulation = crate::Simulation::from_sv_sources(
+                        vec![(source, std::path::Path::new("active-latch.sv"))],
+                        "Top",
+                    )
+                    .four_state(four_state)
+                    .opt_level(level)
+                    .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+                    .build_with_backend(
+                        crate::MemoryLayoutMode::ElementStrided,
+                        true,
+                        |program, options| {
+                            // Existing SV probes otherwise mask the missing stateful
+                            // consumer dependency in the scheduler's classification.
+                            let program = crate::scheduler::without_probe_hints_for_test(
+                                program.clone(),
+                                statefulness_known,
+                            );
+                            if fused {
+                                crate::NativeBackend::new(&program, options)
+                            } else {
+                                let first_tier =
+                                    crate::scheduler::without_fused_domains(program.clone(), true);
+                                crate::NativeBackend::new(&first_tier, options)
+                            }
+                        },
+                    )
+                    .unwrap();
+                    simulation.run_until(3).unwrap_or_else(|error| {
+                        panic!("four_state={four_state}, level={level:?}, fused={fused}: {error}")
+                    });
+                    assert!(simulation.is_finished());
+                    let q = simulation.signal("q");
+                    assert_eq!(simulation.get(q), num_bigint::BigUint::from(1u8));
+                    let stats = simulation.scheduler_stats();
+                    assert!(stats.compiled_slots > 0, "{stats:?}");
+                    assert!(stats.checked_steps > 0, "{stats:?}");
+                }
+            }
+        }
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn unrelated_active_updates_allow_a_procedural_clock_cone() {
+        let source = r#"`timescale 1ns/1ns
+module Top;
+    bit clk = 0, d = 0, en = 0, q = 0;
+    bit [1:0] select_clock = 0;
+    bit gated;
+    int count = 0;
+    always #1 clk = !clk;
+    always @* case (select_clock)
+        0: gated = clk;
+        1: gated = !clk;
+        default: gated = 0;
+    endcase
+    always_latch if (!en) q = d;
+    always @(posedge clk) begin d = 1; en <= 1; end
+    always @(posedge gated) count <= count + 1;
+    initial begin
+        #6;
+        if (q != 1 || count != 3) $fatal(1, "procedural clock or latch lost an update");
+        $finish;
+    end
+endmodule"#;
+        for level in [crate::OptLevel::O0, crate::OptLevel::O2] {
+            for four_state in [false, true] {
+                let mut simulation = crate::Simulation::from_sv_sources(
+                    vec![(source, std::path::Path::new("procedural-clock.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .opt_level(level)
+                .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+                .build_with_backend(
+                    crate::MemoryLayoutMode::ElementStrided,
+                    true,
+                    |program, options| {
+                        assert!(
+                            program
+                                .design
+                                .events
+                                .combinational_derived
+                                .values()
+                                .flatten()
+                                .any(|clock| clock.gate.is_none() && clock.inputs.is_some()),
+                            "the fixture must need the full dependency cone"
+                        );
+                        crate::NativeBackend::new(program, options)
+                    },
+                )
+                .unwrap();
+                simulation.run_until(7).unwrap();
+                assert!(simulation.is_finished());
+                let stats = simulation.scheduler_stats();
+                assert!(stats.compiled_slots > 0, "{stats:?}");
+                assert!(stats.checked_steps > 0, "{stats:?}");
+            }
+        }
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn derived_clock_domains_stop_at_the_same_state_as_the_reference() {
+        for active in [false, true] {
+            for derived in [false, true] {
+                for fatal in [false, true] {
+                    let counter = if derived { "secondary" } else { "primary" };
+                    let stop = if fatal {
+                        "$fatal(1, \"domain stopped\");"
+                    } else {
+                        "$finish;"
+                    };
+                    let condition = format!("if ({counter} == 2) {stop}");
+                    let source = format!(
+                        r#"`timescale 1ns/1ns
+module Top;
+    bit clk = 0, d = 0, en = 0, q = 0;
+    wire derived = ~clk;
+    int primary = 0, secondary = 0;
+    always #1 clk = !clk;
+    always_latch if (!en) q = d;
+    always @(posedge clk) begin
+        primary <= primary + 1;
+        {blocking}
+        {primary_stop}
+    end
+    always @(posedge derived) begin
+        secondary <= secondary + 1;
+        {derived_stop}
+    end
+    initial #100 $fatal(1, "deadline");
+endmodule"#,
+                        blocking = if active { "d = 1; en <= 1;" } else { "" },
+                        primary_stop = if derived { "" } else { &condition },
+                        derived_stop = if derived { &condition } else { "" },
+                    );
+                    for level in [crate::OptLevel::O0, crate::OptLevel::O2] {
+                        for four_state in [false, true] {
+                            let build = |mode| {
+                                crate::Simulation::from_sv_sources(
+                                    vec![(source.as_str(), std::path::Path::new("domain-stop.sv"))],
+                                    "Top",
+                                )
+                                .four_state(four_state)
+                                .opt_level(level)
+                                .scheduler_mode(mode)
+                                .live_signal(Vec::new(), vec!["primary".into()])
+                                .live_signal(Vec::new(), vec!["secondary".into()])
+                                .live_signal(Vec::new(), vec!["clk".into()])
+                                .live_signal(Vec::new(), vec!["derived".into()])
+                                .live_signal(Vec::new(), vec!["d".into()])
+                                .live_signal(Vec::new(), vec!["en".into()])
+                                .live_signal(Vec::new(), vec!["q".into()])
+                                .build_native()
+                                .unwrap()
+                            };
+                            let mut reference = build(crate::SchedulerMode::Reference);
+                            let mut compiled = build(crate::SchedulerMode::DifferentialRuns);
+                            let expected = reference.run_until(100);
+                            let actual = compiled.run_until(100);
+                            assert_eq!(
+                                format!("{actual:?}"),
+                                format!("{expected:?}"),
+                                "active={active}, derived={derived}, fatal={fatal}, level={level:?}, four_state={four_state}"
+                            );
+                            assert_eq!(expected.is_err(), fatal);
+                            assert_eq!(compiled.time(), reference.time());
+                            for name in ["primary", "secondary", "clk", "derived", "d", "en", "q"] {
+                                let expected = reference.signal(name);
+                                let actual = compiled.signal(name);
+                                assert_eq!(compiled.get(actual), reference.get(expected), "{name}");
+                            }
+                            let stats = compiled.scheduler_stats();
+                            assert!(stats.compiled_slots > 0, "{stats:?}");
+                            assert!(stats.checked_steps > 0, "{stats:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn raw_wait_multiple_terms_can_wake_one_kernel_twice_in_a_slot() {
+        for level in [crate::OptLevel::O0, crate::OptLevel::O2] {
+            let source = r#"`timescale 1ns/1ns
+module Top;
+    bit [69:0] a = 0;
+    bit [3:0] b = 0;
+    bit [7:0] count = 0;
+    always #1 a = a + 70'h200000000000000000;
+    initial forever begin @(a or b); count = count + 1; end
+    initial forever begin #2; b = b + 1; end
+    initial begin #11; if (count != 16) $fatal(1, "lost wakeup"); $finish; end
+endmodule"#;
+            for four_state in [false, true] {
+                let mut simulation = crate::Simulation::from_sv_sources(
+                    vec![(source, std::path::Path::new("multiple-wait.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .opt_level(level)
+                .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+                .build_native()
+                .unwrap();
+                let result = simulation.run_until(11);
+                let observed = simulation.signal("count");
+                assert!(
+                    result.is_ok(),
+                    "{result:?}; count={}; stats={:?}",
+                    simulation.get(observed),
+                    simulation.scheduler_stats()
+                );
+                assert!(simulation.is_finished());
+                let count = simulation.signal("count");
+                assert_eq!(simulation.get(count), num_bigint::BigUint::from(16u8));
+                let stats = simulation.scheduler_stats();
+                assert!(stats.compiled_slots > 0, "{stats:?}");
+                assert!(stats.checked_steps > 0, "{stats:?}");
+            }
+        }
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn raw_wait_snapshots_distinguish_x_from_z() {
+        for level in [crate::OptLevel::O0, crate::OptLevel::O2] {
+            for four_state in [false, true] {
+                let expected = if four_state { 3 } else { 1 };
+                let source = format!(
+                    r#"`timescale 1ns/1ns
+module Top;
+    bit [1:0] phase = 0;
+    logic [69:0] data = 0;
+    bit [7:0] count = 0;
+    always #1 begin
+        phase = phase + 1;
+        data = phase == 1 ? 'x : (phase == 2 ? 'z : 70'd7);
+    end
+    initial forever begin @(data); count = count + 1; end
+    initial begin #4; if (count != {expected}) $fatal(1, "bad raw planes"); $finish; end
+endmodule"#
+                );
+                let mut simulation = crate::Simulation::from_sv_sources(
+                    vec![(source.as_str(), std::path::Path::new("wide-wait.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .opt_level(level)
+                .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+                .build_native()
+                .unwrap();
+                simulation.run_until(4).unwrap();
+                assert!(simulation.is_finished());
+                let count = simulation.signal("count");
+                assert_eq!(
+                    simulation.get(count),
+                    num_bigint::BigUint::from(expected as u8)
+                );
+                let stats = simulation.scheduler_stats();
+                assert!(stats.compiled_slots > 0, "{stats:?}");
+                assert!(stats.checked_steps > 0, "{stats:?}");
+            }
+        }
+    }
+    #[cfg(all(
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn raw_wait_rearms_at_distinct_sites_and_across_run_boundaries() {
+        let source = r#"`timescale 1ns/1ns
+module Top;
+    bit [69:0] a = 0;
+    bit [3:0] b = 0;
+    int count = 0;
+    always #1 a = a + 70'h200000000000000000;
+    initial forever begin
+        @(a or b); count = count + 1;
+        #1;
+        @(a or b); count = count + 1;
+    end
+    initial forever begin #2; b = b + 1; end
+    initial #12 $finish;
+endmodule"#;
+        for level in [crate::OptLevel::O0, crate::OptLevel::O2] {
+            for four_state in [false, true] {
+                let build = |mode| {
+                    crate::Simulation::from_sv_sources(
+                        vec![(source, std::path::Path::new("rearm-raw-wait.sv"))],
+                        "Top",
+                    )
+                    .opt_level(level)
+                    .four_state(four_state)
+                    .scheduler_mode(mode)
+                    .live_signal(Vec::new(), vec!["count".into()])
+                    .build_native()
+                    .unwrap()
+                };
+                let mut reference = build(crate::SchedulerMode::Reference);
+                let mut compiled = build(crate::SchedulerMode::DifferentialRuns);
+                for end in [2, 3, 4, 5, 11, 12] {
+                    reference.run_until(end).unwrap();
+                    compiled.run_until(end).unwrap();
+                    assert_eq!(compiled.time(), reference.time());
+                    let expected = reference.signal("count");
+                    let actual = compiled.signal("count");
+                    assert_eq!(compiled.get(actual), reference.get(expected));
+                }
+                assert!(compiled.is_finished());
+                let stats = compiled.scheduler_stats();
+                assert!(stats.compiled_slots > 0, "{stats:?}");
+                assert!(stats.checked_steps > 0, "{stats:?}");
+            }
+        }
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn reactive_waits_run_after_nbas_without_repeating_domains() {
+        for derived in [false, true] {
+            let clock = if derived { "divided" } else { "clk" };
+            let source = format!(
+                r#"`timescale 1ns/1ns
+module Top;
+    bit clk = 0;
+    bit divided = 0;
+    bit [69:0] data = 0;
+    wire [69:0] expression = data + data;
+    bit [69:0] middle = 0;
+    bit [69:0] seen = 0;
+    int count = 0;
+    int sampled = 0;
+    always #1 clk = ~clk;
+    always @(posedge clk) divided <= ~divided;
+    always @(posedge {clock}) begin data <= data + 1; sampled <= count; end
+    initial forever begin @(expression); middle = expression; end
+    initial forever begin @(middle); seen = middle; count = count + 1; end
+    initial #13 $finish;
+endmodule"#
+            );
+            for level in [crate::OptLevel::O0, crate::OptLevel::O2] {
+                for four_state in [false, true] {
+                    let build = |mode| {
+                        crate::Simulation::from_sv_sources(
+                            vec![(source.as_str(), std::path::Path::new("reactive-waits.sv"))],
+                            "Top",
+                        )
+                        .opt_level(level)
+                        .four_state(four_state)
+                        .scheduler_mode(mode)
+                        .build_native()
+                        .unwrap()
+                    };
+                    let mut reference = build(crate::SchedulerMode::Reference);
+                    let mut compiled = build(crate::SchedulerMode::DifferentialRuns);
+                    for end in [2, 3, 4, 7, 12] {
+                        reference.run_until(end).unwrap();
+                        compiled.run_until(end).unwrap();
+                        assert_eq!(compiled.time(), reference.time());
+                        for name in ["data", "middle", "seen", "count", "sampled"] {
+                            let expected = reference.signal(name);
+                            let actual = compiled.signal(name);
+                            assert_eq!(compiled.get(actual), reference.get(expected), "{name}");
+                        }
+                    }
+                    let count = compiled.signal("count");
+                    let sampled = compiled.signal("sampled");
+                    let expected = if derived { 3u8 } else { 6u8 };
+                    assert_eq!(compiled.get(count), num_bigint::BigUint::from(expected));
+                    assert_eq!(
+                        compiled.get(sampled),
+                        num_bigint::BigUint::from(expected - 1)
+                    );
+                    let stats = compiled.scheduler_stats();
+                    assert!(
+                        stats.compiled_slots > 0 && stats.checked_steps > 0,
+                        "{stats:?}"
+                    );
+                    assert!(
+                        stats
+                            .kernels
+                            .iter()
+                            .all(|kernel| matches!(kernel, crate::KernelSchedule::Compiled)),
+                        "{stats:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn reactive_wait_cycles_use_a_bounded_native_work_list() {
+        let source = r#"module Top;
+            bit a = 0;
+            bit b = 0;
+            initial forever begin @(a); b = ~b; end
+            initial forever begin @(b); a = ~a; end
+        endmodule"#;
+        for four_state in [false, true] {
+            let simulation = crate::Simulation::from_sv_sources(
+                vec![(source, std::path::Path::new("wait-cycle.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+            .build_native()
+            .unwrap();
+            let stats = simulation.scheduler_stats();
+            assert_eq!(stats.kernels.len(), 2, "{stats:?}");
+            assert!(
+                stats
+                    .kernels
+                    .iter()
+                    .all(|kernel| matches!(kernel, crate::KernelSchedule::Compiled)),
+                "{stats:?}"
+            );
+        }
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn reactive_waits_on_active_results_run_before_native_nba_publication() {
+        let source = r#"`timescale 1ns/1ns
+        module Top;
+            bit clk = 0;
+            bit [69:0] data = 0;
+            wire [69:0] expression = data + data;
+            bit nba_value = 0;
+            bit seen = 0;
+            always #1 clk = ~clk;
+            always @(posedge clk) begin data = data + 1; nba_value <= 1; end
+            initial forever begin @(expression); seen = nba_value; end
+        endmodule"#;
+        for level in [crate::OptLevel::O0, crate::OptLevel::O2] {
+            for four_state in [false, true] {
+                let mut simulation = crate::Simulation::from_sv_sources(
+                    vec![(source, std::path::Path::new("active-wait.sv"))],
+                    "Top",
+                )
+                .opt_level(level)
+                .four_state(four_state)
+                .build_native()
+                .unwrap();
+                simulation.run_until(2).unwrap();
+                let seen = simulation.signal("seen");
+                assert_eq!(simulation.get(seen), num_bigint::BigUint::from(0u8));
+                let stats = simulation.scheduler_stats();
+                assert!(
+                    stats
+                        .kernels
+                        .iter()
+                        .all(|kernel| matches!(kernel, crate::KernelSchedule::Compiled))
+                        && stats.compiled_slots > 0,
+                    "{stats:?}"
+                );
+            }
+        }
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn reactive_wait_can_finish_after_a_host_clock_nba() {
+        let source = r#"`timescale 1ns/1ns
+        module Top(input bit clk);
+            bit [69:0] data = 0;
+            always @(posedge clk) data <= data + 1;
+            initial forever begin @(data); if (data == 3) $finish; end
+        endmodule"#;
+        for level in [crate::OptLevel::O0, crate::OptLevel::O2] {
+            for four_state in [false, true] {
+                let mut simulation = crate::Simulation::from_sv_sources(
+                    vec![(source, std::path::Path::new("finish-after-nba.sv"))],
+                    "Top",
+                )
+                .opt_level(level)
+                .four_state(four_state)
+                .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+                .build_native()
+                .unwrap();
+                simulation.add_clock("clk", 2, 1);
+                simulation.run_until(12).unwrap();
+                assert!(simulation.is_finished());
+                assert_eq!(simulation.time(), 5);
+                assert_eq!(
+                    simulation.get(simulation.signal("data")),
+                    num_bigint::BigUint::from(3u8)
+                );
+                let stats = simulation.scheduler_stats();
+                assert!(
+                    stats.compiled_slots > 0 && stats.checked_steps > 0,
+                    "{stats:?}"
+                );
+                assert!(
+                    stats
+                        .kernels
+                        .iter()
+                        .all(|kernel| matches!(kernel, crate::KernelSchedule::Compiled)),
+                    "{stats:?}"
+                );
+            }
+        }
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn reactive_wait_remembers_an_intermediate_domain_wave() {
+        let source = r#"`timescale 1ns/1ns
+        module Top;
+            bit clk = 0;
+            bit divided = 0;
+            bit first = 0, second = 0;
+            wire changed = first ^ second;
+            int count = 0;
+            always #1 clk = ~clk;
+            always @(posedge clk) begin divided <= ~divided; first <= ~first; end
+            always @(posedge divided) second <= ~second;
+            initial forever begin @(changed); count = count + 1; end
+            initial #13 $finish;
+        endmodule"#;
+        for level in [crate::OptLevel::O0, crate::OptLevel::O2] {
+            for four_state in [false, true] {
+                let mut simulation = crate::Simulation::from_sv_sources(
+                    vec![(source, std::path::Path::new("intermediate-wave.sv"))],
+                    "Top",
+                )
+                .opt_level(level)
+                .four_state(four_state)
+                .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+                .build_native()
+                .unwrap();
+                simulation.run_until(0).unwrap();
+                let initial_count = simulation.get(simulation.signal("count"));
+                simulation.run_until(12).unwrap();
+                assert_eq!(
+                    simulation.get(simulation.signal("count")),
+                    initial_count + num_bigint::BigUint::from(6u8),
+                    "level={level:?}, four_state={four_state}"
+                );
+                let stats = simulation.scheduler_stats();
+                assert!(
+                    stats.compiled_slots > 0 && stats.checked_steps > 0,
+                    "{stats:?}"
+                );
+                assert!(
+                    stats
+                        .kernels
+                        .iter()
+                        .all(|kernel| matches!(kernel, crate::KernelSchedule::Compiled)),
+                    "{stats:?}"
+                );
+            }
+        }
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn reactive_wait_direct_self_write_is_captured_before_registration() {
+        let source = r#"`timescale 1ns/1ns
+        module Top;
+            bit trigger = 0, own = 0;
+            int count = 0;
+            always #1 trigger = ~trigger;
+            initial forever begin @(trigger or own); own = ~own; count = count + 1; end
+            initial #13 $finish;
+        endmodule"#;
+        for level in [crate::OptLevel::O0, crate::OptLevel::O2] {
+            for four_state in [false, true] {
+                let mut simulation = crate::Simulation::from_sv_sources(
+                    vec![(source, std::path::Path::new("direct-self-write.sv"))],
+                    "Top",
+                )
+                .opt_level(level)
+                .four_state(four_state)
+                .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+                .build_native()
+                .unwrap();
+                for end in [2, 3, 7, 12] {
+                    simulation.run_until(end).unwrap();
+                }
+                assert_eq!(
+                    simulation.get(simulation.signal("count")),
+                    num_bigint::BigUint::from(12u8)
+                );
+                let stats = simulation.scheduler_stats();
+                assert!(
+                    stats.compiled_slots > 0 && stats.checked_steps > 0,
+                    "{stats:?}"
+                );
+                assert!(
+                    stats
+                        .kernels
+                        .iter()
+                        .all(|kernel| matches!(kernel, crate::KernelSchedule::Compiled)),
+                    "{stats:?}"
+                );
+            }
+        }
+        let feedback = r#"module Top;
+            bit own = 0;
+            wire expression = ~own;
+            initial forever begin @(expression); own = ~own; end
+        endmodule"#;
+        let simulation = crate::Simulation::from_sv_sources(
+            vec![(feedback, std::path::Path::new("computed-self-write.sv"))],
+            "Top",
+        )
+        .build_native()
+        .unwrap();
+        assert!(
+            simulation
+                .scheduler_stats()
+                .kernels
+                .iter()
+                .all(|kernel| matches!(kernel, crate::KernelSchedule::Compiled)),
+            "{:?}",
+            simulation.scheduler_stats()
+        );
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn native_file_calls_keep_the_host_return_bound() {
+        let source = r#"`timescale 1ns/1ns
+        module Top;
+            bit clk = 0;
+            int count = 0;
+            always #1 clk = ~clk;
+            always @(posedge clk) count <= count + 1;
+            always @(posedge clk) for (int i = 0; i < 8; i++) $fwrite(1, "bounded");
+        endmodule"#;
+        let shared = source.replace(
+            r#"always @(posedge clk) for (int i = 0; i < 8; i++) $fwrite(1, "bounded");"#,
+            concat!(
+                "always @(posedge clk) repeat (3) $fwrite(1, \"first\"); ",
+                "always @(posedge clk) repeat (3) $fwrite(1, \"second\");",
+            ),
+        );
+        for source in [source, shared.as_str()] {
+            for four_state in [false, true] {
+                let mut results = Vec::new();
+                for mode in [
+                    crate::SchedulerMode::Reference,
+                    crate::SchedulerMode::Compiled,
+                ] {
+                    let mut simulation = crate::Simulation::from_sv_sources(
+                        vec![(source, std::path::Path::new("host-return-bound.sv"))],
+                        "Top",
+                    )
+                    .four_state(four_state)
+                    .scheduler_mode(mode)
+                    .build_native()
+                    .unwrap();
+                    simulation.state.set_slot_budgets(32, 4);
+                    let error = simulation.run_until(2).unwrap_err();
+                    assert!(error.to_string().contains("does not suspend"), "{error}");
+                    results.push((
+                        simulation.time(),
+                        simulation.get(simulation.signal("count")),
+                        simulation.drain_runtime_events(),
+                    ));
+                    if mode == crate::SchedulerMode::Compiled {
+                        assert!(
+                            simulation.scheduler_stats().compiled_slots > 0,
+                            "{:?}",
+                            simulation.scheduler_stats()
+                        );
+                    }
+                }
+                assert_eq!(results[0], results[1]);
+                assert_eq!(results[1].2.len(), 5);
+            }
+        }
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn native_file_calls_survive_tiered_adoption() {
+        let source = r#"`timescale 1ns/1ns
+        module Top;
+            bit clk = 0;
+            int count = 0;
+            always #1 clk = ~clk;
+            always @(posedge clk) count <= count + 1;
+            always @(posedge clk) $fdisplay(1, "count:%0d", count);
+        endmodule"#;
+        for four_state in [false, true] {
+            let build = || {
+                crate::Simulation::from_sv_sources(
+                    vec![(source, std::path::Path::new("tiered-file-call.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+            };
+            let mut reference = build()
+                .scheduler_mode(crate::SchedulerMode::Reference)
+                .build_native()
+                .unwrap();
+            let mut tiered = build()
+                .tier_promotion(crate::TierPromotion::AfterSteps(1))
+                .build_tiered()
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            let mut end = 2;
+            loop {
+                reference.run_until(end).unwrap();
+                tiered.run_until(end).unwrap();
+                assert_eq!(
+                    tiered.drain_runtime_events(),
+                    reference.drain_runtime_events()
+                );
+                assert_eq!(
+                    tiered.get(tiered.signal("count")),
+                    reference.get(reference.signal("count"))
+                );
+                if tiered.simulator.is_compiled() && tiered.scheduler_stats().compiled_slots > 0 {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "{:?}",
+                    tiered.simulator.backend.promotion_error()
+                );
+                end += 2;
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            assert!(
+                tiered
+                    .scheduler_stats()
+                    .kernels
+                    .iter()
+                    .all(|kernel| matches!(kernel, crate::KernelSchedule::Compiled)),
+                "{:?}",
+                tiered.scheduler_stats()
+            );
+        }
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn native_file_calls_reset_the_bound_after_a_wait() {
+        let source = r#"`timescale 1ns/1ns
+        module Top;
+            bit clk = 0;
+            bit [69:0] data = 0;
+            always #1 clk = ~clk;
+            always @(posedge clk) data <= data + 1;
+            initial forever begin @(clk or data); repeat (4) $fwrite(1, "bounded"); end
+        endmodule"#;
+        for four_state in [false, true] {
+            let mut results = Vec::new();
+            for mode in [
+                crate::SchedulerMode::Reference,
+                crate::SchedulerMode::Compiled,
+            ] {
+                let mut simulation = crate::Simulation::from_sv_sources(
+                    vec![(source, std::path::Path::new("host-return-rearm.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .scheduler_mode(mode)
+                .build_native()
+                .unwrap();
+                simulation.state.set_slot_budgets(32, 4);
+                simulation.run_until(2).unwrap();
+                results.push((simulation.time(), simulation.drain_runtime_events()));
+                if mode == crate::SchedulerMode::Compiled {
+                    assert!(
+                        simulation.scheduler_stats().compiled_slots > 0,
+                        "{:?}",
+                        simulation.scheduler_stats()
+                    );
+                }
+            }
+            assert_eq!(results[0], results[1]);
+            assert_eq!(results[1].1.len(), 12);
+        }
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn native_loop_checkpoints_continue_without_reference_slots() {
+        let source = r#"`timescale 1ns/1ns
+        module Top;
+            bit clk = 0;
+            int count = 0;
+            always #1 clk = ~clk;
+            initial forever begin @(posedge clk); repeat (65537) count = count + 1; end
+        endmodule"#;
+        for level in [crate::OptLevel::O0, crate::OptLevel::O2] {
+            for four_state in [false, true] {
+                let mut simulation = crate::Simulation::from_sv_sources(
+                    vec![(source, std::path::Path::new("loop-checkpoint.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .opt_level(level)
+                .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+                .build_native()
+                .unwrap();
+                simulation.run_until(6).unwrap();
+                assert_eq!(
+                    simulation.get(simulation.signal("count")),
+                    num_bigint::BigUint::from(196611u32)
+                );
+                let stats = simulation.scheduler_stats();
+                assert!(
+                    stats.compiled_slots > 0 && stats.checked_steps > 0,
+                    "{stats:?}"
+                );
+                assert!(
+                    stats
+                        .kernels
+                        .iter()
+                        .all(|kernel| matches!(kernel, crate::KernelSchedule::Compiled)),
+                    "{stats:?}"
+                );
+                let mut bounded = crate::Simulation::from_sv_sources(
+                    vec![(source, std::path::Path::new("bounded-loop-checkpoint.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .opt_level(level)
+                .build_native()
+                .unwrap();
+                bounded.state.set_slot_budgets(32, 0);
+                let error = bounded.run_until(2).unwrap_err();
+                assert!(error.to_string().contains("does not suspend"), "{error}");
+                assert!(
+                    bounded.scheduler_stats().compiled_slots > 0,
+                    "{:?}",
+                    bounded.scheduler_stats()
+                );
+            }
+        }
+    }
+
     /// A first tier settles before a domain instead of compiling a fused
     /// copy of the settle into the scheduler for it.
     #[test]
@@ -5015,6 +5980,210 @@ endmodule"#;
         );
         (backend.get_as::<u64>(count), fused)
     }
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[test]
+    fn partitioned_host_clock_glue_invalidates_its_comb_readers() {
+        let source = r#"module Top(clk: input clock, d: input bit<8>, low: output bit<8>, probe: output bit<8>, side: output bit<8>, q: output bit<8>) {
+            assign low = (clk as u8) + d;
+            assign probe = low + 1;
+            assign side = d ^ 3;
+            always_ff { q = probe; }
+        }"#;
+        for four_state in [false, true] {
+            let mut sim = crate::Simulation::builder(source, "Top")
+                .four_state(four_state)
+                .settle_partition(crate::SettlePartition::Always)
+                .settle_check(true)
+                .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+                .build_native()
+                .unwrap();
+            assert!(
+                sim.simulator
+                    .program
+                    .runtime_schema
+                    .settle_partitions
+                    .is_some()
+            );
+            let d = sim.signal("d");
+            sim.modify(|io| io.set(d, 7u8)).unwrap();
+            sim.add_clock("clk", 2, 1);
+            sim.run_until(8).unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 9u8.into());
+            assert_eq!(sim.get(sim.signal("probe")), 8u8.into());
+            let stats = sim.scheduler_stats();
+            assert!(
+                stats.compiled_slots > 0 && stats.checked_steps > 0,
+                "{stats:?}"
+            );
+        }
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn partitioned_compiled_run_marks_native_nbas() {
+        let source = r#"`timescale 1ns/1ns
+module Top(output logic [7:0] q, output wire [7:0] y, output wire clock_echo);
+    bit clk = 0;
+    wire [7:0] a = q + 3;
+    wire [7:0] b = a ^ 8'h35;
+    assign y = b + 7;
+    assign clock_echo = clk;
+    always #1 clk = !clk;
+    initial begin q = 0; #2; q <= 5; #3; q <= 12; #3; q <= 7; #2; $write("q=%0d", q); end
+endmodule"#;
+        for four_state in [false, true] {
+            let mut sim = crate::Simulation::from_sv_sources(
+                vec![(source, std::path::Path::new("partitioned-native-nba.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+            .settle_partition(crate::SettlePartition::Always)
+            .settle_check(true)
+            .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+            .build_native()
+            .unwrap();
+            sim.run_until(12).unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 7u8.into());
+            assert_eq!(sim.get(sim.signal("y")), (((7u8 + 3) ^ 0x35) + 7).into());
+            let stats = sim.scheduler_stats();
+            assert!(
+                stats.compiled_slots > 0 && stats.checked_steps > 0,
+                "{stats:?}"
+            );
+        }
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn incremental_clock_settle_matches_full_reference_with_mixed_writes() {
+        let source = r#"`timescale 1ns/1ns
+module Top(output wire [1023:0] padding, output wire observed_clock, output logic [7:0] held, output wire [63:0] now_value);
+    bit clk = 0;
+    logic [7:0] epoch = 0;
+    logic enable = 1;
+    logic [31:0] payload = 1;
+    integer seen = 0;
+    wire watched = ^padding;
+    assign observed_clock = clk ^ enable ^ epoch[1];
+    assign now_value = $time;
+    always_latch if (enable) held = payload[7:0];
+    always #1 begin clk = !clk; epoch = epoch + 1; end
+    always @(posedge clk) payload <= payload + 1;
+    initial forever begin @(watched); seen = seen + 1; end
+    for (genvar i = 0; i < 32; i = i + 1) begin
+        assign padding[i*32 +: 32] = (payload + i) * (payload ^ (i + 1));
+    end
+    initial begin #4; enable = 'x; #4; enable = 'z; #4; enable = 0; #4; enable = 1; end
+    initial begin #24; if (seen == 0) $fatal(1, "wait never woke"); $finish; end
+endmodule"#;
+        for four_state in [false, true] {
+            let builder = || {
+                crate::Simulation::from_sv_sources(
+                    vec![(source, std::path::Path::new("incremental-clock.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+            };
+            let (program, _, _, _, _) = builder()
+                .emit_triggers()
+                .into_laid_out_program(crate::MemoryLayoutMode::Packed, false)
+                .unwrap();
+            assert!(
+                crate::scheduler::incremental_inputs_for_test(&program)
+                    .is_some_and(|inputs| inputs >= 2),
+                "clock-only writes must use the small cone"
+            );
+            let mut simulation = builder()
+                .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+                .build_native()
+                .unwrap();
+            simulation.run_until(28).unwrap();
+            assert!(simulation.is_finished());
+            let stats = simulation.scheduler_stats();
+            assert!(
+                stats.compiled_slots > 0 && stats.checked_steps > 0,
+                "{stats:?}"
+            );
+        }
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn combinational_rtl_wait_inputs_keep_unrelated_outputs_deferred() {
+        let source = r#"`timescale 1ns/1ns
+module Top(output wire [1023:0] padding);
+    bit clk = 0;
+    logic [31:0] payload = 1;
+    integer seen = 0;
+    wire watched = clk ^ payload[0];
+    always #1 clk = !clk;
+    always @(posedge clk) payload <= payload + 1;
+    initial forever begin @(watched); seen = seen + 1; end
+    for (genvar i = 0; i < 32; i = i + 1) begin
+        assign padding[i*32 +: 32] = (payload + i) * (payload ^ (i + 1));
+    end
+    initial begin #20; if (seen == 0) $fatal(1, "wait never woke"); $finish; end
+endmodule"#;
+        for four_state in [false, true] {
+            let builder = || {
+                crate::Simulation::from_sv_sources(
+                    vec![(source, std::path::Path::new("deferred-wait-inputs.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+            };
+            let (mut program, _, _, _, _) = builder()
+                .emit_triggers()
+                .into_laid_out_program(crate::MemoryLayoutMode::Packed, false)
+                .unwrap();
+            let (deferred, _) = crate::scheduler::defers_settles_for_test(&program);
+            assert!(
+                deferred,
+                "a small observed cone must not force whole-circuit settling"
+            );
+            // State-retention metadata is captured before optimization. Model
+            // a removed comb writer whose home remains readable as an input.
+            let clock = program.get_addr(&[], &["clk"]).unwrap();
+            let stale = crate::ir::RegionedAbsoluteAddr::from_absolute_addr(
+                celox_design::STABLE_REGION,
+                clock,
+            );
+            program.sir.eval_comb_stateful.as_mut().unwrap().push(stale);
+            // Also model an old self-read eliminated from a surviving writer.
+            let padding = program.get_addr(&[], &["padding"]).unwrap();
+            program.sir.eval_comb_stateful.as_mut().unwrap().push(
+                crate::ir::RegionedAbsoluteAddr::from_absolute_addr(
+                    celox_design::STABLE_REGION,
+                    padding,
+                ),
+            );
+
+            assert!(
+                crate::scheduler::defers_settles_for_test(&program).0,
+                "a stateful target without a remaining comb writer must not disable deferral"
+            );
+            let mut simulation = builder()
+                .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+                .build_native()
+                .unwrap();
+            simulation.run_until(24).unwrap();
+            assert!(simulation.is_finished());
+            let stats = simulation.scheduler_stats();
+            assert!(
+                stats.compiled_slots > 0 && stats.checked_steps > 0,
+                "{stats:?}"
+            );
+        }
+    }
 }
 
 #[cfg(feature = "host-runtime")]
@@ -5071,6 +6240,81 @@ mod parallel_option_tests {
             let options = builder.optimize_options_for_test();
             assert_eq!(options.parallel_lanes(), 4);
             assert_eq!(options.parallel_partition(), ParallelPartition::Always);
+        }
+    }
+    #[cfg(all(
+        feature = "systemverilog",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn native_feedback_work_lists_converge_or_report_the_slot_bound() {
+        for four_state in [false, true] {
+            for limit in [Some(8), None] {
+                let body = limit.map_or("b = ~b;".to_string(), |limit| {
+                    format!("if (count < {limit}) begin count = count + 1; b = ~b; end")
+                });
+                let other = limit.map_or("a = ~a;".to_string(), |limit| {
+                    format!("if (count < {limit}) begin count = count + 1; a = ~a; end")
+                });
+                let source = format!(
+                    r#"`timescale 1ns/1ns
+module Top;
+    bit a = 0, b = 0;
+    int count = 0;
+    initial begin #1; a = 1; #20; end
+    initial forever begin @(a); {body} end
+    initial forever begin @(b); {other} end
+endmodule"#
+                );
+                // Ordinary timed activations can outnumber the round limit
+                // without consuming any non-suspending returns.
+                let source = if limit.is_some() {
+                    let independent: String = (0..20).map(|index| format!(
+                        "int extra_{index} = 0; initial begin #1; extra_{index} = 1; #20; end\n"
+                    )).collect();
+                    source.replace("endmodule", &format!("{independent}endmodule"))
+                } else {
+                    source
+                };
+                for level in [crate::OptLevel::O0, crate::OptLevel::O2] {
+                    for mode in [
+                        crate::SchedulerMode::Reference,
+                        crate::SchedulerMode::Compiled,
+                    ] {
+                        // The unbounded reference work list is deliberately not
+                        // run: only the native path adds a work-list guard.
+                        if limit.is_none() && mode == crate::SchedulerMode::Reference {
+                            continue;
+                        }
+                        let mut sim = crate::Simulation::from_sv_sources(
+                            vec![(source.as_str(), std::path::Path::new("native-feedback.sv"))],
+                            "Top",
+                        )
+                        .four_state(four_state)
+                        .opt_level(level)
+                        .scheduler_mode(mode)
+                        .build_native()
+                        .unwrap();
+                        sim.state.set_slot_budgets(16, 0);
+                        if limit.is_some() {
+                            sim.run_until(10).unwrap();
+                            assert_eq!(sim.get(sim.signal("count")), 8u8.into());
+                            assert_eq!(sim.get(sim.signal("extra_19")), 1u8.into());
+                        } else {
+                            let error = sim.run_until(10).unwrap_err();
+                            assert!(error.to_string().contains("does not settle"), "{error}");
+                            assert_eq!(sim.time(), 1);
+                        }
+                        if mode == crate::SchedulerMode::Compiled {
+                            assert!(
+                                sim.scheduler_stats().compiled_slots > 0,
+                                "{:?}",
+                                sim.scheduler_stats()
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 }

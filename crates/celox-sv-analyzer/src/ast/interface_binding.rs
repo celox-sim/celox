@@ -1215,6 +1215,22 @@ fn instance_symbols(
     bound
         .state_signals
         .retain(|signal| virtual_interfaces::VirtualInterfaceSignal::of(&signal.name).is_none());
+    // A package variable that the instance reads is the package's shared
+    // object, which the binding scope also declares (IEEE 1800-2023 26.3),
+    // not a signal of the instance.
+    let (shared, own): (Vec<_>, Vec<_>) = std::mem::take(&mut bound.signals)
+        .into_iter()
+        .partition(|signal| signal.package_variable.is_some());
+    bound.signals = own;
+    for signal in shared {
+        if !bound
+            .state_signals
+            .iter()
+            .any(|known| known.name == signal.name)
+        {
+            bound.state_signals.push(signal);
+        }
+    }
     bound.interface_members.clear();
     bound.interface_types.clear();
     bound.interface_arrays.clear();

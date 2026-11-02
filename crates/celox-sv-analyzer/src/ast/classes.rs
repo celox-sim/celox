@@ -331,6 +331,28 @@ impl Class {
         false
     }
 
+    /// The classes that [`Self::derives_from`] is true of.
+    fn lineage(
+        &self,
+        tree: &AnalysisContext<'_>,
+        session: &mut Session,
+        env: &HashMap<String, i128>,
+        aliases: &HashMap<String, Type>,
+    ) -> HashSet<String> {
+        let mut pending = vec![self.name.clone()];
+        let mut seen = HashSet::default();
+        while let Some(name) = pending.pop() {
+            if seen.contains(&name) {
+                continue;
+            }
+            if let Ok(class) = self::class(tree, session, &name, env, aliases) {
+                pending.extend(class.base.iter().chain(&class.interfaces).cloned());
+            }
+            seen.insert(name);
+        }
+        seen
+    }
+
     /// The subroutine that `$cast` to a variable of `class` calls (IEEE
     /// 1800-2023 8.16).
     pub fn cast_name(class: &str) -> String {
@@ -368,10 +390,31 @@ pub(super) fn declaration<'a>(
     name: &str,
 ) -> Option<&'a celox_sv_syntax::ClassDeclaration> {
     let name = specializations::generic(session, name);
-    tree.declarations()
-        .classes
-        .iter()
-        .find(|class| declared_name(tree, class) == name)
+    let classes = &tree.declarations().classes;
+    let index = tree.spans().classes.get_or_init(|| ClassIndex {
+        path: tree.compilation_path().to_owned(),
+        by_name: classes
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(index, class)| (declared_name(tree, class), index))
+            .collect(),
+    });
+    // The names of `$unit` classes depend on the compilation path.
+    if index.path != tree.compilation_path() {
+        return classes
+            .iter()
+            .find(|class| declared_name(tree, class) == name);
+    }
+    index.by_name.get(&name).map(|index| &classes[*index])
+}
+
+/// The class declarations of a file by [`declared_name`], the first of each
+/// name, indexed once per file.
+#[derive(Debug)]
+pub(crate) struct ClassIndex {
+    path: std::path::PathBuf,
+    by_name: HashMap<String, usize>,
 }
 
 /// The name of class declaration `declaration`: qualified by the package
@@ -1259,16 +1302,46 @@ fn signature(
         .ports
         .iter()
         .flatten()
-        .map(|port| {
-            port.name
-                .as_ref()
-                .map(|name| instances::normalize_identifier(&name.spelling))
+        .map(|port| match &port.name {
+            Some(name) => Some(instances::normalize_identifier(&name.spelling)),
+            None => prototype_formal_name(port, tree, session, context),
         })
         .collect();
     let result = return_type(tree, session, id, context).ok().map(|ty| {
         ty.and_then(|ty| type_parameters::resolve(&tree.functions, ty, &context.const_env))
     });
     (formals, result)
+}
+
+/// The name of formal `port` of a prototype that the parser read as an
+/// unnamed formal of a named type: a lone identifier there is a type when
+/// one of its name is visible, and otherwise the formal's name, of the type
+/// of the formal before it, as in `bit is_int, is_bitstream` (IEEE 1800-2023
+/// 13.4, A.2.7). `None` for a formal that names a type or its formal.
+pub(super) fn prototype_formal_name(
+    port: &celox_sv_syntax::SubroutinePort,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    context: &PackedDimensions,
+) -> Option<String> {
+    if port.name.is_some() {
+        return None;
+    }
+    let native = tree.declarations();
+    let data = native.data_type(port.data_type);
+    let celox_sv_syntax::DataTypeKind::Named(segments) = &data.kind else {
+        return None;
+    };
+    let [segment] = segments.as_slice() else {
+        return None;
+    };
+    if segment.arguments.is_some() || data.signed.is_some() || !data.packed_dimensions.is_empty() {
+        return None;
+    }
+    match type_binding::binding::bind_in(port.data_type, native, tree, session, context) {
+        Ok(Some(_)) => None,
+        _ => Some(instances::normalize_identifier(&segment.name.spelling)),
+    }
 }
 
 /// The return type of subroutine `id`, `None` for a task or `void`.
@@ -1326,9 +1399,8 @@ pub(super) fn field(
                 .ok_or_else(|| unsupported("class property type"))?;
             (shape.width, shape.signed, None)
         }
-        TypeKind::Real | TypeKind::Shortreal => {
-            return Err(unsupported("real class property"));
-        }
+        TypeKind::Real => (64, false, None),
+        TypeKind::Shortreal => (32, false, None),
     };
     Ok(ObjectField {
         offset: offset.next_multiple_of(8),
@@ -1342,6 +1414,7 @@ pub(super) fn field(
                 TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
             ),
         nullable: false,
+        real: matches!(ty.kind(), TypeKind::Real | TypeKind::Shortreal),
     })
 }
 
@@ -1365,27 +1438,71 @@ fn object_classes(
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Converted<Vec<Rc<Class>>> {
+    let concrete = ConcreteClasses::of(tree, session, env, aliases);
     let mut classes = Vec::new();
     let mut ids = HashMap::default();
-    for name in visible_classes(tree, session) {
-        // A class that cannot be laid out has no objects.
-        let Ok(class) = class(tree, session, &name, env, aliases) else {
-            continue;
-        };
-        if class.is_abstract || class.is_interface {
+    for (name, class, lineage) in &concrete.classes {
+        if !lineage.contains(ancestor) {
             continue;
         }
-        if !class.derives_from(tree, session, ancestor, env, aliases) {
-            continue;
-        }
-        if let Some(other) = ids.insert(class.id, name.clone()) {
+        if let Some(other) = ids.insert(class.id, name) {
             return Err(unsupported(format!(
                 "classes `{other}` and `{name}` with the same run-time identifier"
             )));
         }
-        classes.push(class);
+        classes.push(class.clone());
     }
     Ok(classes)
+}
+
+/// The classes of [`visible_classes`] that can be laid out and are neither
+/// abstract nor interface classes, each with the classes it is, derives from
+/// or implements (see [`Class::derives_from`]). A scope keeps them while no
+/// class is laid out or specialized, which is what could change them.
+pub(super) struct ConcreteClasses {
+    syntax_tree: *const SyntaxTree,
+    imported: Arc<scope::ScopeSymbols>,
+    generation: (usize, usize),
+    classes: Vec<(String, Rc<Class>, HashSet<String>)>,
+}
+
+impl ConcreteClasses {
+    fn of(
+        tree: &AnalysisContext<'_>,
+        session: &mut Session,
+        env: &HashMap<String, i128>,
+        aliases: &HashMap<String, Type>,
+    ) -> Rc<Self> {
+        let generation =
+            |session: &Session| (session.classes.len(), session.class_specializations.len());
+        if let Some(known) = &session.concrete_classes
+            && std::ptr::eq(known.syntax_tree, tree.syntax_tree)
+            && Arc::ptr_eq(&known.imported, &tree.imported)
+            && known.generation == generation(session)
+        {
+            return known.clone();
+        }
+        let mut classes = Vec::new();
+        for name in visible_classes(tree, session) {
+            // A class that cannot be laid out has no objects.
+            let Ok(class) = class(tree, session, &name, env, aliases) else {
+                continue;
+            };
+            if class.is_abstract || class.is_interface {
+                continue;
+            }
+            let lineage = class.lineage(tree, session, env, aliases);
+            classes.push((name, class, lineage));
+        }
+        let concrete = Rc::new(Self {
+            syntax_tree: tree.syntax_tree,
+            imported: tree.imported.clone(),
+            generation: generation(session),
+            classes,
+        });
+        session.concrete_classes = Some(concrete.clone());
+        concrete
+    }
 }
 
 /// The overrides that dispatcher `Class::dispatcher_name(owner, method)`

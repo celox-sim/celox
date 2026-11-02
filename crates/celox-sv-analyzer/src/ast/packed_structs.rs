@@ -42,6 +42,23 @@ impl generate::CallSites for PackedMember {
 }
 
 impl PackedMember {
+    /// A bit window in the flat storage of an unpacked structure array.
+    pub(in crate::ast) fn storage_member(
+        owner: Arc<str>,
+        name: String,
+        offset: usize,
+        r#type: Type,
+    ) -> Self {
+        Self {
+            owner,
+            name,
+            offset,
+            r#type,
+            tag: None,
+            is_void: false,
+        }
+    }
+
     pub(in crate::ast) fn is_tagged(&self) -> bool {
         self.tag.is_some()
     }

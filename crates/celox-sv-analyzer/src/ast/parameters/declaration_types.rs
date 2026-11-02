@@ -114,3 +114,50 @@ impl Prefix<'_> {
         Ok(ranges)
     }
 }
+
+impl Prefix<'_> {
+    /// Freeze the final parameter type after overrides and width inference.
+    /// IEEE 1800-2023 6.20.2: an inferred integral parameter is a logic vector,
+    /// whereas an explicit type retains its declaration and packed dimensions.
+    pub fn constant_type(
+        &self,
+        parameter: &Parameter,
+        types: &HashMap<String, ExprType>,
+        functions: &const_functions::ConstantFunctions,
+        table: &mut semantic_types::TyTable,
+        env: &HashMap<String, i128>,
+    ) -> Option<semantic_types::ConstantType> {
+        if parameter
+            .value()
+            .is_some_and(|v| parameters::is_unbounded(v, env))
+        {
+            return None;
+        }
+        let mut ty = self
+            .alias
+            .as_ref()
+            .or(self.primitive.as_ref())
+            .cloned()
+            .unwrap_or_else(|| Type::new(TypeKind::Logic));
+        if matches!(&self.data.kind, DataTypeKind::Builtin(name) if name == "string") {
+            ty = type_binding::builtin_type("string", None)?;
+        } else if let Some(kind) = parameter.floating {
+            ty.kind = kind;
+        } else {
+            let inferred = parameter.resolved_type(types)?;
+            ty.is_signed = inferred.signed;
+            ty.packed_ranges = parameter.packed_ranges.clone();
+            if ty.packed_ranges.is_empty() && (inferred.width > 1 || !parameter.has_declared_type) {
+                ty.packed_ranges.push(PackedRange {
+                    left: ConstExpr::Literal((inferred.width.checked_sub(1)?).to_string()),
+                    right: ConstExpr::Literal("0".into()),
+                });
+            }
+            ty.signed_element_depth = parameter.signed_element_depth;
+            if ty.is_enum && !self.data.packed_dimensions.is_empty() {
+                ty.packed_enum = true;
+            }
+        }
+        semantic_types::ConstantType::of_type(ty, functions, table, env)
+    }
+}

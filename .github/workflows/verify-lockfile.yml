@@ -3,8 +3,6 @@ name: Verify workflow lockfile
 on:
   pull_request:
   merge_group:
-  push:
-    branches: [master, develop]
   workflow_dispatch:
   workflow_call:
 

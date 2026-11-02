@@ -4,6 +4,7 @@ use super::*;
 
 sv_backends! {
     fn class_imported_member_type_dimensions(sim) { @case "class::imported_member_type_dimensions"; }
+    fn class_members_hide_module_names(sim) { @case "class::members_hide_module_names"; }
     fn class_imported_member_type_inheritance(sim) { @case "class::imported_member_type_inheritance"; }
     fn class_package_constant_class_defaults(sim) { @case "class::package_constant_class_defaults"; }
     fn class_waits_on_static_properties(sim) { @case "class::waits_on_static_properties"; }
@@ -41,6 +42,9 @@ sv_backends! {
     fn class_methods_called_through_interface_class_handles(sim) { @case "class::methods_called_through_interface_class_handles"; }
     fn class_inherited_methods_of_extended_interface_classes(sim) { @case "class::inherited_methods_of_extended_interface_classes"; }
     fn class_casts_of_class_handles(sim) { @case "class::casts_of_class_handles"; }
+    fn class_casts_to_class_properties(sim) { @case "class::casts_to_class_properties"; }
+    fn class_void_casts_of_class_handles(sim) { @case "class::void_casts_of_class_handles"; }
+    fn class_failing_casts_evaluate_their_sources(sim) { @case "class::failing_casts_evaluate_their_sources"; }
     fn class_casts_from_interface_class_handles(sim) { @case "class::casts_from_interface_class_handles"; }
     fn class_specializations_of_parameterized_classes(sim) { @case "class::specializations_of_parameterized_classes"; }
     fn class_specializations_are_named_by_parameter_values(sim) { @case "class::specializations_are_named_by_parameter_values"; }
@@ -295,6 +299,89 @@ sv_backends! {
     }
 }
 
+/// A static method called without its empty parentheses may be the receiver
+/// of a member, and a method that returns a chandle so called gives a chandle
+/// (IEEE 1800-2023 13.5.5).
+#[test]
+fn parenless_static_factories_and_chandle_results() {
+    let source = r#"
+    module Top(output int latest_id, output int latest_value, output bit empty);
+        class Node;
+            static Node last;
+            int id;
+            chandle ch;
+            function new(int id); this.id = id; last = this; endfunction
+            function int get_id(); return id; endfunction
+            function chandle get_handle(); return ch; endfunction
+            static function Node latest(); return last; endfunction
+        endclass
+        Node n;
+        chandle h;
+        initial begin
+            n = new(3);
+            n = new(5);
+            latest_id = Node::latest.get_id();
+            latest_value = Node::latest.id;
+            h = n.get_handle;
+            empty = h == null;
+        end
+    endmodule"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    let latest_id = sim.signal("latest_id");
+    let latest_value = sim.signal("latest_value");
+    let empty = sim.signal("empty");
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(latest_id), BigUint::from(5u8));
+    assert_eq!(sim.get(latest_value), BigUint::from(5u8));
+    assert_eq!(sim.get(empty), BigUint::from(1u8));
+}
+
+/// A method that returns an unpacked structure or a virtual interface and is
+/// called without its empty parentheses gives a value of that type, to an
+/// assignment and to an argument (IEEE 1800-2023 13.5.5).
+#[test]
+fn parenless_method_results_of_structure_and_interface_types() {
+    let source = r#"
+    interface Bus; int data; endinterface
+    module Top(output int sum, output int passed, output int read);
+        typedef struct { int a; int b; } pair_t;
+        class Holder;
+            pair_t p;
+            virtual Bus bus;
+            function pair_t get(); return p; endfunction
+            function virtual Bus get_bus(); return bus; endfunction
+        endclass
+        function automatic int total(pair_t q); return q.a + q.b; endfunction
+        Bus b();
+        Holder h;
+        pair_t g;
+        virtual Bus v;
+        initial begin
+            h = new;
+            h.p.a = 2; h.p.b = 5;
+            h.bus = b;
+            b.data = 7;
+            g = h.get;
+            sum = g.a + g.b;
+            passed = total(h.get);
+            v = h.get_bus;
+            read = v.data;
+        end
+    endmodule"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    let sum = sim.signal("sum");
+    let passed = sim.signal("passed");
+    let read = sim.signal("read");
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sum), BigUint::from(7u8));
+    assert_eq!(sim.get(passed), BigUint::from(7u8));
+    assert_eq!(sim.get(read), BigUint::from(7u8));
+}
+
 /// A write of a class property does not wake a process waiting on it, so a
 /// wait whose condition reads one is rejected instead of never waking. The
 /// condition reads it in a method through `this`, through a handle, through
@@ -392,6 +479,38 @@ fn waits_read_property_defaults_only_when_omitted() {
     assert!(error.contains("in a wait condition"), "{error}");
 }
 
+/// The defaults of a method use the object it is called on, as the call
+/// evaluated its receiver, also when an argument then assigns the variable
+/// the receiver names (IEEE 1800-2023 13.5.3). Verilator 5.052 reads the
+/// variable again, so this is not a shared case.
+#[test]
+fn method_defaults_use_the_receiver_the_call_evaluated() {
+    let source = r#"
+    module Top(output int r);
+        class Pair;
+            int n;
+            function int f(int x, int y = n); return x + y; endfunction
+        endclass
+        Pair a, b, cur;
+        function automatic int swap(); cur = b; return 0; endfunction
+        initial begin
+            a = new;
+            a.n = 1;
+            b = new;
+            b.n = 2;
+            cur = a;
+            r = cur.f(swap());
+        end
+    endmodule"#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("receiver.sv"))], "Top")
+            .build()
+            .unwrap();
+    let r = sim.signal("r");
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(r), BigUint::from(1u8));
+}
+
 #[test]
 fn randomizing_four_state_properties_is_rejected() {
     for (body, want) in [
@@ -478,7 +597,6 @@ fn incompatible_class_handle_assignments_are_rejected() {
         ("d.next = b;", ["handle of class `B`", "class `D`"]),
         ("d = new b;", ["handle of class `B`", "class `D`"]),
         ("u = new d;", ["handle of class `D`", "class `U`"]),
-        ("$cast(d.next, b);", ["`$cast` to a class property", ""]),
     ] {
         let source = format!(
             "module Top;
@@ -1490,9 +1608,43 @@ sv_backends! {
     fn class_new_initializers_of_scoped_and_alias_types(sim) { @case "class::new_initializers_of_scoped_and_alias_types"; }
     fn class_parameter_literals_hide_module_constants(sim) { @case "class::parameter_literals_hide_module_constants"; }
     fn class_static_initializers_run_once_before_time_zero(sim) { @case "class::static_initializers_run_once_before_time_zero"; }
+    fn class_method_defaults_use_the_object(sim) { @case "class::method_defaults_use_the_object"; }
+    fn class_methods_called_without_parentheses(sim) { @case "class::methods_called_without_parentheses"; }
+    fn class_constrained_enumerations_and_randc(sim) { @case "class::constrained_enumerations_and_randc"; }
+    fn class_prototype_formals_inherit_types(sim) { @case "class::prototype_formals_inherit_types"; }
+    fn class_real_values_round_into_integral_properties(sim) { @case "class::real_values_round_into_integral_properties"; }
+    fn class_real_properties(sim) { @case "class::real_properties"; }
 }
 
 sv_backends! {
+    // A random enumeration of 1024 members takes one of them (IEEE 1800-2023
+    // 18.3): its domain stays within the solver's limits.
+    fn class_randomizes_large_enumerations(sim) {
+        @setup {
+            let members = (0..1024)
+                .map(|index| format!("M{index} = 12'd{}", index * 3))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let source = format!(
+                "module Top(output int ok, output int value);
+                    typedef enum bit [11:0] {{ {members} }} big_e;
+                    class Big; rand big_e e; constraint c {{ e > 12'd30; }} endclass
+                    Big b;
+                    initial begin
+                        b = new;
+                        ok = b.randomize() with {{ 1; }};
+                        value = b.e;
+                    end
+                endmodule"
+            );
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source.as_str(), Path::new("big_enum.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("ok")), 1u32.into());
+        let value: u32 = sim.get(sim.signal("value")).try_into().unwrap();
+        assert!(value > 30 && value.is_multiple_of(3), "{value}");
+    }
+
     // A class parameter hides the module's constant of its name also in a
     // static call that passes it on by name (8.25).
     fn class_parameter_literals_hide_module_constants_in_static_calls(sim) {

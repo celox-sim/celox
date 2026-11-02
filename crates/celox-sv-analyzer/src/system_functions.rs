@@ -125,8 +125,14 @@ pub enum SystemFunction {
     UrandomRange,
     /// `$fopen` (21.3.1).
     Fopen,
+    /// Host command execution (20.17.1).
+    System,
     /// Binary input into packed integers or a static memory (21.3.4.4).
     Fread,
+    /// Line input into a string variable (21.3.4.2).
+    Fgets,
+    /// Most recent file I/O error and its description (21.3.7).
+    Ferror,
     /// File position and byte input functions (21.3.4–8).
     Ftell,
     Fseek,
@@ -211,7 +217,10 @@ impl SystemFunction {
         matches!(
             self,
             Self::Fopen
+                | Self::System
                 | Self::Fread
+                | Self::Fgets
+                | Self::Ferror
                 | Self::Ftell
                 | Self::Fseek
                 | Self::Rewind
@@ -338,7 +347,10 @@ impl SystemFunction {
             Self::ScopeRandomizeEnum => "$__celox_randomize_enum",
             Self::UrandomRange => "$urandom_range",
             Self::Fopen => "$fopen",
+            Self::System => "$system",
             Self::Fread => "$fread",
+            Self::Fgets => "$fgets",
+            Self::Ferror => "$ferror",
             Self::Ftell => "$ftell",
             Self::Fseek => "$fseek",
             Self::Rewind => "$rewind",
@@ -395,7 +407,10 @@ impl SystemFunction {
                     | Self::ValuePlusargs
                     | Self::Urandom
                     | Self::Fopen
+                    | Self::System
                     | Self::Fread
+                    | Self::Fgets
+                    | Self::Ferror
                     | Self::Ftell
                     | Self::Fseek
                     | Self::Rewind
@@ -455,7 +470,8 @@ impl SystemFunction {
                     | Self::DistErlang
             ) && position == 0)
             || (self == Self::ValuePlusargs && position == 1)
-            || (self == Self::Fread && position == 0)
+            || (matches!(self, Self::Fread | Self::Fgets) && position == 0)
+            || (self == Self::Ferror && position == 1)
             || (matches!(self, Self::Sscanf | Self::Fscanf) && position >= 2)
             || (matches!(
                 self,
@@ -521,7 +537,8 @@ impl SystemFunction {
             | Self::Fell
             | Self::Stable
             | Self::Changed => Some((1, false)),
-            Self::Random
+            Self::System
+            | Self::Random
             | Self::DistUniform
             | Self::DistNormal
             | Self::DistExponential
@@ -532,6 +549,8 @@ impl SystemFunction {
             | Self::TestPlusargs
             | Self::ValuePlusargs
             | Self::Fread
+            | Self::Fgets
+            | Self::Ferror
             | Self::Ftell
             | Self::Fseek
             | Self::Rewind
@@ -895,6 +914,9 @@ pub struct ObjectField {
     pub four_state: bool,
     /// A member of a [`Record`]: `null` reads as the member's default.
     pub nullable: bool,
+    /// A `real` (64 bits) or `shortreal` (32 bits) value, as its IEEE 754
+    /// bits (IEEE 1800-2023 6.12).
+    pub real: bool,
 }
 
 /// The layout of an immutable heap record that holds the value of an
@@ -1052,6 +1074,7 @@ pub struct Locator {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ContainerOp {
+    Shuffle,
     Reverse,
     Sort,
     Rsort,
@@ -1066,6 +1089,8 @@ pub enum ContainerOp {
     CaseEqual,
     New,
     Literal,
+    /// Empty associative array with the supplied default element.
+    WithDefault,
     Convert,
     /// A new sequence of the elements of the sequence in the first argument
     /// and then those of the one in the second.
@@ -1103,7 +1128,8 @@ impl ContainerOp {
     pub fn mutates(self) -> bool {
         matches!(
             self,
-            Self::Reverse
+            Self::Shuffle
+                | Self::Reverse
                 | Self::Sort
                 | Self::Rsort
                 | Self::Set
@@ -1922,7 +1948,7 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     unsupported("$sync$or$plane", Task),
     unsupported("$sync$nor$plane", Task),
     // 20.17 Miscellaneous tasks and functions
-    unsupported("$system", TaskOrFunction),
+    function(SystemFunction::System, 0, Some(1)),
     unsupported("$stacktrace", TaskOrFunction),
     // 21.2 Display system tasks
     task(
@@ -2053,7 +2079,7 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     unsupported("$sformatf", Function),
     function(SystemFunction::Fgetc, 1, Some(1)),
     function(SystemFunction::Ungetc, 2, Some(2)),
-    unsupported("$fgets", Function),
+    function(SystemFunction::Fgets, 2, Some(2)),
     function(SystemFunction::Fscanf, 2, None),
     function(SystemFunction::Sscanf, 2, None),
     function(SystemFunction::Fread, 2, Some(4)),
@@ -2061,7 +2087,7 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     function(SystemFunction::Fseek, 3, Some(3)),
     function(SystemFunction::Rewind, 1, Some(1)),
     task(SystemTask::Fflush, ProceduralAndInitial, 0, Some(1)),
-    unsupported("$ferror", Function),
+    function(SystemFunction::Ferror, 2, Some(2)),
     function(SystemFunction::Feof, 1, Some(1)),
     // 21.4 Loading memory array data from a file
     task(

@@ -1,6 +1,9 @@
 use super::*;
 
 sv_backends! {
+    fn real_to_wide_integral_results(sim) {
+        @case "floating_point::real_to_wide_integral_results";
+    }
     fn real_parameter_overrides_preserve_fractional_values(sim) {
         @case "floating_point::real_parameter_overrides_preserve_fractional_values";
     }

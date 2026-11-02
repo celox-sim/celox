@@ -1767,7 +1767,7 @@ fn deep_foreach_statements_and_long_slot_lists_parse_clone_and_drop_on_default_s
 #[test]
 fn assertion_headers_distinguish_typed_immediate_predicates_from_property_boundaries() {
     let syntax = parse(
-        "module M;initial begin assert(a+1);assume #0(b);cover final(c);assert property(@(posedge clk)a|->b);cover sequence(a##1b);expect(a);end endmodule",
+        "module M;initial begin assert(a+1);assume #0(b);cover final(c);assert property(@(posedge clk)a|=>b);cover sequence(a##1b);expect(a);end endmodule",
     );
     let headers = syntax
         .statements
@@ -3170,6 +3170,52 @@ fn intra_assignment_delays_have_native_operands() {
         assert_eq!(
             syntax.token_text(syntax.expression(value).tokens),
             if parenthesized { "(d+1)" } else { "1.25" }
+        );
+    }
+}
+
+#[test]
+fn clocked_overlapped_implication_retains_both_boolean_operands() {
+    let syntax = parse(
+        "module M; p: assert property (@(posedge clk) disable iff (reset) (a && ready) |-> b == 3) else $error; endmodule",
+    );
+    let (antecedent, condition) = syntax
+        .statements
+        .iter()
+        .find_map(|stmt| match &stmt.kind {
+            StatementKind::Assertion {
+                header:
+                    AssertionHeader::Concurrent {
+                        antecedent: Some(antecedent),
+                        condition,
+                        module_item: true,
+                        ..
+                    },
+                ..
+            } => Some((*antecedent, *condition)),
+            _ => None,
+        })
+        .unwrap();
+    assert!(syntax.expression(antecedent).tokens.end < syntax.expression(condition).tokens.start);
+    for property in [
+        "a |=> b",
+        "a ##1 b |-> c",
+        "a |-> b |-> c",
+        "a |-> b ##1 c",
+        "(a |-> b)",
+    ] {
+        let syntax = parse(&format!(
+            "module M; assert property (@(posedge clk) {property}); endmodule"
+        ));
+        assert!(
+            syntax.statements.iter().any(|stmt| matches!(
+                &stmt.kind,
+                StatementKind::Assertion {
+                    header: AssertionHeader::Unconverted(_),
+                    ..
+                }
+            )),
+            "{property}"
         );
     }
 }

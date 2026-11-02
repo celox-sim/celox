@@ -118,7 +118,7 @@ impl Ff<'_, '_> {
         if op.reduction().is_none() && args.iter().any(|arg| self.m.calls(arg)) {
             let value_receiver = matches!(
                 op,
-                New | Literal | Convert | Concat | Slice | Equal | CaseEqual
+                New | Literal | WithDefault | Convert | Concat | Slice | Equal | CaseEqual
             );
             if !value_receiver {
                 // Preserve the receiver's location, not an old immutable copy
@@ -155,7 +155,7 @@ impl Ff<'_, '_> {
                 if !value_receiver && (index == 0 || matches!(op, First | Last | Next | Prev)) {
                     continue;
                 }
-                let element = op == Literal
+                let element = matches!(op, Literal | WithDefault)
                     || (matches!(op, Set | Insert | PushFront | PushBack) && index + 1 == count);
                 let (context, kind) = if element {
                     (
@@ -200,7 +200,7 @@ impl Ff<'_, '_> {
         // its current container after the arguments, so a nested pop is kept.
         let property = if !matches!(
             op,
-            New | Literal | Convert | Concat | Slice | Equal | CaseEqual
+            New | Literal | WithDefault | Convert | Concat | Slice | Equal | CaseEqual
         ) && let sv::ir::Expr::Call {
             callee: sv::ir::Callee::Object(object),
             args,
@@ -220,7 +220,7 @@ impl Ff<'_, '_> {
         let element_result = matches!(op, Get | PopFront | PopBack);
         let four_state = (element_result || op == Equal) && !layout.two_state && self.m.four_state;
         let (temp, name) = self.m.temp("container", width, signed, four_state);
-        if matches!(op, New | Literal | Convert | Concat | Slice)
+        if matches!(op, New | Literal | WithDefault | Convert | Concat | Slice)
             || element_result && layout.handle == Some(HandleProperty::Object)
         {
             self.m.variables.get_mut(&temp).unwrap().value_kind = celox_design::ValueKind::ObjRef;
@@ -271,6 +271,10 @@ impl Ff<'_, '_> {
                 let size = self.heap_call(code(heap::LEN), &[source]);
                 self.heap_call(code(heap::NEW), &[size, source])
             }
+            WithDefault => {
+                let (value, mask) = self.container_element(&args[0], layout)?;
+                self.heap_call(code(heap::WITH_DEFAULT), &[zero, value, mask])
+            }
             Literal => {
                 let size = self.constant64(args.len() as u64);
                 let mut handle = self.heap_call(code(heap::NEW), &[size, zero]);
@@ -286,6 +290,10 @@ impl Ff<'_, '_> {
                 let mut index_mask = zero;
                 let index = match op {
                     Size | Clear | PushFront | PopFront | PushBack | PopBack | Reverse => zero,
+                    Shuffle => {
+                        let seed = self.randomize_word()?;
+                        self.integer_of_width(&seed, 64, false)?
+                    }
                     Sort | Rsort => self.constant64(u64::from(layout.signed)),
                     _ if string_key => self.handle(&args[1])?,
                     _ if let Some((width, signed)) = wide => {
@@ -464,6 +472,7 @@ impl Ff<'_, '_> {
                                 Set => heap::SET,
                                 Insert | PushFront | PushBack => heap::INSERT,
                                 Clear => heap::CLEAR,
+                                Shuffle => heap::SHUFFLE,
                                 Reverse => heap::REVERSE,
                                 Sort => heap::SORT,
                                 Rsort => heap::RSORT,

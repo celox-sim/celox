@@ -46,6 +46,15 @@ pub trait UnitExecutor {
         Ok(())
     }
 
+    /// Supply the per-slot bounds to synchronous native services, which
+    /// enforce them without entering the reference scheduler.
+    fn set_compiled_host_budgets(&mut self, _rounds: u64, _returns: u64) {}
+
+    /// Unpublished NBA values left by a native run, including an early error.
+    fn take_compiled_nbas(&mut self) -> Vec<super::NbaUpdate> {
+        Vec::new()
+    }
+
     /// Perform a synchronous request after a kernel has stored its
     /// arguments and before that kernel resumes. The timestamp is the
     /// current scheduler time in the design's precision units.

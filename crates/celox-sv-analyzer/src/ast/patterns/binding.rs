@@ -113,14 +113,15 @@ fn select<'a>(
     }
     if let Some((dim, rest)) = shape.unpacked.split_first() {
         let (left, right, count) = dimension_bounds(functions, &dim.left, &dim.right, dims)?;
-        let sub = Shape::Owned(Rc::new(VariableDimensions {
-            declared: type_names::Declared::default(),
+        // Selecting an unpacked dimension keeps the declaration of its
+        // element type, including the nominal structure identity.
+        let sub = Shape::Owned(Rc::new(VariableDimensions::new(VariableShape {
             container: None,
             real: false,
             class: None,
             unpacked: rest.to_vec(),
-            ..(*shape).clone()
-        }));
+            ..(*shape).clone_shape()
+        })));
         let items = indexed_items(kind, bindings, count, |index| {
             (left.min(right)..=left.max(right))
                 .contains(&index)
@@ -145,7 +146,7 @@ fn select<'a>(
         && !rest.is_empty()
     {
         let (left, right, count) = dimension_bounds(functions, &dim.left, &dim.right, dims)?;
-        let sub = Shape::Owned(Rc::new(VariableDimensions {
+        let sub = Shape::Owned(Rc::new(VariableDimensions::new(VariableShape {
             declared: type_names::Declared::default(),
             container: None,
             chandle: false,
@@ -166,7 +167,7 @@ fn select<'a>(
                 .and_then(|depth| depth.checked_sub(1))
                 .filter(|depth| *depth > 0),
             unpacked_struct: None,
-        }));
+        })));
         let items = indexed_items(kind, bindings, count, |index| {
             (left.min(right)..=left.max(right))
                 .contains(&index)
@@ -261,7 +262,7 @@ fn select<'a>(
     }
     let width = shape_width(functions, &shape, dims)
         .ok_or_else(|| unsupported("assignment pattern target width"))?;
-    let bit = Shape::Owned(Rc::new(VariableDimensions {
+    let bit = Shape::Owned(Rc::new(VariableDimensions::new(VariableShape {
         declared: type_names::Declared::default(),
         container: None,
         chandle: false,
@@ -279,7 +280,7 @@ fn select<'a>(
         members: Vec::new(),
         signed_element_depth: None,
         unpacked_struct: None,
-    }));
+    })));
     let items = indexed_items(kind, bindings, width, |index| {
         usize::try_from(index)
             .ok()
@@ -412,18 +413,17 @@ pub(in crate::ast) fn bind_native(
                 if default
                     && let Some((dim, rest)) = shape.unpacked.split_first()
                     && !pattern
-                    && native_rank(id, native, dims) < shape.unpacked.len()
+                    && native_rank(id, native, tree, session, dims)? < shape.unpacked.len()
                 {
                     let (_, _, count) =
                         dimension_bounds(&tree.functions, &dim.left, &dim.right, dims)?;
-                    let sub = Shape::Owned(Rc::new(VariableDimensions {
-                        declared: type_names::Declared::default(),
+                    let sub = Shape::Owned(Rc::new(VariableDimensions::new(VariableShape {
                         container: None,
                         real: false,
                         class: None,
                         unpacked: rest.to_vec(),
-                        ..(*shape).clone()
-                    }));
+                        ..(*shape).clone_shape()
+                    })));
                     jobs.push(Job::Broadcast(count));
                     jobs.push(Job::Value(Selected {
                         value: id,
@@ -438,10 +438,14 @@ pub(in crate::ast) fn bind_native(
                 }
                 // A typed pattern of a member must name the member's
                 // structure type (6.22.3).
-                if pattern && let Some(aggregate) = shape.unpacked_struct.as_deref() {
+                if pattern
+                    && shape.unpacked.is_empty()
+                    && let Some(aggregate) = shape.unpacked_struct.as_deref()
+                {
                     unpacked_structs::check_value(aggregate, id, native, tree, session, dims)?;
                 }
                 if let Some(aggregate) = shape.unpacked_struct.clone()
+                    && shape.unpacked.is_empty()
                     && !pattern
                 {
                     // A default that is not a structure of the member's type
@@ -536,7 +540,8 @@ pub(in crate::ast) fn bind_native(
                             .ok_or_else(|| unsupported("assignment pattern operand signedness"))?;
                     let descend_default = default
                         && (shape.unpacked.is_empty()
-                            || native_rank(id, native, dims) < shape.unpacked.len());
+                            || native_rank(id, native, tree, session, dims)?
+                                < shape.unpacked.len());
                     let value_type =
                         bound_patterns::native_value_type(id, tree, session, &type_dims)?;
                     values.push(assignment_value(
@@ -601,6 +606,9 @@ fn unpacked_struct_items<'a>(
             }
             bindings.into_iter().map(|value| (value, false)).collect()
         }
+        NativeKind::Repeat(times) => {
+            indexed_items(NativeKind::Repeat(times), bindings, members.len(), |_| None)?
+        }
         NativeKind::Keyed(keys) => {
             let mut named = Vec::new();
             let mut default = None;
@@ -637,7 +645,6 @@ fn unpacked_struct_items<'a>(
                 })
                 .collect::<Converted<Vec<_>>>()?
         }
-        _ => return Err(unsupported("structure assignment pattern form")),
     };
     Ok(members
         .iter()
@@ -653,8 +660,11 @@ fn unpacked_struct_items<'a>(
 fn native_rank(
     mut id: ExprId,
     native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
-) -> usize {
+) -> Converted<usize> {
+    let root = id;
     let mut indices = 0;
     loop {
         match &native.expression(id).kind {
@@ -667,11 +677,17 @@ fn native_rank(
                 id = *expression;
             }
             ExprKind::Name(name) => {
-                return dims
+                return Ok(dims
                     .get(&instances::normalize_identifier(&name.spelling))
-                    .map_or(0, |shape| shape.unpacked.len().saturating_sub(indices));
+                    .map_or(0, |shape| shape.unpacked.len().saturating_sub(indices)));
             }
-            _ => return 0,
+            _ => {
+                // Members and subarrays retain their resolved unpacked shape.
+                // An array-valued default is copied as a whole value rather
+                // than broadcast into scalar elements (10.9.2).
+                return Ok(dimensions::operand_shape(root, tree, session, dims)?
+                    .map_or(0, |shape| shape.unpacked.len()));
+            }
         }
     }
 }

@@ -320,3 +320,92 @@ endmodule
     assert_eq!(sim.get(q), 4u8.into());
     assert!(sim.scheduler_stats().checked_steps > 0);
 }
+
+struct DataChanges {
+    count: SignalRef,
+    mirror: SignalRef,
+    last: u64,
+    changes: mpsc::Sender<(u64, u64)>,
+    settled: mpsc::Sender<(u64, u64)>,
+}
+
+impl<B: SimBackend> SlotObserver<B> for DataChanges {
+    fn before_domains(&mut self, io: &mut SlotIo<'_, B>, _: u64) {
+        let count = u64::try_from(io.get(self.count)).unwrap();
+        if count != self.last {
+            self.changes
+                .send((count, u64::try_from(io.get(self.mirror)).unwrap()))
+                .unwrap();
+        }
+        self.last = count;
+    }
+
+    fn end_of_slot(&mut self, io: &mut SlotIo<'_, B>, _: u64) {
+        self.settled
+            .send((
+                u64::try_from(io.get(self.count)).unwrap(),
+                u64::try_from(io.get(self.mirror)).unwrap(),
+            ))
+            .unwrap();
+    }
+}
+
+#[test]
+fn observed_data_changes_precede_native_waiters_and_unwatching_restores_native_slots() {
+    let source = r#"`timescale 1ns/1ns
+module Top;
+    logic clk = 0;
+    logic [7:0] count = 0;
+    logic [7:0] mirror = 0;
+    always #5 clk = ~clk;
+    always_ff @(posedge clk) count <= count + 1;
+    initial forever begin
+        @(count);
+        mirror = count;
+    end
+endmodule
+"#;
+    for four_state in [false, true] {
+        for optimize in [false, true] {
+            let mut sim = Simulation::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top")
+                .four_state(four_state)
+                .optimize(optimize)
+                .build_native()
+                .unwrap();
+            sim.run_until(0).unwrap();
+            assert!(
+                sim.scheduler_stats()
+                    .kernels
+                    .iter()
+                    .all(|kernel| { matches!(kernel, celox::KernelSchedule::Compiled) })
+            );
+            let count = sim.signal("count");
+            let (changes, received) = mpsc::channel();
+            let (settled, final_values) = mpsc::channel();
+            sim.observe_slots(
+                Box::new(DataChanges {
+                    count,
+                    mirror: sim.signal("mirror"),
+                    last: 0,
+                    changes,
+                    settled,
+                }),
+                &[count],
+            );
+            sim.run_until(30).unwrap();
+            assert_eq!(
+                received.try_iter().collect::<Vec<_>>(),
+                vec![(1, 0), (2, 1), (3, 2)]
+            );
+            assert!(
+                final_values
+                    .try_iter()
+                    .all(|(count, mirror)| count == mirror)
+            );
+            let compiled = sim.scheduler_stats().compiled_slots;
+            sim.set_observed_signals(&[]);
+            sim.run_until(60).unwrap();
+            assert!(sim.scheduler_stats().compiled_slots > compiled);
+        }
+    }
+}

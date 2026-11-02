@@ -16,7 +16,73 @@ per state mode**, comprising 1,028 checked-in cases and 622 generated cases.
 library submodules, generates into a fresh temporary tree, checks the reviewed
 counts in [`corpus.json`](corpus.json), and rejects stale or foreign generated
 cases. CI prepares this corpus before collecting results. The dashboard's
-`cores` and `imported` groups are separate corpora and are not included here.
+`cores` and `imported` groups are separate corpora and are not included in the
+PR corpus. Imported tests run in the daily extended workflow described below.
+
+## Daily extended verification and website
+
+`sv-tests-daily.yml` runs daily and on manual dispatch, outside PR gates. It
+measures the **imported** (3,442 cases) and **cores** (21 cases) groups separately
+at the pinned revision, in both state modes. A shared release driver is built once;
+the two matrix jobs fetch only their own dependencies. Case failures are
+measurements, while infrastructure failures fail collection. Neither group
+changes the PR expectation contract.
+
+The Verification page also reads the main group's current `expected.tsv` at docs
+build time. That is a reviewed baseline assembled from multiple runs, not a fresh
+full-corpus measurement. `docs/verification/main-tags.json` captures tag metadata
+from the matching pinned corpus; regenerate it when the corpus revision changes:
+
+```sh
+python conformance/sv-tests/snapshot_metadata.py ../sv-tests docs/verification/main-tags.json
+```
+
+For imported tests, initialize the main dependencies above and:
+
+```sh
+git -C ../sv-tests submodule update --init --depth 1 \
+  third_party/tests/hdlconvertor third_party/tests/utd-sv \
+  third_party/tests/projf-explore third_party/cores/basejump_stl \
+  third_party/tools/yosys third_party/tools/icarus
+git -C ../sv-tests/third_party/tools/icarus submodule update --init --depth 1 ivtest
+python conformance/sv-tests/prepare.py ../sv-tests
+python conformance/sv-tests/prepare_imported.py ../sv-tests
+python conformance/sv-tests/run.py ../sv-tests \
+  --driver target/debug/examples/sv_tests --jobs 4 --group imported \
+  --out-dir work/sv-tests-imported --report work/sv-tests-imported.tsv
+```
+
+Use a clean checkout and prepare main before adding imported cases. For cores,
+install `requirements-cores.txt` into the same Python environment and initialize
+`third_party/cores/{ariane,black-parrot,fx68k,ibex,rggen-sample,rggen-sv-rtl,rsd,scr1,tnoc,veer-eh1,veer-el2}`
+at the pinned submodule commits. Then run:
+
+```sh
+python conformance/sv-tests/prepare_cores.py ../sv-tests
+python conformance/sv-tests/run.py ../sv-tests \
+  --driver target/debug/examples/sv_tests --jobs 4 --group cores \
+  --out-dir work/sv-tests-cores --report work/sv-tests-cores.tsv
+```
+
+The unmodified upstream generators produce the core wrappers and file lists.
+The preparer initializes required nested RTL/testbench dependencies and rejects
+missing sources or unreviewed missing includes. CVA6's testbench retains two
+upstream include defects: the uninstalled Spike include and an `axi_node` path
+resolved against `tests/`. Exact paths, case and revision are recorded in
+`input-issues.json`; only this positive fixture may forward them to the driver.
+It remains an official failure and is classified as an upstream input issue.
+No source or metadata is repaired. Upstream compatible-runner restrictions remain
+in force; skipped core tags stay visible without entering the executed denominator.
+
+Complete imported summaries publish to `verification-data/latest.json`; cores
+publish to `verification-data/cores.json`. The page keeps independent provenance
+for each group, retains snapshots offline, and loads newer complete results.
+Raw reports/logs are retained as workflow artifacts for 14 days. An incomplete
+collection cannot replace public results. Tag rows overlap, and the UI keeps
+2state/4state totals separate. See the page's methodology notes for parsing,
+elaboration, negative tests and imported output-validation limitations.
+
+## Main corpus reporting
 
 The TSV report has a companion `.summary.json` containing the tested revision,
 per-group/per-state pass totals, per-tag results, fully passing tag totals, and execution-mode
@@ -51,6 +117,12 @@ parsed declarations and instantiations; multiple roots receive a diagnostic
 because Celox’s simulator requires one root. Each input file is a separate
 compilation unit, so source-defined macros do not leak between files;
 command-line defines apply to each file.
+
+Source files and included headers accept non-UTF-8 bytes inside comments by
+default. Invalid comment bytes are replaced with spaces, preserving valid UTF-8
+and byte offsets; code and string bytes are not silently replaced. The driver
+option `--source-encoding utf8` requires UTF-8 throughout both sources and
+headers; `--source-encoding non-utf8-comments` explicitly selects the default.
 
 | Result | Meaning |
 | --- | --- |
@@ -603,3 +675,90 @@ measurement. Shared cases additionally check nested types, explicit-initializer
 suppression, declaration scopes, parameter specializations, constant functions,
 assignment sizing, four-state values, local lifetimes and class properties.
 The supported boundaries are documented in the language reference.
+
+Fixed-size unpacked-structure arrays update two reviewed expectation rows:
+`chapter-5/5.10-structure-arrays.sv` passes in both state modes. The focused
+four-verdict official run also confirms `5.10-structure-arrays-illegal.sv`
+continues to reject C-style flattened initialization in both modes. This is
+not a new full-corpus measurement. The shared suite exercises element and
+member writes, whole-array and subarray copies, nested members, local lifetime,
+wide NBA destinations, and invalid-index defaults. Arrays with non-integral,
+mixed-state or defaulted members remain unsupported.
+
+Fixed integral array members of unpacked structures update two reviewed
+expectation rows: `chapter-5/5.10-structure-replication.sv` passes in both state
+modes. A focused six-verdict official run also confirms the existing structure
+array pass and illegal flattened initializer rejection in both modes. This is
+not a new full-corpus measurement. Shared cases additionally exercise nested
+members, declaration-scope dimensions, dynamic indices, X/Z preservation,
+member-array and subarray copies, wide elements and local lifetime. Variable-size
+and non-integral array members and array-member structure interfaces remain
+unsupported; see the language reference for the exact boundaries.
+
+Default-only associative array literals update two reviewed expectation rows:
+`chapter-7/arrays/associative/literals.sv` passes in both state modes in a
+focused official-runner invocation. This is not a new full-corpus measurement.
+Shared cases check assignment-time string defaults, replacing defaults on
+copies, entry deletion and clearing, unknown-index reads with X/Z defaults,
+wide elements and heap lifetime. Explicit index entries in associative array
+literals remain unsupported.
+
+Dynamic-array and queue `shuffle` updates two reviewed expectations:
+`chapter-7/arrays/unpacked/ordering-methods/shuffle.sv` passes in both state
+modes in a focused official-runner invocation. This is not a full-corpus
+measurement. The official case prints the arrays without checking the result;
+shared regressions additionally check element multiplicities, X/Z preservation,
+wide values, string and class-handle lifetime, bounded queues, empty and singleton
+sequences, copies and selected nested receivers. Celox-specific tests check
+process RNG seeding and serialized checkpoint replay without imposing one
+simulator's permutation on the external tools. Fixed-array ordering remains
+unsupported.
+
+Single constant delays on continuous assignment statements update two reviewed
+expectations: `chapter-10/10.3.3--cont-assignment-delay.sv` passes in both state
+modes in a focused official-runner invocation. This is not a full-corpus
+measurement; the official case checks elaboration without checking waveforms.
+Shared regressions additionally exercise inertial pulse rejection, unchanged
+RHS deadlines, destination sizing, independent selected drivers, X/Z,
+generate-local constants and zero delays. Celox API tests check scope precision,
+checkpoint replay and removal of cancelled timers. Delay lists, dynamic amounts,
+complex targets and net-declaration delays remain outside the supported subset.
+
+Net-declaration continuous initializers now honor a single constant delay, as
+in `wire #5 w = a;`. No official expectation rows change: the pinned net-delay
+case uses an uninitialized net declaration instead. Three shared cases check
+continuous updates, inertial cancellation, independent declarators,
+generate-local constants, destination sizing and X/Z. Icarus and xezim pass
+all three; Verilator passes the two two-state cases and skips the four-state
+case as unsupported. Independent net delays remain a separate implementation.
+
+Independent constant net delays now delay scalar and packed-net bits after
+continuous or supported gate drivers. Seven shared cases check per-bit pending
+updates, composed assignment/net delays, mixed declarators, scoped constants,
+selected drivers, nonzero/ascending bounds and wholly/partially undriven Z. Checkpoints retain
+independent pending bits. Instance connections to delayed nets and delayed
+input/inout ports remain unsupported. The existing official net-delay case
+keeps its two pass expectations; its verdict does not test waveforms, so no
+new official pass count is claimed. Focused external disagreements are recorded
+in the shared suite's limitations with standalone evidence.
+
+String `$fgets` support updates two reviewed expectations:
+`chapter-21/21.3--fgets.sv` passes in both state modes in a focused official
+runner invocation. This is not a new full-corpus measurement. That case reads
+from a write-only file without checking the return value or contents; the
+shared invalid-descriptor case and Celox's temporary-file regressions provide
+additional status, line-boundary, EOF, pushback, long-line and byte-content
+checks. Destinations include scalar strings, fixed string-array elements and
+automatic reference arguments. Packed buffers remain unsupported. Native image
+and interpreter/tiered/Cranelift/Wasm tests replay file-handler and core snapshots.
+EOF destination policy and NUL-input tool differences are documented in the
+shared suite's limitations, without changing retained failure exclusions.
+
+File error queries update two reviewed expectations: `chapter-21/21.3--ferror.sv`
+passes in 2-state and 4-state modes in a focused official invocation. The
+upstream case only queries a newly opened file and prints the result; Celox's
+regressions additionally check error recording, per-FD independence, successful
+reset, EOF, packed/string outputs, selected destination side effects and replay.
+The shared success-description case enforces 21.3.7's explicit empty-output rule;
+Icarus passes, while the observed Verilator/xezim wording disagreements have
+focused retained evidence and exclusions. This is not a full-corpus measurement.

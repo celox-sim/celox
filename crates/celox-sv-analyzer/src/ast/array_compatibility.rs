@@ -108,8 +108,8 @@ pub(super) fn incompatible(
     dims: &PackedDimensions,
 ) -> Option<(String, String)> {
     let table = &mut session.types;
-    let actual = semantic_types::of_shape(table, &tree.functions, actual, &dims.const_env)?;
-    let target = semantic_types::of_shape(table, &tree.functions, target, &dims.const_env)?;
+    let actual = actual.type_id(table, &tree.functions, &dims.const_env)?;
+    let target = target.type_id(table, &tree.functions, &dims.const_env)?;
     incompatible_types(table, actual, target)
 }
 
@@ -127,11 +127,11 @@ pub(super) fn selected_unpacked_shape(
         .filter(|rest| !rest.is_empty())?;
     // A subarray has the element type of the whole array; `$typename`
     // compares the declared dimensions before it uses the declared type.
-    Some(VariableDimensions {
+    Some(VariableDimensions::new(VariableShape {
         container: None,
         unpacked: unpacked.to_vec(),
-        ..shape.clone()
-    })
+        ..shape.clone_shape()
+    }))
 }
 
 /// The variable an expression selects from, as the dotted path of its
@@ -227,8 +227,9 @@ fn native_unpacked_type(
     use semantic_types::{ArrayKind, Range, TyData};
     let (path, indices, slice) = native_selection(id, tree, session, dims)?;
     let table = &mut session.types;
-    let mut ty =
-        semantic_types::of_shape(table, &tree.functions, dims.get(&path)?, &dims.const_env)?;
+    let mut ty = dims
+        .get(&path)?
+        .type_id(table, &tree.functions, &dims.const_env)?;
     for _ in 0..indices {
         let TyData::Array { element, .. } = table.data(ty) else {
             return None;
@@ -304,8 +305,7 @@ fn check_assignment(
         check_assignment(tree, session, *then_expression, target, context, dims)?;
         return check_assignment(tree, session, *else_expression, target, context, dims);
     }
-    let target =
-        semantic_types::of_shape(&mut session.types, &tree.functions, target, &dims.const_env);
+    let target = target.type_id(&mut session.types, &tree.functions, &dims.const_env);
     let actual = native_unpacked_type(id, tree, session, dims);
     let Some((actual, target)) = target
         .zip(actual)

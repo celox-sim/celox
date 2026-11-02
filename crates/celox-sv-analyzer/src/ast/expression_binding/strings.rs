@@ -198,6 +198,13 @@ pub(in crate::ast) fn native_string(
         }
         // `e.name` without parentheses (6.19.5.6, 6.19.5.7).
         ExprKind::Member { .. } if enum_name(tree, session, id, native, dimensions) => true,
+        // A method called without parentheses (13.5.5).
+        ExprKind::Member { .. }
+            if objects::method(tree, session, id, native, dimensions)
+                .is_ok_and(|method| method.is_some()) =>
+        {
+            returns_string(tree, session, id, native, dimensions)
+        }
         // A string member of a container element of unpacked structure type.
         ExprKind::Member { .. }
             if containers::element_member(
@@ -237,7 +244,7 @@ pub(in crate::ast) fn native_string(
 
 /// Only an index that consumes every unpacked dimension selects one string.
 /// A slice or a remaining subarray is still an array, including extent one.
-pub(super) fn fixed_array_element(
+pub(in crate::ast) fn fixed_array_element(
     tree: &AnalysisContext<'_>,
     mut id: ExprId,
     native: &Declarations,
@@ -287,22 +294,8 @@ fn returns_string(
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> bool {
-    let name = match objects::method(tree, session, id, native, dimensions) {
-        Ok(Some((name, ..))) => name,
-        Ok(None) => match super::direct::callable_name(tree, id, native) {
-            Some(name) => name,
-            None => return false,
-        },
-        Err(_) => return false,
-    };
-    dimensions
-        .functions
-        .get(&name)
-        .is_some_and(|function| function.return_string)
-        || dimensions
-            .function_return_types
-            .get(&name)
-            .is_some_and(|metadata| metadata.string)
+    expression_types::function_result(tree, session, id, native, dimensions)
+        .is_some_and(|ty| matches!(session.types.data(ty), semantic_types::TyData::String))
 }
 
 /// Whether native callee expression `id` names the `name` method of an

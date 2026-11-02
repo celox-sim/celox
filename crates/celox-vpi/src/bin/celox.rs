@@ -256,6 +256,11 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
         .signal_access(arguments.design.signal_access.clone())
         .plusargs(arguments.plusargs.iter().cloned())
         .defer_initialization(arguments.save_state.restore_checkpoint.is_some());
+    let builder = if let Some(path) = &arguments.execution.vcd {
+        builder.vcd(path)
+    } else {
+        builder
+    };
     let builder = if signal.is_some() || arguments.save_state.restore_checkpoint.is_some() {
         builder.file_system(|| Box::<checkpoint_fs::CheckpointFs>::default())
     } else {
@@ -287,7 +292,13 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
             if let Some(progress) = progress {
                 saves.restore_progress(&simulation, &arguments.design.top, progress)?;
             }
-            simulate_sv(simulation, max_steps, saves, &mut std::io::stdout())
+            simulate_sv(
+                simulation,
+                max_steps,
+                saves,
+                &mut std::io::stdout(),
+                arguments.execution.report,
+            )
         }};
     }
     match arguments.execution.backend() {
@@ -307,12 +318,31 @@ fn simulate_sv<B: celox::SimBackend>(
     max_steps: u64,
     mut saves: StateSaves,
     output: &mut (impl Write + Send),
+    report: bool,
+) -> Result<(), String> {
+    let result = simulate_sv_inner(&mut simulation, max_steps, &mut saves, output, report);
+    simulation
+        .flush_vcd()
+        .map_err(|error| format!("VCD flush failed: {error}"))?;
+    result
+}
+
+#[cfg(feature = "systemverilog")]
+fn simulate_sv_inner<B: celox::SimBackend>(
+    simulation: &mut celox::Simulation<B>,
+    max_steps: u64,
+    saves: &mut StateSaves,
+    output: &mut (impl Write + Send),
+    report: bool,
 ) -> Result<(), String> {
     let initial = simulation.eval_comb();
-    drain_sv_output(&mut simulation, output, &mut saves.failed)?;
+    drain_sv_output(simulation, output, &mut saves.failed)?;
     initial.map_err(|error| error.to_string())?;
-    saves.start(&mut simulation);
-    saves.service_signal(&mut simulation);
+    if report {
+        report_sv_scheduler(simulation, "initial", 0, output)?;
+    }
+    saves.start(simulation);
+    saves.service_signal(simulation);
     let mut steps = 0;
     while !simulation.is_finished()
         && let Some(next) = simulation.next_event_time()
@@ -323,28 +353,59 @@ fn simulate_sv<B: celox::SimBackend>(
         // Without state files to save at time steps, slots run in the
         // compiled scheduler where it can.
         if !saves.saves_at_steps()
-            && let Some(run) = run_sv_slots(&mut simulation, max_steps - steps, &mut saves, output)?
+            && let Some(run) = run_sv_slots(simulation, max_steps - steps, saves, output)?
         {
             steps += run;
             continue;
         }
-        saves.before(&mut simulation, next)?;
+        saves.before(simulation, next)?;
         let step = simulation.step();
-        drain_sv_output(&mut simulation, output, &mut saves.failed)?;
+        drain_sv_output(simulation, output, &mut saves.failed)?;
         if step.map_err(|error| error.to_string())?.is_none() {
             break;
         }
-        saves.after_step(&mut simulation)?;
+        saves.after_step(simulation)?;
         steps += 1;
     }
     let finished = simulation.finish();
-    drain_sv_output(&mut simulation, output, &mut saves.failed)?;
+    drain_sv_output(simulation, output, &mut saves.failed)?;
     finished.map_err(|error| error.to_string())?;
-    saves.finish(&mut simulation)?;
+    saves.finish(simulation)?;
+    if report {
+        report_sv_scheduler(simulation, "finished", steps, output)?;
+    }
     if saves.failed {
         return Err("SystemVerilog testbench reported an assertion failure or $error".to_string());
     }
     Ok(())
+}
+
+/// Report actual compiled-slot execution as well as static eligibility.
+#[cfg(feature = "systemverilog")]
+fn report_sv_scheduler<B: celox::SimBackend>(
+    simulation: &celox::Simulation<B>,
+    phase: &str,
+    total_slots: u64,
+    output: &mut impl Write,
+) -> Result<(), String> {
+    let stats = simulation.scheduler_stats();
+    let compiled = stats
+        .kernels
+        .iter()
+        .filter(|kernel| matches!(kernel, celox::KernelSchedule::Compiled))
+        .count();
+    let fallback: std::collections::BTreeSet<_> = stats
+        .kernels
+        .iter()
+        .filter_map(|kernel| match kernel {
+            celox::KernelSchedule::Reference(reason) => Some(reason.as_str()),
+            celox::KernelSchedule::Compiled => None,
+        })
+        .collect();
+    writeln!(output, "CELOX_SCHEDULER phase={phase} mode={:?} total_slots={total_slots} compiled_slots={} kernel_compiled={} kernel_reference={} reasons_json={}",
+        stats.mode, stats.compiled_slots, compiled, stats.kernels.len()-compiled,
+        serde_json::to_string(&fallback).expect("scheduler reasons are serializable"))
+        .map_err(|error| format!("failed to write scheduler report: {error}"))
 }
 
 /// The state files a SystemVerilog run saves (`--save-state-*`).
@@ -1464,7 +1525,8 @@ mod tests {
                 .unwrap();
         simulation.add_clock("clk", 2, 1);
         let mut output = Vec::new();
-        let error = simulate_sv(simulation, 3, StateSaves::default(), &mut output).unwrap_err();
+        let error =
+            simulate_sv(simulation, 3, StateSaves::default(), &mut output, false).unwrap_err();
         assert!(error.contains("exceeded --max-steps 3"));
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("tick"));
@@ -1485,7 +1547,7 @@ mod tests {
             .build()
             .unwrap();
             let mut output = Vec::new();
-            simulate_sv(simulation, 10, StateSaves::default(), &mut output).unwrap();
+            simulate_sv(simulation, 10, StateSaves::default(), &mut output, false).unwrap();
             assert_eq!(String::from_utf8(output).unwrap(), "final=42\n");
         }
     }
@@ -1508,8 +1570,14 @@ mod tests {
             celox::Simulation::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top")
                 .build()
                 .unwrap();
-        let error =
-            simulate_sv(simulation, u64::MAX, StateSaves::default(), &mut Closed).unwrap_err();
+        let error = simulate_sv(
+            simulation,
+            u64::MAX,
+            StateSaves::default(),
+            &mut Closed,
+            false,
+        )
+        .unwrap_err();
         assert!(
             error.contains("failed to write simulation output"),
             "{error}"
@@ -1530,7 +1598,7 @@ mod tests {
             .build()
             .unwrap();
             let mut output = Vec::new();
-            let result = simulate_sv(simulation, 10, StateSaves::default(), &mut output);
+            let result = simulate_sv(simulation, 10, StateSaves::default(), &mut output, false);
             (result, String::from_utf8(output).unwrap())
         };
         let (result, output) = run("$info");

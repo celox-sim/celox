@@ -1,0 +1,34 @@
+{
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "timing::continuous_delay_net_per_bit at 29:18: assert_eq y: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "timing::continuous_delay_net_per_bit",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "timing::continuous_delay_net_selected_drivers at 46:17: assert_eq y: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "timing::continuous_delay_net_selected_drivers",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "exclude_stronger_than_sv": false,
+  "schema_version": 3,
+  "suite": "sv",
+  "suite_version": "0.12.0",
+  "tool": "verilator",
+  "version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "include_ignored": true,
+  "scope": "Focused independent net delay run with --include-ignored; passing and unsupported cases omitted, only observed failures retained."
+}

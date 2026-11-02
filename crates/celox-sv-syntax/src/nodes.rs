@@ -1133,6 +1133,8 @@ pub enum AssertionHeader {
     Concurrent {
         clock: TimingControlId,
         disable: Option<ExprId>,
+        /// A single-cycle antecedent for overlapped implication (`|->`).
+        antecedent: Option<ExprId>,
         condition: ExprId,
         module_item: bool,
         tokens: TokenRange,

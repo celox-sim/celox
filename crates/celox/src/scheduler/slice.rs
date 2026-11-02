@@ -27,8 +27,8 @@ struct Indexed {
     definitions: HashMap<RegisterId, Definition>,
     /// The predecessors of each block, with the arguments of their edge.
     incoming: HashMap<BlockId, Vec<(BlockId, Vec<RegisterId>)>>,
-    /// The branch and switch selectors each block is control dependent on.
-    control: HashMap<BlockId, Vec<RegisterId>>,
+    /// Immediate controlling branch/switch blocks and their selectors.
+    control: HashMap<BlockId, Vec<(BlockId, RegisterId)>>,
 }
 
 pub(crate) struct CombSlicer<'a> {
@@ -179,7 +179,7 @@ fn index(unit: &Unit) -> Indexed {
     // one of the branch's successors up to (not including) the branch's
     // post-dominator.
     let ipdom = post_dominators(unit);
-    let mut control: HashMap<BlockId, Vec<RegisterId>> = HashMap::default();
+    let mut control: HashMap<BlockId, Vec<(BlockId, RegisterId)>> = HashMap::default();
     for (&id, block) in &unit.blocks {
         let Some(selector) = selector(&block.terminator) else {
             continue;
@@ -194,7 +194,7 @@ fn index(unit: &Unit) -> Indexed {
                 if Some(current) == stop || !seen.insert(current) {
                     break;
                 }
-                control.entry(current).or_default().push(selector);
+                control.entry(current).or_default().push((id, selector));
                 runner = ipdom.get(&current).copied().flatten();
             }
         }
@@ -240,10 +240,124 @@ impl<'a> CombSlicer<'a> {
         self.stores.contains_key(&self.representative(address))
     }
 
+    /// Storage which can change after the supplied inputs change, through
+    /// both data and control dependencies, including block-argument choices.
+    pub(crate) fn affected_storage(
+        &self,
+        inputs: impl IntoIterator<Item = AbsoluteAddr>,
+    ) -> HashSet<AbsoluteAddr> {
+        let mut users: HashMap<Need, Vec<Need>> = HashMap::default();
+        let mut edge = |source, target| users.entry(source).or_default().push(target);
+        for (unit, body) in self.units.iter().enumerate() {
+            for (&block, body) in &body.blocks {
+                let block_need = Need::Block(unit, block);
+                for &(controller, selector) in
+                    self.indexed[unit].control.get(&block).into_iter().flatten()
+                {
+                    edge(Need::Register(unit, selector), block_need);
+                    // The selector may be captured in the entry block. A
+                    // nested branch still executes only when its controlling
+                    // block executes, even when that selector is unchanged.
+                    edge(Need::Block(unit, controller), block_need);
+                }
+                for (position, &parameter) in body.params.iter().enumerate() {
+                    let target = Need::Register(unit, parameter);
+                    edge(block_need, target);
+                    for (predecessor, arguments) in self.indexed[unit]
+                        .incoming
+                        .get(&block)
+                        .into_iter()
+                        .flatten()
+                    {
+                        if let Some(&argument) = arguments.get(position) {
+                            edge(Need::Register(unit, argument), target);
+                        }
+                        edge(Need::Block(unit, *predecessor), target);
+                        // A branch may pass different constants directly to
+                        // the same successor: neither argument itself changes.
+                        if let Some(selector) =
+                            selector(&self.units[unit].blocks[predecessor].terminator)
+                        {
+                            edge(Need::Register(unit, selector), target);
+                        }
+                    }
+                }
+                for instruction in &body.instructions {
+                    let register = instruction
+                        .defined_register()
+                        .map(|register| Need::Register(unit, register));
+                    let storage = instruction.memory_write().map(|write| {
+                        Need::Storage(self.representative(write.addr.absolute_addr()))
+                    });
+                    for target in register.into_iter().chain(storage) {
+                        edge(block_need, target);
+                        instruction
+                            .for_each_use(|register| edge(Need::Register(unit, register), target));
+                        if let Some(read) = instruction.memory_read() {
+                            edge(
+                                Need::Storage(self.representative(read.addr.absolute_addr())),
+                                target,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let mut work: Vec<_> = inputs
+            .into_iter()
+            .map(|address| Need::Storage(self.representative(address)))
+            .collect();
+        let mut seen = HashSet::default();
+        while let Some(need) = work.pop() {
+            if seen.insert(need) {
+                work.extend(users.get(&need).into_iter().flatten().copied());
+            }
+        }
+        seen.into_iter()
+            .filter_map(|need| match need {
+                Need::Storage(address) if self.stores.contains_key(&address) => Some(address),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Re-evaluate changed inputs and stateful activations, reading cached
+    /// values of unaffected intermediate storage instead of recomputing it.
+    pub(crate) fn affected_slice(
+        &self,
+        inputs: impl IntoIterator<Item = AbsoluteAddr>,
+    ) -> Vec<Unit> {
+        let affected = self.affected_storage(inputs);
+        self.slice_selected(affected.iter().copied(), true, Some(&affected))
+    }
+
     /// The part of the settle that computes `reads`: every store of storage
     /// they or the part load, and what decides it. Stores the part does not
     /// need, and the settle's other effects, are left to the settle.
     pub(crate) fn slice(&self, reads: impl IntoIterator<Item = AbsoluteAddr>) -> Vec<Unit> {
+        self.slice_with_control(reads, false)
+    }
+
+    /// Even without a mutable-state sink, an eager activation must retain
+    /// control flow which cannot fold away, such as a nonterminating loop.
+    pub(crate) fn eager_slice(&self, reads: impl IntoIterator<Item = AbsoluteAddr>) -> Vec<Unit> {
+        self.slice_with_control(reads, true)
+    }
+
+    fn slice_with_control(
+        &self,
+        reads: impl IntoIterator<Item = AbsoluteAddr>,
+        preserve_control: bool,
+    ) -> Vec<Unit> {
+        self.slice_selected(reads, preserve_control, None)
+    }
+
+    fn slice_selected(
+        &self,
+        reads: impl IntoIterator<Item = AbsoluteAddr>,
+        preserve_control: bool,
+        allowed: Option<&HashSet<AbsoluteAddr>>,
+    ) -> Vec<Unit> {
         let mut kept: Vec<HashSet<(BlockId, usize)>> = vec![HashSet::default(); self.units.len()];
         let mut seen: HashSet<Need> = HashSet::default();
         let mut work: Vec<Need> = reads
@@ -254,12 +368,12 @@ impl<'a> CombSlicer<'a> {
             .collect();
         // Reads no unit stores hold their values already. Built from no
         // needs, the part would still keep the loops it cannot fold.
-        if work.is_empty() {
+        if work.is_empty() && !preserve_control {
             return Vec::new();
         }
         let mut units: Vec<Unit>;
         loop {
-            self.walk(&mut work, &mut seen, &mut kept);
+            self.walk(&mut work, &mut seen, &mut kept, allowed);
             units = self.build(&kept, &seen);
             // A terminator whose operands the walk did not reach survives
             // only where folding could not remove it: keep what it uses.
@@ -284,6 +398,7 @@ impl<'a> CombSlicer<'a> {
         work: &mut Vec<Need>,
         seen: &mut HashSet<Need>,
         kept: &mut [HashSet<(BlockId, usize)>],
+        allowed: Option<&HashSet<AbsoluteAddr>>,
     ) {
         while let Some(need) = work.pop() {
             if !seen.insert(need) {
@@ -291,6 +406,9 @@ impl<'a> CombSlicer<'a> {
             }
             match need {
                 Need::Storage(address) => {
+                    if allowed.is_some_and(|allowed| !allowed.contains(&address)) {
+                        continue;
+                    }
                     for &(unit, block, position) in self.stores.get(&address).into_iter().flatten()
                     {
                         kept[unit].insert((block, position));
@@ -335,8 +453,11 @@ impl<'a> CombSlicer<'a> {
                     }
                 }
                 Need::Block(unit, block) => {
-                    for &selector in self.indexed[unit].control.get(&block).into_iter().flatten() {
+                    for &(controller, selector) in
+                        self.indexed[unit].control.get(&block).into_iter().flatten()
+                    {
                         work.push(Need::Register(unit, selector));
+                        work.push(Need::Block(unit, controller));
                     }
                 }
             }
@@ -482,6 +603,31 @@ mod tests {
         RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, address(id))
     }
 
+    #[test]
+    fn eager_empty_sink_keeps_nonterminating_control() {
+        let mut builder = Builder::new();
+        let forever = builder.new_block();
+        builder.seal_block(SIRTerminator::Jump(forever, Vec::new()));
+        builder.switch_to_block(forever);
+        builder.seal_block(SIRTerminator::Jump(forever, Vec::new()));
+        let (blocks, register_map, _) = builder.drain();
+        let units = [Unit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        }];
+        let slicer = CombSlicer::new(&units, HashMap::default());
+        assert!(slicer.slice([]).is_empty());
+        let eager = slicer.eager_slice([]);
+        assert_eq!(eager.len(), 1);
+        eager[0].verify();
+        let cfg = celox_sir::cfg::SirCfg::analyze(&eager[0]).unwrap();
+        assert!(
+            !cfg.loops.is_empty(),
+            "an activation cannot elide an infinite loop"
+        );
+    }
+
     /// `if (a) { x = c; y = c; }  z = c;`
     fn settle() -> Unit {
         let mut b = Builder::new();
@@ -555,6 +701,232 @@ mod tests {
             .collect();
         stored.sort_unstable();
         stored
+    }
+
+    #[test]
+    fn affected_slice_reads_cached_unaffected_intermediates() {
+        let mut b = Builder::new();
+        let a = b.alloc_bit(8, false);
+        b.emit(SIRInstruction::Load(a, stable(0), SIROffset::Static(0), 8));
+        b.emit(SIRInstruction::Store(
+            stable(1),
+            SIROffset::Static(0),
+            8,
+            a,
+            vec![],
+            vec![],
+        ));
+        let cached = b.alloc_bit(8, false);
+        b.emit(SIRInstruction::Load(
+            cached,
+            stable(1),
+            SIROffset::Static(0),
+            8,
+        ));
+        let clock = b.alloc_bit(8, false);
+        b.emit(SIRInstruction::Load(
+            clock,
+            stable(2),
+            SIROffset::Static(0),
+            8,
+        ));
+        let result = b.alloc_bit(8, false);
+        b.emit(SIRInstruction::Binary(result, clock, BinaryOp::And, cached));
+        b.emit(SIRInstruction::Store(
+            stable(3),
+            SIROffset::Static(0),
+            8,
+            result,
+            vec![],
+            vec![],
+        ));
+        b.seal_block(SIRTerminator::Return);
+        let (blocks, register_map, _) = b.drain();
+        let units = [Unit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        }];
+        let slicer = CombSlicer::new(&units, HashMap::default());
+        let slice = slicer.affected_slice([address(2)]);
+        assert_eq!(stored(&slice), [address(3)]);
+        assert!(instructions(&slice[0]).any(|inst| matches!(inst, SIRInstruction::Load(_, target, ..) if target.absolute_addr() == address(1))));
+        assert!(!instructions(&slice[0]).any(|inst| matches!(inst, SIRInstruction::Load(_, target, ..) if target.absolute_addr() == address(0))));
+        slice[0].verify();
+    }
+
+    #[test]
+    fn affected_storage_tracks_a_branch_choosing_constant_block_arguments() {
+        let mut b = Builder::new();
+        let condition = b.alloc_bit(1, false);
+        b.emit(SIRInstruction::Load(
+            condition,
+            stable(0),
+            SIROffset::Static(0),
+            1,
+        ));
+        let zero = b.alloc_bit(8, false);
+        let one = b.alloc_bit(8, false);
+        b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+        b.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+        let parameter = b.alloc_bit(8, false);
+        let join = b.new_block_with(vec![parameter]);
+        b.seal_block(SIRTerminator::Branch {
+            cond: condition,
+            true_block: (join, vec![one]),
+            false_block: (join, vec![zero]),
+        });
+        b.switch_to_block(join);
+        b.emit(SIRInstruction::Store(
+            stable(1),
+            SIROffset::Static(0),
+            8,
+            parameter,
+            vec![],
+            vec![],
+        ));
+        b.seal_block(SIRTerminator::Return);
+        let (blocks, register_map, _) = b.drain();
+        let units = [Unit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        }];
+        let slicer = CombSlicer::new(&units, HashMap::default());
+        assert_eq!(
+            slicer.affected_storage([address(0)]),
+            [address(1)].into_iter().collect()
+        );
+        let slice = slicer.affected_slice([address(0)]);
+        slice[0].verify();
+        assert_eq!(stored(&slice), [address(1)]);
+    }
+
+    #[test]
+    fn affected_storage_follows_nested_branch_and_switch_execution() {
+        // All selectors and constants are defined in the entry block, so
+        // only block execution (not a new register definition) carries the
+        // outer branch's influence into the nested stores.
+        for switches in 0..8 {
+            let mut b = Builder::new();
+            let conditions: Vec<_> = (0..3)
+                .map(|input| {
+                    let register = b.alloc_bit(1, false);
+                    b.emit(SIRInstruction::Load(
+                        register,
+                        stable(input),
+                        SIROffset::Static(0),
+                        1,
+                    ));
+                    register
+                })
+                .collect();
+            let zero = b.alloc_bit(1, false);
+            let one = b.alloc_bit(1, false);
+            b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+            b.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+            b.emit(SIRInstruction::Store(
+                stable(3),
+                SIROffset::Static(0),
+                1,
+                zero,
+                vec![],
+                vec![],
+            ));
+            let entry = BlockId(0);
+            let nested = [b.new_block(), b.new_block(), b.new_block()];
+            let join = b.new_block();
+            for (level, &condition) in conditions.iter().enumerate() {
+                if level > 0 {
+                    b.switch_to_block(nested[level - 1]);
+                }
+                let then = nested[level];
+                b.seal_block(if switches & (1 << level) == 0 {
+                    SIRTerminator::Branch {
+                        cond: condition,
+                        true_block: (then, vec![]),
+                        false_block: (join, vec![]),
+                    }
+                } else {
+                    SIRTerminator::Switch {
+                        selector: condition,
+                        cases: vec![SIRSwitchCase {
+                            value: 1u8.into(),
+                            target: then,
+                        }],
+                        default: join,
+                    }
+                });
+            }
+            b.switch_to_block(nested[2]);
+            b.emit(SIRInstruction::Store(
+                stable(3),
+                SIROffset::Static(0),
+                1,
+                one,
+                vec![],
+                vec![],
+            ));
+            b.seal_block(SIRTerminator::Jump(join, vec![]));
+            b.switch_to_block(join);
+            // No input can affect this unconditional constant store.
+            b.emit(SIRInstruction::Store(
+                stable(4),
+                SIROffset::Static(0),
+                1,
+                one,
+                vec![],
+                vec![],
+            ));
+            b.seal_block(SIRTerminator::Return);
+            let (blocks, register_map, _) = b.drain();
+            let units = [Unit {
+                entry_block_id: entry,
+                blocks,
+                register_map,
+            }];
+            units[0].verify();
+            let slicer = CombSlicer::new(&units, HashMap::default());
+            for input in 0..3 {
+                assert_eq!(
+                    slicer.affected_storage([address(input)]),
+                    [address(3)].into_iter().collect(),
+                    "switches={switches} input={input}"
+                );
+                for slice in [
+                    slicer.affected_slice([address(input)]),
+                    slicer.slice([address(3)]),
+                ] {
+                    slice[0].verify();
+                    assert!(stored(&slice).iter().all(|&target| target == address(3)));
+                    assert!(stored(&slice).contains(&address(3)));
+                    for &condition in &conditions {
+                        assert!(
+                            slice[0]
+                                .blocks
+                                .values()
+                                .any(|block| selector(&block.terminator) == Some(condition)),
+                            "lost nested selector: switches={switches} input={input} condition={condition:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn affected_storage_follows_control_without_tainting_the_join() {
+        let units = [settle()];
+        let slicer = CombSlicer::new(&units, HashMap::default());
+        assert_eq!(
+            slicer.affected_storage([address(0)]),
+            [address(2), address(3)].into_iter().collect()
+        );
+        assert_eq!(
+            slicer.affected_storage([address(1)]),
+            [address(2), address(3), address(4)].into_iter().collect()
+        );
+        assert!(slicer.affected_storage([address(9)]).is_empty());
     }
 
     #[test]

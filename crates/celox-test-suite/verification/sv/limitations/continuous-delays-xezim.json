@@ -1,0 +1,34 @@
+{
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "timing::continuous_delay_generate_parameters at 25:27: assert_eq y: expected 0x1, got 0x3",
+      "expectation": "Simulation",
+      "name": "timing::continuous_delay_generate_parameters",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "timing::continuous_delay_selected_drivers at 11:28: assert_eq y: expected 0x3, got 0xf",
+      "expectation": "Simulation",
+      "name": "timing::continuous_delay_selected_drivers",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "exclude_stronger_than_sv": false,
+  "include_ignored": false,
+  "schema_version": 3,
+  "suite": "sv",
+  "suite_version": "0.12.0",
+  "tool": "xezim",
+  "version": "xezim version 0.11.4",
+  "scope": "Focused continuous assignment delay failures before reviewed exclusions; passing and unsupported cases omitted."
+}

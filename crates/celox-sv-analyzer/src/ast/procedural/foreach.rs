@@ -10,6 +10,11 @@ pub(super) enum ForeachLoop {
         layout: ContainerLayout,
         status: Option<String>,
     },
+    /// The characters of a string, indexed from 0 below its length.
+    String {
+        array: Expr,
+        index: String,
+    },
 }
 
 impl BodyBuilder<'_, '_, '_> {
@@ -85,6 +90,32 @@ impl BodyBuilder<'_, '_, '_> {
             }
             return Ok(loops);
         }
+        // A string is a dynamic array of bytes indexed from 0 to N-1, where
+        // N is its length (IEEE 1800-2023 12.7.3).
+        if expression_binding::native_string(
+            self.tree,
+            self.session,
+            header.array,
+            native,
+            &self.dims,
+        ) {
+            let [variable] = &header.variables[..] else {
+                return Err(unsupported(
+                    "foreach over a string with more than one index",
+                ));
+            };
+            // An omitted index skips the string's only dimension, so the
+            // body runs once (12.7.3).
+            let Some(variable) = variable else {
+                return Ok(Vec::new());
+            };
+            let array = self.native_value(header.array)?;
+            let index = self.declare(
+                &instances::normalize_identifier(&variable.spelling),
+                int_type(),
+            );
+            return Ok(vec![ForeachLoop::String { array, index }]);
+        }
         let variables = header
             .variables
             .iter()
@@ -123,9 +154,14 @@ impl BodyBuilder<'_, '_, '_> {
             process.clone()
         } else if string {
             type_binding::builtin_type("string", None).expect("string is a builtin type")
-        } else if let Some(key) = container.key.as_ref().filter(|key| !key.members.is_empty()) {
-            // A packed structure index keeps its type, so the body may
-            // select its members (IEEE 1800-2023 12.7.3).
+        } else if let Some(key) = container
+            .key
+            .as_ref()
+            .filter(|key| !key.members.is_empty() || key.is_enum)
+        {
+            // A packed structure or enumeration index keeps its type, so the
+            // body may select its members or call its methods (IEEE
+            // 1800-2023 12.7.3, 6.19.5).
             key.clone()
         } else {
             let mut ty = int_type();

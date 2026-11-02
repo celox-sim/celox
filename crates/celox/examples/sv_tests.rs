@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! sv_tests --mode preprocessing|parsing|elaboration|simulation --state-mode 2state|4state \
-//!     [--top NAME] [--define NAME[=VALUE]] [--include DIR] [--simvariant ARG] -- FILE...
+//!     [--source-encoding utf8|non-utf8-comments] [--top NAME] [--define NAME[=VALUE]] [--include DIR] [--simvariant ARG] -- FILE...
 //! ```
 
 #![allow(clippy::disallowed_methods)] // This binary is the process environment boundary.
@@ -29,6 +29,7 @@ struct Options {
     includes: Vec<PathBuf>,
     simvariants: Vec<String>,
     files: Vec<PathBuf>,
+    source_encoding: celox_sv_analyzer::syntax::SourceEncoding,
 }
 
 fn parse_options(args: &[String]) -> Result<Options, String> {
@@ -39,6 +40,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
     let mut includes = Vec::new();
     let mut simvariants = Vec::new();
     let mut files = Vec::new();
+    let mut source_encoding = Default::default();
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         if arg == "--" {
@@ -70,6 +72,15 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
                 })
             }
             "--top" if top.is_none() && !value.is_empty() => top = Some(value.clone()),
+            "--source-encoding" => {
+                source_encoding = match value.as_str() {
+                    "utf8" => celox_sv_analyzer::syntax::SourceEncoding::Utf8,
+                    "non-utf8-comments" => {
+                        celox_sv_analyzer::syntax::SourceEncoding::NonUtf8Comments
+                    }
+                    _ => return Err(format!("unsupported source encoding: {value}")),
+                };
+            }
             "--define" => {
                 let (name, replacement) = value
                     .split_once('=')
@@ -103,6 +114,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         includes,
         simvariants,
         files,
+        source_encoding,
     })
 }
 
@@ -151,10 +163,18 @@ fn run(options: &Options) -> Result<(), String> {
         .files
         .iter()
         .map(|path| {
-            let text = std::fs::read_to_string(path)
+            let text = options
+                .source_encoding
+                .read(path)
                 .map_err(|error| format!("{}: {error}", path.display()))?;
-            celox_sv_analyzer::syntax::preprocess_source(&text, path, &options.defines, &includes)
-                .map_err(|error| error.to_string())
+            celox_sv_analyzer::syntax::preprocess_source_with_encoding(
+                &text,
+                path,
+                &options.defines,
+                &includes,
+                options.source_encoding,
+            )
+            .map_err(|error| error.to_string())
         })
         .collect::<Result<_, _>>()?;
     if options.mode == Mode::Preprocessing {
@@ -301,7 +321,7 @@ fn main() -> ExitCode {
         Ok(options) => options,
         Err(error) => {
             eprintln!(
-                "{error}\nusage: sv_tests --mode preprocessing|parsing|elaboration|simulation --state-mode 2state|4state [--top NAME] [--define NAME[=VALUE]] [--include DIR] [--simvariant ARG] -- FILE..."
+                "{error}\nusage: sv_tests --mode preprocessing|parsing|elaboration|simulation --state-mode 2state|4state [--source-encoding utf8|non-utf8-comments] [--top NAME] [--define NAME[=VALUE]] [--include DIR] [--simvariant ARG] -- FILE..."
             );
             return ExitCode::from(2);
         }
@@ -413,7 +433,51 @@ mod tests {
             includes: Vec::new(),
             simvariants: Vec::new(),
             files,
+            source_encoding: Default::default(),
         }
+    }
+
+    #[test]
+    fn non_utf8_comments_are_allowed_by_default_in_sources_and_nested_headers() {
+        use celox_sv_analyzer::syntax::SourceEncoding;
+        let dir = tempfile::tempdir().unwrap();
+        let top = dir.path().join("top.sv");
+        std::fs::write(&top, b"// copyright \xa9\n`include \"outer.svh\"\nmodule Top; initial begin if (`VALUE != 42) $fatal; $finish; end endmodule").unwrap();
+        fixture(dir.path(), "outer.svh", "`include \"inner.svh\"\n");
+        std::fs::write(
+            dir.path().join("inner.svh"),
+            b"/* \xff\xfe */\n`define VALUE 42\n",
+        )
+        .unwrap();
+        let mut options = fixture_options(vec![top.clone()], Mode::Simulation);
+        run(&options).unwrap();
+        options.source_encoding = SourceEncoding::Utf8;
+        assert!(run(&options).unwrap_err().contains("utf-8"));
+        // A UTF-8 top must still enforce strict encoding in nested includes.
+        std::fs::write(&top, "`include \"outer.svh\"\nmodule Top; endmodule").unwrap();
+        assert!(run(&options).unwrap_err().contains("cannot read include"));
+        options.source_encoding = SourceEncoding::default();
+        run(&options).unwrap();
+        std::fs::write(&top, b"module Top; initial $display(\"\xff\"); endmodule").unwrap();
+        assert!(run(&options).unwrap_err().contains("outside a comment"));
+        assert_eq!(
+            parse_options(
+                &[
+                    "--mode",
+                    "parsing",
+                    "--state-mode",
+                    "2state",
+                    "--source-encoding",
+                    "utf8",
+                    "--",
+                    "top.sv"
+                ]
+                .map(str::to_owned)
+            )
+            .unwrap()
+            .source_encoding,
+            SourceEncoding::Utf8
+        );
     }
 
     #[test]

@@ -3,6 +3,14 @@ use super::*;
 // IEEE 1800-2023 11.5.1: the index operator and declaration direction
 // independently determine the endpoints of the selected range.
 sv_backends! {
+    fn wide_parameter_index_bounds(sim) {
+        @case "indexed_select::wide_parameter_index_bounds";
+    }
+
+    fn wide_parameter_unknown_index_bounds(sim) {
+        @case "indexed_select::wide_parameter_unknown_index_bounds";
+    }
+
     fn procedural_loop_selects_constant_packed_bytes(sim) {
         @case "indexed_select::procedural_loop_selects_constant_packed_bytes";
     }

@@ -36,7 +36,7 @@ struct Settled {
 }
 
 /// Whether `a` and `b` hold the same tables: one is a clone of the other.
-fn same_tables(a: &PackedDimensions, b: &PackedDimensions) -> bool {
+pub(in crate::ast) fn same_tables(a: &PackedDimensions, b: &PackedDimensions) -> bool {
     a.variables.identity() == b.variables.identity()
         && a.const_env.identity() == b.const_env.identity()
         && a.type_aliases.identity() == b.type_aliases.identity()
@@ -51,6 +51,7 @@ fn same_tables(a: &PackedDimensions, b: &PackedDimensions) -> bool {
         && Arc::ptr_eq(&a.subroutine_param_shapes, &b.subroutine_param_shapes)
         && Arc::ptr_eq(&a.subroutine_directions, &b.subroutine_directions)
         && Arc::ptr_eq(&a.subroutine_param_names, &b.subroutine_param_names)
+        && Arc::ptr_eq(&a.constant_types, &b.constant_types)
         && a.class_scope == b.class_scope
 }
 
@@ -180,8 +181,27 @@ fn type_with_dimensions(
 ) -> Converted<Type> {
     containers::with_dimensions(ty, dimensions, tree, session, context)
 }
-fn shape(context: &mut PackedDimensions, name: String, ty: &Type, local: bool) {
-    let value = procedural::dimensions_from_type(ty);
+fn same_shapes(a: &[VariableDimensions], b: &[VariableDimensions]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.same_declaration(b))
+}
+
+fn shape(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    context: &mut PackedDimensions,
+    name: String,
+    ty: &Type,
+    local: bool,
+) {
+    if context.constant_types.contains_key(&name) {
+        Arc::make_mut(&mut context.constant_types).remove(&name);
+    }
+    let value = procedural::bound_dimensions_from_type(
+        ty,
+        &tree.functions,
+        &mut session.types,
+        &context.const_env,
+    );
     if local {
         extend_query_local_dimensions(context, [(name, value)]);
     } else {
@@ -193,6 +213,7 @@ fn shape(context: &mut PackedDimensions, name: String, ty: &Type, local: bool) {
 // only our own old snapshot during that edit, so ScopedMap need not copy its
 // growing overlay on every declaration, then publish before the next query.
 fn publish_shape(
+    tree: &AnalysisContext<'_>,
     session: &mut Session,
     key: &Key,
     context: &mut PackedDimensions,
@@ -201,7 +222,7 @@ fn publish_shape(
     local: bool,
 ) {
     session.dimensions.partial.remove(key);
-    shape(context, name, ty, local);
+    shape(tree, session, context, name, ty, local);
     publish(&mut session.dimensions, key, context);
 }
 fn variables(
@@ -215,11 +236,20 @@ fn variables(
     let Some(base) = type_binding::bind(declaration.data_type, tree, session, context)? else {
         return Ok(());
     };
+    publish_enum_constants(declaration.data_type, &base, tree, session, context)?;
     for variable in declaration.variables.iter().filter(|variable| {
         type_binding::ordinary_variable(variable, declaration.data_type, tree.declarations())
     }) {
         let ty = type_with_dimensions(base.clone(), &variable.dimensions, tree, session, context)?;
-        publish_shape(session, key, context, name(&variable.name), &ty, local);
+        publish_shape(
+            tree,
+            session,
+            key,
+            context,
+            name(&variable.name),
+            &ty,
+            local,
+        );
     }
     Ok(())
 }
@@ -232,6 +262,10 @@ fn parameter(
     local: bool,
 ) -> Converted<()> {
     let n = name(&parameter.name);
+    let retained = context.constant_types.get(&n).cloned();
+    if retained.is_some() {
+        Arc::make_mut(&mut context.constant_types).remove(&n);
+    }
     match &parameter.kind {
         ParameterKind::Type { default: Some(id) } => {
             if !context.type_aliases.contains_key(&n)
@@ -271,8 +305,25 @@ fn parameter(
             {
                 let ty = type_with_dimensions(base, dimensions, tree, session, context)?;
                 if !dimensions.is_empty() || !ty.packed_ranges().is_empty() {
-                    publish_shape(session, key, context, n, &ty, local);
+                    publish_shape(tree, session, key, context, n.clone(), &ty, local);
                 }
+            }
+            // Retain only this declaration's final binding. An imported
+            // parameter or enumerator with the same name belongs to another
+            // declaration; an implicit genvar binding has no retained type.
+            let binding = retained
+                .filter(|ty| !local && ty.declares_parameter(tree, parameter))
+                .or_else(|| {
+                    parameters::native_constant_type(
+                        parameter,
+                        tree,
+                        session,
+                        context,
+                        scalar_binding,
+                    )
+                });
+            if let Some(binding) = binding {
+                Arc::make_mut(&mut context.constant_types).insert(n, binding);
             }
         }
         _ => {}
@@ -310,7 +361,15 @@ fn declaration(
                         session,
                         context,
                     )?;
-                    publish_shape(session, key, context, name(&variable.name), &ty, false);
+                    publish_shape(
+                        tree,
+                        session,
+                        key,
+                        context,
+                        name(&variable.name),
+                        &ty,
+                        false,
+                    );
                 }
             }
         }
@@ -331,6 +390,10 @@ fn declaration(
                 if top {
                     ty.name_declaration(|| types::declaration_name(tree, alias, None));
                 }
+                if context.constant_types.contains_key(&name(&alias.name)) {
+                    Arc::make_mut(&mut context.constant_types).remove(&name(&alias.name));
+                }
+                publish_enum_constants(id, &ty, tree, session, context)?;
                 context.type_aliases.insert(name(&alias.name), ty);
                 publish(&mut session.dimensions, key, context);
             }
@@ -361,7 +424,7 @@ fn formal_types(
     for ports in groups {
         for port in ports {
             if let Some((name, ty)) = declared.take() {
-                shape(&mut local, name, &ty, true);
+                shape(tree, session, &mut local, name, &ty, true);
             }
             if let Some(d) = port.direction {
                 if port.static_reference {
@@ -370,11 +433,17 @@ fn formal_types(
                 direction = ParamDirection::declared(d, port.constant);
             }
             let data = tree.declarations().data_type(port.data_type);
-            let omitted = matches!(data.kind, DataTypeKind::Implicit)
-                && data.signed.is_none()
-                && data.packed_dimensions.is_empty();
+            // A prototype's lone identifier that names no type is the
+            // formal's name, its type omitted.
+            let renamed = classes::prototype_formal_name(port, tree, session, &local);
+            let omitted = renamed.is_some()
+                || matches!(data.kind, DataTypeKind::Implicit)
+                    && data.signed.is_none()
+                    && data.packed_dimensions.is_empty();
             let mut base = if port.direction.is_none() && omitted && previous.is_some() {
                 previous.clone().unwrap()
+            } else if renamed.is_some() {
+                Type::new(TypeKind::Logic)
             } else {
                 let Some(mut ty) = type_binding::bind(port.data_type, tree, session, &local)?
                 else {
@@ -391,6 +460,7 @@ fn formal_types(
                 .name
                 .as_ref()
                 .map(name)
+                .or(renamed)
                 .ok_or_else(|| unsupported("subroutine argument without a name"))?;
             declared = Some((n.clone(), base.clone()));
             result.push((
@@ -405,72 +475,6 @@ fn formal_types(
     }
     Ok(result)
 }
-fn return_metadata(
-    tree: &AnalysisContext<'_>,
-    ty: Option<&Type>,
-    arguments: Arc<[FunctionArgumentMetadata]>,
-    context: &PackedDimensions,
-) -> FunctionReturnMetadata {
-    let functions = &tree.functions;
-    let widths = ty.map(|ty| {
-        ty.packed_ranges()
-            .iter()
-            .map(|range| {
-                usize::try_from(
-                    eval_ast_const_expr(functions, range.left(), &context.const_env)?.abs_diff(
-                        eval_ast_const_expr(functions, range.right(), &context.const_env)?,
-                    ),
-                )
-                .ok()?
-                .checked_add(1)
-            })
-            .collect::<Option<Vec<_>>>()
-    });
-    let width = ty
-        .and_then(|ty| expr_type_from_type(&tree.functions, ty, &context.const_env))
-        .map(|ty| ty.width);
-    FunctionReturnMetadata {
-        arguments: Some(arguments),
-        width,
-        first_packed_dimension_width: widths
-            .as_ref()
-            .and_then(|widths| widths.as_ref())
-            .and_then(|widths| widths.first().copied())
-            .or(width),
-        dimensions: ty.map(|ty| {
-            ty.unpacked_ranges().len()
-                // A chandle has no packed dimensions (IEEE 1800-2023 6.14).
-                + if ty.chandle || matches!(ty.kind(), TypeKind::Real | TypeKind::Shortreal) {
-                    0
-                } else {
-                    ty.packed_ranges().len()
-                }
-        }),
-        signed: ty.is_some_and(Type::is_signed),
-        is_2state: ty.is_some_and(|ty| ty.kind() == TypeKind::Bit),
-        string: ty.is_some_and(|ty| ty.kind() == TypeKind::String),
-        enum_domain: ty
-            .filter(|ty| ty.unpacked_ranges.is_empty())
-            .and_then(|ty| ty.enum_domain.clone()),
-        class: ty
-            .filter(|ty| ty.unpacked_ranges.is_empty() && ty.container.is_none())
-            .and_then(|ty| ty.class().map(str::to_owned)),
-        virtual_interface: ty.and_then(|ty| ty.virtual_interface.clone()),
-        chandle: ty.is_some_and(|ty| ty.chandle && ty.unpacked_ranges.is_empty()),
-        pattern_type: ty
-            .filter(|ty| {
-                !ty.members.is_empty()
-                    || !ty.unpacked_ranges.is_empty()
-                    || ty.packed_ranges.len() > 1
-            })
-            .and_then(|ty| {
-                ty.pattern_target(&const_functions::Environment {
-                    constants: &*context.const_env,
-                    functions,
-                })
-            }),
-    }
-}
 fn signature(
     id: SubroutineId,
     tree: &AnalysisContext<'_>,
@@ -483,7 +487,14 @@ fn signature(
     let result = return_type(subroutine, tree, session, context)?;
     // As in `publish_shape`, the table edits perform no queries.
     session.dimensions.partial.remove(key);
-    publish_signature(name(&subroutine.name), formals, result, tree, context);
+    publish_signature(
+        name(&subroutine.name),
+        formals,
+        result,
+        tree,
+        session,
+        context,
+    );
     Ok(())
 }
 /// The return type of a function, `None` for a task.
@@ -561,7 +572,7 @@ fn class_signatures(
     )?;
     drop((env, aliases));
     for (name, formals, result) in signatures {
-        publish_signature(name, formals, result, tree, context);
+        publish_signature(name, formals, result, tree, session, context);
     }
     class_builtin_signatures(
         class,
@@ -676,6 +687,7 @@ fn class_builtin_signatures(
             formals,
             Some((method == "randomize").then(procedural::int_type)),
             tree,
+            session,
             context,
         );
     }
@@ -693,6 +705,7 @@ fn class_builtin_signatures(
             vec![this],
             Some(Some(handle.clone())),
             tree,
+            session,
             context,
         );
     }
@@ -715,6 +728,7 @@ fn class_builtin_signatures(
         ],
         Some(Some(procedural::int_type())),
         tree,
+        session,
         context,
     );
     Ok(())
@@ -815,17 +829,18 @@ fn scope_class_signatures(
     let classes = classes::scope_declarations(tree)
         .flat_map(|class| classes::specializations_of(tree, session, class))
         .collect::<HashSet<_>>();
-    fn changed<V: Clone + PartialEq>(
+    fn changed<V: Clone>(
         classes: &HashSet<String>,
         before: &HashMap<String, V>,
         after: &HashMap<String, V>,
+        same: impl Fn(&V, &V) -> bool,
     ) -> Vec<(String, V)> {
         after
             .iter()
             .filter(|(name, value)| {
                 name.rsplit_once("::")
                     .is_some_and(|(owner, _)| classes.contains(owner))
-                    && before.get(*name) != Some(*value)
+                    && before.get(*name).is_none_or(|old| !same(old, *value))
             })
             .map(|(name, value)| (name.clone(), value.clone()))
             .collect()
@@ -839,16 +854,19 @@ fn scope_class_signatures(
             &classes,
             &base.subroutine_param_shapes,
             &bound.subroutine_param_shapes,
+            |a, b| same_shapes(a, b),
         ),
         names: changed(
             &classes,
             &base.subroutine_param_names,
             &bound.subroutine_param_names,
+            |a, b| a == b,
         ),
         returns: changed(
             &classes,
             &base.function_return_types,
             &bound.function_return_types,
+            |a, b| a == b,
         ),
     });
     session
@@ -964,28 +982,13 @@ fn subroutine_signatures(
                 publish(&mut session.dimensions, key, context);
             } else if let BodyItemKind::Dpi(id) = native.body_item(*id).kind
                 && let Ok(import) = dpi::import(id, native)
-                && let Some(ty) = import.return_type()
+                && let Some(metadata) =
+                    FunctionReturnMetadata::from_dpi(&import, &mut session.types)
             {
                 session.dimensions.partial.remove(key);
-                context.function_return_types.insert(
-                    import.name().to_string(),
-                    FunctionReturnMetadata {
-                        arguments: Some(dpi_argument_metadata(&import)),
-                        width: Some(ty.width()),
-                        first_packed_dimension_width: (ty.width() > 1).then_some(ty.width()),
-                        dimensions: Some(usize::from(
-                            ty.width() > 1 && ty != crate::ir::DpiType::Chandle,
-                        )),
-                        signed: ty.is_signed(),
-                        is_2state: !ty.is_4state(),
-                        string: false,
-                        chandle: ty == crate::ir::DpiType::Chandle,
-                        pattern_type: None,
-                        enum_domain: None,
-                        class: None,
-                        virtual_interface: None,
-                    },
-                );
+                context
+                    .function_return_types
+                    .insert(import.name().to_string(), metadata);
                 publish(&mut session.dimensions, key, context);
             }
         }
@@ -1014,7 +1017,7 @@ fn declare(
                 && let Ok(ty) = type_with_dimensions(base, &port.dimensions, tree, session, context)
                 && let celox_sv_syntax::PortKind::Named(n) = &port.kind
             {
-                publish_shape(session, key, context, name(n), &ty, false);
+                publish_shape(tree, session, key, context, name(n), &ty, false);
             }
         }
     }
@@ -1048,6 +1051,7 @@ fn publish_signature(
     formals: Vec<(FunctionArgumentMetadata, Type)>,
     result: Option<Option<Type>>,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     context: &mut PackedDimensions,
 ) {
     let arguments = formals
@@ -1058,9 +1062,20 @@ fn publish_signature(
     // unchanged one leaves the tables, which snapshots may share, alone.
     let shapes = formals
         .iter()
-        .map(|(_, ty)| procedural::dimensions_from_type(ty))
+        .map(|(_, ty)| {
+            procedural::bound_dimensions_from_type(
+                ty,
+                &tree.functions,
+                &mut session.types,
+                &context.const_env,
+            )
+        })
         .collect::<Vec<_>>();
-    if context.subroutine_param_shapes.get(&n) != Some(&shapes) {
+    if !context
+        .subroutine_param_shapes
+        .get(&n)
+        .is_some_and(|old| same_shapes(old, &shapes))
+    {
         Arc::make_mut(&mut context.subroutine_param_shapes).insert(n.clone(), shapes);
     }
     let names = formals
@@ -1071,7 +1086,8 @@ fn publish_signature(
         Arc::make_mut(&mut context.subroutine_param_names).insert(n.clone(), names);
     }
     if let Some(ty) = result {
-        let metadata = return_metadata(tree, ty.as_ref(), arguments, context);
+        let metadata =
+            FunctionReturnMetadata::from_type(tree, session, ty.as_ref(), arguments, context);
         if context.function_return_types.get(&n) != Some(&metadata) {
             context.function_return_types.insert(n, metadata);
         }
@@ -1098,7 +1114,20 @@ fn local_declaration(
             if let TypeAliasTarget::DataType(id) = alias.target
                 && let Some(ty) = type_binding::bind(id, tree, session, context)?
             {
-                let ty = type_with_dimensions(ty, &alias.dimensions, tree, session, context)?;
+                let mut ty = type_with_dimensions(ty, &alias.dimensions, tree, session, context)?;
+                ty.name_declaration(|| {
+                    let (identity, typename) = types::declaration_name(tree, alias, None);
+                    // Lexically nested typedefs may reuse a name. The native
+                    // declaration, rather than that spelling, owns this type.
+                    (
+                        format!("{identity}@native:{}", alias.tokens.start),
+                        typename,
+                    )
+                });
+                if context.constant_types.contains_key(&name(&alias.name)) {
+                    Arc::make_mut(&mut context.constant_types).remove(&name(&alias.name));
+                }
+                publish_enum_constants(id, &ty, tree, session, context)?;
                 context.type_aliases.insert(name(&alias.name), ty);
             }
         }
@@ -1174,7 +1203,15 @@ fn statement_scope(
                         type_binding::bind(declaration.data_type, tree, session, context)?
                     {
                         for variable in declaration.variables {
-                            publish_shape(session, key, context, name(&variable.name), &ty, true);
+                            publish_shape(
+                                tree,
+                                session,
+                                key,
+                                context,
+                                name(&variable.name),
+                                &ty,
+                                true,
+                            );
                         }
                     }
                 }
@@ -1183,7 +1220,7 @@ fn statement_scope(
                 let ty = type_binding::builtin_type("int", None)
                     .ok_or_else(|| unsupported("foreach index type"))?;
                 for n in names {
-                    publish_shape(session, key, context, name(&n), &ty, true);
+                    publish_shape(tree, session, key, context, name(&n), &ty, true);
                 }
             }
         }
@@ -1208,6 +1245,13 @@ fn overlay(context: &mut PackedDimensions, input: &PackedDimensions) {
         .function_return_types
         .extend(input.function_return_types.clone());
     context.parameter_values = input.parameter_values.clone();
+    if !input.constant_types.is_empty() {
+        for (name, binding) in input.constant_types.iter() {
+            if !context.constant_types.contains_key(name) {
+                Arc::make_mut(&mut context.constant_types).insert(name.clone(), binding.clone());
+            }
+        }
+    }
 }
 fn finish(mut context: PackedDimensions) -> PackedDimensions {
     let signedness = context
@@ -1231,11 +1275,23 @@ fn settle_scope(
     #[cfg(test)]
     super::SCOPE_SETTLES.with(|count| count.set(count.get() + 1));
     let mut context = input.clone();
+    for (name, binding) in &scope::imported(tree).enum_constants.declarations {
+        Arc::make_mut(&mut context.constant_types)
+            .entry(name.clone())
+            .or_insert_with(|| binding.clone());
+    }
     for (name, metadata) in &scope::imported(tree).function_return_types {
         context
             .function_return_types
             .entry(name.clone())
             .or_insert_with(|| metadata.clone());
+    }
+    for parameter in &scope::imported(tree).parameters {
+        if let Some(ty) = &parameter.semantic_type {
+            Arc::make_mut(&mut context.constant_types)
+                .entry(parameter.name().into())
+                .or_insert_with(|| ty.clone());
+        }
     }
     extend_interface_dimensions(tree, &mut context);
     extend_variable_dimensions_from_const_env(&mut context, &input.const_env);
@@ -1352,7 +1408,7 @@ fn query_published(
     if let Some(id) = owners.subroutine {
         let subroutine = native.subroutine(id);
         for (argument, ty) in formal_types(subroutine, tree, session, &context)? {
-            publish_shape(session, key, &mut context, argument.name, &ty, true);
+            publish_shape(tree, session, key, &mut context, argument.name, &ty, true);
         }
         if contains(subroutine.body_tokens, target)
             && subroutine.kind == SubroutineKind::Function
@@ -1363,6 +1419,7 @@ fn query_published(
                 ty.kind = TypeKind::Logic;
             }
             publish_shape(
+                tree,
                 session,
                 key,
                 &mut context,
@@ -1408,13 +1465,41 @@ fn query_published(
             for signal in signals {
                 context.insert(
                     item.name(signal.name()),
-                    procedural::dimensions_from_type(signal.r#type()),
+                    procedural::bound_dimensions_from_type(
+                        signal.r#type(),
+                        &tree.functions,
+                        &mut session.types,
+                        &item.env,
+                    ),
                 );
             }
             publish(&mut session.dimensions, key, &context);
         }
     }
     Ok(finish(context))
+}
+
+fn publish_enum_constants(
+    id: celox_sv_syntax::TypeId,
+    declared: &Type,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    context: &mut PackedDimensions,
+) -> Converted<()> {
+    if let Some(binding) = parameters::enum_constant_type(
+        tree,
+        session,
+        id,
+        declared,
+        &context.const_env,
+        &context.type_aliases,
+    )? && let DataTypeKind::Enum { items, .. } = &tree.declarations().data_type(id).kind
+    {
+        for member in items {
+            Arc::make_mut(&mut context.constant_types).insert(name(&member.name), binding.clone());
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

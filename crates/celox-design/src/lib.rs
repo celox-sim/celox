@@ -556,6 +556,8 @@ pub enum HostRequestKind {
     Testbench,
     /// Formatting to a string (`$sformatf`).
     Format,
+    /// Host command execution (`$system`).
+    System,
 }
 
 impl HostRequestKind {
@@ -570,6 +572,7 @@ impl HostRequestKind {
             Self::Process => 6,
             Self::Testbench => 7,
             Self::Format => 8,
+            Self::System => 9,
         };
         (family << 32) | site as u64
     }
@@ -585,6 +588,7 @@ impl HostRequestKind {
             6 => Self::Process,
             7 => Self::Testbench,
             8 => Self::Format,
+            9 => Self::System,
             _ => return None,
         };
         Some((family, request as u32))
@@ -709,6 +713,10 @@ impl ProcessOp {
 /// Flag in a wait's control word that distinguishes level waits from events.
 /// A resumed suspended level wait must check its predicate immediately.
 pub const PROCESS_LEVEL_WAIT: u64 = 1 << 63;
+
+/// The lowest bit of the edge index in a [`SchedulerSlots::baseline`] byte,
+/// above the level (`edges::LEVEL_UNKNOWN` and the value bit).
+pub const BASELINE_TERM_SHIFT: u32 = 2;
 
 /// A state slot exchanged with a synchronous host operation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -870,8 +878,9 @@ pub struct ProcessSlots<A> {
     pub kind: ProcessKind,
     /// This kernel requires Simulation's process scheduler rather than Simulator.
     pub requires_timed_simulation: bool,
-    /// Every delay the kernel suspends for is a constant of at least one
-    /// time unit.
+    /// Every delay after startup is a constant of at least one time unit.
+    /// A compiler-inserted zero-time startup fence is handled by the reference
+    /// loop at time zero, before any compiled slot can start.
     pub const_delays: bool,
     /// For an `initial` procedure of a program instance (IEEE 1800-2023
     /// 24.3), the status slot of that instance's first such kernel, which
@@ -1432,6 +1441,13 @@ pub const SCHEDULER_CLOCKS: usize = 64;
 /// [`SchedulerSlots::cont`], [`SchedulerSlots::dirty`] and every [`SchedulerSlots::waiting`] and
 /// [`SchedulerSlots::baseline`] object.
 pub const SCHEDULER_FLAG_WIDTH: usize = 8;
+/// Width of the private control word at [`SchedulerSlots::defer_limit_settle`].
+/// Its low byte is the defer flag; the other fields are internal to a run.
+pub const SCHEDULER_CONTROL_WIDTH: usize = 128;
+/// Bit position of the private Active-wave continuation byte in that word.
+pub const SCHEDULER_ACTIVE_RESUME_BIT: usize = 8;
+/// Bit position of the borrowed synchronous host-services pointer in that word.
+pub const SCHEDULER_HOST_CONTEXT_BIT: usize = 64;
 
 /// Hidden state objects through which a compiled scheduler and the runtime
 /// exchange a run of time slots. Between runs they hold no state: the
@@ -1459,6 +1475,8 @@ pub struct SchedulerSlots<A> {
     /// testbench) while it runs the scheduler: a run that reaches its limit
     /// then leaves a deferred settle pending instead of settling for the
     /// host.
+    /// Its low byte is the flag. The rest of this private control word holds
+    /// an Active-wave continuation and a borrowed host-services context.
     pub defer_limit_settle: A,
     /// The number of time slots the run ran.
     pub count: A,
@@ -1482,11 +1500,15 @@ pub struct SchedulerSlots<A> {
     /// kernel order.
     pub ready: A,
     /// The time each process kernel resumes at, in kernel order, valid
-    /// where [`Self::waiting`] is set.
+    /// where [`Self::waiting`] is set and the kernel's status is a delay.
     pub wake: Vec<A>,
-    /// Whether each process kernel waits for its wake time or event.
+    /// Whether each process kernel waits for its wake time or event; a
+    /// kernel that does both waits for the one its status names.
     pub waiting: Vec<A>,
-    /// The level a kernel waiting for an event last saw its signal at.
+    /// The level a kernel waiting for an event last saw its signal at, in
+    /// the bits below [`BASELINE_TERM_SHIFT`], and above them the edge it
+    /// waits for, as an index into
+    /// [`schedule::ProcessModel::wait_terms`].
     pub baseline: Vec<A>,
     /// The time of each host clock's next edge, one element per entry of
     /// [`SchedulerSchema::clocks`], valid where [`Self::clock_armed`] is set.
@@ -1715,6 +1737,7 @@ pub struct EventTopology<A> {
 
 /// A clock computed combinationally from an event's signal.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound(deserialize = "A: Deserialize<'de>"))]
 pub struct CombDerivedClock<A> {
     /// The canonical derived clock.
     pub clock: A,
@@ -1722,6 +1745,13 @@ pub struct CombDerivedClock<A> {
     /// variables, when its combinational cone is small enough. It lets an
     /// event-based tick judge the edge without settling the design.
     pub gate: Option<Vec<GateOp<A>>>,
+    /// All storage in the transitive combinational cone, including its
+    /// output. Unlike `gate`, this also covers procedural definitions and
+    /// large expressions. Absent metadata cannot prove that a state update
+    /// leaves the clock unchanged. These compiler hints are not needed to
+    /// execute an image and do not change its serialized representation.
+    #[serde(skip)]
+    pub inputs: Option<Vec<A>>,
 }
 
 /// One step of a postfix program computing a derived clock from its source
@@ -2407,6 +2437,7 @@ mod tests {
             HostRequestKind::Process,
             HostRequestKind::Testbench,
             HostRequestKind::Format,
+            HostRequestKind::System,
         ] {
             for site in [0, 1, u32::MAX] {
                 assert_eq!(
@@ -2415,7 +2446,7 @@ mod tests {
                 );
             }
         }
-        for invalid in [0, u32::MAX as u64, 9u64 << 32, 1u64 << 63] {
+        for invalid in [0, u32::MAX as u64, 10u64 << 32, 1u64 << 63] {
             assert_eq!(HostRequestKind::decode(invalid), None);
         }
         assert_eq!(

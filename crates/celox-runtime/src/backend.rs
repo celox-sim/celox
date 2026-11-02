@@ -186,6 +186,11 @@ pub trait SimBackend {
         true
     }
 
+    /// Maximum slots in one native call before returning to a backend safe point.
+    fn compiled_scheduler_budget(&self) -> u64 {
+        u64::MAX
+    }
+
     /// Whether the code now running has the generated derived-edge units
     /// (`RuntimeSchema::derived_edges`); otherwise a host walks the
     /// derived-tick plans.

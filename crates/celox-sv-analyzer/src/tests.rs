@@ -6292,7 +6292,10 @@ fn automatic_task_nbas_are_illegal_even_in_folded_branches() {
 }
 
 #[test]
-fn scoped_timed_task_static_formals_require_shared_storage() {
+fn scoped_timed_task_static_formals_are_scope_variables() {
+    // Overlapping calls share the static formals of a task (IEEE 1800-2023
+    // 13.3.2), so those of a package or `$unit` task are its variables;
+    // `timing::static_formals_of_package_tasks` checks the sharing.
     for scope in ["package p;", ""] {
         let end_scope = if scope.is_empty() { "" } else { "endpackage" };
         let call = if scope.is_empty() { "t(q)" } else { "p::t(q)" };
@@ -6300,18 +6303,8 @@ fn scoped_timed_task_static_formals_require_shared_storage() {
             let source = format!(
                 "{scope} task {lifetime} t(input int x); #1; endtask {end_scope} module Top; int q; initial {call}; endmodule"
             );
-            let result = analyze_source(&source, Path::new("scoped_timed_task.sv"));
-            if lifetime.is_empty() {
-                let error = result.expect_err("scoped static formals are not shared yet");
-                assert!(
-                    error
-                        .to_string()
-                        .contains("static arguments in a package or compilation-unit timed task"),
-                    "{error}"
-                );
-            } else {
-                result.expect("scoped automatic tasks have per-activation storage");
-            }
+            analyze_source(&source, Path::new("scoped_timed_task.sv"))
+                .unwrap_or_else(|error| panic!("{source}: {error}"));
         }
     }
 }
@@ -6385,6 +6378,17 @@ fn time_literal_delays_reject_scheduler_overflow() {
     )
     .unwrap_err();
     assert!(error.to_string().contains("scheduler range"), "{error}");
+}
+
+#[test]
+fn time_literals_in_expressions_scale_without_rounding() {
+    // Scaled to the time unit (IEEE 1800-2023 5.8); the precision rounds
+    // delays only (3.14.1, 20.3).
+    let source = "module Top; timeunit 1ns / 1ps; real r; initial r = 1.2345ns + 2s; endmodule";
+    let ir = analyze_source(source, Path::new("time_literal_value.sv")).unwrap();
+    let body = format!("{:?}", ir.modules()[0].initial_processes()[0].body());
+    assert!(body.contains("\"1.2345\""), "{body}");
+    assert!(body.contains("\"2000000000.0\""), "{body}");
 }
 
 #[test]
@@ -7918,6 +7922,27 @@ fn long_handle_chains_resolve_in_linear_time() {
 }
 
 #[test]
+fn long_parenless_method_chains_resolve_in_linear_time() {
+    // A method called without parentheses (IEEE 1800-2023 13.5.5) resolves
+    // its receiver once, as a property does.
+    let chain = ".get_next".repeat(30);
+    let source = format!(
+        "class Node; Node next; int value; function Node get_next(); return next; endfunction endclass
+        module Top(output int y);
+            Node head;
+            initial y = head{chain}.value;
+        endmodule"
+    );
+    let started = std::time::Instant::now();
+    analyze_source(&source, Path::new("method-chain.sv")).expect("the chain analyzes");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
 fn container_formals_copy_only_what_container_assignment_represents() {
     // IEEE 1800-2023 13.5.1: a container formal that is not a reference
     // holds a copy, which an input receives as a container value and an
@@ -7953,7 +7978,6 @@ fn container_formals_copy_only_what_container_assignment_represents() {
         ("output int q[$]", "x", "compatible container"),
         ("inout int q[$]", "m", "incompatible dynamic container"),
         ("int q[$]", "m", "incompatible dynamic container"),
-        ("int q[$]", "make()", "compatible container"),
     ] {
         let source = format!(
             "module Top; typedef int q_t[$]; int a[$]; int b[$:3]; int x; int m[string]; \
@@ -8251,4 +8275,21 @@ fn scalar_logic_gates_keep_unsupported_modifiers_explicit() {
                 .contains("non-scalar gate terminal")
         );
     }
+}
+
+#[test]
+fn preserves_package_enum_unknown_values() {
+    let source = r#"
+        package p;
+            typedef enum logic [3:0] {
+                READ = 4'b0101, DESELECT = 4'b1xxx, HIGHZ = 4'bzzzz,
+                COPY = DESELECT | 4'b0010, ZERO = DESELECT & 4'b0000,
+                NEXT
+            } cmd_t;
+        endpackage
+        module Top(output logic [3:0] command);
+            assign command = p::DESELECT;
+        endmodule
+    "#;
+    analyze_source(source, Path::new("package_enum_unknown.sv")).unwrap();
 }

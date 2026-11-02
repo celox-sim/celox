@@ -140,6 +140,14 @@ of a changed failure; proof contracts change when executable coverage changes.
 See the [runner documentation](crates/celox-test-suite/README.md#independent-verification).
 Daily CI uses `--fresh` and runs the complete corpus afresh.
 
+Extended sv-tests measurement (`sv-tests-daily.yml`) runs daily at 04:23 UTC and
+on manual dispatch, outside PR gates. It measures the imported and cores groups in both
+state modes and publishes complete results to the website Verification page.
+Changes to its preparation/reporting scripts require the Python contract suite;
+website changes require `pnpm docs:build` and the baseline reader tests
+(`node --test scripts/read-sv-tests-baseline.test.mjs`). The existing PR main-corpus expectation
+check remains independent; extended measurements do not refresh that baseline.
+
 ## Compilation scaling in CodSpeed
 
 Affected PR and full CI retain small nested-write semantic regressions on

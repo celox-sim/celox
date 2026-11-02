@@ -215,7 +215,15 @@ pub(in crate::ast) fn cast_target_native(
             celox_sv_syntax::DataTypeKind::Builtin(name)
                 if matches!(
                     name.as_str(),
-                    "byte" | "shortint" | "int" | "longint" | "integer" | "time"
+                    "bit"
+                        | "logic"
+                        | "reg"
+                        | "byte"
+                        | "shortint"
+                        | "int"
+                        | "longint"
+                        | "integer"
+                        | "time"
                 ) => {}
             celox_sv_syntax::DataTypeKind::Named(_) => {}
             _ => return Err(unsupported("cast target type")),
@@ -643,6 +651,7 @@ fn bind_value_in(
                     });
                     continue;
                 }
+                let method_call = objects::method_call(tree, session, id, native, dimensions)?;
                 let (finish, children) = match &native.expression(id).kind {
                     ExprKind::Group(inner) => {
                         permits.grant_if(permitted, *inner);
@@ -657,6 +666,10 @@ fn bind_value_in(
                     ExprKind::Literal(text) => {
                         if let Some(packed) = packed_string_literal(text) {
                             values.push(Expr::Literal(packed));
+                        } else if typecheck::integral_literal_type_metadata(text).is_none()
+                            && let Some(real) = timescales::real_literal(id, text, tree)?
+                        {
+                            values.push(Expr::Literal(real));
                         } else {
                             if typecheck::integral_literal_type_metadata(text).is_none()
                                 && !(text.contains(['.', 'e', 'E'])
@@ -845,14 +858,9 @@ fn bind_value_in(
                             cast_shape(*target, native, tree, session, dimensions)?.map(Rc::new),
                         )],
                     ),
-                    ExprKind::Call {
-                        expression,
-                        arguments: args,
-                    } if objects::method(tree, session, *expression, native, dimensions)?
-                        .is_some() =>
-                    {
+                    _ if let Some((callee, args)) = method_call => {
                         let (name, formals, receiver) =
-                            objects::method(tree, session, *expression, native, dimensions)?
+                            objects::method(tree, session, callee, native, dimensions)?
                                 .expect("checked by the guard");
                         let selection = name
                             .ends_with("::randomize")
@@ -1881,6 +1889,42 @@ fn bind_value_in(
                         system,
                     } => {
                         if let Some(function) = system {
+                            let mut operands = operands;
+                            // Bind selected string outputs as targets: the read path
+                            // wraps handles and folds invalid indices to empty strings.
+                            let output = usize::from(function == SystemFunction::Ferror);
+                            if matches!(function, SystemFunction::Fgets | SystemFunction::Ferror)
+                                && let Some(Some(destination)) = args.get(output)
+                                && strings::fixed_array_element(
+                                    tree,
+                                    *destination,
+                                    native,
+                                    dimensions,
+                                )
+                            {
+                                operands[output] = match lvalues::variable_lvalue(
+                                    *destination,
+                                    native,
+                                    tree,
+                                    session,
+                                    dimensions,
+                                    false,
+                                )? {
+                                    LValue::Ident(name) => Expr::Ident(name),
+                                    LValue::Select {
+                                        name,
+                                        msb,
+                                        lsb,
+                                        signed,
+                                        ..
+                                    } => Expr::Select {
+                                        expr: Box::new(Expr::Ident(name)),
+                                        msb,
+                                        lsb,
+                                        signed,
+                                    },
+                                };
+                            }
                             if function == SystemFunction::Fread {
                                 let mut operands = operands.into_iter();
                                 let mut values = Vec::new();
@@ -1930,7 +1974,10 @@ fn bind_value_in(
                                     | SystemFunction::DistErlang
                                     | SystemFunction::TestPlusargs
                                     | SystemFunction::ValuePlusargs
+                                    | SystemFunction::System
                                     | SystemFunction::Fopen
+                                    | SystemFunction::Fgets
+                                    | SystemFunction::Ferror
                                     | SystemFunction::Ftell
                                     | SystemFunction::Fseek
                                     | SystemFunction::Rewind
@@ -1970,7 +2017,13 @@ fn bind_value_in(
                                     {
                                         return Err(AnalyzerError::InvalidSystemTfCall {
                                             name: name.clone(),
-                                            detail: if matches!(
+                                            detail: if function == SystemFunction::Ferror {
+                                                "output argument must be a writable text variable"
+                                                    .into()
+                                            } else if function == SystemFunction::Fgets {
+                                                "output argument must be a writable string variable"
+                                                    .into()
+                                            } else if matches!(
                                                 function,
                                                 SystemFunction::Sscanf | SystemFunction::Fscanf
                                             ) {
@@ -2099,6 +2152,15 @@ fn read_index_value(
     Ok(value)
 }
 
+/// Whether native expression `id` is the element of a dynamic container
+/// whose select is being bound against a local.
+fn is_element_select(id: ExprId, native: &Declarations, dimensions: &PackedDimensions) -> bool {
+    dimensions
+        .element_select
+        .as_ref()
+        .is_some_and(|(element, _)| *element == ungroup(id, native))
+}
+
 pub(super) fn path(
     mut root: ExprId,
     native: &Declarations,
@@ -2121,6 +2183,11 @@ pub(super) fn path(
     // A static class property is a variable of the module.
     if let Some(variable) = objects::static_property(tree, session, root, native, dimensions)? {
         return Ok((vec![variable], None));
+    }
+    if let Some((_, local)) = &dimensions.element_select
+        && is_element_select(root, native, dimensions)
+    {
+        return Ok((vec![local.clone()], None));
     }
     // The property whose select is being bound is bound as its template.
     if dimensions.property_select_base == Some(ungroup(root, native))
@@ -2464,6 +2531,10 @@ pub(in crate::ast) fn selected_lvalue(
         dimension,
     } = &native.expression(base).kind
     {
+        // The selected element of a dynamic container is its local.
+        if is_element_select(base, native, dimensions) {
+            break;
+        }
         suffix.push(&dimension.kind);
         base = *expression;
     }
@@ -2764,6 +2835,11 @@ pub(in crate::ast) fn real_value(expr: &Expr, dimensions: &PackedDimensions) -> 
             .functions
             .get(name)
             .is_some_and(|function| function.return_real),
+        // A real or shortreal class property (IEEE 1800-2023 6.12).
+        Expr::Call {
+            callee: Callee::Object(op),
+            ..
+        } => matches!(&**op, ObjectOp::Load(field) if field.real),
         // A sampled value has the type of its operand.
         Expr::Call {
             callee: Callee::System(SystemFunction::Sampled | SystemFunction::Past),
@@ -2849,6 +2925,7 @@ pub(in crate::ast) fn member_context(
     session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Option<(Vec<Expr>, Type)>> {
+    let authored = root;
     while let ExprKind::Select { expression, .. } = native.expression(root).kind {
         root = expression;
     }
@@ -2857,7 +2934,14 @@ pub(in crate::ast) fn member_context(
     }
     if let Some(element) = element_members::element_member(root, native, tree, session, dims) {
         let (_, ty) = packed_structs::element_member(&element.name, &element.members, dims)?;
-        return Ok(Some((Vec::new(), ty.clone())));
+        let ty = if ty.unpacked_ranges.is_empty() {
+            ty.clone()
+        } else {
+            dimensions::operand_shape(authored, tree, session, dims)?
+                .and_then(|shape| shape.pattern_type(&tree.functions, dims))
+                .ok_or_else(|| unsupported("structure array member type"))?
+        };
+        return Ok(Some((Vec::new(), ty)));
     }
     let (mut parts, qualified) = path(root, native, tree, session, dims)?;
     if let Some(name) = qualified {

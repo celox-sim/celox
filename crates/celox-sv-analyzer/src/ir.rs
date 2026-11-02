@@ -1606,6 +1606,425 @@ impl InsideItem {
     }
 }
 
+impl Expr {
+    /// `self` with each identifier `name` replaced by `value`, also in the
+    /// positions of its selects; `None` when a position reads `name` and
+    /// `value` cannot be written in one.
+    pub fn substitute(&self, name: &str, value: &Expr) -> Option<Expr> {
+        let position = |bound: &ConstExpr| -> Option<ConstExpr> {
+            if !bound.reads(name) {
+                return Some(bound.clone());
+            }
+            Some(bound.substitute(name, &value.to_const()?))
+        };
+        let go = |expr: &Expr| expr.substitute(name, value).map(Box::new);
+        let all = |exprs: &[Expr]| {
+            exprs
+                .iter()
+                .map(|expr| expr.substitute(name, value))
+                .collect::<Option<Vec<_>>>()
+        };
+        Some(match self {
+            Expr::Ident(ident) if ident == name => value.clone(),
+            Expr::Ident(_) | Expr::Literal(_) => self.clone(),
+            Expr::Select {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => Expr::Select {
+                expr: go(expr)?,
+                msb: position(msb)?,
+                lsb: position(lsb)?,
+                signed: *signed,
+            },
+            Expr::Concat(parts) => Expr::Concat(all(parts)?),
+            Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
+                count: position(count)?,
+                parts: all(parts)?,
+            },
+            Expr::Resize {
+                expr,
+                width,
+                signed,
+            } => Expr::Resize {
+                expr: go(expr)?,
+                width: *width,
+                signed: *signed,
+            },
+            Expr::Unary { op, expr } => Expr::Unary {
+                op: *op,
+                expr: go(expr)?,
+            },
+            Expr::Binary { left, op, right } => Expr::Binary {
+                left: go(left)?,
+                op: *op,
+                right: go(right)?,
+            },
+            Expr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => Expr::Mux {
+                condition: go(condition)?,
+                then_expr: go(then_expr)?,
+                else_expr: go(else_expr)?,
+            },
+            Expr::Call {
+                callee,
+                args,
+                arg_order,
+            } => Expr::Call {
+                callee: callee.clone(),
+                args: args
+                    .iter()
+                    .map(|arg| match arg {
+                        Some(arg) => arg.substitute(name, value).map(Some),
+                        None => Some(None),
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+                arg_order: arg_order.clone(),
+            },
+            Expr::Inside { expr, items } => {
+                let mut substituted = true;
+                let items = items
+                    .iter()
+                    .map(|item| {
+                        item.map(&mut |expr| {
+                            expr.substitute(name, value).unwrap_or_else(|| {
+                                substituted = false;
+                                expr.clone()
+                            })
+                        })
+                    })
+                    .collect();
+                if !substituted {
+                    return None;
+                }
+                Expr::Inside {
+                    expr: go(expr)?,
+                    items,
+                }
+            }
+        })
+    }
+
+    /// `self` as a select position: a value whose operands are such
+    /// values, or `None`.
+    fn to_const(&self) -> Option<ConstExpr> {
+        let go = |expr: &Expr| expr.to_const().map(Box::new);
+        Some(match self {
+            Expr::Ident(name) => ConstExpr::Ident(name.clone()),
+            Expr::Literal(text) => ConstExpr::Literal(text.clone()),
+            Expr::Select {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => ConstExpr::SelectRange {
+                expr: go(expr)?,
+                msb: Box::new(msb.clone()),
+                lsb: Box::new(lsb.clone()),
+                signed: *signed,
+            },
+            Expr::Resize {
+                expr,
+                width,
+                signed,
+            } => ConstExpr::Resize {
+                expr: go(expr)?,
+                width: *width,
+                signed: *signed,
+            },
+            Expr::Unary { op, expr } => ConstExpr::Unary {
+                op: *op,
+                expr: go(expr)?,
+            },
+            Expr::Binary { left, op, right } => ConstExpr::Binary {
+                left: go(left)?,
+                op: *op,
+                right: go(right)?,
+            },
+            Expr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => ConstExpr::Mux {
+                condition: go(condition)?,
+                then_expr: go(then_expr)?,
+                else_expr: go(else_expr)?,
+            },
+            Expr::Call { callee, args, .. } => ConstExpr::Function {
+                callee: callee.clone(),
+                args: args
+                    .iter()
+                    .map(|arg| arg.as_ref()?.to_const())
+                    .collect::<Option<Vec<_>>>()?,
+                site: None,
+            },
+            Expr::Concat(_) | Expr::RepeatConcat { .. } | Expr::Inside { .. } => return None,
+        })
+    }
+
+    /// Whether `self` reads identifier `name`.
+    pub fn reads(&self, name: &str) -> bool {
+        match self {
+            Expr::Ident(ident) => ident == name,
+            Expr::Literal(_) => false,
+            Expr::Select { expr, msb, lsb, .. } => {
+                expr.reads(name) || msb.reads(name) || lsb.reads(name)
+            }
+            Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => expr.reads(name),
+            Expr::Concat(parts) => parts.iter().any(|part| part.reads(name)),
+            Expr::RepeatConcat { count, parts } => {
+                count.reads(name) || parts.iter().any(|part| part.reads(name))
+            }
+            Expr::Binary { left, right, .. } => left.reads(name) || right.reads(name),
+            Expr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => condition.reads(name) || then_expr.reads(name) || else_expr.reads(name),
+            Expr::Call { args, .. } => args.iter().flatten().any(|arg| arg.reads(name)),
+            Expr::Inside { expr, items } => {
+                expr.reads(name)
+                    || items
+                        .iter()
+                        .any(|item| item.exprs().iter().any(|e| e.reads(name)))
+            }
+        }
+    }
+
+    /// Whether evaluating `self` again has no effects: its calls only read
+    /// strings, properties or container elements.
+    fn rereadable(&self) -> bool {
+        match self {
+            Expr::Ident(_) | Expr::Literal(_) => true,
+            Expr::Select { expr, msb, lsb, .. } => {
+                expr.rereadable() && msb.rereadable() && lsb.rereadable()
+            }
+            Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => expr.rereadable(),
+            Expr::Concat(parts) => parts.iter().all(Expr::rereadable),
+            Expr::RepeatConcat { count, parts } => {
+                count.rereadable() && parts.iter().all(Expr::rereadable)
+            }
+            Expr::Binary { left, right, .. } => left.rereadable() && right.rereadable(),
+            Expr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => condition.rereadable() && then_expr.rereadable() && else_expr.rereadable(),
+            Expr::Call { callee, args, .. } => {
+                reads_only(callee) && args.iter().flatten().all(Expr::rereadable)
+            }
+            Expr::Inside { expr, items } => {
+                expr.rereadable()
+                    && items
+                        .iter()
+                        .all(|item| item.exprs().into_iter().all(Expr::rereadable))
+            }
+        }
+    }
+}
+
+/// Whether a call of `callee` only reads strings, properties or container
+/// elements.
+fn reads_only(callee: &Callee) -> bool {
+    match callee {
+        Callee::String(_) | Callee::Lookup { .. } | Callee::Checked { .. } => true,
+        Callee::Object(op) => matches!(
+            **op,
+            ObjectOp::Load(_)
+                | ObjectOp::Container {
+                    op: ContainerOp::Get | ContainerOp::Size,
+                    ..
+                }
+        ),
+        _ => false,
+    }
+}
+
+impl ConstExpr {
+    fn operands(&self) -> Vec<&ConstExpr> {
+        match self {
+            ConstExpr::Literal(_) | ConstExpr::Ident(_) => Vec::new(),
+            ConstExpr::Select { expr, bit } => vec![expr, bit],
+            ConstExpr::SelectRange { expr, msb, lsb, .. } => vec![expr, msb, lsb],
+            ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => vec![expr],
+            ConstExpr::Function { args, .. } => args.iter().collect(),
+            ConstExpr::Binary { left, right, .. } => vec![left, right],
+            ConstExpr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => vec![condition, then_expr, else_expr],
+        }
+    }
+
+    /// Whether `self` reads identifier `name`.
+    pub fn reads(&self, name: &str) -> bool {
+        matches!(self, ConstExpr::Ident(ident) if ident == name)
+            || self
+                .operands()
+                .into_iter()
+                .any(|operand| operand.reads(name))
+    }
+
+    /// Whether evaluating `self` again has no effects.
+    fn rereadable(&self) -> bool {
+        !matches!(self, ConstExpr::Function { callee, .. } if !reads_only(callee))
+            && self.operands().into_iter().all(ConstExpr::rereadable)
+    }
+
+    /// `self` with each identifier `name` replaced by `value`.
+    fn substitute(&self, name: &str, value: &ConstExpr) -> ConstExpr {
+        let go = |expr: &ConstExpr| Box::new(expr.substitute(name, value));
+        match self {
+            ConstExpr::Ident(ident) if ident == name => value.clone(),
+            ConstExpr::Ident(_) | ConstExpr::Literal(_) => self.clone(),
+            ConstExpr::Select { expr, bit } => ConstExpr::Select {
+                expr: go(expr),
+                bit: go(bit),
+            },
+            ConstExpr::SelectRange {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => ConstExpr::SelectRange {
+                expr: go(expr),
+                msb: go(msb),
+                lsb: go(lsb),
+                signed: *signed,
+            },
+            ConstExpr::Resize {
+                expr,
+                width,
+                signed,
+            } => ConstExpr::Resize {
+                expr: go(expr),
+                width: *width,
+                signed: *signed,
+            },
+            ConstExpr::Function { callee, args, site } => ConstExpr::Function {
+                callee: callee.clone(),
+                args: args.iter().map(|arg| arg.substitute(name, value)).collect(),
+                site: *site,
+            },
+            ConstExpr::Unary { op, expr } => ConstExpr::Unary {
+                op: *op,
+                expr: go(expr),
+            },
+            ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
+                left: go(left),
+                op: *op,
+                right: go(right),
+            },
+            ConstExpr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => ConstExpr::Mux {
+                condition: go(condition),
+                then_expr: go(then_expr),
+                else_expr: go(else_expr),
+            },
+        }
+    }
+}
+
+impl crate::procedural::SubroutineBase<Expr, LValue, Type> {
+    /// Whether a call with `args` uses a default that uses the object of
+    /// the method, which [`Self::actual`] evaluates with the receiver.
+    pub fn defaults_read_object(&self, args: &[Option<Expr>]) -> bool {
+        let Some(this) = self
+            .params
+            .first()
+            .filter(|this| this.source_name == "this")
+        else {
+            return false;
+        };
+        self.params
+            .iter()
+            .enumerate()
+            .skip(1)
+            .any(|(position, param)| {
+                args.get(position).is_none_or(Option::is_none)
+                    && param
+                        .default
+                        .as_ref()
+                        .is_some_and(|default| default.reads(&this.name))
+            })
+    }
+
+    /// The actual of formal `position` of a call with `args`: the given
+    /// one, or the formal's default. The default of a method is evaluated in
+    /// the scope of the method (IEEE 1800-2023 13.5.3), where the handle of
+    /// its object is the receiver of the call, its first actual; one that
+    /// uses the object evaluates the receiver again, so the receiver may not
+    /// have effects. Unless the caller keeps the receiver's value in a
+    /// variable that only the call writes (`receiver_kept`), the receiver may
+    /// also not be changed by what is evaluated after it and before that use:
+    /// so neither the other arguments of the call nor the default before it
+    /// reads the object may have effects.
+    pub fn actual(
+        &self,
+        position: usize,
+        args: &[Option<Expr>],
+        receiver_kept: bool,
+    ) -> Result<Option<Expr>, String> {
+        if let Some(actual) = args.get(position).cloned().flatten() {
+            return Ok(Some(actual));
+        }
+        let Some(default) = self
+            .params
+            .get(position)
+            .and_then(|param| param.default.clone())
+        else {
+            return Ok(None);
+        };
+        match (self.params.first(), args.first().cloned().flatten()) {
+            (Some(this), Some(receiver))
+                if position > 0 && this.source_name == "this" && default.reads(&this.name) =>
+            {
+                if !receiver.rereadable() {
+                    return Err(format!(
+                        "default of `{}` of a method called on an object with effects",
+                        self.params[position].source_name
+                    ));
+                }
+                // A call reads its arguments before it runs.
+                let reads_first = match &default {
+                    Expr::Call { args, .. } => args.iter().flatten().all(Expr::rereadable),
+                    default => default.rereadable(),
+                };
+                let others_rereadable = (1..self.params.len())
+                    .filter(|&other| other != position)
+                    .filter_map(|other| {
+                        args.get(other)
+                            .cloned()
+                            .flatten()
+                            .or_else(|| self.params[other].default.clone())
+                    })
+                    .all(|other| other.rereadable());
+                if !receiver_kept && (!reads_first || !others_rereadable) {
+                    return Err(format!(
+                        "default of `{}` that uses the object after an argument with effects",
+                        self.params[position].source_name
+                    ));
+                }
+                default.substitute(&this.name, &receiver).map(Some).ok_or_else(|| {
+                    format!(
+                        "default of `{}` that selects at a position of the object of its receiver",
+                        self.params[position].source_name
+                    )
+                })
+            }
+            _ => Ok(Some(default)),
+        }
+    }
+}
+
 impl From<ast::InsideItem> for InsideItem {
     fn from(item: ast::InsideItem) -> Self {
         match item {

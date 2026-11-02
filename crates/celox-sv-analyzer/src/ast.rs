@@ -31,6 +31,9 @@ pub(crate) struct Session {
     generate_items: generate::Memo,
     /// Classes laid out so far, by name.
     classes: HashMap<String, std::rc::Rc<classes::Class>>,
+    /// The classes whose objects dispatchers and `$cast` select from, as
+    /// the scope last saw them.
+    concrete_classes: Option<std::rc::Rc<classes::ConcreteClasses>>,
     /// The constants and types of the scope that declares each class, which
     /// its parameter defaults and body see (IEEE 1800-2023 8.25).
     class_declaration_scopes: HashMap<String, (SharedMap<i128>, SharedMap<Type>)>,
@@ -58,6 +61,7 @@ pub(crate) struct Session {
     virtual_interfaces: Option<Arc<virtual_interfaces::VirtualInterfaces>>,
     /// The semantic types of the design.
     types: semantic_types::TyTable,
+    expression_types: expression_types::Memo,
 }
 
 impl Session {
@@ -207,9 +211,12 @@ mod bound_patterns;
 mod case;
 mod casts;
 mod classes;
+pub(crate) use classes::ClassIndex;
 mod comb_process;
+mod continuous_delays;
 mod events;
 mod mailboxes;
+mod net_delays;
 mod processes;
 mod semaphores;
 pub use bound_patterns::BoundPattern;
@@ -224,8 +231,11 @@ mod dpi;
 mod enums;
 mod expression_binding;
 mod expression_types;
+mod variable_dimensions;
+use variable_dimensions::{VariableDimensions, VariableShape};
 mod expressions;
 mod ff_process;
+mod function_returns;
 mod functions;
 mod generate;
 pub(crate) mod imports;
@@ -1195,6 +1205,14 @@ impl Module {
                 &const_env,
                 &type_aliases,
             );
+            packed_dimensions.constant_types = Arc::new(enum_constants.declarations.clone());
+            for parameter in imported.parameters.iter().chain(&parameters) {
+                let bindings = Arc::make_mut(&mut packed_dimensions.constant_types);
+                bindings.remove(parameter.name());
+                if let Some(ty) = &parameter.semantic_type {
+                    bindings.insert(parameter.name().into(), ty.clone());
+                }
+            }
             // Four-state parameter values cannot be represented by the numeric
             // environment. Keep their expressions for constant case analysis.
             packed_dimensions.parameter_values = parameter_value_env_with_imported(
@@ -1493,47 +1511,14 @@ impl Module {
                 .extend(functions.iter().map(|(name, function)| {
                     (
                         name.clone(),
-                        FunctionReturnMetadata {
-                            arguments: Some(function_argument_metadata(&function.params)),
-                            width: function.return_width,
-                            first_packed_dimension_width: function
-                                .return_first_packed_dimension_width,
-                            dimensions: function.return_dimensions,
-                            signed: function.return_signed,
-                            is_2state: function.return_is_2state,
-                            string: function.return_string,
-                            chandle: function.return_chandle,
-                            pattern_type: function.return_type.clone(),
-                            enum_domain: function.return_enum_domain.clone(),
-                            class: function.return_class.clone(),
-                            virtual_interface: function.return_virtual_interface.clone(),
-                        },
+                        FunctionReturnMetadata::from_function(function),
                     )
                 }));
             packed_dimensions
                 .function_return_types
                 .extend(dpi_imports.iter().filter_map(|import| {
-                    let r#type = import.return_type()?;
-                    Some((
-                        import.name().to_string(),
-                        FunctionReturnMetadata {
-                            arguments: Some(dpi_argument_metadata(import)),
-                            width: Some(r#type.width()),
-                            first_packed_dimension_width: (r#type.width() > 1)
-                                .then_some(r#type.width()),
-                            dimensions: Some(usize::from(
-                                r#type.width() > 1 && r#type != crate::ir::DpiType::Chandle,
-                            )),
-                            signed: r#type.is_signed(),
-                            is_2state: !r#type.is_4state(),
-                            string: r#type == crate::ir::DpiType::String,
-                            chandle: r#type == crate::ir::DpiType::Chandle,
-                            pattern_type: None,
-                            enum_domain: None,
-                            class: None,
-                            virtual_interface: None,
-                        },
-                    ))
+                    FunctionReturnMetadata::from_dpi(import, &mut session.types)
+                        .map(|metadata| (import.name().to_string(), metadata))
                 }));
             // Class methods are subroutines `class::method` (IEEE 1800-2023 8.6).
             dimensions::all_class_signatures(syntax_tree, session, &mut packed_dimensions);
@@ -1560,6 +1545,7 @@ impl Module {
             // Bodies now have the active module's declarations and function types.
             // Declaration-time queries still use syntax discovery while metadata
             // is incomplete; generated/procedural scopes overlay this complete base.
+            packed_dimensions.bind_types(&mut session.types, &syntax_tree.functions);
             packed_dimensions.scope_types_complete = true;
             let mut locals = Vec::new();
             let mut local_counter = 0usize;
@@ -1627,6 +1613,21 @@ impl Module {
                     )?);
                     (subroutines, comb_processes, ff_processes, initial_processes)
                 };
+            net_delays::lower(
+                syntax_tree,
+                &mut packed_dimensions,
+                &ports,
+                &instances,
+                &mut signals,
+                &mut comb_processes,
+            )?;
+            continuous_delays::lower(
+                syntax_tree,
+                &packed_dimensions,
+                &mut signals,
+                &mut comb_processes,
+                &mut initial_processes,
+            )?;
             let (inline_subroutines, inline_randomizations) =
                 procedural::randomization::inline_subroutines(
                     syntax_tree,
@@ -1768,6 +1769,11 @@ impl Module {
                 .iter()
                 .flat_map(|process| process.assignments().iter().cloned())
                 .collect();
+            if is_package || export_symbols {
+                enum_constants.declarations.extend(
+                    classes::specializations::export_enum_constants(syntax_tree, session),
+                );
+            }
             // A package keeps its symbols for the scopes that use it.
             let symbols = (is_package || export_symbols).then(|| scope::ScopeSymbols {
                 package_scopes: imported.package_scopes.clone(),
@@ -2004,6 +2010,7 @@ const MAX_GENERATE_LOOP_EXPANSION: usize = 10_000;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parameter {
     floating: Option<TypeKind>,
+    semantic_type: Option<semantic_types::ConstantType>,
     name: String,
     value: Option<ConstExpr>,
     declared_width: Option<usize>,
@@ -2034,6 +2041,7 @@ impl Parameter {
             value,
             declared_width,
             floating: None,
+            semantic_type: None,
             packed_ranges: Vec::new(),
             members: Vec::new(),
             declared_signed,
@@ -2952,6 +2960,10 @@ impl LValue {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CombProcess {
+    /// Elaborated ticks, consumed by continuous_delays before IR publication.
+    delay: Option<u64>,
+    /// A declaration's independent net delay, consumed before IR publication.
+    net_delay: bool,
     creation_order: usize,
     site: Option<crate::procedural::SourceSpan>,
     /// Where the procedure is written, for an `always @*` that becomes a
@@ -2999,6 +3011,8 @@ impl CombProcess {
             })
             .collect();
         Self {
+            delay: None,
+            net_delay: false,
             creation_order: 0,
             site: None,
             process_site: None,
@@ -3012,6 +3026,8 @@ impl CombProcess {
 
     fn procedural(kind: CombProcessKind, condition: Option<ConstExpr>, body: Vec<Stmt>) -> Self {
         Self {
+            delay: None,
+            net_delay: false,
             creation_order: 0,
             site: None,
             process_site: None,
@@ -3201,6 +3217,8 @@ impl ConditionalAssignment {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Function {
+    /// The resolved return type, retained through body binding and renaming.
+    return_semantic_type: Option<semantic_types::TyId>,
     /// The aggregate return type, frozen in its declaration scope.
     return_type: Option<Type>,
     return_real: bool,
@@ -3230,6 +3248,9 @@ struct Function {
     return_class: Option<String>,
     /// The function returns a virtual interface of this type.
     return_virtual_interface: Option<Arc<virtual_interfaces::VirtualInterface>>,
+    /// The container type of a dynamic array, associative array or queue
+    /// result (IEEE 1800-2023 7.5, 7.8, 7.10).
+    return_container: Option<Arc<ContainerType>>,
 }
 
 fn function_argument_metadata(params: &[FunctionParam]) -> Arc<[FunctionArgumentMetadata]> {
@@ -3367,6 +3388,7 @@ struct EnumMemberConstants {
     exprs: HashMap<String, Expr>,
     /// Base width and signedness retained for early constant substitution.
     types: HashMap<String, ExprType>,
+    declarations: HashMap<String, semantic_types::ConstantType>,
 }
 
 impl EnumMemberConstants {
@@ -3382,6 +3404,11 @@ impl EnumMemberConstants {
         }
         for (name, value) in &other.types {
             self.types.entry(name.clone()).or_insert(*value);
+        }
+        for (name, value) in &other.declarations {
+            self.declarations
+                .entry(name.clone())
+                .or_insert_with(|| value.clone());
         }
     }
 }
@@ -3442,36 +3469,6 @@ struct UnpackedDimension {
     width: ConstExpr,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct VariableDimensions {
-    container: Option<Arc<ContainerType>>,
-    randomizable: bool,
-    enum_domain: Option<Arc<enums::EnumDomain>>,
-    /// See [`Type::packed_enum`].
-    packed_enum: bool,
-    real: bool,
-    /// A `string`: each element is a heap handle, not packed bits.
-    string: bool,
-    /// The class of an object handle variable.
-    class: Option<String>,
-    /// The interface of a virtual interface variable.
-    virtual_interface: Option<Arc<virtual_interfaces::VirtualInterface>>,
-    packed: Vec<PackedDimension>,
-    unpacked: Vec<UnpackedDimension>,
-    signed: bool,
-    is_2state: bool,
-    members: Vec<packed_structs::PackedMember>,
-    /// See [`Type::signed_element_depth`].
-    signed_element_depth: Option<usize>,
-    /// A variable of unpacked structure type: the names of its members
-    /// are variables (see [`unpacked_structs`]).
-    unpacked_struct: Option<Arc<unpacked_structs::UnpackedStruct>>,
-    /// The declared type, for `$typename`.
-    declared: type_names::Declared,
-    /// A `chandle` variable (see [`Type::chandle`]).
-    chandle: bool,
-}
-
 type VariablePackedDimensions = HashMap<String, VariableDimensions>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3483,6 +3480,8 @@ struct FunctionArgumentMetadata {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct FunctionReturnMetadata {
+    /// Resolved self-determined result type in this design's semantic table.
+    semantic_type: Option<semantic_types::TyId>,
     /// Validate calls in type queries without retaining or executing bodies.
     arguments: Option<Arc<[FunctionArgumentMetadata]>>,
     width: Option<usize>,
@@ -3498,11 +3497,11 @@ struct FunctionReturnMetadata {
     pattern_type: Option<Type>,
     /// The members of an enumerated return type, for its methods.
     enum_domain: Option<Arc<enums::EnumDomain>>,
-    /// The class of a class handle result, whose members a call may select
-    /// (IEEE 1800-2023 8.4).
-    class: Option<String>,
     /// The function returns a virtual interface of this type.
     virtual_interface: Option<Arc<virtual_interfaces::VirtualInterface>>,
+    /// The function returns a dynamic array, associative array or queue of
+    /// this type (IEEE 1800-2023 7.5, 7.8, 7.10).
+    container: Option<Arc<ContainerType>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -3537,13 +3536,31 @@ struct PackedDimensions {
     /// The values of the operands whose side effects a procedural body has
     /// already executed before their statement (see [`effects`]).
     effect_values: Arc<HashMap<celox_sv_syntax::ExprId, Expr>>,
+    /// The frozen declaration types of visible enumerators and scalar
+    /// parameters, independent of their numeric values.
+    constant_types: Arc<HashMap<String, semantic_types::ConstantType>>,
     /// The class property expression whose select is being bound against
     /// the property's template; every other property is read through its
     /// object.
     property_select_base: Option<celox_sv_syntax::ExprId>,
+    /// The element of a dynamic container whose select is being bound
+    /// against a local of its type, with the local's name (see
+    /// `containers::selected_element`).
+    element_select: Option<(celox_sv_syntax::ExprId, String)>,
 }
 
 impl PackedDimensions {
+    /// Bind the completed declaration set without changing lexical map identity.
+    fn bind_types(
+        &self,
+        table: &mut semantic_types::TyTable,
+        functions: &const_functions::ConstantFunctions,
+    ) {
+        for (_, shape) in self.iter() {
+            shape.bind_type(table, functions, &self.const_env);
+        }
+    }
+
     fn new(
         variables: impl Into<ScopedMap<VariableDimensions>>,
         const_env: impl ToShared<i128>,
@@ -3568,7 +3585,9 @@ impl PackedDimensions {
             locator_locals: None,
             locator_iterators: Arc::default(),
             effect_values: Arc::default(),
+            constant_types: Arc::default(),
             property_select_base: None,
+            element_select: None,
         }
     }
 }

@@ -21,6 +21,7 @@ mod references;
 mod scan;
 mod streams;
 mod strings;
+mod system;
 
 use super::procedural::*;
 use super::*;
@@ -916,8 +917,17 @@ impl<'p, 'a> Ff<'p, 'a> {
                     }
                     continue;
                 }
-                sv::ir::Callee::Object(op) if matches!(*op, sv::ir::ObjectOp::New { .. }) => {
-                    // Constructor seeding consumes the process RNG. Register it
+                sv::ir::Callee::Object(op)
+                    if matches!(
+                        *op,
+                        sv::ir::ObjectOp::New { .. }
+                            | sv::ir::ObjectOp::Container {
+                                op: sv::ir::ContainerOp::Shuffle,
+                                ..
+                            }
+                    ) =>
+                {
+                    // Construction and shuffling consume the process RNG. Register it
                     // before lower_process freezes the persistent target ranges.
                     self.urandom_state();
                     continue;
@@ -1683,6 +1693,14 @@ impl<'p, 'a> Ff<'p, 'a> {
             Expr::Call {
                 callee:
                     sv::ir::Callee::System(
+                        function @ (sv::ir::SystemFunction::Fgets | sv::ir::SystemFunction::Ferror),
+                    ),
+                args,
+                ..
+            } => self.string_file_function(*function, args)?,
+            Expr::Call {
+                callee:
+                    sv::ir::Callee::System(
                         function @ (sv::ir::SystemFunction::Ftell
                         | sv::ir::SystemFunction::Fseek
                         | sv::ir::SystemFunction::Rewind
@@ -1721,6 +1739,11 @@ impl<'p, 'a> Ff<'p, 'a> {
                 sv::ir::ObjectOp::Stream(op) => self.stream_call(op, args)?,
                 _ => self.object_call(op, args)?,
             },
+            Expr::Call {
+                callee: sv::ir::Callee::System(sv::ir::SystemFunction::System),
+                args,
+                ..
+            } => self.system_call(args)?,
             Expr::Call {
                 callee: sv::ir::Callee::System(sv::ir::SystemFunction::Fopen),
                 args,
@@ -3430,19 +3453,23 @@ impl<'p, 'a> Ff<'p, 'a> {
                             .map_err(slt_error)
                     };
                     let placed_mask = place(arena, mask)?;
-                    let placed_value = place(arena, value)?;
-                    let placed_value = arena
-                        .alloc(SLTNode::Binary(placed_value, BinaryOp::And, placed_mask))
-                        .map_err(slt_error)?;
-                    let keep = arena
-                        .alloc(SLTNode::Unary(UnaryOp::BitNot, placed_mask))
-                        .map_err(slt_error)?;
-                    let kept = arena
-                        .alloc(SLTNode::Binary(current, BinaryOp::And, keep))
-                        .map_err(slt_error)?;
-                    let mut updated = arena
-                        .alloc(SLTNode::Binary(kept, BinaryOp::Or, placed_value))
-                        .map_err(slt_error)?;
+                    let mut updated = if self.m.four_state && self.m.var(id).is_4state {
+                        masked::dynamic_four_state(arena, current, value, placed_mask, up, down)?
+                    } else {
+                        let placed_value = place(arena, value)?;
+                        let placed_value = arena
+                            .alloc(SLTNode::Binary(placed_value, BinaryOp::And, placed_mask))
+                            .map_err(slt_error)?;
+                        let keep = arena
+                            .alloc(SLTNode::Unary(UnaryOp::BitNot, placed_mask))
+                            .map_err(slt_error)?;
+                        let kept = arena
+                            .alloc(SLTNode::Binary(current, BinaryOp::And, keep))
+                            .map_err(slt_error)?;
+                        arena
+                            .alloc(SLTNode::Binary(kept, BinaryOp::Or, placed_value))
+                            .map_err(slt_error)?
+                    };
                     if self.m.four_state {
                         // A write at an unknown position is ignored (IEEE 1800-2023 11.5.1).
                         let mut known = None;
@@ -4695,6 +4722,29 @@ impl<'p, 'a> Ff<'p, 'a> {
                 "function call `{name}` with too many arguments"
             )));
         }
+        // A default that uses the object reads the receiver as the call
+        // evaluated it, kept before the other arguments are evaluated
+        // (IEEE 1800-2023 13.5.3).
+        let receiver_kept =
+            matches!(args.first(), Some(Some(_))) && subroutine.defaults_read_object(args);
+        let kept_args;
+        let args = match args.split_first() {
+            Some((Some(receiver), rest)) if receiver_kept => {
+                let this = self
+                    .m
+                    .id(&subroutine.params[0].name)
+                    .ok_or_else(|| unsupported(format!("object of `{name}`")))?;
+                let value = self.eval(receiver, None)?;
+                let Err(kept) = self.kept_input(this, value, true) else {
+                    unreachable!("a kept input is kept")
+                };
+                kept_args = std::iter::once(Some(sv::ir::Expr::Ident(kept)))
+                    .chain(rest.iter().cloned())
+                    .collect::<Vec<_>>();
+                &kept_args[..]
+            }
+            _ => args,
+        };
         // Each inlined automatic task activation owns persistent storage, so
         // another process can enter the same task while this one is suspended.
         // Static formals/locals deliberately keep their module-wide addresses.
@@ -4769,11 +4819,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                 .m
                 .id(&param.name)
                 .ok_or_else(|| unsupported(format!("argument `{}`", param.source_name)))?;
-            let actual = args
-                .get(position)
-                .cloned()
-                .flatten()
-                .or_else(|| param.default.clone());
+            let actual = subroutine
+                .actual(position, args, receiver_kept)
+                .map_err(unsupported)?;
             if param.leaves.is_empty() {
                 match self.reference(name, param, actual)? {
                     Reference::Variable(target) => {
@@ -4820,11 +4868,10 @@ impl<'p, 'a> Ff<'p, 'a> {
             subroutine.params.get(position).is_some_and(|param| {
                 param.direction.is_read()
                     && !param.direction.is_reference()
-                    && args
-                        .get(position)
-                        .cloned()
+                    && subroutine
+                        .actual(position, args, receiver_kept)
+                        .ok()
                         .flatten()
-                        .or_else(|| param.default.clone())
                         .is_some_and(|actual| self.m.makes_host_request(&actual))
             })
         });
@@ -4841,11 +4888,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                 .m
                 .id(&param.name)
                 .ok_or_else(|| unsupported(format!("argument `{}`", param.source_name)))?;
-            let actual = args
-                .get(position)
-                .cloned()
-                .flatten()
-                .or_else(|| param.default.clone());
+            let actual = subroutine
+                .actual(position, args, receiver_kept)
+                .map_err(unsupported)?;
             if param.direction.is_written() {
                 let reference = actual
                     .as_ref()
@@ -7412,6 +7457,7 @@ impl Ff<'_, '_> {
             width: EVENT_COUNTER_WIDTH,
             signed: false,
             is_4state: false,
+            is_unpacked_struct: false,
             packed_ranges: vec![(EVENT_COUNTER_WIDTH as i128 - 1, 0)],
             array_dims: Vec::new(),
             unpacked_ranges: Vec::new(),
@@ -7492,6 +7538,7 @@ impl Ff<'_, '_> {
                 width,
                 signed,
                 is_4state: float.is_none(),
+                is_unpacked_struct: false,
                 packed_ranges: vec![(width as i128 - 1, 0)],
                 array_dims: Vec::new(),
                 unpacked_ranges: Vec::new(),

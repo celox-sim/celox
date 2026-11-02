@@ -371,7 +371,23 @@ impl SLTToSIRLowerer {
                 }
                 Frame::Unary(node, op, width) => {
                     let inner = value.take().unwrap();
-                    let result = if matches!(op, UnaryOp::ToTwoState | UnaryOp::Float { .. }) {
+                    // Plane bits are unsigned two-state data even when the
+                    // surrounding expression graph uses Logic registers.
+                    let inner = if matches!(op, UnaryOp::FromPlanes)
+                        && !matches!(
+                            builder.register(&inner),
+                            RegisterType::Bit { signed: false, .. }
+                        ) {
+                        let bits = builder.alloc_bit(builder.register(&inner).width(), false);
+                        builder.emit(SIRInstruction::Unary(bits, UnaryOp::ToTwoState, inner));
+                        bits
+                    } else {
+                        inner
+                    };
+                    let result = if matches!(
+                        op,
+                        UnaryOp::ToTwoState | UnaryOp::ToPlanes | UnaryOp::Float { .. }
+                    ) {
                         builder.alloc_bit(width, self.get_bound_signed(node, arena))
                     } else {
                         builder.alloc_logic(width)
