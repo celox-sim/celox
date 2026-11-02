@@ -407,3 +407,44 @@
   (modify (set a 0xe318)) (assert_eq y 15)
   (modify (set a 0xe680)) (assert_eq y 14)
   (modify (set a 0x1000)) (assert_eq y 0))
+
+; A long event list must refresh every baseline after an early difference,
+; observe a last-input X/Z-only change, and stay dormant for repeated values.
+; The intermediate pulse makes executing the body unnecessarily observable.
+(case large_sensitivity_list_preserves_initial_wait_and_four_state_changes
+  (four_state)
+  (source "large_sensitivity.sv" #"
+    module Top;
+      logic a, b, c, d, e, f, g, h, i;
+      logic [8:0] observed = 9'h155;
+      logic [8:0] combinational;
+      bit pulse = 0;
+      int count = 0;
+      always_comb combinational = {a,b,c,d,e,f,g,h,i};
+      always @(a or b or c or d or e or f or g or h or i) begin
+        pulse = 0;
+        observed = {a,b,c,d,e,f,g,h,i};
+        pulse = 1;
+      end
+      always @(posedge pulse) count = count + 1;
+      initial begin
+        #1 $display("%b %b %0d", observed, combinational, count);
+        a = 0;
+        #1 $display("%b %b %0d", observed, combinational, count);
+        i = 1;
+        #1 $display("%b %b %0d", observed, combinational, count);
+        i = 1;
+        #1 $display("%b %b %0d", observed, combinational, count);
+        i = 1'bx;
+        #1 $display("%b %b %0d", observed, combinational, count);
+        i = 1'bz;
+        #1 $display("%b %b %0d", observed, combinational, count);
+        a = 1;
+        #1 $display("%b %b %0d", observed, combinational, count);
+        $finish;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "101010101 xxxxxxxxx 0\n0xxxxxxxx 0xxxxxxxx 1\n0xxxxxxx1 0xxxxxxx1 2\n0xxxxxxx1 0xxxxxxx1 2\n0xxxxxxxx 0xxxxxxxx 3\n0xxxxxxxz 0xxxxxxxz 4\n1xxxxxxxz 1xxxxxxxz 5\n"))

@@ -5565,10 +5565,28 @@ impl<'p, 'a> Ff<'p, 'a> {
         let mut changed = self.b.alloc_bit(1, false);
         self.b
             .emit(SIRInstruction::Imm(changed, SIRValue::new(0u8)));
+        // A large sensitivity list need not retain every old and current
+        // value until the final comparison. Check bounded groups, stop at
+        // the first change, and refresh the snapshots only when needed.
+        // Occurrence counters also observe transient changes; retain their
+        // existing path until they can share the same grouped check.
+        let grouped = sources.len() >= 4 && !self.input_occurrences;
+        let capture = grouped.then(|| self.b.new_block());
+        let execute = self.b.new_block();
+        let done = self.b.new_block();
+        if let Some(capture) = capture {
+            let check = self.b.new_block();
+            self.b.seal_block(SIRTerminator::Branch {
+                cond: init,
+                true_block: (check, vec![]),
+                false_block: (capture, vec![]),
+            });
+            self.b.switch_to_block(check);
+        }
         let mut snapshots = Vec::new();
         let mut sensitivity_counters = Vec::new();
         let mut counter_snapshots = Vec::new();
-        for source in &sources {
+        for (ordinal, source) in sources.iter().enumerate() {
             let width = source.access.msb - source.access.lsb + 1;
             let (saved, _) = self.m.temp(
                 "comb_input",
@@ -5603,6 +5621,26 @@ impl<'p, 'a> Ff<'p, 'a> {
                 .emit(SIRInstruction::Binary(next, changed, BinaryOp::Or, differs));
             changed = next;
             snapshots.push((saved, width, current));
+            if let Some(capture) = capture
+                && ((ordinal + 1).is_multiple_of(4) || ordinal + 1 == sources.len())
+            {
+                let next = if ordinal + 1 == sources.len() {
+                    done
+                } else {
+                    self.b.new_block()
+                };
+                self.b.seal_block(SIRTerminator::Branch {
+                    cond: changed,
+                    true_block: (capture, vec![]),
+                    false_block: (next, vec![]),
+                });
+                if next != done {
+                    self.b.switch_to_block(next);
+                    changed = self.b.alloc_bit(1, false);
+                    self.b
+                        .emit(SIRInstruction::Imm(changed, SIRValue::new(0u8)));
+                }
+            }
             if !self.input_occurrences {
                 continue;
             }
@@ -5641,8 +5679,18 @@ impl<'p, 'a> Ff<'p, 'a> {
             sensitivity_counters.push((*source, counter));
             counter_snapshots.push((counter, saved_counter));
         }
+        if let Some(capture) = capture {
+            self.b.switch_to_block(capture);
+        }
         let run = self.b.alloc_bit(1, false);
-        if runs_at_time_zero {
+        if grouped && runs_at_time_zero {
+            self.b.emit(SIRInstruction::Imm(run, SIRValue::new(1u8)));
+        } else if grouped {
+            // Ordinary event controls establish their initial baseline
+            // without executing; always_comb executes on that first visit.
+            self.b
+                .emit(SIRInstruction::Binary(run, init, BinaryOp::Or, init));
+        } else if runs_at_time_zero {
             let first = self.b.alloc_bit(1, false);
             self.b
                 .emit(SIRInstruction::Unary(first, UnaryOp::LogicNot, init));
@@ -5653,14 +5701,27 @@ impl<'p, 'a> Ff<'p, 'a> {
                 .emit(SIRInstruction::Binary(run, init, BinaryOp::And, changed));
         }
         // Snapshot before executing: writes in the body do not retrigger it.
-        for &(saved, width, current) in &snapshots {
+        for (source, &(saved, width, current)) in sources.iter().zip(&snapshots) {
+            let current = if grouped {
+                // The checks do not mutate input state. Load each value at
+                // its store, avoiding a live snapshot set spanning the list.
+                let current = self.b.alloc_logic(width);
+                let offset = sv_memory_offset(self.m.var(source.id), source.access.lsb, width);
+                self.b.emit(SIRInstruction::Load(
+                    current,
+                    stable(source.id),
+                    offset,
+                    width,
+                ));
+                current
+            } else {
+                current
+            };
             self.store(saved, SIROffset::Static(0), width, current);
         }
         let one = self.b.alloc_bit(1, false);
         self.b.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
         self.store(initialized, SIROffset::Static(0), 1, one);
-        let execute = self.b.new_block();
-        let done = self.b.new_block();
         self.b.seal_block(SIRTerminator::Branch {
             cond: run,
             true_block: (execute, vec![]),
