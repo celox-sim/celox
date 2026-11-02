@@ -170,6 +170,7 @@ impl Proof<'_> {
                     }
                     if lhs.name() == self.name {
                         match lhs {
+                            LValue::Object { .. } => crate::ast::lowered_object(),
                             LValue::Ident(_) => self.written = self.full.clone(),
                             LValue::Select { msb, lsb, .. } => {
                                 if !pure_constant(msb) || !pure_constant(lsb) {

@@ -17,6 +17,9 @@ pub(in crate::ast) fn variable_lvalue(
         unpacked_structs::check_operands(ungroup(root, native), native, tree, session, dimensions)?;
     }
     chandles::check_target(chandle, root, tree, native, dimensions, session)?;
+    if let Some(place) = direct::object_place(root, native, tree, session, dimensions)? {
+        return Ok(place);
+    }
     direct::selected_lvalue(root, native, tree, session, dimensions, false)
 }
 pub(in crate::ast) fn net_lvalue(

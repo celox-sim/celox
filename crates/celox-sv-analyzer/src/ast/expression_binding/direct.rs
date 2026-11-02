@@ -1909,6 +1909,12 @@ fn bind_value_in(
                                     dimensions,
                                     false,
                                 )? {
+                                    // An element of a fixed array is a variable.
+                                    LValue::Object { .. } => {
+                                        return Err(unsupported(
+                                            "string output to a class property or container element",
+                                        ));
+                                    }
                                     LValue::Ident(name) => Expr::Ident(name),
                                     LValue::Select {
                                         name,
@@ -2488,6 +2494,89 @@ fn selected_value(
     packed_structs::checked_value(guards, value, tree, dimensions)
 }
 
+/// The place of property `property` of the object that native expression
+/// `receiver` denotes, or of `this` without one. Every property place is
+/// made here, and every write of a property's place is a write of the
+/// property, so a property that is not writable here has none (IEEE
+/// 1800-2023 8.19).
+fn property_place(
+    property: classes::Property,
+    receiver: Option<ExprId>,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> Converted<ObjectPlace> {
+    objects::check_writable(&property, dimensions)?;
+    let handle = objects::receiver(tree, session, receiver, native, dimensions)?;
+    Ok(ObjectPlace::Property {
+        field: property.field,
+        handle,
+        r#type: property.r#type,
+    })
+}
+
+/// The target that native expression `root` assigns when it is a class
+/// property of integral type, a select of one, or a select of an element
+/// that a container holds by value: an [`LValue::Object`], whose selection
+/// is that of a variable of the value's type (see `value_selects`).
+pub(in crate::ast) fn object_place(
+    root: ExprId,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<LValue>> {
+    // A place is found in the declarations of the scope.
+    if !std::ptr::eq(native, tree.declarations()) {
+        return Ok(None);
+    }
+    let mut base = ungroup(root, native);
+    while let ExprKind::Select { expression, .. } = &native.expression(base).kind {
+        base = ungroup(*expression, native);
+    }
+    let (place, base) = if let Some((property, receiver)) =
+        objects::property(tree, session, base, native, dimensions)?
+        && property.field.handle.is_none()
+        && property.r#type.container.is_none()
+        && property.r#type.unpacked_struct().is_none()
+    {
+        let place = property_place(property, receiver, native, tree, session, dimensions)?;
+        (place, base)
+    } else if let Some((element, target, container, index)) =
+        containers::selected_element(root, tree, session, dimensions)?
+    {
+        (
+            ObjectPlace::Element {
+                container,
+                index,
+                layout: target.layout,
+                element: target.element.clone(),
+            },
+            element,
+        )
+    } else {
+        return Ok(None);
+    };
+    let steps = value_selects::steps(root, base, native).ok_or_else(disagreement)?;
+    let selection = value_selects::selection(
+        OBJECT_VALUE,
+        Expr::Ident(OBJECT_VALUE.into()),
+        place.value_type(),
+        &steps,
+        native,
+        tree,
+        session,
+        dimensions,
+    )?;
+    Ok(Some(LValue::Object {
+        place: Box::new(place),
+        select: Box::new(selection.lvalue),
+        guards: selection.guards,
+        whole: base,
+    }))
+}
+
 pub(in crate::ast) fn selected_lvalue(
     root: ExprId,
     native: &Declarations,
@@ -2911,6 +3000,11 @@ pub(in crate::ast) fn member_context(
         root = expression;
     }
     if !matches!(native.expression(root).kind, ExprKind::Member { .. }) {
+        return Ok(None);
+    }
+    // A class property is a place, whose members are those of its value
+    // (see `object_place`).
+    if objects::property(tree, session, root, native, dims)?.is_some() {
         return Ok(None);
     }
     if let Some(element) = element_members::element_member(root, native, tree, session, dims) {

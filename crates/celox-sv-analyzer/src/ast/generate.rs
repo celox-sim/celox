@@ -505,6 +505,7 @@ impl Item {
 
     pub fn lvalue(&self, lvalue: &mut LValue) {
         match lvalue {
+            LValue::Object { .. } => lowered_object(),
             LValue::Ident(name) => *name = self.name(name),
             LValue::Select {
                 name,

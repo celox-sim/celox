@@ -62,9 +62,7 @@ pub(super) fn lower(
         if inlining::effectful(rhs) {
             return Err(unsupported("delayed continuous assignment with calls"));
         }
-        let name = match lhs {
-            LValue::Ident(name) | LValue::Select { name, .. } => name,
-        };
+        let name = lhs.name();
         let shape = dimensions
             .get(name)
             .ok_or_else(|| unsupported("delayed continuous assignment target"))?;

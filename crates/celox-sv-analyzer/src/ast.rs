@@ -2948,12 +2948,120 @@ pub enum LValue {
         /// Whether this selection names a two-state packed struct member.
         is_2state: bool,
     },
+    /// A class property or a container element, which no variable holds,
+    /// or a selection of its value: `select` is the selection of a variable
+    /// `OBJECT_VALUE` of the value's type (see `value_selects`), the whole
+    /// value `LValue::Ident(OBJECT_VALUE)`. An assignment loads the value,
+    /// assigns the selection and stores the value back, once for each
+    /// statement (see `BodyBuilder::place_assignment`).
+    Object {
+        place: Box<ObjectPlace>,
+        select: Box<LValue>,
+        /// The checks of the tags of the members the selection crosses,
+        /// which read `OBJECT_VALUE` (7.3.2): every write of the place
+        /// applies them.
+        guards: Vec<Expr>,
+        /// The native expression of the whole value at the place, whose
+        /// type the local that a write goes through has.
+        whole: celox_sv_syntax::ExprId,
+    },
+}
+
+/// The variable a selection of an [`ObjectPlace`] selects from.
+pub(crate) const OBJECT_VALUE: &str = "$object_value";
+
+/// An [`LValue::Object`] past the statement that assigns it: the body
+/// builder lowers each place with its statement, into a load and a store of
+/// the object (`BodyBuilder::place_assignment`), so no other pass sees it.
+pub(crate) fn lowered_object() -> ! {
+    unreachable!("an object place is lowered with the statement that assigns it")
+}
+
+/// Where an [`LValue::Object`] is: a property of the object `handle`, or an
+/// element, held by value, of the container `container` at `index`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObjectPlace {
+    Property {
+        field: crate::system_functions::ObjectField,
+        handle: Expr,
+        r#type: Type,
+    },
+    Element {
+        container: Expr,
+        index: Expr,
+        layout: crate::system_functions::ContainerLayout,
+        element: Type,
+    },
+}
+
+impl ObjectPlace {
+    /// The type of the value at the place.
+    pub(crate) fn value_type(&self) -> &Type {
+        match self {
+            ObjectPlace::Property { r#type, .. } => r#type,
+            ObjectPlace::Element { element, .. } => element,
+        }
+    }
+
+    /// The expressions that select the place: the handle, or the container
+    /// and the index.
+    pub(crate) fn exprs_mut(&mut self) -> Vec<&mut Expr> {
+        match self {
+            ObjectPlace::Property { handle, .. } => vec![handle],
+            ObjectPlace::Element {
+                container, index, ..
+            } => vec![container, index],
+        }
+    }
+
+    /// A read of the value at the place.
+    pub(crate) fn load(&self) -> Expr {
+        match self {
+            ObjectPlace::Property { field, handle, .. } => classes::object_call(
+                crate::system_functions::ObjectOp::Load(*field),
+                vec![handle.clone()],
+            ),
+            ObjectPlace::Element {
+                container,
+                index,
+                layout,
+                ..
+            } => containers::call(
+                crate::system_functions::ContainerOp::Get,
+                *layout,
+                vec![container.clone(), index.clone()],
+            ),
+        }
+    }
+
+    /// A write of `value` to the place.
+    pub(crate) fn store(&self, value: Expr) -> Stmt {
+        Stmt::Eval(match self {
+            ObjectPlace::Property { field, handle, .. } => classes::object_call(
+                crate::system_functions::ObjectOp::Store(*field),
+                vec![handle.clone(), value],
+            ),
+            ObjectPlace::Element {
+                container,
+                index,
+                layout,
+                ..
+            } => containers::call(
+                crate::system_functions::ContainerOp::Set,
+                *layout,
+                vec![container.clone(), index.clone(), value],
+            ),
+        })
+    }
 }
 
 impl LValue {
+    /// The variable the lvalue writes, or the `OBJECT_VALUE` variable that a
+    /// place is assigned through.
     pub fn name(&self) -> &str {
         match self {
             LValue::Ident(name) | LValue::Select { name, .. } => name,
+            LValue::Object { .. } => OBJECT_VALUE,
         }
     }
 }
@@ -3528,6 +3636,8 @@ struct PackedDimensions {
     subroutine_param_names: Arc<HashMap<String, Vec<String>>>,
     /// The class whose method is being bound.
     class_scope: Option<String>,
+    /// The method being bound is the constructor of `class_scope`.
+    constructor: bool,
     /// Where array locator methods declare their iterator locals; `None`
     /// outside a procedural body.
     locator_locals: Option<locators::LocalSink>,
@@ -3536,6 +3646,9 @@ struct PackedDimensions {
     /// The values of the operands whose side effects a procedural body has
     /// already executed before their statement (see [`effects`]).
     effect_values: Arc<HashMap<celox_sv_syntax::ExprId, Expr>>,
+    /// The saved index of the last element of a queue that a select `q[$]`
+    /// of an assignment target names, by the select (IEEE 1800-2023 7.10.1).
+    last_indices: Arc<HashMap<celox_sv_syntax::ExprId, Expr>>,
     /// The frozen declaration types of visible enumerators and scalar
     /// parameters, independent of their numeric values.
     constant_types: Arc<HashMap<String, semantic_types::ConstantType>>,
@@ -3574,9 +3687,11 @@ impl PackedDimensions {
             subroutine_directions: Arc::default(),
             subroutine_param_names: Arc::default(),
             class_scope: None,
+            constructor: false,
             locator_locals: None,
             locator_iterators: Arc::default(),
             effect_values: Arc::default(),
+            last_indices: Arc::default(),
             constant_types: Arc::default(),
         }
     }

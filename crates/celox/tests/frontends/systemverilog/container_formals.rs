@@ -80,20 +80,75 @@ fn element_select_index_before_a_call_keeps_its_value() {
 }
 
 /// A select of a dynamic element at a position that changes the container
-/// is rejected: the element would be read before the position is
-/// evaluated (IEEE 1800-2023 11.5.1).
+/// is evaluated before the element is read, so the write keeps the bits of
+/// the element the select denotes (IEEE 1800-2023 11.4.1, 11.5.1).
 #[test]
-fn element_select_at_a_position_with_effects_is_rejected() {
-    let source = "module Top; bit [7:0] q[$]; \
-        initial begin q = '{8'h00, 8'h10}; q[0][q.pop_front()] = 1'b1; end endmodule";
-    let Err(error) =
-        Simulator::from_sv_sources(vec![(source, Path::new("select.sv"))], "Top").build_cranelift()
-    else {
-        panic!("a select at a position with effects is unsupported");
-    };
-    let error = error.to_string();
-    assert!(
-        error.contains("select of a dynamic element at a position with effects"),
-        "{error}"
-    );
+fn element_select_at_a_position_with_effects() {
+    let source = "module Top(output bit [7:0] first, output int size); bit [7:0] q[$]; \
+        initial begin q = '{8'h02, 8'h10}; q[0][q.pop_front()] = 1'b1; \
+        first = q[0]; size = q.size(); end endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("select.sv"))], "Top")
+        .build()
+        .unwrap();
+    let first = sim.signal("first");
+    let size = sim.signal("size");
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(first), BigUint::from(0x14u8));
+    assert_eq!(sim.get(size), BigUint::from(1u8));
+}
+
+/// Two calls in the position of a select of a dynamic element are two
+/// evaluations, each of which pops an element; the bounds of the select,
+/// which repeat the position, read each once (IEEE 1800-2023 11.5.1).
+#[test]
+fn element_select_positions_evaluate_each_call() {
+    let source = "module Top(output bit [7:0] first, output int size); bit [7:0] q[$]; \
+        initial begin q = '{8'h00, 8'h01, 8'h10}; q[0][q.pop_front() + q.pop_front()] = 1'b1; \
+        first = q[0]; size = q.size(); end endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("select.sv"))], "Top")
+        .build()
+        .unwrap();
+    let first = sim.signal("first");
+    let size = sim.signal("size");
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(first), BigUint::from(0x12u8));
+    assert_eq!(sim.get(size), BigUint::from(1u8));
+}
+
+/// An assignment evaluates its value before the address of its target,
+/// which it evaluates with the values it has when it is written (IEEE
+/// 1800-2023 4.9.3): a value that reads a variable an index call changes
+/// reads it before the call.
+#[test]
+fn assignment_values_are_evaluated_before_target_addresses() {
+    let source = "module Top(output bit [7:0] first, output int i); bit [7:0] q[$]; \
+        function automatic int next_index(); i++; return 0; endfunction \
+        initial begin q = '{8'h00, 8'h00}; i = 1; q[next_index()][3:0] = i; \
+        first = q[0]; end endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("order.sv"))], "Top")
+        .build()
+        .unwrap();
+    let first = sim.signal("first");
+    let i = sim.signal("i");
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(first), BigUint::from(1u8));
+    assert_eq!(sim.get(i), BigUint::from(2u8));
+}
+
+/// An increment evaluates the address of its operand once, before it reads
+/// it, as an assignment operator does (IEEE 1800-2023 11.4.2, 11.4.1).
+#[test]
+fn increments_evaluate_place_addresses_once() {
+    let source = "module Top(output bit [7:0] first, output int calls); bit [7:0] q[$]; \
+        function automatic int next_index(); calls++; return 0; endfunction \
+        initial begin q = '{8'h0f, 8'h00}; calls = 0; q[next_index()][3:0]++; \
+        first = q[0]; end endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("order.sv"))], "Top")
+        .build()
+        .unwrap();
+    let first = sim.signal("first");
+    let calls = sim.signal("calls");
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(first), BigUint::from(0x00u8));
+    assert_eq!(sim.get(calls), BigUint::from(1u8));
 }

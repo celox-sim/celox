@@ -76,7 +76,9 @@ pub(super) fn lower(
             .width;
         let mut ranges = Vec::new();
         let retarget = |lhs: &mut LValue| {
-            let (LValue::Ident(base) | LValue::Select { name: base, .. }) = lhs;
+            let (LValue::Ident(base) | LValue::Select { name: base, .. }) = lhs else {
+                lowered_object()
+            };
             if base == name {
                 *base = raw.clone();
                 true
@@ -89,6 +91,7 @@ pub(super) fn lower(
                 return Ok(());
             }
             ranges.push(match lhs {
+                LValue::Object { .. } => lowered_object(),
                 LValue::Ident(_) => None,
                 LValue::Select { msb, lsb, .. } => {
                     let msb = eval_ast_const_expr(&tree.functions, msb, &dimensions.const_env);

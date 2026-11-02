@@ -471,15 +471,22 @@ impl BodyBuilder<'_, '_, '_> {
                 .is_ok_and(|value| inlining::effectful(&value))
     }
 
-    /// The operands of target `destination` that a `$cast` captures, outside
-    /// in: the class-handle receivers its write goes through, which an
-    /// assignment reads before its value (a saved receiver covers the
-    /// operands inside it), and the indices with an effect, which it
-    /// evaluates once whether or not it writes (8.16, 6.24.2). A pure index
-    /// is read where the destination is written, as an assignment reads it.
-    fn destination_operands(&mut self, destination: ExprId) -> (Vec<ExprId>, Vec<ExprId>) {
+    /// The operands of the address of target `destination` that its write
+    /// evaluates once, outside in: the class-handle receivers the write
+    /// goes through (a saved receiver covers the operands inside it), and
+    /// the indices with an effect, which a `$cast` evaluates once whether
+    /// or not it writes (8.16, 6.24.2); with `all`, every index that is not
+    /// a literal, and the selects `q[$]` of the last element of a queue, as
+    /// an assignment operator evaluates its target's address once (11.4.1).
+    /// Otherwise a pure index is read where the destination is written, as
+    /// an assignment reads it (4.9.3).
+    pub(super) fn destination_operands(
+        &mut self,
+        destination: ExprId,
+        all: bool,
+    ) -> (Vec<ExprId>, Vec<ExprId>, Vec<ExprId>) {
         let native = self.tree.declarations();
-        let (mut receivers, mut indices) = (Vec::new(), Vec::new());
+        let (mut receivers, mut indices, mut lasts) = (Vec::new(), Vec::new(), Vec::new());
         let mut id = expression_binding::ungroup(destination, native);
         loop {
             match &native.expression(id).kind {
@@ -516,21 +523,29 @@ impl BodyBuilder<'_, '_, '_> {
                         _ => (*expression, Vec::new()),
                     };
                     for index in selects {
-                        if self.effectful(index) {
+                        if (all && !constant(native, index)) || self.effectful(index) {
                             indices.push(index);
                         }
+                    }
+                    // `$`, the index `q.size() - 1` (7.10.1).
+                    if all && matches!(dimension.kind, DimensionKind::Queue(None)) {
+                        lasts.push(id);
                     }
                     id = expression_binding::ungroup(base, native);
                 }
                 _ => break,
             }
         }
-        (receivers, indices)
+        (receivers, indices, lasts)
     }
 
     /// Evaluate `operands`, found outside in, left to right into hidden
     /// locals of their types, which every later binding of them reads.
-    fn save_operands(&mut self, operands: Vec<ExprId>, stmts: &mut Vec<Stmt>) -> Converted<()> {
+    pub(super) fn save_operands(
+        &mut self,
+        operands: Vec<ExprId>,
+        stmts: &mut Vec<Stmt>,
+    ) -> Converted<()> {
         let native = self.tree.declarations();
         for operand in operands.into_iter().rev() {
             let mut value =
@@ -560,11 +575,12 @@ impl BodyBuilder<'_, '_, '_> {
         stmts: &mut Vec<Stmt>,
     ) -> Converted<()> {
         let native = self.tree.declarations();
-        // The destination is addressed as an assignment to it is: its
-        // receivers before the source, its indices after; it is evaluated
-        // whether or not the cast succeeds, but only written when it does.
-        let (receivers, indices) = self.destination_operands(destination);
-        self.save_operands(receivers, stmts)?;
+        // The destination is addressed as an assignment to it is, after the
+        // source, with the values it has when it is written (IEEE 1800-2023
+        // 4.9.3); it is evaluated whether or not the cast succeeds, but only
+        // written when it does. The receiver is saved first, outside in.
+        let (receivers, mut indices, _) = self.destination_operands(destination, false);
+        indices.extend(receivers);
         if let Some((_, _, domain)) = self.enum_cast(id)? {
             return self.cast_to_enum(id, destination, source, &domain, indices, stmts);
         }
@@ -880,7 +896,10 @@ impl BodyBuilder<'_, '_, '_> {
                 "assignment expression to this selected target type",
             ));
         }
-        let mut assignment = self.assignment_value(operator, false, (left, right))?;
+        let [mut assignment] =
+            <[Stmt; 1]>::try_from(self.assignment_value(operator, false, (left, right))?).map_err(
+                |_| unsupported("assignment expression to a class property or container element"),
+            )?;
         let rhs = match &mut assignment {
             Stmt::Assign { rhs, .. } | Stmt::AssignConcat { rhs, .. } => rhs,
             _ => return Err(unsupported("assignment expression to this target")),
@@ -929,10 +948,11 @@ impl BodyBuilder<'_, '_, '_> {
     }
 
     /// Declare a hidden local that saves the value of native expression
-    /// `id`, of the expression's own type: a variable's declared type, or
-    /// the self-determined semantic type of any other expression (a string,
-    /// a class handle, a real or an integral vector), and return its source
-    /// and unique names. Every saved operand is declared through this.
+    /// `id`, of the expression's own type: a variable's or class property's
+    /// declared type, or the self-determined semantic type of any other
+    /// expression (a string, a class handle, a real or an integral vector),
+    /// and return its source and unique names. Every saved operand, value
+    /// and target is declared through this.
     pub(super) fn hidden_of(&mut self, id: ExprId) -> Converted<(String, String)> {
         let native = self.tree.declarations();
         if let Some(name) = expression_binding::native_name(self.tree, id, native)
@@ -942,6 +962,40 @@ impl BodyBuilder<'_, '_, '_> {
                 .and_then(type_names::declared_type)
                 .cloned()
         {
+            return Ok(self.hidden(ty));
+        }
+        // A class property has its declared type too.
+        if let Some((property, _)) =
+            expression_binding::object_property(self.tree, self.session, id, native, &self.dims)?
+        {
+            return Ok(self.hidden(property.r#type));
+        }
+        // A streaming concatenation that is unpacked into holds the bits of
+        // its operands, a vector of their width (11.4.14.3).
+        if let ExprKind::Streaming { expressions, .. } = &native
+            .expression(expression_binding::ungroup(id, native))
+            .kind
+        {
+            let mut width = 0u128;
+            let mut four_state = false;
+            for &item in expressions {
+                let semantic =
+                    expression_types::type_of(self.tree, self.session, item, native, &self.dims)?;
+                let semantic_types::TyData::Packed(packed) = self.session.types.data(semantic)
+                else {
+                    return Err(unsupported("a saved stream of this type"));
+                };
+                width += packed.bits();
+                four_state |= packed.four_state;
+            }
+            let width =
+                usize::try_from(width).map_err(|_| unsupported("a saved value of this width"))?;
+            let mut ty = Type::new(if four_state {
+                TypeKind::Logic
+            } else {
+                TypeKind::Bit
+            });
+            ty.packed_ranges = vector_type(width, false).packed_ranges;
             return Ok(self.hidden(ty));
         }
         let semantic = expression_types::type_of(self.tree, self.session, id, native, &self.dims)?;
@@ -1044,6 +1098,18 @@ impl BodyBuilder<'_, '_, '_> {
         if expression_binding::native_string(self.tree, self.session, operand, native, &self.dims) {
             return Err(unsupported("increment or decrement of a string"));
         }
+        // The operator evaluates the address of a place once, before it reads
+        // it, as an assignment operator does (11.4.2, 11.4.1).
+        if let Ok(LValue::Object { .. }) = expression_binding::variable_lvalue(
+            operand,
+            native,
+            self.tree,
+            self.session,
+            &self.dims,
+            false,
+        ) {
+            self.save_destination(operand, true, stmts)?;
+        }
         let current =
             expression_binding::value(operand, native, self.tree, self.session, &self.dims)?;
         // The operand is read and then written: a select of it must not
@@ -1111,12 +1177,7 @@ impl BodyBuilder<'_, '_, '_> {
         id: ExprId,
         stmts: &mut Vec<Stmt>,
     ) -> Converted<()> {
-        // A select of a class property is written through a local.
-        if let Some(write) = self.property_select_assignment("=", false, operand, id)? {
-            stmts.extend(write);
-        } else {
-            stmts.push(self.assignment_value("=", false, (operand, id))?);
-        }
+        stmts.extend(self.assignment_value("=", false, (operand, id))?);
         Ok(())
     }
 
@@ -1136,6 +1197,11 @@ impl BodyBuilder<'_, '_, '_> {
         });
         Ok(Some(stmts))
     }
+}
+
+/// Whether native expression `id` is a literal, which evaluates to itself.
+fn constant(native: &Declarations, id: ExprId) -> bool {
+    matches!(native.expression(id).kind, ExprKind::Literal(_))
 }
 
 #[cfg(test)]

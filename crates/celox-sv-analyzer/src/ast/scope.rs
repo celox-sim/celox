@@ -801,6 +801,7 @@ impl Renamer<'_> {
 
     pub fn lvalue(&self, lvalue: LValue) -> LValue {
         match lvalue {
+            LValue::Object { .. } => lowered_object(),
             LValue::Ident(name) => LValue::Ident(self.name(&name)),
             LValue::Select {
                 name,

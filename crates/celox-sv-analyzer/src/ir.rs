@@ -2173,6 +2173,7 @@ impl From<ast::Assignment> for Assignment {
 impl From<ast::LValue> for LValue {
     fn from(value: ast::LValue) -> Self {
         match value {
+            ast::LValue::Object { .. } => ast::lowered_object(),
             ast::LValue::Ident(name) => LValue::Ident(name),
             ast::LValue::Select {
                 name,

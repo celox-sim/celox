@@ -1100,6 +1100,7 @@ pub(super) fn expr_reads(expr: &Expr, name: &str) -> bool {
 /// indices of an assignment target.
 pub(super) fn stmts_read(stmts: &[Stmt], name: &str) -> bool {
     let lvalue_reads = |lvalue: &LValue| match lvalue {
+        LValue::Object { .. } => lowered_object(),
         LValue::Ident(_) => false,
         LValue::Select {
             msb,
