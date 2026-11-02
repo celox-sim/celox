@@ -1,1 +1,1 @@
-Option A: class properties and container elements are places of the ordinary target (LValue::Object), lowered once per statement in assignment_value
+Codex: evaluate a place's address once with no structural rewrite (assignment after its value, 4.9.3; assignment operator before its read, 11.4.1), freeze the object holding a container, split concatenations into place assignments with an escape assertion; reject writes of const properties (8.19)
