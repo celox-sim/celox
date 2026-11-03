@@ -302,6 +302,8 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
             |builder, (name, value)| builder.param(name, *value),
         );
         return Ok(match backend {
+            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+            "hotspot" => Box::new(TimedBackend::new(builder.hotspot_jit(true).build_tiered()?)),
             "interpreter" => Box::new(TimedBackend::new(builder.build_interpreter()?)),
             "native" => Box::new(TimedBackend::new(builder.build_native()?)),
             // The image goes through its container bytes, as an attached
@@ -359,6 +361,10 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
         }
     };
     Ok(match backend {
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        "hotspot" => Box::new(CeloxBackend(
+            builder.hotspot_jit(true).build_tiered().map_err(rejected)?,
+        )),
         "interpreter" => Box::new(CeloxBackend(builder.build_interpreter().map_err(rejected)?)),
         "native" => Box::new(CeloxBackend(builder.build_native().map_err(rejected)?)),
         "native-image" => {
