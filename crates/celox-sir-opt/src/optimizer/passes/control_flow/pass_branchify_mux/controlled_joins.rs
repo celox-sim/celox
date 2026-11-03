@@ -20,7 +20,9 @@ pub(super) fn eliminate_controlled_join_muxes(
                 .instructions
                 .iter()
                 .position(|instruction| {
-                    memory_write(instruction).is_some() || is_memory_barrier(instruction)
+                    memory_write(instruction).is_some()
+                        || is_memory_barrier(instruction)
+                        || writes_state_opaquely(instruction)
                 })
                 .unwrap_or(block.instructions.len());
             (block_id, index)

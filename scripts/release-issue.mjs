@@ -27,7 +27,7 @@ export async function updateReleaseIssue({ github, manifest, pullNumber }) {
     return;
   }
   const pull = candidates[0];
-  const body = `${TRACKER_MARKER}\n\n${pull.title.toString()}\n\nThis issue tracks the next Celox release. The release PR is created on Monday at 12:00 JST or by manually running Release Management. Apply \`release:hold\` here to postpone PR creation. Once a PR exists, apply the hold to that PR.\n\n${pull.body.notes()}`;
+  const body = `${TRACKER_MARKER}\n\n${pull.title.toString()}\n\nThis issue tracks the next Celox release. The release PR is created only by manually running Release Management on master. Apply \`release:hold\` here to postpone PR creation. Once a PR exists, apply the hold to that PR.\n\n${pull.body.notes()}`;
   if (!issue) await github.createIssue(TRACKER_TITLE, body);
   else if (issue.body !== body) await github.updateIssue(issue.number, body);
 }

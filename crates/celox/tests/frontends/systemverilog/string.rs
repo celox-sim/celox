@@ -1,6 +1,10 @@
 use super::*;
 
 sv_backends! {
+    fn local_bindings_shadow_imported_string_types(sim) {
+        @case "string::local_bindings_shadow_imported_string_types";
+    }
+
     fn string_fixed_array_mutations(sim) { @case "string::fixed_array_mutations"; }
     fn string_fixed_array_mutating_methods(sim) { @case "string::fixed_array_mutating_methods"; }
     fn string_fixed_array_mutation_indices(sim) { @case "string::fixed_array_mutation_indices"; }

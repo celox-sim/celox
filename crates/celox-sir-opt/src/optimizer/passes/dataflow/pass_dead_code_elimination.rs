@@ -10,6 +10,10 @@ impl ExecutionUnitPass for DeadCodeEliminationPass {
         "dead_code_elimination"
     }
 
+    fn handles_calls(&self) -> bool {
+        true
+    }
+
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _: &PassOptions) {
         super::pass_vectorize_concat::remove_dead_definitions(eu);
     }

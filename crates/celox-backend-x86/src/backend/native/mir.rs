@@ -80,6 +80,20 @@ impl Uses {
     pub fn as_slice(&self) -> &[VReg] {
         &self.buf[..usize::from(self.len)]
     }
+
+    /// Unique operands in register order without allocating a temporary vector.
+    pub(crate) fn sorted_unique(mut self) -> Self {
+        self.buf[..usize::from(self.len)].sort_unstable();
+        let mut len = 0;
+        for index in 0..usize::from(self.len) {
+            if len == 0 || self.buf[index] != self.buf[len - 1] {
+                self.buf[len] = self.buf[index];
+                len += 1;
+            }
+        }
+        self.len = len as u8;
+        self
+    }
 }
 
 impl std::ops::Deref for Uses {
@@ -2287,6 +2301,22 @@ pub struct MFunction {
     constant_tables: Vec<Vec<u64>>,
     /// Target facts shared by optimization, register allocation, and emission.
     pub(crate) target_features: super::features::X86Features,
+    /// The call stack that the function's calls of function units use, when
+    /// it makes any. Read by x86-64 emission only.
+    #[cfg_attr(
+        not(any(target_arch = "x86_64", feature = "cross-codegen")),
+        allow(dead_code)
+    )]
+    pub(crate) call_stack: Option<celox_state_layout::CallStackLayout>,
+    /// The frame window of a function unit, which addresses the frame its
+    /// caller passes from a reserved register; `None` for other functions.
+    pub(crate) frame_window: Option<super::function_unit::FrameWindow>,
+    /// Physical settle-flag bytes, used only to cluster clean guard paths.
+    #[cfg_attr(
+        not(any(target_arch = "x86_64", feature = "cross-codegen")),
+        allow(dead_code)
+    )]
+    pub(crate) settle_flags: Option<std::ops::Range<i32>>,
 }
 
 impl MFunction {
@@ -2298,7 +2328,17 @@ impl MFunction {
             x86_vec_count: 0,
             constant_tables: Vec::new(),
             target_features: super::features::X86Features::detect(),
+            call_stack: None,
+            frame_window: None,
+            settle_flags: None,
         }
+    }
+
+    /// The general-purpose registers the allocator may assign: a prefix of
+    /// `ALLOCATABLE_REGS`, which leaves out the frame register of a function
+    /// unit.
+    pub(crate) fn allocatable_register_count(&self) -> usize {
+        self.target_features.allocatable_register_count() - usize::from(self.frame_window.is_some())
     }
 
     pub fn alloc_x86_vec(&mut self) -> X86VecReg {

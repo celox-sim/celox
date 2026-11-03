@@ -694,6 +694,7 @@ fn narrow_wide_shift_uses_only_chunks_covered_by_the_result() {
         runtime_event_slot_size: 0,
         runtime_event_buffer_size: 0,
         runtime_event_site_layouts: vec![],
+        call_stack: None,
     };
 
     let mut function = lower_execution_unit(&eu, &layout, false);
@@ -863,6 +864,7 @@ fn wide_shift_result_is_canonical_before_mux_condition() {
         runtime_event_slot_size: 0,
         runtime_event_buffer_size: 0,
         runtime_event_site_layouts: vec![],
+        call_stack: None,
     };
 
     let mut function = lower_execution_unit(&eu, &layout, false);

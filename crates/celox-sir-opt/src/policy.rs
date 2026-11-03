@@ -20,7 +20,7 @@ pub enum OptLevel {
     O1,
     /// Production-default SIR optimizations + DSE(`PreserveTopPorts`),
     /// including conservative two-state control-flow recovery for profitable
-    /// Mux regions.
+    /// Mux regions, and selective settling of large combinational schedules.
     /// Cranelift: Speed / Backtracking.
     O2,
 }
@@ -30,8 +30,9 @@ impl OptLevel {
     pub fn default_enabled(self, pass: SirPass) -> bool {
         match self {
             OptLevel::O0 => matches!(pass, SirPass::TailCallSplit),
-            // Opt-in until it pays off on its own (#2013).
-            OptLevel::O1 | OptLevel::O2 => !matches!(pass, SirPass::PartitionedSettle),
+            OptLevel::O1 => !matches!(pass, SirPass::PartitionedSettle),
+            // The frontend keeps small and lane-parallel schedules whole.
+            OptLevel::O2 => true,
         }
     }
 
@@ -125,7 +126,8 @@ define_sir_passes! {
     DerivedEdgeUnits => "derived_edge_units",
     /// Split the combinational settle of designs with many event domains
     /// into partitions that run only when state they read changed. Not a
-    /// SIR transform: the frontend consumes it. Off unless enabled.
+    /// SIR transform: the frontend consumes it. Enabled by O2; the frontend
+    /// keeps small and lane-parallel schedules whole.
     PartitionedSettle => "partitioned_settle",
 }
 /// Diagnostics and additional verification for the SIR optimizer.
@@ -385,6 +387,18 @@ mod tests {
         assert!(options.is_enabled(SirPass::Gvn));
         assert!(!options.is_enabled(SirPass::TailCallSplit));
         assert!(options.any_enabled());
+    }
+
+    #[test]
+    fn selective_settling_is_an_o2_default_and_remains_overridable() {
+        assert!(!OptimizeOptions::new(OptLevel::O0).is_enabled(SirPass::PartitionedSettle));
+        assert!(!OptimizeOptions::new(OptLevel::O1).is_enabled(SirPass::PartitionedSettle));
+        assert!(OptimizeOptions::new(OptLevel::O2).is_enabled(SirPass::PartitionedSettle));
+        assert!(
+            !OptimizeOptions::new(OptLevel::O2)
+                .disable(SirPass::PartitionedSettle)
+                .is_enabled(SirPass::PartitionedSettle)
+        );
     }
 
     #[test]

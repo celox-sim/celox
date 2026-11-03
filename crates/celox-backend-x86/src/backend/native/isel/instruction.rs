@@ -1,5 +1,6 @@
 //! SIR instruction dispatch and scalar instruction lowering.
 
+use super::four_state::lower_bitwise_planes;
 use super::*;
 
 pub(super) fn lower_instruction(
@@ -31,7 +32,20 @@ pub(super) fn lower_instruction(
         });
         return;
     }
+    if packed_state::capture(ctx, block, inst) || packed_state::commit(ctx, block, inst) {
+        return;
+    }
     match inst {
+        SIRInstruction::Call {
+            function,
+            frame,
+            args,
+            outputs,
+            dst,
+            ..
+        } => {
+            call::lower_call(ctx, block, *function, *frame, args, outputs, *dst);
+        }
         SIRInstruction::ExternCall { dst, func, args } => {
             extern_call::lower_extern_call(ctx, block, *dst, *func, args);
         }
@@ -2021,6 +2035,9 @@ pub(super) fn lower_instruction(
                 );
                 return;
             }
+            if four_state::try_lower_associative_binary(ctx, block, inst, sir_block, sir_defs) {
+                return;
+            }
             let d_width = ctx.sir_width(dst);
             let lhs_width = ctx.sir_width(lhs);
             let rhs_width = ctx.sir_width(rhs);
@@ -2386,7 +2403,14 @@ pub(super) fn lower_instruction(
                     kind: CmpKind::Ne,
                 }),
                 BinaryOp::EqCase | BinaryOp::NeCase => {
-                    if ctx.four_state {
+                    if packed_state::compare(ctx, block, dst_vreg, *lhs, *rhs, *op) {
+                        let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+                        block.push(MInst::LoadImm {
+                            dst: zero,
+                            value: 0,
+                        });
+                        ctx.set_mask(*dst, zero);
+                    } else if ctx.four_state {
                         let l_m = ctx.get_mask(*lhs, block);
                         let r_m = ctx.get_mask(*rhs, block);
                         let value_diff = ctx.alloc_vreg(SpillDesc::transient());
@@ -2797,6 +2821,21 @@ pub(super) fn lower_instruction(
                     l_m
                 };
                 let r_m = ctx.get_mask(*rhs, block);
+                if matches!(op, BinaryOp::And | BinaryOp::Or)
+                    && ctx.const_mask_value(*lhs) != Some(0)
+                    && ctx.const_mask_value(*rhs) != Some(0)
+                {
+                    let (value, mask) = lower_bitwise_planes(
+                        ctx,
+                        block,
+                        *op,
+                        &[(lhs_vreg, l_m), (rhs_vreg, r_m)],
+                        d_width,
+                    );
+                    ctx.reg_map.set(*dst, value);
+                    ctx.set_mask(*dst, mask);
+                    return;
+                }
                 let res_m =
                     lower_binary_mask(ctx, block, op, lhs_vreg, rhs_vreg, l_m, r_m, d_width);
                 ctx.set_mask(*dst, res_m);
@@ -3158,6 +3197,7 @@ pub(super) fn lower_instruction(
         }
 
         SIRInstruction::Slice(dst, src, bit_offset, width) => {
+            packed_state::slice(ctx, block, *dst, *src, *bit_offset, *width);
             let dst_vreg = ctx.reg_map.get(*dst);
             let src_width = ctx.sir_width(src);
 

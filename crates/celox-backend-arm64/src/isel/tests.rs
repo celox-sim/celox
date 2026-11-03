@@ -41,6 +41,7 @@ fn layout_for(address: AbsoluteAddr, width: usize, four_state: bool) -> MemoryLa
         runtime_event_slot_size: 0,
         runtime_event_buffer_size: 0,
         runtime_event_site_layouts: Vec::new(),
+        call_stack: None,
     }
 }
 

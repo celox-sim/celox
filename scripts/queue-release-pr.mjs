@@ -269,11 +269,8 @@ export class GitHubCli {
   }
 }
 
-function positiveSeconds(name, fallback) {
-  const raw = process.env[name];
-  if (raw === undefined) {
-    return fallback;
-  }
+export function positiveSeconds(name, fallback, env = process.env) {
+  const raw = env[name] ?? fallback;
   const value = Number(raw);
   if (!Number.isFinite(value) || value <= 0) {
     throw new Error(`${name} must be a positive number`);

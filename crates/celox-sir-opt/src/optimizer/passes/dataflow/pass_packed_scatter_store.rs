@@ -111,6 +111,10 @@ impl ExecutionUnitPass for PackedScatterStorePass {
         "packed_scatter_store"
     }
 
+    fn handles_calls(&self) -> bool {
+        true
+    }
+
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions) {
         // An X/Z selector makes every procedural equality false after
         // ToTwoState. A raw dynamic offset cannot express that without an

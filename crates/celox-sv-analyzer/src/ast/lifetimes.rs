@@ -836,7 +836,7 @@ impl Flow<'_> {
                 Ok(Exits::next(written))
             }
             // An `@*` samples what its statements read; they do not run.
-            Stmt::WaitImplicit(reads) => {
+            Stmt::WaitImplicit { reads, .. } => {
                 let mut exprs = Vec::new();
                 for stmt in reads {
                     stmt.walk(&mut |stmt| exprs.extend(stmt_exprs(stmt)));
@@ -990,7 +990,7 @@ pub(super) fn stmt_exprs(stmt: &Stmt) -> Vec<&Expr> {
         | Stmt::AssertionRegion { .. }
         | Stmt::WaitFork
         | Stmt::DisableFork
-        | Stmt::WaitImplicit(_)
+        | Stmt::WaitImplicit { .. }
         | Stmt::Break
         | Stmt::Continue => Vec::new(),
     }
@@ -1100,6 +1100,7 @@ pub(super) fn expr_reads(expr: &Expr, name: &str) -> bool {
 /// indices of an assignment target.
 pub(super) fn stmts_read(stmts: &[Stmt], name: &str) -> bool {
     let lvalue_reads = |lvalue: &LValue| match lvalue {
+        LValue::Object { .. } => lowered_object(),
         LValue::Ident(_) => false,
         LValue::Select {
             msb,

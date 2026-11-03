@@ -556,6 +556,8 @@ fn generate(
         known: HashMap::default(),
     };
     let mut g = Generator {
+        outlined: None,
+        outline_base: 0,
         b,
         slots,
         finish_sites: &finish_sites,

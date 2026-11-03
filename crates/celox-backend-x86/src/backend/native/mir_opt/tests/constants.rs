@@ -1,6 +1,73 @@
 use super::*;
 
 #[test]
+fn or_absorbs_and_subset_without_losing_word_extension() {
+    for and32 in [false, true] {
+        for or32 in [false, true] {
+            for reverse_and in [false, true] {
+                for reverse_or in [false, true] {
+                    let (lhs, rhs) = if reverse_and {
+                        (VReg(1), VReg(0))
+                    } else {
+                        (VReg(0), VReg(1))
+                    };
+                    let product = if and32 {
+                        MInst::And32 {
+                            dst: VReg(2),
+                            lhs,
+                            rhs,
+                        }
+                    } else {
+                        MInst::And {
+                            dst: VReg(2),
+                            lhs,
+                            rhs,
+                        }
+                    };
+                    let (lhs, rhs) = if reverse_or {
+                        (VReg(2), VReg(0))
+                    } else {
+                        (VReg(0), VReg(2))
+                    };
+                    let sum = if or32 {
+                        MInst::Or32 {
+                            dst: VReg(3),
+                            lhs,
+                            rhs,
+                        }
+                    } else {
+                        MInst::Or {
+                            dst: VReg(3),
+                            lhs,
+                            rhs,
+                        }
+                    };
+                    let unrelated = MInst::Or {
+                        dst: VReg(5),
+                        lhs: VReg(2),
+                        rhs: VReg(4),
+                    };
+                    let mut func = make_func(vec![product, sum, unrelated.clone()], 6);
+                    algebraic_simplify(&mut func);
+                    assert!(match func.blocks[0].insts[1] {
+                        MInst::Mov {
+                            dst: VReg(3),
+                            src: VReg(0),
+                        } => !or32,
+                        MInst::Mov32 {
+                            dst: VReg(3),
+                            src: VReg(0),
+                        } => or32,
+                        _ => false,
+                    });
+                    assert_eq!(func.blocks[0].insts[2], unrelated);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn multiply_immediates_preserve_full_and_low_word_constant_semantics() {
     for word32 in [false, true] {
         for constant_on_left in [false, true] {

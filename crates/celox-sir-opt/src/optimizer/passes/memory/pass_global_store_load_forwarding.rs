@@ -861,6 +861,16 @@ pub(crate) fn promote_eval_apply_working_round_trips(
     promote_eval_apply_working_round_trips_with_mode(eu, false)
 }
 
+/// Whether a call can consume pending values or publish working state: it
+/// reads or writes the working or sparse region.
+fn touches_pending_state(effects: &celox_sir::CallEffects<RegionedAbsoluteAddr>) -> bool {
+    effects
+        .reads
+        .iter()
+        .chain(&effects.writes)
+        .any(|addr| addr.region != celox_design::STABLE_REGION)
+}
+
 pub(crate) fn promote_eval_apply_working_round_trips_with_mode(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     two_state: bool,
@@ -869,9 +879,11 @@ pub(crate) fn promote_eval_apply_working_round_trips_with_mode(
         .blocks
         .values()
         .flat_map(|block| &block.instructions)
-        .any(|inst| {
-            matches!(inst, SIRInstruction::ExternCall { func, .. }
-            if celox_sir::extern_abi::native_kernel_index(*func).is_some())
+        .any(|instruction| {
+            instruction.accesses_unknown_state()
+                || instruction
+                    .call_effects()
+                    .is_some_and(touches_pending_state)
         })
     {
         // The callee can consume pending values or publish working state.
@@ -1149,6 +1161,10 @@ fn instruction_blocks_writeback_motion(
             .into_iter()
             .flatten()
             .any(|access| aliases(access.addr, access.offset, access.width))
+        // A call may access any part of the objects its effects list.
+        || instruction.opaque_accessed_objects().is_none_or(|mut objects| {
+            objects.any(|object| object.absolute_addr() == address.absolute_addr())
+        })
 }
 
 /// A writeback whose only operand is a merge value does not need an actual

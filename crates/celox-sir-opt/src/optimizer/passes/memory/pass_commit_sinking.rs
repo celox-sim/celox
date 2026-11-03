@@ -12,6 +12,10 @@ impl ExecutionUnitPass for CommitSinkingPass {
         "optimize_commit_sinking"
     }
 
+    fn handles_calls(&self) -> bool {
+        true
+    }
+
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
         optimize_commit_sinking(eu);
     }

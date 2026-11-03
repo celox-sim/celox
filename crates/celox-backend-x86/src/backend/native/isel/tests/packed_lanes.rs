@@ -24,7 +24,7 @@ fn packed_bitwise_lanes_preserve_four_state_truth_tables() {
                 }) {
                     let mut layout = empty_layout();
                     layout.four_state = true;
-                    let addresses: Vec<_> = (0..3)
+                    let addresses: Vec<_> = (0..4)
                         .map(|index| {
                             let absolute = AbsoluteAddr {
                                 instance_id: InstanceId(0),
@@ -36,12 +36,29 @@ fn packed_bitwise_lanes_preserve_four_state_truth_tables() {
                             RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, absolute)
                         })
                         .collect();
-                    layout.total_size = bytes * 6;
-                    layout.working_base_offset = bytes * 6;
-                    layout.sparse_base_offset = bytes * 6;
-                    layout.merged_total_size = bytes * 6;
-                    layout.triggered_bits_offset = bytes * 6;
-                    layout.scratch_base_offset = bytes * 6;
+                    layout.total_size = bytes * 8;
+                    layout.working_base_offset = bytes * 8;
+                    layout.sparse_base_offset = bytes * 8;
+                    layout.merged_total_size = bytes * 8;
+                    layout.triggered_bits_offset = bytes * 8;
+                    layout.scratch_base_offset = bytes * 8;
+                    // Depth three deliberately inserts a different operator;
+                    // it must remain a normalization boundary. Deeper cases
+                    // exercise homogeneous trees beyond the expansion limit.
+                    let operation_at = |level| {
+                        if depth == 3 && level == 1 {
+                            match operation {
+                                BinaryOp::And => BinaryOp::Or,
+                                BinaryOp::LogicAnd => BinaryOp::LogicOr,
+                                BinaryOp::Or => BinaryOp::And,
+                                BinaryOp::LogicOr => BinaryOp::LogicAnd,
+                                BinaryOp::Xor => BinaryOp::Or,
+                                _ => unreachable!(),
+                            }
+                        } else {
+                            operation
+                        }
+                    };
                     let mut instructions = vec![
                         SIRInstruction::Load(
                             RegisterId(0),
@@ -55,16 +72,23 @@ fn packed_bitwise_lanes_preserve_four_state_truth_tables() {
                             SIROffset::Static(0),
                             width,
                         ),
+                        SIRInstruction::Load(
+                            RegisterId(14),
+                            addresses[2],
+                            SIROffset::Static(0),
+                            width,
+                        ),
                     ];
                     let mut types = HashMap::default();
-                    for register in [0, 1, 11] {
+                    for register in [0, 1, 11, 14] {
                         types.insert(RegisterId(register), RegisterType::Logic { width });
                     }
                     for lane in 0..lane_count {
                         let a = RegisterId(2 + lane * 3);
                         let b = RegisterId(3 + lane * 3);
                         let result = RegisterId(4 + lane * 3);
-                        for register in [a, b, result] {
+                        let c = RegisterId(15 + lane);
+                        for register in [a, b, c, result] {
                             types.insert(register, RegisterType::Logic { width: lane_width });
                         }
                         instructions.push(SIRInstruction::Slice(
@@ -79,6 +103,12 @@ fn packed_bitwise_lanes_preserve_four_state_truth_tables() {
                             lane * lane_width,
                             lane_width,
                         ));
+                        instructions.push(SIRInstruction::Slice(
+                            c,
+                            RegisterId(14),
+                            lane * lane_width,
+                            lane_width,
+                        ));
                         let mut previous = a;
                         for level in 0..depth {
                             let target = if level + 1 == depth {
@@ -87,8 +117,12 @@ fn packed_bitwise_lanes_preserve_four_state_truth_tables() {
                                 RegisterId(100 + lane * 32 + level)
                             };
                             types.insert(target, RegisterType::Logic { width: lane_width });
-                            instructions
-                                .push(SIRInstruction::Binary(target, previous, operation, b));
+                            instructions.push(SIRInstruction::Binary(
+                                target,
+                                previous,
+                                operation_at(level),
+                                if level % 2 == 0 { b } else { c },
+                            ));
                             previous = target;
                         }
                     }
@@ -96,7 +130,7 @@ fn packed_bitwise_lanes_preserve_four_state_truth_tables() {
                     // homes are overwritten, even when register pressure causes spills.
                     types.insert(RegisterId(12), RegisterType::Logic { width });
                     instructions.push(SIRInstruction::Imm(RegisterId(12), SIRValue::new(0u8)));
-                    for &address in &addresses[..2] {
+                    for &address in &addresses[..3] {
                         instructions.push(SIRInstruction::Store(
                             address,
                             SIROffset::Static(0),
@@ -114,7 +148,7 @@ fn packed_bitwise_lanes_preserve_four_state_truth_tables() {
                             .collect(),
                     ));
                     instructions.push(SIRInstruction::Store(
-                        addresses[2],
+                        addresses[3],
                         SIROffset::Static(0),
                         width,
                         RegisterId(11),
@@ -159,20 +193,25 @@ fn packed_bitwise_lanes_preserve_four_state_truth_tables() {
                     };
                     let mut random = 0x91a3_dc49_b210_570fu64;
                     for trial in 0..4352 {
-                        let mut planes = [0u64; 4];
+                        let mut planes = [0u64; 6];
                         for (index, plane) in planes.iter_mut().enumerate() {
                             random ^= random << 13;
                             random ^= random >> 7;
                             random ^= random << 17;
                             *plane = if trial < 4096 {
-                                expand(((trial as u64) >> (index * 3)) & 7)
+                                {
+                                    let bits = ((trial as u64) >> (index * 2)) & 3;
+                                    expand(bits | (((bits ^ (bits >> 1)) & 1) << 2))
+                                }
                             } else {
                                 random & word_mask
                             };
                             set_bits(&mut state, index * bytes * 8, width, *plane);
                         }
-                        let [mut av, mut am, bv, bm] = planes;
-                        for _ in 0..depth {
+                        let [mut av, mut am, bv, bm, cv, cm] = planes;
+                        for level in 0..depth {
+                            let (bv, bm) = if level % 2 == 0 { (bv, bm) } else { (cv, cm) };
+                            let operation = operation_at(level);
                             let known_zero = match operation {
                                 BinaryOp::And | BinaryOp::LogicAnd => (!am & !av) | (!bm & !bv),
                                 BinaryOp::Or | BinaryOp::LogicOr => !am & !bm & !av & !bv,
@@ -190,8 +229,8 @@ fn packed_bitwise_lanes_preserve_four_state_truth_tables() {
                         }
                         assert_eq!(unsafe { jit.call(&mut state) }, 0);
                         let actual = (
-                            get_bits(&state, bytes * 4 * 8, width),
-                            get_bits(&state, bytes * 5 * 8, width),
+                            get_bits(&state, bytes * 6 * 8, width),
+                            get_bits(&state, bytes * 7 * 8, width),
                         );
                         assert_eq!(
                             actual,

@@ -147,6 +147,33 @@ pub(in crate::ast) fn operands(
         .collect()
 }
 
+/// A declared name, including constant indices within an instance path.
+fn alias_name(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Option<String> {
+    type_binding::argument_alias(ungroup(id, native), native)
+        .filter(|(_, selections)| selections.is_empty())
+        .map(|(name, _)| name)
+        .or_else(|| {
+            interface_binding::is_handle_path(id, native)
+                .then(|| {
+                    interface_binding::actual_handle_key(
+                        id,
+                        tree,
+                        session,
+                        &dimensions.const_env,
+                        &dimensions.type_aliases,
+                    )
+                    .ok()
+                })
+                .flatten()
+        })
+}
+
 /// Whether native expression `id` has type `string`, judged before it is
 /// bound: a string variable, or a method of a string value that returns one.
 pub(in crate::ast) fn native_string(
@@ -156,8 +183,30 @@ pub(in crate::ast) fn native_string(
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> bool {
-    if fixed_array_element(tree, id, native, dimensions) {
+    // A local declaration takes precedence over retained import aliases,
+    // including when its type is not string.
+    if let ExprKind::Name(name) = &native.expression(ungroup(id, native)).kind
+        && let Some(ty) = dimensions.get(&instances::normalize_identifier(&name.spelling))
+    {
+        return ty.string && ty.unpacked.is_empty();
+    }
+    if fixed_array_element(tree, session, id, native, dimensions) {
         return true;
+    }
+    // Hierarchical and interface names are bound to typed local aliases,
+    // even when their native syntax is a dotted member expression.
+    let alias = alias_name(tree, session, id, native, dimensions);
+    if let Some(name) = alias {
+        let imported = scope::imported(tree);
+        if imported
+            .interface_members
+            .get(&name)
+            .or_else(|| imported.aliases.get(&name))
+            .and_then(|binding| dimensions.get(binding))
+            .is_some_and(|ty| ty.string && ty.unpacked.is_empty())
+        {
+            return true;
+        }
     }
     match &native.expression(ungroup(id, native)).kind {
         ExprKind::Call { expression, .. } if matches!(&native.expression(*expression).kind, ExprKind::Member { expression: base, name, separator } if separator == "." && name.spelling == "get_randstate" && objects::native_class(tree, session, *base, native, dimensions).as_deref() == Some(super::super::processes::CLASS)) => {
@@ -178,15 +227,6 @@ pub(in crate::ast) fn native_string(
         }
         ExprKind::Call { expression, .. } if matches!(&native.expression(*expression).kind, ExprKind::Member { expression: base, name, .. } if matches!(name.spelling.as_str(), "pop_front" | "pop_back") && containers::native_type(*base, native, tree, session, dimensions).ok().flatten().is_some_and(|ty| ty.layout.handle == Some(crate::system_functions::HandleProperty::String))) => {
             true
-        }
-        ExprKind::Name(name)
-            if dimensions
-                .get(&instances::normalize_identifier(&name.spelling))
-                .is_some() =>
-        {
-            dimensions
-                .get(&instances::normalize_identifier(&name.spelling))
-                .is_some_and(|ty| ty.string && ty.unpacked.is_empty())
         }
         ExprKind::Call { expression, .. } => {
             matches!(&native.expression(ungroup(*expression, native)).kind,
@@ -246,6 +286,7 @@ pub(in crate::ast) fn native_string(
 /// A slice or a remaining subarray is still an array, including extent one.
 pub(in crate::ast) fn fixed_array_element(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     mut id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
@@ -267,11 +308,10 @@ pub(in crate::ast) fn fixed_array_element(
     if indices == 0 {
         return false;
     }
-    let name = super::direct::call_name(tree, id, native).or_else(|| {
-        type_binding::argument_alias(id, native)
-            .filter(|(_, selections)| selections.is_empty())
-            .map(|(name, _)| name)
-    });
+    // Only the trailing selects consume the string array's dimensions.
+    // The remaining path can still have generate or instance indices.
+    let name = super::direct::call_name(tree, id, native)
+        .or_else(|| alias_name(tree, session, id, native, dimensions));
     let imported = scope::imported(tree);
     name.and_then(|name| {
         dimensions.get(&name).or_else(|| {

@@ -470,7 +470,8 @@ pub(crate) struct NativeRuntimeSchema {
     pub(crate) runtime_event_sites: Vec<RuntimeEventSite>,
     /// Extern functions the code calls, resolved when the image is attached.
     pub(crate) extern_functions: Vec<celox_design::ExternFunction>,
-    /// Image-local compiled callees appended to the DPI address table.
+    /// Image-local compiled callees appended to the DPI address table: the
+    /// function units first, then the generated kernels.
     pub(crate) native_kernel_offsets: Vec<usize>,
     pub(crate) comb_observers: Vec<RuntimeCombObserver<AbsoluteAddr>>,
     pub(crate) testbench_read_roots: HashSet<AbsoluteAddr>,
@@ -1155,6 +1156,132 @@ pub(super) struct CompiledNativeFunction {
     pub(super) required_native_features: u8,
 }
 
+/// An independently owned complete entry using the program's existing state ABI.
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+pub(crate) struct HotspotCode {
+    code: jit_mem::JitCode,
+    // Keep every linked mapping and its immutable address table alive until
+    // the caller is retired. Nested code uses a disjoint compiler arena.
+    callees: Vec<Arc<HotspotCode>>,
+    extern_functions: Option<crate::dpi::ExternFunctionTable>,
+    pub(crate) required_state_size: usize,
+    pub(crate) code_size: usize,
+}
+
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+impl HotspotCode {
+    pub(crate) fn compile(
+        units: &[crate::ir::ExecutionUnit<RegionedAbsoluteAddr>],
+        layout: &MemoryLayout,
+        options: &SimulatorOptions,
+        cancel: &CompileCancel,
+    ) -> Result<Self, SimulatorError> {
+        // Calls need a linked function table and disjoint nested scratch. Keep
+        // them interpreted until incremental linking implements that contract.
+        if units
+            .iter()
+            .flat_map(|unit| unit.blocks.values())
+            .any(|block| {
+                block
+                    .instructions
+                    .iter()
+                    .any(|inst| matches!(inst, SIRInstruction::Call { .. }))
+            })
+        {
+            return Err(codegen_message(
+                "hotspot entry requires an unlinked function",
+            ));
+        }
+        let mut native = options.x86_options.clone();
+        native.baseline = false;
+        native.native_tick_loop = false;
+        let refs = units.iter().collect::<Vec<_>>();
+        let compiled = compile_unit_refs(
+            &refs,
+            layout,
+            options.four_state,
+            "hotspot",
+            NativeMergeKind::Partial,
+            None,
+            &native,
+            false,
+            &options.optimize_options.diagnostics,
+            Some(cancel),
+        )?;
+        let code_size = compiled.code.len();
+        let code = jit_mem::JitCode::new_named_with_symbols_profiled(
+            &compiled.code,
+            "celox_hotspot",
+            &compiled.symbols,
+            native.diagnostics.perf_map,
+        )
+        .map_err(|error| codegen_message(format!("hotspot executable allocation: {error}")))?;
+        Ok(Self {
+            code,
+            callees: Vec::new(),
+            extern_functions: None,
+            required_state_size: compiled.required_state_size,
+            code_size,
+        })
+    }
+
+    pub(crate) fn compile_scheduler(
+        program: &LaidOutProgram,
+        comb: Arc<HotspotCode>,
+        options: &SimulatorOptions,
+        cancel: &CompileCancel,
+    ) -> Result<Self, SimulatorError> {
+        let (unit, outlined) =
+            crate::scheduler::hotspot_scheduler(program).map_err(codegen_message)?;
+        let mut callees = Vec::new();
+        let mut additional_bytes = 0usize;
+        for body in outlined {
+            if cancel.is_cancelled() {
+                return Err(crate::backend::compile_cancel::cancelled_error());
+            }
+            let code = if program.sir.eval_comb.len() == 1 && body == program.sir.eval_comb[0] {
+                Arc::clone(&comb)
+            } else {
+                let code = Self::compile(&[body], program.layout(), options, cancel)?;
+                additional_bytes = additional_bytes.saturating_add(code.code_size);
+                Arc::new(code)
+            };
+            callees.push(code);
+        }
+        let mut caller_options = options.clone();
+        caller_options.x86_options = caller_options
+            .x86_options
+            .with_native_callees(callees.iter().map(|code| code.required_state_size));
+        let mut caller = Self::compile(&[unit], program.layout(), &caller_options, cancel)?;
+        let mut table = options
+            .dpi
+            .resolve(&program.runtime().runtime_schema.extern_functions)?;
+        table.append_native_kernels(callees.iter().map(|code| code.code.fn_ptr as usize));
+        caller.code_size = caller.code_size.saturating_add(additional_bytes);
+        caller.callees = callees;
+        caller.extern_functions = Some(table);
+        Ok(caller)
+    }
+
+    /// The entry was emitted in this process for the caller's immutable layout.
+    pub(crate) fn run(&self, memory: &mut [u64]) -> Result<(), SimulatorErrorCode> {
+        if memory.len().saturating_mul(8) < self.required_state_size {
+            return Err(SimulatorErrorCode::InternalError);
+        }
+        // The mapping owns the generated entry and the checked image covers
+        // all semantic storage and private scratch. The simulation owner holds
+        // exclusive access for the entire call.
+        let header = celox_state_layout::STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET / 8;
+        let previous = memory[header];
+        if let Some(table) = &self.extern_functions {
+            memory[header] = table.as_ptr() as u64;
+        }
+        let result = NativeBackend::call_func(memory, self.code.fn_ptr);
+        memory[header] = previous;
+        result
+    }
+}
+
 #[cfg_attr(
     any(
         all(feature = "arm64-codegen", not(target_arch = "aarch64")),
@@ -1191,6 +1318,7 @@ fn prepare_merged_sir(
     diagnostics: &crate::optimizer::SirDiagnostics,
     cancel: Option<&CompileCancel>,
     baseline: bool,
+    calls_functions: bool,
 ) -> Result<crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>, SimulatorError> {
     let verify_enabled = cfg!(debug_assertions) || diagnostics.verify_boundaries;
     let mut phase_start = diagnostics.pass_timing.then(crate::timing::now);
@@ -1241,6 +1369,11 @@ fn prepare_merged_sir(
     // state store; the optional cross-unit transforms belong to the
     // optimizing tier. ISel/legalize/regalloc/emit still run below.
     if baseline {
+        return Ok(sir_eu);
+    }
+    // These rewrites read the unit's own loads and stores, not the effects
+    // of the functions it calls, nor frame slots, which no other unit sees.
+    if calls_functions {
         return Ok(sir_eu);
     }
     if let Some(first_ff_unit) = first_ff_unit {
@@ -1480,6 +1613,16 @@ pub(super) fn compile_unit_refs_inspected(
         diagnostics,
         cancel,
         x86_options.baseline,
+        // A function unit, or a unit that calls one.
+        x86_options.function.is_some()
+            || units.iter().any(|unit| {
+                unit.blocks.values().any(|block| {
+                    block
+                        .instructions
+                        .iter()
+                        .any(|instruction| matches!(instruction, SIRInstruction::Call { .. }))
+                })
+            }),
     )?;
     inspect_prepared(&sir_eu);
     if cancelled(cancel) {
@@ -1510,13 +1653,21 @@ pub(super) fn compile_unit_refs_inspected(
         feature = "arm64-codegen",
         all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
     ))]
-    let emit_result = emit::emit_prepared_eu_with_arena(
+    let emit_result = emit::emit_prepared_eu_with_functions(
         &sir_eu,
         layout,
         four_state,
         label,
         x86_options.native_tick_loop,
         x86_options.arena_base,
+        x86_options
+            .functions
+            .as_deref()
+            .map(|functions| celox_backend_arm64::FunctionCalls {
+                frames: &functions.frames,
+                first_slot: functions.first_slot,
+                function: x86_options.function,
+            }),
         trace.as_mut(),
         || cancelled(cancel),
     )
@@ -2421,8 +2572,58 @@ fn compile_program_with_outlining_threshold(
     cancel: Option<&CompileCancel>,
     outline_threshold: usize,
 ) -> Result<(NativeProgramImage, Option<NativeCodegenTrace>), SimulatorError> {
+    laid_out.reject_unsupported_callee_stores("native", true)?;
     let sir = laid_out;
     let layout = laid_out.layout();
+    // Function units take the extern address table slots after the DPI
+    // imports, before the generated kernels. Every unit may call them, so
+    // every compile sees their frames; a program without them compiles with
+    // the options it was given.
+    let extern_count = sir.runtime().runtime_schema.extern_functions.len();
+    let function_options;
+    let options = if sir.sir.functions.is_empty() {
+        options
+    } else {
+        let mut with_functions = options.clone();
+        with_functions.x86_options.functions =
+            Some(std::sync::Arc::new(crate::backend::NativeFunctions {
+                frames: sir
+                    .sir
+                    .functions
+                    .iter()
+                    .map(|function| function.frame.clone())
+                    .collect(),
+                first_slot: u32::try_from(extern_count)
+                    .map_err(|_| codegen_message("too many native extern functions"))?,
+            }));
+        function_options = with_functions;
+        &function_options
+    };
+    let kernel_slots = extern_count + sir.sir.functions.len();
+    let function_jits = sir
+        .sir
+        .functions
+        .iter()
+        .enumerate()
+        .map(|(index, function)| {
+            let mut function_options = options.x86_options.clone();
+            function_options.function = Some(celox_sir::FunctionId(
+                u32::try_from(index).map_err(|_| codegen_message("too many function units"))?,
+            ));
+            compile_unit_refs(
+                &[&function.unit],
+                layout,
+                options.four_state,
+                &format!("function[{index}]"),
+                NativeMergeKind::Complete,
+                None,
+                &function_options,
+                false,
+                &options.optimize_options.diagnostics,
+                cancel,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let force_bindings =
         build_force_bindings(sir.runtime(), layout, &options.signal_access.force_signals)?;
     let (compile_tasks, task_bindings) = collect_ff_compile_tasks(sir);
@@ -2566,7 +2767,7 @@ fn compile_program_with_outlining_threshold(
                 comb_chunk_jits.push(code);
             }
         }
-        let first_slot = sir.runtime().runtime_schema.extern_functions.len() + 1;
+        let first_slot = kernel_slots + 1;
         let mut builder = celox_sir::SIRBuilder::new();
         for index in 0..comb_chunk_jits.len() {
             let slot = u32::try_from(first_slot + index)
@@ -2764,7 +2965,7 @@ fn compile_program_with_outlining_threshold(
     )) && !sir.deferred_derived_edges.is_empty()
         && comb_instructions >= outline_threshold;
     let outlined_comb = if outline_comb {
-        let slot = u32::try_from(sir.runtime().runtime_schema.extern_functions.len())
+        let slot = u32::try_from(kernel_slots)
             .ok()
             .filter(|&slot| slot < 0x1000_0000)
             .ok_or_else(|| codegen_message("too many native extern functions"))?;
@@ -2911,6 +3112,7 @@ fn compile_program_with_outlining_threshold(
         .checked_add(layout.triggered_bits_total_size)
         .expect("native semantic-memory size overflow");
     let native_memory_size = std::iter::once(comb_jit.required_state_size)
+        .chain(function_jits.iter().map(|code| code.required_state_size))
         .chain(
             clock_alias_jits
                 .iter()
@@ -2936,6 +3138,11 @@ fn compile_program_with_outlining_threshold(
         )
         .fold(semantic_memory_size, usize::max);
     let required_native_features = std::iter::once(comb_jit.required_native_features)
+        .chain(
+            function_jits
+                .iter()
+                .map(|code| code.required_native_features),
+        )
         .chain(
             clock_alias_jits
                 .iter()
@@ -2974,11 +3181,20 @@ fn compile_program_with_outlining_threshold(
         "eval_comb".into(),
         &comb_jit,
     )?;
-    let mut native_kernel_offsets = if outline_comb || split_comb {
-        vec![comb_offset]
-    } else {
-        Vec::new()
-    };
+    // The function units' slots come first, then the generated kernels'.
+    let mut native_kernel_offsets = Vec::with_capacity(function_jits.len() + 1);
+    for (index, code) in function_jits.iter().enumerate() {
+        native_kernel_offsets.push(append_native_code(
+            &mut packed_image,
+            &mut code_entries,
+            &mut image_symbols,
+            format!("function[{index}]"),
+            code,
+        )?);
+    }
+    if outline_comb || split_comb {
+        native_kernel_offsets.push(comb_offset);
+    }
     for (index, code) in comb_chunk_jits.iter().enumerate() {
         native_kernel_offsets.push(append_native_code(
             &mut packed_image,

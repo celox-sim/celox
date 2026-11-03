@@ -21,6 +21,7 @@ mod references;
 mod scan;
 mod streams;
 mod strings;
+mod strobe;
 mod system;
 
 use super::procedural::*;
@@ -102,6 +103,7 @@ pub(super) struct Ff<'p, 'a> {
     process_control: bool,
     process_predicate: bool,
     frame_locals: Vec<SourceVarId>,
+    postponed_locals: HashSet<SourceVarId>,
     event_probes: Vec<celox_design::ProcessEventProbe<SourceVarId>>,
     unobserved_function_writes: HashSet<SourceVarId>,
     observe_blocking_assignments: bool,
@@ -204,6 +206,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             process_control: false,
             process_predicate: false,
             frame_locals: Vec::new(),
+            postponed_locals: HashSet::default(),
             event_probes: Vec::new(),
             unobserved_function_writes: HashSet::default(),
             observe_blocking_assignments: false,
@@ -1065,12 +1068,21 @@ impl<'p, 'a> Ff<'p, 'a> {
     ) -> Result<NodeId, sv::AnalyzerError> {
         let expr = expr_for_state_mode(expr, self.m.four_state);
         let expr = if self.m.calls(&expr) {
-            self.hoist(&expr)?
+            std::borrow::Cow::Owned(self.hoist(&expr)?)
         } else {
             expr
         };
-        let expr = force_reads(&self.propagate(&expr), self.m);
-        if let (sv::ir::Expr::Literal(literal), Some((width, _))) = (&expr, context)
+        let expr = if self.overlay.is_empty() {
+            expr
+        } else {
+            std::borrow::Cow::Owned(self.propagate(&expr))
+        };
+        let expr = if self.m.forceable.is_empty() {
+            expr
+        } else {
+            std::borrow::Cow::Owned(force_reads(&expr, self.m))
+        };
+        if let (sv::ir::Expr::Literal(literal), Some((width, _))) = (expr.as_ref(), context)
             && let Some(fill) = unbased_fill_literal(literal)
         {
             return lower_unbased_fill_literal_slt(arena, fill, width)
@@ -2610,10 +2622,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         match store_back {
             Some((lvalues, guards)) => {
                 self.check_tagged_guards(&guards)?;
-                match lvalues.as_slice() {
-                    [lvalue] => self.assign(lvalue, &next)?,
-                    parts => self.assign_concat(parts, &next)?,
-                }
+                self.write_system_actual(&lvalues, &next)?;
             }
             None => {
                 let (id, _) = self.dist_seed();
@@ -2784,10 +2793,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         };
         let restored = mux(invalid, original, next);
         self.check_tagged_guards(&guards)?;
-        match lvalues.as_slice() {
-            [lvalue] => self.assign(lvalue, &restored)?,
-            parts => self.assign_concat(parts, &restored)?,
-        }
+        self.write_system_actual(&lvalues, &restored)?;
         Ok(E::Resize {
             expr: Box::new(value),
             width: 32,
@@ -2814,11 +2820,32 @@ impl<'p, 'a> Ff<'p, 'a> {
 
     /// Capture an inout/output actual's reference before reading or writing
     /// it, including selectors changed by the call or by other selectors.
+    /// A class property or a container element, or a select of one, is
+    /// captured as its place: the object or container and the index are
+    /// evaluated now, and the value is written through a local of its type
+    /// (see [`SystemActual`]).
     fn capture_system_actual(
         &mut self,
         expr: &sv::ir::Expr,
-    ) -> Result<(Vec<sv::ir::LValue>, sv::ir::Expr, Vec<sv::ir::Expr>), sv::AnalyzerError> {
-        use sv::ir::{Expr, LValue};
+    ) -> Result<(SystemActual, sv::ir::Expr, Vec<sv::ir::Expr>), sv::AnalyzerError> {
+        use sv::ir::{Callee, Expr, LValue};
+        // A place comes with the checks of the tags its selection crosses,
+        // which its write applies as a variable's does.
+        let mut place = expr;
+        while let Expr::Call {
+            callee: Callee::Checked { .. },
+            args,
+            ..
+        } = place
+            && let [Some(_), Some(value)] = args.as_slice()
+        {
+            place = value;
+        }
+        if let Some((actual, read)) =
+            self.capture_place_actual(place, &tagged_actual_guards(expr))?
+        {
+            return Ok((actual, read, Vec::new()));
+        }
         let parts =
             lvalue_from_expr(expr).ok_or_else(|| unsupported("integral output/inout actual"))?;
         let guards = tagged_actual_guards(expr);
@@ -2846,7 +2873,233 @@ impl<'p, 'a> Ff<'p, 'a> {
         } else {
             Expr::Concat(reads)
         };
-        Ok((captured, read, guards))
+        Ok((
+            SystemActual {
+                parts: captured,
+                place: None,
+            },
+            read,
+            guards,
+        ))
+    }
+
+    /// A temporary that holds a value from before a host request to after
+    /// it, kept by a forked activation of its own.
+    fn request_temp(
+        &mut self,
+        purpose: &str,
+        width: usize,
+        signed: bool,
+        four_state: bool,
+        kind: celox_design::ValueKind,
+    ) -> Result<(SourceVarId, String), sv::AnalyzerError> {
+        let (id, name) = self.m.temp(purpose, width, signed, four_state);
+        self.m
+            .variables
+            .get_mut(&id)
+            .expect("a temporary")
+            .value_kind = kind;
+        if self.forked {
+            let slot = self.frame_locals.len();
+            self.frame_locals.push(id);
+            self.with_kernel(|kernel| kernel.local(slot))
+                .map_err(kernel_error)?;
+        }
+        Ok((id, name))
+    }
+
+    /// [`Self::capture_system_actual`] of a class property of integral type,
+    /// `h.p`, or an element of a container, `q[i]`, or a select of one: its
+    /// object, container and index are evaluated now, in that order, into
+    /// temporaries, and its select positions frozen as a variable's are.
+    fn capture_place_actual(
+        &mut self,
+        expr: &sv::ir::Expr,
+        guards: &[sv::ir::Expr],
+    ) -> Result<Option<(SystemActual, sv::ir::Expr)>, sv::AnalyzerError> {
+        use sv::ir::{Callee, ContainerOp, Expr, LValue, ObjectOp};
+        let (place, select) = match expr {
+            Expr::Select {
+                expr: place,
+                msb,
+                lsb,
+                ..
+            } => (&**place, Some((msb, lsb))),
+            place => (place, None),
+        };
+        let Expr::Call {
+            callee: Callee::Object(op),
+            args,
+            ..
+        } = place
+        else {
+            return Ok(None);
+        };
+        let (store, args, width, four_state) = match (&**op, args.as_slice()) {
+            (ObjectOp::Load(field), [Some(handle)]) if field.handle.is_none() => {
+                let object = self.capture_handle(handle)?;
+                (
+                    ObjectOp::Store(*field),
+                    vec![object],
+                    field.width as usize,
+                    field.four_state && self.m.four_state,
+                )
+            }
+            (
+                ObjectOp::Container {
+                    op: ContainerOp::Get,
+                    layout,
+                },
+                [Some(container), Some(index)],
+            ) if layout.handle.is_none() => {
+                // A container variable names its elements; the container
+                // of a property is the one of the property's object.
+                let container = match container {
+                    Expr::Ident(_) => container.clone(),
+                    Expr::Call {
+                        callee: Callee::Object(load),
+                        args,
+                        arg_order,
+                    } if matches!(**load, ObjectOp::Load(_)) => {
+                        let [Some(handle)] = args.as_slice() else {
+                            return Err(unsupported("container property receiver"));
+                        };
+                        Expr::Call {
+                            callee: Callee::Object(load.clone()),
+                            args: vec![Some(self.capture_handle(handle)?)],
+                            arg_order: arg_order.clone(),
+                        }
+                    }
+                    _ => return Err(unsupported("output actual of a selected container")),
+                };
+                let index = self.hoist(index)?;
+                let index_width = self
+                    .m
+                    .comparison_width(&index, &index)
+                    .ok_or_else(|| unsupported("container index output actual"))?;
+                let index_signed = self.expr_signed(&index);
+                let (id, name) = self.request_temp(
+                    "actual_index",
+                    index_width,
+                    index_signed,
+                    self.m.four_state,
+                    celox_design::ValueKind::Bits,
+                )?;
+                let value = self.eval(&index, Some((index_width, index_signed)))?;
+                self.store(id, SIROffset::Static(0), index_width, value);
+                (
+                    ObjectOp::Container {
+                        op: ContainerOp::Set,
+                        layout: *layout,
+                    },
+                    vec![container, Expr::Ident(name)],
+                    layout.width as usize,
+                    !layout.two_state && self.m.four_state,
+                )
+            }
+            _ => return Ok(None),
+        };
+        let load = Expr::Call {
+            callee: Callee::Object(op.clone()),
+            args: args.iter().cloned().map(Some).collect(),
+            arg_order: Vec::new(),
+        };
+        // The local is written after the request, from its result.
+        let (id, local) = self.m.temp("actual_value", width, false, four_state);
+        let float = self.m.expr_float_precision(&load);
+        self.m.variables.get_mut(&id).expect("a temporary").float = float;
+        let part = match select {
+            Some((msb, lsb)) => {
+                let part = LValue::Select {
+                    name: local.clone(),
+                    msb: msb.clone(),
+                    lsb: lsb.clone(),
+                    array_slice_width: None,
+                    array_slice_reversed: false,
+                };
+                let part = self.hoist_lvalue(&part)?;
+                self.freeze_lvalue(part)?
+            }
+            None => LValue::Ident(local.clone()),
+        };
+        let read = match &part {
+            LValue::Select { msb, lsb, .. } => Expr::Select {
+                expr: Box::new(load.clone()),
+                msb: msb.clone(),
+                lsb: lsb.clone(),
+                signed: self.expr_signed(expr),
+            },
+            LValue::Ident(_) => load.clone(),
+        };
+        let store = Expr::Call {
+            callee: Callee::Object(Box::new(store)),
+            args: args
+                .into_iter()
+                .chain([Expr::Ident(local.clone())])
+                .map(Some)
+                .collect(),
+            arg_order: Vec::new(),
+        };
+        // The place's checks read the value at the place it captured, which
+        // its local holds when it is written.
+        let guards = guards
+            .iter()
+            .map(|guard| {
+                guard
+                    .substitute(sv::ir::PLACE_VALUE, &Expr::Ident(local.clone()))
+                    .ok_or_else(|| unsupported("check of an output place"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Some((
+            SystemActual {
+                parts: vec![part],
+                place: Some(SystemPlace {
+                    local,
+                    load,
+                    store,
+                    guards,
+                }),
+            },
+            read,
+        )))
+    }
+
+    /// A class handle evaluated now into a temporary that keeps its object.
+    fn capture_handle(&mut self, handle: &sv::ir::Expr) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        let (id, name) = self.request_temp(
+            "actual_object",
+            32,
+            false,
+            false,
+            celox_design::ValueKind::ObjRef,
+        )?;
+        let object = self.handle(handle)?;
+        self.store(id, SIROffset::Static(0), 32, object);
+        Ok(sv::ir::Expr::Ident(name))
+    }
+
+    /// Write `value` to output actual `actual`, as an assignment to it: a
+    /// place takes its local, which a select of it writes into after the
+    /// local reads the place's value.
+    fn write_system_actual(
+        &mut self,
+        actual: &SystemActual,
+        value: &sv::ir::Expr,
+    ) -> Result<(), sv::AnalyzerError> {
+        if let Some(place) = &actual.place
+            && matches!(actual.parts.as_slice(), [sv::ir::LValue::Select { .. }])
+        {
+            self.assign(&sv::ir::LValue::Ident(place.local.clone()), &place.load)?;
+            self.check_tagged_guards(&place.guards)?;
+        }
+        match actual.parts.as_slice() {
+            [one] => self.assign(one, value)?,
+            parts => self.assign_concat(parts, value)?,
+        }
+        if let Some(place) = &actual.place {
+            self.eval(&place.store, None)?;
+        }
+        Ok(())
     }
 
     fn host_hidden(
@@ -2930,10 +3183,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         self.with_kernel(|kernel| kernel.host_request(HostRequestKind::Distribution, site))
             .map_err(kernel_error)?;
         self.check_tagged_guards(&guards)?;
-        match lvalues.as_slice() {
-            [lvalue] => self.assign(lvalue, &seed_result)?,
-            parts => self.assign_concat(parts, &seed_result)?,
-        }
+        self.write_system_actual(&lvalues, &seed_result)?;
         Ok(Expr::Ident(ret_name))
     }
 
@@ -3099,10 +3349,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             .map_err(kernel_error)?;
         if let Some((lvalues, result, guards)) = target {
             self.check_tagged_guards(&guards)?;
-            match lvalues.as_slice() {
-                [lvalue] => self.assign(lvalue, &result)?,
-                parts => self.assign_concat(parts, &result)?,
-            }
+            self.write_system_actual(&lvalues, &result)?;
         }
         Ok(Expr::Ident(ret_name))
     }
@@ -3745,7 +3992,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             stmt,
             sv::ir::Stmt::Delay { .. }
                 | sv::ir::Stmt::WaitEvent(_)
-                | sv::ir::Stmt::WaitImplicit(_)
+                | sv::ir::Stmt::WaitImplicit { .. }
                 | sv::ir::Stmt::Wait(_)
         ) && (self.kernel.is_none()
             || self
@@ -3838,8 +4085,8 @@ impl<'p, 'a> Ff<'p, 'a> {
                 self.wait_event(items)?;
                 Ok(true)
             }
-            sv::ir::Stmt::WaitImplicit(reads) => {
-                self.wait_implicit(reads)?;
+            sv::ir::Stmt::WaitImplicit { reads, always_comb } => {
+                self.wait_implicit(reads, *always_comb)?;
                 Ok(true)
             }
             sv::ir::Stmt::Wait(condition) => {
@@ -3900,6 +4147,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     .m
                     .id(name)
                     .ok_or_else(|| unsupported(format!("local `{name}`")))?;
+                self.postponed_locals.insert(id);
                 if self.forked && self.kernel.is_some() {
                     let slot = match self.frame_locals.iter().position(|&local| local == id) {
                         Some(slot) => slot,
@@ -4046,6 +4294,17 @@ impl<'p, 'a> Ff<'p, 'a> {
         site: Option<&sv::ir::SourceSpan>,
         assertion_site: Option<&celox_design::AssertionSite>,
     ) -> Result<bool, sv::AnalyzerError> {
+        if matches!(
+            task,
+            sv::ir::SystemTask::Strobe(_)
+                | sv::ir::SystemTask::Fstrobe(_)
+                | sv::ir::SystemTask::Monitor(_)
+                | sv::ir::SystemTask::Fmonitor(_)
+                | sv::ir::SystemTask::MonitorOn
+                | sv::ir::SystemTask::MonitorOff
+        ) {
+            return self.strobe(task, args, site);
+        }
         if let sv::ir::SystemTask::Vcd(operation) = task {
             self.vcd_task(operation, args)?;
             return Ok(true);
@@ -4711,7 +4970,10 @@ impl<'p, 'a> Ff<'p, 'a> {
             .subroutine(name)
             .cloned()
             .ok_or_else(|| unsupported(format!("call of `{name}`")))?;
+        self.m.record_call(&self.active_calls, name);
         if self.active_calls.iter().any(|active| active == name) {
+            self.m
+                .record_argument_calls(&self.active_calls, &subroutine, args);
             return Err(unsupported(format!("recursive call of `{name}`")));
         }
         if self.active_calls.len() >= MAX_CALL_DEPTH {
@@ -5016,9 +5278,19 @@ impl<'p, 'a> Ff<'p, 'a> {
         for alias in &aliases {
             body = alias.rewrite(body, &constant)?;
         }
+        let built = self.b.built();
         self.active_calls.push(name.to_string());
         let falls = self.exec_block(&body);
         self.active_calls.pop();
+        let after = self.b.built();
+        self.m.expanded_call(
+            name,
+            super::recursion::Expansion {
+                instructions: after.instructions - built.instructions,
+                blocks: after.blocks - built.blocks,
+                nodes: 0,
+            },
+        );
         self.functions.pop();
         for (formal, original, _) in references {
             self.m.name_to_id.insert(formal, original);
@@ -5317,10 +5589,28 @@ impl<'p, 'a> Ff<'p, 'a> {
         let mut changed = self.b.alloc_bit(1, false);
         self.b
             .emit(SIRInstruction::Imm(changed, SIRValue::new(0u8)));
+        // A large sensitivity list need not retain every old and current
+        // value until the final comparison. Check bounded groups, stop at
+        // the first change, and refresh the snapshots only when needed.
+        // Occurrence counters also observe transient changes; retain their
+        // existing path until they can share the same grouped check.
+        let grouped = sources.len() >= 4 && !self.input_occurrences;
+        let capture = grouped.then(|| self.b.new_block());
+        let execute = self.b.new_block();
+        let done = self.b.new_block();
+        if let Some(capture) = capture {
+            let check = self.b.new_block();
+            self.b.seal_block(SIRTerminator::Branch {
+                cond: init,
+                true_block: (check, vec![]),
+                false_block: (capture, vec![]),
+            });
+            self.b.switch_to_block(check);
+        }
         let mut snapshots = Vec::new();
         let mut sensitivity_counters = Vec::new();
         let mut counter_snapshots = Vec::new();
-        for source in &sources {
+        for (ordinal, source) in sources.iter().enumerate() {
             let width = source.access.msb - source.access.lsb + 1;
             let (saved, _) = self.m.temp(
                 "comb_input",
@@ -5355,6 +5645,26 @@ impl<'p, 'a> Ff<'p, 'a> {
                 .emit(SIRInstruction::Binary(next, changed, BinaryOp::Or, differs));
             changed = next;
             snapshots.push((saved, width, current));
+            if let Some(capture) = capture
+                && ((ordinal + 1).is_multiple_of(4) || ordinal + 1 == sources.len())
+            {
+                let next = if ordinal + 1 == sources.len() {
+                    done
+                } else {
+                    self.b.new_block()
+                };
+                self.b.seal_block(SIRTerminator::Branch {
+                    cond: changed,
+                    true_block: (capture, vec![]),
+                    false_block: (next, vec![]),
+                });
+                if next != done {
+                    self.b.switch_to_block(next);
+                    changed = self.b.alloc_bit(1, false);
+                    self.b
+                        .emit(SIRInstruction::Imm(changed, SIRValue::new(0u8)));
+                }
+            }
             if !self.input_occurrences {
                 continue;
             }
@@ -5393,8 +5703,18 @@ impl<'p, 'a> Ff<'p, 'a> {
             sensitivity_counters.push((*source, counter));
             counter_snapshots.push((counter, saved_counter));
         }
+        if let Some(capture) = capture {
+            self.b.switch_to_block(capture);
+        }
         let run = self.b.alloc_bit(1, false);
-        if runs_at_time_zero {
+        if grouped && runs_at_time_zero {
+            self.b.emit(SIRInstruction::Imm(run, SIRValue::new(1u8)));
+        } else if grouped {
+            // Ordinary event controls establish their initial baseline
+            // without executing; always_comb executes on that first visit.
+            self.b
+                .emit(SIRInstruction::Binary(run, init, BinaryOp::Or, init));
+        } else if runs_at_time_zero {
             let first = self.b.alloc_bit(1, false);
             self.b
                 .emit(SIRInstruction::Unary(first, UnaryOp::LogicNot, init));
@@ -5405,14 +5725,27 @@ impl<'p, 'a> Ff<'p, 'a> {
                 .emit(SIRInstruction::Binary(run, init, BinaryOp::And, changed));
         }
         // Snapshot before executing: writes in the body do not retrigger it.
-        for &(saved, width, current) in &snapshots {
+        for (source, &(saved, width, current)) in sources.iter().zip(&snapshots) {
+            let current = if grouped {
+                // The checks do not mutate input state. Load each value at
+                // its store, avoiding a live snapshot set spanning the list.
+                let current = self.b.alloc_logic(width);
+                let offset = sv_memory_offset(self.m.var(source.id), source.access.lsb, width);
+                self.b.emit(SIRInstruction::Load(
+                    current,
+                    stable(source.id),
+                    offset,
+                    width,
+                ));
+                current
+            } else {
+                current
+            };
             self.store(saved, SIROffset::Static(0), width, current);
         }
         let one = self.b.alloc_bit(1, false);
         self.b.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
         self.store(initialized, SIROffset::Static(0), 1, one);
-        let execute = self.b.new_block();
-        let done = self.b.new_block();
         self.b.seal_block(SIRTerminator::Branch {
             cond: run,
             true_block: (execute, vec![]),
@@ -7280,10 +7613,63 @@ impl Ff<'_, '_> {
     /// branches and the defaults of omitted subroutine arguments count. A
     /// process-local variable it reads is sampled like an operand of an
     /// event expression.
-    fn wait_implicit(&mut self, reads: &[sv::ir::Stmt]) -> Result<(), sv::AnalyzerError> {
+    fn wait_implicit(
+        &mut self,
+        reads: &[sv::ir::Stmt],
+        always_comb: bool,
+    ) -> Result<(), sv::AnalyzerError> {
         // The expressions of timing controls are not part of the event list.
         let reads = without_timing_controls(reads);
         let reads = reads.as_slice();
+        if always_comb {
+            let sources = self.m.implicit_reads(reads, true);
+            let mut writes = Vec::new();
+            super::comb::static_writes(self.m, reads, &mut HashSet::default(), &mut writes, true);
+            let writes = writes
+                .into_iter()
+                .map(|(id, access)| VarAtomBase::new(id, access.lsb, access.msb))
+                .collect::<Vec<_>>();
+            let sources = super::comb::subtract_written_sensitivity(sources, &writes);
+            let mut sources: Vec<_> = sources
+                .into_iter()
+                .filter(|atom| !self.m.is_hidden(atom.id))
+                .collect();
+            sources.sort_by_key(|atom| (atom.id.0, atom.access.lsb, atom.access.msb));
+            let mut terms = Vec::new();
+            let mut gates = Vec::new();
+            let mut samples = Vec::new();
+            let mut selected = Vec::new();
+            for source in sources {
+                if source.access.lsb == 0 && source.access.msb + 1 == self.m.var(source.id).width {
+                    terms.push((source.id, CounterKind::Changes));
+                    gates.push(None);
+                    continue;
+                }
+                let name = self
+                    .m
+                    .name_to_id
+                    .iter()
+                    .filter_map(|(name, id)| (*id == source.id).then_some(name))
+                    .min()
+                    .cloned()
+                    .ok_or_else(|| unsupported("implicit sensitivity variable"))?;
+                selected.push(sv::ir::EventItem {
+                    edge: sv::ir::EventEdge::Any,
+                    expr: sv::ir::Expr::Select {
+                        // Sensitivity ranges are storage offsets. A concatenation
+                        // normalizes shifted, ascending and multidimensional
+                        // declarations to a zero-based packed value.
+                        expr: Box::new(sv::ir::Expr::Concat(vec![sv::ir::Expr::Ident(name)])),
+                        msb: sv::ir::ConstExpr::Literal(source.access.msb.to_string()),
+                        lsb: sv::ir::ConstExpr::Literal(source.access.lsb.to_string()),
+                        signed: false,
+                    },
+                    iff: None,
+                });
+            }
+            self.event_terms(&selected, &mut terms, &mut gates, &mut samples)?;
+            return self.suspend_on(terms, gates, samples);
+        }
         let mut ids: Vec<SourceVarId> = self
             .m
             .implicit_reads(reads, false)
@@ -7646,7 +8032,8 @@ impl Ff<'_, '_> {
                 | SIRInstruction::RuntimeEvent { .. }
                 | SIRInstruction::CombCaptureEvent { .. }
                 | SIRInstruction::CombCaptureEnableIfChanged { .. }
-                | SIRInstruction::ExternCall { .. } => {
+                | SIRInstruction::ExternCall { .. }
+                | SIRInstruction::Call { .. } => {
                     return Err(unsupported("event expression with runtime effects"));
                 }
                 SIRInstruction::Imm(..)
@@ -7933,7 +8320,7 @@ fn without_timing_controls(stmts: &[sv::ir::Stmt]) -> Vec<sv::ir::Stmt> {
         .filter(|stmt| {
             !matches!(
                 stmt,
-                Stmt::Delay { .. } | Stmt::WaitEvent(_) | Stmt::WaitImplicit(_) | Stmt::Wait(_)
+                Stmt::Delay { .. } | Stmt::WaitEvent(_) | Stmt::WaitImplicit { .. } | Stmt::Wait(_)
             )
         })
         .map(|stmt| match stmt {
@@ -7986,7 +8373,9 @@ fn always_suspends(stmts: &[sv::ir::Stmt]) -> bool {
     stmts.iter().any(|stmt| {
         matches!(
             stmt,
-            sv::ir::Stmt::Delay { .. } | sv::ir::Stmt::WaitEvent(_) | sv::ir::Stmt::WaitImplicit(_)
+            sv::ir::Stmt::Delay { .. }
+                | sv::ir::Stmt::WaitEvent(_)
+                | sv::ir::Stmt::WaitImplicit { .. }
         )
     })
 }
@@ -8182,7 +8571,7 @@ fn impure_call(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
                     | sv::ir::Stmt::SystemTask { .. }
                     | sv::ir::Stmt::Delay { .. }
                     | sv::ir::Stmt::WaitEvent(_)
-                    | sv::ir::Stmt::WaitImplicit(_)
+                    | sv::ir::Stmt::WaitImplicit { .. }
                     | sv::ir::Stmt::Wait(_) => effect = true,
                     _ => {}
                 });
@@ -8811,4 +9200,23 @@ fn forwarded_members(actual: &sv::ir::Expr, formal: &str) -> Option<Vec<sv::ir::
             forwarded_property(part, bits)
         })
         .collect()
+}
+
+/// An output or inout actual of a system function, captured by
+/// [`Ff::capture_system_actual`]: the variable parts it writes, or, for a
+/// class property or container element, the part of the local that holds
+/// its value, which the place then takes.
+pub(super) struct SystemActual {
+    pub(super) parts: Vec<sv::ir::LValue>,
+    place: Option<SystemPlace>,
+}
+
+/// The local of a place an output actual writes, its read of the place,
+/// its store into it, and the checks of the tags its selection crosses,
+/// which read the local.
+struct SystemPlace {
+    local: String,
+    load: sv::ir::Expr,
+    store: sv::ir::Expr,
+    guards: Vec<sv::ir::Expr>,
 }

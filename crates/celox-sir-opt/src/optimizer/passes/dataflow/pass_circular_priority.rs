@@ -224,6 +224,10 @@ impl ExecutionUnitPass for CircularPriorityPass {
         "circular_priority"
     }
 
+    fn handles_calls(&self) -> bool {
+        true
+    }
+
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions) {
         if options.four_state || self.bit_array_elements.is_empty() && self.array_shapes.is_empty()
         {

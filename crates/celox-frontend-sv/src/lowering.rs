@@ -45,6 +45,7 @@ mod floating;
 mod hierarchy;
 mod masked;
 mod procedural;
+mod recursion;
 mod virtual_interfaces;
 
 type RegionedVarAddr = RegionedVarAddrBase<SourceVarId>;
@@ -163,6 +164,8 @@ pub(crate) struct LoweredSvModule {
     /// The `inout` ports whose net has its driver in this module or below it,
     /// filled in by [`resolve_inout_drivers`].
     inout_driven_inside: HashSet<String>,
+    /// The calls the lowering inlined, when the recursion report is written.
+    calls: Option<recursion::CallGraph>,
 }
 
 #[derive(Clone)]
@@ -330,6 +333,7 @@ fn interface_signatures_collecting(
                 &HashMap::default(),
                 &HashMap::default(),
                 SharedAlways::default(),
+                None,
             )?;
             Ok(InterfaceSignature {
                 name: prototype.name,
@@ -1019,6 +1023,7 @@ fn lower_package_states(
                 &HashMap::default(),
                 &HashMap::default(),
                 SharedAlways::default(),
+                None,
             )?;
             lowered.sim_module.time_precision = Some(
                 celox_design::TimePrecision::try_from(packages.global_time_precision())
@@ -2733,6 +2738,7 @@ fn prepare_external_hierarchy_collecting(
             event_assignments: Vec::new(),
             repeated_ff_writes: Vec::new(),
             inout_driven_inside: HashSet::default(),
+            calls: None,
         }
     };
     let foreign_modules: HashMap<_, _> = foreign
@@ -2951,6 +2957,7 @@ fn prepare_external_hierarchy_collecting(
             true,
             &HashSet::default(),
             warnings,
+            None,
         )?;
         modules.insert(
             module_id,
@@ -3618,6 +3625,7 @@ fn schedule_sources_collecting(
                     signals: &signals,
                     foreign_writes: foreign_writes.get(&module_id).unwrap_or(&no_foreign_writes),
                     analyzed: analyses.get(&module_id).or(discovery_analysis.as_ref()),
+                    recursion_report: analysis_options.recursion_report.as_deref(),
                     shared: SharedAlways {
                         temporaries: analysis_options.shared_always_temporaries,
                         foreign_references: foreign_references
@@ -3689,7 +3697,8 @@ fn schedule_sources_collecting(
             if let Some((instances, _)) = &virtual_instances {
                 instance_values.extend(instances.values(module_id, lowered));
             }
-            attach_instance_glue(
+            let mut calls = lowered.calls.clone();
+            let glued = attach_instance_glue(
                 &mut sim_module,
                 lowered,
                 key,
@@ -3700,7 +3709,14 @@ fn schedule_sources_collecting(
                 false,
                 hierarchical_targets.get(&module_id).unwrap_or(&no_targets),
                 warnings,
-            )?;
+                calls.as_mut(),
+            );
+            if let (Some(graph), Some(path)) =
+                (&calls, analysis_options.recursion_report.as_deref())
+            {
+                recursion::append(&lowered.source, graph, path);
+            }
+            glued?;
             module_names.insert(module_id, key.name.clone());
             modules.insert(module_id, sim_module);
         }
@@ -4025,7 +4041,10 @@ fn specialize_module(
                 .map_or_else(|| path.clone(), |(flat, _)| flat.clone())
         })
         .collect::<Vec<_>>();
-    let mut lowered = lower_module(
+    let mut calls = hierarchical
+        .recursion_report
+        .map(|_| recursion::CallGraph::default());
+    let lowered = lower_module(
         specialized,
         four_state,
         module.implicit_nets_allowed,
@@ -4036,7 +4055,18 @@ fn specialize_module(
         hierarchical.foreign_writes,
         &module.interface_member_paths,
         hierarchical.shared,
-    )?;
+        calls.as_mut(),
+    );
+    let mut lowered = match (lowered, &calls, hierarchical.recursion_report) {
+        (Ok(lowered), _, _) => lowered,
+        // Report the graph recorded up to the error.
+        (Err(error), Some(graph), Some(path)) => {
+            recursion::append(specialized, graph, path);
+            return Err(error);
+        }
+        (Err(error), _, _) => return Err(error),
+    };
+    lowered.calls = calls;
     propagate_force_signals(&mut lowered.instances, &key.force_signals);
     lowered.sim_module.time_precision = Some(
         celox_design::TimePrecision::try_from(module.packages.global_time_precision())
@@ -4058,6 +4088,8 @@ struct HierarchicalNames<'a> {
     shared: SharedAlways<'a>,
     /// The analysis of the module with `signals`, if it is done already.
     analyzed: Option<&'a sv::Ir>,
+    /// Where to append the module's recursive call cycles, if anywhere.
+    recursion_report: Option<&'a std::path::Path>,
 }
 
 impl Default for HierarchicalNames<'_> {
@@ -4069,6 +4101,7 @@ impl Default for HierarchicalNames<'_> {
             foreign_writes: &EMPTY,
             shared: SharedAlways::default(),
             analyzed: None,
+            recursion_report: None,
         }
     }
 }
@@ -4156,6 +4189,7 @@ fn lower_module(
     foreign_writes: &HashMap<String, hierarchy::ForeignWrites>,
     reflected_paths: &HashMap<String, sv::InterfaceMemberPath>,
     shared: SharedAlways<'_>,
+    calls: Option<&mut recursion::CallGraph>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     lower_module_with_overrides(
         module,
@@ -4169,6 +4203,7 @@ fn lower_module(
         foreign_writes,
         reflected_paths,
         shared,
+        calls,
     )
 }
 
@@ -4254,6 +4289,7 @@ fn lower_module_with_overrides(
     foreign_writes: &HashMap<String, hierarchy::ForeignWrites>,
     reflected_paths: &HashMap<String, sv::InterfaceMemberPath>,
     shared: SharedAlways<'_>,
+    mut calls: Option<&mut recursion::CallGraph>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     let parameter_types = module_parameter_types(module);
     let constants = module_constants_with_overrides(module, parameter_overrides);
@@ -4695,6 +4731,7 @@ fn lower_module_with_overrides(
             four_state,
             warnings,
         );
+        pm.calls = calls.as_deref_mut();
         let blocks = lower_ff_processes(
             module,
             &mut pm,
@@ -4734,6 +4771,7 @@ fn lower_module_with_overrides(
         &mut runtime_errors,
         &mut extern_functions,
         warnings,
+        calls,
     )?;
     let mut declaration_initial_memory_values = initial_memory_values.clone();
     declaration_initial_memory_values.extend(declaration_values);
@@ -4798,6 +4836,7 @@ fn lower_module_with_overrides(
         event_assignments,
         repeated_ff_writes,
         inout_driven_inside: HashSet::default(),
+        calls: None,
     })
 }
 
@@ -5364,6 +5403,7 @@ pub(crate) fn attach_instance_glue(
     foreign: bool,
     hierarchical_targets: &HashSet<String>,
     warnings: &mut Vec<crate::warning::PendingWarning>,
+    calls: Option<&mut recursion::CallGraph>,
 ) -> Result<(), ParserError> {
     let mut signal_names = lowered.signal_names.clone();
     let mut parent_variables = lowered.variables.clone();
@@ -5595,6 +5635,7 @@ pub(crate) fn attach_instance_glue(
             waits,
             watch_seeds.as_ref(),
             gated_waits,
+            calls,
         )
         .map_err(|error| match error {
             sv::AnalyzerError::MemoryFile(detail) => ParserError::MemoryFile {
@@ -5748,6 +5789,23 @@ pub(crate) fn attach_instance_glue(
         })
         .collect();
     candidates.retain(|signal| !probe_results.contains(signal));
+    // Monitors observe the entire time slot, not just the interval between
+    // process suspensions. Even single writes therefore require counters.
+    candidates.extend(
+        module
+            .host_request_sites
+            .iter()
+            .filter(|site| {
+                site.kind == celox_design::HostRequestKind::FileIo
+                    && matches!(site.operation, 17 | 18)
+            })
+            .flat_map(|site| {
+                site.args
+                    .iter()
+                    .skip(usize::from(site.operation == 18))
+                    .map(|arg| arg.id)
+            }),
+    );
     module.counter_slots =
         celox_frontend_core::watch::declare_counter_slots(&mut module.variables, candidates);
     if waits {
@@ -5954,7 +6012,54 @@ fn inside_as_comparisons(expr: &sv::ir::Expr, items: &[sv::ir::InsideItem]) -> s
         .unwrap_or_else(|| sv::ir::Expr::Literal("1'b0".to_string()))
 }
 
-fn expr_for_state_mode(expr: &sv::ir::Expr, four_state: bool) -> sv::ir::Expr {
+/// Borrow expressions that need no state-mode conversion. Select bounds and
+/// repeat counts are not rewritten by this pass, so do not copy their trees
+/// merely to inspect the expression that contains them.
+fn expr_for_state_mode(
+    expr: &sv::ir::Expr,
+    four_state: bool,
+) -> std::borrow::Cow<'_, sv::ir::Expr> {
+    if needs_state_mode_rewrite(expr, four_state) {
+        std::borrow::Cow::Owned(rewrite_expr_for_state_mode(expr, four_state))
+    } else {
+        std::borrow::Cow::Borrowed(expr)
+    }
+}
+
+fn needs_state_mode_rewrite(expr: &sv::ir::Expr, four_state: bool) -> bool {
+    use sv::ir::Expr;
+    let needs = |expr| needs_state_mode_rewrite(expr, four_state);
+    match expr {
+        Expr::Literal(_) => !four_state && expr_is_unknown_literal(expr),
+        Expr::Ident(_) => false,
+        Expr::Select { expr, .. } | Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => {
+            needs(expr)
+        }
+        Expr::Concat(parts) | Expr::RepeatConcat { parts, .. } => parts.iter().any(needs),
+        Expr::Binary { left, op, right } => {
+            let keep_unknown =
+                four_state || matches!(op, sv::ir::BinaryOp::EqCase | sv::ir::BinaryOp::NeCase);
+            needs_state_mode_rewrite(left, keep_unknown)
+                || needs_state_mode_rewrite(right, keep_unknown)
+        }
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            matches!(&**then_expr, Expr::Literal(literal) if literal == sv::DIV_ZERO_UNKNOWN_LITERAL)
+                || needs(condition)
+                || needs(then_expr)
+                || needs(else_expr)
+        }
+        Expr::Inside { expr, items } => {
+            needs(expr) || items.iter().any(|item| item.exprs().into_iter().any(needs))
+        }
+        Expr::Call { args, .. } => args.iter().flatten().any(needs),
+    }
+}
+
+fn rewrite_expr_for_state_mode(expr: &sv::ir::Expr, four_state: bool) -> sv::ir::Expr {
     match expr {
         sv::ir::Expr::Mux {
             then_expr,
@@ -5975,7 +6080,7 @@ fn expr_for_state_mode(expr: &sv::ir::Expr, four_state: bool) -> sv::ir::Expr {
                 else {
                     unreachable!()
                 };
-                let else_expr = expr_for_state_mode(else_expr, four_state);
+                let else_expr = rewrite_expr_for_state_mode(else_expr, four_state);
                 // The unknown result has the width and signedness of the
                 // division: an X operand makes the whole sum X (IEEE 1800-2023
                 // 11.4.3), and `'x` alone would make the result unsigned.
@@ -5992,12 +6097,12 @@ fn expr_for_state_mode(expr: &sv::ir::Expr, four_state: bool) -> sv::ir::Expr {
                     _ => sv::ir::Expr::Literal("'x".to_string()),
                 };
                 sv::ir::Expr::Mux {
-                    condition: Box::new(expr_for_state_mode(condition, four_state)),
+                    condition: Box::new(rewrite_expr_for_state_mode(condition, four_state)),
                     then_expr: Box::new(unknown),
                     else_expr: Box::new(else_expr),
                 }
             } else {
-                expr_for_state_mode(else_expr, four_state)
+                rewrite_expr_for_state_mode(else_expr, four_state)
             }
         }
         sv::ir::Expr::Literal(literal) if !four_state && expr_is_unknown_literal(expr) => {
@@ -6017,7 +6122,7 @@ fn expr_for_state_mode(expr: &sv::ir::Expr, four_state: bool) -> sv::ir::Expr {
             lsb,
             signed,
         } => sv::ir::Expr::Select {
-            expr: Box::new(expr_for_state_mode(expr, four_state)),
+            expr: Box::new(rewrite_expr_for_state_mode(expr, four_state)),
             msb: msb.clone(),
             lsb: lsb.clone(),
             signed: *signed,
@@ -6025,14 +6130,14 @@ fn expr_for_state_mode(expr: &sv::ir::Expr, four_state: bool) -> sv::ir::Expr {
         sv::ir::Expr::Concat(parts) => sv::ir::Expr::Concat(
             parts
                 .iter()
-                .map(|part| expr_for_state_mode(part, four_state))
+                .map(|part| rewrite_expr_for_state_mode(part, four_state))
                 .collect(),
         ),
         sv::ir::Expr::RepeatConcat { count, parts } => sv::ir::Expr::RepeatConcat {
             count: count.clone(),
             parts: parts
                 .iter()
-                .map(|part| expr_for_state_mode(part, four_state))
+                .map(|part| rewrite_expr_for_state_mode(part, four_state))
                 .collect(),
         },
         sv::ir::Expr::Resize {
@@ -6040,13 +6145,13 @@ fn expr_for_state_mode(expr: &sv::ir::Expr, four_state: bool) -> sv::ir::Expr {
             width,
             signed,
         } => sv::ir::Expr::Resize {
-            expr: Box::new(expr_for_state_mode(expr, four_state)),
+            expr: Box::new(rewrite_expr_for_state_mode(expr, four_state)),
             width: *width,
             signed: *signed,
         },
         sv::ir::Expr::Unary { op, expr } => sv::ir::Expr::Unary {
             op: *op,
-            expr: Box::new(expr_for_state_mode(expr, four_state)),
+            expr: Box::new(rewrite_expr_for_state_mode(expr, four_state)),
         },
         sv::ir::Expr::Binary { left, op, right }
             if !four_state && matches!(op, sv::ir::BinaryOp::EqCase | sv::ir::BinaryOp::NeCase) =>
@@ -6054,30 +6159,32 @@ fn expr_for_state_mode(expr: &sv::ir::Expr, four_state: bool) -> sv::ir::Expr {
             // Storage remains two-state; exact comparison operands retain
             // literal X/Z until value and mask are compared (11.4.5).
             sv::ir::Expr::Binary {
-                left: Box::new(expr_for_state_mode(left, true)),
+                left: Box::new(rewrite_expr_for_state_mode(left, true)),
                 op: *op,
-                right: Box::new(expr_for_state_mode(right, true)),
+                right: Box::new(rewrite_expr_for_state_mode(right, true)),
             }
         }
         sv::ir::Expr::Binary { left, op, right } => sv::ir::Expr::Binary {
-            left: Box::new(expr_for_state_mode(left, four_state)),
+            left: Box::new(rewrite_expr_for_state_mode(left, four_state)),
             op: *op,
-            right: Box::new(expr_for_state_mode(right, four_state)),
+            right: Box::new(rewrite_expr_for_state_mode(right, four_state)),
         },
         sv::ir::Expr::Mux {
             condition,
             then_expr,
             else_expr,
         } => sv::ir::Expr::Mux {
-            condition: Box::new(expr_for_state_mode(condition, four_state)),
-            then_expr: Box::new(expr_for_state_mode(then_expr, four_state)),
-            else_expr: Box::new(expr_for_state_mode(else_expr, four_state)),
+            condition: Box::new(rewrite_expr_for_state_mode(condition, four_state)),
+            then_expr: Box::new(rewrite_expr_for_state_mode(then_expr, four_state)),
+            else_expr: Box::new(rewrite_expr_for_state_mode(else_expr, four_state)),
         },
         sv::ir::Expr::Inside { expr, items } => sv::ir::Expr::Inside {
-            expr: Box::new(expr_for_state_mode(expr, four_state)),
+            expr: Box::new(rewrite_expr_for_state_mode(expr, four_state)),
             items: items
                 .iter()
-                .map(|item| item.map(&mut |operand| expr_for_state_mode(operand, four_state)))
+                .map(|item| {
+                    item.map(&mut |operand| rewrite_expr_for_state_mode(operand, four_state))
+                })
                 .collect(),
         },
         sv::ir::Expr::Call {
@@ -6089,7 +6196,10 @@ fn expr_for_state_mode(expr: &sv::ir::Expr, four_state: bool) -> sv::ir::Expr {
             callee: callee.clone(),
             args: args
                 .iter()
-                .map(|arg| arg.as_ref().map(|arg| expr_for_state_mode(arg, four_state)))
+                .map(|arg| {
+                    arg.as_ref()
+                        .map(|arg| rewrite_expr_for_state_mode(arg, four_state))
+                })
                 .collect(),
         },
     }
@@ -6169,6 +6279,7 @@ fn lower_initial_processes(
     runtime_errors: &mut HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
     extern_functions: &mut Vec<ExternFunction>,
     warnings: &mut Vec<crate::warning::PendingWarning>,
+    mut calls: Option<&mut recursion::CallGraph>,
 ) -> Result<
     (
         Vec<InitialStateValue<SourceVarId>>,
@@ -6190,6 +6301,8 @@ fn lower_initial_processes(
     let mut declaration_values = Vec::new();
     let mut folded_values = Vec::new();
     let mut runtime = Vec::new();
+    // The unit of the call graph of each runtime process.
+    let mut runtime_units = Vec::new();
     let mut pm = procedural::ProcModule::new(
         module,
         variables,
@@ -6199,6 +6312,7 @@ fn lower_initial_processes(
         four_state,
         warnings,
     );
+    pm.calls = calls.as_deref_mut();
     let mut arena = SLTNodeArena::new();
     let mut seed = comb::Store::default();
     let random_seeds = process_random_seeds(module);
@@ -6217,6 +6331,7 @@ fn lower_initial_processes(
             .get(&(1, index))
             .copied()
             .unwrap_or(0x4d59_5df4);
+        let unit = pm.call_unit();
         // An `always` process never finishes, so it is never folded into
         // initial state. A program's `initial` procedure runs in the reactive
         // region set (IEEE 1800-2023 24.3.1), after the design's processes of
@@ -6226,10 +6341,15 @@ fn lower_initial_processes(
             || (module.is_program() && !process.is_initializer())
         {
             runtime.push((process, random_seed));
+            runtime_units.push(unit);
             continue;
         }
+        // A process that cannot be folded runs as a kernel instead.
+        pm.attempt_calls();
         let mut comb = comb::Comb::new(&mut pm, &mut arena);
-        match comb.lower_initial(process.body(), process.is_initializer(), &seed) {
+        let folded = comb.lower_initial(process.body(), process.is_initializer(), &seed);
+        pm.end_attempt_calls(folded.is_ok());
+        match folded {
             Ok((written, store)) => {
                 if process.is_initializer() {
                     declaration_values.extend(written.iter().cloned());
@@ -6239,7 +6359,10 @@ fn lower_initial_processes(
                 }
                 values.extend(written);
             }
-            Err(_) => runtime.push((process, random_seed)),
+            Err(_) => {
+                runtime.push((process, random_seed));
+                runtime_units.push(unit);
+            }
         }
     }
     let created = std::mem::take(&mut pm.created);
@@ -6340,6 +6463,7 @@ fn lower_initial_processes(
         four_state,
         warnings,
     );
+    pm.calls = calls;
     pm.runtime_event_sites = std::mem::take(runtime_event_sites);
     pm.runtime_errors = std::mem::take(runtime_errors);
     pm.extern_functions = std::mem::take(extern_functions);
@@ -6352,6 +6476,7 @@ fn lower_initial_processes(
         .zip(slots)
         .enumerate()
         .map(|(index, ((process, random_seed), slots))| {
+            pm.resume_call_unit(runtime_units[index]);
             // `always @(list) statement` waits for a change (IEEE 1800-2023
             // 9.4.2). In two-state mode its outputs would then start as a
             // real 0, so it runs once at time zero, after the time-zero
@@ -6444,6 +6569,7 @@ fn lower_comb_processes(
     waits: bool,
     watch_seeds: Option<&HashSet<SourceVarId>>,
     gated_waits: bool,
+    calls: Option<&mut recursion::CallGraph>,
 ) -> Result<
     (
         Vec<LogicPath<SourceVarId>>,
@@ -6469,6 +6595,7 @@ fn lower_comb_processes(
         four_state,
         warnings,
     );
+    pm.calls = calls;
     pm.runtime_errors = std::mem::take(runtime_errors);
     pm.extern_functions = std::mem::take(extern_functions);
     let random_seeds = process_random_seeds(module);
@@ -6491,6 +6618,7 @@ fn lower_comb_processes(
                 continue;
             }
         }
+        pm.call_unit();
         // A wildcard control waits for its first source event even when
         // every output is assigned. A symbolic combinational definition
         // would instead execute during the initial fixed-point evaluation.
@@ -6514,10 +6642,26 @@ fn lower_comb_processes(
             sites = std::mem::take(&mut pm.runtime_event_sites);
             continue;
         }
+        // A process that latches falls back to Ff below.
+        pm.attempt_calls();
         let mut comb = comb::Comb::new(&mut pm, &mut arena);
         comb.site_base = sites.len() as u32;
         comb.continuous = process.kind() == sv::ir::CombProcessKind::ContinuousAssign;
-        match comb.lower_process(process.body()) {
+        let lowered = comb.lower_process(process.body());
+        let fallback = matches!(
+            &lowered,
+            Err(sv::AnalyzerError::Unsupported(reason))
+                if reason.starts_with("latch inference inside always_comb")
+                    && process.kind() != sv::ir::CombProcessKind::ContinuousAssign
+                    && (allow_inferred_latches
+                        || matches!(
+                            process.kind(),
+                            sv::ir::CombProcessKind::AlwaysLatch
+                                | sv::ir::CombProcessKind::AlwaysStar
+                        ))
+        );
+        comb.m.end_attempt_calls(!fallback);
+        match lowered {
             // In a design with a wait, a variable the process stores twice
             // may be watched, so it also gets its imperative alternative.
             // A process with runtime events keeps only its symbolic form.
@@ -6561,16 +6705,7 @@ fn lower_comb_processes(
                 continue;
             }
             Ok(paths) => comb_blocks.extend(paths),
-            Err(sv::AnalyzerError::Unsupported(reason))
-                if reason.starts_with("latch inference inside always_comb")
-                    && process.kind() != sv::ir::CombProcessKind::ContinuousAssign
-                    && (allow_inferred_latches
-                        || matches!(
-                            process.kind(),
-                            sv::ir::CombProcessKind::AlwaysLatch
-                                | sv::ir::CombProcessKind::AlwaysStar
-                        )) =>
-            {
+            Err(_) if fallback => {
                 // A retained output is procedural state. The guarded unit
                 // executes once per implicit-sensitivity change, without
                 // interpreting held values as a combinational feedback loop.
@@ -6674,6 +6809,7 @@ fn lower_comb_processes(
         sites.append(&mut comb.sites);
     }
     for (target, body) in port_assignments {
+        pm.call_unit();
         pm.runtime_event_sites = std::mem::take(&mut sites);
         comb_blocks.extend(ff::Ff::new(&mut pm, 0).lower_comb_process(
             body,
@@ -6753,6 +6889,7 @@ fn lower_comb_alternative(
     arena: &mut SLTNodeArena<SourceVarId>,
 ) -> Option<(Vec<LogicPath<SourceVarId>>, CombAlternative)> {
     let checkpoint = pm.checkpoint();
+    pm.attempt_calls();
     let mut scratch = SLTNodeArena::new();
     let lowered = ff::Ff::new(pm, random_seed)
         .without_input_occurrences()
@@ -6784,6 +6921,7 @@ fn lower_comb_alternative(
             .map(|(process, candidates)| (paths, process, candidates)),
         _ => None,
     };
+    pm.end_attempt_calls(alternative.is_some());
     let Some((mut paths, process, mut candidates)) = alternative else {
         pm.rollback(checkpoint);
         return None;
@@ -11076,6 +11214,7 @@ fn lower_ff_processes(
     let window_writes = kernel_window_writes(module, foreign_writes);
     let random_seeds = process_random_seeds(module);
     for ((index, process), events) in module.ff_processes().iter().enumerate().zip(process_events) {
+        pm.call_unit();
         let mut events = events
             .into_iter()
             .map(|(signal, kind)| event_vars.sensed(pm, signal, kind));
@@ -11228,16 +11367,19 @@ fn runs_as_process(
 }
 
 fn clock_event_from_ff_process(process: &sv::ir::FfProcess) -> Option<&sv::ir::FfEvent> {
-    let clock = process.events().first()?;
-    if process.events().len() == 1 {
+    if let [clock] = process.events() {
         return Some(clock);
     }
 
-    (!ff_event_used_as_condition(process, clock)
-        && process.events()[1..]
-            .iter()
-            .all(|event| ff_event_used_as_condition(process, event)))
-    .then_some(clock)
+    // Event OR has no ordering (IEEE 1800-2023 9.4.2.1). For this
+    // optimized FF path, resets are the events used as conditions in the
+    // body; require exactly one remaining clock candidate.
+    let mut clocks = process
+        .events()
+        .iter()
+        .filter(|event| !ff_event_used_as_condition(process, event));
+    let clock = clocks.next()?;
+    clocks.next().is_none().then_some(clock)
 }
 
 fn ff_event_used_as_condition(process: &sv::ir::FfProcess, event: &sv::ir::FfEvent) -> bool {

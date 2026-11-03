@@ -19,6 +19,7 @@ impl LayoutSource<AbsoluteAddr> for Objects {
             runtime_event_sites: vec![],
             lane_writers: Default::default(),
             access_rank: Default::default(),
+            call_stack: None,
         }
     }
 }

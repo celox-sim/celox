@@ -212,6 +212,7 @@ pub fn estimate_clif_cost(
         // A call saves the caller's live values and moves each argument into
         // its ABI register.
         SIRInstruction::ExternCall { args, .. } => 20 + args.len() * 2,
+        SIRInstruction::Call { args, .. } => 20 + args.len() * 2,
     }
 }
 

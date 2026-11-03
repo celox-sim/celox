@@ -11,6 +11,10 @@ impl ExecutionUnitPass for HoistCommonBranchLoadsPass {
         "hoist_common_branch_loads"
     }
 
+    fn handles_calls(&self) -> bool {
+        true
+    }
+
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
         hoist_common_branch_loads(eu);
     }

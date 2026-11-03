@@ -132,12 +132,45 @@ fn physical_offset(context: &EmissionContext, base: BaseReg, offset: i32) -> i32
     }
 }
 
+/// The frame register and the offset into the frame that state offset
+/// `offset` addresses, when it lies in a function unit's frame window.
+fn frame_operand(
+    context: &EmissionContext,
+    base: BaseReg,
+    offset: i32,
+) -> Option<(AsmRegister64, i32)> {
+    let (window, register) = context.frame?;
+    if base != BaseReg::SimState {
+        return None;
+    }
+    Some((register, window.frame_offset(offset)?))
+}
+
+/// `[base + offset]` of the function's arena: in the state after the
+/// simulation state, or on the machine stack in a function unit.
+pub(super) fn arena_operand(context: &EmissionContext, offset: i32) -> AsmMemoryOperand {
+    if context.frame.is_some() {
+        return rsp + offset;
+    }
+    match state_base_strategy(context) {
+        StateBaseStrategy::Fs => ptr(offset).fs(),
+        StateBaseStrategy::Gs => ptr(offset).gs(),
+        StateBaseStrategy::R15 => r15 + offset,
+    }
+}
+
 pub(super) fn mem_operand(
     context: &EmissionContext,
     base: BaseReg,
     offset: i32,
 ) -> AsmMemoryOperand {
+    if let Some((register, offset)) = frame_operand(context, base, offset) {
+        return register + offset;
+    }
     let offset = physical_offset(context, base, offset);
+    if base == BaseReg::StackFrame {
+        return arena_operand(context, offset);
+    }
     match state_base_strategy(context) {
         StateBaseStrategy::Fs => ptr(offset).fs(),
         StateBaseStrategy::Gs => ptr(offset).gs(),
@@ -153,12 +186,7 @@ fn scratch_offset(context: &EmissionContext, slot: usize) -> i32 {
 }
 
 pub(super) fn scratch_operand(context: &EmissionContext, slot: usize) -> AsmMemoryOperand {
-    let offset = scratch_offset(context, slot);
-    match state_base_strategy(context) {
-        StateBaseStrategy::Fs => ptr(offset).fs(),
-        StateBaseStrategy::Gs => ptr(offset).gs(),
-        StateBaseStrategy::R15 => r15 + offset,
-    }
+    arena_operand(context, scratch_offset(context, slot))
 }
 
 pub(super) fn mem_operand_indexed(
@@ -168,6 +196,15 @@ pub(super) fn mem_operand_indexed(
     index: AsmRegister64,
     scale: u8,
 ) -> AsmMemoryOperand {
+    if let Some((register, offset)) = frame_operand(context, base, offset) {
+        return match scale {
+            1 => register + index + offset,
+            2 => register + index * 2 + offset,
+            4 => register + index * 4 + offset,
+            8 => register + index * 8 + offset,
+            _ => unreachable!("invalid indexed-memory scale {scale}"),
+        };
+    }
     let offset = physical_offset(context, base, offset);
     match (state_base_strategy(context), scale) {
         (StateBaseStrategy::Fs, 1) => ptr(index + offset).fs(),

@@ -1884,3 +1884,47 @@ endmodule
 "#)
   (top Top) (run_until 0)
   (assert_eq names_ok 1) (assert_eq levels_ok 1) (assert_eq last 1))
+
+(case element_part_selects
+  (source "containers.sv" #"
+module Top(output bit [7:0] fixed, output bit [31:0] bytes, output bit [7:0] low,
+           output bit [3:0] nibble, output bit [7:0] member, output bit [7:0] copied,
+           output bit [7:0] last, output bit [7:0] nested);
+    typedef struct { bit [63:0] data; int n; } op_t;
+    bit [63:0] values[];
+    bit [31:0] q[$];
+    bit [15:0] m[string];
+    op_t acc[$];
+    op_t a;
+    byte p[$];
+    initial begin
+        values = new[1];
+        values[0] = 64'h0403_0201;
+        q.push_back(32'hdead_beef);
+        m["k"] = 16'h1234;
+        a.data = 64'h00aa_bb00;
+        acc.push_back(a);
+        // A part-select of a container element selects the element's bits
+        // (IEEE 1800-2023 7.4.6, 11.5.1).
+        fixed = values[0][15:8];
+        for (int i = 0; i < 4; i++) begin
+            p.push_back(values[0][8*i+:8]);
+            bytes[8*i+:8] = p[i];
+        end
+        low = q[0][7:0];
+        nibble = m["k"][15-:4];
+        member = acc[0].data[2*8+:8];
+        // A select of one element assigned to a select of another, the
+        // last element of a queue, and a select in an index.
+        q.push_back(32'h0000_0011);
+        q[1][15:8] = q[0][15:8];
+        copied = q[1][15:8];
+        last = q[$][7:0];
+        nested = values[0][8*q[1][1:0]+:8];
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq fixed 2) (assert_eq bytes 0x04030201) (assert_eq low 0xef)
+  (assert_eq nibble 1) (assert_eq member 0xaa) (assert_eq copied 0xbe) (assert_eq last 0x11)
+  (assert_eq nested 2))

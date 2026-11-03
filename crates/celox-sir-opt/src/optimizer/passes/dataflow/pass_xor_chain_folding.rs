@@ -28,6 +28,10 @@ impl ExecutionUnitPass for XorChainFoldingPass {
         "xor_chain_folding"
     }
 
+    fn handles_calls(&self) -> bool {
+        true
+    }
+
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
         let mut any_changed = false;
         let mut max_reg = eu.register_map.keys().map(|r| r.0).max().unwrap_or(0);

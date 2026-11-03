@@ -1,7 +1,7 @@
 use crate::{HashMap, HashSet};
 pub use celox_design::PortTypeKind;
 pub(crate) use celox_design::{
-    AbsoluteAddrBase, BitAccess, InstanceId, ModuleId, RegionedAbsoluteAddrBase,
+    AbsoluteAddrBase, BitAccess, FRAME_REGION, InstanceId, ModuleId, RegionedAbsoluteAddrBase,
     RegionedVarAddrBase, RuntimeSchema, SPARSE_WORKING_REGION, STABLE_REGION, VarAtomBase,
     WORKING_REGION,
 };
@@ -669,6 +669,54 @@ pub struct LaidOutProgram {
 }
 
 impl LaidOutProgram {
+    /// Fail when a function unit makes a store that `backend` cannot compile
+    /// in a callee yet:
+    ///
+    /// - a store with triggers, which compiled code would compare with the
+    ///   value its object had at the callee's entry, not at the entry of the
+    ///   caller's unit group as the interpreter does;
+    /// - with `sparse`, a store to the sparse working region, whose dirty
+    ///   state the native caller tracks only for its own stores.
+    #[cfg(any(
+        feature = "cranelift",
+        feature = "wasm-runtime",
+        all(
+            feature = "host-runtime",
+            any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            )
+        )
+    ))]
+    pub(crate) fn reject_unsupported_callee_stores(
+        &self,
+        backend: &str,
+        sparse: bool,
+    ) -> Result<(), crate::SimulatorError> {
+        let reject = |what: &str| {
+            Err(crate::CodegenError::message(format!(
+                "the {backend} backend does not run {what} in function units yet"
+            ))
+            .into())
+        };
+        for function in &self.sir.functions {
+            if !function.effects.triggers.is_empty() {
+                return reject("triggered stores");
+            }
+            if sparse
+                && function
+                    .effects
+                    .writes
+                    .iter()
+                    .any(|addr| addr.region == crate::ir::SPARSE_WORKING_REGION)
+            {
+                return reject("sparse working stores");
+            }
+        }
+        Ok(())
+    }
+
     /// The units, with the layout and runtime metadata they are checked
     /// against, borrowed apart.
     pub(crate) fn split_mut(
@@ -1258,6 +1306,10 @@ impl RuntimeProgram {
     pub(crate) fn from_scheduled(
         scheduled: celox_frontend_core::ScheduledRtl,
     ) -> Result<(SirProgram, Self), DesignProjectionError> {
+        debug_assert!(
+            scheduled.sir.calls_summarized(),
+            "the program's call effects are stale"
+        );
         let design = RuntimeDesign::from_projection(scheduled.design, scheduled.frontend_lookup)?;
         let rtl_accesses = {
             let mut rtl_accesses = HashSet::default();
@@ -1273,6 +1325,13 @@ impl RuntimeProgram {
             {
                 for inst in unit.blocks.values().flat_map(|block| &block.instructions) {
                     match inst {
+                        SIRInstruction::Call { effects, .. } => rtl_accesses.extend(
+                            effects
+                                .reads
+                                .iter()
+                                .chain(&effects.writes)
+                                .map(|addr| addr.absolute_addr()),
+                        ),
                         SIRInstruction::Load(_, addr, ..) | SIRInstruction::Store(addr, ..) => {
                             rtl_accesses.insert(addr.absolute_addr());
                         }
@@ -1409,30 +1468,11 @@ impl OptimizedSir {
     /// region (region != STABLE). These are the only variables that need working
     /// region space.
     pub fn collect_working_region_addrs(&self) -> crate::HashSet<AbsoluteAddr> {
-        let mut addrs = crate::HashSet::default();
-        for eu in self.ff_units() {
-            for block in eu.blocks.values() {
-                for inst in &block.instructions {
-                    match inst {
-                        SIRInstruction::Store(addr, _, _, _, _, _)
-                            if addr.region == WORKING_REGION =>
-                        {
-                            addrs.insert(addr.absolute_addr());
-                        }
-                        SIRInstruction::Commit(src, dst, _, _, _) => {
-                            if src.region == WORKING_REGION {
-                                addrs.insert(src.absolute_addr());
-                            }
-                            if dst.region == WORKING_REGION {
-                                addrs.insert(dst.absolute_addr());
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-        addrs
+        debug_assert!(
+            self.sir.calls_summarized(),
+            "the program's call effects are stale"
+        );
+        working_region_addrs(self.ff_units())
     }
 
     /// Every unit that may touch FF staging state: the sequential FF groups
@@ -1620,6 +1660,96 @@ pub use celox_frontend_core::TraceSimModule as SimModule;
 ))]
 pub(crate) use celox_runtime::SignalArrayLayout;
 pub use celox_runtime::SignalRef;
+
+/// The objects that `units` access in the working region, through the
+/// functions they call too.
+fn working_region_addrs<'u>(
+    units: impl Iterator<Item = &'u ExecutionUnit<RegionedAbsoluteAddr>>,
+) -> crate::HashSet<AbsoluteAddr> {
+    let mut addrs = crate::HashSet::default();
+    for eu in units {
+        for block in eu.blocks.values() {
+            for inst in &block.instructions {
+                match inst {
+                    // A function can use the working region on behalf of an
+                    // FF.
+                    SIRInstruction::Call { effects, .. } => addrs.extend(
+                        effects
+                            .reads
+                            .iter()
+                            .chain(&effects.writes)
+                            .filter(|addr| addr.region == WORKING_REGION)
+                            .map(|addr| addr.absolute_addr()),
+                    ),
+                    SIRInstruction::Store(addr, _, _, _, _, _) if addr.region == WORKING_REGION => {
+                        addrs.insert(addr.absolute_addr());
+                    }
+                    SIRInstruction::Commit(src, dst, _, _, _) => {
+                        if src.region == WORKING_REGION {
+                            addrs.insert(src.absolute_addr());
+                        }
+                        if dst.region == WORKING_REGION {
+                            addrs.insert(dst.absolute_addr());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    addrs
+}
+
+#[cfg(test)]
+mod working_region_tests {
+    use super::*;
+
+    #[test]
+    fn allocates_the_working_objects_of_called_functions() {
+        let object = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: celox_design::StateObjectId(4),
+        };
+        let working = RegionedAbsoluteAddr::from_absolute_addr(WORKING_REGION, object);
+        let stable = RegionedAbsoluteAddr::from_absolute_addr(
+            STABLE_REGION,
+            AbsoluteAddr {
+                var_id: celox_design::StateObjectId(5),
+                ..object
+            },
+        );
+        let unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [(
+                BlockId(0),
+                crate::ir::BasicBlock {
+                    id: BlockId(0),
+                    params: Vec::new(),
+                    instructions: vec![SIRInstruction::Call {
+                        function: celox_sir::FunctionId(0),
+                        frame: RegisterId(0),
+                        args: Vec::new(),
+                        outputs: Vec::new(),
+                        dst: None,
+                        effects: std::sync::Arc::new(celox_sir::CallEffects {
+                            reads: vec![stable],
+                            writes: vec![working],
+                            ..Default::default()
+                        }),
+                    }],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: Default::default(),
+        };
+        assert_eq!(
+            working_region_addrs(std::iter::once(&unit)),
+            [object].into_iter().collect()
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {

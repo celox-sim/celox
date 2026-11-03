@@ -75,6 +75,9 @@ pub(super) struct ProcModule<'a> {
     /// Where the warnings found while lowering go. A process lowered more
     /// than once repeats its warnings; the frontend reports each once.
     warnings: &'a mut Vec<crate::warning::PendingWarning>,
+    /// Where the calls that the lowering inlines are recorded, for the
+    /// recursion report (see [`super::recursion`]).
+    pub calls: Option<&'a mut super::recursion::CallGraph>,
     /// Whether a call of each subroutine asked about can make a host
     /// request, by name.
     requesting_subroutines: HashMap<String, bool>,
@@ -193,6 +196,16 @@ impl<'a> ProcModule<'a> {
                 self.expr_float_precision(then_expr),
                 self.expr_float_precision(else_expr),
             ),
+            // A `real` or `shortreal` class property (6.12).
+            Expr::Call {
+                callee: sv::ir::Callee::Object(op),
+                ..
+            } => match &**op {
+                sv::ir::ObjectOp::Load(field) if field.real => {
+                    Some(if field.width == 32 { P::F32 } else { P::F64 })
+                }
+                _ => None,
+            },
             _ => floating::precision(expr, self.variables, self.name_to_id),
         }
     }
@@ -287,6 +300,7 @@ impl<'a> ProcModule<'a> {
             event_assignments: Vec::new(),
             unpacked_bounds,
             warnings,
+            calls: None,
             requesting_subroutines: Default::default(),
         }
     }
@@ -611,7 +625,7 @@ impl<'a> ProcModule<'a> {
                 stmt,
                 sv::ir::Stmt::Delay { .. }
                     | sv::ir::Stmt::WaitEvent(_)
-                    | sv::ir::Stmt::WaitImplicit(_)
+                    | sv::ir::Stmt::WaitImplicit { .. }
                     | sv::ir::Stmt::Wait(_)
                     | sv::ir::Stmt::Assign {
                         nonblocking: true,
@@ -1553,7 +1567,13 @@ pub(super) fn system_task_kind(task: sv::ir::SystemTask) -> Option<SystemTaskKin
         SystemTask::AssertContinue => {
             SystemTaskKind::Assertion(RuntimeEventKind::Report(Severity::Error))
         }
-        SystemTask::Readmem(_)
+        SystemTask::Monitor(_)
+        | SystemTask::Fmonitor(_)
+        | SystemTask::MonitorOn
+        | SystemTask::MonitorOff
+        | SystemTask::Strobe(_)
+        | SystemTask::Fstrobe(_)
+        | SystemTask::Readmem(_)
         | SystemTask::Writemem(_)
         | SystemTask::Fclose
         | SystemTask::Fflush

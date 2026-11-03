@@ -89,6 +89,21 @@ pub(in crate::ast) fn member_access(
     tree: &AnalysisContext<'_>,
 ) -> Converted<Option<(Vec<Expr>, Type)>> {
     selects::bind_interface_path(tree, &mut path, dims);
+    let Some(name) = path.first() else {
+        return Ok(None);
+    };
+    let base = Expr::Ident(name.clone());
+    member_guards(&path, base, dims)
+}
+
+/// The checks of the tags that member path `path`, a variable of `dims`
+/// followed by members, crosses (IEEE 1800-2023 7.3.2), each reading the
+/// tag of `base`, the variable's value, with the member's type.
+pub(in crate::ast) fn member_guards(
+    path: &[String],
+    base: Expr,
+    dims: &PackedDimensions,
+) -> Converted<Option<(Vec<Expr>, Type)>> {
     let Some(root) = path.first().and_then(|name| dims.get(name)) else {
         return Ok(None);
     };
@@ -111,7 +126,7 @@ pub(in crate::ast) fn member_access(
                 let lsb = offset + tag.payload_width;
                 guards.push(Expr::Binary {
                     left: Box::new(Expr::Select {
-                        expr: Box::new(Expr::Ident(path[0].clone())),
+                        expr: Box::new(base.clone()),
                         msb: ConstExpr::Literal((lsb + tag.tag_width - 1).to_string()),
                         lsb: ConstExpr::Literal(lsb.to_string()),
                         signed: false,
@@ -130,7 +145,7 @@ pub(in crate::ast) fn member_access(
 
 pub(in crate::ast) fn checked_value(
     guards: Vec<Expr>,
-    mut value: Expr,
+    value: Expr,
     tree: &AnalysisContext<'_>,
     dims: &PackedDimensions,
 ) -> Converted<Expr> {
@@ -140,6 +155,17 @@ pub(in crate::ast) fn checked_value(
     let width =
         expr_static_width(tree, &value, dims).ok_or_else(|| unsupported("tagged access width"))?;
     let signed = dimensions::expression_signedness(&value, dims, &dims.const_env).unwrap_or(false);
+    Ok(checked_typed_value(guards, value, width, signed))
+}
+
+/// `value`, of `width` bits and signedness `signed`, read only when each of
+/// `guards` holds (see [`checked_value`]).
+pub(in crate::ast) fn checked_typed_value(
+    guards: Vec<Expr>,
+    mut value: Expr,
+    width: usize,
+    signed: bool,
+) -> Expr {
     for guard in guards.into_iter().rev() {
         value = Expr::Call {
             callee: Callee::Checked {
@@ -151,7 +177,7 @@ pub(in crate::ast) fn checked_value(
             arg_order: Vec::new(),
         };
     }
-    Ok(value)
+    value
 }
 
 impl Type {

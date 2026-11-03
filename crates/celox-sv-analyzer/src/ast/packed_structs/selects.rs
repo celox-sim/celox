@@ -47,7 +47,7 @@ fn selected_member<'a>(
     dimensions: &'a PackedDimensions,
 ) -> Option<(usize, &'a Type)> {
     let root = dimensions.get(path.first()?)?;
-    if !root.unpacked.is_empty() {
+    if !root.unpacked.is_empty() || root.packed.len() != 1 {
         return None;
     }
     member_in(root, &path[1..])
@@ -56,9 +56,6 @@ fn selected_member<'a>(
 /// The offset and type of member path `path` in a packed structure of
 /// `root`'s element type.
 fn member_in<'a>(root: &'a VariableDimensions, path: &[String]) -> Option<(usize, &'a Type)> {
-    if root.packed.len() != 1 {
-        return None;
-    }
     let mut members = root.members.as_slice();
     let mut offset = 0usize;
     let mut selected = None;
@@ -116,6 +113,8 @@ fn finish_lvalue(
     let functions = &tree.functions;
     let width = expr_type_from_type(&tree.functions, r#type, &dimensions.const_env)?.width;
     let (msb, lsb, signed) = match relative {
+        // A selection within a member is of a variable.
+        LValue::Object { .. } => lowered_object(),
         LValue::Ident(_) => (width.checked_sub(1)? as i128, 0, r#type.is_signed),
         LValue::Select {
             msb, lsb, signed, ..
@@ -204,7 +203,7 @@ pub(in crate::ast) fn select_member(
     })
 }
 
-/// Select member path `members` of the element of unpacked array variable
+/// Select member path `members` of the element of fixed array variable
 /// `name` that `indices` select, such as `m[i].y` (IEEE 1800-2023 7.2.1):
 /// the member's bits in that element, which an index outside the array's
 /// range or with unknown bits reads as the default value and never writes,
@@ -276,6 +275,8 @@ fn array_member_selection(
         .ok_or_else(|| unsupported("structure array member selection width"))?
         .width;
     let (msb, lsb, signed, slice_width, reversed) = match relative {
+        // A selection within a member is of a variable.
+        LValue::Object { .. } => lowered_object(),
         LValue::Ident(_) => (
             ConstExpr::Literal((member_width - 1).to_string()),
             ConstExpr::Literal("0".into()),
@@ -351,7 +352,7 @@ fn array_member_selection(
     })
 }
 
-/// The offset and type of member path `members` in an element of unpacked
+/// The offset and type of member path `members` in an element of a fixed
 /// array variable `name`. A member of a tagged union is rejected: its tag is
 /// checked only in a variable of its own (see `member_access`).
 pub(in crate::ast) fn element_member<'a>(
@@ -362,7 +363,6 @@ pub(in crate::ast) fn element_member<'a>(
     let path = || format!("{name}.{}", members.join("."));
     let root = dimensions
         .get(name)
-        .filter(|root| !root.unpacked.is_empty())
         .ok_or_else(|| unsupported(format!("structure member `{}`", path())))?;
     let mut level = root.members.as_slice();
     for member in members {

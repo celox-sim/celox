@@ -388,7 +388,7 @@ impl Class {
                     domain
                         .values()
                         .into_iter()
-                        .map(|value| value as u64 & mask)
+                        .map(|value| value.bits() as u64 & mask)
                         .collect()
                 })
                 .unwrap_or_default();

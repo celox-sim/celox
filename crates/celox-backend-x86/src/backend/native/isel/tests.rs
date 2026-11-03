@@ -42,6 +42,7 @@ fn empty_layout() -> MemoryLayout {
         runtime_event_slot_size: 0,
         runtime_event_buffer_size: 0,
         runtime_event_site_layouts: vec![],
+        call_stack: None,
     }
 }
 
@@ -92,3 +93,5 @@ fn assert_indexed_state_accesses_have_alias_ranges(function: &MFunction) {
 }
 
 mod packed_muxes;
+
+mod packed_state;

@@ -1652,6 +1652,11 @@ pub fn schedule_symbolic_rtl_reporting_loops(
 
     let settle_flags = settle_flags.filter(|_| !settle_partitions.is_empty());
     if let Some(settle) = &settle_flags {
+        tracing::debug!(
+            partitions = settle_partitions.len(),
+            target_cost = settle.target_cost,
+            "partitioned combinational settle"
+        );
         // The flags carry what changed from one settle to the next.
         persistent_comb_state.insert(settle.flags);
         declare_settle_flags(
@@ -2269,7 +2274,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         initial_copies,
         ..
     } = timing;
-    let source_sir = SirProgram {
+    let mut source_sir = SirProgram {
         eval_apply_ffs,
         eval_comb_apply_ffs,
         merge_comb_apply,
@@ -2279,7 +2284,23 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         eval_comb,
         parallel: parallel_sir,
         processes: process_kernels,
+        functions: Vec::new(),
     };
+    // Calls carry their callees' effects from the start (see
+    // `SirProgram::calls_summarized`).
+    source_sir.summarize_calls();
+    // The one gate of the stages after this one (scheduling, settle, layout,
+    // testbench lowering, and the analyses above), which do not handle calls
+    // yet: each is converted before any frontend produces them.
+    if source_sir.has_calls() {
+        return Err(ParserError::unsupported(
+            2984,
+            crate::LoweringPhase::SimulatorParser,
+            "SIR function calls",
+            "the scheduler, settle, layout and testbench stages do not handle function calls yet",
+            None,
+        ));
+    }
     let mut source_addresses = state_objects.keys().copied().collect::<Vec<_>>();
     source_addresses.sort_unstable();
     let mut source_to_state = HashMap::default();
@@ -2737,10 +2758,10 @@ pub fn schedule_symbolic_rtl_reporting_loops(
 /// [`SettlePartitionMode::Estimated`] partitions.
 const MIN_PARTITIONED_SETTLE_COST: usize = 20_000;
 /// Expression nodes per partition of an estimated partitioned settle.
-const SETTLE_PARTITION_COST: usize = 16_000;
+const SETTLE_PARTITION_COST: usize = 32;
 /// Bound flag tests, publication checks, and their compiler analyses on large
 /// designs instead of growing the number of partitions with every source node.
-const TARGET_ESTIMATED_SETTLE_PARTITIONS: usize = 64;
+const TARGET_ESTIMATED_SETTLE_PARTITIONS: usize = 4096;
 
 fn estimated_settle_partition_cost(cost: usize) -> usize {
     SETTLE_PARTITION_COST.max(cost.div_ceil(TARGET_ESTIMATED_SETTLE_PARTITIONS))

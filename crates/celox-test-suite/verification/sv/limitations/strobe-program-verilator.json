@@ -1,0 +1,23 @@
+{
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "file_io::strobe_reads_after_reactive_program at 131:3: expect_output: expected [114, 101, 97, 99, 116, 105, 118, 101, 61, 57, 10], got [114, 101, 97, 99, 116, 105, 118, 101, 61, 48, 10]",
+      "expectation": "Simulation",
+      "name": "file_io::strobe_reads_after_reactive_program",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "exclude_stronger_than_sv": false,
+  "include_ignored": true,
+  "schema_version": 3,
+  "suite": "sv",
+  "suite_version": "0.12.0",
+  "tool": "verilator",
+  "version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "scope": "Focused strobe run using the suite VPI/public-signal configuration; only the observed program-output failure is retained."
+}

@@ -318,3 +318,152 @@ endmodule
 "#)
   (top Top)
   (run_to_finish))
+
+; The latch example in IEEE 1800-2023 9.2.2.3 uses <=. Its updates belong
+; to NBA; the implicit process runs at time zero and retains state while closed.
+(case nonblocking_clock_gate
+  (source "nonblocking_clock_gate.sv" #"
+module Top;
+ bit clk=0, enable=1, test_mode=0;
+ logic held;
+ wire gated = held & clk;
+ int edges=0;
+ always_latch if (!clk) held <= enable | test_mode;
+ always @(posedge gated) edges++;
+ initial begin
+   #1; if (held !== 1) $fatal(1,"startup"); clk=1;
+   #1; if (edges != 1 || gated !== 1) $fatal(1,"first edge"); enable=0;
+   #1; if (gated !== 1) $fatal(1,"closed latch"); clk=0;
+   #1; if (held !== 0) $fatal(1,"disabled gate"); clk=1;
+   #1; if (edges != 1 || gated !== 0) $fatal(1,"disabled edge"); test_mode=1;
+   #1; if (gated !== 0) $fatal(1,"test hold"); clk=0;
+   #1; if (held !== 1) $fatal(1,"test open"); clk=1;
+   #1; if (edges != 2) $fatal(1,"test edge");
+   $finish;
+ end
+endmodule"#)
+  (top Top) (run_to_finish))
+
+(case nonblocking_latch_old_values
+  (source "nonblocking_latch_old_values.sv" #"
+module Top;
+ bit enable=1;
+ logic [7:0] d=3, q=0, r=0;
+ always_latch if (enable) begin q <= d; r <= q; end
+ initial begin
+   #1; if (q !== 3 || r !== 0) $fatal(1,"NBA old value or self trigger");
+   enable=0; d=5;
+   #1; if (q !== 3 || r !== 0) $fatal(1,"hold"); enable=1;
+   #1; if (q !== 5 || r !== 3) $fatal(1,"reopen");
+   #1; if (r !== 3) $fatal(1,"self trigger"); d=8'hxx;
+   #1; if (q !== 8'hxx || r !== 5) $fatal(1,"four state NBA");
+   $finish;
+ end
+endmodule"#)
+  (four_state) (top Top) (run_to_finish))
+
+(case nonblocking_latch_function_sensitivity
+  (source "nonblocking_latch_function.sv" #"
+module Top;
+ bit [7:0] d=1;
+ logic [7:0] q;
+ function automatic logic [7:0] read_data(); return d; endfunction
+ always_latch q <= read_data();
+ initial begin
+   #1; if (q !== 1) $fatal(1,"function startup"); d=7;
+   #1; if (q !== 7) $fatal(1,"function sensitivity");
+   $finish;
+ end
+endmodule"#)
+  (top Top) (run_to_finish))
+
+(case nonblocking_latch_partial_sensitivity
+  (source "nonblocking_latch_partial.sv" #"
+module Top;
+ logic [7:0] value=8'h21;
+ int activations=0;
+ always_latch begin activations++; value[3:0] <= value[7:4]; end
+ initial begin
+   #1; if (value !== 8'h22 || activations != 1) $fatal(1,"partial startup");
+   value[7:4]=4'ha;
+   #1; if (value !== 8'haa || activations != 2) $fatal(1,"partial sensitivity");
+   $finish;
+ end
+endmodule"#)
+  (top Top) (run_to_finish))
+
+(case nonblocking_latch_function_writes
+  (source "nonblocking_latch_function_writes.sv" #"
+module Top;
+ bit d=1;
+ logic q=0, mirror=0;
+ logic default_q=0, default_mirror=0, explicit_q=0;
+ bit folded_d=1;
+ logic folded_q=0, folded_mirror=0, nested_q=0, nested_mirror=0;
+ int activations=0, default_activations=0, folded_activations=0;
+ function automatic logic sample_folded();
+   if (0) folded_mirror=0;
+   return folded_d;
+ endfunction
+ function automatic logic write_nested(); nested_mirror=0; return 0; endfunction
+ function automatic logic sample_nested();
+   if (0) return write_nested();
+   return folded_d;
+ endfunction
+ function automatic logic sample_data(); mirror <= d; return d; endfunction
+ function automatic logic sample_default(); default_mirror <= d; return d; endfunction
+ function automatic logic inner(input logic arg=sample_default()); return arg; endfunction
+ function automatic logic outer(input logic arg=inner()); return arg; endfunction
+ always_latch begin activations++; q <= sample_data() ^ mirror; end
+ always_latch begin
+   default_activations++;
+   explicit_q <= outer(d);
+   default_q <= outer() ^ default_mirror;
+ end
+ always_latch begin
+   folded_activations++;
+   folded_q <= sample_folded() ^ folded_mirror;
+   nested_q <= sample_nested() ^ nested_mirror;
+ end
+ initial begin
+   #1; if (q !== 1 || mirror !== 1 || activations != 1) $fatal(1,"function write self trigger");
+   if (default_q !== 1 || default_mirror !== 1 || explicit_q !== 1 || default_activations != 1)
+     $fatal(1,"default function write self trigger");
+   if (folded_q !== 1 || nested_q !== 1 || folded_activations != 1)
+     $fatal(1,"folded function startup");
+   folded_mirror=1; nested_mirror=1;
+   d=0;
+   #1; if (q !== 1 || mirror !== 0 || activations != 2) $fatal(1,"function write sensitivity");
+   if (default_q !== 1 || default_mirror !== 0 || explicit_q !== 0 || default_activations != 2)
+     $fatal(1,"default function write sensitivity");
+   if (folded_q !== 1 || nested_q !== 1 || folded_activations != 1)
+     $fatal(1,"folded function writes remain excluded");
+   folded_d=0;
+   #1; if (folded_q !== 1 || nested_q !== 1 || folded_activations != 2)
+     $fatal(1,"folded function reads remain sensitive");
+   $finish;
+ end
+endmodule"#)
+  (top Top) (run_to_finish))
+
+(case nonblocking_latch_declared_index_sensitivity
+  (source "nonblocking_latch_declared_indices.sv" #"
+module Top;
+ logic [15:8] shifted=8'h21;
+ logic [0:7] ascending=8'h43;
+ logic [-1:-8] negative=8'h65;
+ logic [3:2][7:4] packed_array=8'h87;
+ logic [3:0] a, b, c, d;
+ always_latch a <= shifted[11:8];
+ always_latch b <= ascending[4:7];
+ always_latch c <= negative[-5:-8];
+ always_latch d <= packed_array[2];
+ initial begin
+   #1; if ({a,b,c,d} !== 16'h1357) $fatal(1,"declared index startup");
+   shifted[11:8]=4'h9; ascending[4:7]=4'ha;
+   negative[-5:-8]=4'hb; packed_array[2]=4'hc;
+   #1; if ({a,b,c,d} !== 16'h9abc) $fatal(1,"declared index wakeup");
+   $finish;
+ end
+endmodule"#)
+  (top Top) (run_to_finish))

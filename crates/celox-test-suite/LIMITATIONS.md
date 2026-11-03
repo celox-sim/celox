@@ -413,6 +413,52 @@ static properties through such a typedef with unknown bits
 (`sv_class_scoped_typedef_static_properties`, see the
 [probe](verification/repros/sv_class_scoped_typedef_static_properties_xezim.json)).
 
+`$cast` to an enumerated type as a task, as a function in an expression, under
+`void'`, into a local of a class method and into a class property, and its
+rejection of a source with unknown bits, are checked against IEEE 1800-2023
+6.24.2. Verilator 5.052 rejects a `$cast` to an enumeration of `int` base at
+compile time (ENUMVALUE, "Implicit conversion to enum"), although 6.24.2 uses
+that cast as its example, and does not run the four-state case. Icarus 13.0 does
+not implement `$cast`. xezim 0.11.3, in a module instantiated below the top,
+accepts a value that is no member of the type in a `$cast` inside a function
+(`sv_enum_casts_in_instance_functions`, see the
+[probe](verification/repros/sv_enum_casts_in_instance_functions_xezim.json)).
+The source's whole value at its self-determined width is checked, not the value
+narrowed or widened to the base type, and a class handle source is not cast
+compatible (6.22.4); an unbased unsized `'1` is one bit (5.7.1), and a cast
+`int'(1)` has its target type. Verilator 5.052 rejects `$cast` of a class
+handle to an enumerated type as unsupported, and of a context-determined source
+such as `a + b` with ENUMVALUE. xezim 0.11.3 assigns 255 for `'1` to an 8-bit
+enumeration (`sv_enum_casts_of_fill_literals`, see the
+[probe](verification/repros/sv_enum_casts_of_fill_literals_xezim.json)).
+Constant sources (enum members, package and class-scoped constants,
+parameters, genvars and a class parameter typed by a type parameter) have their
+declared types; Verilator 5.052 passes that case, Icarus 13.0 does not parse
+it, and xezim 0.11.3 does not parse the class parameter
+(`sv_class_value_parameters_of_type_parameters`, see the
+[probe](verification/repros/sv_class_value_parameters_of_type_parameters_xezim.json)).
+An equality of arrays with unknown element bits is x and so no member;
+xezim 0.11.3 gives 0 (`sv_container_equality_unknown_elements`, see the
+[probe](verification/repros/sv_container_equality_unknown_elements_xezim.json)). xezim
+0.11.3 rejects a negative member's value given in a wider signed type
+(`sv_enum_casts_of_wider_signed_values`, see the
+[probe](verification/repros/sv_enum_casts_of_wider_signed_values_xezim.json))
+and assigns the representation of a class handle, `null` or a virtual interface
+(`sv_enum_casts_of_class_handles`, see the
+[probe](verification/repros/sv_enum_casts_of_class_handles_xezim.json)).
+A `$cast` evaluates its destination once whether or not it assigns it, a
+receiver called without parentheses and an index included (6.24.2, 8.16).
+Verilator 5.052 skips the destination of a failing cast; xezim 0.11.3 assigns a
+non-member and evaluates such a destination the wrong number of times
+(`sv_casts_through_method_results`, see the
+[probe](verification/repros/sv_casts_through_method_results_xezim.json)).
+An enumerated type may have a base wider than 64 bits (6.19); its members up
+to 128 bits keep their whole values through `$cast`, the enumeration methods
+and randomization. Verilator 5.052 rejects the methods of such a type as
+unsupported, Icarus 13.0 does not parse the case, and xezim 0.11.3 loses the
+member bits above bit 63 (`sv_wide_enum_domains`, see the
+[probe](verification/repros/sv_wide_enum_domains_xezim.json)).
+
 The new `$dist_uniform` seed-width case is excluded for Verilator 5.052 and
 Icarus 13.0. Verilator generates an invalid C++ reference binding for converted
 seed arguments; Icarus rejects the `shortint` seed at startup. IEEE 1800-2023
@@ -521,6 +567,28 @@ contents, from implicit sensitivity; 9.2.2.3 applies the same rule to
 including its positive check that changing the argument does wake the procedures.
 The [standalone comparison](verification/repros/wildcard_task_sensitivity_verilator.json)
 records both executions. Only this Verilator case is excluded for this reason.
+
+The nonblocking latch cases `latch::nonblocking_latch_partial_sensitivity` and
+`latch::nonblocking_latch_function_writes` fail to converge in Verilator 5.052
+before their timed assertions. Icarus 13.0 rejects the first because it cannot
+form the partial-select sensitivity, and the second because it rejects NBA
+assignments in functions. The [standalone observations](verification/repros/nonblocking_latch_sensitivity.json)
+retain both tools' diagnostics and the original sources. IEEE 1800-2023
+9.2.2.3 applies the written-expression exclusions of 9.2.2.2.1 to these latches;
+10.4.2 defines the delayed updates, and 13.4 permits these function statements
+that update module variables. Only these two cases are excluded for each tool;
+their assertions remain unchanged and available with `--include-ignored`.
+
+The packed-structure array case `packed_structs::packed_struct_array_dynamic_members`
+passes its valid-index checks but Verilator 5.052 writes element 0 when the NBA
+destination index is 4 for an array declared `[3:0]`. Icarus 13.0 rejects that
+case and `packed_structs::packed_struct_array_unknown_indices` during compilation,
+requiring a constant index and aborting in `collapse_array_indices`. The
+[standalone observations](verification/repros/packed_struct_array_selection.json)
+retain these failures. IEEE 1800-2023 7.4.6 permits variable element indices and
+gives the out-of-range write no storage; 10.4.2 preserves the NBA destination.
+Only the listed tool/case pairs are excluded. The constant-index ascending case
+passes both tools, and Celox passes all original assertions.
 
 The SystemVerilog suite's exclusions are listed in [`verification/sv/limitations.json`](verification/sv/limitations.json), with the failures observed before them in [`verification/sv/limitations/`](verification/sv/limitations). A case is excluded for a tool only when the expected value follows IEEE 1800 and the tool either cannot run the design or disagrees with the standard; where the two tools disagree with each other, the entry says so. A case tagged with an expectation stronger than SV (see the [tag table](README.md)) may also be excluded for a tool whose state model cannot produce it.
 
@@ -1576,6 +1644,16 @@ follows; its exact compile diagnostic remains an executed failure in
 [the Icarus containers report](verification/sv/icarus/containers.json).
 No assertions or exclusions are weakened.
 
+### Four-state container equality
+
+`containers::four_state_container_equality` compares dynamic arrays holding
+unknown bits: their equality is x (IEEE 1800-2023 11.4.5, 7.6), their case
+equality 1, and equalities of differing and empty arrays 0 and 1. xezim 0.11.3
+evaluates the equality as 0 (`sv_container_equality_unknown_elements`, see the
+[probe](verification/repros/sv_container_equality_unknown_elements_xezim.json)).
+Icarus 13.0 aborts on an internal assertion compiling the case; Verilator 5.052
+does not run four-state cases. No assertions or exclusions are weakened.
+
 ### Array items in concatenations
 
 `containers::array_items_in_concatenations` assigns unpacked array
@@ -1868,6 +1946,28 @@ Focused raw failures are retained for
 Only the exact observed failures are excluded; passing cases add no historical
 baseline rows.
 
+### Hierarchical string method receivers
+
+`hierarchy::hierarchical_string_mutating_methods` checks `putc` on module and
+generate-instance string variables while preserving copies and other instances.
+IEEE 1800-2023 23.6 permits these hierarchical names, and 6.16.2 makes `putc`
+equivalent to a character assignment. Verilator 5.052 raises an internal VARXREF
+type error; Icarus 13.0 reports an unknown task. Both failures reproduce in the
+[standalone source](verification/repros/hierarchical_string_mutating_methods.sv),
+with [diagnostics retained here](verification/repros/hierarchical_string_mutating_methods.json).
+Only this case is excluded for those two tools. The separate
+`hierarchy::hierarchical_string_variables` case keeps reads, assignments, copies,
+array elements and nonmutating methods executable.
+
+`hierarchy::generated_string_array_element_methods` separately checks `len()`
+on string-array elements beneath an indexed generate instance. Verilator 5.052
+passes. Icarus 13.0 returns `2` for both the six-character string and its empty
+neighbor, where 6.16.1 requires `6` and `0`. The
+[standalone source](verification/repros/generated_string_array_element_methods.sv)
+and [captured output](verification/repros/generated_string_array_element_methods.json)
+reproduce this disagreement without an adapter. Only this additional case is
+excluded for Icarus; the existing read/write case remains executable.
+
 ### Dynamic-array and queue shuffle
 
 Five `containers::shuffle_*` cases check element multiplicities and preservation
@@ -1987,6 +2087,53 @@ closed descriptors, output selection order, reference arguments and replay
 of core plus file-handler snapshots. Error codes and descriptions depend on
 the host; tests require zero/nonzero status and text presence rather than a
 particular operating-system errno or wording.
+
+### Strobed output
+
+Shared cases check `$strobe` after NBA publication and Reactive program writes,
+`$fstrobe` to stdout, and binary/octal/hexadecimal variants. Icarus 13.0 and
+xezim 0.11.4 pass all four. Verilator 5.052 passes three, but its suite build
+with VPI/public-signal options prints `reactive=0` for a program output that
+settles to 9. The [standalone probe](verification/repros/sv_strobe_program_output.sv)
+prints `reactive=0` then `settled=9` with the configuration recorded in its
+header; without those options Verilator prints 9 for both. IEEE 1800-2023
+21.2.2 requires the slot's final value, after Reactive writes (24.3.1).
+Only that case is excluded for Verilator, with its
+[exact failure](verification/sv/limitations/strobe-program-verilator.json).
+Passing cases add no historical baseline rows.
+
+Celox API regressions also check zero-delay work, `$sampled`, repeated calls,
+multiple timestamps, captured file descriptors, partial MCD cancellation,
+close/reopen cancellation, native-image execution, differential scheduling,
+core checkpoint bytes and portable state files at quiescent boundaries.
+User subroutine calls, side-effecting arguments and procedural local references
+remain outside the current strobed-output subset and are rejected explicitly.
+
+### Continuous monitoring
+
+Five shared cases cover slot coalescing, transient writes, replacement and
+on/off control, independent file monitoring, and time-query arguments.
+Icarus 13.0 passes all five. Verilator 5.052 misses transient changes and forced
+`$monitoron` redisplays, and suppresses `$fmonitor` after `$monitoroff`.
+xezim 0.11.4 also misses transient changes and suppresses file monitoring;
+its configured suite run additionally prints `$time` as 2000 instead of 2 at
+2ns in the 1ns source scope. The standalone time-query probe passes, so that
+exclusion is specific to the suite configuration.
+IEEE 1800-2023 21.2.3, 21.3.2 and 20.3.1 define the retained expectations.
+The [standalone probes](verification/repros/sv_monitor_slot.sv) and their
+[outputs](verification/repros/sv_monitor_slot.json) reproduce the monitoring differences and distinguish the time-query configuration.
+Only the three failing cases per tool are excluded, with exact evidence for
+[Verilator](verification/sv/limitations/monitor-verilator.json) and
+[xezim](verification/sv/limitations/monitor-xezim.json).
+
+Celox API tests additionally cover host writes during idle slots, X/Z mask
+changes, captured descriptors, multiple file lists, partial MCD closure,
+close/reopen cancellation, string handles and core checkpoint replay across
+execution backends, native images and differential scheduling. The current
+monitor subset accepts whole static scalar variables, constants and direct
+time queries. General expressions, selected values, file-monitor string variables
+and unsupported strobe call contexts are rejected explicitly. Portable state
+files capture values but cannot resume designs containing monitor tasks.
 
 ## veryl-native-queue-components
 

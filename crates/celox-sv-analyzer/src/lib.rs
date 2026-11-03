@@ -68,6 +68,9 @@ pub struct AnalysisOptions {
     /// The virtual interfaces of the design (IEEE 1800-2023 25.9), which the
     /// frontend provides when the design declares virtual interface types.
     pub virtual_interfaces: Option<std::sync::Arc<ast::virtual_interfaces::VirtualInterfaces>>,
+    /// A file to which the frontend appends the recursive call cycles of
+    /// each module it lowers, a diagnostic that changes no lowering.
+    pub recursion_report: Option<std::sync::Arc<std::path::Path>>,
 }
 
 /// Errors reported by the SystemVerilog analyzer.
@@ -87,6 +90,11 @@ pub enum AnalyzerError {
     /// IEEE 1800-2023 Table 10-1: a procedural assignment needs a variable.
     #[error("procedural assignment to net `{name}`")]
     ProceduralNetAssignment { name: String },
+    /// A constant class property is written only by the initializer of its
+    /// declaration or, without one, in the constructor of its class
+    /// (IEEE 1800-2023 8.19).
+    #[error("assignment to const class property `{owner}::{name}`")]
+    ConstPropertyAssignment { owner: String, name: String },
     /// A class member is inaccessible from the lexical scope (IEEE 1800-2023 8.18).
     #[error("{visibility} class member `{owner}::{name}` is not accessible from this scope")]
     InaccessibleClassMember {
@@ -274,7 +282,6 @@ pub const SV_FRONTEND_TRACKING_ISSUE: u32 = 88;
 const UNSUPPORTED_CONSTRUCT_ISSUES: &[(&str, u32)] = &[
     ("non-ANSI port expressions", 1953),
     ("ref port direction", 427),
-    ("nonblocking assignment inside always_latch", 431),
     (
         "unpacked struct, union, or unsupported packed struct member",
         440,

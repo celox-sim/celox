@@ -270,7 +270,7 @@ pub(in crate::ast) fn cast_target_native(
 }
 
 enum Finish {
-    ScopeRandomize(Vec<Option<Vec<i128>>>),
+    ScopeRandomize(Vec<Option<Arc<crate::ast::enums::EnumDomain>>>),
     Tagged(packed_structs::Construction),
     Unary(String),
     Binary(String),
@@ -1025,8 +1025,7 @@ fn bind_value_in(
                                         "scope randomize requires a packed variable with a supported enum domain",
                                     ));
                                 }
-                                domains
-                                    .push(shape.enum_domain.as_ref().map(|domain| domain.values()));
+                                domains.push(shape.enum_domain.clone());
                                 if !expressions::query_actual_is_writable(
                                     &Expr::Ident(name),
                                     dimensions,
@@ -1433,7 +1432,7 @@ fn bind_value_in(
                     ExprKind::Member { .. } | ExprKind::Select { .. } => {
                         let value = selected_value(id, native, tree, session, dimensions)?;
                         values.push(
-                            if strings::fixed_array_element(tree, id, native, dimensions) {
+                            if strings::fixed_array_element(tree, session, id, native, dimensions) {
                                 strings::call(StringOp::FromHandle, vec![value])
                             } else {
                                 value
@@ -1729,13 +1728,13 @@ fn bind_value_in(
                             let mut calls =
                                 operands.into_iter().zip(domains).map(|(operand, domain)| {
                                     let mut args = vec![Some(operand)];
-                                    let function = if let Some(values) = domain {
-                                        args.extend(values.into_iter().map(|value| {
-                                            Some(Expr::Literal(format_typed_parameter_literal(
-                                                value,
-                                                64,
-                                                value < 0,
-                                            )))
+                                    let function = if let Some(domain) = domain {
+                                        // Each member at its base type's width
+                                        // and signing, as the variable holds it.
+                                        args.extend(domain.values().into_iter().map(|value| {
+                                            Some(Expr::Literal(
+                                                value.literal(domain.width, domain.signed),
+                                            ))
                                         }));
                                         SystemFunction::ScopeRandomizeEnum
                                     } else {
@@ -1897,6 +1896,7 @@ fn bind_value_in(
                                 && let Some(Some(destination)) = args.get(output)
                                 && strings::fixed_array_element(
                                     tree,
+                                    session,
                                     *destination,
                                     native,
                                     dimensions,
@@ -1910,6 +1910,12 @@ fn bind_value_in(
                                     dimensions,
                                     false,
                                 )? {
+                                    // An element of a fixed array is a variable.
+                                    LValue::Object { .. } => {
+                                        return Err(unsupported(
+                                            "string output to a class property or container element",
+                                        ));
+                                    }
                                     LValue::Ident(name) => Expr::Ident(name),
                                     LValue::Select {
                                         name,
@@ -1989,6 +1995,7 @@ fn bind_value_in(
                                     | SystemFunction::UrandomRange
                                     | SystemFunction::ScopeRandomize
                             ) {
+                                let mut places = Vec::new();
                                 for (position, arg) in operands.iter().enumerate() {
                                     let real_output = matches!(
                                         function,
@@ -2012,7 +2019,31 @@ fn bind_value_in(
                                             "integral argument of `{name}`"
                                         )));
                                     }
+                                    // An output of a scan may be a class property or
+                                    // a container element, a place that the scan
+                                    // writes as an assignment does (21.3.4.3).
+                                    // The scan writes it through the place, with the
+                                    // place's checks (see `place_output`).
+                                    let place = match args.get(position).copied().flatten() {
+                                        Some(id)
+                                            if matches!(
+                                                function,
+                                                SystemFunction::Sscanf | SystemFunction::Fscanf
+                                            ) && position >= 2 =>
+                                        {
+                                            object_place(id, native, tree, session, dimensions)?
+                                        }
+                                        _ => None,
+                                    };
+                                    if let Some(place) = &place {
+                                        places.push((
+                                            position,
+                                            place_output(place, tree, dimensions)?,
+                                        ));
+                                    }
+                                    let place = place.is_some();
                                     if function.writes_argument(position)
+                                        && !place
                                         && !expressions::query_actual_is_writable(arg, dimensions)
                                     {
                                         return Err(AnalyzerError::InvalidSystemTfCall {
@@ -2034,6 +2065,10 @@ fn bind_value_in(
                                             },
                                         });
                                     }
+                                }
+                                let mut operands = operands;
+                                for (position, output) in places {
+                                    operands[position] = output;
                                 }
                                 Expr::Call {
                                     callee: Callee::System(function),
@@ -2154,13 +2189,6 @@ fn read_index_value(
 
 /// Whether native expression `id` is the element of a dynamic container
 /// whose select is being bound against a local.
-fn is_element_select(id: ExprId, native: &Declarations, dimensions: &PackedDimensions) -> bool {
-    dimensions
-        .element_select
-        .as_ref()
-        .is_some_and(|(element, _)| *element == ungroup(id, native))
-}
-
 pub(super) fn path(
     mut root: ExprId,
     native: &Declarations,
@@ -2183,17 +2211,6 @@ pub(super) fn path(
     // A static class property is a variable of the module.
     if let Some(variable) = objects::static_property(tree, session, root, native, dimensions)? {
         return Ok((vec![variable], None));
-    }
-    if let Some((_, local)) = &dimensions.element_select
-        && is_element_select(root, native, dimensions)
-    {
-        return Ok((vec![local.clone()], None));
-    }
-    // The property whose select is being bound is bound as its template.
-    if dimensions.property_select_base == Some(ungroup(root, native))
-        && let Some((property, _)) = objects::property(tree, session, root, native, dimensions)?
-    {
-        return Ok((vec![objects::select_template(&property)], None));
     }
     let mut parts = Vec::new();
     let mut qualified = None;
@@ -2270,6 +2287,32 @@ fn selected_value(
     session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
+    // A member of a class property of packed structure type, such as
+    // `h.p.m` or `h.p.m[1:0]`, selects the property's value.
+    if let Some((base, property, receiver)) =
+        property_member_base(root, native, tree, session, dimensions)?
+    {
+        let steps = value_selects::steps(root, base, native).ok_or_else(disagreement)?;
+        let handle = objects::receiver(tree, session, receiver, native, dimensions)?;
+        return value_selects::read(
+            objects::load(&property, handle),
+            &property.r#type,
+            &steps,
+            native,
+            tree,
+            session,
+            dimensions,
+        );
+    }
+    // A select of an element of a container, or of a member of one, such
+    // as `d[i][8*j+:8]` or `q[i].m[k]`, selects the element's value.
+    if let Some((element, r#type)) =
+        selected_container_element(root, native, tree, session, dimensions)?
+    {
+        let steps = value_selects::steps(root, element, native).ok_or_else(disagreement)?;
+        let value = bind_value(element, native, tree, session, dimensions, None)?;
+        return value_selects::read(value, &r#type, &steps, native, tree, session, dimensions);
+    }
     let mut base = root;
     let mut suffix = Vec::new();
     while let ExprKind::Select {
@@ -2288,10 +2331,8 @@ fn selected_value(
     {
         return Err(unsupported("bit-select or part-select of a real variable"));
     }
-    // A select of a class property is bound as a select of its template,
-    // a variable of the property's type, which the property's value then
-    // replaces: the select keeps the semantics of a variable select
-    // (IEEE 1800-2023 11.5.1).
+    // A select of a class property selects its value, read through its
+    // handle, as a select of a variable of its type (IEEE 1800-2023 11.5.1).
     if !suffix.is_empty()
         && let Some((property, receiver)) =
             objects::property(tree, session, base, native, dimensions)?
@@ -2299,35 +2340,31 @@ fn selected_value(
         && property.r#type.container.is_none()
         && property.r#type.unpacked_struct().is_none()
     {
-        let base = ungroup(base, native);
-        let template = objects::select_template(&property);
-        if dimensions.property_select_base != Some(base) {
-            // The value replaces the template as a `[N-1:0]` vector.
-            if !zero_based_vector(&property.r#type, tree, dimensions) {
-                return Err(unsupported(
-                    "read of a select of a class property that is not declared [N-1:0]",
-                ));
-            }
-            let mut scope = dimensions.clone();
-            scope.insert(
-                template.clone(),
-                procedural::dimensions_from_type(&property.r#type),
-            );
-            scope.property_select_base = Some(base);
-            let selected = selected_value(root, native, tree, session, &scope)?;
-            let handle = objects::receiver(tree, session, receiver, native, dimensions)?;
-            return Ok(crate::ast::inlining::substitute_expr_idents(
-                selected,
-                &HashMap::from_iter([(template, objects::load(&property, handle))]),
+        // The value has the positions of a `[N-1:0]` vector.
+        if !zero_based_vector(&property.r#type, tree, dimensions) {
+            return Err(unsupported(
+                "read of a select of a class property that is not declared [N-1:0]",
             ));
         }
+        let steps = value_selects::steps(root, base, native).ok_or_else(disagreement)?;
+        let handle = objects::receiver(tree, session, receiver, native, dimensions)?;
+        return value_selects::read(
+            objects::load(&property, handle),
+            &property.r#type,
+            &steps,
+            native,
+            tree,
+            session,
+            dimensions,
+        );
     }
     // A select of the iterator of a locator over elements kept in records,
     // such as `item[31:0]`, selects the element's value.
     if !suffix.is_empty()
         && let ExprKind::Name(name) = &native.expression(base).kind
-        && let name = instances::normalize_identifier(&name.spelling)
-        && dimensions.get(&name).is_none()
+        && dimensions
+            .get(&instances::normalize_identifier(&name.spelling))
+            .is_none()
         && let Some((container, handle)) = locators::record_iterator(base, native, dimensions)
         && container.element.unpacked_struct().is_none()
     {
@@ -2336,19 +2373,16 @@ fn selected_value(
                 "select of an element wider than 64 bits that is not declared [N-1:0]",
             ));
         }
-        let mut scope = dimensions.clone();
-        scope.insert(
-            name.clone(),
-            procedural::dimensions_from_type(&container.element),
+        let steps = value_selects::steps(root, base, native).ok_or_else(disagreement)?;
+        return value_selects::read(
+            containers::element_read(&container, handle),
+            &container.element,
+            &steps,
+            native,
+            tree,
+            session,
+            dimensions,
         );
-        scope
-            .expression_signedness
-            .insert(name.clone(), container.element.is_signed());
-        let selected = selected_value(root, native, tree, session, &scope)?;
-        return Ok(crate::ast::inlining::substitute_expr_idents(
-            selected,
-            &HashMap::from_iter([(name, containers::element_read(&container, handle))]),
-        ));
     }
     // An element wider than 64 bits is held in a record, whose packed
     // selects, such as `q[0][129]`, are not bound yet.
@@ -2516,6 +2550,134 @@ fn selected_value(
     packed_structs::checked_value(guards, value, tree, dimensions)
 }
 
+/// The output actual of a system function that writes place `place`, an
+/// [`LValue::Object`]: the bits of the value at the place that its
+/// selection names, under the place's checks of the tags its selection
+/// crosses, which read the place's value as [`crate::ir::PLACE_VALUE`]: the
+/// write captures the place and applies them to the value at the place it
+/// captured (IEEE 1800-2023 7.3.2).
+fn place_output(
+    place: &LValue,
+    tree: &AnalysisContext<'_>,
+    dimensions: &PackedDimensions,
+) -> Converted<Expr> {
+    let LValue::Object {
+        place: object,
+        select,
+        guards,
+        ..
+    } = place
+    else {
+        unreachable!("a place is an object place");
+    };
+    let load = object.load();
+    // The bits the place's selection names, as a variable's are named.
+    let value = match &**select {
+        LValue::Ident(_) => load,
+        LValue::Select {
+            msb,
+            lsb,
+            array_slice_width: None,
+            ..
+        } => Expr::Select {
+            expr: Box::new(load),
+            msb: msb.clone(),
+            lsb: lsb.clone(),
+            signed: false,
+        },
+        _ => return Err(unsupported("output actual of a slice of a place")),
+    };
+    packed_structs::checked_value(guards.clone(), value, tree, dimensions)
+}
+
+/// The place of property `property` of the object that native expression
+/// `receiver` denotes, or of `this` without one. Every property place is
+/// made here, and every write of a property's place is a write of the
+/// property, so a property that is not writable here has none (IEEE
+/// 1800-2023 8.19).
+fn property_place(
+    property: classes::Property,
+    receiver: Option<ExprId>,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> Converted<ObjectPlace> {
+    objects::check_writable(&property, dimensions)?;
+    let handle = objects::receiver(tree, session, receiver, native, dimensions)?;
+    Ok(ObjectPlace::Property {
+        field: property.field,
+        handle,
+        r#type: property.r#type,
+    })
+}
+
+/// The target that native expression `root` assigns when it is a class
+/// property of integral type, a select of one, or a select of an element
+/// that a container holds by value: an [`LValue::Object`], whose selection
+/// is that of a variable of the value's type (see `value_selects`).
+pub(in crate::ast) fn object_place(
+    root: ExprId,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<LValue>> {
+    // A place is found in the declarations of the scope.
+    if !std::ptr::eq(native, tree.declarations()) {
+        return Ok(None);
+    }
+    let mut base = ungroup(root, native);
+    while let ExprKind::Select { expression, .. } = &native.expression(base).kind {
+        base = ungroup(*expression, native);
+    }
+    // A member of a property of packed structure type, `h.p.m[1:0]`.
+    let member = property_member_base(root, native, tree, session, dimensions)?;
+    let (place, base) = if let Some((base, property, receiver)) = member {
+        let place = property_place(property, receiver, native, tree, session, dimensions)?;
+        (place, base)
+    } else if let Some((property, receiver)) =
+        objects::property(tree, session, base, native, dimensions)?
+        && property.field.handle.is_none()
+        && property.r#type.container.is_none()
+        && property.r#type.unpacked_struct().is_none()
+    {
+        let place = property_place(property, receiver, native, tree, session, dimensions)?;
+        (place, base)
+    } else if let Some((element, target, container, index)) =
+        containers::selected_element(root, tree, session, dimensions)?
+    {
+        (
+            ObjectPlace::Element {
+                container,
+                index,
+                layout: target.layout,
+                element: target.element.clone(),
+            },
+            element,
+        )
+    } else {
+        return Ok(None);
+    };
+    let steps = value_selects::steps(root, base, native).ok_or_else(disagreement)?;
+    let selection = value_selects::selection(
+        OBJECT_VALUE,
+        Expr::Ident(OBJECT_VALUE.into()),
+        place.value_type(),
+        &steps,
+        native,
+        tree,
+        session,
+        dimensions,
+    )?;
+    Ok(Some(LValue::Object {
+        place: Box::new(place),
+        select: Box::new(selection.lvalue),
+        guards: selection.guards,
+        whole: base,
+    }))
+}
+
 pub(in crate::ast) fn selected_lvalue(
     root: ExprId,
     native: &Declarations,
@@ -2531,10 +2693,6 @@ pub(in crate::ast) fn selected_lvalue(
         dimension,
     } = &native.expression(base).kind
     {
-        // The selected element of a dynamic container is its local.
-        if is_element_select(base, native, dimensions) {
-            break;
-        }
         suffix.push(&dimension.kind);
         base = *expression;
     }
@@ -2563,102 +2721,8 @@ pub(in crate::ast) fn selected_lvalue(
     if suffix.is_empty() && parts.len() > 1 {
         return packed_structs::whole_member(tree, parts, qualified, dimensions);
     }
-    let mut finish = |name: String,
-                      context: &PackedDimensions,
-                      strict: bool|
-     -> Converted<LValue> {
-        if context.get(&name).is_some_and(|ty| {
-            ty.members
-                .first()
-                .is_some_and(packed_structs::PackedMember::is_tagged)
-                && suffix.len() >= ty.unpacked.len() + ty.packed.len()
-        }) {
-            return Err(unsupported("bit-select or part-select of a tagged union"));
-        }
-        if context
-            .get(&name)
-            .is_some_and(|ty| ty.chandle && suffix.len() > ty.unpacked.len())
-        {
-            return Err(chandles::packed_select());
-        }
-        if context
-            .get(&name)
-            .is_some_and(|ty| ty.real && suffix.len() > ty.unpacked.len())
-        {
-            return Err(unsupported("bit-select or part-select of a real variable"));
-        }
-        let mut indices = Vec::new();
-        let mut range = None;
-        let mut ranged = false;
-        for dimension in &suffix {
-            if ranged {
-                return Err(unsupported("select following a part-select"));
-            }
-            ranged = !matches!(dimension, DimensionKind::Index(_));
-            match dimension {
-                DimensionKind::Index(id) => {
-                    let index = index_value(*id, native, tree, session, context)?;
-                    indices.push(selects::self_determined_index(tree, index, context))
-                }
-                DimensionKind::Range { left, right } => {
-                    range = Some((
-                        index_value(*left, native, tree, session, context)?,
-                        index_value(*right, native, tree, session, context)?,
-                        false,
-                    ))
-                }
-                DimensionKind::Indexed {
-                    base,
-                    operator,
-                    width,
-                } => {
-                    let start = index_value(*base, native, tree, session, context)?;
-                    let width = index_value(*width, native, tree, session, context)?;
-                    let ((msb, lsb), dynamic) = if net {
-                        let width =
-                            eval_ast_const_expr(&tree.functions, &width, &context.const_env)
-                                .ok_or_else(|| {
-                                    unsupported("indexed part-select width that is not constant")
-                                })?;
-                        (
-                            selects::indexed_select_bounds_values(
-                                tree,
-                                start,
-                                operator == "+:",
-                                width,
-                                (Some(&name), indices.len()),
-                                context,
-                            )?,
-                            false,
-                        )
-                    } else {
-                        selects::indexed_range_values(
-                            tree,
-                            &name,
-                            start,
-                            width,
-                            operator == "+:",
-                            indices.len(),
-                            context,
-                        )?
-                    };
-                    range = Some((msb, lsb, dynamic));
-                }
-                _ => return Err(unsupported("select dimension")),
-            }
-        }
-        if strict
-            && !selects::constant_packed_indices_in_range(&tree.functions, &name, &indices, context)
-        {
-            return Err(unsupported(format!(
-                "constant select of `{name}` outside its declared range"
-            )));
-        }
-        if let Some((msb, lsb, dynamic)) = range {
-            selects::lvalue_from_range(tree, name, indices, msb, lsb, dynamic, context)
-        } else {
-            selects::lvalue_from_indices(tree, name, indices, context)
-        }
+    let mut finish = |name: String, context: &PackedDimensions, strict: bool| {
+        select_suffix(name, &suffix, native, tree, session, context, strict, net)
     };
     let lvalue = if let Some((element, indices)) = element {
         packed_structs::select_element_member(
@@ -2679,6 +2743,113 @@ pub(in crate::ast) fn selected_lvalue(
         )?
     };
     Ok(lvalue)
+}
+
+/// The selection that `suffix`, the selects of a native expression, make of
+/// variable `name`, whose layout `context` holds; `strict` rejects constant
+/// indices outside it, and `net` selects of a net.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn select_suffix(
+    name: String,
+    suffix: &[&DimensionKind],
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    context: &PackedDimensions,
+    strict: bool,
+    net: bool,
+) -> Converted<LValue> {
+    if context.get(&name).is_some_and(|ty| {
+        ty.members
+            .first()
+            .is_some_and(packed_structs::PackedMember::is_tagged)
+            && suffix.len() >= ty.unpacked.len() + ty.packed.len()
+    }) {
+        return Err(unsupported("bit-select or part-select of a tagged union"));
+    }
+    if context
+        .get(&name)
+        .is_some_and(|ty| ty.chandle && suffix.len() > ty.unpacked.len())
+    {
+        return Err(chandles::packed_select());
+    }
+    if context
+        .get(&name)
+        .is_some_and(|ty| ty.real && suffix.len() > ty.unpacked.len())
+    {
+        return Err(unsupported("bit-select or part-select of a real variable"));
+    }
+    let mut indices = Vec::new();
+    let mut range = None;
+    let mut ranged = false;
+    for dimension in suffix {
+        if ranged {
+            return Err(unsupported("select following a part-select"));
+        }
+        ranged = !matches!(dimension, DimensionKind::Index(_));
+        match dimension {
+            DimensionKind::Index(id) => {
+                let index = index_value(*id, native, tree, session, context)?;
+                indices.push(selects::self_determined_index(tree, index, context))
+            }
+            DimensionKind::Range { left, right } => {
+                range = Some((
+                    index_value(*left, native, tree, session, context)?,
+                    index_value(*right, native, tree, session, context)?,
+                    false,
+                ))
+            }
+            DimensionKind::Indexed {
+                base,
+                operator,
+                width,
+            } => {
+                let start = index_value(*base, native, tree, session, context)?;
+                let width = index_value(*width, native, tree, session, context)?;
+                let ((msb, lsb), dynamic) = if net {
+                    let width = eval_ast_const_expr(&tree.functions, &width, &context.const_env)
+                        .ok_or_else(|| {
+                            unsupported("indexed part-select width that is not constant")
+                        })?;
+                    (
+                        selects::indexed_select_bounds_values(
+                            tree,
+                            start,
+                            operator == "+:",
+                            width,
+                            (Some(&name), indices.len()),
+                            context,
+                        )?,
+                        false,
+                    )
+                } else {
+                    selects::indexed_range_values(
+                        tree,
+                        &name,
+                        start,
+                        width,
+                        operator == "+:",
+                        indices.len(),
+                        context,
+                    )?
+                };
+                range = Some((msb, lsb, dynamic));
+            }
+            _ => return Err(unsupported("select dimension")),
+        }
+    }
+    if strict
+        && !selects::constant_packed_indices_in_range(&tree.functions, &name, &indices, context)
+    {
+        return Err(unsupported(format!(
+            "constant select of `{name}` outside its declared range"
+        )));
+    }
+    if let Some((msb, lsb, dynamic)) = range {
+        selects::lvalue_from_range(tree, name, indices, msb, lsb, dynamic, context)
+    } else {
+        selects::lvalue_from_indices(tree, name, indices, context)
+    }
 }
 
 /// The actuals of `$sformatf` (IEEE 1800-2023 21.3.3): a format followed by
@@ -2917,19 +3088,240 @@ pub(in crate::ast) fn remove_real_division_guards(expr: Expr, dims: &PackedDimen
     }
 }
 
-/// Preserve the native member path before flattening it to bit coordinates.
+/// Preserve the native member path before flattening it to bit coordinates:
+/// the checks of the tags the path crosses, and the type of the target, a
+/// selection of the member when the path is selected (IEEE 1800-2023
+/// 10.9, 11.5.1).
 pub(in crate::ast) fn member_context(
-    mut root: ExprId,
+    authored: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Option<(Vec<Expr>, Type)>> {
-    let authored = root;
+    let mut root = authored;
     while let ExprKind::Select { expression, .. } = native.expression(root).kind {
         root = expression;
     }
+    path_context(authored, root, native, tree, session, dims)
+}
+
+/// The variable, member, class property or container element that
+/// assignment target `root` selects, and its declared type.
+fn target_base(
+    root: ExprId,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<Option<(ExprId, Type)>> {
+    let mut base = ungroup(root, native);
+    while let ExprKind::Select { expression, .. } = &native.expression(base).kind {
+        base = ungroup(*expression, native);
+    }
+    // An element of a container, which a property may hold, before the
+    // property.
+    if let Some((element, target, ..)) = containers::selected_element(root, tree, session, dims)? {
+        return Ok(Some((element, target.element.clone())));
+    }
+    if let Some((property, _)) = objects::property(tree, session, base, native, dims)? {
+        return Ok(Some((base, property.r#type)));
+    }
+    Ok(dimensions::operand_shape(base, tree, session, dims)?
+        .as_ref()
+        .and_then(type_names::declared_type)
+        .cloned()
+        .map(|ty| (base, ty)))
+}
+
+/// The type of assignment target `root`, of any form: the type that its
+/// selection gives the member, variable, class property or container
+/// element it selects ([`selected_type`]), which is the context of the
+/// value assigned to it (IEEE 1800-2023 10.9, 11.5.1).
+pub(in crate::ast) fn target_type(
+    root: ExprId,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<Option<Type>> {
+    if let Some((_, ty)) = member_context(root, native, tree, session, dims)? {
+        return Ok(Some(ty));
+    }
+    let Some((base, whole)) = target_base(root, native, tree, session, dims)? else {
+        return Ok(None);
+    };
+    selected_type(root, base, whole, native, tree, session, dims).map(Some)
+}
+
+/// Whether a value of type `ty` holds a tagged union, at any depth.
+fn holds_tagged(ty: &Type) -> bool {
+    ty.members
+        .iter()
+        .any(|member| member.is_tagged() || holds_tagged(member.r#type()))
+}
+
+/// Whether assignment target `root`, of any form, is a whole tagged union,
+/// whose tag an integral update would change with its bits (IEEE 1800-2023
+/// 7.3.2, 11.9): its type is [`target_type`]'s.
+pub(in crate::ast) fn targets_tagged_union(
+    root: ExprId,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<bool> {
+    // Only a type that holds a tagged union has one to select.
+    if !target_base(root, native, tree, session, dims)?
+        .is_some_and(|(_, whole)| holds_tagged(&whole))
+        && member_context(root, native, tree, session, dims)?.is_none()
+    {
+        return Ok(false);
+    }
+    Ok(
+        target_type(root, native, tree, session, dims)?.is_some_and(|ty| {
+            ty.members
+                .first()
+                .is_some_and(packed_structs::PackedMember::is_tagged)
+        }),
+    )
+}
+
+/// The type of target `authored`, a selection of `root` of type `whole`,
+/// as the select typing of expressions gives it (IEEE 1800-2023 7.4.6,
+/// 11.5.1): an index of a packed dimension selects the element type, and a
+/// part-select keeps the dimensions after it, so `s.data[1:0]` of a
+/// `logic [3:0][3:0] data` is `logic [1:0][3:0]`. The element of `whole`, an
+/// enumeration or a structure, is kept with the dimensions that remain.
+pub(in crate::ast) fn selected_type(
+    authored: ExprId,
+    root: ExprId,
+    whole: Type,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<Type> {
+    use semantic_types::{PackedElement, TyData};
+    if authored == root {
+        return Ok(whole);
+    }
+    use semantic_types::ArrayKind;
+    let selected = expression_types::type_of(tree, session, authored, native, dims)?;
+    let complete = expression_types::type_of(tree, session, root, native, dims)?;
+    // The unpacked dimensions of each, outermost first, and its element.
+    let layers = |session: &Session, mut id| {
+        let mut kinds = Vec::new();
+        while let TyData::Array { kind, element } = session.types.data(id) {
+            kinds.push(kind.clone());
+            id = *element;
+        }
+        (kinds, session.types.data(id).clone())
+    };
+    let (complete_layers, complete) = layers(session, complete);
+    let (selected_layers, selected) = layers(session, selected);
+    let mut whole = whole;
+    let consumed = complete_layers
+        .len()
+        .checked_sub(selected_layers.len())
+        .filter(|consumed| *consumed <= whole.unpacked_ranges.len())
+        .ok_or_else(|| unsupported("type of a selected target"))?;
+    // A selection of unpacked dimensions has the element type of `whole`,
+    // with the dimensions that remain, the first a slice's.
+    if !selected_layers.is_empty() || !matches!(selected, TyData::Packed(_)) {
+        whole.unpacked_ranges.drain(..consumed);
+        if let (Some(ArrayKind::Fixed(range)), Some(first)) =
+            (selected_layers.first(), whole.unpacked_ranges.first_mut())
+        {
+            *first = UnpackedRange::new(
+                ConstExpr::Literal(range.left.to_string()),
+                ConstExpr::Literal(range.right.to_string()),
+            );
+        }
+        return Ok(whole);
+    }
+    let (TyData::Packed(complete), TyData::Packed(selected)) = (complete, selected) else {
+        return Err(unsupported("type of a selected target"));
+    };
+    whole.unpacked_ranges.clear();
+    let ranges = |dims: &[semantic_types::Range]| {
+        dims.iter()
+            .map(|range| {
+                PackedRange::new(
+                    ConstExpr::Literal(range.left.to_string()),
+                    ConstExpr::Literal(range.right.to_string()),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut ty = match selected.element {
+        PackedElement::Bits => {
+            let mut ty = Type::new(if selected.four_state {
+                TypeKind::Logic
+            } else {
+                TypeKind::Bit
+            });
+            ty.packed_ranges = ranges(&selected.dims);
+            ty
+        }
+        // The dimensions of `whole` precede those of its element.
+        _ => {
+            let dropped = complete
+                .dims
+                .len()
+                .checked_sub(selected.dims.len())
+                .filter(|dropped| *dropped <= whole.packed_ranges.len())
+                .ok_or_else(|| unsupported("type of a selected target"))?;
+            let mut ty = whole;
+            let kept = ty.packed_ranges.len() - dropped;
+            ty.packed_ranges = ranges(&selected.dims[..kept]);
+            ty
+        }
+    };
+    ty.is_signed = selected.signed;
+    Ok(ty)
+}
+
+/// [`member_context`] of member path `root`, selected as `authored`.
+fn path_context(
+    authored: ExprId,
+    root: ExprId,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<Option<(Vec<Expr>, Type)>> {
     if !matches!(native.expression(root).kind, ExprKind::Member { .. }) {
+        return Ok(None);
+    }
+    // A member of a class property is one of the property's value, read
+    // through `OBJECT_VALUE` (see `object_place`).
+    if let Some((base, property, _)) = property_member_base(root, native, tree, session, dims)? {
+        let steps = value_selects::steps(root, base, native).ok_or_else(disagreement)?;
+        let selection = value_selects::selection(
+            OBJECT_VALUE,
+            Expr::Ident(OBJECT_VALUE.into()),
+            &property.r#type,
+            &steps,
+            native,
+            tree,
+            session,
+            dims,
+        )?;
+        let mut r#type = property.r#type.clone();
+        for step in &steps {
+            let value_selects::Step::Member(name) = step else {
+                return Ok(None);
+            };
+            let Some(member) = r#type.members.iter().find(|member| member.name() == name) else {
+                return Ok(None);
+            };
+            r#type = member.r#type().clone();
+        }
+        let r#type = selected_type(authored, root, r#type, native, tree, session, dims)?;
+        return Ok(Some((selection.guards, r#type)));
+    }
+    if objects::property(tree, session, root, native, dims)?.is_some() {
         return Ok(None);
     }
     if let Some(element) = element_members::element_member(root, native, tree, session, dims) {
@@ -2947,7 +3339,11 @@ pub(in crate::ast) fn member_context(
     if let Some(name) = qualified {
         parts[0] = name;
     }
-    packed_structs::member_access(parts, dims, tree)
+    let Some((guards, member)) = packed_structs::member_access(parts, dims, tree)? else {
+        return Ok(None);
+    };
+    let member = selected_type(authored, root, member, native, tree, session, dims)?;
+    Ok(Some((guards, member)))
 }
 
 fn cast_shape(
@@ -3042,6 +3438,106 @@ fn scheduler_call(
 
 /// `r#type` is a vector with one `[N-1:0]` range, whose select indices are
 /// offsets from bit 0.
+/// The element of a container, or the member of one, that native select
+/// `root` selects bits of, `d[i]` of `d[i][8*j+:8]` or `q[i].m` of
+/// `q[i].m[k]`, with its type: an integral `[N-1:0]` vector of at most 64
+/// bits, which the element holds by value.
+fn selected_container_element(
+    root: ExprId,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<(ExprId, Type)>> {
+    let mut chain = Vec::new();
+    let mut base = ungroup(root, native);
+    while let ExprKind::Select { expression, .. } = &native.expression(base).kind {
+        chain.push(base);
+        base = ungroup(*expression, native);
+    }
+    if chain.is_empty() {
+        return Ok(None);
+    }
+    chain.reverse();
+    // A member of an element, selected after the member.
+    if let Some((r#type, _)) = containers::element_member(base, native, tree, session, dimensions)?
+    {
+        return Ok(zero_based_vector(&r#type, tree, dimensions).then_some((base, r#type)));
+    }
+    let ExprKind::Name(name) = &native.expression(base).kind else {
+        return Ok(None);
+    };
+    let Some(shape) = dimensions.get(&instances::normalize_identifier(&name.spelling)) else {
+        return Ok(None);
+    };
+    let Some(mut container) = shape.container.as_deref() else {
+        return Ok(None);
+    };
+    let mut levels = shape.unpacked.len() + 1;
+    while let Some(inner) = container.element.container.as_deref() {
+        container = inner;
+        levels += 1;
+    }
+    if chain.len() <= levels
+        || container.record.is_some()
+        || !zero_based_vector(&container.element, tree, dimensions)
+    {
+        return Ok(None);
+    }
+    // Each container level is selected by an element index, `[i]` or the
+    // last element `[$]`, not a slice.
+    let indexed = chain[..levels].iter().all(|&id| {
+        matches!(&native.expression(id).kind, ExprKind::Select { dimension, .. }
+            if matches!(dimension.kind, DimensionKind::Index(_) | DimensionKind::Queue(None)))
+    });
+    Ok(indexed.then(|| (chain[levels - 1], container.element.clone())))
+}
+
+/// The class property of packed structure type that native member path
+/// `root` selects a member of, `h.p` of `h.p.m` or `h.p.m[1:0]`, with the
+/// receiver as [`objects::property`] returns it.
+pub(in crate::ast) fn property_member_base(
+    root: ExprId,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<(ExprId, classes::Property, Option<ExprId>)>> {
+    let mut id = ungroup(root, native);
+    loop {
+        match &native.expression(id).kind {
+            ExprKind::Select { expression, .. } => id = ungroup(*expression, native),
+            ExprKind::Member {
+                expression,
+                separator,
+                ..
+            } if separator == "." => {
+                let inner = ungroup(*expression, native);
+                if let Some((property, receiver)) =
+                    objects::property(tree, session, inner, native, dimensions)?
+                {
+                    let packed = property.field.handle.is_none()
+                        && property.r#type.container.is_none()
+                        && !property.r#type.members.is_empty()
+                        && match property.r#type.packed_ranges() {
+                            [range] => {
+                                eval_ast_const_expr(
+                                    &tree.functions,
+                                    range.right(),
+                                    &dimensions.const_env,
+                                ) == Some(0)
+                            }
+                            _ => false,
+                        };
+                    return Ok(packed.then_some((inner, property, receiver)));
+                }
+                id = inner;
+            }
+            _ => return Ok(None),
+        }
+    }
+}
+
 fn zero_based_vector(
     r#type: &Type,
     tree: &AnalysisContext<'_>,

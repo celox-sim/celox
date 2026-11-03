@@ -394,6 +394,26 @@ pub(in crate::ast) fn member_type(
 /// The property that native expression `id` names, `h.p` or an unqualified
 /// `p` inside a method of its class, with the receiver: the expression of
 /// the handle, or `None` for the enclosing method's `this`.
+/// Reject a write of `property` unless it is writable here: a constant
+/// property is written only by the initializer of its declaration or,
+/// without one, in the constructor of its class (IEEE 1800-2023 8.19).
+pub(in crate::ast) fn check_writable(
+    property: &classes::Property,
+    dimensions: &PackedDimensions,
+) -> Converted<()> {
+    if property.constant
+        && !(property.initializer.is_none()
+            && dimensions.constructor
+            && dimensions.class_scope.as_deref() == Some(property.owner.as_str()))
+    {
+        return Err(AnalyzerError::ConstPropertyAssignment {
+            owner: property.owner.clone(),
+            name: property.name.clone(),
+        });
+    }
+    Ok(())
+}
+
 pub(in crate::ast) fn property(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
@@ -598,12 +618,6 @@ pub(in crate::ast) fn receiver(
         Some(receiver) => bind_value(receiver, native, tree, session, dimensions, None),
         None => Ok(this()),
     }
-}
-
-/// The local a select of property `property` is written in: the property
-/// is read into it, the select assigned, and the local stored back.
-pub(in crate::ast) fn select_template(property: &classes::Property) -> String {
-    format!("$property_select${}${}", property.owner, property.name)
 }
 
 /// A read of property `property` of the object `handle`.
@@ -868,7 +882,7 @@ pub(in crate::ast) fn check_assignment(
 }
 
 /// Whether class `class_name` derives from or implements `ancestor`.
-fn derives_from(
+pub(in crate::ast) fn derives_from(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     dimensions: &PackedDimensions,

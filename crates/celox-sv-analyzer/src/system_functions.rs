@@ -603,6 +603,12 @@ pub enum SystemTask {
     Severity(Severity),
     /// `$display` and its `b`, `o` and `h` variants (21.2.1).
     Display(Radix),
+    /// Display final values at the end of the current time slot (21.2.2).
+    Strobe(Radix),
+    /// Continuous output at the end of a slot with argument changes (21.2.3).
+    Monitor(Radix),
+    MonitorOn,
+    MonitorOff,
     /// `$write` and its `b`, `o` and `h` variants (21.2.1).
     Write(Radix),
     /// `$readmemb` and `$readmemh` (21.4).
@@ -614,6 +620,8 @@ pub enum SystemTask {
     /// Flush selected output files or all open files (21.3.6).
     Fflush,
     Fdisplay(Radix),
+    Fstrobe(Radix),
+    Fmonitor(Radix),
     Fwrite(Radix),
     /// Memory snapshot output (21.5).
     Writemem(MemoryFormat),
@@ -693,7 +701,13 @@ impl SystemTask {
     pub fn is_host_request(self) -> bool {
         matches!(
             self,
-            Self::Fclose
+            Self::Monitor(_)
+                | Self::Fmonitor(_)
+                | Self::MonitorOn
+                | Self::MonitorOff
+                | Self::Strobe(_)
+                | Self::Fstrobe(_)
+                | Self::Fclose
                 | Self::Fflush
                 | Self::Fdisplay(_)
                 | Self::Fwrite(_)
@@ -715,9 +729,19 @@ impl SystemTask {
             Self::Severity(Severity::Warning) => "$warning",
             Self::Severity(Severity::Info) => "$info",
             Self::Display(Decimal) => "$display",
+            Self::Strobe(Decimal) => "$strobe",
+            Self::MonitorOn => "$monitoron",
+            Self::MonitorOff => "$monitoroff",
+            Self::Monitor(Decimal) => "$monitor",
             Self::Display(Binary) => "$displayb",
+            Self::Strobe(Binary) => "$strobeb",
+            Self::Monitor(Binary) => "$monitorb",
             Self::Display(Octal) => "$displayo",
+            Self::Strobe(Octal) => "$strobeo",
+            Self::Monitor(Octal) => "$monitoro",
             Self::Display(Hexadecimal) => "$displayh",
+            Self::Strobe(Hexadecimal) => "$strobeh",
+            Self::Monitor(Hexadecimal) => "$monitorh",
             Self::Write(Decimal) => "$write",
             Self::Write(Binary) => "$writeb",
             Self::Write(Octal) => "$writeo",
@@ -725,9 +749,17 @@ impl SystemTask {
             Self::Fclose => "$fclose",
             Self::Fflush => "$fflush",
             Self::Fdisplay(Decimal) => "$fdisplay",
+            Self::Fstrobe(Decimal) => "$fstrobe",
+            Self::Fmonitor(Decimal) => "$fmonitor",
             Self::Fdisplay(Binary) => "$fdisplayb",
+            Self::Fstrobe(Binary) => "$fstrobeb",
+            Self::Fmonitor(Binary) => "$fmonitorb",
             Self::Fdisplay(Octal) => "$fdisplayo",
+            Self::Fstrobe(Octal) => "$fstrobeo",
+            Self::Fmonitor(Octal) => "$fmonitoro",
             Self::Fdisplay(Hexadecimal) => "$fdisplayh",
+            Self::Fstrobe(Hexadecimal) => "$fstrobeh",
+            Self::Fmonitor(Hexadecimal) => "$fmonitorh",
             Self::Fwrite(Decimal) => "$fwrite",
             Self::Fwrite(Binary) => "$fwriteb",
             Self::Fwrite(Octal) => "$fwriteo",
@@ -1999,16 +2031,56 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
         0,
         None,
     ),
-    unsupported("$strobe", Task),
-    unsupported("$strobeb", Task),
-    unsupported("$strobeo", Task),
-    unsupported("$strobeh", Task),
-    unsupported("$monitor", Task),
-    unsupported("$monitorb", Task),
-    unsupported("$monitoro", Task),
-    unsupported("$monitorh", Task),
-    unsupported("$monitoron", Task),
-    unsupported("$monitoroff", Task),
+    task(
+        SystemTask::Strobe(Radix::Decimal),
+        ProceduralAndInitial,
+        0,
+        None,
+    ),
+    task(
+        SystemTask::Strobe(Radix::Binary),
+        ProceduralAndInitial,
+        0,
+        None,
+    ),
+    task(
+        SystemTask::Strobe(Radix::Octal),
+        ProceduralAndInitial,
+        0,
+        None,
+    ),
+    task(
+        SystemTask::Strobe(Radix::Hexadecimal),
+        ProceduralAndInitial,
+        0,
+        None,
+    ),
+    task(
+        SystemTask::Monitor(Radix::Decimal),
+        ProceduralAndInitial,
+        0,
+        None,
+    ),
+    task(
+        SystemTask::Monitor(Radix::Binary),
+        ProceduralAndInitial,
+        0,
+        None,
+    ),
+    task(
+        SystemTask::Monitor(Radix::Octal),
+        ProceduralAndInitial,
+        0,
+        None,
+    ),
+    task(
+        SystemTask::Monitor(Radix::Hexadecimal),
+        ProceduralAndInitial,
+        0,
+        None,
+    ),
+    task(SystemTask::MonitorOn, ProceduralAndInitial, 0, Some(0)),
+    task(SystemTask::MonitorOff, ProceduralAndInitial, 0, Some(0)),
     // 21.3 File input/output system tasks and system functions
     function(SystemFunction::Fopen, 1, Some(2)),
     task(SystemTask::Fclose, ProceduralAndInitial, 1, Some(1)),
@@ -2060,14 +2132,54 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
         1,
         None,
     ),
-    unsupported("$fstrobe", Task),
-    unsupported("$fstrobeb", Task),
-    unsupported("$fstrobeo", Task),
-    unsupported("$fstrobeh", Task),
-    unsupported("$fmonitor", Task),
-    unsupported("$fmonitorb", Task),
-    unsupported("$fmonitoro", Task),
-    unsupported("$fmonitorh", Task),
+    task(
+        SystemTask::Fstrobe(Radix::Decimal),
+        ProceduralAndInitial,
+        1,
+        None,
+    ),
+    task(
+        SystemTask::Fstrobe(Radix::Binary),
+        ProceduralAndInitial,
+        1,
+        None,
+    ),
+    task(
+        SystemTask::Fstrobe(Radix::Octal),
+        ProceduralAndInitial,
+        1,
+        None,
+    ),
+    task(
+        SystemTask::Fstrobe(Radix::Hexadecimal),
+        ProceduralAndInitial,
+        1,
+        None,
+    ),
+    task(
+        SystemTask::Fmonitor(Radix::Decimal),
+        ProceduralAndInitial,
+        1,
+        None,
+    ),
+    task(
+        SystemTask::Fmonitor(Radix::Binary),
+        ProceduralAndInitial,
+        1,
+        None,
+    ),
+    task(
+        SystemTask::Fmonitor(Radix::Octal),
+        ProceduralAndInitial,
+        1,
+        None,
+    ),
+    task(
+        SystemTask::Fmonitor(Radix::Hexadecimal),
+        ProceduralAndInitial,
+        1,
+        None,
+    ),
     // The binders convert `$swrite`, `$sformat` and `$sformatf` into string
     // operations (`StringOp::Format`) before consulting the catalog, which
     // rejects them anywhere else, such as in a constant expression.

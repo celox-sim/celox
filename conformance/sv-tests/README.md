@@ -762,3 +762,12 @@ reset, EOF, packed/string outputs, selected destination side effects and replay.
 The shared success-description case enforces 21.3.7's explicit empty-output rule;
 Icarus passes, while the observed Verilator/xezim wording disagreements have
 focused retained evidence and exclusions. This is not a full-corpus measurement.
+
+Strobed output updates four reviewed expectations: `21.2--strobe.sv` and
+`21.3--fstrobe.sv` pass in both state modes in a focused official invocation.
+Those cases have no driven clock, so their strobe statements do not execute;
+the shared regressions separately verify output after NBA/Reactive activity,
+stdout file output and radix variants. Celox API cases check zero-delay work,
+sampled values, repeated calls, descriptor capture, close cancellation and
+checkpoint/native-image replay. Verilator's configured program-output mismatch
+is recorded with narrow retained evidence. This is not a full-corpus measurement.

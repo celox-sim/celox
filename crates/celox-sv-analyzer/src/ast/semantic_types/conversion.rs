@@ -174,8 +174,18 @@ impl Parts<'_> {
             });
         }
         if let Some(aggregate) = self.unpacked_struct {
+            let members = aggregate
+                .members()
+                .iter()
+                .map(|member| {
+                    Some((
+                        Arc::<str>::from(member.name.as_str()),
+                        of_type(table, functions, &member.r#type, env)?,
+                    ))
+                })
+                .collect::<Option<Arc<[_]>>>()?;
             return Some(TyData::UnpackedStruct(
-                self.aggregate_decl(aggregate.identity()),
+                self.aggregate_decl(aggregate.identity(), members),
             ));
         }
         let four_state = match self.kind {
@@ -205,7 +215,18 @@ impl Parts<'_> {
             // declaration nor its members, so only its bits tell it apart.
             PackedElement::Bits
         } else if let Some(member) = self.members.first() {
-            PackedElement::Aggregate(self.aggregate_decl(member.owner()))
+            let owner = member.owner().clone();
+            let members = self
+                .members
+                .iter()
+                .map(|member| {
+                    Some((
+                        Arc::<str>::from(member.name()),
+                        of_type(table, functions, member.r#type(), env)?,
+                    ))
+                })
+                .collect::<Option<Arc<[_]>>>()?;
+            PackedElement::Aggregate(self.aggregate_decl(&owner, members))
         } else {
             PackedElement::Bits
         };
@@ -229,9 +250,14 @@ impl Parts<'_> {
 
     /// The declaration of a structure or union type declared at `owner`:
     /// its typedef, which is a type of its own in each generate scope that
-    /// declares it (27.4), or the position of an anonymous declaration.
-    fn aggregate_decl(&self, owner: &str) -> Decl {
-        Decl::Named(self.declaration.unwrap_or(owner).into())
+    /// declares it (27.4), or the position of an anonymous declaration,
+    /// with the types of its `members`, which tell the specializations of a
+    /// parameterized scope apart.
+    fn aggregate_decl(&self, owner: &str, members: Arc<[(Arc<str>, TyId)]>) -> Decl {
+        Decl::Aggregate {
+            name: self.declaration.unwrap_or(owner).into(),
+            members,
+        }
     }
 }
 

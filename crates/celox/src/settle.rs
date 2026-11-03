@@ -188,6 +188,9 @@ struct Marker<'a> {
     settle: &'a SettleLayout,
     layout: &'a crate::backend::MemoryLayout,
     flags: RegionedAbsoluteAddr,
+    /// Reuse each state-change predicate for the timed scheduler's settle
+    /// guard, instead of comparing the instrumented writer a second time.
+    scheduler_dirty: Option<RegionedAbsoluteAddr>,
 }
 
 impl<'a> Marker<'a> {
@@ -201,6 +204,9 @@ impl<'a> Marker<'a> {
             settle,
             layout,
             flags: RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, schema.flags),
+            scheduler_dirty: runtime.runtime_schema.scheduler.as_ref().map(|scheduler| {
+                RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, scheduler.slots.dirty)
+            }),
         })
     }
 
@@ -307,6 +313,16 @@ impl<'a> Marker<'a> {
                     || self.spans_padded_elements(&address, &offset, width)
                 {
                     instructions.push(instruction);
+                    if let Some(dirty) = self.scheduler_dirty {
+                        instructions.push(SIRInstruction::Store(
+                            dirty,
+                            SIROffset::Static(0),
+                            8,
+                            one,
+                            Vec::new(),
+                            Vec::new(),
+                        ));
+                    }
                     for partition in readers {
                         instructions.push(SIRInstruction::Store(
                             self.flags,
@@ -339,12 +355,44 @@ impl<'a> Marker<'a> {
                     celox_sir::BinaryOp::NeCase,
                     new,
                 ));
+                if let Some(dirty) = self.scheduler_dirty {
+                    let previous = alloc(unit, byte.clone());
+                    let pending = alloc(unit, byte.clone());
+                    instructions.push(SIRInstruction::Load(
+                        previous,
+                        dirty,
+                        SIROffset::Static(0),
+                        8,
+                    ));
+                    instructions.push(SIRInstruction::Binary(
+                        pending,
+                        previous,
+                        celox_sir::BinaryOp::Or,
+                        changed,
+                    ));
+                    instructions.push(SIRInstruction::Store(
+                        dirty,
+                        SIROffset::Static(0),
+                        8,
+                        pending,
+                        Vec::new(),
+                        Vec::new(),
+                    ));
+                }
                 for partition in readers {
                     let flag = alloc(unit, byte.clone());
                     let marked = alloc(unit, byte.clone());
                     let offset = SIROffset::Static(partition as usize * 8);
                     instructions.push(SIRInstruction::Load(flag, self.flags, offset.clone(), 8));
-                    instructions.push(SIRInstruction::Mux(marked, changed, one, flag));
+                    // Flags are boolean bytes. OR preserves a notification
+                    // already pending without selecting 1 separately for
+                    // every reader of this same state-change predicate.
+                    instructions.push(SIRInstruction::Binary(
+                        marked,
+                        flag,
+                        celox_sir::BinaryOp::Or,
+                        changed,
+                    ));
                     instructions.push(SIRInstruction::Store(
                         self.flags,
                         offset,

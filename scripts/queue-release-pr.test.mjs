@@ -2,9 +2,20 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   queueReleasePullRequest,
+  positiveSeconds,
   RELEASE_HEAD,
   selectReleasePullRequest,
 } from "./queue-release-pr.mjs";
+
+test("queue timing defaults and environment overrides use seconds", () => {
+  assert.equal(positiveSeconds("TIMEOUT", 60 * 60, {}), 3_600_000);
+  assert.equal(positiveSeconds("POLL", 15, {}), 15_000);
+  assert.equal(positiveSeconds("TIMEOUT", 60 * 60, { TIMEOUT: "120" }), 120_000);
+  assert.equal(positiveSeconds("POLL", 15, { POLL: "0.5" }), 500);
+  for (const raw of ["", "0", "-1", "NaN", "Infinity", "invalid"]) {
+    assert.throws(() => positiveSeconds("TIMEOUT", 60 * 60, { TIMEOUT: raw }), /positive number/);
+  }
+});
 
 function pr(overrides = {}) {
   return {

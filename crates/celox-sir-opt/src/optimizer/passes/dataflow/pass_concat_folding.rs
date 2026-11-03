@@ -2,7 +2,7 @@
 //! wider operations, reducing ISel's shl+or expansion.
 
 use super::pass_manager::ExecutionUnitPass;
-use super::shared::{collect_all_used_registers, is_unused_definition};
+use super::shared::{StateWritePositions, collect_all_used_registers, is_unused_definition};
 use crate::HashMap;
 use crate::PassOptions;
 use crate::ir::*;
@@ -20,6 +20,7 @@ struct BitSource {
     base: BitSourceBase,
     bit_offset: usize,
     width: usize,
+    load_site: Option<(BlockId, usize)>,
 }
 
 pub(in crate::optimizer) struct ConcatFoldingPass {
@@ -53,6 +54,10 @@ impl ExecutionUnitPass for ConcatFoldingPass {
         "concat_folding"
     }
 
+    fn handles_calls(&self) -> bool {
+        true
+    }
+
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
         let mut max_reg = eu.register_map.keys().map(|r| r.0).max().unwrap_or(0);
         let mut changed = fold_slices_of_concat(eu);
@@ -62,7 +67,7 @@ impl ExecutionUnitPass for ConcatFoldingPass {
         // direct slices and slices of loads with the same code path.
         let mut extract_defs: HashMap<RegisterId, BitSource> = HashMap::default();
         for block in eu.blocks.values() {
-            for inst in &block.instructions {
+            for (index, inst) in block.instructions.iter().enumerate() {
                 match inst {
                     SIRInstruction::Load(dst, addr, SIROffset::Static(off), width) => {
                         extract_defs.insert(
@@ -71,6 +76,7 @@ impl ExecutionUnitPass for ConcatFoldingPass {
                                 base: BitSourceBase::Load(*addr),
                                 bit_offset: *off,
                                 width: *width,
+                                load_site: Some((block.id, index)),
                             },
                         );
                     }
@@ -82,6 +88,7 @@ impl ExecutionUnitPass for ConcatFoldingPass {
                                     base: src_info.base,
                                     bit_offset: src_info.bit_offset + *off,
                                     width: *width,
+                                    load_site: src_info.load_site,
                                 },
                             );
                         } else {
@@ -91,6 +98,7 @@ impl ExecutionUnitPass for ConcatFoldingPass {
                                     base: BitSourceBase::Register(*src),
                                     bit_offset: *off,
                                     width: *width,
+                                    load_site: None,
                                 },
                             );
                         }
@@ -102,10 +110,22 @@ impl ExecutionUnitPass for ConcatFoldingPass {
 
         // Process each block
         for block in eu.blocks.values_mut() {
+            let writes = StateWritePositions::new(&block.instructions);
+            let block_id = block.id;
             let mut new_insts_to_insert: Vec<(usize, SIRInstruction<RegionedAbsoluteAddr>)> =
                 Vec::new();
 
             for (inst_idx, inst) in block.instructions.iter_mut().enumerate() {
+                // A register slice keeps its SSA snapshot. A replacement Load
+                // must still observe the state from every original Load.
+                let available = |info: &&BitSource| match (info.base, info.load_site) {
+                    (BitSourceBase::Load(address), Some((load_block, load_index))) => {
+                        load_block == block_id
+                            && !writes.written_between(address, load_index, inst_idx)
+                    }
+                    (BitSourceBase::Register(_), None) => true,
+                    _ => false,
+                };
                 let SIRInstruction::Concat(_dst, args) = inst else {
                     continue;
                 };
@@ -122,7 +142,7 @@ impl ExecutionUnitPass for ConcatFoldingPass {
                     i -= 1;
                     let arg = args[i];
 
-                    if let Some(&info) = extract_defs.get(&arg) {
+                    if let Some(&info) = extract_defs.get(&arg).filter(available) {
                         let run_base = info.base;
                         let run_start = info.bit_offset;
                         let mut run_width = info.width;
@@ -130,7 +150,7 @@ impl ExecutionUnitPass for ConcatFoldingPass {
 
                         while i > 0 {
                             let prev = args[i - 1];
-                            if let Some(&prev_info) = extract_defs.get(&prev) {
+                            if let Some(&prev_info) = extract_defs.get(&prev).filter(available) {
                                 if prev_info.base == run_base
                                     && prev_info.bit_offset == run_start + run_width
                                 {

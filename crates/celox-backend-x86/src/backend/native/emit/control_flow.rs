@@ -419,8 +419,8 @@ fn block_is_empty_fallthrough(
 /// is disjoint because its first and subsequent blocks each have exactly one
 /// predecessor. The layout walk itself is `O(B + E)` after the shared forward
 /// CFG analysis; that analysis additionally owns its dominance-frontier and
-/// natural-loop membership costs. No instruction-sized or pairwise value
-/// structure is built here.
+/// natural-loop membership costs. A final selective-settle layout pass uses
+/// one fact per virtual register to cluster the clean guard continuations.
 pub(super) fn emission_block_order(func: &MFunction) -> Vec<usize> {
     let identity = (0..func.blocks.len()).collect::<Vec<_>>();
     if func.blocks.len() < 2 {
@@ -522,7 +522,7 @@ pub(super) fn emission_block_order(func: &MFunction) -> Vec<usize> {
         }
     }
     debug_assert_eq!(order.len(), func.blocks.len());
-    order
+    super::settle_layout::cluster_clean_guards(func, order)
 }
 
 pub(super) fn branch_label(labels: &BlockLabels, block: BlockId) -> Result<CodeLabel, EmitError> {

@@ -382,6 +382,307 @@ fn parenless_method_results_of_structure_and_interface_types() {
     assert_eq!(sim.get(read), BigUint::from(7u8));
 }
 
+/// A select or a member of a property is the target of a for-loop's
+/// initialization and step, and a tagged expression assigned to a tagged union property takes
+/// the property's type (IEEE 1800-2023 12.7.1, 11.9). Verilator 5.052
+/// rejects a select as a for-loop target, and Icarus and xezim tagged
+/// unions, so this is not a shared case.
+#[test]
+fn property_targets_of_loop_headers_and_tagged_values() {
+    let source = r#"
+    module Top(output int steps, output bit [8:0] full);
+        typedef union tagged packed { void Empty; bit [7:0] Full; } item_t;
+        typedef struct packed { bit [3:0] x; bit [3:0] y; } pair_t;
+        class Info; bit [7:0] bits; item_t item; pair_t pair; endclass
+        Info info;
+        initial begin
+            info = new;
+            steps = 0;
+            for (info.bits[3:0] = 4'h1; info.bits[3:0] < 4'h4; info.bits[3:0] += 1) steps++;
+            for (info.pair.x = 4'h1; info.pair.x < 4'h3; info.pair.x++) steps++;
+            info.item = tagged Full 8'h5a;
+            full = 9'(info.item);
+        end
+    endmodule"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    let steps = sim.signal("steps");
+    let full = sim.signal("full");
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(steps), BigUint::from(5u8));
+    assert_eq!(sim.get(full), BigUint::from(0x15au16));
+}
+
+/// An assignment operator evaluates the address of its target once
+/// (IEEE 1800-2023 11.4.1), before it reads the target, so it writes the
+/// object it read even when its value changes what the target names. The
+/// standard does not say when the address is evaluated, and Verilator
+/// 5.052 evaluates it after the value, so this is not a shared case.
+#[test]
+fn assignment_operators_write_the_place_they_read() {
+    let source = r#"
+    module Top(output bit [7:0] bits, output bit [7:0] element, output bit [7:0] other_bits,
+               output bit [7:0] other_element);
+        class Info; bit [7:0] bits; bit [7:0] q[$]; endclass
+        Info info, other, saved;
+        function automatic bit [3:0] rebind(); info = other; return 4'h1; endfunction
+        initial begin
+            info = new;
+            other = new;
+            saved = info;
+            info.bits = 8'h10;
+            info.q.push_back(8'h10);
+            other.q.push_back(8'h20);
+            info.bits[3:0] += rebind();
+            info = saved;
+            info.q[0][3:0] += rebind();
+            bits = saved.bits;
+            element = saved.q[0];
+            other_bits = other.bits;
+            other_element = other.q[0];
+        end
+    endmodule"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    let signals = ["bits", "element", "other_bits", "other_element"].map(|name| sim.signal(name));
+    sim.run_until(0).unwrap();
+    let values = signals.map(|signal| sim.get(signal));
+    assert_eq!(values, [0x11u8, 0x11, 0x00, 0x20].map(BigUint::from));
+}
+
+/// A const class property is written only by its initializer or, without
+/// one, in its class's constructor (IEEE 1800-2023 8.19), whatever form
+/// the write takes.
+#[test]
+fn const_property_writes_are_rejected() {
+    let writes = [
+        "c.k = 8'h1;",
+        "c.k[3:0] = 4'h1;",
+        "c.k += 8'h1;",
+        "c.k++;",
+        "{c.k, c.v} = 16'h1;",
+        "c.s = \"x\";",
+        "c.s.putc(0, \"y\");",
+        "c.h = null;",
+        "c.fixed = 8'h1;",
+        "c.p.x = 4'hf;",
+        "void'($sscanf(\"5\", \"%d\", c.k));",
+    ];
+    for write in writes {
+        let source = format!(
+            "module Top;
+                typedef struct packed {{ bit [3:0] x; bit [3:0] y; }} pair_t;
+                class C;
+                    const pair_t p;
+                    const bit [7:0] k;
+                    const bit [7:0] fixed = 8'h3;
+                    bit [7:0] v;
+                    const string s;
+                    const C h;
+                    function new();
+                        k = 8'h2;
+                        s = \"a\";
+                        h = null;
+                    endfunction
+                endclass
+                initial begin
+                    automatic C c = new;
+                    {write}
+                end
+            endmodule"
+        );
+        let error =
+            celox::Simulation::from_sv_sources(vec![(&*source, Path::new("class.sv"))], "Top")
+                .build()
+                .err()
+                .unwrap_or_else(|| panic!("`{write}` was accepted"))
+                .to_string();
+        assert!(error.contains("const class property"), "`{write}`: {error}");
+    }
+}
+
+/// A member of a tagged union nested in a packed structure property is
+/// read and written with the check of its active member (IEEE 1800-2023
+/// 7.3.2), as one of a variable is: an inactive member stops the run.
+#[test]
+fn inactive_tagged_members_of_properties_stop_the_run() {
+    for access in [
+        "r = info.record.item.Full;",
+        "info.record.item.Full = 8'h42;",
+        // The check of the value is the value's, whatever it is assigned to.
+        "info.record.n = info.record.item.Full[3:0];",
+        "info.record.n = value.item.Full[3:0];",
+    ] {
+        let source = format!(
+            "module Top(output bit [7:0] r);
+                typedef union tagged packed {{ void Empty; bit [7:0] Full; }} item_t;
+                typedef struct packed {{ item_t item; bit [3:0] n; }} record_t;
+                class Info; record_t record; endclass
+                Info info;
+                record_t value;
+                initial begin info = new; value.item = tagged Empty; info.record = value; {access} end
+            endmodule"
+        );
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build()
+        .unwrap();
+        let error = sim.run_until(0).expect_err(access).to_string();
+        assert!(error.contains("active tag"), "{access}: {error}");
+    }
+}
+
+/// The check of a tagged member that an assignment writes reads the tag
+/// when the member is written, after the value is evaluated (IEEE 1800-2023
+/// 7.3.2, 10.4.1). Icarus and xezim reject tagged unions, so this is not a
+/// shared case.
+#[test]
+fn tagged_member_targets_are_checked_when_written() {
+    let source = r#"
+    module Top(output bit [8:0] full);
+        typedef union tagged packed { void Empty; bit [7:0] Full; } item_t;
+        typedef struct packed { item_t item; } record_t;
+        class Info; record_t record; endclass
+        Info info;
+        function automatic bit [7:0] fill();
+            info.record.item = tagged Full 8'h00;
+            return 8'h5a;
+        endfunction
+        initial begin
+            info = new;
+            info.record.item = tagged Empty;
+            info.record.item.Full = fill();
+            full = 9'(info.record.item);
+        end
+    endmodule"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    let full = sim.signal("full");
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(full), BigUint::from(0x15au16));
+}
+
+/// An integral update of a whole tagged union would change its tag with
+/// its bits (IEEE 1800-2023 7.3.2), so it is rejected whatever form the
+/// target takes: a variable, a member of a variable, a class property, a
+/// member of a property, or an element of an array of unions.
+#[test]
+fn integral_updates_of_tagged_union_targets_are_rejected() {
+    for update in [
+        "item += 1;",
+        "record.item += 1;",
+        "items[1] += 1;",
+        "info.item += 1;",
+        "info.record.item += 1;",
+        "info.record.item++;",
+        "unpacked[0] += 1;",
+        "info.items[0]++;",
+    ] {
+        let source = format!(
+            "module Top;
+                typedef union tagged packed {{ void Empty; bit [7:0] Full; }} item_t;
+                typedef struct packed {{ item_t item; bit [3:0] n; }} record_t;
+                class Info; item_t item; record_t record; item_t items[$]; endclass
+                item_t item;
+                item_t [1:0] items;
+                item_t unpacked[2];
+                record_t record;
+                initial begin
+                    automatic Info info = new;
+                    {update}
+                end
+            endmodule"
+        );
+        let error =
+            celox::Simulation::from_sv_sources(vec![(&*source, Path::new("class.sv"))], "Top")
+                .build()
+                .err()
+                .unwrap_or_else(|| panic!("`{update}` was accepted"))
+                .to_string();
+        assert!(error.contains("tagged union"), "`{update}`: {error}");
+    }
+}
+
+/// A select of the bits of an element of an unpacked array of structures
+/// that hold a tagged union is an ordinary vector, which an integral update
+/// may write: the target's type is the type the selection of the whole
+/// array gives (IEEE 1800-2023 7.4.6, 11.5.1).
+#[test]
+fn bit_selects_of_elements_holding_tagged_unions_are_vectors() {
+    let source = r#"
+    module Top(output bit [12:0] whole);
+        typedef union tagged packed { void Empty; bit [7:0] Full; } item_t;
+        typedef struct packed { item_t item; bit [3:0] n; } record_t;
+        record_t records[2];
+        initial begin
+            records[0].item = tagged Full 8'h41;
+            records[0].n = 4'h2;
+            records[0][3:0] += 1;
+            whole = records[0];
+        end
+    endmodule"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    let whole = sim.signal("whole");
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(whole), BigUint::from(0x1413u16));
+}
+
+/// An assignment operator reads its target, with the target's checks,
+/// before it evaluates its value (IEEE 1800-2023 11.4.1): a value that
+/// makes an inactive member active does not hide the invalid read.
+#[test]
+fn assignment_operators_check_their_target_before_the_value() {
+    let source = r#"
+    module Top;
+        typedef union tagged packed { void Empty; bit [7:0] Full; } item_t;
+        typedef struct packed { item_t item; bit [3:0] n; } record_t;
+        class Info; record_t record; endclass
+        Info info;
+        function automatic bit [7:0] activate();
+            info.record.item = tagged Full 8'h00;
+            return 8'h01;
+        endfunction
+        initial begin
+            info = new;
+            info.record.item = tagged Empty;
+            info.record.item.Full += activate();
+        end
+    endmodule"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    let error = sim.run_until(0).unwrap_err().to_string();
+    assert!(error.contains("active tag"), "{error}");
+}
+
+/// A two-state member of a four-state packed structure property takes no
+/// unknown bits (IEEE 1800-2023 7.2.1), assigned as a member.
+#[test]
+fn two_state_members_of_packed_structure_properties_drop_unknown_bits() {
+    let source = r#"
+    module Top(output logic [1:0] whole);
+        typedef struct packed { bit b; logic l; } mixed_t;
+        class Info; mixed_t p; endclass
+        Info info;
+        initial begin info = new; info.p.b = 1'bx; info.p.l = 1'b1; whole = info.p; end
+    endmodule"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .four_state(true)
+        .build()
+        .unwrap();
+    let whole = sim.signal("whole");
+    sim.run_until(0).unwrap();
+    let (value, mask) = sim.get_four_state(whole);
+    assert_eq!((value, mask), (BigUint::from(1u8), BigUint::from(0u8)));
+}
+
 /// A write of a class property does not wake a process waiting on it, so a
 /// wait whose condition reads one is rejected instead of never waking. The
 /// condition reads it in a method through `this`, through a handle, through
@@ -1609,6 +1910,14 @@ sv_backends! {
     fn class_parameter_literals_hide_module_constants(sim) { @case "class::parameter_literals_hide_module_constants"; }
     fn class_static_initializers_run_once_before_time_zero(sim) { @case "class::static_initializers_run_once_before_time_zero"; }
     fn class_method_defaults_use_the_object(sim) { @case "class::method_defaults_use_the_object"; }
+    fn class_nested_value_selects(sim) { @case "class::nested_value_selects"; }
+    fn class_property_assignment_sites(sim) { @case "class::property_assignment_sites"; }
+    fn class_property_place_addresses(sim) { @case "class::property_place_addresses"; }
+    fn class_property_member_place_addresses(sim) { @case "class::property_member_place_addresses"; }
+    fn class_formatting_task_place_outputs(sim) { @case "class::formatting_task_place_outputs"; }
+    fn class_property_member_assignment_sites(sim) { @case "class::property_member_assignment_sites"; }
+    fn class_packed_structure_property_members(sim) { @case "class::packed_structure_property_members"; }
+    fn class_tagged_members_of_structure_properties(sim) { @case "class::tagged_members_of_structure_properties"; }
     fn class_methods_called_without_parentheses(sim) { @case "class::methods_called_without_parentheses"; }
     fn class_constrained_enumerations_and_randc(sim) { @case "class::constrained_enumerations_and_randc"; }
     fn class_prototype_formals_inherit_types(sim) { @case "class::prototype_formals_inherit_types"; }

@@ -106,6 +106,7 @@ fn compile_raw(mut function: MFunction) -> JitCode {
         &allocated.allocated.edge_copies,
         false,
         false,
+        FunctionFrame::default(),
     )
     .unwrap();
     assert!(emitted.required_state_size <= 4096);

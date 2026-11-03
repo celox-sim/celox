@@ -114,6 +114,10 @@ impl ExecutionUnitPass for SparseCaseDispatchPass {
         "sparse_case_dispatch"
     }
 
+    fn handles_calls(&self) -> bool {
+        true
+    }
+
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions) {
         // EqWildcard is an exact equality only for two-state values.  In
         // four-state mode its RHS wildcard mask and Mux X/Z-condition behavior
@@ -1218,6 +1222,17 @@ fn has_intervening_memory_conflict(
         is_memory_barrier(inst)
             || memory_write(inst)
                 .is_some_and(|write| memory_may_alias(read, write, stable_alias_class))
+            // A call may write any part of the objects its effects list.
+            || inst.opaque_written_objects().is_none_or(|mut objects| {
+                objects.any(|addr| {
+                    let write = MemAccess {
+                        addr,
+                        offset: None,
+                        width: 0,
+                    };
+                    memory_may_alias(read, write, stable_alias_class)
+                })
+            })
     })
 }
 
@@ -1721,7 +1736,8 @@ fn runtime_instruction_cost(
         | SIRInstruction::RuntimeEvent { .. }
         | SIRInstruction::CombCaptureEvent { .. }
         | SIRInstruction::CombCaptureEnableIfChanged { .. }
-        | SIRInstruction::ExternCall { .. } => 0,
+        | SIRInstruction::ExternCall { .. }
+        | SIRInstruction::Call { .. } => 0,
     }
 }
 

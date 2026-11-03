@@ -3528,10 +3528,6 @@ struct WatchedChunk<Addr> {
     offset: SIROffset,
     width: usize,
     readers: Vec<usize>,
-    /// The readers at or before the partition in the schedule: the only ones
-    /// marked when the settle runs every partition, since the others run
-    /// after it in the same settle.
-    earlier: Vec<usize>,
 }
 
 /// The widest chunk of a written object compared at once.
@@ -3679,9 +3675,27 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
             copy_source.insert(target, source);
         }
     }
+    // WorkLowering executes an acyclic process only at its first
+    // projection: that execution writes every output. Later projections
+    // emit no code and must not acquire duplicate reads, writes or watches.
+    // Cyclic components and guarded regions retain their existing plan.
+    let mut run_processes = HashSet::default();
+    let mut skipped_work = HashSet::default();
+    for (index, work) in prepared.scheduled_work.iter().enumerate() {
+        if let ScheduledWork::CombPath(path) = work
+            && !prepared.adj[*path].contains(path)
+            && let LogicPathTarget::Process { process, .. } = &input[*path].target
+            && !run_processes.insert(*process)
+        {
+            skipped_work.insert(index);
+        }
+    }
     let mut first_work = Vec::new();
     let mut cost = 0;
     for (index, work) in prepared.scheduled_work.iter().enumerate() {
+        if skipped_work.contains(&index) {
+            continue;
+        }
         if first_work.is_empty() || cost >= partitioning.target_cost {
             first_work.push(index);
             cost = 0;
@@ -3708,6 +3722,9 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
     let mut previous = vec![BTreeSet::new(); count];
     let mut pinned = vec![false; count];
     for (index, work) in prepared.scheduled_work.iter().enumerate() {
+        if skipped_work.contains(&index) {
+            continue;
+        }
         let partition = partition_of_work[index];
         for &path_index in work_paths(work) {
             let path = &input[path_index];
@@ -3828,11 +3845,6 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
                         ),
                         width: chunk,
                         readers: targets.clone(),
-                        earlier: targets
-                            .iter()
-                            .copied()
-                            .filter(|&reader| reader <= partition)
-                            .collect(),
                     });
                 }
             }
@@ -3910,6 +3922,8 @@ struct WorkLowering<'a, Addr: Clone + Eq + Hash> {
     in_partition: bool,
     /// Where a guarded partition continues when it is skipped.
     partition_merge: Option<BlockId>,
+    /// Where a group of clean, effect-free partitions can be skipped.
+    partition_group_merge: Option<BlockId>,
     /// The open partition's watched chunks before it ran.
     partition_old: Vec<RegisterId>,
 }
@@ -3932,36 +3946,16 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
             run_processes: HashSet::default(),
             in_partition: false,
             partition_merge: None,
+            partition_group_merge: None,
             partition_old: Vec::new(),
         }
     }
 
-    /// Start a settle of `count` partitions. Skip publication comparisons
-    /// when every partition will run anyway, or an untracked raw view requires
-    /// a full settle. A fraction of dirty flags is not a cost estimate: a
-    /// clean partition can contain most of the program's work.
+    /// Start a settle of `count` partitions. An untracked raw view requires
+    /// every partition to run. When all individual flags are already set,
+    /// their own guards suffice; counting them would scan the complete flag
+    /// array on every settle without changing which partitions execute.
     fn begin_settle(&mut self, flags: Addr, count: usize) {
-        let all = self.builder.alloc_bit(count * 8, false);
-        self.builder.emit(SIRInstruction::Load(
-            all,
-            flags,
-            SIROffset::Static(0),
-            count * 8,
-        ));
-        let count_width = UnaryOp::PopCount.result_width(count * 8);
-        let dirty = self.builder.alloc_bit(count_width, false);
-        self.builder
-            .emit(SIRInstruction::Unary(dirty, UnaryOp::PopCount, all));
-        let threshold = self.builder.alloc_bit(count_width, false);
-        self.builder
-            .emit(SIRInstruction::Imm(threshold, SIRValue::new(count as u64)));
-        let busy = self.builder.alloc_bit(1, false);
-        self.builder.emit(SIRInstruction::Binary(
-            busy,
-            dirty,
-            BinaryOp::GeU,
-            threshold,
-        ));
         let untracked = self.builder.alloc_bit(8, false);
         self.builder.emit(SIRInstruction::Load(
             untracked,
@@ -3975,15 +3969,11 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
         let raw = self.builder.alloc_bit(1, false);
         self.builder
             .emit(SIRInstruction::Binary(raw, untracked, BinaryOp::Ne, zero));
-        let full = self.builder.alloc_bit(1, false);
-        self.builder
-            .emit(SIRInstruction::Binary(full, busy, BinaryOp::Or, raw));
         let one = self.builder.alloc_bit(8, false);
         self.builder
             .emit(SIRInstruction::Imm(one, SIRValue::new(1u64)));
         let byte = self.builder.alloc_bit(8, false);
-        self.builder
-            .emit(SIRInstruction::Mux(byte, full, one, zero));
+        self.builder.emit(SIRInstruction::Mux(byte, raw, one, zero));
         self.builder.emit(SIRInstruction::Store(
             flags,
             SIROffset::Static((count + 1) * 8),
@@ -3994,27 +3984,9 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
         ));
     }
 
-    /// Whether the settle of `count` partitions runs every partition.
-    fn settle_is_full(&mut self, flags: Addr, count: usize) -> RegisterId {
-        let byte = self.builder.alloc_bit(8, false);
-        self.builder.emit(SIRInstruction::Load(
-            byte,
-            flags,
-            SIROffset::Static((count + 1) * 8),
-            8,
-        ));
-        let zero = self.builder.alloc_bit(8, false);
-        self.builder
-            .emit(SIRInstruction::Imm(zero, SIRValue::new(0u64)));
-        let full = self.builder.alloc_bit(1, false);
-        self.builder
-            .emit(SIRInstruction::Binary(full, byte, BinaryOp::Ne, zero));
-        full
-    }
-
     /// Compare each chunk with its value before the partition ran (`old`),
-    /// and set the flags of its `readers` when it changed: one change bit per
-    /// reader set, then one flag update per reader.
+    /// and set the flags of its `readers` when it changed. Readers with the
+    /// same dependencies share a change test and packed flag stores.
     fn mark_changed_readers(
         &mut self,
         flags: Addr,
@@ -4044,41 +4016,121 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
                 None => set_changes.push((readers, changed)),
             }
         }
-        let mut reader_changes: BTreeMap<usize, RegisterId> = BTreeMap::new();
         for (readers, changed) in set_changes {
+            let publish = self.builder.new_block();
+            let done = self.builder.new_block();
+            self.builder.seal_block(SIRTerminator::Branch {
+                cond: changed,
+                true_block: (publish, Vec::new()),
+                false_block: (done, Vec::new()),
+            });
+            self.builder.switch_to_block(publish);
+            let mut words = BTreeMap::<usize, u64>::new();
             for &reader in readers {
-                let any = match reader_changes.get(&reader).copied() {
-                    Some(any) => {
-                        let both = self.builder.alloc_bit(1, false);
-                        self.builder
-                            .emit(SIRInstruction::Binary(both, any, BinaryOp::Or, changed));
-                        both
-                    }
-                    None => changed,
+                *words.entry(reader / 8).or_default() |= 1u64 << ((reader % 8) * 8);
+            }
+            for (word, mask) in words {
+                if mask.count_ones() == 1 {
+                    self.builder.emit(SIRInstruction::Store(
+                        flags,
+                        SIROffset::Static(word * 64 + mask.trailing_zeros() as usize),
+                        8,
+                        one,
+                        Vec::new(),
+                        Vec::new(),
+                    ));
+                    continue;
+                }
+                let width = (64 - mask.leading_zeros() as usize).div_ceil(8) * 8;
+                let offset = SIROffset::Static(word * 64);
+                let constant = self.builder.alloc_bit(width, false);
+                self.builder
+                    .emit(SIRInstruction::Imm(constant, SIRValue::new(mask)));
+                let marked = if mask.count_ones() as usize == width / 8 {
+                    constant
+                } else {
+                    let old = self.builder.alloc_bit(width, false);
+                    self.builder
+                        .emit(SIRInstruction::Load(old, flags, offset.clone(), width));
+                    let marked = self.builder.alloc_bit(width, false);
+                    self.builder
+                        .emit(SIRInstruction::Binary(marked, old, BinaryOp::Or, constant));
+                    marked
                 };
-                reader_changes.insert(reader, any);
+                self.builder.emit(SIRInstruction::Store(
+                    flags,
+                    offset,
+                    width,
+                    marked,
+                    Vec::new(),
+                    Vec::new(),
+                ));
+            }
+            self.builder
+                .seal_block(SIRTerminator::Jump(done, Vec::new()));
+            self.builder.switch_to_block(done);
+        }
+    }
+
+    /// Skip a consecutive group without testing every individual clean flag.
+    /// A pinned partition can have effects even without an input change.
+    fn begin_partition_group(
+        &mut self,
+        flags: Addr,
+        first: usize,
+        count: usize,
+        partitions: &[PlannedPartition<Addr>],
+    ) {
+        if partitions.len() < 4 || partitions.iter().any(|partition| partition.pinned) {
+            return;
+        }
+        if self.context.split_large_units && self.builder.block_count() >= EU_BLOCK_LIMIT {
+            if let Some(eu) = self.builder.flush_eu() {
+                self.execution_units.push(eu);
             }
         }
-        for (reader, changed) in reader_changes {
-            let flag = self.builder.alloc_bit(8, false);
-            self.builder.emit(SIRInstruction::Load(
-                flag,
-                flags,
-                SIROffset::Static(reader * 8),
-                8,
-            ));
-            let marked = self.builder.alloc_bit(8, false);
+        let width = partitions.len() * 8;
+        let word = self.builder.alloc_bit(width, false);
+        self.builder.emit(SIRInstruction::Load(
+            word,
+            flags,
+            SIROffset::Static(first * 8),
+            width,
+        ));
+        let full = self.builder.alloc_bit(8, false);
+        self.builder.emit(SIRInstruction::Load(
+            full,
+            flags,
+            SIROffset::Static((count + 1) * 8),
+            8,
+        ));
+        let any = self.builder.alloc_bit(width, false);
+        self.builder
+            .emit(SIRInstruction::Binary(any, word, BinaryOp::Or, full));
+        let zero = self.builder.alloc_bit(width, false);
+        self.builder
+            .emit(SIRInstruction::Imm(zero, SIRValue::new(0u64)));
+        let dirty = self.builder.alloc_bit(1, false);
+        self.builder
+            .emit(SIRInstruction::Binary(dirty, any, BinaryOp::Ne, zero));
+        let body = self.builder.new_block();
+        let done = self.builder.new_block();
+        self.builder.seal_block(SIRTerminator::Branch {
+            cond: dirty,
+            true_block: (body, Vec::new()),
+            false_block: (done, Vec::new()),
+        });
+        self.builder.switch_to_block(body);
+        self.partition_group_merge = Some(done);
+    }
+
+    fn end_partition_group(&mut self) {
+        if let Some(done) = self.partition_group_merge.take() {
             self.builder
-                .emit(SIRInstruction::Mux(marked, changed, one, flag));
-            self.builder.emit(SIRInstruction::Store(
-                flags,
-                SIROffset::Static(reader * 8),
-                8,
-                marked,
-                Vec::new(),
-                Vec::new(),
-            ));
+                .seal_block(SIRTerminator::Jump(done, Vec::new()));
+            self.builder.switch_to_block(done);
         }
+        self.lower_cache.clear();
     }
 
     /// Open partition `index` of `count`: run it only when its flag or the
@@ -4093,7 +4145,10 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
         partition: &PlannedPartition<Addr>,
     ) {
         self.flush_pending_folds();
-        if self.context.split_large_units && self.builder.block_count() >= EU_BLOCK_LIMIT {
+        if self.partition_group_merge.is_none()
+            && self.context.split_large_units
+            && self.builder.block_count() >= EU_BLOCK_LIMIT
+        {
             if let Some(eu) = self.builder.flush_eu() {
                 self.execution_units.push(eu);
             }
@@ -4158,36 +4213,16 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
     /// Close a partition of a settle of `count`: set the flags of the
     /// partitions reading what it changed, then join the path that skipped
     /// it.
-    fn end_partition(&mut self, flags: Addr, count: usize, partition: &PlannedPartition<Addr>) {
+    fn end_partition(&mut self, flags: Addr, _count: usize, partition: &PlannedPartition<Addr>) {
         self.flush_pending_folds();
         if !partition.watched.is_empty() {
             let one = self.builder.alloc_bit(8, false);
             self.builder
                 .emit(SIRInstruction::Imm(one, SIRValue::new(1u64)));
             let old = std::mem::take(&mut self.partition_old);
-            let full = self.settle_is_full(flags, count);
-            let skip = self.builder.new_block();
-            let compare = self.builder.new_block();
-            let join = self.builder.new_block();
-            self.builder.seal_block(SIRTerminator::Branch {
-                cond: full,
-                true_block: (skip, Vec::new()),
-                false_block: (compare, Vec::new()),
-            });
-            // Every partition runs in this settle: only the earlier readers
-            // need their flags, for the next one.
-            self.builder.switch_to_block(skip);
-            let earlier: Vec<_> = partition
-                .watched
-                .iter()
-                .zip(&old)
-                .filter(|(chunk, _)| !chunk.earlier.is_empty())
-                .map(|(chunk, &old)| (chunk, chunk.earlier.as_slice(), old))
-                .collect();
-            self.mark_changed_readers(flags, one, earlier);
-            self.builder
-                .seal_block(SIRTerminator::Jump(join, Vec::new()));
-            self.builder.switch_to_block(compare);
+            // A full settle also clears each later reader's flag when it
+            // runs. Publishing to those readers is harmless and shares the
+            // normal path, avoiding a duplicate comparison/notification CFG.
             let all = partition
                 .watched
                 .iter()
@@ -4195,9 +4230,6 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
                 .map(|(chunk, &old)| (chunk, chunk.readers.as_slice(), old))
                 .collect();
             self.mark_changed_readers(flags, one, all);
-            self.builder
-                .seal_block(SIRTerminator::Jump(join, Vec::new()));
-            self.builder.switch_to_block(join);
         }
         if !partition.marks.is_empty() {
             let one = self.builder.alloc_bit(8, false);
@@ -4753,6 +4785,15 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
                 } else {
                     lowering.begin_settle(*flags, plan.partitions.len());
                 }
+                if partition % 8 == 0 {
+                    lowering.end_partition_group();
+                    lowering.begin_partition_group(
+                        *flags,
+                        partition,
+                        plan.partitions.len(),
+                        &plan.partitions[partition..(partition + 8).min(plan.partitions.len())],
+                    );
+                }
                 lowering.begin_partition(
                     *flags,
                     partition,
@@ -4772,6 +4813,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
         && let Some(last) = plan.partitions.last()
     {
         lowering.end_partition(*flags, plan.partitions.len(), last);
+        lowering.end_partition_group();
     }
     // Flush the final exact grouped-fold run after the SCC loop.
     lowering.flush_pending_folds();
@@ -5510,10 +5552,9 @@ mod tests {
         }
         loaded.sort_unstable();
         stored.sort_unstable();
-        // Guards of 0, 8 and 16, the readers' flags of partitions 1 and 2
-        // before a conditional mark, the untracked byte, and the full byte
-        // for the three guards and the two partitions that compare.
-        assert_eq!(loaded, vec![0, 8, 8, 16, 16, 24, 32, 32, 32, 32, 32]);
+        // The three guards read their flags and the full byte. Publication
+        // stores 1 directly without reading an individual reader's flag.
+        assert_eq!(loaded, vec![0, 8, 16, 24, 32, 32, 32]);
         // The clears of all three flags, the marks of partitions 1 and 2,
         // and the full byte.
         assert_eq!(stored, vec![0, 8, 8, 16, 16, 32]);
@@ -6424,31 +6465,59 @@ mod tests {
             .chain(outputs.map(|output| output + 100))
             .map(|variable| (variable, if variable == PROCESS { 1 } else { 8 }))
             .collect();
-        let result = sort(
-            paths,
-            &arena,
-            &crate::HashSet::default(),
-            &crate::HashMap::default(),
-            false,
-            &widths,
-            1,
-        )
-        .unwrap();
-        let stores = |variable| {
-            result
-                .execution_units
-                .iter()
-                .flat_map(|unit| unit.blocks.values())
-                .flat_map(|block| &block.instructions)
-                .filter(|instruction| {
-                    matches!(instruction, SIRInstruction::Store(target, ..) if *target == variable)
-                })
-                .count()
-        };
-        assert_eq!(stores(PROCESS), 1, "the unit runs once");
-        for output in outputs {
-            assert_eq!(stores(output), 1);
-            assert_eq!(stores(output + 100), 1, "each consumer is emitted");
+        for partitioning in [
+            None,
+            Some(super::SettlePartitioning {
+                flags: 99,
+                target_cost: 1,
+            }),
+        ] {
+            let result = super::sort_with_unpacked_element_widths(
+                paths.clone(),
+                &arena,
+                &crate::HashSet::default(),
+                &crate::HashMap::default(),
+                false,
+                &widths,
+                &crate::HashMap::default(),
+                1,
+                partitioning,
+            )
+            .unwrap();
+            let stores = |variable| {
+                result.execution_units.iter()
+                    .flat_map(|unit| unit.blocks.values())
+                    .flat_map(|block| &block.instructions)
+                    .filter(|instruction| matches!(instruction, SIRInstruction::Store(target, ..) if *target == variable))
+                    .count()
+            };
+            assert_eq!(stores(PROCESS), 1, "the unit runs once");
+            for output in outputs {
+                assert_eq!(stores(output), 1);
+                assert_eq!(stores(output + 100), 1, "each consumer is emitted");
+            }
+            if !result.partitions.is_empty() {
+                assert_eq!(result.partitions.len(), 4, "one body and three consumers");
+                assert_eq!(
+                    result
+                        .partitions
+                        .iter()
+                        .filter(|part| part.reads.contains(&INPUT))
+                        .count(),
+                    1
+                );
+                for output in outputs.into_iter().chain([PROCESS]) {
+                    assert_eq!(
+                        result
+                            .partitions
+                            .iter()
+                            .filter(|part| part.writes.contains(&output))
+                            .count(),
+                        1,
+                        "only the executing partition watches output {output}"
+                    );
+                }
+            }
         }
     }
 }

@@ -138,7 +138,11 @@ pub enum StmtBase<E, L> {
     /// branches that constant folding removed included, and only describe
     /// the reads: they do not execute here, and [`StmtBase::walk`] does not
     /// visit them.
-    WaitImplicit(Vec<StmtBase<E, L>>),
+    WaitImplicit {
+        reads: Vec<StmtBase<E, L>>,
+        /// Apply the function-body and written-expression rules of 9.2.2.2.1.
+        always_comb: bool,
+    },
     WaitFork,
     DisableFork,
     /// An internal scheduling boundary in the current Active region (4.7).
@@ -424,7 +428,10 @@ impl<E, L> StmtBase<E, L> {
             StmtBase::WaitFork => StmtBase::WaitFork,
             StmtBase::DisableFork => StmtBase::DisableFork,
             StmtBase::Wait(condition) => StmtBase::Wait(fe(condition)),
-            StmtBase::WaitImplicit(reads) => StmtBase::WaitImplicit(body(reads, fe, fl)),
+            StmtBase::WaitImplicit { reads, always_comb } => StmtBase::WaitImplicit {
+                reads: body(reads, fe, fl),
+                always_comb,
+            },
         }
     }
 
@@ -556,7 +563,7 @@ impl<E, L> StmtBase<E, L> {
             | StmtBase::DisableFork
             | StmtBase::AssertionRegion { .. } => {}
             StmtBase::Wait(condition) => fe(condition),
-            StmtBase::WaitImplicit(reads) => body(reads, fe, fl, fname),
+            StmtBase::WaitImplicit { reads, .. } => body(reads, fe, fl, fname),
         }
     }
 
