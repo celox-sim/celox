@@ -1161,13 +1161,15 @@ pub(super) struct CompiledNativeFunction {
 pub(crate) struct PreparedHotspotScheduler {
     program: Arc<LaidOutProgram>,
     allocated: emit::AllocatedFunction,
-    outlined: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
+    // Only the shared Comb entry is unresolved. All other outlined kernels
+    // can compile independently while that entry is still on the worker.
+    callees: Vec<Option<Arc<HotspotCode>>>,
 }
 
 #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
 impl PreparedHotspotScheduler {
-    /// Optimize and allocate immutable IR while Comb compiles. Only emission
-    /// waits for the actual callee scratch extents.
+    /// Optimize, allocate and compile independent callees while Comb compiles.
+    /// Only linking and emission wait for its actual scratch extent.
     pub(crate) fn new(
         program: Arc<LaidOutProgram>,
         options: &SimulatorOptions,
@@ -1201,10 +1203,27 @@ impl PreparedHotspotScheduler {
             || cancel.is_cancelled(),
         )
         .map_err(hotspot_pipeline_error)?;
+        let mut callees = Vec::with_capacity(outlined.len());
+        for body in outlined {
+            if cancel.is_cancelled() {
+                return Err(crate::backend::compile_cancel::cancelled_error());
+            }
+            let code = if program.sir.eval_comb.len() == 1 && body == program.sir.eval_comb[0] {
+                None
+            } else {
+                Some(Arc::new(HotspotCode::compile(
+                    &[body],
+                    program.layout(),
+                    options,
+                    cancel,
+                )?))
+            };
+            callees.push(code);
+        }
         Ok(Self {
             program,
             allocated,
-            outlined,
+            callees,
         })
     }
 }
@@ -1308,20 +1327,19 @@ impl HotspotCode {
         let PreparedHotspotScheduler {
             program,
             allocated,
-            outlined,
+            callees: prepared_callees,
         } = prepared;
-        let mut callees = Vec::new();
+        let mut callees = Vec::with_capacity(prepared_callees.len());
         let mut additional_bytes = 0usize;
-        for body in outlined {
+        for prepared in prepared_callees {
             if cancel.is_cancelled() {
                 return Err(crate::backend::compile_cancel::cancelled_error());
             }
-            let code = if program.sir.eval_comb.len() == 1 && body == program.sir.eval_comb[0] {
-                Arc::clone(&comb)
-            } else {
-                let code = Self::compile(&[body], program.layout(), options, cancel)?;
+            let code = if let Some(code) = prepared {
                 additional_bytes = additional_bytes.saturating_add(code.code_size);
-                Arc::new(code)
+                code
+            } else {
+                Arc::clone(&comb)
             };
             callees.push(code);
         }
