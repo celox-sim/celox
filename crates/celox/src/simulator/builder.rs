@@ -4986,6 +4986,89 @@ endmodule"#;
         assert!(count_clean_clock_batch(false, false, true).0 > 0);
     }
 
+    #[cfg(all(
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    #[test]
+    fn native_scheduler_host_wait_scans_grow_linearly() {
+        for four_state in [false, true] {
+            let size = |processes| {
+                let mut source = String::from(
+                    "`timescale 1ns/1ns\nmodule Top; bit clk = 0; always #1 clk = ~clk;\n",
+                );
+                for index in 0..processes {
+                    source +=
+                        &format!("always @(posedge clk) $fwrite(1, \"process {index}\\n\");\n");
+                }
+                source += "endmodule\n";
+                let mut builder = crate::Simulation::from_sv_sources(
+                    vec![(source.as_str(), std::path::Path::new("host-waits.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .emit_triggers();
+                builder.native_file_calls = true;
+                let (program, _, _, _, _) = builder
+                    .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, true)
+                    .unwrap();
+                let scheduler = program.runtime.runtime_schema.scheduler.as_ref().unwrap();
+                assert!(scheduler.fallback.iter().all(Option::is_none));
+                let (unit, _) = crate::scheduler::hotspot_scheduler(&program).unwrap();
+                unit.blocks
+                    .values()
+                    .map(|block| block.instructions.len())
+                    .sum::<usize>()
+            };
+            let small = size(32);
+            let large = size(64);
+            assert!(
+                large < small * 3,
+                "quadratic wait scans: {small} -> {large}, four_state={four_state}"
+            );
+        }
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    #[test]
+    fn native_scheduler_host_wait_continuations_exceed_one_byte() {
+        let mut source =
+            String::from("`timescale 1ns/1ns\nmodule Top; bit clk = 0; always #1 clk = ~clk;\n");
+        for index in 0..260 {
+            source += &format!("always @(posedge clk) $fwrite(1, \"process {index}\\n\");\n");
+        }
+        source += "endmodule\n";
+        let mut results = Vec::new();
+        for mode in [
+            crate::SchedulerMode::Reference,
+            crate::SchedulerMode::DifferentialRuns,
+        ] {
+            let mut sim = crate::Simulation::from_sv_sources(
+                vec![(
+                    source.as_str(),
+                    std::path::Path::new("host-continuations.sv"),
+                )],
+                "Top",
+            )
+            .four_state(true)
+            .scheduler_mode(mode)
+            .build_native()
+            .unwrap();
+            sim.run_until(3).unwrap();
+            results.push(sim.drain_runtime_events());
+            if mode == crate::SchedulerMode::DifferentialRuns {
+                assert!(sim.scheduler_stats().compiled_slots > 0);
+            }
+        }
+        assert_eq!(results[0].len(), 520);
+        assert_eq!(results[0], results[1]);
+    }
+
     /// A bit-level schedule may load a range before the bits it needs are
     /// stored, and discard the stale ones: the settle is still a function of
     /// its inputs, so it may be deferred.
@@ -5972,6 +6055,60 @@ endmodule"#
                 );
             }
         }
+    }
+
+    #[cfg(feature = "systemverilog")]
+    #[test]
+    fn first_tier_scheduler_continuations_exceed_one_byte() {
+        let mut source = String::from("module Top(input bit [7:0] d");
+        for index in 0..260 {
+            source.push_str(&format!(", input bit c{index}, output bit [7:0] q{index}"));
+        }
+        source.push_str("); wire [7:0] next_value = d + 1;\n");
+        for index in 0..260 {
+            source.push_str(&format!(
+                "always_ff @(posedge c{index}) q{index} <= next_value;\n"
+            ));
+        }
+        source.push_str("endmodule");
+        let mut sim =
+            crate::Simulation::from_sv_sources(
+                vec![(
+                    source.as_str(),
+                    std::path::Path::new("many-continuations.sv"),
+                )],
+                "Top",
+            )
+            .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+            .build_with_backend(
+                crate::MemoryLayoutMode::Packed,
+                false,
+                |program, options| {
+                    let first = crate::scheduler::without_fused_domains(program.clone(), true);
+                    let unit = first
+                        .runtime
+                        .runtime_schema
+                        .scheduler
+                        .as_ref()
+                        .unwrap()
+                        .unit
+                        .unwrap();
+                    let cont = first.runtime.runtime_schema.scheduler.as_ref().unwrap().slots.cont;
+                    assert!(first.sir.processes[unit].blocks.values().flat_map(|block| &block.instructions).any(|inst| {
+                        matches!(inst, crate::ir::SIRInstruction::Load(_, address, crate::ir::SIROffset::Static(8), 8)
+                            if address.absolute_addr() == cont)
+                    }), "the fixture must dispatch the high byte of a continuation");
+                    crate::NativeBackend::new(&first, options)
+                },
+            )
+            .unwrap();
+        let d = sim.signal("d");
+        sim.modify(|io| io.set(d, 41u8)).unwrap();
+        sim.add_clock("c259", 10, 5);
+        sim.run_until(25).unwrap();
+        let q = sim.signal("q259");
+        assert_eq!(sim.get(q), 42u8.into());
+        assert!(sim.scheduler_stats().compiled_slots > 0);
     }
 
     /// A first tier settles before a domain instead of compiling a fused
