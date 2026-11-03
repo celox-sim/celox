@@ -15,6 +15,15 @@ pub(crate) struct Header {
     pub phase: u64,
     pub waves: u64,
     pub wave_limit: u64,
+    pub guard_time: u64,
+    pub guard_valid: u64,
+    pub passes: u64,
+    pub work: u64,
+    pub returns: u64,
+    pub work_limit: u64,
+    pub return_limit: u64,
+    pub recent_next: u64,
+    pub recent: [u64; 64],
 }
 
 impl Default for Header {
@@ -29,6 +38,29 @@ impl Default for Header {
             phase: 0,
             waves: 0,
             wave_limit: u64::MAX,
+            guard_time: 0,
+            guard_valid: 0,
+            passes: 0,
+            work: 0,
+            returns: 0,
+            work_limit: u64::MAX,
+            return_limit: u64::MAX,
+            recent_next: 0,
+            recent: [u64::MAX; 64],
+        }
+    }
+}
+
+impl Header {
+    pub fn guard_timestamp(&mut self, timestamp: u64) {
+        if self.guard_valid == 0 || self.guard_time != timestamp {
+            self.guard_valid = 1;
+            self.guard_time = timestamp;
+            self.passes = 0;
+            self.work = 0;
+            self.returns = 0;
+            self.recent.fill(u64::MAX);
+            self.recent_next = 0;
         }
     }
 }
