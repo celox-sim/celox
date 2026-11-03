@@ -1268,3 +1268,132 @@ fn spilled_vectors_of_a_function_unit_are_aligned_without_avx() {
         );
     }
 }
+
+#[test]
+fn allocated_caller_uses_late_callee_extent_without_changing_code() {
+    let layout = MemoryLayout::build(&VectorObjects, false, MemoryLayoutMode::Packed);
+    let mut unit = vector_pressure().unit;
+    unit.blocks
+        .get_mut(&crate::BlockId(0))
+        .unwrap()
+        .instructions
+        .insert(
+            2 * VECTORS as usize,
+            SIRInstruction::ExternCall {
+                dst: None,
+                func: celox_sir::extern_abi::NATIVE_KERNEL_CALL_TAG,
+                args: vec![],
+            },
+        );
+    let mut strategies = vec![StateBaseStrategy::R15];
+    if X86Features::detect().state_base() == StateBaseStrategy::Gs {
+        strategies.push(StateBaseStrategy::Gs);
+    }
+    for strategy in strategies {
+        let features = X86Features::for_test_with_state_base(false, strategy);
+        let options = X86BackendOptions {
+            target_features: Some(features),
+            ..Default::default()
+        };
+        let mut early_trace = NativeFunctionTrace::default();
+        let allocated = allocate_owned_prepared_eu(
+            unit.clone(),
+            &layout,
+            false,
+            "caller",
+            &options,
+            Some(&mut early_trace),
+            || false,
+        )
+        .unwrap();
+        assert!(
+            early_trace.spill_frame_size > 0,
+            "values must spill across the call"
+        );
+
+        // The child is compiled only after caller allocation. It destroys its
+        // entire private region, including where an unreserved caller would
+        // have placed live spills. Its emitted extent, not a guess, is linked.
+        let semantic_end =
+            (layout.merged_total_size + layout.triggered_bits_total_size).next_multiple_of(8);
+        let child_end = semantic_end + 4096;
+        let mut vregs = VRegAllocator::new();
+        let trash = vregs.alloc();
+        let mut child = MFunction::new(vregs, vec![SpillDesc::transient()]);
+        child.target_features = features;
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm {
+            dst: trash,
+            value: 0xdead_beef_dead_beef,
+        });
+        for offset in (semantic_end..child_end).step_by(8) {
+            block.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: offset as i32,
+                src: trash,
+                size: OpSize::S64,
+            });
+        }
+        block.push(MInst::Return);
+        child.push_block(block);
+        let ra = regalloc::run_regalloc(&mut child).unwrap();
+        let child_code =
+            emit_with_callees(&child, &ra.assignment, ra.spill_frame_size, child_end, &[]).unwrap();
+        let linked = options
+            .clone()
+            .with_native_callees([child_code.required_state_size as usize]);
+        let expected =
+            emit_prepared_eu(&unit, &layout, false, "caller", &linked, None, || false).unwrap();
+        let actual = allocated
+            .emit(linked.arena_base, Some(&mut early_trace), || false)
+            .unwrap();
+        assert_eq!(actual.code, expected.code);
+        assert_eq!(actual.required_state_size, expected.required_state_size);
+        assert!(!early_trace.disassembly.is_empty());
+        let child_jit = JitCode::new(&child_code.code).unwrap();
+        let caller_jit = JitCode::new(&actual.code).unwrap();
+        let table = [child_jit.fn_ptr as usize];
+        let mut memory = vec![0u8; actual.required_state_size as usize];
+        memory[celox_state_layout::STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET..][..8]
+            .copy_from_slice(&(table.as_ptr() as u64).to_le_bytes());
+        for id in 0..2 * VECTORS {
+            let addr = layout.offsets[&object(id)];
+            let value = (u128::from(id + 1) << 80) | u128::from(id + 101);
+            memory[addr..][..16].copy_from_slice(&value.to_le_bytes());
+        }
+        assert_eq!(unsafe { caller_jit.call(&mut memory) }, 0);
+        for id in 0..VECTORS {
+            let a = (u128::from(id + 1) << 80) | u128::from(id + 101);
+            let b = (u128::from(id + VECTORS + 1) << 80) | u128::from(id + VECTORS + 101);
+            let addr = layout.offsets[&object(2 * VECTORS + id)];
+            assert_eq!(&memory[addr..][..16], &(a ^ b).to_le_bytes());
+        }
+        let missing = allocate_owned_prepared_eu(
+            unit.clone(),
+            &layout,
+            false,
+            "caller",
+            &options,
+            None,
+            || false,
+        )
+        .unwrap()
+        .emit(None, None, || false);
+        assert!(
+            missing.is_err(),
+            "unresolved native callee must be rejected"
+        );
+        let cancelled = allocate_owned_prepared_eu(
+            unit.clone(),
+            &layout,
+            false,
+            "caller",
+            &options,
+            None,
+            || false,
+        )
+        .unwrap()
+        .emit(linked.arena_base, None, || true);
+        assert!(matches!(cancelled, Err(ChainedEmitError::Cancelled)));
+    }
+}

@@ -47,7 +47,9 @@ use operands::{
     preg_to_reg8, preg_to_reg16, preg_to_reg32, preg_to_reg64, resolve, scratch_operand,
     x86_vec_to_xmm,
 };
-pub use pipeline::{emit_owned_prepared_eu, emit_prepared_eu};
+pub use pipeline::{
+    AllocatedFunction, allocate_owned_prepared_eu, emit_owned_prepared_eu, emit_prepared_eu,
+};
 
 use std::fmt;
 
