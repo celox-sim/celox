@@ -10,12 +10,12 @@
   "groups": {
     "imported": {
       "2state": {
-        "passed": 2630,
-        "failed": 812,
+        "passed": 2645,
+        "failed": 797,
         "skipped": 0,
         "executed": 3442,
         "upstream_input_issues": 0,
-        "pass_percent": 76.41,
+        "pass_percent": 76.84,
         "tags_passed": 3,
         "tags_tested": 8,
         "skipped_by_tag": {},
@@ -37,7 +37,7 @@
             "executed": 144
           },
           "ivtest": {
-            "passed": 1825,
+            "passed": 1840,
             "executed": 2546
           },
           "projf-explore": {
@@ -63,8 +63,8 @@
             "fail": 9
           },
           "simulation": {
-            "fail": 721,
-            "pass": 1825
+            "fail": 706,
+            "pass": 1840
           }
         },
         "by_failure_category": {
@@ -72,16 +72,16 @@
           "timeout": 1,
           "unclassified": 42,
           "unexpected_success": 81,
-          "unsupported": 590
+          "unsupported": 575
         }
       },
       "4state": {
-        "passed": 2630,
-        "failed": 812,
+        "passed": 2645,
+        "failed": 797,
         "skipped": 0,
         "executed": 3442,
         "upstream_input_issues": 0,
-        "pass_percent": 76.41,
+        "pass_percent": 76.84,
         "tags_passed": 3,
         "tags_tested": 8,
         "skipped_by_tag": {},
@@ -103,7 +103,7 @@
             "executed": 144
           },
           "ivtest": {
-            "passed": 1825,
+            "passed": 1840,
             "executed": 2546
           },
           "projf-explore": {
@@ -129,8 +129,8 @@
             "fail": 9
           },
           "simulation": {
-            "fail": 721,
-            "pass": 1825
+            "fail": 706,
+            "pass": 1840
           }
         },
         "by_failure_category": {
@@ -138,14 +138,14 @@
           "timeout": 1,
           "unclassified": 42,
           "unexpected_success": 81,
-          "unsupported": 590
+          "unsupported": 575
         }
       }
     }
   },
   "cases": [],
   "driver_profile": "release",
-  "measured_at": "2026-11-02T12:59:16.002141+00:00",
-  "celox_revision": "9ba409accdd0fb667910ae45a21bec1a7d9e5461",
-  "run_url": "https://github.com/celox-sim/celox/actions/runs/41446427998"
+  "measured_at": "2026-11-03T12:25:38.828060+00:00",
+  "celox_revision": "40e8c4db57431079ad0980a154c56de9794fb3fd",
+  "run_url": "https://github.com/celox-sim/celox/actions/runs/41632650650"
 }
