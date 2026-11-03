@@ -3882,6 +3882,12 @@ mod host {
     }
 
     impl Simulator<crate::backend::TieredBackend> {
+        /// Counts for incremental JIT execution, or `None` for whole-image tiering.
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        pub fn hotspot_stats(&self) -> Option<crate::backend::HotspotStats> {
+            self.backend.hotspot_stats()
+        }
+
         /// Whether this tiered simulation has adopted its compiled tier.
         ///
         /// False while background compilation is still running or after it
