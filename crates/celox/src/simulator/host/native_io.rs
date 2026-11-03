@@ -180,6 +180,8 @@ pub(super) struct Scope<'a> {
     pub scheduler_time: Option<u64>,
     pub passes: u64,
     pub run_returns: u64,
+    pub recent_processes: [u64; 64],
+    pub recent_next: usize,
     pub nbas: &'a mut std::collections::VecDeque<celox_runtime::NbaUpdate>,
     pub pending_scan: usize,
 }
@@ -310,14 +312,23 @@ impl Scope<'_> {
         }
     }
 
-    fn charge_scheduler(&mut self, request: u64, timestamp: u64) -> Result<(), RuntimeErrorCode> {
+    fn charge_scheduler(
+        &mut self,
+        process: u64,
+        request: u64,
+        timestamp: u64,
+    ) -> Result<(), RuntimeErrorCode> {
         if self.scheduler_time != Some(timestamp) {
             self.scheduler_time = Some(timestamp);
             self.passes = 0;
             self.run_returns = 0;
             self.returns = 0;
+            self.recent_processes.fill(u64::MAX);
+            self.recent_next = 0;
         }
         if request == SCHEDULER_RUN {
+            self.recent_processes[self.recent_next] = process;
+            self.recent_next = (self.recent_next + 1) % self.recent_processes.len();
             self.run_returns = self.run_returns.saturating_add(1);
             // Ordinary activations can suspend on an event or delay and do
             // not consume the reference process-return budget. This guard is
@@ -327,20 +338,41 @@ impl Scope<'_> {
                 .round_budget
                 .saturating_mul(self.metadata.process_names.len().max(1) as u64);
             if self.run_returns > work_budget {
-                return Err(Self::fault(format!(
-                    "time slot at {timestamp} does not settle within its work-list budget"
-                )));
+                return Err(self.scheduler_fault(timestamp, "work-list"));
             }
         } else {
             self.passes = self.passes.saturating_add(1);
             self.run_returns = 0;
             if self.passes > self.round_budget {
-                return Err(Self::fault(format!(
-                    "time slot at {timestamp} does not settle within its round budget"
-                )));
+                return Err(self.scheduler_fault(timestamp, "round"));
             }
         }
         Ok(())
+    }
+
+    fn scheduler_fault(&self, timestamp: u64, budget: &str) -> RuntimeErrorCode {
+        let mut processes = self.recent_processes.to_vec();
+        processes.retain(|&process| process != u64::MAX);
+        processes.sort_unstable();
+        processes.dedup();
+        let names: Vec<_> = processes
+            .into_iter()
+            .map(|process| {
+                self.metadata
+                    .process_names
+                    .get(process as usize)
+                    .cloned()
+                    .unwrap_or_else(|| format!("process {process}"))
+            })
+            .collect();
+        let origins = if names.is_empty() {
+            String::new()
+        } else {
+            format!(": processes keep resuming: {}", names.join(", "))
+        };
+        Self::fault(format!(
+            "time slot at {timestamp} does not settle within its {budget} budget{origins}"
+        ))
     }
 
     fn charge_return(&mut self, process: u64, timestamp: u64) -> Result<(), RuntimeErrorCode> {
@@ -349,6 +381,8 @@ impl Scope<'_> {
             self.passes = 0;
             self.run_returns = 0;
             self.returns = 0;
+            self.recent_processes.fill(u64::MAX);
+            self.recent_next = 0;
         }
         self.returns = self.returns.saturating_add(1);
         if self.returns > self.return_budget {
@@ -530,7 +564,7 @@ pub(crate) extern "C" fn call(
     let scope = unsafe { &mut *(context as *mut Scope<'_>) };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if matches!(encoded, SCHEDULER_RUN | SCHEDULER_PASS) {
-            scope.charge_scheduler(encoded, timestamp)?;
+            scope.charge_scheduler(process, encoded, timestamp)?;
         } else if encoded == PROCESS_PHASE {
             // One counter spans every activation/pass of process_phase.
             // A new phase after NBA publication starts a fresh counter.
@@ -633,6 +667,8 @@ mod tests {
             scheduler_time: None,
             passes: 0,
             run_returns: 0,
+            recent_processes: [u64::MAX; 64],
+            recent_next: 0,
             nbas: &mut queue,
             pending_scan: 0,
         };

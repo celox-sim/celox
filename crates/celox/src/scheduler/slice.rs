@@ -23,12 +23,17 @@ enum Definition {
     Parameter(BlockId, usize),
 }
 
+struct StabilityAnalysis {
+    partition_flags: Option<AbsoluteAddr>,
+}
+
 struct Indexed {
     definitions: HashMap<RegisterId, Definition>,
     /// The predecessors of each block, with the arguments of their edge.
     incoming: HashMap<BlockId, Vec<(BlockId, Vec<RegisterId>)>>,
     /// Immediate controlling branch/switch blocks and their selectors.
     control: HashMap<BlockId, Vec<(BlockId, RegisterId)>>,
+    completed_control: std::cell::OnceCell<HashMap<BlockId, Vec<(BlockId, RegisterId)>>>,
 }
 
 /// Selected instruction positions and pruned control flow. Keep the original
@@ -119,12 +124,13 @@ fn selector(terminator: &SIRTerminator) -> Option<RegisterId> {
 
 /// The immediate post-dominator of each block reachable from the entry,
 /// `None` for the virtual exit (Cooper, Harvey and Kennedy).
-fn post_dominators(unit: &Unit) -> HashMap<BlockId, Option<BlockId>> {
+fn post_dominators(unit: &Unit, completed_only: bool) -> HashMap<BlockId, Option<BlockId>> {
     let mut predecessors: HashMap<BlockId, Vec<BlockId>> = HashMap::default();
     let mut exits = Vec::new();
     for (&id, block) in &unit.blocks {
         let next = successors(&block.terminator);
-        if next.is_empty() {
+        if next.is_empty() && (!completed_only || matches!(block.terminator, SIRTerminator::Return))
+        {
             exits.push(id);
         }
         for (target, _) in next {
@@ -225,10 +231,22 @@ fn index(unit: &Unit) -> Indexed {
                 .push((id, arguments.to_vec()));
         }
     }
+    Indexed {
+        definitions,
+        incoming,
+        control: control_dependencies(unit, false),
+        completed_control: std::cell::OnceCell::new(),
+    }
+}
+
+fn control_dependencies(
+    unit: &Unit,
+    completed_only: bool,
+) -> HashMap<BlockId, Vec<(BlockId, RegisterId)>> {
     // A block is control dependent on a branch when it lies on a path from
     // one of the branch's successors up to (not including) the branch's
     // post-dominator.
-    let ipdom = post_dominators(unit);
+    let ipdom = post_dominators(unit, completed_only);
     let mut control: HashMap<BlockId, Vec<(BlockId, RegisterId)>> = HashMap::default();
     for (&id, block) in &unit.blocks {
         let Some(selector) = selector(&block.terminator) else {
@@ -238,6 +256,9 @@ fn index(unit: &Unit) -> Indexed {
         // everything it reaches as depending on it.
         let stop = ipdom.get(&id).copied().flatten();
         for (target, _) in successors(&block.terminator) {
+            if completed_only && !ipdom.contains_key(&target) {
+                continue;
+            }
             let mut runner = Some(target);
             let mut seen = HashSet::default();
             while let Some(current) = runner {
@@ -249,11 +270,7 @@ fn index(unit: &Unit) -> Indexed {
             }
         }
     }
-    Indexed {
-        definitions,
-        incoming,
-        control,
-    }
+    control
 }
 
 impl<'a> CombSlicer<'a> {
@@ -391,6 +408,59 @@ impl<'a> CombSlicer<'a> {
         self.slice_with_control(reads, false)
     }
 
+    /// Storage in the data/control cone, and its external inputs, when that
+    /// cone retains no state. This is an analysis of a completed settle, not
+    /// an executable slice: unrelated errors and loops must still execute in
+    /// the full settle but do not make the sink's value depend on their inputs.
+    pub(crate) fn stateless_cone(
+        &self,
+        signal: AbsoluteAddr,
+        partition_flags: Option<AbsoluteAddr>,
+    ) -> Option<(HashSet<AbsoluteAddr>, HashSet<AbsoluteAddr>)> {
+        let signal = self.representative(signal);
+        if !self.stores.contains_key(&signal) {
+            return None;
+        }
+        let mut kept = vec![HashSet::default(); self.units.len()];
+        let mut seen = HashSet::default();
+        self.walk(
+            &mut vec![Need::Storage(signal)],
+            &mut seen,
+            &mut kept,
+            None,
+            Some(&StabilityAnalysis { partition_flags }),
+        );
+        let units: Vec<_> = self
+            .build(&kept, &seen, partition_flags)
+            .into_iter()
+            .map(Selection::materialize)
+            .collect();
+        let storage = |address| self.representative(address);
+        let writes: HashSet<_> = units
+            .iter()
+            .flat_map(instructions)
+            .filter_map(|inst| match inst {
+                SIRInstruction::Store(target, ..) | SIRInstruction::Commit(_, target, ..) => {
+                    Some(storage(target.absolute_addr()))
+                }
+                _ => None,
+            })
+            .collect();
+        let retained = retained_storage(&units, &storage, &writes);
+        if !retained.is_empty() {
+            tracing::debug!(target: "celox::scheduler", ?signal, instructions = units.iter().flat_map(instructions).count(), retained = ?retained.iter().take(8).collect::<Vec<_>>(), "event cone retains state");
+            tracing::trace!(target: "celox::scheduler", ?signal, instructions = ?units.iter().flat_map(instructions).take(64).collect::<Vec<_>>(), "event cone instructions");
+            return None;
+        }
+        let inputs = units
+            .iter()
+            .flat_map(loads)
+            .map(storage)
+            .filter(|input| !writes.contains(input))
+            .collect();
+        Some((writes, inputs))
+    }
+
     /// The same loads as `slice(reads)`, including operands of control flow
     /// that cannot fold away, without cloning executable IR to inspect it.
     pub(crate) fn input_signals(
@@ -441,8 +511,8 @@ impl<'a> CombSlicer<'a> {
         }
         let mut units;
         loop {
-            self.walk(&mut work, &mut seen, &mut kept, allowed);
-            units = self.build(&kept, &seen);
+            self.walk(&mut work, &mut seen, &mut kept, allowed, None);
+            units = self.build(&kept, &seen, None);
             // A terminator whose operands the walk did not reach survives
             // only where folding could not remove it: keep what it uses.
             for (unit_index, unit) in units.iter().enumerate() {
@@ -467,6 +537,7 @@ impl<'a> CombSlicer<'a> {
         seen: &mut HashSet<Need>,
         kept: &mut [HashSet<(BlockId, usize)>],
         allowed: Option<&HashSet<AbsoluteAddr>>,
+        stability: Option<&StabilityAnalysis>,
     ) {
         while let Some(need) = work.pop() {
             if !seen.insert(need) {
@@ -474,7 +545,10 @@ impl<'a> CombSlicer<'a> {
             }
             match need {
                 Need::Storage(address) => {
-                    if allowed.is_some_and(|allowed| !allowed.contains(&address)) {
+                    if allowed.is_some_and(|allowed| !allowed.contains(&address))
+                        || stability
+                            .is_some_and(|analysis| analysis.partition_flags == Some(address))
+                    {
                         continue;
                     }
                     for &(unit, block, position) in self.stores.get(&address).into_iter().flatten()
@@ -521,9 +595,14 @@ impl<'a> CombSlicer<'a> {
                     }
                 }
                 Need::Block(unit, block) => {
-                    for &(controller, selector) in
-                        self.indexed[unit].control.get(&block).into_iter().flatten()
-                    {
+                    let control = if stability.is_some() {
+                        self.indexed[unit]
+                            .completed_control
+                            .get_or_init(|| control_dependencies(&self.units[unit], true))
+                    } else {
+                        &self.indexed[unit].control
+                    };
+                    for &(controller, selector) in control.get(&block).into_iter().flatten() {
                         work.push(Need::Register(unit, selector));
                         work.push(Need::Block(unit, controller));
                     }
@@ -536,6 +615,7 @@ impl<'a> CombSlicer<'a> {
         &self,
         kept: &[HashSet<(BlockId, usize)>],
         seen: &HashSet<Need>,
+        partition_flags: Option<AbsoluteAddr>,
     ) -> Vec<Selection<'_>> {
         self.units
             .iter()
@@ -603,11 +683,89 @@ impl<'a> CombSlicer<'a> {
                         _ => {}
                     }
                 }
+                if let Some(flags) = partition_flags {
+                    let mut known = HashMap::default();
+                    for block in unit.blocks.values_mut() {
+                        if let SIRTerminator::Branch {
+                            cond,
+                            true_block,
+                            false_block,
+                        } = &block.terminator
+                            && let Some((value, true)) =
+                                full_partition_value(*cond, flags, self, unit_index, &mut known)
+                        {
+                            let (target, arguments) =
+                                if value != 0 { true_block } else { false_block };
+                            block.terminator = SIRTerminator::Jump(*target, arguments.clone());
+                        }
+                    }
+                }
                 fold_empty_branches(&mut unit);
                 unit
             })
             .collect()
     }
+}
+
+/// Evaluate compiler-owned partition guards as in a full settle. Every
+/// flag byte is one. This analysis-only view makes cached intermediate reads
+/// follow their producers, without treating the cache as a semantic latch.
+fn full_partition_value(
+    register: RegisterId,
+    flags: AbsoluteAddr,
+    slicer: &CombSlicer<'_>,
+    unit: usize,
+    known: &mut HashMap<RegisterId, Option<(u64, bool)>>,
+) -> Option<(u64, bool)> {
+    if let Some(value) = known.get(&register) {
+        return *value;
+    }
+    known.insert(register, None);
+    let result = (|| {
+        let &Definition::Instruction(block, position) =
+            slicer.indexed[unit].definitions.get(&register)?
+        else {
+            return None;
+        };
+        match &slicer.units[unit].blocks[&block].instructions[position] {
+            SIRInstruction::Load(_, source, offset, width)
+                if source.region == STABLE_REGION
+                    && slicer.representative(source.absolute_addr()) == flags
+                    && *width <= 64 =>
+            {
+                let start = offset.constant_bit_offset()?;
+                let value = (0..*width)
+                    .filter(|bit| (start + bit).is_multiple_of(8))
+                    .fold(0u64, |value, bit| value | (1u64 << bit));
+                Some((value, true))
+            }
+            SIRInstruction::Imm(_, value) if value.mask == num_bigint::BigUint::default() => {
+                Some((u64::try_from(&value.payload).ok()?, false))
+            }
+            SIRInstruction::Binary(_, left, op, right) => {
+                let (left, lf) = full_partition_value(*left, flags, slicer, unit, known)?;
+                let (right, rf) = full_partition_value(*right, flags, slicer, unit, known)?;
+                let value = match op {
+                    BinaryOp::Or => left | right,
+                    BinaryOp::And => left & right,
+                    BinaryOp::Xor => left ^ right,
+                    BinaryOp::Eq | BinaryOp::EqCase => u64::from(left == right),
+                    BinaryOp::Ne | BinaryOp::NeCase => u64::from(left != right),
+                    _ => return None,
+                };
+                Some((value, lf || rf))
+            }
+            SIRInstruction::Mux(_, condition, yes, no) => {
+                let (condition, cf) = full_partition_value(*condition, flags, slicer, unit, known)?;
+                let selected = if condition != 0 { yes } else { no };
+                let (value, vf) = full_partition_value(*selected, flags, slicer, unit, known)?;
+                Some((value, cf || vf))
+            }
+            _ => None,
+        }
+    })();
+    known.insert(register, result);
+    result
 }
 
 /// Replace branches whose arms run nothing on the way to one block (with
@@ -692,6 +850,144 @@ mod tests {
 
     fn stable(id: u32) -> RegionedAbsoluteAddr {
         RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, address(id))
+    }
+
+    #[test]
+    fn partition_caches_do_not_make_a_constant_alias_stateful() {
+        let mut b = Builder::new();
+        for index in 0..2 {
+            let flag = b.alloc_bit(8, false);
+            let zero = b.alloc_bit(8, false);
+            let cond = b.alloc_bit(1, false);
+            b.emit(SIRInstruction::Load(
+                flag,
+                stable(0),
+                SIROffset::Static(index * 8),
+                8,
+            ));
+            b.emit(SIRInstruction::Imm(zero, celox_sir::SIRValue::new(0u8)));
+            b.emit(SIRInstruction::Binary(cond, flag, BinaryOp::Ne, zero));
+            // The coarse guard of a partition group converts its full flag
+            // to a byte before combining it with several dirty bytes.
+            let cond = if index == 0 {
+                let one = b.alloc_bit(8, false);
+                let full = b.alloc_bit(8, false);
+                let grouped = b.alloc_bit(1, false);
+                b.emit(SIRInstruction::Imm(one, celox_sir::SIRValue::new(1u8)));
+                b.emit(SIRInstruction::Mux(full, cond, one, zero));
+                b.emit(SIRInstruction::Binary(grouped, full, BinaryOp::Ne, zero));
+                grouped
+            } else {
+                cond
+            };
+            let execute = b.new_block();
+            let done = b.new_block();
+            b.seal_block(SIRTerminator::Branch {
+                cond,
+                true_block: (execute, Vec::new()),
+                false_block: (done, Vec::new()),
+            });
+            b.switch_to_block(execute);
+            let value = b.alloc_bit(1, false);
+            b.emit(if index == 0 {
+                SIRInstruction::Imm(value, celox_sir::SIRValue::new(1u8))
+            } else {
+                SIRInstruction::Load(value, stable(1), SIROffset::Static(0), 1)
+            });
+            b.emit(SIRInstruction::Store(
+                stable(index as u32 + 1),
+                SIROffset::Static(0),
+                1,
+                value,
+                Vec::new(),
+                Vec::new(),
+            ));
+            b.emit(SIRInstruction::Store(
+                stable(0),
+                SIROffset::Static(index * 8),
+                8,
+                zero,
+                Vec::new(),
+                Vec::new(),
+            ));
+            b.seal_block(SIRTerminator::Jump(done, Vec::new()));
+            b.switch_to_block(done);
+        }
+        b.seal_block(SIRTerminator::Return);
+        let (blocks, register_map, _) = b.drain();
+        let units = [Unit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        }];
+        units[0].verify();
+        let slicer = CombSlicer::new(&units, HashMap::default());
+        assert!(slicer.stateless_cone(address(2), None).is_none());
+        let (writes, inputs) = slicer.stateless_cone(address(2), Some(address(0))).unwrap();
+        assert_eq!(writes, HashSet::from_iter([address(1), address(2)]));
+        assert_eq!(inputs, HashSet::from_iter([address(0)]));
+    }
+
+    #[test]
+    fn stability_analysis_excludes_unrelated_error_control() {
+        let mut b = Builder::new();
+        let value = b.alloc_bit(1, false);
+        b.emit(SIRInstruction::Load(
+            value,
+            stable(0),
+            SIROffset::Static(0),
+            1,
+        ));
+        let cond = b.alloc_bit(1, false);
+        b.emit(SIRInstruction::Load(
+            cond,
+            stable(2),
+            SIROffset::Static(0),
+            1,
+        ));
+        let error = b.new_block();
+        let done = b.new_block();
+        b.seal_block(SIRTerminator::Branch {
+            cond,
+            true_block: (error, Vec::new()),
+            false_block: (done, Vec::new()),
+        });
+        b.switch_to_block(error);
+        b.seal_block(SIRTerminator::Error(1));
+        b.switch_to_block(done);
+        b.emit(SIRInstruction::Store(
+            stable(1),
+            SIROffset::Static(0),
+            1,
+            value,
+            Vec::new(),
+            Vec::new(),
+        ));
+        b.seal_block(SIRTerminator::Return);
+        let (blocks, register_map, _) = b.drain();
+        let units = [Unit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        }];
+        let slicer = CombSlicer::new(&units, HashMap::default());
+        let (writes, inputs) = slicer.stateless_cone(address(1), None).unwrap();
+        assert_eq!(writes, HashSet::from_iter([address(1)]));
+        assert_eq!(inputs, HashSet::from_iter([address(0)]));
+        let executable = slicer.slice([address(1)]);
+        assert!(executable.iter().any(fails));
+        assert!(executable.iter().flat_map(loads).any(|a| a == address(2)));
+        for unit in &executable {
+            unit.verify();
+        }
+
+        // Control that decides a sink's write remains a real dependency.
+        let units = [settle()];
+        let slicer = CombSlicer::new(&units, HashMap::default());
+        assert_eq!(
+            slicer.stateless_cone(address(2), None).unwrap().1,
+            HashSet::from_iter([address(0), address(1)])
+        );
     }
 
     #[test]

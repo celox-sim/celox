@@ -236,7 +236,7 @@ impl<B: SimBackend> SimulationState<B> {
 
     /// Whether a region of the reactive region set holds work.
     #[inline]
-    fn reactive_pending(&self) -> bool {
+    pub(super) fn reactive_pending(&self) -> bool {
         let state = &self.process_state;
         !state.reactive.is_empty()
             || !state.re_inactive.is_empty()
