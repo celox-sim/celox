@@ -2682,3 +2682,11 @@ module Top (
         on_every_backend!(Simulation::builder(REGISTER_CLOCK, "Top"), check);
     }
 }
+
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+impl Simulation<crate::backend::TieredBackend> {
+    /// Counts for incremental JIT execution, or `None` for whole-image tiering.
+    pub fn hotspot_stats(&self) -> Option<crate::backend::HotspotStats> {
+        self.simulator.hotspot_stats()
+    }
+}
