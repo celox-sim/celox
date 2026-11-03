@@ -336,4 +336,4 @@ required-features = ["veryl-reference"]
 
 [[test]]
 name = "native_testbench"
-required-features = ["veryl-reference", "cranelift"]
+required-features = ["cranelift"]

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { workspaceFeatures } from "./run-vtest.mjs";
+import { CI_FEATURES } from "./ci-rust-scope.mjs";
 
 const workflow = readFileSync(
   new URL("../.github/workflows/ci.yml", import.meta.url),
@@ -710,5 +711,14 @@ test("validation disables LTO without changing benchmark or publication profiles
   for (const name of ["bench", "heliodor-bench", "rica-bench", "circuit-bench", "taxi-bench", "ci-napi"]) {
     const source = readFileSync(new URL(`../.github/workflows/${name}.yml`, import.meta.url), "utf8");
     assert.doesNotMatch(source, /CARGO_PROFILE_\w+_LTO/);
+  }
+});
+
+test("CI omits the opt-in Veryl reference simulator from every build lane", () => {
+  assert.ok(!CI_FEATURES.includes("celox/veryl-reference"));
+  assert.ok(!workspaceFeatures.split(",").includes("celox/veryl-reference"));
+  const warm = readFileSync(new URL("../.github/workflows/rust-cache.yml", import.meta.url), "utf8");
+  for (const source of [workflow, warm]) {
+    assert.doesNotMatch(source, /(?:celox\/)?veryl-reference|--all-features/);
   }
 });
