@@ -2640,13 +2640,7 @@ mod host {
                         error: None,
                         calls: 0,
                         return_budget: self.native_host_return_budget,
-                        returns: 0,
                         round_budget: self.native_host_round_budget,
-                        scheduler_time: None,
-                        passes: 0,
-                        run_returns: 0,
-                        recent_processes: [u64::MAX; 64],
-                        recent_next: 0,
                         nbas: &mut self.native_nba_queue,
                         pending_scan: 0,
                     };

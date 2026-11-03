@@ -1,4 +1,7 @@
 //! Ordered Active-domain evaluations and deferred publication inside native code.
+mod guards;
+pub(super) use guards::Guards;
+
 use super::*;
 use crate::simulator::native_io::{self, ArenaHeader};
 use celox_sir::{BlockId, native_memory::NativeMemoryOp as Memory};
