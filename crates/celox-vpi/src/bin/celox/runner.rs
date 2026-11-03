@@ -35,9 +35,17 @@ pub(super) struct ExecutionArgs {
     /// cross-codegen builds.
     #[arg(long, value_enum)]
     backend: Option<Backend>,
-    /// Experimentally compile hot execution groups independently (x86-64 tiered).
-    #[arg(long, conflicts_with = "require_compiled")]
-    pub(super) hotspot_jit: bool,
+    /// JIT strategy. Auto uses hotspot on supported single-thread x86-64 runs.
+    #[arg(
+        long,
+        value_enum,
+        default_value = "auto",
+        conflicts_with = "hotspot_jit"
+    )]
+    jit: JitMode,
+    /// Alias for --jit hotspot.
+    #[arg(long)]
+    hotspot_jit: bool,
     #[arg(long)]
     compile_only: bool,
     /// Write a pointer-free native image during compile-only mode.
@@ -82,7 +90,69 @@ pub(super) struct ExecutionArgs {
     always_partition: bool,
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+enum JitMode {
+    #[default]
+    Auto,
+    Hotspot,
+    WholeImage,
+}
+
 impl ExecutionArgs {
+    /// Resolve after project settings, including force targets, are applied.
+    pub(super) fn use_hotspot(&self, force_signals: bool) -> Result<bool, &'static str> {
+        let mode = if self.hotspot_jit {
+            JitMode::Hotspot
+        } else {
+            self.jit
+        };
+        let reason = self.hotspot_unavailable(force_signals);
+        if mode == JitMode::Hotspot
+            && let Some(reason) = reason
+        {
+            return Err(reason);
+        }
+        if mode == JitMode::WholeImage && self.backend() != Backend::Tiered {
+            return Err("--jit whole-image requires --backend tiered");
+        }
+        Ok(mode != JitMode::WholeImage && reason.is_none())
+    }
+
+    fn hotspot_unavailable(&self, force_signals: bool) -> Option<&'static str> {
+        if self.backend() != Backend::Tiered {
+            Some("hotspot JIT requires --backend tiered")
+        } else if !cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen"))) {
+            Some("hotspot JIT requires a native x86-64 build")
+        } else if self.threads != 1 {
+            Some("hotspot JIT requires --threads 1")
+        } else if force_signals {
+            Some("hotspot JIT does not support force targets")
+        } else if !self.native_profile_blocks.is_empty() {
+            Some("hotspot JIT does not support --native-profile-block")
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn report_jit(&self, force_signals: bool, hotspot: bool) {
+        let mode = if hotspot {
+            "hotspot"
+        } else if self.backend() == Backend::Tiered {
+            "whole-image"
+        } else {
+            "none"
+        };
+        let fallback = (self.jit == JitMode::Auto && !self.hotspot_jit)
+            .then(|| self.hotspot_unavailable(force_signals))
+            .flatten();
+        report!(
+            self.report,
+            "CELOX_JIT_CONFIG mode={} reason_json={}",
+            mode,
+            serde_json::to_string(&fallback).expect("static reason")
+        );
+    }
+
     pub(super) fn backend(&self) -> Backend {
         self.backend.unwrap_or(
             // A cross-codegen build only exports foreign native images.
@@ -105,9 +175,6 @@ impl ExecutionArgs {
 
     #[cfg(feature = "systemverilog")]
     pub(super) fn validate_sv(&self) -> Result<(), String> {
-        if self.hotspot_jit && (self.backend() != Backend::Tiered || self.threads != 1) {
-            return Err("--hotspot-jit requires --backend tiered and --threads 1".into());
-        }
         if self.compile_only
             || self.native_image_input.is_some()
             || self.native_image_output.is_some()
@@ -222,9 +289,14 @@ pub(super) fn run(
     max_steps: u64,
 ) -> Result<(), RunError> {
     let backend = cli.backend();
+    let force_signals = !design.signal_access.force_signals.is_empty();
+    let hotspot_jit = cli
+        .use_hotspot(force_signals)
+        .map_err(|message| RunError::InvalidConfiguration { message })?;
+    cli.report_jit(force_signals, hotspot_jit);
     let mut opts = Options {
         report: cli.report,
-        hotspot_jit: cli.hotspot_jit,
+        hotspot_jit,
         require_compiled: cli.require_compiled,
         project: design.project_root.clone().unwrap_or_else(|| {
             design
@@ -268,11 +340,6 @@ pub(super) fn run(
         always_partition: cli.always_partition,
         design,
     };
-    if opts.hotspot_jit && (opts.backend != Backend::Tiered || opts.threads != 1) {
-        return Err(RunError::InvalidConfiguration {
-            message: "--hotspot-jit requires --backend tiered and --threads 1",
-        });
-    }
     if opts.require_compiled && opts.backend != Backend::Tiered {
         return Err(RunError::InvalidConfiguration {
             message: "--require-compiled requires --backend tiered",
@@ -841,6 +908,7 @@ pub(super) fn run(
     }
 
     let compile_start = total_start;
+    let mut generated_code_exercised = false;
     let (
         result,
         ticks,
@@ -1037,6 +1105,20 @@ pub(super) fn run(
             sim.flush_vcd()?;
             let timing = sim.finish_tiered_execution_timing();
             let stats = sim.tiered_execution_stats();
+            generated_code_exercised = stats.tier == TieredExecutionTier::Compiled
+                && stats.promotion == TieredPromotionStatus::Promoted
+                && stats.compiled_evaluations > 0
+                && timing
+                    .and_then(TieredExecutionTiming::promotion_elapsed)
+                    .is_some();
+            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+            if let Some(hotspot) = sim.hotspot_stats() {
+                generated_code_exercised =
+                    hotspot.compiled_calls > 0 || hotspot.compiled_block_calls > 0;
+                if opts.report {
+                    print_hotspot_stats(&opts.test, &hotspot);
+                }
+            }
             let promotion_error = sim.promotion_error().map(ToString::to_string);
             (
                 result,
@@ -1069,16 +1151,10 @@ pub(super) fn run(
         if let Some(timing) = tiered_timing {
             print_tiered_timeline(opts.report, &opts.test, timing);
         }
-        if opts.require_compiled
-            && !tick_limit_reached
-            && (stats.tier != TieredExecutionTier::Compiled
-                || stats.promotion != TieredPromotionStatus::Promoted
-                || stats.compiled_evaluations == 0
-                || promotion_elapsed.is_none())
-        {
+        if opts.require_compiled && !tick_limit_reached && !generated_code_exercised {
             let detail = tiered_promotion_error
                 .as_deref()
-                .unwrap_or("the compiled tier was not adopted and exercised");
+                .unwrap_or("no generated code was exercised (the run may have finished before JIT publication)");
             report!(
                 opts.report,
                 "CELOX_TEST_RESULT test={} status=fail elapsed_ns={}",
@@ -1388,4 +1464,56 @@ fn load_sources(
         })
         .collect::<Result<_, _>>()?;
     Ok((sources, metadata))
+}
+
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+pub(super) fn print_hotspot_stats(test: &str, stats: &celox::HotspotStats) {
+    report!(
+        true,
+        "CELOX_HOTSPOT_STATS test={test} interpreted_calls={} compiled_calls={} compiled_block_calls={} compiled_entries={} rejected_entries={} failed_entries={} code_bytes={} compile_ns={} frame_bytes_transferred={}",
+        stats.interpreted_calls,
+        stats.compiled_calls,
+        stats.compiled_block_calls,
+        stats.compiled_entries,
+        stats.rejected_entries,
+        stats.failed_entries,
+        stats.code_bytes,
+        stats.compile_time.as_nanos(),
+        stats.frame_bytes_transferred
+    );
+}
+
+#[cfg(test)]
+mod jit_policy_tests {
+    use super::*;
+
+    #[test]
+    fn auto_respects_force_targets_threads_and_explicit_backends() {
+        let mut args = ExecutionArgs {
+            threads: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            args.use_hotspot(false),
+            Ok(cfg!(all(
+                target_arch = "x86_64",
+                not(feature = "arm64-codegen")
+            )))
+        );
+        assert_eq!(args.use_hotspot(true), Ok(false));
+        args.jit = JitMode::Hotspot;
+        assert!(args.use_hotspot(true).is_err());
+        args.threads = 4;
+        assert!(args.use_hotspot(false).is_err());
+        args.jit = JitMode::Auto;
+        assert_eq!(args.use_hotspot(false), Ok(false));
+        args.threads = 1;
+        args.backend = Some(Backend::Native);
+        assert_eq!(args.use_hotspot(false), Ok(false));
+        args.jit = JitMode::WholeImage;
+        assert!(args.use_hotspot(false).is_err());
+        args.backend = Some(Backend::Tiered);
+        assert_eq!(args.use_hotspot(false), Ok(false));
+        assert_eq!(args.use_hotspot(true), Ok(false));
+    }
 }
