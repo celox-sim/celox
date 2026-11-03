@@ -25,6 +25,15 @@ pub(super) fn block_dynamic_load_cache_plans(
     layout: &MemoryLayout,
 ) -> BlockDynamicLoadCachePlans {
     const MIN_LOADS: usize = 4;
+    // Opaque writes include native restoration of a saved working image. A
+    // block-wide cached plane must not outlive one of those writes.
+    if block
+        .instructions
+        .iter()
+        .any(SIRInstruction::has_opaque_state_access)
+    {
+        return BlockDynamicLoadCachePlans::default();
+    }
 
     let mut counts = HashMap::<RegionedAbsoluteAddr, usize>::default();
     let mut written_ranges = Vec::<(i32, usize)>::new();

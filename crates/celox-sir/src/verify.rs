@@ -669,6 +669,25 @@ fn verify_instruction_types<A>(
             same_width(*old, *new, "TYPE.CAPTURE_COMPARE_OPERANDS")?;
         }
         SIRInstruction::ExternCall { dst, func, args } => {
+            if let Some(op) = crate::native_memory::NativeMemoryOp::decode(*func) {
+                let words = args.iter().chain(dst).all(|reg| {
+                    matches!(
+                        eu.register_map.get(reg),
+                        Some(RegisterType::Bit {
+                            width: 64,
+                            signed: false
+                        })
+                    )
+                });
+                if args.len() != op.arguments() || dst.is_some() != op.reads() || !words {
+                    return Err(SirVerifyError::instruction(
+                        "TYPE.NATIVE_MEMORY_SIGNATURE",
+                        block,
+                        index,
+                        "native memory operations require their exact unsigned 64-bit signature",
+                    ));
+                }
+            }
             if crate::extern_abi::native_kernel_index(*func).is_some()
                 && (dst.is_some() || !args.is_empty())
             {

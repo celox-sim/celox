@@ -17,6 +17,7 @@ pub mod cfg;
 pub mod effects;
 pub mod extern_abi;
 pub mod float;
+pub mod native_memory;
 mod serde_helpers;
 pub mod transform;
 pub mod two_state;

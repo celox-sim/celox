@@ -684,6 +684,7 @@ fn find_packed_lane_compare_plans(
         if block.instructions[earliest_load..root_idx]
             .iter()
             .any(|instruction| match instruction {
+                _ if instruction.has_opaque_state_access() => true,
                 SIRInstruction::Store(destination, ..) => {
                     *destination == address
                         || matches!(rhs_plan, Some(PackedLaneComparePlanRhs::Memory(rhs)) if *destination == rhs)
@@ -919,6 +920,7 @@ fn find_packed_field_compare_plans(
         if block.instructions[earliest_load..root_idx]
             .iter()
             .any(|instruction| match instruction {
+                _ if instruction.has_opaque_state_access() => true,
                 SIRInstruction::Store(destination, ..) => *destination == address,
                 SIRInstruction::Commit(_, destination, ..) => *destination == address,
                 _ => false,
@@ -1311,6 +1313,13 @@ fn lower_execution_unit_for_target(
             // Track SIR effects before specialized lowering can consume/skip
             // stores, commits, or loads.
             ctx.update_slice_load_origins(inst);
+            // A packed comparison reloads state at its Concat. Cached words
+            // belong only to the state version in which they were loaded.
+            if inst.has_opaque_state_access() {
+                packed_field_load_cache.clear();
+            } else if let Some(write) = inst.memory_write() {
+                packed_field_load_cache.retain(|(address, ..), _| *address != *write.addr);
+            }
             let target = match inst {
                 SIRInstruction::Store(addr, _, width, _, _, _)
                 | SIRInstruction::Commit(_, addr, _, width, _)
