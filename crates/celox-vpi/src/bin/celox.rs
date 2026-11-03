@@ -247,6 +247,14 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
     let signal = (cfg!(unix) && !arguments.save_state.no_checkpoint_on_signal)
         .then(state_signal::StateSignal::install)
         .transpose()?;
+    let force_signals = !arguments.design.signal_access.force_signals.is_empty();
+    let hotspot = arguments
+        .execution
+        .use_hotspot(force_signals)
+        .unwrap_or_else(|message| {
+            clap::Error::raw(clap::error::ErrorKind::ArgumentConflict, message).exit()
+        });
+    arguments.execution.report_jit(force_signals, hotspot);
     let sources = arguments.design.sv_sources()?;
     let source_refs = sources
         .iter()
@@ -255,7 +263,7 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
     let builder = celox::Simulation::from_sv_sources(source_refs, &arguments.design.top)
         .diagnostics_from_env()
         .four_state(arguments.design.four_state.unwrap_or(false))
-        .hotspot_jit(arguments.execution.hotspot_jit)
+        .hotspot_jit(hotspot)
         .threads(arguments.execution.threads as usize)
         .opt_level(arguments.opt_level)
         .diagnostic_policy(arguments.design.diagnostics.clone())
@@ -280,7 +288,7 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
         arguments.max_steps
     };
     macro_rules! execute {
-        ($build:ident) => {{
+        ($build:ident $(, $report_hotspots:ident)?) => {{
             let mut simulation = builder
                 .$build()
                 .map_err(|error| format!("compilation failed:\n{error}"))?;
@@ -299,13 +307,15 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
             if let Some(progress) = progress {
                 saves.restore_progress(&simulation, &arguments.design.top, progress)?;
             }
-            simulate_sv(
-                simulation,
+            let result = simulate_sv(
+                &mut simulation,
                 max_steps,
                 saves,
                 &mut std::io::stdout(),
                 arguments.execution.report,
-            )
+            );
+            $(if arguments.execution.report { $report_hotspots(&simulation, &arguments.design.top); })?
+            result
         }};
     }
     match arguments.execution.backend() {
@@ -315,19 +325,19 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
         runner::Backend::Interpreter => execute!(build_interpreter),
         #[cfg(feature = "wasm-runtime")]
         runner::Backend::Wasm => execute!(build_wasm),
-        runner::Backend::Tiered => execute!(build_tiered),
+        runner::Backend::Tiered => execute!(build_tiered, report_sv_hotspots),
     }
 }
 
 #[cfg(feature = "systemverilog")]
 fn simulate_sv<B: celox::SimBackend>(
-    mut simulation: celox::Simulation<B>,
+    simulation: &mut celox::Simulation<B>,
     max_steps: u64,
     mut saves: StateSaves,
     output: &mut (impl Write + Send),
     report: bool,
 ) -> Result<(), String> {
-    let result = simulate_sv_inner(&mut simulation, max_steps, &mut saves, output, report);
+    let result = simulate_sv_inner(simulation, max_steps, &mut saves, output, report);
     simulation
         .flush_vcd()
         .map_err(|error| format!("VCD flush failed: {error}"))?;
@@ -1446,6 +1456,14 @@ fn main() -> ExitCode {
     }
 }
 
+#[cfg(feature = "systemverilog")]
+fn report_sv_hotspots(_simulation: &celox::Simulation<celox::TieredBackend>, _test: &str) {
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    if let Some(stats) = _simulation.hotspot_stats() {
+        runner::print_hotspot_stats(_test, &stats);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1532,8 +1550,14 @@ mod tests {
                 .unwrap();
         simulation.add_clock("clk", 2, 1);
         let mut output = Vec::new();
-        let error =
-            simulate_sv(simulation, 3, StateSaves::default(), &mut output, false).unwrap_err();
+        let error = simulate_sv(
+            &mut simulation,
+            3,
+            StateSaves::default(),
+            &mut output,
+            false,
+        )
+        .unwrap_err();
         assert!(error.contains("exceeded --max-steps 3"));
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("tick"));
@@ -1547,14 +1571,21 @@ mod tests {
             let source = format!(
                 "module Top; int value; initial begin value=42; {ending} end final $display(\"final=%0d\", value); endmodule"
             );
-            let simulation = celox::Simulation::from_sv_sources(
+            let mut simulation = celox::Simulation::from_sv_sources(
                 vec![(source.as_str(), Path::new("top.sv"))],
                 "Top",
             )
             .build()
             .unwrap();
             let mut output = Vec::new();
-            simulate_sv(simulation, 10, StateSaves::default(), &mut output, false).unwrap();
+            simulate_sv(
+                &mut simulation,
+                10,
+                StateSaves::default(),
+                &mut output,
+                false,
+            )
+            .unwrap();
             assert_eq!(String::from_utf8(output).unwrap(), "final=42\n");
         }
     }
@@ -1573,12 +1604,12 @@ mod tests {
             }
         }
         let source = "`timescale 1ns/1ns\nmodule Top; bit clk; always #1 clk = ~clk; initial forever @(posedge clk) $display(\"tick\"); endmodule";
-        let simulation =
+        let mut simulation =
             celox::Simulation::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top")
                 .build()
                 .unwrap();
         let error = simulate_sv(
-            simulation,
+            &mut simulation,
             u64::MAX,
             StateSaves::default(),
             &mut Closed,
@@ -1598,14 +1629,20 @@ mod tests {
     fn sv_reports_fail_the_run_only_from_errors() {
         let run = |task: &str| {
             let source = format!("module Top; initial {task}(\"note\"); endmodule");
-            let simulation = celox::Simulation::from_sv_sources(
+            let mut simulation = celox::Simulation::from_sv_sources(
                 vec![(source.as_str(), Path::new("top.sv"))],
                 "Top",
             )
             .build()
             .unwrap();
             let mut output = Vec::new();
-            let result = simulate_sv(simulation, 10, StateSaves::default(), &mut output, false);
+            let result = simulate_sv(
+                &mut simulation,
+                10,
+                StateSaves::default(),
+                &mut output,
+                false,
+            );
             (result, String::from_utf8(output).unwrap())
         };
         let (result, output) = run("$info");

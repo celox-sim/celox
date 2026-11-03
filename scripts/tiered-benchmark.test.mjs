@@ -117,3 +117,23 @@ console.log(${JSON.stringify(celox)});
     assert.equal(existsSync(marker), false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+
+test('hotspot execution and cold completion retain evidence without whole-image promotion', () => {
+  const whole = celox.replace('promotion=pending', 'promotion=disabled');
+  const hot = 'CELOX_HOTSPOT_STATS test=tb interpreted_calls=4 compiled_calls=8 compiled_block_calls=0 compiled_entries=2 rejected_entries=0 failed_entries=0 code_bytes=128 compile_ns=1000 frame_bytes_transferred=0';
+  const log = `${whole}\n${hot}`;
+  const stats = parseTiered(log, 'tb', 'celox-tiered');
+  assert.equal(stats.hotspot_compiled_calls, '8');
+  const saved = `CELOX_TIERED_STATS ${Object.entries(stats).map(([k,v]) => `${k}=${v}`).join(' ')}`;
+  assert.deepEqual(parseTiered(saved, 'tb', 'celox-tiered'), stats);
+  assert.equal(parseTiered(log.replace('compiled_calls=8', 'compiled_calls=0'), 'tb', 'celox-tiered').hotspot_compiled_calls, '0');
+  for (const bad of [whole, `${log}\n${hot}`, log.replace('failed_entries=0', 'failed_entries=1'),
+    log.replace('compiled_entries=2', 'compiled_entries=0'), log.replace('rejected_entries=0', 'rejected_entries=-1'),
+    `${whole}\n${hot.replace('test=tb', 'test=wrong')}`, log.replace('promotion=disabled', 'promotion=failed'),
+    log.replace('code_bytes=128', 'code_bytes=9007199254740992'),
+    log.replace('compiled_evaluations=0', 'compiled_evaluations=1'),
+    log.replace('code_bytes=128', 'code_bytes=0')]) {
+    assert.throws(() => parseTiered(bad, 'tb', 'celox-tiered'), bad);
+  }
+});
