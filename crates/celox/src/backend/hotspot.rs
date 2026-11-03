@@ -1,7 +1,7 @@
 //! Incremental compilation at complete interpreter invocation boundaries.
 //!
 //! The simulation thread alone installs and calls entries. The worker owns no
-//! live state. Bounded jobs select hot groups and unconditional block regions;
+//! live state. Bounded jobs select hot groups and profiled block regions;
 //! cold or unsupported work remains interpreted.
 
 use std::{
@@ -75,12 +75,13 @@ struct Entry {
     unavailable: bool,
     block_regions: bool,
     large_attempted: bool,
+    successors: Vec<(celox_sir::BlockId, u64)>,
     code: Option<EntryCode>,
 }
 
 enum EntryCode {
     Group(Arc<HotspotCode>),
-    Block(BlockCode),
+    Block(Box<BlockCode>),
 }
 impl EntryCode {
     fn native(&self) -> &HotspotCode {
@@ -113,6 +114,7 @@ pub(crate) struct HotspotRuntime {
     busy: bool,
     polls: u64,
     stats: HotspotStats,
+    compiled_trace_calls: u64,
     scheduler: Option<Arc<crate::ir::LaidOutProgram>>,
     scheduler_index: Option<usize>,
 }
@@ -144,6 +146,7 @@ impl HotspotRuntime {
                         match request.block {
                             Some(block) => block
                                 .compile(&layout, &options, &worker_cancel)
+                                .map(Box::new)
                                 .map(EntryCode::Block),
                             None => HotspotCode::compile(
                                 &request.units,
@@ -180,6 +183,7 @@ impl HotspotRuntime {
             busy: false,
             polls: 0,
             stats: HotspotStats::default(),
+            compiled_trace_calls: 0,
             scheduler: None,
             scheduler_index: None,
         })
@@ -229,6 +233,11 @@ impl HotspotRuntime {
         if sender.try_send(request).is_ok() {
             self.busy = true;
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn compiled_trace_calls(&self) -> u64 {
+        self.compiled_trace_calls
     }
 
     pub(crate) fn stats(&self) -> HotspotStats {
@@ -414,6 +423,28 @@ impl HotspotRuntime {
             .is_some_and(|entry| entry.block_regions)
     }
 
+    pub(crate) fn observe_edge(
+        &mut self,
+        group: EntryKey,
+        unit_index: usize,
+        previous: Option<celox_sir::BlockId>,
+        block: celox_sir::BlockId,
+    ) {
+        if let Some(previous) =
+            previous.and_then(|id| self.entries.get_mut(&group.block(unit_index, id)))
+        {
+            if let Some((_, count)) = previous
+                .successors
+                .iter_mut()
+                .find(|(target, _)| *target == block)
+            {
+                *count = count.saturating_add(1);
+            } else if previous.successors.len() < 128 {
+                previous.successors.push((block, 1));
+            }
+        }
+    }
+
     pub(crate) fn try_block(
         &mut self,
         group: EntryKey,
@@ -431,13 +462,16 @@ impl HotspotRuntime {
         if let Some(EntryCode::Block(code)) =
             self.entries.get(&key).and_then(|entry| entry.code.as_ref())
         {
-            code.run(memory, registers)?;
+            let (tail, transferred_bytes) = code.run(memory, registers)?;
+            if code.is_trace() {
+                self.compiled_trace_calls = self.compiled_trace_calls.saturating_add(1);
+            }
             self.stats.compiled_block_calls = self.stats.compiled_block_calls.saturating_add(1);
             self.stats.frame_bytes_transferred = self
                 .stats
                 .frame_bytes_transferred
-                .saturating_add(code.transferred_bytes as u64);
-            return Ok(Some(code.tail));
+                .saturating_add(transferred_bytes as u64);
+            return Ok(Some(tail));
         }
         if self.entries.len() >= 65_536 && !self.entries.contains_key(&key) {
             return Ok(None);
@@ -450,7 +484,12 @@ impl HotspotRuntime {
             && !self.cancel.is_cancelled()
             && self.stats.code_bytes < MAX_CODE_BYTES
         {
-            if let Some(block) = BlockRequest::new(source, block) {
+            if let Some(block) = BlockRequest::profiled(source, block, |id| {
+                let edges = &self.entries.get(&group.block(unit_index, id))?.successors;
+                let total: u128 = edges.iter().map(|(_, count)| u128::from(*count)).sum();
+                let &(target, count) = edges.iter().max_by_key(|(_, count)| *count)?;
+                (total >= 4 && u128::from(count) * 10 >= total * 9).then_some(target)
+            }) {
                 if let Some(sender) = &self.requests {
                     match sender.try_send(Request {
                         key,
@@ -466,7 +505,7 @@ impl HotspotRuntime {
                     }
                 }
             } else {
-                entry.unavailable = true;
+                self.entries.get_mut(&key).unwrap().unavailable = true;
             }
         }
         Ok(None)
@@ -479,7 +518,7 @@ impl Drop for HotspotRuntime {
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
-        tracing::debug!(stats = ?self.stats, "hotspot execution finished");
+        tracing::debug!(stats = ?self.stats, compiled_trace_calls = self.compiled_trace_calls, "hotspot execution finished");
     }
 }
 
