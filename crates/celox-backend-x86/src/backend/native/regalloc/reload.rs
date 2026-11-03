@@ -16,9 +16,9 @@ use celox_analysis::memory_versions::{
     self, MemoryVersion, MemoryVersionEvent, MemoryVersions, RangeWrite, VersionId, VersionSegment,
 };
 
-use crate::HashMap;
 use crate::native::memory_effect::{self, MemoryObject, analysis_effects};
 use crate::native::mir::{BaseReg, BlockId, CmpKind, MFunction, MInst, OpSize, VReg};
+use crate::{HashMap, HashSet};
 
 use super::cfg::NormalizedCfg;
 
@@ -68,7 +68,7 @@ struct SnapshotPhi {
 /// in its roots plus its phi pieces.
 #[derive(Debug, Default)]
 struct PhiTable {
-    pieces: BTreeMap<BlockId, Vec<SnapshotPhi>>,
+    pieces: HashMap<BlockId, Vec<SnapshotPhi>>,
 }
 
 impl PhiTable {
@@ -2968,6 +2968,7 @@ pub(super) fn verify_expected_materialized_reloads_after_state_spills(
 
     let requested_points = locations.values().copied().collect::<BTreeSet<_>>();
     let rebuilt = analyze_with_queries(func, cfg, &requested_points)?;
+    let mut snapshots = SnapshotComparison::new(&inserted_state_writes, &memory_phi_factorings);
     for materialization in reloads {
         let Some(location) = locations.get(&materialization.reload).copied() else {
             return Err(ReloadRecipeError::new(
@@ -2994,8 +2995,7 @@ pub(super) fn verify_expected_materialized_reloads_after_state_spills(
             location,
             &materialization.expected,
             &actual,
-            &inserted_state_writes,
-            &memory_phi_factorings,
+            &mut snapshots,
         )?;
     }
     Ok(())
@@ -3152,8 +3152,7 @@ fn verify_resolved_recipe_match(
     final_location: PointUse,
     original: &ResolvedRecipe,
     materialized: &ResolvedRecipe,
-    inserted_state_writes: &BTreeMap<BlockId, Vec<usize>>,
-    memory_phi_factorings: &BTreeMap<BlockId, &MemoryPhiFactoring>,
+    snapshots: &mut SnapshotComparison<'_>,
 ) -> Result<(), ReloadRecipeError> {
     match (&original.base, &materialized.base) {
         (ResolvedBase::Constant(left), ResolvedBase::Constant(right)) if left == right => {}
@@ -3177,26 +3176,18 @@ fn verify_resolved_recipe_match(
                     ),
                 ));
             }
-            if !stable_memory_snapshot_matches(
-                &left.snapshot,
-                &right.snapshot,
-                inserted_state_writes,
-                memory_phi_factorings,
-            ) {
-                let first_difference = first_snapshot_difference(
-                    &left.snapshot,
-                    &right.snapshot,
-                    inserted_state_writes,
-                    memory_phi_factorings,
-                )
-                .map(|(expected, actual)| {
-                    format!(
-                        "; expected_write={} actual_write={}",
-                        describe_expected_snapshot_write(func, expected, inserted_state_writes),
-                        describe_snapshot_write(func, actual)
-                    )
-                })
-                .unwrap_or_default();
+            if let Some((expected, actual)) =
+                snapshots.first_difference(&left.snapshot, &right.snapshot)
+            {
+                let first_difference = format!(
+                    "; expected_write={} actual_write={}",
+                    describe_expected_snapshot_write(
+                        func,
+                        expected,
+                        snapshots.inserted_state_writes
+                    ),
+                    describe_snapshot_write(func, actual)
+                );
                 return Err(ReloadRecipeError::new(
                     "RELOAD_RECIPE.STATE_SNAPSHOT_CURRENT",
                     None,
@@ -3241,6 +3232,7 @@ fn verify_resolved_recipe_match(
     Ok(())
 }
 
+#[cfg(test)]
 fn stable_memory_snapshot_matches(
     expected: &MemorySnapshot,
     actual: &MemorySnapshot,
@@ -3256,6 +3248,67 @@ fn stable_memory_snapshot_matches(
     .is_none()
 }
 
+type SnapshotPair = (SnapshotAccess, SnapshotAccess, i64, i64);
+
+struct EqualSnapshotPairs {
+    // Keep the immutable tables alive: allocation addresses must never be
+    // reused for a different graph while its proof results are cached.
+    expected: Rc<PhiTable>,
+    actual: Rc<PhiTable>,
+    equal: HashSet<SnapshotPair>,
+}
+
+/// Shared proofs within one final-MIR verification. The write renumbering and
+/// validated factoring environment remain borrowed and immutable throughout.
+/// A result from another graph, byte range or verification cannot be reused.
+struct SnapshotComparison<'a> {
+    inserted_state_writes: &'a BTreeMap<BlockId, Vec<usize>>,
+    memory_phi_factorings: &'a BTreeMap<BlockId, &'a MemoryPhiFactoring>,
+    tables: Vec<EqualSnapshotPairs>,
+}
+
+impl<'a> SnapshotComparison<'a> {
+    fn new(
+        inserted_state_writes: &'a BTreeMap<BlockId, Vec<usize>>,
+        memory_phi_factorings: &'a BTreeMap<BlockId, &'a MemoryPhiFactoring>,
+    ) -> Self {
+        Self {
+            inserted_state_writes,
+            memory_phi_factorings,
+            tables: Vec::new(),
+        }
+    }
+
+    fn first_difference(
+        &mut self,
+        expected: &MemorySnapshot,
+        actual: &MemorySnapshot,
+    ) -> Option<(SnapshotAccess, SnapshotAccess)> {
+        let index = self
+            .tables
+            .iter()
+            .position(|table| {
+                Rc::ptr_eq(&table.expected, &expected.phis)
+                    && Rc::ptr_eq(&table.actual, &actual.phis)
+            })
+            .unwrap_or_else(|| {
+                self.tables.push(EqualSnapshotPairs {
+                    expected: Rc::clone(&expected.phis),
+                    actual: Rc::clone(&actual.phis),
+                    equal: HashSet::default(),
+                });
+                self.tables.len() - 1
+            });
+        first_snapshot_difference_with_cache(
+            expected,
+            actual,
+            self.inserted_state_writes,
+            self.memory_phi_factorings,
+            &mut self.tables[index].equal,
+        )
+    }
+}
+
 /// First pair of differing accesses over the covered range.
 ///
 /// Both snapshots describe, for every byte, a tree of versions rooted at the
@@ -3268,6 +3321,22 @@ fn first_snapshot_difference(
     actual: &MemorySnapshot,
     inserted_state_writes: &BTreeMap<BlockId, Vec<usize>>,
     memory_phi_factorings: &BTreeMap<BlockId, &MemoryPhiFactoring>,
+) -> Option<(SnapshotAccess, SnapshotAccess)> {
+    first_snapshot_difference_with_cache(
+        expected,
+        actual,
+        inserted_state_writes,
+        memory_phi_factorings,
+        &mut HashSet::default(),
+    )
+}
+
+fn first_snapshot_difference_with_cache(
+    expected: &MemorySnapshot,
+    actual: &MemorySnapshot,
+    inserted_state_writes: &BTreeMap<BlockId, Vec<usize>>,
+    memory_phi_factorings: &BTreeMap<BlockId, &MemoryPhiFactoring>,
+    equal: &mut HashSet<SnapshotPair>,
 ) -> Option<(SnapshotAccess, SnapshotAccess)> {
     let expected_span = expected.span();
     if expected_span != actual.span() {
@@ -3288,9 +3357,10 @@ fn first_snapshot_difference(
             }
         }
     }
-    let mut visited = BTreeSet::new();
+    let mut visited = HashSet::default();
     while let Some((expected_access, actual_access, start, end)) = pending.pop() {
-        if !visited.insert((expected_access, actual_access, start, end)) {
+        let pair = (expected_access, actual_access, start, end);
+        if equal.contains(&pair) || !visited.insert(pair) {
             continue;
         }
         match (expected_access, actual_access) {
@@ -3409,6 +3479,10 @@ fn first_snapshot_difference(
             _ => return Some((expected_access, actual_access)),
         }
     }
+    // A cycle is provisionally accepted only within this walk. Publish no
+    // new proof until all reachable inputs have passed, including exits from
+    // cycles; a failed walk must not leave behind assumed equal subgraphs.
+    equal.extend(visited);
     None
 }
 
@@ -5672,6 +5746,83 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.rule, "RELOAD_RECIPE.STATE_SNAPSHOT_CURRENT");
+    }
+
+    #[test]
+    fn shared_snapshot_proofs_preserve_graph_ranges_cycles_and_write_renumbering() {
+        let snapshot = |ordinals: [usize; 2]| {
+            let phi = SnapshotAccess::Phi(BlockId(10));
+            MemorySnapshot::new(
+                vec![SnapshotSegment {
+                    start: 0,
+                    end: 8,
+                    access: phi,
+                }],
+                ordinals
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, ordinal)| SnapshotPhi {
+                        block: BlockId(10),
+                        start: i as i64 * 4,
+                        end: (i as i64 + 1) * 4,
+                        inputs: vec![
+                            (
+                                BlockId(i as u32 + 1),
+                                SnapshotAccess::Write {
+                                    block: BlockId(i as u32 + 1),
+                                    ordinal,
+                                },
+                            ),
+                            (BlockId(10), phi),
+                        ]
+                        .into_boxed_slice(),
+                    })
+                    .collect(),
+            )
+        };
+        let range = |snapshot: &MemorySnapshot, start, end| MemorySnapshot {
+            root: vec![SnapshotSegment {
+                start,
+                end,
+                access: SnapshotAccess::Phi(BlockId(10)),
+            }]
+            .into(),
+            phis: Rc::clone(&snapshot.phis),
+        };
+        let expected = snapshot([0, 0]);
+        let unchanged = snapshot([0, 0]);
+        let changed = snapshot([0, 1]);
+        let inserted = BTreeMap::new();
+        let factorings = BTreeMap::new();
+        let mut proof = SnapshotComparison::new(&inserted, &factorings);
+        assert!(proof.first_difference(&expected, &unchanged).is_none());
+        assert!(proof.first_difference(&expected, &unchanged).is_none());
+        // Identical phi IDs in another immutable graph do not inherit proofs.
+        assert!(proof.first_difference(&expected, &changed).is_some());
+        assert!(
+            proof
+                .first_difference(&range(&expected, 0, 4), &range(&changed, 0, 4))
+                .is_none()
+        );
+        // A proof for half a load does not validate its other bytes. Failed
+        // cyclic walks also cannot publish provisional equality assumptions.
+        for _ in 0..2 {
+            assert!(proof.first_difference(&expected, &changed).is_some());
+            assert!(
+                proof
+                    .first_difference(&range(&expected, 4, 8), &range(&changed, 4, 8))
+                    .is_some()
+            );
+        }
+        let renumbered = snapshot([1, 1]);
+        let inserted = BTreeMap::from([(BlockId(1), vec![0]), (BlockId(2), vec![0])]);
+        let mut renumbered_proof = SnapshotComparison::new(&inserted, &factorings);
+        assert!(
+            renumbered_proof
+                .first_difference(&expected, &renumbered)
+                .is_none()
+        );
+        assert!(proof.first_difference(&expected, &renumbered).is_some());
     }
 
     #[test]
