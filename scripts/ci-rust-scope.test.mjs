@@ -93,10 +93,10 @@ test("a test file change runs only that binary and nothing downstream", () => {
   assert.deepEqual(rustTestScope(["crates/celox/tests/flip_flop.rs"], workspace), {
     full: false,
     packages: ["celox"],
-    features: ["celox/systemverilog", "celox/cranelift", "celox/wasm-runtime", "celox/wasm-component", "celox/veryl-reference"],
+    features: ["celox/systemverilog", "celox/cranelift", "celox/wasm-runtime", "celox/wasm-component"],
     filter: "binary_id(celox::flip_flop)",
     targets: ["flip_flop"],
-    builds: [{ packages: ["celox"], targets: ["flip_flop"], features: ["celox/systemverilog", "celox/cranelift", "celox/wasm-runtime", "celox/wasm-component", "celox/veryl-reference"] }],
+    builds: [{ packages: ["celox"], targets: ["flip_flop"], features: ["celox/systemverilog", "celox/cranelift", "celox/wasm-runtime", "celox/wasm-component"] }],
     libraries: [],
     libraryFeatures: [],
   });
@@ -283,7 +283,7 @@ test("multiple packages keep their own Cargo test targets and omit unused adapte
     [["celox"], ["flip_flop"]], [["consumer"], ["e2e"]],
   ]);
   const real = rustTestScope(["crates/celox/tests/param_override.rs"], readWorkspace(root));
-  assert.deepEqual(real.features, ["celox/systemverilog", "celox/cranelift", "celox/wasm-runtime", "celox/wasm-component", "celox/veryl-reference"]);
+  assert.deepEqual(real.features, ["celox/systemverilog", "celox/cranelift", "celox/wasm-runtime", "celox/wasm-component"]);
 });
 
 test("a shared case does not turn a simultaneous SV fix into every backend", () => {
@@ -304,4 +304,20 @@ test("default application builds and tests do not pull optional compilers", () =
   ], { cwd: root, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
   assert.doesNotMatch(tree, /^(?:wasmtime|cranelift)(?:-| )/m);
   assert.doesNotMatch(tree, /^(?:celox-backend-cranelift|veryl-simulator) /m);
+});
+
+
+test("local-only reference tests do not request a disabled Cargo target in CI", () => {
+  const packages = readWorkspace(root);
+  for (const path of [
+    "crates/celox/tests/veryl_reference_adapter.rs",
+    "crates/celox/tests/snapshots/veryl_reference_adapter__case.snap",
+  ]) {
+    const scope = rustTestScope([path], packages);
+    assert.deepEqual(scope.packages, []);
+    assert.deepEqual(scope.builds, []);
+    const mixed = rustTestScope([path, "crates/celox/tests/native_testbench.rs"], packages);
+    assert.deepEqual(mixed.targets, ["native_testbench"]);
+    assert.ok(!mixed.features.includes("celox/veryl-reference"));
+  }
 });

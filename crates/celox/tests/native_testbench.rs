@@ -218,6 +218,7 @@ fn test_native_testbench_uses_metadata_project_name() {
     );
 }
 
+#[cfg(feature = "veryl-reference")]
 #[test]
 fn test_random_methods_match_veryl_sequence() {
     let explicit = veryl_parser::resource_table::insert_str("r");
@@ -288,6 +289,7 @@ fn test_random_methods_match_veryl_sequence() {
     );
 }
 
+#[cfg(feature = "veryl-reference")]
 #[test]
 fn test_random_signed_results_sign_extend_on_wider_stores() {
     let handle = veryl_parser::resource_table::insert_str("r");
@@ -397,6 +399,7 @@ fn test_unset_testbench_seed_is_fresh_per_execution() {
     assert_eq!(explicit_first, explicit_second);
 }
 
+#[cfg(feature = "veryl-reference")]
 #[test]
 fn test_selected_testbench_destinations_update_only_selected_targets() {
     let random_handle = veryl_parser::resource_table::insert_str("r");
@@ -606,6 +609,7 @@ fn test_packed_prefix_and_low_bound_testbench_destinations() {
     );
 }
 
+#[cfg(feature = "veryl-reference")]
 #[test]
 fn test_selected_testbench_destinations_keep_dynamic_reads_and_old_value_live() {
     let random_handle = veryl_parser::resource_table::insert_str("r");
