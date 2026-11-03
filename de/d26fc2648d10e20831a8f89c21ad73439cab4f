@@ -1,1 +1,1 @@
-Refresh ff_branch_mir for the widened private continuation slot. Audited all 22 differences: working-state offsets move by 8 bytes and aligned scratch offsets by 16 bytes; MIR instructions, branches, and register assignments are unchanged. All 9 native_mir tests pass.
+Fix review r4460758039: widen host ClockBatch masks above 64 clocks, retain the allocation-free small path, and cover high-bit batches and duplicate fallback across native, Cranelift and Wasm.
