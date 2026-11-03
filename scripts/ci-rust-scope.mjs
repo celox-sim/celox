@@ -11,7 +11,6 @@ export const CI_FEATURES = Object.freeze([
   "celox/cranelift",
   "celox/wasm-runtime",
   "celox/wasm-component",
-  "celox/veryl-reference",
   "celox-vpi/cranelift",
   "celox-vpi/wasm-runtime",
   "celox-bench/cranelift",
@@ -78,6 +77,12 @@ export function workspacePackages(metadata, root) {
           .map((dep) => dep.name),
       ),
     ],
+    // Local reference comparisons must not become explicit --test targets in
+    // a scoped CI build, where their required feature is deliberately disabled.
+    localOnlyTests: pkg.targets
+      .filter((target) => target.kind.includes("test")
+        && target["required-features"]?.includes("veryl-reference"))
+      .map((target) => target.name),
     tests: pkg.targets
       .filter((target) => target.kind.includes("test"))
       .map((target) => target.name),
@@ -169,6 +174,7 @@ export function rustTestScope(files, packages) {
     const test = /^tests\/([^/]+)\.rs$/.exec(inner);
     // Insta prefixes snapshots with their integration-test binary name.
     const snapshot = /^tests\/snapshots\/([^/]+?)__[^/]+\.snap(?:\.new)?$/.exec(inner);
+    if (owner.localOnlyTests?.includes(test?.[1] ?? snapshot?.[1])) continue;
     if (test && owner.tests.includes(test[1])) {
       addBinary(owner.name, test[1]);
     } else if (snapshot && owner.tests.includes(snapshot[1])) {

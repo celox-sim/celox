@@ -70,7 +70,7 @@ jobs:
         if: steps.cache.outputs.cache-hit != 'true'
         run: >-
           cargo nextest list --locked --workspace --exclude 'lydite*' --cargo-profile vtest --message-format json
-          --features celox/systemverilog,celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox/veryl-reference,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
+          --features celox/systemverilog,celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
           > /dev/null
 
   rust-default-tests:
@@ -130,7 +130,7 @@ jobs:
         if: steps.cache.outputs.cache-hit != 'true'
         run: >-
           cargo clippy --locked --workspace --exclude lydite-celox --all-targets
-          --features celox/systemverilog,celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox/veryl-reference,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim
+          --features celox/systemverilog,celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim
           --no-deps
       - name: Build documentation dependencies with the CI command
         if: steps.cache.outputs.cache-hit != 'true'
@@ -251,7 +251,7 @@ jobs:
           cargo test --locked -p celox-backend-common -p celox-backend-arm64 --no-run
           cargo check --locked -p celox -p celox-bench
           cargo test --locked -p celox --lib --test native_exec --no-run
-          cargo test --locked -p celox --features systemverilog,cranelift,wasm-runtime,wasm-component,veryl-reference --test systemverilog --no-run
+          cargo test --locked -p celox --features systemverilog,cranelift,wasm-runtime,wasm-component --test systemverilog --no-run
           cargo check --locked -p celox -p celox-bench --no-default-features --features x86_64-codegen
 
   napi-linux-arm64:

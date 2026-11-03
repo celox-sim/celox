@@ -26,7 +26,10 @@ feature when a `.wasm` library is requested.
 Common test matrices use the enabled backends. Binaries that directly compare
 optional backends declare required features. To run the complete Celox suite,
 use `cargo test -p celox --features systemverilog,cranelift,wasm-runtime,wasm-component,veryl-reference`.
-CI explicitly enables these features to retain backend coverage.
+CI enables the Celox backend features, but does not enable `veryl-reference`,
+including in full, scheduled and release validation. The upstream Veryl
+reference simulator comparisons remain available through the explicit local
+command above; they are excluded from CI to keep test duration bounded.
 Host cross-codegen features also enable Cranelift for their fallback runtime.
 
 ## Select checks from the change
