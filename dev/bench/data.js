@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793711934645,
+  "lastUpdate": 1793711952179,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -432973,6 +432973,63 @@ window.BENCHMARK_DATA = {
             "unit": "us",
             "value": 15423271.290000003,
             "extra": "{\"contract\":\"taxi-cocotb-v1\",\"taxi\":\"cc70b270b910d369ab1ad7b3855e76399fd461f1\",\"clock\":\"cocotb-regression-monotonic-v2\",\"samples\":3,\"tests\":78,\"seed\":12345,\"verilator\":\"Verilator 5.052 2026-09-05 rev vUNKNOWN-built20261103-ea338be\",\"python\":\"3.13.17 (main, Oct 22 2026, 02:41:26) [GCC 15.2.0]\",\"cocotb\":\"2.1.0\",\"configuration\":{\"celox\":\"native O1 two-state\",\"verilator\":\"--vpi --public-flat-rw; C++ default -Os\"},\"celoxBinary\":\"2721a880004f985916fd78cc1876ade5f7b29077aae409e0f603e280c9c0cc44\",\"medianPairedBodyRatio\":1.0381990505173897,\"run\":\"https://github.com/celox-sim/celox/actions/runs/41622662890\"}"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "45e92a07e22b474f6f5c84e98523841721445113",
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "message": "chore(deps): update pnpm to v12.16.0 (#3048)",
+          "timestamp": "2026-11-03T02:15:00Z",
+          "url": "https://github.com/celox-sim/celox/commit/45e92a07e22b474f6f5c84e98523841721445113"
+        },
+        "date": 1793711952179,
+        "cpu": "AMD EPYC 9V45",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "taxi-celox/taxi_rx32_v1_x64_body",
+            "unit": "us",
+            "value": 587343000,
+            "extra": "{\"contract\":\"taxi-cocotb-v1\",\"taxi\":\"cc70b270b910d369ab1ad7b3855e76399fd461f1\",\"clock\":\"cocotb-regression-monotonic-v2\",\"samples\":3,\"tests\":312,\"seed\":12345,\"verilator\":\"Verilator 5.052 2026-09-05 rev vUNKNOWN-built20261103-ea338be\",\"python\":\"3.13.17 (main, Oct 22 2026, 02:41:26) [GCC 15.2.0]\",\"cocotb\":\"2.1.0\",\"configuration\":{\"celox\":\"native O1 two-state\",\"verilator\":\"--vpi --public-flat-rw; C++ default -Os\"},\"celoxBinary\":\"2721a880004f985916fd78cc1876ade5f7b29077aae409e0f603e280c9c0cc44\",\"medianPairedBodyRatio\":1.0058640904645764,\"run\":\"https://github.com/celox-sim/celox/actions/runs/41622662890\"}"
+          },
+          {
+            "name": "taxi-celox/taxi_rx32_v1_x64_process",
+            "unit": "us",
+            "value": 587992872.9840003,
+            "extra": "{\"contract\":\"taxi-cocotb-v1\",\"taxi\":\"cc70b270b910d369ab1ad7b3855e76399fd461f1\",\"clock\":\"cocotb-regression-monotonic-v2\",\"samples\":3,\"tests\":312,\"seed\":12345,\"verilator\":\"Verilator 5.052 2026-09-05 rev vUNKNOWN-built20261103-ea338be\",\"python\":\"3.13.17 (main, Oct 22 2026, 02:41:26) [GCC 15.2.0]\",\"cocotb\":\"2.1.0\",\"configuration\":{\"celox\":\"native O1 two-state\",\"verilator\":\"--vpi --public-flat-rw; C++ default -Os\"},\"celoxBinary\":\"2721a880004f985916fd78cc1876ade5f7b29077aae409e0f603e280c9c0cc44\",\"medianPairedBodyRatio\":1.0058640904645764,\"run\":\"https://github.com/celox-sim/celox/actions/runs/41622662890\"}"
+          },
+          {
+            "name": "taxi-celox/taxi_rx32_v1_x64_compilation",
+            "unit": "us",
+            "value": 811743.4190000026,
+            "extra": "{\"contract\":\"taxi-cocotb-v1\",\"taxi\":\"cc70b270b910d369ab1ad7b3855e76399fd461f1\",\"clock\":\"cocotb-regression-monotonic-v2\",\"samples\":3,\"tests\":312,\"seed\":12345,\"verilator\":\"Verilator 5.052 2026-09-05 rev vUNKNOWN-built20261103-ea338be\",\"python\":\"3.13.17 (main, Oct 22 2026, 02:41:26) [GCC 15.2.0]\",\"cocotb\":\"2.1.0\",\"configuration\":{\"celox\":\"native O1 two-state\",\"verilator\":\"--vpi --public-flat-rw; C++ default -Os\"},\"celoxBinary\":\"2721a880004f985916fd78cc1876ade5f7b29077aae409e0f603e280c9c0cc44\",\"medianPairedBodyRatio\":1.0058640904645764,\"run\":\"https://github.com/celox-sim/celox/actions/runs/41622662890\"}"
+          },
+          {
+            "name": "taxi-verilator/taxi_rx32_v1_x64_body",
+            "unit": "us",
+            "value": 573661000.0000004,
+            "extra": "{\"contract\":\"taxi-cocotb-v1\",\"taxi\":\"cc70b270b910d369ab1ad7b3855e76399fd461f1\",\"clock\":\"cocotb-regression-monotonic-v2\",\"samples\":3,\"tests\":312,\"seed\":12345,\"verilator\":\"Verilator 5.052 2026-09-05 rev vUNKNOWN-built20261103-ea338be\",\"python\":\"3.13.17 (main, Oct 22 2026, 02:41:26) [GCC 15.2.0]\",\"cocotb\":\"2.1.0\",\"configuration\":{\"celox\":\"native O1 two-state\",\"verilator\":\"--vpi --public-flat-rw; C++ default -Os\"},\"celoxBinary\":\"2721a880004f985916fd78cc1876ade5f7b29077aae409e0f603e280c9c0cc44\",\"medianPairedBodyRatio\":1.0058640904645764,\"run\":\"https://github.com/celox-sim/celox/actions/runs/41622662890\"}"
+          },
+          {
+            "name": "taxi-verilator/taxi_rx32_v1_x64_process",
+            "unit": "us",
+            "value": 574240354.3419998,
+            "extra": "{\"contract\":\"taxi-cocotb-v1\",\"taxi\":\"cc70b270b910d369ab1ad7b3855e76399fd461f1\",\"clock\":\"cocotb-regression-monotonic-v2\",\"samples\":3,\"tests\":312,\"seed\":12345,\"verilator\":\"Verilator 5.052 2026-09-05 rev vUNKNOWN-built20261103-ea338be\",\"python\":\"3.13.17 (main, Oct 22 2026, 02:41:26) [GCC 15.2.0]\",\"cocotb\":\"2.1.0\",\"configuration\":{\"celox\":\"native O1 two-state\",\"verilator\":\"--vpi --public-flat-rw; C++ default -Os\"},\"celoxBinary\":\"2721a880004f985916fd78cc1876ade5f7b29077aae409e0f603e280c9c0cc44\",\"medianPairedBodyRatio\":1.0058640904645764,\"run\":\"https://github.com/celox-sim/celox/actions/runs/41622662890\"}"
+          },
+          {
+            "name": "taxi-verilator/taxi_rx32_v1_x64_compilation",
+            "unit": "us",
+            "value": 8826171.934000002,
+            "extra": "{\"contract\":\"taxi-cocotb-v1\",\"taxi\":\"cc70b270b910d369ab1ad7b3855e76399fd461f1\",\"clock\":\"cocotb-regression-monotonic-v2\",\"samples\":3,\"tests\":312,\"seed\":12345,\"verilator\":\"Verilator 5.052 2026-09-05 rev vUNKNOWN-built20261103-ea338be\",\"python\":\"3.13.17 (main, Oct 22 2026, 02:41:26) [GCC 15.2.0]\",\"cocotb\":\"2.1.0\",\"configuration\":{\"celox\":\"native O1 two-state\",\"verilator\":\"--vpi --public-flat-rw; C++ default -Os\"},\"celoxBinary\":\"2721a880004f985916fd78cc1876ade5f7b29077aae409e0f603e280c9c0cc44\",\"medianPairedBodyRatio\":1.0058640904645764,\"run\":\"https://github.com/celox-sim/celox/actions/runs/41622662890\"}"
           }
         ]
       }
