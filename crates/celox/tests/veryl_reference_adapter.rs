@@ -6,6 +6,45 @@ use std::path::Path;
 use veryl_sim::build_veryl_adapter;
 
 #[test]
+fn function_loop_bounds_remain_runtime_values_in_child_instances() {
+    let code = r#"
+        module Counter #(
+            param P: u32 = 3,
+        ) (clk: input clock, n: input logic<4>, q: output logic<4>) {
+            function count (limit: input logic<4>) -> logic<4> {
+                var c: logic<4>;
+                c = 0;
+                for i in 0..limit { c += 4'd1; }
+                return c;
+            }
+            function fixed_count () -> logic<4> {
+                var c: logic<4>;
+                c = 0;
+                for i in 0..P { c += 4'd1; }
+                return c;
+            }
+            always_ff (clk) {
+                q = count(n) + count(4'd2) + fixed_count();
+            }
+        }
+        module Top (clk: input clock, n: input logic<4>, q: output logic<4>) {
+            inst counter: Counter (clk, n, q);
+        }
+    "#;
+    for use_4state in [false, true] {
+        let mut sim = build_veryl_adapter(&[(code, Path::new("test.veryl"))], "Top", use_4state);
+        let clk = sim.event("clk");
+        let n = sim.signal("n");
+        let q = sim.signal("q");
+        for value in [0u8, 3, 8, 1] {
+            sim.modify(|io| io.set(n, value)).unwrap();
+            sim.tick(clk).unwrap();
+            assert_eq!(sim.get(q), (value + 5).into());
+        }
+    }
+}
+
+#[test]
 fn scalar_writes_preserve_all_128_bits() {
     let code = r#"
         module Top (a: input logic<128>, y: output logic<128>) {

@@ -4536,9 +4536,6 @@ module Top (
 
 fn test_comb_outputless_function_output_preview_honors_loop_break(sim) {
     @omit_veryl;
-    // `slots[observe(first)]` writes one bit of `slots` and leaves the other
-    // unassigned, which the SV frontend rejects as a latch in always_comb.
-    @ignore_on(sv);
     @build Simulator::builder(r#"
 module Top (
     value: input logic<8>,

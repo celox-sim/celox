@@ -1212,7 +1212,7 @@ fn sv_value(
         Ok(match expr {
             Expression::Term(factor) => match factor.as_ref() {
                 Factor::Variable(id, index, select, _)
-                    if index.0.is_empty() && select.is_empty() =>
+                    if index.indices.is_empty() && index.range.is_none() && select.is_empty() =>
                 {
                     variables
                         .get(id)
@@ -1785,7 +1785,12 @@ pub(crate) fn specialize_foreign_module(
             .collect();
         context.push_override(symbol.inner_namespace(), overrides);
         context.modport_signatures.push(modports);
-        let result = veryl_analyzer::conv::utils::get_component(context, &signature, module.token);
+        // Only an instantiated conversion carries the pushed modport signatures.
+        let result = veryl_analyzer::conv::utils::get_instantiated_component(
+            context,
+            &signature,
+            module.token,
+        );
         context.modport_signatures.pop();
         context.pop_override();
         let component =

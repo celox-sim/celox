@@ -4588,7 +4588,9 @@ fn physical_offset(layout: &MemoryLayout, address: &AbsoluteAddr, offset: &SIROf
             bit_offset: *bit_offset,
             dynamic_bit_offset: *dynamic_bit_offset,
         },
-        SIROffset::Dynamic(_) => unreachable!("dynamic packed access to strided array"),
+        SIROffset::Dynamic(_) | SIROffset::ElementRun { .. } => {
+            unreachable!("dynamic packed access to strided array")
+        }
     }
 }
 
@@ -4630,6 +4632,16 @@ fn compile_logical_bit_offset(
         } => instrs.push(Instruction::I64Const(*value as i64)),
         SIROffset::Dynamic(reg) => {
             instrs.push(Instruction::LocalGet(locals.reg_map[reg].value_idx));
+        }
+        SIROffset::ElementRun {
+            index,
+            element_width,
+        } => {
+            instrs.push(Instruction::LocalGet(locals.reg_map[index].value_idx));
+            if *element_width != 1 {
+                instrs.push(Instruction::I64Const(*element_width as i64));
+                instrs.push(Instruction::I64Mul);
+            }
         }
         SIROffset::Element {
             index,
@@ -4747,7 +4759,7 @@ fn compile_load(
                 }
             }
         }
-        SIROffset::Element { .. } => {
+        SIROffset::Element { .. } | SIROffset::ElementRun { .. } => {
             let offset_local = compile_logical_bit_offset(offset, locals, instrs);
             compile_load_dynamic(&d, base_offset, offset_local, op_width, instrs);
 
@@ -5266,7 +5278,7 @@ fn compile_store(
                 }
             }
         }
-        SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+        SIROffset::Dynamic(_) | SIROffset::Element { .. } | SIROffset::ElementRun { .. } => {
             let offset_reg_value_idx = compile_logical_bit_offset(offset, locals, instrs);
             compile_store_dynamic(
                 &s,
@@ -5406,7 +5418,7 @@ fn emit_load_store_value(
                 }
             }
         }
-        SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+        SIROffset::Dynamic(_) | SIROffset::Element { .. } | SIROffset::ElementRun { .. } => {
             let dyn_bit_offset_local = compile_logical_bit_offset(offset, locals, instrs);
             if op_width <= 64 {
                 compile_load_dynamic(dst, base_offset, dyn_bit_offset_local, op_width, instrs);
