@@ -49,23 +49,25 @@ pub(super) fn balance_private_bitwise_trees(func: &mut MFunction) {
         }
     }
     fn tree(
-        block: &mut MBlock,
         op: Operation,
-        values: &[VReg],
+        values: &[(VReg, usize)],
         vregs: &mut VRegAllocator,
         descs: &mut Vec<SpillDesc>,
-    ) -> VReg {
+        scheduled: &mut Vec<(usize, MInst)>,
+    ) -> (VReg, usize) {
         if values.len() == 1 {
             return values[0];
         }
         let middle = values.len() / 2;
-        let lhs = tree(block, op, &values[..middle], vregs, descs);
-        let rhs = tree(block, op, &values[middle..], vregs, descs);
+        let (lhs, lhs_ready) = tree(op, &values[..middle], vregs, descs, scheduled);
+        let (rhs, rhs_ready) = tree(op, &values[middle..], vregs, descs, scheduled);
         let dst = alloc_transient_vreg(vregs, descs);
-        block.push(instruction(op, dst, lhs, rhs));
-        dst
+        let ready = lhs_ready.max(rhs_ready);
+        scheduled.push((ready, instruction(op, dst, lhs, rhs)));
+        (dst, ready)
     }
     let mut definitions = vec![None; func.vregs.count() as usize];
+    let mut available = vec![None; definitions.len()];
     let mut users = vec![User::Unused; definitions.len()];
     for (bi, block) in func.blocks.iter().enumerate() {
         for phi in &block.phis {
@@ -73,8 +75,9 @@ pub(super) fn balance_private_bitwise_trees(func: &mut MFunction) {
                 users[source.0 as usize].record(None);
             }
         }
-        for inst in &block.insts {
+        for (index, inst) in block.insts.iter().enumerate() {
             if let Some(dst) = inst.def() {
+                available[dst.0 as usize] = Some((bi, index + 1));
                 // Only these facts participate in tree matching. Retaining
                 // every full instruction (and every user list) is unnecessary.
                 let definition = if let Some((op, lhs, rhs)) = operands(inst) {
@@ -93,6 +96,13 @@ pub(super) fn balance_private_bitwise_trees(func: &mut MFunction) {
     }
     for (bi, block) in func.blocks.iter_mut().enumerate() {
         let original = std::mem::take(&mut block.insts);
+        let mut scheduled = Vec::new();
+        let ready = |value: VReg| {
+            let position = available[value.0 as usize]
+                .filter(|&(owner, _)| owner == bi)
+                .map_or(0, |(_, position)| position);
+            (value, position)
+        };
         for inst in original {
             let Some((op, lhs, rhs)) = operands(&inst) else {
                 block.push(inst);
@@ -124,11 +134,11 @@ pub(super) fn balance_private_bitwise_trees(func: &mut MFunction) {
                         continue;
                     }
                     if let Definition::Not(src) = *definition {
-                        negative.push(src);
+                        negative.push(ready(src));
                         continue;
                     }
                 }
-                positive.push(value);
+                positive.push(ready(value));
             }
             let count = positive.len() + negative.len();
             if count < 6
@@ -139,23 +149,27 @@ pub(super) fn balance_private_bitwise_trees(func: &mut MFunction) {
             }
             let vregs = &mut func.vregs;
             let descs = &mut func.spill_descs;
-            let positive = (!positive.is_empty()).then(|| tree(block, op, &positive, vregs, descs));
+            let positive =
+                (!positive.is_empty()).then(|| tree(op, &positive, vregs, descs, &mut scheduled));
             let result = if negative.is_empty() {
-                positive.unwrap()
+                positive.unwrap().0
             } else {
-                let negative = tree(
-                    block,
+                let (negative, position) = tree(
                     Operation { and: !op.and, ..op },
                     &negative,
                     vregs,
                     descs,
+                    &mut scheduled,
                 );
                 let inverted = alloc_transient_vreg(vregs, descs);
-                block.push(MInst::BitNot {
-                    dst: inverted,
-                    src: negative,
-                });
-                if let Some(positive) = positive {
+                scheduled.push((
+                    position,
+                    MInst::BitNot {
+                        dst: inverted,
+                        src: negative,
+                    },
+                ));
+                if let Some((positive, _)) = positive {
                     block.push(instruction(op, dst, inverted, positive));
                     continue;
                 }
@@ -166,6 +180,22 @@ pub(super) fn balance_private_bitwise_trees(func: &mut MFunction) {
             } else {
                 MInst::Mov { dst, src: result }
             });
+        }
+        if !scheduled.is_empty() {
+            // Rebuilding at the root would keep every leaf live until then.
+            // Reduce each subtree as soon as its captured SSA operands exist;
+            // only pure arithmetic moves, never loads or observable effects.
+            // Stable order also keeps same-position children before parents.
+            scheduled.sort_by_key(|&(position, _)| position);
+            let mut scheduled = scheduled.into_iter().peekable();
+            let rewritten = std::mem::take(&mut block.insts);
+            for (position, inst) in rewritten.into_iter().enumerate() {
+                while scheduled.peek().is_some_and(|&(at, _)| at == position) {
+                    block.push(scheduled.next().unwrap().1);
+                }
+                block.push(inst);
+            }
+            debug_assert!(scheduled.next().is_none());
         }
     }
 }
@@ -647,6 +677,139 @@ mod tests {
             JitCode::new(&code.code).unwrap(),
             code.required_state_size.max(48) as usize,
         )
+    }
+
+    #[test]
+    fn balanced_reductions_consume_interleaved_inputs_without_retaining_all_leaves() {
+        fn peak_live(block: &MBlock) -> usize {
+            let mut live = HashSet::default();
+            let mut peak = 0;
+            for inst in block.insts.iter().rev() {
+                if let Some(dst) = inst.def() {
+                    live.remove(&dst);
+                }
+                live.extend(inst.uses());
+                peak = peak.max(live.len());
+            }
+            peak
+        }
+        fn depth(block: &MBlock, result: VReg) -> usize {
+            let mut depths = HashMap::default();
+            for inst in &block.insts {
+                if let Some(dst) = inst.def() {
+                    let inputs = inst.uses().iter().map(|v| depths[v]).max().unwrap_or(0);
+                    let reduction = matches!(
+                        inst,
+                        MInst::And { .. }
+                            | MInst::And32 { .. }
+                            | MInst::Or { .. }
+                            | MInst::Or32 { .. }
+                    );
+                    depths.insert(dst, inputs + usize::from(reduction));
+                }
+            }
+            depths[&result]
+        }
+        for count in [64usize, 257] {
+            for is_and in [false, true] {
+                for word32 in [false, true] {
+                    for reversed in [false, true] {
+                        let mut vregs = VRegAllocator::new();
+                        for _ in 0..count * 2 + 2 {
+                            vregs.alloc();
+                        }
+                        let mut function =
+                            MFunction::new(vregs, vec![SpillDesc::transient(); count * 2 + 2]);
+                        let mut block = MBlock::new(BlockId(0));
+                        block.push(MInst::LoadImm {
+                            dst: VReg(0),
+                            value: 0,
+                        });
+                        let mut result = VReg(1);
+                        for index in 0..count {
+                            let input = VReg(index as u32 + 1);
+                            block.push(MInst::Load {
+                                dst: input,
+                                base: BaseReg::SimState,
+                                offset: index as i32 * 8,
+                                size: OpSize::S64,
+                            });
+                            // Leaves are captured values: moving a load past
+                            // this overwrite would change the reduction.
+                            block.push(MInst::Store {
+                                base: BaseReg::SimState,
+                                offset: index as i32 * 8,
+                                src: VReg(0),
+                                size: OpSize::S64,
+                            });
+                            if index != 0 {
+                                let dst = VReg((count + index + 1) as u32);
+                                let (lhs, rhs) = if reversed {
+                                    (input, result)
+                                } else {
+                                    (result, input)
+                                };
+                                block.push(match (is_and, word32) {
+                                    (false, false) => MInst::Or { dst, lhs, rhs },
+                                    (false, true) => MInst::Or32 { dst, lhs, rhs },
+                                    (true, false) => MInst::And { dst, lhs, rhs },
+                                    (true, true) => MInst::And32 { dst, lhs, rhs },
+                                });
+                                result = dst;
+                            }
+                        }
+                        block.push(MInst::Store {
+                            base: BaseReg::SimState,
+                            offset: count as i32 * 8,
+                            src: result,
+                            size: OpSize::S64,
+                        });
+                        block.push(MInst::Return);
+                        function.push_block(block);
+                        let mut optimized = function.clone();
+                        balance_private_bitwise_trees(&mut optimized);
+                        copy_propagate(&mut optimized);
+                        dead_code_eliminate(&mut optimized);
+                        optimized.verify();
+                        let bound = count.next_power_of_two().ilog2() as usize;
+                        assert!(peak_live(&optimized.blocks[0]) <= bound + 3);
+                        let MInst::Store { src, .. } =
+                            optimized.blocks[0].insts[optimized.blocks[0].insts.len() - 2]
+                        else {
+                            panic!("reduction output store");
+                        };
+                        assert_eq!(depth(&function.blocks[0], result), count - 1);
+                        assert!(depth(&optimized.blocks[0], src) <= bound);
+                        let (before, before_size) = compile(function);
+                        let (after, after_size) = compile(optimized);
+                        for bit in [0, 31, 32, 63] {
+                            let mut left = vec![0xa5; before_size.max(after_size)];
+                            let value = if is_and { !(1u64 << bit) } else { 1u64 << bit };
+                            for index in 0..count {
+                                let lane = if index == count / 2 {
+                                    value
+                                } else if is_and {
+                                    u64::MAX
+                                } else {
+                                    0
+                                };
+                                left[index * 8..index * 8 + 8].copy_from_slice(&lane.to_le_bytes());
+                            }
+                            let mut right = left.clone();
+                            assert_eq!(unsafe { before.call(&mut left) }, 0);
+                            assert_eq!(unsafe { after.call(&mut right) }, 0);
+                            assert_eq!(&left[..count * 8 + 8], &right[..count * 8 + 8]);
+                            let expected = if word32 {
+                                value & u64::from(u32::MAX)
+                            } else {
+                                value
+                            };
+                            assert_eq!(&right[count * 8..count * 8 + 8], &expected.to_le_bytes());
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
