@@ -1013,7 +1013,7 @@ checksum = "af491d569909a7e4dee0ad7db7f5341fef5c614d5b8ec8cf765732aba3cff681"
 dependencies = [
  "serde",
  "termcolor",
- "unicode-width 0.2.2",
+ "unicode-width 0.1.14",
 ]
 
 [[package]]
@@ -1085,7 +1085,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1928,7 +1928,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2538,7 +2538,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3168,9 +3168,9 @@ dependencies = [
 
 [[package]]
 name = "parol"
-version = "5.0.3"
+version = "5.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10318214b9d6d20d950f11e6d04b91dcba3398dbcb2f32b0ba9b90bbf57dd8cd"
+checksum = "b3edd6f95b950705ebfe70bb7a01b9c9fdbe7fb3b6f1f4958b1592018a11d1c1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3213,9 +3213,9 @@ checksum = "54ec451836679aaa55158b454b441e21446a111ea34aa1917eba29245bafe4b8"
 
 [[package]]
 name = "parol_runtime"
-version = "5.0.2"
+version = "5.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b36bcb5c5908d5d063aa32c5c34dc75d23b0bd8839a1ff2ce0dfe8688bd9c76"
+checksum = "274a0e53aefcaa7f5e3152b007bdd269379903f514fd69c6387410265f07e129"
 dependencies = [
  "anyhow",
  "codespan-reporting",
@@ -3749,7 +3749,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4110,15 +4110,15 @@ dependencies = [
 
 [[package]]
 name = "syntree"
-version = "0.18.0"
+version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00c99c9cda412afe293a6b962af651b4594161ba88c1affe7ef66459ea040a06"
+checksum = "41a357e911815897d5b73a55402c5252d51b0ae00d8a4f6100cf366fb76979bd"
 
 [[package]]
 name = "syntree_layout"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24d027955f5f14d526450b6a11ef5aa962761e924dcd092298dd0d1466570565"
+checksum = "f1cd199782ff53ff3f11ecbeff9d0d586800598354e3352d325261ade3c903bb"
 dependencies = [
  "anyhow",
  "syntree",
@@ -4148,7 +4148,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5341,7 +5341,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
