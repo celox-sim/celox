@@ -340,7 +340,14 @@ impl HotspotRuntime {
                             self.stats.compiled_entries += 1;
                             entry.code = Some(code);
                         }
-                        Ok(_) => {
+                        Ok(code) => {
+                            tracing::debug!(key = ?completed.key,
+                                required_state_bytes = code.native().required_state_size,
+                                available_state_bytes = memory.len() * 8,
+                                code_bytes = code.native().code_size,
+                                published_bytes = self.stats.code_bytes,
+                                code_budget_bytes = MAX_CODE_BYTES,
+                                "hotspot publication exceeded its memory or code budget");
                             entry.unavailable = true;
                             self.stats.rejected_entries += 1;
                         }
@@ -426,6 +433,13 @@ impl HotspotRuntime {
             MAX_INSTRUCTIONS
         };
         if *instructions > limit || unsupported {
+            tracing::debug!(
+                ?key,
+                instructions = *instructions,
+                limit,
+                unsupported,
+                "hotspot group deferred to interpreter or block regions"
+            );
             *units = None;
             self.entries
                 .get_mut(&key)
@@ -583,48 +597,85 @@ module Top;
   always @(posedge gclk) seen = seen + 8'd1;
 endmodule
 "#;
-        let builder = || {
-            crate::Simulation::from_sv_sources(
-                vec![(SOURCE, std::path::Path::new("hotspot-scheduler.sv"))],
-                "Top",
-            )
-            .four_state(true)
-            .settle_partition(crate::SettlePartition::Always)
-        };
-        let mut mixed = builder().hotspot_jit(true).build_tiered().unwrap();
-        let mut reference = builder().build_interpreter().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(15);
-        let mut time = 0;
-        loop {
-            time += 43;
-            mixed.run_until(time).unwrap();
-            reference.run_until(time).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        for recording in [false, true] {
+            let mixed_vcd = directory.path().join("mixed.vcd");
+            let reference_vcd = directory.path().join("reference.vcd");
+            let builder = || {
+                crate::Simulation::from_sv_sources(
+                    vec![(SOURCE, std::path::Path::new("hotspot-scheduler.sv"))],
+                    "Top",
+                )
+                .four_state(true)
+                .settle_partition(crate::SettlePartition::Always)
+            };
+            let mixed_builder = if recording {
+                builder().vcd(&mixed_vcd)
+            } else {
+                builder()
+            };
+            let reference_builder = if recording {
+                builder().vcd(&reference_vcd)
+            } else {
+                builder()
+            };
+            let mut mixed = mixed_builder.hotspot_jit(true).build_tiered().unwrap();
+            let mut reference = reference_builder.build_interpreter().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(15);
+            let mut time = 0;
+            loop {
+                time += 43;
+                mixed.run_until(time).unwrap();
+                reference.run_until(time).unwrap();
+                for name in ["q", "g", "seen"] {
+                    assert_eq!(
+                        mixed.get_four_state(mixed.signal(name)),
+                        reference.get_four_state(reference.signal(name)),
+                        "{name} at {time}"
+                    );
+                }
+                let stats = mixed.hotspot_stats().unwrap();
+                assert_eq!(stats.failed_entries, 0, "{stats:?}");
+                if mixed.scheduler_stats().compiled_slots >= 256 {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "no scheduler publication: {stats:?}"
+                );
+                std::thread::yield_now();
+            }
+            // Restore a state captured after actual native scheduler execution into
+            // a fresh mixed executor. The checkpoint contains no JIT code or frames.
+            let checkpoint = mixed.save_state().unwrap();
+            let mut resumed = builder()
+                .hotspot_jit(true)
+                .defer_initialization(true)
+                .build_tiered()
+                .unwrap();
+            resumed.load_state(&checkpoint).unwrap();
+            assert_eq!(resumed.time(), mixed.time());
+            // Cancelling future work must not invalidate already linked code.
+            mixed.simulator.backend.cancel_background_compilation();
+            mixed.run_until(time + 10_000).unwrap();
+            reference.run_until(time + 10_000).unwrap();
+            resumed.run_until(time + 10_000).unwrap();
             for name in ["q", "g", "seen"] {
+                let expected = reference.get_four_state(reference.signal(name));
+                assert_eq!(mixed.get_four_state(mixed.signal(name)), expected);
+                assert_eq!(resumed.get_four_state(resumed.signal(name)), expected);
+            }
+            if recording {
+                mixed.flush_vcd().unwrap();
+                reference.flush_vcd().unwrap();
+                let mixed = std::fs::read_to_string(&mixed_vcd).unwrap();
+                let reference = std::fs::read_to_string(&reference_vcd).unwrap();
                 assert_eq!(
-                    mixed.get_four_state(mixed.signal(name)),
-                    reference.get_four_state(reference.signal(name)),
-                    "{name} at {time}"
+                    mixed.split_once("$enddefinitions").unwrap().1,
+                    reference.split_once("$enddefinitions").unwrap().1
                 );
             }
-            let stats = mixed.simulator.backend.hotspot_stats().unwrap();
-            assert_eq!(stats.failed_entries, 0, "{stats:?}");
-            if mixed.scheduler_stats().compiled_slots >= 256 {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "no scheduler publication: {stats:?}"
-            );
-            std::thread::yield_now();
         }
-        // Cancelling future work must not invalidate already linked code.
-        mixed.simulator.backend.cancel_background_compilation();
-        mixed.run_until(time + 10_000).unwrap();
-        reference.run_until(time + 10_000).unwrap();
-        assert_eq!(
-            mixed.get_four_state(mixed.signal("g")),
-            reference.get_four_state(reference.signal("g"))
-        );
     }
 
     #[test]
