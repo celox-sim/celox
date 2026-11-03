@@ -1774,6 +1774,60 @@ impl Plan {
                 }
             }
         }
+        // A clock need not have an upstream event domain: `clk & enable`
+        // still clocks RTL when nothing waits on `clk` itself. Such clocks
+        // (including latch-based gates) are observed after the same settles
+        // as in the reference loop. Topology only supplies their downstream
+        // FF domains; it must not be an admission requirement for the root.
+        if !effects {
+            let candidates: Vec<_> = rtl_written
+                .difference(&derived)
+                .filter(|index| !edged.contains(index) && !stable_host_events.contains(index))
+                .copied()
+                .filter(|&index| {
+                    let signal = storage(plan.events[index].signal);
+                    comb_stores.contains(&signal) && !scheduled_stores.contains(&signal)
+                })
+                .collect();
+            if !candidates.is_empty() {
+                // A blocking FF write may move this clock before NBA
+                // publication, including several edges in one domain. Until
+                // those evaluations have an ordered queue, require the cone
+                // to be independent of all such writes, even ones the normal
+                // Active-observer pruning would otherwise discard.
+                let active_stores: HashSet<_> = model
+                    .active_commits
+                    .iter()
+                    .filter_map(|event| sir.eval_only_ffs.get(event))
+                    .flatten()
+                    .flat_map(instructions)
+                    .filter_map(|inst| match inst {
+                        SIRInstruction::Store(target, ..)
+                        | SIRInstruction::Commit(_, target, ..)
+                            if target.region == STABLE_REGION =>
+                        {
+                            Some(storage(target.absolute_addr()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let mut pending: Vec<_> = candidates
+                    .into_iter()
+                    .filter(|&index| {
+                        active_stores.is_empty()
+                            || comb_slicer
+                                .input_signals([plan.events[index].signal])
+                                .iter()
+                                .all(|input| !active_stores.contains(&storage(*input)))
+                    })
+                    .collect();
+                while let Some(event) = pending.pop() {
+                    if !edged.contains(&event) && derived.insert(event) {
+                        pending.extend(derived_from(event));
+                    }
+                }
+            }
+        }
         let unhandled_rtl_events: Vec<_> = rtl_written
             .difference(&derived)
             .filter(|event| !stable_host_events.contains(event))
@@ -6353,5 +6407,100 @@ impl Generator<'_> {
             self.store_at(self.slots.baseline[process], term.value_offset, width, next);
         }
         self.binary(1, occurred, BinaryOp::And, waiting)
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod orphan_clock_tests {
+    use crate::{KernelSchedule, SchedulerMode, SimBackend, Simulation};
+
+    fn check<B: SimBackend>(mut sim: Simulation<B>, stops: &[u64], expected: &[(&str, u8)]) {
+        for &stop in stops {
+            sim.run_until(stop).unwrap();
+        }
+        assert!(sim.is_finished());
+        let stats = sim.scheduler_stats();
+        assert!(stats.compiled_slots > 0, "{stats:?}");
+        assert!(stats.checked_steps > 0, "{stats:?}");
+        assert!(stats.unchecked.is_none(), "{stats:?}");
+        assert!(
+            stats.kernels.iter().all(|k| *k == KernelSchedule::Compiled),
+            "{stats:?}"
+        );
+        for &(name, value) in expected {
+            let signal = sim.signal(name);
+            assert_eq!(sim.get(signal), value.into(), "{name}");
+        }
+    }
+
+    fn check_backends(source: &str, four_state: bool, stops: &[u64], expected: &[(&str, u8)]) {
+        let build = || {
+            Simulation::from_sv_sources(
+                vec![(source, std::path::Path::new("orphan-clock.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+            .scheduler_mode(SchedulerMode::DifferentialRuns)
+        };
+        check(build().build_native().unwrap(), stops, expected);
+        #[cfg(feature = "cranelift")]
+        check(build().build_cranelift().unwrap(), stops, expected);
+        #[cfg(feature = "wasm-runtime")]
+        check(build().build_wasm().unwrap(), stops, expected);
+    }
+
+    // An unrelated source-clock FF must not decide whether the entire design
+    // can run compiled. Include a concurrent independent clock and a divided
+    // domain downstream of the clock whose source has no event of its own.
+    #[test]
+    fn combinational_clocks_do_not_require_source_domains() {
+        for definition in [
+            "assign gclk = clk & en;",
+            "assign gclk = en ? clk : 1'b0;",
+            "assign gclk = ~clk;",
+            "always_comb gclk = clk & en;",
+            "logic held=0; always_latch if (!clk) held=en; assign gclk=clk & held;",
+            "wire gate=clk & en; logic half=0; always_ff @(posedge gate) half<=~half; assign gclk=half;",
+        ] {
+            for source_domain in ["", "always_ff @(posedge clk) dummy<=~dummy;"] {
+                let source = format!(
+                    r#"`timescale 1ns/1ns
+module Top;
+ logic clk=0; logic en=0; logic gclk;
+ logic other_clk=0; logic [7:0] other=0; logic dummy=0;
+ logic [7:0] q=0;
+ always #5 clk=~clk;
+ always #7 other_clk=~other_clk;
+ initial forever #17 en=~en;
+ always_ff @(posedge other_clk) other<=other+1;
+ {source_domain}
+ {definition}
+ always_ff @(posedge gclk) q<=q+1;
+ initial begin #400 $display("Q %d other %d dummy %d",q,other,dummy); $finish; end
+endmodule
+"#
+                );
+                for four_state in [false, true] {
+                    check_backends(&source, four_state, &[100, 333, 500], &[]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn orphan_clock_edges_preserve_unknown_transitions() {
+        let source = r#"`timescale 1ns/1ns
+module Top;
+ logic clk=0; logic en=1; wire gclk=clk & en;
+ logic [7:0] p=0, n=0;
+ always_ff @(posedge gclk) p<=p+1;
+ always_ff @(negedge gclk) n<=n+1;
+ initial begin #5 clk=1'bx; #5 clk=1; #5 clk=1'bz; #5 clk=0; #5 clk=1; #5 clk=0; end
+ initial begin #35 en=0; #5 $display("p %d n %d",p,n); $finish; end
+endmodule
+"#;
+        // IEEE 1800-2023 Table 9-2: three rises and three falls in the
+        // sequence, plus the initial settle's X-to-0 falling edge.
+        check_backends(source, true, &[10, 25, 50], &[("p", 3), ("n", 4)]);
     }
 }
