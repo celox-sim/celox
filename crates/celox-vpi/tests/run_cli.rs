@@ -384,7 +384,7 @@ fn tiered_report_records_when_each_tier_ran() {
         }";
     let output = run(
         &[("top.veryl", source)],
-        &["--report", "--backend", "tiered"],
+        &["--report", "--backend", "tiered", "--jit", "whole-image"],
     );
     assert!(output.status.success(), "{output:?}");
     let report = String::from_utf8(output.stdout).unwrap();
@@ -1125,7 +1125,7 @@ fn sv_vcd_preserves_compiled_slots_and_matches_interpreter() {
     endmodule"#;
     let dir = tempfile::tempdir().unwrap();
     let mut reference = None;
-    for backend in ["interpreter", "native"] {
+    for backend in ["interpreter", "native", "tiered"] {
         let path = dir.path().join(format!("{backend}.vcd"));
         let output = run(
             &[("top.sv", source)],
@@ -1237,4 +1237,89 @@ fn vcd_is_flushed_when_an_sv_run_fails_or_hits_the_step_limit() {
             "{text}"
         );
     }
+}
+
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[test]
+fn jit_strategy_defaults_and_overrides_reach_both_frontends() {
+    for (name, source) in [
+        (
+            "top.veryl",
+            "#[test(Top)] module Top { initial { $finish(); } }",
+        ),
+        #[cfg(feature = "systemverilog")]
+        ("top.sv", "module Top; initial $finish; endmodule"),
+    ] {
+        for (args, expected) in [
+            (vec![], "hotspot"),
+            (vec!["--jit", "auto"], "hotspot"),
+            (vec!["--jit", "hotspot"], "hotspot"),
+            (vec!["--hotspot-jit"], "hotspot"),
+            (vec!["--jit", "whole-image"], "whole-image"),
+            (vec!["--threads", "2"], "whole-image"),
+            (vec!["--backend", "native"], "none"),
+            (vec!["--backend", "interpreter"], "none"),
+        ] {
+            let mut args = args;
+            args.push("--report");
+            let output = run(&[(name, source)], &args);
+            assert!(output.status.success(), "{name} {args:?}: {output:?}");
+            let report = String::from_utf8(output.stdout).unwrap();
+            assert!(
+                report.contains(&format!("CELOX_JIT_CONFIG mode={expected} ")),
+                "{report}"
+            );
+            assert_eq!(
+                report.contains("CELOX_HOTSPOT_STATS "),
+                expected == "hotspot",
+                "{report}"
+            );
+        }
+        for args in [
+            vec!["--jit", "hotspot", "--threads", "2"],
+            vec!["--jit", "hotspot", "--backend", "native"],
+            vec!["--hotspot-jit", "--jit", "whole-image"],
+            vec!["--jit", "whole-image", "--backend", "interpreter"],
+        ] {
+            let output = run(&[(name, source)], &args);
+            assert_eq!(output.status.code(), Some(2), "{name} {args:?}: {output:?}");
+        }
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[test]
+fn require_compiled_accepts_hotspot_execution_and_rejects_cold_runs() {
+    let args = [
+        "--report",
+        "--require-compiled",
+        "--jit",
+        "hotspot",
+        "--unlimited",
+    ];
+    let cold = run(
+        &[(
+            "top.veryl",
+            "#[test(Top)] module Top { initial { $finish(); } }",
+        )],
+        &args,
+    );
+    assert!(!cold.status.success(), "{cold:?}");
+    assert!(
+        String::from_utf8_lossy(&cold.stderr).contains("did not exercise generated code"),
+        "{cold:?}"
+    );
+    let source = "module Counter(clk: input clock, q: output logic<32>) { always_ff { q += 1; } }
+        #[test(Top)] module Top {
+            inst clk: $tb::clock_gen;
+            var q: logic<32>;
+            inst counter: Counter(clk, q);
+            initial { clk.next(200000); $assert(q == 200000); $finish(); }
+        }";
+    let hot = run(&[("top.veryl", source)], &args);
+    assert!(hot.status.success(), "{hot:?}");
+    assert!(
+        String::from_utf8_lossy(&hot.stdout).contains("CELOX_HOTSPOT_STATS "),
+        "{hot:?}"
+    );
 }

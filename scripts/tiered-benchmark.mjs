@@ -26,10 +26,42 @@ export function parseTiered(log, top, runner) {
   if (lines.length !== 1) throw new Error('Missing or ambiguous tiered statistics');
   const fields = Object.fromEntries(lines[0].split(' ').slice(1).map(v => v.split('=')));
   if (fields.test !== top) throw new Error('Tiered statistics test mismatch');
-  const names = runner === 'veryl-tiered' ? ['compiled_dispatches', 'fallback_dispatches'] : ['compiled_evaluations', 'interpreted_evaluations'];
+  if (runner === 'celox-tiered') {
+    const hotspot = log.split(/\r?\n/).filter(l => l.startsWith('CELOX_HOTSPOT_STATS '));
+    if (hotspot.length > 1) throw new Error('Ambiguous hotspot statistics');
+    if (hotspot.length) {
+      for (const field of hotspot[0].split(' ').slice(1)) {
+        const [key, value] = field.split('=');
+        if (`hotspot_${key}` in fields) throw new Error('Duplicate hotspot field');
+        fields[`hotspot_${key}`] = value;
+      }
+    }
+  }
+  // Flat names retain the hotspot evidence in saved reports and allow the
+  // publication validators to revalidate it without inventing a promotion.
+  const hotspot = fields.hotspot_test !== undefined;
+  if (hotspot) {
+    const names = ['interpreted_calls', 'compiled_calls', 'compiled_block_calls',
+      'compiled_entries', 'rejected_entries', 'failed_entries', 'code_bytes',
+      'compile_ns', 'frame_bytes_transferred'];
+    if (runner !== 'celox-tiered' || fields.hotspot_test !== top ||
+        fields.tier !== 'interpreter' || fields.promotion !== 'disabled' ||
+        fields.compiled_evaluations !== '0' ||
+        !/^\d+$/.test(fields.interpreted_evaluations ?? '') ||
+        !Number.isSafeInteger(Number(fields.interpreted_evaluations)) ||
+        !names.every(n => /^\d+$/.test(fields[`hotspot_${n}`] ?? '') &&
+          Number.isSafeInteger(Number(fields[`hotspot_${n}`]))) ||
+        Number(fields.hotspot_failed_entries) !== 0 ||
+        (Number(fields.hotspot_compiled_calls) + Number(fields.hotspot_compiled_block_calls) > 0 &&
+          (Number(fields.hotspot_compiled_entries) === 0 || Number(fields.hotspot_code_bytes) === 0))) {
+      throw new Error('Invalid or failed hotspot execution');
+    }
+  }
+  const names = hotspot ? ['hotspot_compiled_calls', 'hotspot_compiled_block_calls', 'hotspot_interpreted_calls']
+    : runner === 'veryl-tiered' ? ['compiled_dispatches', 'fallback_dispatches'] : ['compiled_evaluations', 'interpreted_evaluations'];
   const counts = names.map(n => /^\d+$/.test(fields[n] ?? '') ? Number(fields[n]) : NaN);
-  if (!counts.every(n => Number.isSafeInteger(n) && n >= 0) || counts[0] + counts[1] === 0 ||
-      (runner === 'celox-tiered' && !['pending', 'promoted'].includes(fields.promotion))) {
+  if (!counts.every(n => Number.isSafeInteger(n) && n >= 0) || counts.every(n => n === 0) ||
+      (runner === 'celox-tiered' && !hotspot && !['pending', 'promoted'].includes(fields.promotion))) {
     throw new Error('Invalid or failed tiered execution');
   }
   if (runner === 'veryl-tiered' && !log.split(/\r?\n/).includes(`VERYL_TEST_CONFIG test=${top} backend=cc aot_c_async=true compile_only=false`)) {
