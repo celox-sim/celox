@@ -28,7 +28,9 @@ pub(crate) const SCRATCH_BYTES: usize = 1024 * 1024;
 const MAX_INSTRUCTIONS: usize = 32_768;
 const MAX_LARGE_INSTRUCTIONS: usize = 1_048_576;
 const LARGE_HOT_COST: Duration = Duration::from_millis(500);
-const MAX_CODE_BYTES: usize = 16 * 1024 * 1024;
+// Large four-state RTL needs room for both Comb and its compiled scheduler
+// (including outlined kernels), in addition to startup block regions.
+const MAX_CODE_BYTES: usize = 64 * 1024 * 1024;
 const HOT_COST: Duration = Duration::from_millis(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
