@@ -28,6 +28,7 @@ mod exclusive_loop;
 mod gvn;
 mod gvn_liveness;
 mod immediates;
+mod increment_change;
 mod known_bits;
 mod loop_guard;
 mod masks;
