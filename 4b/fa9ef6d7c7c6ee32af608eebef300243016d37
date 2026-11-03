@@ -1,1 +1,1 @@
-Fix CI items_after_test_module in #3071 by moving the SystemVerilog hotspot reporting helper before the test module; validate test targets with Clippy.
+Fix review r4460383786: preserve wide clock and reset masks in compiled testbench handoff; add boundary regressions.
