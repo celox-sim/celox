@@ -194,7 +194,7 @@ pub(super) fn run<B: SimBackend>(
         {
             sim.tb_counters.0 += 1;
         }
-        if let Err(e) = sim.backend.run_process(entry) {
+        if let Err(e) = sim.run_process_checked(entry) {
             // A fatal assertion in a domain the unit ran ends it with an
             // error; its message is in the runtime events.
             let drained = drain(sim, ctx);
