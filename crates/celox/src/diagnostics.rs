@@ -6,6 +6,9 @@ pub struct RuntimeDiagnostics {
     pub tick_timing_every: Option<u64>,
     pub testbench_progress_every: Option<u64>,
     pub address_map_filter: Option<String>,
+    /// A file to which the SystemVerilog frontend appends the recursive call
+    /// cycles of each module it lowers (`CELOX_SV_RECURSION_REPORT`).
+    pub sv_recursion_report: Option<std::path::PathBuf>,
 }
 
 #[cfg(feature = "host-runtime")]
@@ -87,6 +90,9 @@ mod host {
                 testbench_progress_every: unsigned("CELOX_TESTBENCH_PROGRESS"),
                 address_map_filter: enabled("CELOX_ADDR_MAP_DUMP")
                     .then(|| string("CELOX_ADDR_MAP_FILTER").unwrap_or_default()),
+                sv_recursion_report: variables
+                    .get(OsStr::new("CELOX_SV_RECURSION_REPORT"))
+                    .map(std::path::PathBuf::from),
             };
             let sir = crate::optimizer::SirDiagnostics {
                 pass_timing,
@@ -175,8 +181,13 @@ mod host {
                 ("CELOX_BRANCHIFY_TRACE_REG", "42"),
                 ("CELOX_TICK_TIMING", "100"),
                 ("CELOX_REGALLOC_VERIFY", "1"),
+                ("CELOX_SV_RECURSION_REPORT", "/tmp/recursion.txt"),
             ]);
             assert!(options.sir.pass_timing);
+            assert_eq!(
+                options.runtime.sv_recursion_report.as_deref(),
+                Some(std::path::Path::new("/tmp/recursion.txt"))
+            );
             assert_eq!(options.sir.branchify_trace_reg, Some(42));
             assert_eq!(options.runtime.tick_timing_every, Some(100));
             #[cfg(any(

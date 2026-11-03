@@ -77,3 +77,9 @@ sv_backends! {
         @case "always_comb::settles_feedback_through_chained_qspi_four_state";
     }
 }
+
+sv_backends! {
+    fn large_sensitivity_list_preserves_initial_wait_and_four_state_changes(sim) {
+        @case "always_comb::large_sensitivity_list_preserves_initial_wait_and_four_state_changes";
+    }
+}

@@ -269,14 +269,6 @@ fn memoized_types_follow_lexical_binding_snapshots() {
         Some(original)
     );
     let outer = dims.clone();
-    let mut selected_element = outer.clone();
-    selected_element.element_select = Some((id, "temporary_element".into()));
-    assert!(
-        session
-            .expression_types
-            .get(&tree, &session, id, tree.declarations(), &selected_element)
-            .is_none()
-    );
     let mut shape = dims.get("a").unwrap().clone();
     shape.packed[0].left = ConstExpr::Literal("15".into());
     shape.packed[0].width = ConstExpr::Literal("16".into());
@@ -546,4 +538,30 @@ fn locator_selection_keeps_the_original_enum_declaration() {
         packed.element,
         PackedElement::Enum { array: false, .. }
     ));
+}
+
+#[test]
+fn conditional_handles_take_the_class_both_arms_assign_to() {
+    // IEEE 1800-2023 11.4.11: matching arms give their type and `null` takes
+    // the other arm's class; arms of different classes await the assignment
+    // relation.
+    for (decl, expr, expected) in [
+        ("class C; endclass bit s; C a, b;", "s ? a : b", "C"),
+        ("class C; endclass bit s; C a;", "s ? a : null", "C"),
+        ("class C; endclass bit s; C a;", "s ? null : a", "C"),
+        ("bit s; int a, b;", "s ? a : b", "int"),
+    ] {
+        let (session, ty) = query(decl, expr);
+        match expected {
+            "int" => assert!(
+                matches!(session.types.data(ty), TyData::Packed(_)),
+                "{expr}"
+            ),
+            class => assert_eq!(
+                class_name(&session.types, ty).as_deref(),
+                Some(class),
+                "{expr}"
+            ),
+        }
+    }
 }

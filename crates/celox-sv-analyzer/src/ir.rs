@@ -3,6 +3,12 @@
 use crate::{ast, symbol::ModuleId, typecheck};
 
 pub use crate::ast::warnings::AnalyzerWarning;
+
+/// The variable that the checks of the tags a written place's selection
+/// crosses read the place's value as: a system function output that is a
+/// class property or container element comes with checks over it, which
+/// its write applies to the value at the place it captured.
+pub const PLACE_VALUE: &str = "$object_value";
 pub use crate::procedural::{
     CaseKind, CaseLabel, EventEdge, LoopKind, ParamDirection, ProcessSite, SourceSpan, StmtBase,
     SystemTaskArg,
@@ -193,7 +199,10 @@ impl Module {
                 .chain(&process.sensitivity_body)
                 .cloned()
                 .collect();
-            let mut body = vec![Stmt::WaitImplicit(reads)];
+            let mut body = vec![Stmt::WaitImplicit {
+                reads,
+                always_comb: false,
+            }];
             body.extend(process.body);
             if defer_rearm {
                 body.push(Stmt::DeferActive);
@@ -2173,6 +2182,7 @@ impl From<ast::Assignment> for Assignment {
 impl From<ast::LValue> for LValue {
     fn from(value: ast::LValue) -> Self {
         match value {
+            ast::LValue::Object { .. } => ast::lowered_object(),
             ast::LValue::Ident(name) => LValue::Ident(name),
             ast::LValue::Select {
                 name,

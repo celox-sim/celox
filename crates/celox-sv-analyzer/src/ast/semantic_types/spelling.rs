@@ -72,13 +72,16 @@ impl TyTable {
 
 fn spell_decl(decl: &Decl) -> String {
     match decl {
-        Decl::Named(name) | Decl::Class(name) | Decl::Interface(name) => name.to_string(),
+        Decl::Named(name)
+        | Decl::Aggregate { name, .. }
+        | Decl::Class(name)
+        | Decl::Interface(name) => name.to_string(),
         Decl::AnonymousEnum(domain) => format!(
             "{{{}}}",
             domain
                 .members
                 .iter()
-                .map(|member| format!("{}={}", member.name, member.value))
+                .map(|member| format!("{}={}", member.name, domain.value_of(member)))
                 .collect::<Vec<_>>()
                 .join(",")
         ),

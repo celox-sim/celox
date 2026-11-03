@@ -43,6 +43,8 @@ fn resolve_forward_src_from_pred(
             SIRInstruction::Store(addr, SIROffset::Static(off), bits, src, _, _) => {
                 (*addr, *off, *bits, *src)
             }
+            // A call after the last store may have replaced its value.
+            _ if writes_opaquely(inst, &commit_src) => return None,
             _ => continue,
         };
 
@@ -81,6 +83,39 @@ fn resolve_forward_src_from_pred(
     }
 
     None
+}
+
+/// Whether `inst` may write `addr` other than through a Store or Commit: a
+/// call whose effects write it, or a native kernel.
+fn writes_opaquely(
+    inst: &SIRInstruction<RegionedAbsoluteAddr>,
+    addr: &RegionedAbsoluteAddr,
+) -> bool {
+    inst.opaque_written_objects()
+        .is_none_or(|mut objects| objects.any(|object| object == addr))
+}
+
+/// Whether `inst` may read or write `addr` other than through a Load, Store
+/// or Commit.
+fn accesses_opaquely(
+    inst: &SIRInstruction<RegionedAbsoluteAddr>,
+    addr: &RegionedAbsoluteAddr,
+) -> bool {
+    inst.opaque_accessed_objects()
+        .is_none_or(|mut objects| objects.any(|object| object == addr))
+}
+
+/// Mark every pending-write segment of `addr` in `bits`, for an access of
+/// the whole object.
+fn update_object_segments(
+    segments: &PendingSegments,
+    bits: &mut [u64],
+    addr: AbsoluteAddr,
+    set: bool,
+) {
+    if let Some((base, endpoints)) = segments.by_addr.get(&addr) {
+        update_segments(bits, *base..(*base + endpoints.len() - 1), set);
+    }
 }
 
 #[derive(Default)]
@@ -430,6 +465,26 @@ pub(crate) fn uninitialized_working_observations(
                     end,
                 );
             }
+            // A call may read any part of the WORKING objects its effects
+            // list; what it writes is not counted as defined.
+            if instruction.has_opaque_state_access() {
+                match instruction.state_reads() {
+                    StateAccess::Objects(objects) => {
+                        for object in objects {
+                            if object.region == WORKING_REGION {
+                                segments.record_observation(
+                                    &mut hazards,
+                                    &undefined,
+                                    object.absolute_addr(),
+                                    0,
+                                    usize::MAX,
+                                );
+                            }
+                        }
+                    }
+                    _ => segments.record_pending(&mut hazards, &undefined),
+                }
+            }
             let defined = match instruction {
                 SIRInstruction::Store(address, offset, width, ..)
                     if address.region == WORKING_REGION =>
@@ -586,6 +641,42 @@ pub(crate) fn direct_stable_store_hazards(
                         end,
                     );
                 }
+                _ if inst.has_opaque_state_access() => {
+                    // A call reads or writes any part of the objects its
+                    // effects list: a STABLE one is an observation, and a
+                    // staged one it writes stays pending until published.
+                    match (inst.state_reads(), inst.state_writes()) {
+                        (StateAccess::Objects(reads), StateAccess::Objects(writes)) => {
+                            for object in reads.iter().chain(writes) {
+                                if object.region == STABLE_REGION {
+                                    segments.record_observation(
+                                        &mut hazards,
+                                        &written,
+                                        object.absolute_addr(),
+                                        0,
+                                        usize::MAX,
+                                    );
+                                }
+                            }
+                            for object in writes {
+                                if matches!(object.region, WORKING_REGION | SPARSE_WORKING_REGION) {
+                                    update_object_segments(
+                                        &segments,
+                                        &mut written,
+                                        object.absolute_addr(),
+                                        true,
+                                    );
+                                }
+                            }
+                        }
+                        // Any state: every pending write is observed, and
+                        // none can be published early.
+                        _ => {
+                            segments.record_pending(&mut hazards, &written);
+                            written.fill(u64::MAX);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -693,6 +784,13 @@ pub(crate) fn inline_commit_forwarding_with_hazards(
                         | SIROffset::ElementRun { .. },
                         _,
                     ) if *addr == src_addr => {
+                        safe = false;
+                        break;
+                    }
+                    // A call reading or writing the staged object between
+                    // its stores and their publication sees or changes what
+                    // the redirected stores no longer stage.
+                    other if accesses_opaquely(other, &src_addr) => {
                         safe = false;
                         break;
                     }
@@ -912,6 +1010,11 @@ pub(crate) fn optimize_commit_sinking_with_hazards(
             if src_addr.region != WORKING_REGION
                 || dst_addr.region != STABLE_REGION
                 || hazards.overlaps(dst_addr.absolute_addr(), off, bits)
+                // The commit publishes what a call before it in the merge
+                // block wrote, not what the predecessors stored.
+                || merge_block.instructions[..idx]
+                    .iter()
+                    .any(|prior| writes_opaquely(prior, &src_addr))
             {
                 continue;
             }
@@ -1260,5 +1363,53 @@ mod tests {
             eu.blocks[&BlockId(1)].instructions.as_slice(),
             [SIRInstruction::Store(address, ..)] if address.region == WORKING_REGION
         ));
+    }
+
+    /// Whether inline forwarding still publishes the staged store directly
+    /// when a call between it and its publication reads `reads` and writes
+    /// `writes`.
+    fn forwards_across_call(
+        reads: Vec<RegionedAbsoluteAddr>,
+        writes: Vec<RegionedAbsoluteAddr>,
+    ) -> bool {
+        let mut eu = forwarding_eu(false);
+        eu.blocks.get_mut(&BlockId(0)).unwrap().instructions.insert(
+            1,
+            SIRInstruction::Call {
+                function: celox_sir::FunctionId(0),
+                frame: RegisterId(0),
+                args: Vec::new(),
+                outputs: Vec::new(),
+                dst: None,
+                effects: std::sync::Arc::new(celox_sir::CallEffects {
+                    reads,
+                    writes,
+                    ..Default::default()
+                }),
+            },
+        );
+        let hazards = direct_stable_store_hazards(&eu);
+        inline_commit_forwarding_with_hazards(&mut eu, &hazards);
+        !eu.blocks[&BlockId(0)]
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, SIRInstruction::Commit(..)))
+    }
+
+    #[test]
+    fn a_call_observing_or_replacing_staged_state_keeps_its_publication() {
+        let (stable, working) = (addr(STABLE_REGION), addr(WORKING_REGION));
+        // Reading the old STABLE value, or writing it, observes the early
+        // publication; reading or writing the staged value sees what the
+        // redirected store no longer stages.
+        assert!(!forwards_across_call(vec![stable], Vec::new()));
+        assert!(!forwards_across_call(Vec::new(), vec![stable]));
+        assert!(!forwards_across_call(vec![working], Vec::new()));
+        assert!(!forwards_across_call(Vec::new(), vec![working]));
+        let other = RegionedAbsoluteAddr {
+            var_id: VarId::from_raw(1),
+            ..stable
+        };
+        assert!(forwards_across_call(vec![other], vec![other]));
     }
 }

@@ -20,6 +20,10 @@ impl ExecutionUnitPass for PartialForwardPass {
         "partial_store_load_forward"
     }
 
+    fn handles_calls(&self) -> bool {
+        true
+    }
+
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
         let mut reg_counter = eu.register_map.keys().map(|r| r.0).max().unwrap_or(0);
 
@@ -141,6 +145,20 @@ fn partial_forward_block(
                 new_instructions.push(inst);
             }
             _ => {
+                // Any other write of a tracked object (a store with triggers
+                // or of packed elements, or a call writing it) makes its
+                // loaded base stale.
+                if let Some(write) = inst.memory_write() {
+                    var_states.remove(write.addr);
+                }
+                match inst.opaque_written_objects() {
+                    Some(objects) => {
+                        for object in objects {
+                            var_states.remove(object);
+                        }
+                    }
+                    None => var_states.clear(),
+                }
                 new_instructions.push(inst);
             }
         }

@@ -56,6 +56,33 @@ use crate::{
 type Unit = ExecutionUnit<RegionedAbsoluteAddr>;
 type Builder = SIRBuilder<RegionedAbsoluteAddr>;
 
+/// A compact native scheduler whose large bodies are separately compiled.
+/// Analyze the original units before outlining, so call opacity cannot change
+/// dirty tracking, finish handling, or event accounting.
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+pub(crate) fn hotspot_scheduler(program: &LaidOutProgram) -> Result<(Unit, Vec<Unit>), String> {
+    let schema = program
+        .runtime
+        .runtime_schema
+        .scheduler
+        .as_ref()
+        .ok_or("no scheduler schema")?;
+    schema.unit.ok_or("no scheduler unit")?;
+    let mut plan = Plan::new(program, &schema.slots, true)?;
+    if let Some(lazy) = &mut plan.lazy {
+        for domain in &mut lazy.domains {
+            if matches!(domain, DomainSettle::Fused(_)) {
+                *domain = DomainSettle::Settled;
+            }
+        }
+    }
+    let base = u32::try_from(program.runtime.runtime_schema.extern_functions.len())
+        .map_err(|_| "too many extern functions")?;
+    let mut callees = Vec::new();
+    let unit = plan.generate_with_outlines(program, &schema.slots, Some(&mut callees), base);
+    Ok((unit, callees))
+}
+
 /// The narrowest event mask: one 64-bit word, which every design with at
 /// most 64 events uses. A design with more uses as many words as its events
 /// need.
@@ -567,13 +594,17 @@ impl Plan {
             .copied()
             .chain(events.iter().map(|event| storage(event.signal)))
             .collect();
-        let wait_slicer =
-            (!model.waited.is_empty()).then(|| CombSlicer::new(&sir.eval_comb, shared.clone()));
-        let observed_cone = wait_slicer
+        // All dependency and settle slices inspect the same immutable units.
+        // Index their definitions and control dependencies only once per plan,
+        // and only if one of these consumers actually needs a slice.
+        let comb_slicer =
+            std::cell::LazyCell::new(|| CombSlicer::new(&sir.eval_comb, shared.clone()));
+        let wait_slicer = (!model.waited.is_empty()).then(|| &*comb_slicer);
+        let observed_inputs = wait_slicer
             .as_ref()
-            .map(|slicer| slicer.slice(model.waited.iter().copied()))
+            .map(|slicer| slicer.input_signals(model.waited.iter().copied()))
             .unwrap_or_default();
-        active_observers.extend(observed_cone.iter().flat_map(loads).map(storage));
+        active_observers.extend(observed_inputs.into_iter().map(storage));
         // A stateful combinational consumer can retain an intermediate
         // blocking result even when no waiter or clock reads it. Include all
         // combinational inputs so indirect cones are covered too. Missing
@@ -1001,27 +1032,44 @@ impl Plan {
         // combinational cones: writing an input of a waited
         // expression can wake its consumer after the settle, even when no
         // kernel stores the expression itself.
+        // Several process kernels commonly wait on the same clock or signal
+        // set. Their dependency cones are identical within this immutable
+        // plan; analyze each distinct set once without materializing an
+        // executable slice just to inspect its loads.
+        let mut wait_dependencies = HashMap::default();
         let dependencies: Vec<(HashSet<AbsoluteAddr>, HashSet<AbsoluteAddr>)> = kernels
             .iter()
             .map(|kernel| {
                 let Some(wait) = kernel.as_ref().and_then(|kernel| kernel.wait.as_ref()) else {
                     return (HashSet::default(), HashSet::default());
                 };
-                let signals = wait.terms.iter().map(|&(signal, _)| signal);
-                let cone = wait_slicer
-                    .as_ref()
-                    .map(|slicer| slicer.slice(signals.clone()))
-                    .unwrap_or_default();
-                let comb: HashSet<_> = cone
-                    .iter()
-                    .flat_map(loads)
-                    .map(storage)
-                    .filter(|input| !control_slots.contains(input))
-                    .collect();
-                let all = signals.map(storage).chain(comb.iter().copied()).collect();
-                (all, comb)
+                let mut signals: Vec<_> = wait.terms.iter().map(|&(signal, _)| signal).collect();
+                signals.sort_unstable();
+                signals.dedup();
+                wait_dependencies
+                    .entry(signals)
+                    .or_insert_with_key(|signals| {
+                        let inputs = wait_slicer
+                            .as_ref()
+                            .map(|slicer| slicer.input_signals(signals.iter().copied()))
+                            .unwrap_or_default();
+                        let comb: HashSet<_> = inputs
+                            .into_iter()
+                            .map(storage)
+                            .filter(|input| !control_slots.contains(input))
+                            .collect();
+                        let all: HashSet<_> = signals
+                            .iter()
+                            .copied()
+                            .map(storage)
+                            .chain(comb.iter().copied())
+                            .collect();
+                        (all, comb)
+                    })
+                    .clone()
             })
             .collect();
+        tracing::debug!(target: "celox::scheduler", kernels = kernels.len(), distinct_wait_sets = wait_dependencies.len(), "scheduler wait dependency slices");
         let mut remaining: HashSet<usize> = kernels
             .iter()
             .enumerate()
@@ -1164,7 +1212,7 @@ impl Plan {
                     if stateful.is_empty() && watched_comb.is_empty() {
                         return Some(Vec::new());
                     }
-                    let slicer = CombSlicer::new(&sir.eval_comb, shared.clone());
+                    let slicer = &*comb_slicer;
                     let targets = stateful
                         .iter()
                         .map(|target| target.absolute_addr())
@@ -1317,7 +1365,7 @@ impl Plan {
                                 .collect()
                         },
                     );
-                    let slicer = CombSlicer::new(&sir.eval_comb, shared.clone());
+                    let slicer = &*comb_slicer;
                     let inputs = sources
                         .iter()
                         .copied()
@@ -1710,12 +1758,24 @@ impl Plan {
     }
 
     fn generate(&self, program: &LaidOutProgram, slots: &SchedulerSlots<AbsoluteAddr>) -> Unit {
+        self.generate_with_outlines(program, slots, None, 0)
+    }
+
+    fn generate_with_outlines(
+        &self,
+        program: &LaidOutProgram,
+        slots: &SchedulerSlots<AbsoluteAddr>,
+        outlined: Option<&mut Vec<Unit>>,
+        outline_base: u32,
+    ) -> Unit {
         let schema = &program.runtime.runtime_schema;
         let edged = self.edged();
         let tracked = self.tracked();
         let mut b = Builder::new();
         let comb = b.new_block();
         let mut g = Generator {
+            outlined,
+            outline_base,
             b,
             slots,
             finish_sites: &self.finish_sites,
@@ -2316,7 +2376,15 @@ impl Plan {
                 false_block: (pick, Vec::new()),
             });
             g.b.switch_to_block(check);
-            g.check_waits(&checks);
+            if self.service_processes.contains(&index) {
+                g.check_waits(&checks);
+            } else {
+                g.check_waits_after_unit(
+                    &checks,
+                    &program.sir.processes[index],
+                    &schema.time_slots,
+                );
+            }
             g.b.seal_block(SIRTerminator::Jump(pick, Vec::new()));
         }
 
@@ -3136,6 +3204,9 @@ impl Plan {
     /// The tracked events whose levels moved to their active edge against
     /// `levels`, their baselines, as bits by event index.
     fn stable_edges(&self, g: &mut Generator<'_>, tracked: &[usize], levels: Levels) -> RegisterId {
+        if tracked.len() >= 4 {
+            return self.batched_stable_edges(g, tracked, levels);
+        }
         let mut edges = g.constant(0, self.event_bits);
         for (position, &index) in tracked.iter().enumerate() {
             let was = g.saved_level(levels, position);
@@ -3144,6 +3215,80 @@ impl Plan {
             let bit = g.event_bit(edge, index);
             edges = g.binary(self.event_bits, edges, BinaryOp::Or, bit);
         }
+        edges
+    }
+
+    /// Judge independent edges as bit planes, in chunks of at most one word.
+    /// Baselines use tracked positions; the result uses event indices, which
+    /// need not be contiguous. No level or event is published by this check.
+    fn batched_stable_edges(
+        &self,
+        g: &mut Generator<'_>,
+        tracked: &[usize],
+        levels: Levels,
+    ) -> RegisterId {
+        let zero = g.constant(0, 1);
+        let mut result = vec![zero; self.event_bits];
+        for (chunk, events) in tracked.chunks(64).enumerate() {
+            let width = events.len();
+            let mut values = Vec::with_capacity(width);
+            let mut unknowns = Vec::with_capacity(width);
+            let mut falling = 0u64;
+            for (bit, &index) in events.iter().enumerate() {
+                let event = &self.events[index];
+                let level = g.level(event);
+                let (value, unknown) = g.level_planes(level);
+                values.push(value);
+                if let Some(unknown) = unknown {
+                    unknowns.push(unknown);
+                }
+                if event.active == 0 {
+                    falling |= 1u64 << bit;
+                }
+            }
+            let pack = |g: &mut Generator<'_>, mut bits: Vec<RegisterId>| {
+                bits.reverse();
+                let result = g.b.alloc_bit(width, false);
+                g.b.emit(SIRInstruction::Concat(result, bits));
+                result
+            };
+            let slice = |g: &mut Generator<'_>, source: RegisterId| {
+                let result = g.b.alloc_bit(width, false);
+                g.b.emit(SIRInstruction::Slice(result, source, chunk * 64, width));
+                result
+            };
+            let was = slice(g, levels.values);
+            let is = pack(g, values);
+            // Invert both value planes of falling-edge lanes. Their masks
+            // stay unchanged, turning the same edge formula into negedge.
+            let falling = g.constant(falling, width);
+            let was = g.binary(width, was, BinaryOp::Xor, falling);
+            let is = g.binary(width, is, BinaryOp::Xor, falling);
+            let all = g.ones(width);
+            let not_was = g.binary(width, was, BinaryOp::Xor, all);
+            let edges = if let Some(old_unknown) = levels.unknown {
+                let old_unknown = slice(g, old_unknown);
+                let new_unknown = pack(g, unknowns);
+                // Table 9-2: leave known zero or reach known one, excluding
+                // all unknown-to-unknown transitions (including X <-> Z).
+                let leaves = g.binary(width, not_was, BinaryOp::Or, old_unknown);
+                let reaches = g.binary(width, is, BinaryOp::Or, new_unknown);
+                let both_unknown = g.binary(width, old_unknown, BinaryOp::And, new_unknown);
+                let some_known = g.binary(width, both_unknown, BinaryOp::Xor, all);
+                let edges = g.binary(width, leaves, BinaryOp::And, reaches);
+                g.binary(width, edges, BinaryOp::And, some_known)
+            } else {
+                g.binary(width, not_was, BinaryOp::And, is)
+            };
+            for (bit, &index) in events.iter().enumerate() {
+                let lane = g.b.alloc_bit(1, false);
+                g.b.emit(SIRInstruction::Slice(lane, edges, bit, 1));
+                result[index] = lane;
+            }
+        }
+        result.reverse();
+        let edges = g.b.alloc_bit(self.event_bits, false);
+        g.b.emit(SIRInstruction::Concat(edges, result));
         edges
     }
 }
@@ -3168,6 +3313,8 @@ enum Phase {
 }
 
 struct Generator<'a> {
+    outlined: Option<&'a mut Vec<Unit>>,
+    outline_base: u32,
     b: Builder,
     slots: &'a SchedulerSlots<AbsoluteAddr>,
     finish_sites: &'a HashSet<u32>,
@@ -3766,6 +3913,44 @@ impl Generator<'_> {
         }
     }
 
+    /// The preceding check established every active wait's baseline. Between
+    /// it and this boundary only this unit ran, apart from the time slots
+    /// updated at slot entry. Host writes are observed before native entry.
+    /// Opaque calls and host-service processes keep a full scan. Buffered
+    /// event notifications do not change simulation state at this boundary;
+    /// cyclic SCHEDULER_RUN calls only charge the work budget.
+    fn check_waits_after_unit(
+        &mut self,
+        waits: &[WaitCheck],
+        unit: &Unit,
+        time_slots: &[AbsoluteAddr],
+    ) {
+        if instructions(unit).any(|inst| matches!(inst, SIRInstruction::ExternCall { .. })) {
+            self.check_waits(waits);
+            return;
+        }
+        let storage = |address| self.shared.get(&address).copied().unwrap_or(address);
+        let writes: HashSet<_> = instructions(unit)
+            .filter_map(SIRInstruction::memory_write)
+            .filter(|write| write.addr.region == STABLE_REGION)
+            .map(|write| storage(write.addr.absolute_addr()))
+            .chain(time_slots.iter().copied().map(storage))
+            .collect();
+        let affected: Vec<_> = waits
+            .iter()
+            .copied()
+            .filter(|check| {
+                check
+                    .wait
+                    .terms
+                    .iter()
+                    .any(|(signal, _)| writes.contains(&storage(*signal)))
+            })
+            .collect();
+        tracing::debug!(target: "celox::scheduler", total=waits.len(), affected=affected.len(), "filtered post-kernel wait checks");
+        self.check_waits(&affected);
+    }
+
     /// Test the waits of `waits` against their signals now
     /// (`check_waits`): a wait whose edge occurred since its baseline wakes
     /// its kernel; every changed signal becomes the baseline.
@@ -3934,6 +4119,17 @@ impl Generator<'_> {
     /// Inline `unit` as [`Self::inline`] does, and record a change of what
     /// combinational logic reads after it when it may write any.
     fn inline_writer(&mut self, unit: &Unit, finish_exit: celox_sir::BlockId) {
+        if self.partitioned_glue.is_some() {
+            // Partition instrumentation already compares every external
+            // write to tracked state and publishes that same predicate to
+            // slots.dirty. Preserve intermediate changes as well as X/Z-only
+            // changes; do not snapshot its notification flags again.
+            self.inline(unit, finish_exit);
+            if instructions(unit).any(|inst| matches!(inst, SIRInstruction::ExternCall { .. })) {
+                self.mark_dirty();
+            }
+            return;
+        }
         // Keep small stable write sets precise. Reading a bounded number of
         // words is much cheaper than repeating the whole comb settle when a
         // process merely rewrites the value already present in its outputs.
@@ -4244,11 +4440,11 @@ impl Generator<'_> {
         let counts = self.event_batch.is_some()
             && instructions(unit).any(|inst| matches!(inst, SIRInstruction::RuntimeEvent { .. }));
         if !finishes && !counts {
-            self.b.inline_execution_unit(unit);
+            self.inline_body(unit);
             return;
         }
         let instrumented = self.instrument(unit, counts);
-        self.b.inline_execution_unit(&instrumented);
+        self.inline_body(&instrumented);
         if !finishes {
             return;
         }
@@ -4262,6 +4458,28 @@ impl Generator<'_> {
             false_block: (next, Vec::new()),
         });
         self.b.switch_to_block(next);
+    }
+
+    fn inline_body(&mut self, unit: &Unit) {
+        if let Some(outlined) = &mut self.outlined
+            && instructions(unit).take(32_769).count() > 32_768
+        {
+            let index = match outlined.iter().position(|previous| previous == unit) {
+                Some(index) => index,
+                None => {
+                    outlined.push(unit.clone());
+                    outlined.len() - 1
+                }
+            };
+            self.b.emit(SIRInstruction::ExternCall {
+                dst: None,
+                func: celox_sir::extern_abi::NATIVE_KERNEL_CALL_TAG
+                    | (self.outline_base + index as u32),
+                args: Vec::new(),
+            });
+        } else {
+            self.b.inline_execution_unit(unit);
+        }
     }
 
     /// A copy of `unit` that sets the finish slot after every `$finish`
@@ -4348,6 +4566,7 @@ impl Generator<'_> {
 }
 
 /// A kernel's wait as `Generator::check_waits` tests it.
+#[derive(Clone, Copy)]
 struct WaitCheck<'a> {
     index: usize,
     /// Its bit in the ready mask.
@@ -4418,12 +4637,16 @@ fn homes_overlap_only_whole(layout: &crate::backend::MemoryLayout) -> bool {
 
 /// The storage `unit` reads.
 fn loads(unit: &Unit) -> impl Iterator<Item = AbsoluteAddr> + '_ {
-    instructions(unit).filter_map(|inst| match inst {
+    instructions(unit).filter_map(loaded_address)
+}
+
+fn loaded_address(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<AbsoluteAddr> {
+    match inst {
         SIRInstruction::Load(_, source, ..) | SIRInstruction::Commit(source, ..) => {
             Some(source.absolute_addr())
         }
         _ => None,
-    })
+    }
 }
 
 /// Whether a settle of `units` may read what an earlier settle left: a load
@@ -5313,9 +5536,75 @@ impl Generator<'_> {
         }
     }
 
+    /// A change-only OR wait can stop at its first changed expression.
+    /// If none changed, its snapshot already equals the current state. If
+    /// any changed, the wait is consumed and capture_raw_wait replaces the
+    /// entire snapshot when the process next suspends. Edge-sensitive waits
+    /// cannot do this: non-triggering changes must advance their baselines.
+    fn check_change_wait(
+        &mut self,
+        process: usize,
+        wait: &Wait,
+        waiting: RegisterId,
+    ) -> RegisterId {
+        let zero = self.constant(0, 1);
+        let one = self.constant(1, 1);
+        let result = self.b.alloc_bit(1, false);
+        let done = self.b.new_block_with(vec![result]);
+        let body = self.b.new_block();
+        self.b.seal_block(SIRTerminator::Branch {
+            cond: waiting,
+            true_block: (body, Vec::new()),
+            false_block: (done, vec![zero]),
+        });
+        self.b.switch_to_block(body);
+        let raw = wait.raw.as_ref().unwrap();
+        // A small batch amortizes branches without extending the lifetime of
+        // every expression in a large sensitivity list.
+        for (signals, terms) in wait.terms.chunks(4).zip(raw.terms.chunks(4)) {
+            let mut differences = zero;
+            let mut difference_width = 1;
+            for (&(signal, _), term) in signals.iter().zip(terms) {
+                let width = if term.mask_offset.is_some() {
+                    term.plane_bits * 2
+                } else {
+                    term.width
+                };
+                let previous = self.load_at(self.slots.baseline[process], term.value_offset, width);
+                let current = self.raw_wait_planes(signal, term);
+                // These are raw, two-state planes. Merge differing bits
+                // before reducing to a boolean, instead of materializing a
+                // comparison result for every value and mask chunk.
+                let different = self.binary(width, previous, BinaryOp::Xor, current);
+                difference_width = difference_width.max(width);
+                differences = self.binary(difference_width, differences, BinaryOp::Or, different);
+            }
+            let no_difference = self.constant(0, difference_width);
+            let changed = self.binary(1, differences, BinaryOp::Ne, no_difference);
+            let next = self.b.new_block();
+            self.b.seal_block(SIRTerminator::Branch {
+                cond: changed,
+                true_block: (done, vec![one]),
+                false_block: (next, Vec::new()),
+            });
+            self.b.switch_to_block(next);
+        }
+        self.b.seal_block(SIRTerminator::Jump(done, vec![zero]));
+        self.b.switch_to_block(done);
+        result
+    }
+
     /// Test every expression in an OR event list against its own snapshot,
     /// before publishing one ready bit and clearing the process's wait flag.
     fn check_raw_wait(&mut self, process: usize, wait: &Wait, waiting: RegisterId) -> RegisterId {
+        if wait.terms.len() >= 4
+            && wait
+                .terms
+                .iter()
+                .all(|(_, kind)| *kind == CounterKind::Changes)
+        {
+            return self.check_change_wait(process, wait, waiting);
+        }
         let mut occurred = self.constant(0, 1);
         for (&(signal, kind), term) in wait.terms.iter().zip(&wait.raw.as_ref().unwrap().terms) {
             let width = if term.mask_offset.is_some() {

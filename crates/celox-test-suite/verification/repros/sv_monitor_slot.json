@@ -1,0 +1,93 @@
+{
+  "standard": "IEEE 1800-2023 21.2.3, 21.3.2; time values in the caller unit (20.3.1)",
+  "probes": [
+    {
+      "top": "Transient",
+      "icarus_compile": {
+        "exit_code": 0,
+        "command": "iverilog -g2012 -s Transient -o <repo>/work/monitor-probes/Transient.vvp <repo>/crates/celox-test-suite/verification/repros/sv_monitor_slot.sv"
+      },
+      "icarus_run": {
+        "exit_code": 0,
+        "command": "vvp <repo>/work/monitor-probes/Transient.vvp",
+        "output": "value=0\nvalue=0\n<repo>/crates/celox-test-suite/verification/repros/sv_monitor_slot.sv:8: $finish called at 2000 (1ps)\n"
+      },
+      "xezim_run": {
+        "exit_code": 0,
+        "command": "/nix/store/x5akm1kg9vcr6hmn4zry5wfvr92yywrz-xezim-0.11.4/bin/xezim --error-exit -s Transient <repo>/crates/celox-test-suite/verification/repros/sv_monitor_slot.sv",
+        "output": "=== xezim 0.11.4 ===\ngit unknown (unknown)\nvalue=0\nSimulation finished at time 2000 ($finish called)\n"
+      },
+      "verilator_compile": {
+        "exit_code": 0,
+        "command": "verilator --binary --timing --vpi --public-flat-rw --assert --coverage-user --x-initial 0 --x-assign 0 -Wno-fatal --top-module Transient --Mdir <repo>/target/monitor-probe-Transient <repo>/crates/celox-test-suite/verification/repros/sv_monitor_slot.sv"
+      },
+      "verilator_run": {
+        "exit_code": 0,
+        "command": "<repo>/target/monitor-probe-Transient/VTransient",
+        "output": "value=0\n- <repo>/crates/celox-test-suite/verification/repros/sv_monitor_slot.sv:8: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 2ns; walltime 0.001 s; speed 3.992 us/s\n- Verilator: cpu 0.001 s on 1 threads; allocated 4 MB\n"
+      }
+    },
+    {
+      "top": "Controls",
+      "icarus_compile": {
+        "exit_code": 0,
+        "command": "iverilog -g2012 -s Controls -o <repo>/work/monitor-probes/Controls.vvp <repo>/crates/celox-test-suite/verification/repros/sv_monitor_slot.sv"
+      },
+      "icarus_run": {
+        "exit_code": 0,
+        "command": "vvp <repo>/work/monitor-probes/Controls.vvp",
+        "output": "new=0\nnew=1\nnew=1\n<repo>/crates/celox-test-suite/verification/repros/sv_monitor_slot.sv:19: $finish called at 4000 (1ps)\n"
+      },
+      "xezim_run": {
+        "exit_code": 0,
+        "command": "/nix/store/x5akm1kg9vcr6hmn4zry5wfvr92yywrz-xezim-0.11.4/bin/xezim --error-exit -s Controls <repo>/crates/celox-test-suite/verification/repros/sv_monitor_slot.sv",
+        "output": "=== xezim 0.11.4 ===\ngit unknown (unknown)\nnew=0\nnew=1\nnew=1\nSimulation finished at time 4000 ($finish called)\n"
+      },
+      "verilator_compile": {
+        "exit_code": 0,
+        "command": "verilator --binary --timing --vpi --public-flat-rw --assert --coverage-user --x-initial 0 --x-assign 0 -Wno-fatal --top-module Controls --Mdir <repo>/target/monitor-probe-Controls <repo>/crates/celox-test-suite/verification/repros/sv_monitor_slot.sv"
+      },
+      "verilator_run": {
+        "exit_code": 0,
+        "command": "<repo>/target/monitor-probe-Controls/VControls",
+        "output": "new=0\n- <repo>/crates/celox-test-suite/verification/repros/sv_monitor_slot.sv:19: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 4ns; walltime 0.000 s; speed 18.331 us/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+      }
+    },
+    {
+      "top": "FileMonitor",
+      "icarus_compile": {
+        "exit_code": 0,
+        "command": "iverilog -g2012 -s FileMonitor -o <repo>/work/monitor-probes/FileMonitor.vvp <repo>/crates/celox-test-suite/verification/repros/sv_monitor_slot.sv"
+      },
+      "icarus_run": {
+        "exit_code": 0,
+        "command": "vvp <repo>/work/monitor-probes/FileMonitor.vvp",
+        "output": "file=0\nfile=1\n<repo>/crates/celox-test-suite/verification/repros/sv_monitor_slot.sv:28: $finish called at 2000 (1ps)\n"
+      },
+      "xezim_run": {
+        "exit_code": 0,
+        "command": "/nix/store/x5akm1kg9vcr6hmn4zry5wfvr92yywrz-xezim-0.11.4/bin/xezim --error-exit -s FileMonitor <repo>/crates/celox-test-suite/verification/repros/sv_monitor_slot.sv",
+        "output": "=== xezim 0.11.4 ===\ngit unknown (unknown)\nSimulation finished at time 2000 ($finish called)\n"
+      },
+      "verilator_compile": {
+        "exit_code": 0,
+        "command": "verilator --binary --timing --vpi --public-flat-rw --assert --coverage-user --x-initial 0 --x-assign 0 -Wno-fatal --top-module FileMonitor --Mdir <repo>/target/monitor-probe-FileMonitor <repo>/crates/celox-test-suite/verification/repros/sv_monitor_slot.sv"
+      },
+      "verilator_run": {
+        "exit_code": 0,
+        "command": "<repo>/target/monitor-probe-FileMonitor/VFileMonitor",
+        "output": "- <repo>/crates/celox-test-suite/verification/repros/sv_monitor_slot.sv:28: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 2ns; walltime 0.000 s; speed 19.935 us/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+      }
+    },
+    {
+      "top": "TimeQueryBench",
+      "note": "This standalone form passes in both tools. The retained xezim failure is specific to the suite configuration, which stages timescale/source/testbench as separate files.",
+      "icarus_run": {
+        "output": "t=0 value=0\nt=2 value=1\ncrates/celox-test-suite/verification/repros/sv_monitor_slot.sv:38: $finish called at 3000 (1ps)\n"
+      },
+      "xezim_run": {
+        "output": "=== xezim 0.11.4 ===\ngit unknown (unknown)\nt=0 value=0\nt=2 value=1\nSimulation finished at time 3000 ($finish called)\n"
+      }
+    }
+  ]
+}

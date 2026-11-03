@@ -2307,6 +2307,10 @@ impl<V: fmt::Display> fmt::Display for AbsoluteAddrBase<V> {
 pub const STABLE_REGION: u32 = 0;
 pub const WORKING_REGION: u32 = 1;
 pub const SPARSE_WORKING_REGION: u32 = 2;
+/// The slots of the frame of the running function unit (see
+/// `celox_sir::FrameLayout`). They are not simulation state: each activation
+/// has its own, on the stack.
+pub const FRAME_REGION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct RegionedVarAddrBase<V> {

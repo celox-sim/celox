@@ -47,6 +47,14 @@ pub(super) enum Decl {
     /// An enumeration whose declaration is not recorded, identified by its
     /// members.
     AnonymousEnum(Arc<super::enums::EnumDomain>),
+    /// A structure or union declaration, identified by its typedef or its
+    /// source position together with the types of its members as its scope
+    /// gives them (7.2, 7.3): each specialization of a parameterized scope
+    /// declares a type of its own.
+    Aggregate {
+        name: Arc<str>,
+        members: Arc<[(Arc<str>, TyId)]>,
+    },
     /// A class, or a specialization of a parameterized class.
     Class(Arc<str>),
     /// An interface.
@@ -157,6 +165,25 @@ impl RetainedType {
 }
 
 impl TyTable {
+    /// The type of member `name` of a value of structure type `aggregate`,
+    /// packed or unpacked (7.2): a packed structure only when it is one
+    /// structure, not a packed array of them.
+    pub fn member(&self, aggregate: TyId, name: &str) -> Option<TyId> {
+        let members = match self.data(aggregate) {
+            TyData::UnpackedStruct(Decl::Aggregate { members, .. }) => members,
+            TyData::Packed(Packed {
+                element: PackedElement::Aggregate(Decl::Aggregate { members, .. }),
+                dims,
+                ..
+            }) if dims.len() == 1 => members,
+            _ => return None,
+        };
+        members
+            .iter()
+            .find(|(member, _)| member.as_ref() == name)
+            .map(|(_, ty)| *ty)
+    }
+
     pub(super) fn retain(&self, id: TyId) -> RetainedType {
         RetainedType {
             id,

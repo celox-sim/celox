@@ -1,6 +1,14 @@
 use super::*;
 
 sv_backends! {
+    fn nonblocking_latch_declared_index_sensitivity(sim) {
+        @case "latch::nonblocking_latch_declared_index_sensitivity";
+    }
+fn nonblocking_latch_function_writes(sim) { @case "latch::nonblocking_latch_function_writes"; }
+fn nonblocking_clock_gate(sim) { @case "latch::nonblocking_clock_gate"; }
+fn nonblocking_latch_old_values(sim) { @case "latch::nonblocking_latch_old_values"; }
+fn nonblocking_latch_function_sensitivity(sim) { @case "latch::nonblocking_latch_function_sensitivity"; }
+fn nonblocking_latch_partial_sensitivity(sim) { @case "latch::nonblocking_latch_partial_sensitivity"; }
     fn task_call_sensitivity(sim) { @case "latch::task_call_sensitivity"; }
     fn star_complete_declaration_startup(sim) { @case "latch::star_complete_declaration_startup"; }
     fn star_unpacked_select_sensitivity(sim) { @case "latch::star_unpacked_select_sensitivity"; }
@@ -19,17 +27,14 @@ sv_backends! {
 }
 
 #[test]
-fn canonical_nonblocking_latch_has_an_explicit_unsupported_diagnostic() {
+fn canonical_nonblocking_latch_requires_the_process_runtime() {
     let source =
         "module Top(input logic en,d, output logic q); always_latch if(en) q<=d; endmodule";
     let error = Simulator::from_sv_sources(vec![(source, Path::new("nba_latch.sv"))], "Top")
         .build_interpreter()
         .unwrap_err()
         .to_string();
-    assert!(
-        error.contains("nonblocking assignment inside always_latch"),
-        "{error}"
-    );
+    assert!(error.contains("build a Simulation instead"), "{error}");
 }
 
 #[test]

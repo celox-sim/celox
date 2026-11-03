@@ -1734,6 +1734,46 @@
     }
   },
   {
+    "id": "sv_verilator_nonblocking_latch_self_activation",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "The two nonblocking latch sensitivity cases fail to converge in Verilator before reaching their timed assertions. Their adapter-free sources reproduce DIDNOTCONVERGE with converge-limit 10000. IEEE 1800-2023 9.2.2.3 and 9.2.2.2.1 exclude written expressions from implicit sensitivity, including a partial written range and a module variable written by a called function; 10.4.2 schedules the updates in NBA. Celox completes the original assertions on every enabled backend.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/nonblocking_latch_sensitivity.json",
+      "verification/repros/nonblocking_latch_partial_sensitivity.sv",
+      "verification/repros/nonblocking_latch_function_writes.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "latch::nonblocking_latch_partial_sensitivity",
+        "latch::nonblocking_latch_function_writes"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_nonblocking_latch_sensitivity_support",
+    "category": "simulator_support",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+    "reason": "Icarus rejects the partial-range sensitivity source with constant selects in always_* processes are not fully supported and always_latch process has no event control. It rejects the function-write source with functions cannot have non blocking assignment statements. Both diagnostics reproduce without the suite adapters. IEEE 1800-2023 9.2.2.2.1 defines sensitivity at the longest static prefix, 9.2.2.3 permits the nonblocking latch form, and 13.4 does not forbid scheduling NBA updates of module variables.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/nonblocking_latch_sensitivity.json",
+      "verification/repros/nonblocking_latch_partial_sensitivity.sv",
+      "verification/repros/nonblocking_latch_function_writes.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "latch::nonblocking_latch_partial_sensitivity",
+        "latch::nonblocking_latch_function_writes"
+      ]
+    }
+  },
+  {
     "id": "sv_verilator_wildcard_timezero",
     "category": "simulator_disagreement",
     "phase": "execute",
@@ -1828,6 +1868,45 @@
         "string::concatenation_and_replication",
         "string::methods",
         "string::characters_are_signed_bytes"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_generated_string_array_element_methods",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+    "reason": "Icarus 13.0 returns 2 for both generated[1].u.files[2].len() after assigning \"binary\" and the empty neighboring files[3].len(), instead of 6 and 0. The standalone source reproduces the failure without an adapter. IEEE 1800-2023 23.6 permits the hierarchical names, and 6.16.1 defines len() as the number of characters. Verilator passes the case; other hierarchical string reads and assignments remain executable.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/generated_string_array_element_methods.json",
+      "verification/repros/generated_string_array_element_methods.sv",
+      "LIMITATIONS.md#hierarchical-string-method-receivers"
+    ],
+    "cases": {
+      "icarus": [
+        "hierarchy::generated_string_array_element_methods"
+      ]
+    }
+  },
+  {
+    "id": "sv_hierarchical_string_mutating_methods",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052 / Icarus 13.0",
+    "reason": "Verilator 5.052 raises an internal VARXREF type error on a.filename.putc; Icarus 13.0 reports it as an unknown task. The standalone source reproduces both compilation failures. IEEE 1800-2023 23.6 permits the hierarchical variable name, and 6.16.2 defines putc as a character update of that string. Only this mutating-method case is excluded; hierarchical string reads and assignments remain executable.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/hierarchical_string_mutating_methods.json",
+      "verification/repros/hierarchical_string_mutating_methods.sv",
+      "LIMITATIONS.md#hierarchical-string-method-receivers"
+    ],
+    "cases": {
+      "verilator": [
+        "hierarchy::hierarchical_string_mutating_methods"
+      ],
+      "icarus": [
+        "hierarchy::hierarchical_string_mutating_methods"
       ]
     }
   },
@@ -3099,6 +3178,43 @@
     "cases": {
       "verilator": [
         "unpacked_structs::fixed_array_multidimensional_and_bounds"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_packed_struct_array_oob_nba",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "A nonblocking member write through index 4 of a packed structure array [3:0] changes element 0 in Verilator: 1234ab78 becomes 1234abff. IEEE 1800-2023 7.4.6 gives an out-of-range packed-array index no element to write; 10.4.2 preserves the evaluated destination. The adapter-free source passes its preceding valid-index checks and reproduces the same bad write. Celox preserves 1234ab78.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/packed_struct_array_selection.json",
+      "verification/repros/packed_struct_array_dynamic_members.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "packed_structs::packed_struct_array_dynamic_members"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_dynamic_packed_structure_array_members",
+    "category": "simulator_support",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0",
+    "reason": "Icarus rejects a variable element index before a packed structure member with a reference to index is not allowed in a constant expression and Array index expressions must be constant here, then aborts in collapse_array_indices. Both shared sources and an adapter-free source reproduce the compiler failure. IEEE 1800-2023 7.4.6 permits these variable indices of packed array variables; these are not indices of hierarchical instance scopes. The constant-index ascending case passes.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/packed_struct_array_selection.json",
+      "verification/repros/packed_struct_array_dynamic_members.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "packed_structs::packed_struct_array_dynamic_members",
+        "packed_structs::packed_struct_array_unknown_indices"
       ]
     }
   },
@@ -4682,6 +4798,138 @@
     "cases": {
       "xezim": [
         "file_io::ferror_success_clears_description"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_strobe_program_output",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 with the suite's VPI/public-signal configuration prints reactive=0 although the program output settles to 9. The standalone probe reproduces reactive=0 and settled=9 with --vpi --public-flat-rw --assert --coverage-user --x-initial 0 --x-assign 0; without those options it prints 9 for both. IEEE 1800-2023 21.2.2 requires strobe to display the time slot's final value, including Reactive program writes (24.3.1). Icarus, xezim and Celox print reactive=9.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/strobe-program-verilator.json",
+      "verification/repros/sv_strobe_program_output.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "file_io::strobe_reads_after_reactive_program"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_fmonitor_is_independent_of_console_monitor_off",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 2026-09-05 rev v5.052 suppresses file monitoring after $monitoroff. IEEE 1800-2023 21.3.2 gives file monitors independent lists and no on/off counterparts. The standalone FileMonitor probe prints no file lines; Icarus and Celox print file=0 and file=1.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/monitor-verilator.json",
+      "verification/repros/sv_monitor_slot.sv",
+      "verification/repros/sv_monitor_slot.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "file_io::fmonitor_is_independent_of_console_monitor_off"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_monitor_replacement_and_on_off",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 2026-09-05 rev v5.052 omits displays forced by $monitoron without another variable change. IEEE 1800-2023 21.2.3 requires redisplay. The standalone Controls probe prints only new=0; Icarus, xezim and Celox also print new=1 twice.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/monitor-verilator.json",
+      "verification/repros/sv_monitor_slot.sv",
+      "verification/repros/sv_monitor_slot.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "file_io::monitor_replacement_and_on_off"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_monitor_reports_transient_changes",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 2026-09-05 rev v5.052 misses a monitor display after a variable changes and returns to its previous value within one slot. IEEE 1800-2023 21.2.3 requires output when an argument changes. The standalone Transient probe prints one line instead of two; Icarus and Celox print both.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/monitor-verilator.json",
+      "verification/repros/sv_monitor_slot.sv",
+      "verification/repros/sv_monitor_slot.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "file_io::monitor_reports_transient_changes"
+      ]
+    }
+  },
+  {
+    "id": "sv_xezim_fmonitor_is_independent_of_console_monitor_off",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "xezim version 0.11.4",
+    "reason": "xezim version 0.11.4 suppresses file monitoring after $monitoroff. IEEE 1800-2023 21.3.2 gives file monitors independent lists and no on/off counterparts. The standalone FileMonitor probe prints no file lines; Icarus and Celox print file=0 and file=1.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/monitor-xezim.json",
+      "verification/repros/sv_monitor_slot.sv",
+      "verification/repros/sv_monitor_slot.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "xezim": [
+        "file_io::fmonitor_is_independent_of_console_monitor_off"
+      ]
+    }
+  },
+  {
+    "id": "sv_xezim_monitor_reports_transient_changes",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "xezim version 0.11.4",
+    "reason": "xezim version 0.11.4 misses a monitor display after a variable changes and returns to its previous value within one slot. IEEE 1800-2023 21.2.3 requires output when an argument changes. The standalone Transient probe prints one line instead of two; Icarus and Celox print both.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/monitor-xezim.json",
+      "verification/repros/sv_monitor_slot.sv",
+      "verification/repros/sv_monitor_slot.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "xezim": [
+        "file_io::monitor_reports_transient_changes"
+      ]
+    }
+  },
+  {
+    "id": "sv_xezim_monitor_time_queries_do_not_trigger_output",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "xezim version 0.11.4",
+    "reason": "xezim 0.11.4 in the configured suite prints t=2000 at 2ns for a monitored $time in the 1ns source scope, where IEEE 1800-2023 20.3.1 requires t=2. The standalone TimeQueryBench probe prints t=2 correctly; this exclusion is specific to the suite configuration, which stages timescale/source/testbench as separate files. The unchanged case still requires direct time queries not to trigger output.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/monitor-xezim.json",
+      "verification/repros/sv_monitor_slot.sv",
+      "verification/repros/sv_monitor_slot.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "xezim": [
+        "file_io::monitor_time_queries_do_not_trigger_output"
       ]
     }
   }

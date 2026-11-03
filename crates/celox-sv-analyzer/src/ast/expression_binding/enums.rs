@@ -83,7 +83,7 @@ pub(super) fn method(
 /// bound: a variable, an element of an array, a class property, a call of
 /// a function, method or enumerated type method, a cast, or the status of a
 /// process.
-pub(super) fn domain(
+pub(in crate::ast) fn domain(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     id: ExprId,
@@ -493,15 +493,48 @@ fn member_lookup(
         args: std::iter::once(Some(receiver))
             .chain(domain.members.iter().flat_map(|member| {
                 [
-                    Some(Expr::Literal(format_typed_parameter_literal(
-                        member.value,
-                        domain.width,
-                        domain.signed,
-                    ))),
+                    Some(Expr::Literal(
+                        domain.value_of(member).literal(domain.width, domain.signed),
+                    )),
                     Some(value(member)),
                 ]
             }))
             .chain(std::iter::once(Some(default)))
+            .collect(),
+        arg_order: Vec::new(),
+    }
+}
+
+/// Whether `value`, of `width` bits and signedness `signed`, is the value of
+/// one of the members of `domain`: what makes `$cast` to the type valid
+/// (IEEE 1800-2023 6.24.2). Values are compared as numbers, so a member that
+/// `value`'s type cannot represent is none; a value with unknown bits is none.
+pub(in crate::ast) fn membership(
+    domain: &EnumDomain,
+    value: Expr,
+    width: usize,
+    signed: bool,
+) -> Expr {
+    // Each member's value as its base type interprets it (6.19), which the
+    // value's type either represents or cannot equal.
+    let members = domain
+        .members
+        .iter()
+        .map(|member| domain.value_of(member))
+        .filter(|member| member.fits(width, signed));
+    Expr::Call {
+        callee: Callee::Lookup {
+            width: 1,
+            signed: false,
+        },
+        args: std::iter::once(Some(value))
+            .chain(members.flat_map(|member| {
+                [
+                    Some(Expr::Literal(member.literal(width, signed))),
+                    Some(Expr::Literal("1'b1".into())),
+                ]
+            }))
+            .chain(std::iter::once(Some(Expr::Literal("1'b0".into()))))
             .collect(),
         arg_order: Vec::new(),
     }

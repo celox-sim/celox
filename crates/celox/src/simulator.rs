@@ -44,12 +44,16 @@ mod host {
     mod file_io;
     mod format;
     mod fread;
+    mod monitor;
     pub(crate) mod native_io;
     mod scan;
+    mod strobe;
+    pub(crate) use monitor::MonitorState;
     mod system;
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    pub(crate) use strobe::StrobeCall;
 
     use crate::backend::RuntimeEventBuffer;
     #[cfg(any(
@@ -140,6 +144,7 @@ mod host {
         native_file_io: Option<Arc<native_io::Metadata>>,
         pub(crate) native_host_return_budget: u64,
         pub(crate) native_host_round_budget: u64,
+        pub(crate) postponed_output: bool,
         pub(crate) native_nba_queue: std::collections::VecDeque<celox_runtime::NbaUpdate>,
         pending_host_events: Arc<std::sync::Mutex<PendingRuntimeEvents>>,
         pub(crate) program: RuntimeProgram,
@@ -532,8 +537,8 @@ mod host {
         }
     }
 
-    /// A bounded continuation of the backend ring. Records remain unformatted
-    /// until the eventual consumer supplies its scope/time context.
+    /// Host-owned continuation of the backend ring and postponed work.
+    /// Records remain unformatted until the eventual consumer supplies context.
     #[derive(Clone, Default)]
     struct PendingRuntimeEvents {
         events: std::collections::VecDeque<RawRuntimeEvent>,
@@ -541,6 +546,8 @@ mod host {
         deferred: DeferredQueues,
         deferred_owners: DeferredOwnerContext,
         next_deferred_owner: u64,
+        strobes: Vec<StrobeCall>,
+        monitors: MonitorState,
     }
 
     #[derive(Clone)]
@@ -1361,6 +1368,14 @@ mod host {
             let runtime_event_handles =
                 sites_record_handles(&program.runtime_schema.runtime_event_sites);
             let native_file_io = native_io::Metadata::new(&backend, &program);
+            let postponed_output = program
+                .runtime_schema
+                .host_request_sites
+                .iter()
+                .any(|site| {
+                    site.kind == celox_design::HostRequestKind::FileIo
+                        && (16..=20).contains(&site.operation)
+                });
             let mut sim = Self {
                 backend,
                 program,
@@ -1376,6 +1391,7 @@ mod host {
                 process_heap_roots: Vec::new(),
                 file_io: Default::default(),
                 native_file_io,
+                postponed_output,
                 native_host_return_budget: u64::MAX,
                 native_host_round_budget: u64::MAX,
                 native_nba_queue: Default::default(),
@@ -1389,7 +1405,9 @@ mod host {
                 deferred_assertions: !deferred_sites.is_empty(),
                 comb_deferred_groups,
                 timed: false,
-                host_slot_work: !deferred_sites.is_empty() || !sample_shadows.is_empty(),
+                host_slot_work: postponed_output
+                    || !deferred_sites.is_empty()
+                    || !sample_shadows.is_empty(),
                 timestamped_reports,
                 sample_shadows,
                 components: Default::default(),
@@ -2068,6 +2086,11 @@ mod host {
         }
 
         pub(super) fn replace_deferred_execution(&mut self) {
+            if self.postponed_output {
+                let mut pending = self.pending_host_events.lock().unwrap();
+                pending.strobes.clear();
+                pending.monitors = MonitorState::default();
+            }
             if self.deferred_assertions {
                 self.stash_runtime_events();
                 self.pending_host_events

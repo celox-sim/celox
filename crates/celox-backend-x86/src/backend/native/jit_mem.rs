@@ -75,27 +75,59 @@ impl JitCode {
         symbols: &[JitSymbol],
         perf_map: bool,
     ) -> Result<Self, std::io::Error> {
-        // Allocate writable memory, copy code, then make executable
-        let mut mmap = MmapMut::map_anon(code.len().max(1))?;
+        // Align the code itself, not just interior pages, so the hot entry
+        // region of a large image can use transparent huge pages too. The
+        // unused prefix/suffix stays reserved but is never touched.
+        let code_len = code.len().max(1);
         #[cfg(target_os = "linux")]
-        if code.len() >= 2 * 1024 * 1024 {
-            // Advise before touching the pages so large generated functions can
-            // use transparent huge pages and reduce instruction-TLB pressure.
-            // Keep the mapping's exact size; unsupported or unavailable huge
-            // pages fall back to the normal anonymous mapping.
+        let alignment = if code_len >= 2 * 1024 * 1024 {
+            2 * 1024 * 1024
+        } else {
+            1
+        };
+        #[cfg(not(target_os = "linux"))]
+        let alignment = 1;
+        // The final code byte also needs a complete huge page in the mapping.
+        // Export only code_len bytes, excluding this allocation padding.
+        let allocation_len = code_len
+            .checked_add(alignment - 1)
+            .map(|length| length & !(alignment - 1))
+            .and_then(|length| length.checked_add(alignment - 1))
+            .ok_or_else(|| std::io::Error::other("JIT image allocation size overflow"))?;
+        let mut mmap = MmapMut::map_anon(allocation_len)?;
+        let prefix = mmap.as_ptr().align_offset(alignment);
+        #[cfg(target_os = "linux")]
+        if alignment > 1 {
+            // Advice is optional: unsupported or unavailable huge pages use
+            // ordinary anonymous pages with exactly the same image bytes.
             let _ = mmap.advise(memmap2::Advice::HugePage);
         }
-        mmap[..code.len()].copy_from_slice(code);
+        mmap[prefix..prefix + code.len()].copy_from_slice(code);
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        if alignment > 1 {
+            // Fault-time huge-page advice can leave ordinary pages behind.
+            // Collapse once before publishing the immutable executable image;
+            // older kernels and allocation failures retain the original pages.
+            // Safety: this aligned, rounded range lies wholly in our writable
+            // anonymous mapping. MADV_COLLAPSE preserves its contents.
+            let _ = unsafe {
+                libc::madvise(
+                    mmap.as_mut_ptr().add(prefix).cast(),
+                    allocation_len - (alignment - 1),
+                    libc::MADV_COLLAPSE,
+                )
+            };
+        }
         let mmap = mmap.make_exec()?;
-
-        // Safety: we just wrote valid x86-64 code into the mmap.
-        let fn_ptr: JitFn = unsafe { std::mem::transmute(mmap.as_ptr()) };
+        // Safety: prefix leaves code_len accessible bytes inside the mapping.
+        let image_base = unsafe { mmap.as_ptr().add(prefix) };
+        // Safety: we just wrote valid x86-64 code into executable memory.
+        let fn_ptr: JitFn = unsafe { std::mem::transmute(image_base) };
 
         if perf_map {
-            write_perf_map_entries(mmap.as_ptr() as usize, code.len().max(1), name, symbols)?;
+            write_perf_map_entries(image_base as usize, code_len, name, symbols)?;
         }
 
-        let code_len = mmap.len();
         Ok(Self {
             _mmap: Some(mmap),
             _external_owner: None,
@@ -236,6 +268,31 @@ fn sanitize_perf_symbol(name: &str) -> String {
 #[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn large_image_alignment_preserves_entries_and_exact_image_bytes() {
+        const HUGE_PAGE: usize = 2 * 1024 * 1024;
+        let mut bytes = vec![0xcc; HUGE_PAGE + 17];
+        bytes[..6].copy_from_slice(&[0xb8, 42, 0, 0, 0, 0xc3]);
+        let last = bytes.len() - 6;
+        bytes[last..].copy_from_slice(&[0xb8, 7, 0, 0, 0, 0xc3]);
+        let mut code = JitCode::new(&bytes).unwrap();
+        assert_eq!(code.image().as_ptr() as usize % HUGE_PAGE, 0);
+        let mapping = code._mmap.as_ref().unwrap();
+        let mapped_end = mapping.as_ptr() as usize + mapping.len();
+        let rounded_image_end =
+            (code.image().as_ptr() as usize + bytes.len()).next_multiple_of(HUGE_PAGE);
+        assert!(rounded_image_end <= mapped_end);
+        assert_eq!(code.image(), bytes);
+        assert_eq!(unsafe { code.call(&mut []) }, 42);
+        assert!(code.entry_ptr(bytes.len()).is_none());
+        // Relocating the public entry must not change the retained image base.
+        code.fn_ptr =
+            unsafe { std::mem::transmute::<*const u8, JitFn>(code.entry_ptr(last).unwrap()) };
+        assert_eq!(unsafe { code.call(&mut []) }, 7);
+        assert_eq!(code.image(), bytes);
+    }
 
     #[test]
     fn external_executable_owner_survives_until_last_code_user() {

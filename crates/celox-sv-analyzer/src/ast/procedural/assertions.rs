@@ -60,7 +60,7 @@ pub(super) fn concurrent_action(body: &[Stmt]) -> Result<(), AnalyzerError> {
                     stmt,
                     Stmt::Delay { .. }
                         | Stmt::WaitEvent(_)
-                        | Stmt::WaitImplicit(_)
+                        | Stmt::WaitImplicit { .. }
                         | Stmt::Wait(_)
                         | Stmt::WaitFork
                         | Stmt::DisableFork

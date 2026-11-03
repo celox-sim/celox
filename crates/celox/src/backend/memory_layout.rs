@@ -58,6 +58,10 @@ impl LayoutSource<AbsoluteAddr> for OptimizedSir {
             runtime_event_sites: self.runtime_schema.runtime_event_sites.clone(),
             lane_writers: self.lane_writers(),
             access_rank: self.access_rank(),
+            // Only a program that calls functions gets a stack: any other
+            // keeps the layout, and so the generated code, it had before
+            // calls existed.
+            call_stack: (!self.sir.functions.is_empty()).then_some(celox_sir::STACK_SIZE),
         }
     }
 }

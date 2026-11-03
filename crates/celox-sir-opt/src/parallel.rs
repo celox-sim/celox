@@ -410,6 +410,65 @@ impl<'a> UnitEffects<'a> {
         self.writes.push(MemoryEffect::UnknownObject(storage));
     }
 
+    /// A call reads and writes the whole objects its effects list, and its
+    /// frames on the one call stack, which every other call uses too.
+    fn call(&mut self, effects: &celox_sir::CallEffects<RegionedAbsoluteAddr>) {
+        if effects.kernel {
+            // A native kernel inside can read and write anything.
+            for storage in [
+                Storage::StateBits,
+                Storage::WriteEnvelope,
+                Storage::RuntimeEvents,
+                Storage::CaptureFlags,
+                Storage::Triggers,
+                Storage::ExternCalls,
+            ] {
+                self.reads.push(MemoryEffect::UnknownObject(storage));
+                self.resource(storage);
+            }
+            return;
+        }
+        let mut reads = std::mem::take(&mut self.reads);
+        for object in &effects.reads {
+            self.home(object, &mut reads);
+        }
+        self.reads = reads;
+        for object in &effects.writes {
+            self.write_home(object);
+        }
+        match self.layout.call_stack {
+            Some(stack) => {
+                // The depth word is followed by the frames.
+                let bytes = stack.base_offset + stack.size - stack.depth_offset;
+                self.reads.push(Self::range(stack.depth_offset, bytes));
+                self.writes.push(Self::range(stack.depth_offset, bytes));
+                self.writes
+                    .push(Self::envelope_range(stack.depth_offset, bytes));
+            }
+            None => {
+                self.reads
+                    .push(MemoryEffect::UnknownObject(Storage::StateBits));
+                self.resource(Storage::StateBits);
+            }
+        }
+        // Its host resources are its instruction's `host_effects`, as any
+        // instruction's are (see `collect`).
+    }
+
+    /// The resources outside the state that `host` names.
+    fn host(&mut self, host: celox_sir::HostEffects) {
+        for (used, storage) in [
+            (host.triggers, Storage::Triggers),
+            (host.capture_flags, Storage::CaptureFlags),
+            (host.runtime_events, Storage::RuntimeEvents),
+            (host.extern_calls, Storage::ExternCalls),
+        ] {
+            if used {
+                self.resource(storage);
+            }
+        }
+    }
+
     fn collect(&mut self, unit: &ExecutionUnit<RegionedAbsoluteAddr>) {
         for block in unit.blocks.values() {
             for instruction in &block.instructions {
@@ -417,14 +476,7 @@ impl<'a> UnitEffects<'a> {
                     SIRInstruction::Load(_, address, offset, width) => {
                         self.read(address, offset, *width);
                     }
-                    SIRInstruction::Store(
-                        address,
-                        offset,
-                        width,
-                        source,
-                        triggers,
-                        capture_sites,
-                    ) => {
+                    SIRInstruction::Store(address, offset, width, source, _, _) => {
                         if address.region == SPARSE_WORKING_REGION {
                             // A sparse store also updates its dirty metadata.
                             self.write_home(address);
@@ -435,14 +487,8 @@ impl<'a> UnitEffects<'a> {
                                 .map_or(usize::MAX, |register| register.width());
                             self.write(address, offset, *width, WriteKind::Store { source_width });
                         }
-                        if !triggers.is_empty() {
-                            self.resource(Storage::Triggers);
-                        }
-                        if !capture_sites.is_empty() {
-                            self.resource(Storage::CaptureFlags);
-                        }
                     }
-                    SIRInstruction::Commit(source, destination, offset, width, triggers) => {
+                    SIRInstruction::Commit(source, destination, offset, width, _) => {
                         self.read(source, offset, *width);
                         if source.region == SPARSE_WORKING_REGION {
                             // A sparse commit consumes and clears dirty bits,
@@ -463,30 +509,22 @@ impl<'a> UnitEffects<'a> {
                                 WriteKind::Commit { object_width },
                             );
                         }
-                        if !triggers.is_empty() {
-                            self.resource(Storage::Triggers);
-                        }
                     }
-                    SIRInstruction::RuntimeEvent { .. } => {
-                        self.resource(Storage::RuntimeEvents);
-                    }
-                    SIRInstruction::CombCaptureEvent { .. } => {
-                        self.resource(Storage::RuntimeEvents);
-                        self.resource(Storage::CaptureFlags);
-                    }
-                    SIRInstruction::CombCaptureEnableIfChanged { .. } => {
-                        self.resource(Storage::CaptureFlags);
-                    }
-                    SIRInstruction::ExternCall { .. } => {
-                        self.resource(Storage::ExternCalls);
-                    }
-                    SIRInstruction::Imm(..)
+                    SIRInstruction::Call { effects, .. } => self.call(effects),
+                    SIRInstruction::RuntimeEvent { .. }
+                    | SIRInstruction::CombCaptureEvent { .. }
+                    | SIRInstruction::CombCaptureEnableIfChanged { .. }
+                    | SIRInstruction::ExternCall { .. }
+                    | SIRInstruction::Imm(..)
                     | SIRInstruction::Binary(..)
                     | SIRInstruction::Unary(..)
                     | SIRInstruction::Concat(..)
                     | SIRInstruction::Slice(..)
                     | SIRInstruction::Mux(..) => {}
                 }
+                // What it does outside the state, from the one query that
+                // call summaries are built from too.
+                self.host(instruction.host_effects());
             }
         }
     }
@@ -740,6 +778,7 @@ mod tests {
                 runtime_event_sites: Vec::new(),
                 lane_writers: LaneWriters::default(),
                 access_rank: Default::default(),
+                call_stack: None,
             }
         }
     }
@@ -1060,5 +1099,95 @@ mod tests {
         )
         .unwrap();
         assert_eq!(tasks.len(), 3);
+    }
+
+    fn call(
+        reads: Vec<RegionedAbsoluteAddr>,
+        writes: Vec<RegionedAbsoluteAddr>,
+    ) -> SIRInstruction<RegionedAbsoluteAddr> {
+        SIRInstruction::Call {
+            function: celox_sir::FunctionId(0),
+            frame: RegisterId(0),
+            args: Vec::new(),
+            outputs: Vec::new(),
+            dst: None,
+            effects: std::sync::Arc::new(celox_sir::CallEffects {
+                reads,
+                writes,
+                ..Default::default()
+            }),
+        }
+    }
+
+    /// A call is ordered after the writes of the objects it reads and before
+    /// later accesses of those it writes, but not against other objects;
+    /// two calls are ordered by the call stack they share.
+    #[test]
+    fn a_call_depends_on_the_objects_its_effects_list_and_on_other_calls() {
+        let mut layout = layout(Vec::new());
+        layout.call_stack = Some(celox_state_layout::CallStackLayout {
+            depth_offset: 4096,
+            base_offset: 4104,
+            size: 64,
+        });
+        let units = [
+            unit(0, vec![store(0, 0, 16)]),
+            unit(1, vec![store(1, 0, 16)]),
+            unit(2, vec![call(vec![stable(0)], vec![stable(2)])]),
+            unit(0, vec![load(2, 0, 16)]),
+            unit(1, vec![load(1, 0, 16)]),
+            unit(3, vec![call(Vec::new(), vec![stable(3)])]),
+        ];
+        let dependencies = unit_dependencies(
+            &units.iter().collect::<Vec<_>>(),
+            &layout,
+            CodegenFootprint::Native,
+        );
+        assert_eq!(dependencies[2], vec![0]); // reads what unit 0 wrote
+        assert_eq!(dependencies[3], vec![2]); // reads what the call wrote
+        assert_eq!(dependencies[4], vec![1]); // the call leaves object 1 alone
+        assert_eq!(dependencies[5], vec![2]); // the shared call stack
+    }
+
+    /// A call whose callee stores with comb-capture sites shares the capture
+    /// flags with a capture store elsewhere: its summary and the direct store
+    /// take that resource from the same `host_effects` query.
+    #[test]
+    fn a_call_to_a_capturing_callee_is_ordered_with_capture_stores() {
+        let captured = SIRInstruction::Store(
+            stable(6),
+            SIROffset::Static(0),
+            16,
+            RegisterId(0),
+            Vec::new(),
+            vec![0],
+        );
+        let callee_host = captured.host_effects();
+        let mut effects = celox_sir::CallEffects {
+            writes: vec![stable(7)],
+            ..Default::default()
+        };
+        effects.host = callee_host;
+        let call = SIRInstruction::Call {
+            function: celox_sir::FunctionId(0),
+            frame: RegisterId(0),
+            args: Vec::new(),
+            outputs: Vec::new(),
+            dst: None,
+            effects: std::sync::Arc::new(effects),
+        };
+        let mut layout = layout(Vec::new());
+        layout.call_stack = Some(celox_state_layout::CallStackLayout {
+            depth_offset: 4096,
+            base_offset: 4104,
+            size: 64,
+        });
+        let units = [unit(0, vec![captured]), unit(1, vec![call])];
+        let dependencies = unit_dependencies(
+            &units.iter().collect::<Vec<_>>(),
+            &layout,
+            CodegenFootprint::Native,
+        );
+        assert_eq!(dependencies[1], vec![0]);
     }
 }

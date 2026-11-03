@@ -72,7 +72,7 @@ pub(super) fn optimize_late_comb(
     // Identity-store bypass can make an entire expression DAG dead.
     if on(SirPass::LoopIdiom) {
         for eu in &mut program.sir.eval_comb {
-            pass_manager::ExecutionUnitPass::run(&LoopIdiomPass, eu, options);
+            pass_manager::run_pass(&LoopIdiomPass, eu, options);
         }
     }
     verify_stage(program, "loop idiom");
@@ -83,7 +83,7 @@ pub(super) fn optimize_late_comb(
     if on(SirPass::PackedScatterStore) {
         let packed_scatter_store = PackedScatterStorePass::for_program(program);
         for eu in &mut program.sir.eval_comb {
-            pass_manager::ExecutionUnitPass::run(&packed_scatter_store, eu, options);
+            pass_manager::run_pass(&packed_scatter_store, eu, options);
         }
     }
     verify_stage(program, "packed scatter");
@@ -94,7 +94,7 @@ pub(super) fn optimize_late_comb(
     if on(SirPass::IndexedStoreRecovery) {
         let indexed_store_recovery = IndexedStoreRecoveryPass::for_program(program);
         for eu in &mut program.sir.eval_comb {
-            pass_manager::ExecutionUnitPass::run(&indexed_store_recovery, eu, options);
+            pass_manager::run_pass(&indexed_store_recovery, eu, options);
         }
     }
     verify_stage(program, "indexed-store recovery");
@@ -104,7 +104,7 @@ pub(super) fn optimize_late_comb(
     }
     if on(SirPass::GuardedRegionSinking) {
         for eu in &mut program.sir.eval_comb {
-            pass_manager::ExecutionUnitPass::run(&GuardedRegionSinkingPass, eu, options);
+            pass_manager::run_pass(&GuardedRegionSinkingPass, eu, options);
         }
     }
     verify_stage(program, "guarded-region sinking");
@@ -119,7 +119,7 @@ pub(super) fn optimize_late_comb(
             tracing::debug!("[branchify-stats] late sparse constructed");
         }
         for eu in &mut program.sir.eval_comb {
-            pass_manager::ExecutionUnitPass::run(&sparse_case_pass, eu, options);
+            pass_manager::run_pass(&sparse_case_pass, eu, options);
         }
     }
     verify_stage(program, "sparse-case dispatch");
@@ -132,11 +132,20 @@ pub(super) fn optimize_late_comb(
     // repair value placement and correlated merge state on that final CFG.
     if on(SirPass::BranchifyMux) {
         for (eu, watermark) in program.sir.eval_comb.iter_mut().zip(branchify_watermarks) {
-            pass_branchify_mux::run_late_branchify_mux(eu, options, watermark);
+            // These stages follow the opt-in of the passes they belong to.
+            if pass_manager::ExecutionUnitPass::handles_calls(&BranchifyMuxPass)
+                || !pass_manager::makes_calls(eu)
+            {
+                pass_branchify_mux::run_late_branchify_mux(eu, options, watermark);
+            }
         }
         for eu in &mut program.sir.eval_comb {
-            pass_guarded_region_sinking::sink_pure_values_with_predicate_repair(eu);
-            pass_manager::ExecutionUnitPass::run(&PhiOutcomeCompressionPass, eu, options);
+            if pass_manager::ExecutionUnitPass::handles_calls(&GuardedRegionSinkingPass)
+                || !pass_manager::makes_calls(eu)
+            {
+                pass_guarded_region_sinking::sink_pure_values_with_predicate_repair(eu);
+            }
+            pass_manager::run_pass(&PhiOutcomeCompressionPass, eu, options);
         }
     }
     verify_stage(program, "branchify and placement repair");
@@ -146,14 +155,14 @@ pub(super) fn optimize_late_comb(
     // ranges and spill slots.
     if on(SirPass::Gvn) {
         for eu in &mut program.sir.eval_comb {
-            pass_manager::ExecutionUnitPass::run(&GvnPass, eu, options);
+            pass_manager::run_pass(&GvnPass, eu, options);
         }
     }
     verify_stage(program, "final GVN");
     checkpoint!("final GVN");
     if on(SirPass::ControlFlowSimplify) {
         for eu in &mut program.sir.eval_comb {
-            pass_manager::ExecutionUnitPass::run(&ControlFlowSimplifyPass, eu, options);
+            pass_manager::run_pass(&ControlFlowSimplifyPass, eu, options);
         }
     }
     verify_stage(program, "final CFG simplify");

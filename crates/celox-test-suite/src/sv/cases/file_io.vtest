@@ -66,3 +66,136 @@ module Top(output bit ok);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq ok 1))
+
+(case strobe_reads_after_nba
+  (source "strobe_nba.sv" #"
+module Top(output int value);
+  bit clk;
+  initial begin value=1; #1 clk=1; #1; end
+  always @(posedge clk) begin
+    $strobe("late=%0d",value);
+    $display("active=%0d",value);
+    value<=3;
+  end
+endmodule
+"#)
+  (top Top) (run_until 2) (assert_eq value 3)
+  (expect_output "active=1\nlate=3\n"))
+
+(case fstrobe_stdout_reads_final_value
+  (source "fstrobe_stdout.sv" #"
+module Top(output int value);
+  initial begin
+    value=4;
+    $fstrobe(32'h80000001,"file=%0d",value);
+    $display("active=%0d",value);
+    value=7;
+    #1;
+  end
+endmodule
+"#)
+  (top Top) (run_until 1) (assert_eq value 7)
+  (expect_output "active=4\nfile=7\n"))
+
+(case strobe_radix_variants
+  (source "strobe_radices.sv" #"
+module Top;
+  logic [7:0] value;
+  initial begin
+    value=0;
+    $strobeb(value);
+    $strobeo(value);
+    $strobeh(value);
+    $fstrobeb(32'h80000001,value);
+    $fstrobeo(32'h80000001,value);
+    $fstrobeh(32'h80000001,value);
+    value=8'h2a;
+    #1;
+  end
+endmodule
+"#)
+  (top Top) (run_until 1)
+  (expect_output "00101010\n052\n2a\n00101010\n052\n2a\n"))
+
+(case strobe_reads_after_reactive_program
+  (source "strobe_program.sv" #"
+program Writer(output logic [31:0] value);
+  initial begin value=9; #10 value=10; end
+endprogram
+module Top(output wire [31:0] value);
+  Writer writer(value);
+  initial begin $strobe("reactive=%0d",value); #2 $display("later"); end
+endmodule
+"#)
+  (top Top) (run_until 1) (assert_eq value 9)
+  (expect_output "reactive=9\n"))
+
+(case monitor_coalesces_and_ignores_unchanged_values
+  (source "monitor_coalesce.sv" #"
+module Top(output int value);
+  initial begin
+    value=0; $monitor("value=%0d",value);
+    #1 value=1; value=2;
+    #1 value=2;
+    #1;
+  end
+endmodule
+"#)
+  (top Top) (run_until 3) (assert_eq value 2)
+  (expect_output "value=0\nvalue=2\n"))
+
+(case monitor_reports_transient_changes
+  (source "monitor_transient.sv" #"
+module Top(output int value);
+  initial begin
+    value=0; $monitor("value=%0d",value);
+    #1 value=1; value=0;
+    #1;
+  end
+endmodule
+"#)
+  (top Top) (run_until 2) (assert_eq value 0)
+  (expect_output "value=0\nvalue=0\n"))
+
+(case monitor_replacement_and_on_off
+  (source "monitor_control.sv" #"
+module Top(output int value);
+  initial begin
+    value=0; $monitor("old=%0d",value); $monitor("new=%0d",value);
+    #1 $monitoroff; value=1;
+    #1 $monitoron;
+    #1 $monitoron;
+    #1;
+  end
+endmodule
+"#)
+  (top Top) (run_until 4) (assert_eq value 1)
+  (expect_output "new=0\nnew=1\nnew=1\n"))
+
+(case fmonitor_is_independent_of_console_monitor_off
+  (source "fmonitor_stdout.sv" #"
+module Top(output int value);
+  initial begin
+    value=0; $fmonitor(32'h80000001,"file=%0d",value);
+    $monitoroff;
+    #1 value=1;
+    #1;
+  end
+endmodule
+"#)
+  (top Top) (run_until 2) (assert_eq value 1)
+  (expect_output "file=0\nfile=1\n"))
+
+(case monitor_time_queries_do_not_trigger_output
+  (source "monitor_time.sv" #"
+module Top(output int value);
+  initial begin
+    value=0; $monitor("t=%0d value=%0d",$time,value);
+    #1;
+    #1 value=1;
+    #1;
+  end
+endmodule
+"#)
+  (top Top) (run_until 3) (assert_eq value 1)
+  (expect_output "t=0 value=0\nt=2 value=1\n"))

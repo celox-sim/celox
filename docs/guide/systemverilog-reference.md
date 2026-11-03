@@ -539,6 +539,10 @@ string, and an integral value assigned or cast to a string contributes its
 bytes from the most significant one. A character read as `s[i]` or `s.getc(i)` is a `byte`,
 which is signed (6.16, 6.11): a code above 127 reads as a negative value.
 
+String variables can be read and written through hierarchical names such as
+`memory.test_file`. String methods use the referenced instance's variable,
+including when the instance is in a generate block; copies retain their prior text.
+
 Fixed unpacked arrays of strings support assignment patterns, whole-array and
 subarray copies, indexed reads and assignments, and string methods that do not
 modify the receiver. A full element selection yields a string; a further index
@@ -1452,6 +1456,47 @@ start at the lowest index by default and proceed through increasing indices;
 optional start and count operands select the range. Packed destinations ignore
 those operands. Partial reads preserve bits that received no input, including
 X/Z bits. The return value is the number of bytes read, or zero on an I/O error.
+
+### Strobed output
+
+`$strobe` and `$fstrobe`, including their `b`, `o` and `h` variants, schedule
+output without blocking the caller (IEEE 1800-2023 21.2.2, 21.3.2). Display
+expressions are evaluated after the current time slot's NBA and Reactive work
+has settled. Formatting follows `$display` / `$fdisplay`; `$sampled` still reads
+the Preponed value.
+
+`$fstrobe` captures its 32-bit FD/MCD at the call. `$fclose` cancels pending
+output to the selected files; for an MCD, other selected channels remain.
+Reopening the same descriptor does not revive cancelled output.
+
+The current subset uses module/static expressions in scheduled processes.
+Calls inside subroutines, procedural locals, unrolled loop-variable references,
+updates and user/effectful calls in arguments are rejected explicitly. Core
+checkpoints include pending output (internal checkpoint format v5). Portable
+state files require a boundary without pending output. External file state for
+`$fstrobe` remains the host's separate snapshot responsibility.
+
+### Continuous monitoring
+
+`$monitor` / `$fmonitor` and their `b`, `o`, `h` variants observe changes to
+whole static scalar variables (IEEE 1800-2023 21.2.3, 21.3.2). They print once
+at the end of a changed time slot, including a slot where a value changes and
+returns to its previous value. Direct `$time`, `$stime` and `$realtime` arguments
+are evaluated for display but do not trigger output.
+
+A new `$monitor` replaces the global console list. `$monitoroff` disables that
+list; `$monitoron` enables it and forces a display. Each `$fmonitor` registers
+an independent list, unaffected by console on/off control. Its FD/MCD is captured
+at registration; closing a file cancels its monitoring, including across descriptor
+reuse. Partial MCD closure preserves the remaining channels.
+
+The current subset accepts constants, whole static numeric variables, console
+`string` variables and direct time queries. Array elements, slices, general
+expressions, file-monitor string variables and the unsupported strobe call
+contexts above are rejected explicitly. Core checkpoints preserve monitor lists,
+change baselines and the console flag (internal format v5). Portable state files
+can capture HDL values but cannot resume designs containing monitor tasks.
+External file contents still require a separate host snapshot.
 
 ### File error status
 

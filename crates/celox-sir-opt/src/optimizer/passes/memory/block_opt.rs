@@ -82,6 +82,23 @@ fn is_memory_barrier<A>(inst: &SIRInstruction<A>) -> bool {
     inst.is_host_interaction() || matches!(inst, SIRInstruction::Commit(..))
 }
 
+/// Forget the facts `facts` keeps about the objects `inst` may write
+/// other than through a Load, Store or Commit: those a call's effects
+/// list, or all of them for a native kernel.
+fn forget_opaque_writes<A: Eq + std::hash::Hash, V>(
+    inst: &SIRInstruction<A>,
+    facts: &mut HashMap<A, V>,
+) {
+    match inst.opaque_written_objects() {
+        Some(objects) => {
+            for object in objects {
+                facts.remove(object);
+            }
+        }
+        None => facts.clear(),
+    }
+}
+
 fn mem_access_info<A>(inst: &SIRInstruction<A>) -> Option<(&A, Option<usize>, usize, bool)> {
     match inst {
         SIRInstruction::Load(_, addr, SIROffset::Static(off), bits) => {
@@ -309,7 +326,10 @@ pub(in crate::optimizer) fn schedule_instructions<A: Clone + PartialEq + Eq + st
     let mut begin = 0usize;
 
     for i in 0..n {
-        if is_memory_barrier(&instructions[i]) {
+        // The window scheduler orders one access per instruction, so an
+        // instruction reaching state through a call's effects orders every
+        // access around it.
+        if is_memory_barrier(&instructions[i]) || instructions[i].has_opaque_state_access() {
             out.extend(schedule_block_interleaved(
                 &instructions[begin..i],
                 max_inflight_loads,
@@ -390,6 +410,19 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
                 .entry(addr.clone())
                 .or_default()
                 .push((idx, offset, width));
+        }
+        // A call accesses any part of the objects its effects list, which
+        // no store of them may move across.
+        match inst.opaque_accessed_objects() {
+            Some(objects) => {
+                for object in objects {
+                    let accesses = access_index.entry(object.clone()).or_default();
+                    if accesses.last().is_none_or(|&(last, _, _)| last != idx) {
+                        accesses.push((idx, None, 0));
+                    }
+                }
+            }
+            None => barriers.push(idx),
         }
     }
 
@@ -829,8 +862,8 @@ fn subsume_static_loads<A: Clone + Eq + std::hash::Hash>(
                     loads.subtract_write(*offset, write_end);
                 }
             }
-            _ if inst.memory_write().is_none() && !inst.is_host_interaction() => {}
-            _ => available.clear(),
+            _ if inst.is_host_interaction() => available.clear(),
+            _ => forget_opaque_writes(inst, &mut available),
         }
     }
 
@@ -956,7 +989,9 @@ fn coalesce_static_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std::has
             SIRInstruction::Commit(_, dst, _, _, _) => {
                 active.remove(dst);
             }
-            _ => {}
+            // A load after a call that may write its object starts a new
+            // segment: the two loads can see different values.
+            other => forget_opaque_writes(other, &mut active),
         }
     }
 
@@ -1357,7 +1392,8 @@ fn eliminate_redundant_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std:
 
                 new_instructions.push(inst);
             }
-            _ => {
+            other => {
+                forget_opaque_writes(other, &mut known_values);
                 new_instructions.push(inst);
             }
         }

@@ -68,6 +68,10 @@ pub fn optimize_merged_chain(
         },
     );
     verify(eu, "after native merged-chain CFG simplification")?;
+    // The native-only recoveries below do not handle calls yet.
+    if super::pipeline::pass_manager::makes_calls(eu) {
+        return Ok(());
+    }
     checkpoint("during native merged-chain optimization")?;
     if recover_merged_effect_regions && !four_state {
         pass_guarded_region_sinking::recover_merged_effect_regions(eu, four_state);

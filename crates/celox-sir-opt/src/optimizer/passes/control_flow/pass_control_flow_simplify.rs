@@ -80,6 +80,10 @@ impl ExecutionUnitPass for ControlFlowSimplifyPass {
         "control_flow_simplify"
     }
 
+    fn handles_calls(&self) -> bool {
+        true
+    }
+
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions) {
         if eu.blocks.is_empty() || eu.verify_result().is_err() {
             return;
@@ -135,6 +139,10 @@ impl ExecutionUnitPass for ControlFlowSimplifyPass {
 impl ExecutionUnitPass for PostGvnCfgCleanupPass {
     fn name(&self) -> &'static str {
         "post_gvn_cfg_cleanup"
+    }
+
+    fn handles_calls(&self) -> bool {
+        true
     }
 
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions) {

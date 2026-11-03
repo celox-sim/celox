@@ -150,7 +150,12 @@ fn plan(
     let mut defs = HashMap::default();
     let mut local = block.params.iter().copied().collect::<HashSet<_>>();
     for inst in &block.instructions {
-        let dst = def_reg(inst)?; // Reject stores, commits and observer effects.
+        // Reject stores, commits and observer effects, and calls, which can
+        // define a result and still write state.
+        if inst.has_side_effects() {
+            return None;
+        }
+        let dst = def_reg(inst)?;
         defs.insert(dst, inst);
         local.insert(dst);
     }

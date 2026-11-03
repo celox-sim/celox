@@ -19,11 +19,16 @@
 
 #![cfg(feature = "host-runtime")]
 
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+use super::hotspot::{EntryKey, HotspotRuntime, HotspotStats, RegionSource};
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use celox_design::RegionedAbsoluteAddrBase;
-use celox_sir::{ExecutionUnit, SIROffset, SIRValue, TriggerIdWithKind};
+use celox_sir::{
+    ExecutionUnit, FrameSlot, FunctionId, FunctionUnit, SIROffset, SIRValue, TriggerIdWithKind,
+};
 use num_bigint::BigUint;
 use num_traits::{ToPrimitive, Zero};
 
@@ -40,7 +45,7 @@ use crate::dpi::ExternFunctionTable;
 use crate::interpreter::{
     InterpError, InterpMachine, Registers, ResolvedAccess, StoreSnapshot, execute_prepared_unit,
 };
-use crate::ir::{SPARSE_WORKING_REGION, STABLE_REGION, WORKING_REGION};
+use crate::ir::{FRAME_REGION, SPARSE_WORKING_REGION, STABLE_REGION, WORKING_REGION};
 use crate::{
     HashMap, SimulatorError, SimulatorOptions,
     ir::{AbsoluteAddr, LaidOutProgram, RegionedAbsoluteAddr, SignalArrayLayout, SignalRef},
@@ -179,6 +184,128 @@ struct Machine<'a> {
     /// Whether trigger detection may mark bits; mirrors the compiled
     /// `emit_triggers` codegen flag.
     emit_triggers: bool,
+    /// The frames of the function calls being run.
+    frames: Frames<'a>,
+}
+
+/// The program's function units and the stack their frames live on.
+#[derive(Default)]
+struct Calls {
+    functions: Vec<FunctionUnit<RegionedAbsoluteAddr>>,
+    /// Each frame slot, by its address.
+    slots: HashMap<RegionedAbsoluteAddr, FrameSlot<RegionedAbsoluteAddr>>,
+    stack: Vec<u8>,
+}
+
+impl Calls {
+    fn new(functions: &[FunctionUnit<RegionedAbsoluteAddr>]) -> Self {
+        Self {
+            functions: functions.to_vec(),
+            slots: functions
+                .iter()
+                .flat_map(|function| &function.frame.slots)
+                .map(|slot| (slot.addr, slot.clone()))
+                .collect(),
+            stack: Vec::new(),
+        }
+    }
+}
+
+/// The frames entered by the calls a unit is running, innermost last.
+struct Frames<'a> {
+    functions: &'a [FunctionUnit<RegionedAbsoluteAddr>],
+    slots: &'a HashMap<RegionedAbsoluteAddr, FrameSlot<RegionedAbsoluteAddr>>,
+    stack: &'a mut Vec<u8>,
+    bases: Vec<usize>,
+}
+
+impl Frames<'_> {
+    /// The slot that `addr` names and the byte offset of its value plane in
+    /// the stack, in the innermost frame.
+    fn slot(
+        &self,
+        addr: &RegionedAbsoluteAddr,
+    ) -> Result<(&FrameSlot<RegionedAbsoluteAddr>, usize), InterpError> {
+        let slot = self.slots.get(addr).ok_or_else(|| {
+            InterpError::Machine(format!("no frame slot {}", addr.absolute_addr()))
+        })?;
+        let base = self.bases.last().ok_or_else(|| {
+            InterpError::Machine("frame slot accessed outside a function".to_string())
+        })?;
+        Ok((slot, base + slot.offset))
+    }
+
+    /// The static bit offset of an access of `slot`, which the verifier
+    /// requires and which must lie within the slot.
+    fn bit_offset(
+        slot: &FrameSlot<RegionedAbsoluteAddr>,
+        access: &ResolvedAccess<'_>,
+        bits: usize,
+    ) -> Result<usize, InterpError> {
+        match access.offset {
+            SIROffset::Static(offset) if offset + bits <= slot.width => Ok(*offset),
+            offset => Err(InterpError::Machine(format!(
+                "{bits}-bit frame slot access at {offset} outside its {}-bit slot",
+                slot.width
+            ))),
+        }
+    }
+
+    fn read(&self, start: usize, bit_offset: usize, bits: usize) -> BigUint {
+        let first = start + bit_offset / 8;
+        let last = (start + (bit_offset + bits).div_ceil(8)).min(self.stack.len());
+        let bytes = self.stack.get(first..last.max(first)).unwrap_or(&[]);
+        (BigUint::from_bytes_le(bytes) >> (bit_offset % 8)) & low_mask(bits)
+    }
+
+    fn write(&mut self, start: usize, bit_offset: usize, bits: usize, value: &BigUint) {
+        let first = start + bit_offset / 8;
+        let last = start + (bit_offset + bits).div_ceil(8);
+        let shift = bit_offset % 8;
+        let bytes = &mut self.stack[first..last];
+        let old = BigUint::from_bytes_le(bytes);
+        let mask = low_mask(bits) << shift;
+        let new = (&old ^ (&old & &mask)) | ((value & low_mask(bits)) << shift);
+        let mut encoded = new.to_bytes_le();
+        encoded.resize(bytes.len(), 0);
+        bytes.copy_from_slice(&encoded);
+    }
+
+    fn load(
+        &self,
+        addr: &RegionedAbsoluteAddr,
+        access: &ResolvedAccess<'_>,
+        bits: usize,
+    ) -> Result<SIRValue, InterpError> {
+        let (slot, start) = self.slot(addr)?;
+        let bit_offset = Self::bit_offset(slot, access, bits)?;
+        let payload = self.read(start, bit_offset, bits);
+        Ok(if slot.four_state {
+            SIRValue::new_four_state(
+                payload,
+                self.read(start + slot.plane_size(), bit_offset, bits),
+            )
+        } else {
+            SIRValue::new(payload)
+        })
+    }
+
+    fn store(
+        &mut self,
+        addr: &RegionedAbsoluteAddr,
+        access: &ResolvedAccess<'_>,
+        bits: usize,
+        value: &SIRValue,
+    ) -> Result<(), InterpError> {
+        let (slot, start) = self.slot(addr)?;
+        let (four_state, plane) = (slot.four_state, slot.plane_size());
+        let bit_offset = Self::bit_offset(slot, access, bits)?;
+        self.write(start, bit_offset, bits, &value.payload);
+        if four_state {
+            self.write(start + plane, bit_offset, bits, &value.mask);
+        }
+        Ok(())
+    }
 }
 
 impl Machine<'_> {
@@ -670,12 +797,37 @@ impl Machine<'_> {
 }
 
 impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
+    fn push_frame(&mut self, base: usize, function: FunctionId) -> Result<(), InterpError> {
+        let size = self
+            .frames
+            .functions
+            .get(function.0 as usize)
+            .map(|function| function.frame.size)
+            .ok_or_else(|| InterpError::Machine(format!("call of missing {function}")))?;
+        let end = base
+            .checked_add(size)
+            .filter(|&end| end <= celox_sir::STACK_SIZE)
+            .ok_or_else(|| InterpError::Machine("stack overflow".to_string()))?;
+        if self.frames.stack.len() < end {
+            self.frames.stack.resize(end, 0);
+        }
+        self.frames.bases.push(base);
+        Ok(())
+    }
+
+    fn pop_frame(&mut self) {
+        self.frames.bases.pop();
+    }
+
     fn load(
         &mut self,
         addr: &RegionedAbsoluteAddr,
         access: ResolvedAccess<'_>,
         bits: usize,
     ) -> Result<SIRValue, InterpError> {
+        if addr.region == FRAME_REGION {
+            return self.frames.load(addr, &access, bits);
+        }
         let object = self.object_offset(addr)?;
         let absolute_addr_ref = addr.absolute_addr();
         let bit_offset =
@@ -698,6 +850,16 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
         bits: usize,
     ) -> Result<u64, InterpError> {
         debug_assert!(bits <= 64);
+        if addr.region == FRAME_REGION {
+            return self
+                .frames
+                .load(addr, &access, bits)?
+                .payload
+                .to_u64()
+                .ok_or_else(|| {
+                    InterpError::Machine("narrow frame load did not fit in u64".to_string())
+                });
+        }
         let object = self.object_offset(addr)?;
         let absolute = addr.absolute_addr();
         debug_assert!(!self.is_4state_object(&absolute));
@@ -734,6 +896,9 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
         bits: usize,
         value: &SIRValue,
     ) -> Result<(), InterpError> {
+        if addr.region == FRAME_REGION {
+            return self.frames.store(addr, &access, bits, value);
+        }
         if bits != 0
             && let Some(offsets) = self.layout.trace_notification_offsets(addr)
         {
@@ -774,6 +939,11 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
         bits: usize,
         value: u64,
     ) -> Result<(), InterpError> {
+        if addr.region == FRAME_REGION {
+            return self
+                .frames
+                .store(addr, &access, bits, &SIRValue::new(BigUint::from(value)));
+        }
         if bits != 0
             && let Some(offsets) = self.layout.trace_notification_offsets(addr)
         {
@@ -1081,6 +1251,8 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
 /// Collect the addresses of objects whose stores carry triggers. Their
 /// first 64-bit word is snapshotted at group entry so trigger marking can
 /// detect actual changes, mirroring the compiled backends.
+/// The trigger-bearing addresses that `units` store, the functions they call
+/// included (through the calls' effects).
 fn collect_trigger_addrs(
     units: &[ExecutionUnit<RegionedAbsoluteAddr>],
 ) -> Vec<(AbsoluteAddr, u32)> {
@@ -1089,6 +1261,14 @@ fn collect_trigger_addrs(
         for block in unit.blocks.values() {
             for inst in &block.instructions {
                 match inst {
+                    celox_sir::SIRInstruction::Call { effects, .. } => {
+                        addrs.extend(
+                            effects
+                                .triggers
+                                .iter()
+                                .map(|addr| (addr.absolute_addr(), addr.region)),
+                        );
+                    }
                     celox_sir::SIRInstruction::Store(addr, _, _, _, triggers, _)
                         if !triggers.is_empty() =>
                     {
@@ -1163,14 +1343,22 @@ impl UnitGroup {
 /// construction. Keeping register storage with the unit removes per-tick
 /// HashMap walks and slot clearing from the interpreter dispatch path.
 struct PreparedUnit {
-    unit: ExecutionUnit<RegionedAbsoluteAddr>,
+    unit: Arc<ExecutionUnit<RegionedAbsoluteAddr>>,
     registers: Registers,
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    region_source: Arc<RegionSource>,
 }
 
 impl PreparedUnit {
     fn new(unit: ExecutionUnit<RegionedAbsoluteAddr>, four_state: bool) -> Self {
         let registers = Registers::new(&unit.register_map, four_state);
-        Self { unit, registers }
+        let unit = Arc::new(unit);
+        Self {
+            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+            region_source: Arc::new(RegionSource::new(Arc::clone(&unit))),
+            unit,
+            registers,
+        }
     }
 }
 
@@ -1198,7 +1386,25 @@ fn run_units<'u>(
     trigger_addrs: TriggerAddrs<'_>,
     trigger_snapshots: &mut Vec<((AbsoluteAddr, u32), u64)>,
     emit_triggers: bool,
+    calls: &mut Calls,
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))] hotspots: (
+        &mut Option<HotspotRuntime>,
+        EntryKey,
+    ),
 ) -> Result<(), SimulatorErrorCode> {
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    let (mut sample_start, mut compile_units) = if let Some(runtime) = hotspots.0 {
+        runtime.begin(hotspots.1)
+    } else {
+        (None, None)
+    };
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    let mut compile_instructions = 0;
+    let Calls {
+        functions,
+        slots,
+        stack,
+    } = calls;
     // Snapshot the first word of every trigger-bearing object at group
     // entry; trigger detection compares the stored range against it. The
     // trigger-bearing addresses are precomputed per group so a tick only
@@ -1217,6 +1423,12 @@ fn run_units<'u>(
                 heap: &mut *heap,
                 trigger_snapshots,
                 emit_triggers,
+                frames: Frames {
+                    functions,
+                    slots,
+                    stack: &mut *stack,
+                    bases: Vec::new(),
+                },
             };
             if let Ok(base) = machine.object_offset(&addr) {
                 // Snapshot the raw first word; trigger detection extracts the
@@ -1227,7 +1439,16 @@ fn run_units<'u>(
         }
     }
 
-    for prepared in units {
+    for (_unit_index, prepared) in units.into_iter().enumerate() {
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        if let Some(runtime) = hotspots.0 {
+            runtime.collect(
+                hotspots.1,
+                &mut compile_units,
+                &prepared.unit,
+                &mut compile_instructions,
+            );
+        }
         let mut machine = Machine {
             // Reborrow through the mutable references so a fresh Machine can
             // be constructed for every execution unit in the loop.
@@ -1239,18 +1460,58 @@ fn run_units<'u>(
             heap: &mut *heap,
             trigger_snapshots,
             emit_triggers,
+            frames: Frames {
+                functions,
+                slots,
+                stack: &mut *stack,
+                bases: Vec::new(),
+            },
         };
         // Entry blocks of top-level execution units take no parameters: the
         // compiled ABI passes only the memory pointer, so all inputs arrive
         // through loads.
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        if let Some(runtime) = hotspots
+            .0
+            .as_mut()
+            // This invocation has reserved a group compilation. Do not let
+            // a region request take its worker slot before finish queues it.
+            .filter(|runtime| compile_units.is_none() && runtime.has_regions(hotspots.1))
+        {
+            crate::interpreter::execute_prepared_unit_with_hook(
+                &prepared.unit,
+                &mut machine,
+                &[],
+                four_state,
+                &mut prepared.registers,
+                functions,
+                &mut |_unit, block, registers, machine| {
+                    runtime.try_block(
+                        hotspots.1,
+                        _unit_index,
+                        &prepared.region_source,
+                        block,
+                        registers,
+                        machine.memory,
+                    )
+                },
+            )
+            .map_err(error_code)?;
+            continue;
+        }
         execute_prepared_unit(
             &prepared.unit,
             &mut machine,
             &[],
             four_state,
             &mut prepared.registers,
+            functions,
         )
         .map_err(error_code)?;
+    }
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    if let Some(runtime) = hotspots.0 {
+        runtime.finish(hotspots.1, sample_start.take(), compile_units);
     }
     Ok(())
 }
@@ -1309,6 +1570,10 @@ pub struct InterpBackend {
     /// Whether trigger detection marks bits; matches the compiled
     /// `emit_triggers` codegen flag.
     emit_triggers: bool,
+    /// The function units the units call.
+    calls: Calls,
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    hotspots: Option<HotspotRuntime>,
 }
 
 impl InterpBackend {
@@ -1429,6 +1694,10 @@ impl InterpBackend {
         // program; executing independently scheduled comb and FF units can
         // observe a different pre-edge snapshot around reset and NBA regions,
         // exactly as with the compiled backends.
+        debug_assert!(
+            laid_out.sir.calls_summarized(),
+            "the program's call effects are stale"
+        );
         let comb_trigger_addrs = collect_trigger_addrs(&laid_out.sir.eval_comb);
         let groups = |ffs: &HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>| {
             ffs.iter()
@@ -1482,12 +1751,57 @@ impl InterpBackend {
             comb_trigger_addrs,
             trigger_snapshots: Vec::new(),
             emit_triggers: options.emit_triggers,
+            calls: Calls::new(&laid_out.sir.functions),
+            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+            hotspots: None,
             extern_functions: options
                 .dpi
                 .resolve(&laid_out.runtime().runtime_schema.extern_functions)?,
         };
         backend.install_event_buffers();
         Ok(backend)
+    }
+
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    pub(crate) fn enable_hotspots(
+        &mut self,
+        options: &SimulatorOptions,
+    ) -> Result<(), SimulatorError> {
+        let words = self.memory.len_words() + super::hotspot::SCRATCH_BYTES / 8;
+        self.memory.reserve_total(words);
+        self.memory.resize_zeroed_within_capacity(words);
+        self.hotspots =
+            Some(HotspotRuntime::new(&self.layout, options).map_err(|error| {
+                crate::CodegenError::message(format!("hotspot worker: {error}"))
+            })?);
+        Ok(())
+    }
+
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    pub(crate) fn hotspot_stats(&self) -> Option<HotspotStats> {
+        self.hotspots.as_ref().map(HotspotRuntime::stats)
+    }
+
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    pub(crate) fn prepare_hotspot_scheduler(&mut self, program: &LaidOutProgram) {
+        if let Some(runtime) = &mut self.hotspots {
+            runtime.prepare_scheduler(program);
+        }
+    }
+
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    pub(crate) fn cancel_hotspots(&mut self) -> bool {
+        self.hotspots.as_mut().is_some_and(HotspotRuntime::cancel)
+    }
+
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    fn run_hotspot(&mut self, key: EntryKey) -> Option<Result<(), SimulatorErrorCode>> {
+        // Do not borrow heap or capture storage here. Native code accesses
+        // those allocations through state-header pointers; run_units borrows
+        // them exclusively for the interpreter and must not contain this call.
+        self.hotspots
+            .as_mut()?
+            .try_run(key, self.memory.as_mut_slice())
     }
 
     fn install_event_buffers(&mut self) {
@@ -1563,12 +1877,24 @@ impl SimBackend for InterpBackend {
     /// Interpreting the scheduler unit costs more than the runtime's loop
     /// (sched_bench (d): about 9% more per cycle).
     fn runs_compiled_scheduler(&self) -> bool {
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        if self
+            .hotspots
+            .as_ref()
+            .is_some_and(HotspotRuntime::has_compiled_scheduler)
+        {
+            return true;
+        }
         false
     }
 
     type Event = InterpEventRef;
 
     fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode> {
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        if let Some(result) = self.run_hotspot(EntryKey::Comb) {
+            return result;
+        }
         run_units(
             self.memory.as_mut_slice(),
             &self.layout,
@@ -1583,10 +1909,17 @@ impl SimBackend for InterpBackend {
             },
             &mut self.trigger_snapshots,
             self.emit_triggers,
+            &mut self.calls,
+            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+            (&mut self.hotspots, EntryKey::Comb),
         )
     }
 
     fn eval_apply_ff_at(&mut self, event: InterpEventRef) -> Result<(), SimulatorErrorCode> {
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        if let Some(result) = self.run_hotspot(EntryKey::EvalApply(event.id())) {
+            return result;
+        }
         let UnitGroup {
             units,
             trigger_addrs,
@@ -1608,10 +1941,17 @@ impl SimBackend for InterpBackend {
             },
             &mut self.trigger_snapshots,
             self.emit_triggers,
+            &mut self.calls,
+            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+            (&mut self.hotspots, EntryKey::EvalApply(event.id())),
         )
     }
 
     fn eval_comb_apply_ff_at(&mut self, event: InterpEventRef) -> Result<(), SimulatorErrorCode> {
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        if let Some(result) = self.run_hotspot(EntryKey::CombApply(event.id())) {
+            return result;
+        }
         let (first, second, trigger_addrs): (&mut [PreparedUnit], &mut [PreparedUnit], _) =
             if let Some(fused) = self.fused_comb_apply_units.get_mut(&event.addr()) {
                 (
@@ -1647,10 +1987,17 @@ impl SimBackend for InterpBackend {
             trigger_addrs,
             &mut self.trigger_snapshots,
             self.emit_triggers,
+            &mut self.calls,
+            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+            (&mut self.hotspots, EntryKey::CombApply(event.id())),
         )
     }
 
     fn eval_only_ff_at(&mut self, event: InterpEventRef) -> Result<(), SimulatorErrorCode> {
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        if let Some(result) = self.run_hotspot(EntryKey::EvalOnly(event.id())) {
+            return result;
+        }
         let UnitGroup {
             units,
             trigger_addrs,
@@ -1672,10 +2019,17 @@ impl SimBackend for InterpBackend {
             },
             &mut self.trigger_snapshots,
             self.emit_triggers,
+            &mut self.calls,
+            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+            (&mut self.hotspots, EntryKey::EvalOnly(event.id())),
         )
     }
 
     fn apply_ff_at(&mut self, event: InterpEventRef) -> Result<(), SimulatorErrorCode> {
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        if let Some(result) = self.run_hotspot(EntryKey::Apply(event.id())) {
+            return result;
+        }
         let UnitGroup {
             units,
             trigger_addrs,
@@ -1697,10 +2051,17 @@ impl SimBackend for InterpBackend {
             },
             &mut self.trigger_snapshots,
             self.emit_triggers,
+            &mut self.calls,
+            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+            (&mut self.hotspots, EntryKey::Apply(event.id())),
         )
     }
 
     fn run_process(&mut self, index: usize) -> Result<(), SimulatorErrorCode> {
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        if let Some(result) = self.run_hotspot(EntryKey::Process(index)) {
+            return result;
+        }
         let unit = self
             .process_units
             .get_mut(index)
@@ -1718,6 +2079,9 @@ impl SimBackend for InterpBackend {
             TriggerAddrs::default(),
             &mut self.trigger_snapshots,
             false,
+            &mut self.calls,
+            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+            (&mut self.hotspots, EntryKey::Process(index)),
         )
     }
 
@@ -2140,6 +2504,318 @@ impl SimBackend for InterpBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(all(
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    #[test]
+    fn hotspot_block_frames_preserve_values_across_native_and_interpreted_branches() {
+        let mut source = String::from(
+            "module Top(input logic [129:0] d, a, input logic sel, output logic [129:0] q); always_comb begin logic [129:0] v; v = d;\n",
+        );
+        for shift in 0..24 {
+            source.push_str(&format!("v = (v ^ a) + (d << {shift});\n"));
+        }
+        source.push_str("if (sel) q = v; else q = (v | a) ^ d; end endmodule");
+        let build = || {
+            crate::Simulator::from_sv_sources(
+                vec![(source.as_str(), std::path::Path::new("region.sv"))],
+                "Top",
+            )
+            .four_state(true)
+            .opt_level(crate::OptLevel::O0)
+            .build_interpreter()
+            .unwrap()
+        };
+        let mut mixed = build();
+        let mut reference = build();
+        let options = SimulatorOptions {
+            four_state: true,
+            ..Default::default()
+        };
+        mixed.backend.enable_hotspots(&options).unwrap();
+        // Force the oversized-group path on this small fixture. The same
+        // admission path is used when a real group exceeds the compile budget.
+        let runtime = mixed.backend.hotspots.as_mut().unwrap();
+        runtime.begin(EntryKey::Comb);
+        let mut oversized = usize::MAX;
+        runtime.collect(
+            EntryKey::Comb,
+            &mut Some(Vec::new()),
+            &mixed.backend.eval_comb_units[0].unit,
+            &mut oversized,
+        );
+        assert!(runtime.has_regions(EntryKey::Comb));
+        let (d, a, sel, q) = (
+            mixed.signal("d"),
+            mixed.signal("a"),
+            mixed.signal("sel"),
+            mixed.signal("q"),
+        );
+        let (rd, ra, rs, rq) = (
+            reference.signal("d"),
+            reference.signal("a"),
+            reference.signal("sel"),
+            reference.signal("q"),
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let mut iteration = 0u32;
+        loop {
+            let value = (BigUint::from(1u8) << 129usize) | BigUint::from(iteration + 1);
+            let mask = if iteration.is_multiple_of(3) {
+                BigUint::from(1u8) << 128usize
+            } else {
+                BigUint::default()
+            };
+            mixed
+                .modify(|io| {
+                    io.set_four_state(d, value.clone(), mask.clone());
+                    io.set_four_state(a, (iteration + 7).into(), (iteration & 1).into());
+                    io.set(sel, (iteration & 1) as u8);
+                })
+                .unwrap();
+            reference
+                .modify(|io| {
+                    io.set_four_state(rd, value, mask);
+                    io.set_four_state(ra, (iteration + 7).into(), (iteration & 1).into());
+                    io.set(rs, (iteration & 1) as u8);
+                })
+                .unwrap();
+            assert_eq!(
+                mixed.get_four_state(q),
+                reference.get_four_state(rq),
+                "iteration={iteration}"
+            );
+            let stats = mixed.backend.hotspot_stats().unwrap();
+            assert_eq!(stats.failed_entries, 0, "{stats:?}");
+            if stats.compiled_block_calls >= 64 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no block publication: {stats:?}"
+            );
+            iteration += 1;
+            std::thread::yield_now();
+        }
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    #[test]
+    fn hotspot_split_groups_share_pending_writes_and_trigger_snapshots() {
+        const SOURCE: &str = r#"`timescale 1ns/1ns
+module Top;
+  logic clk = 0, en = 0;
+  logic gclk;
+  logic [129:0] q = 0, g = 0;
+  logic [7:0] seen = 0;
+  logic [7:0] mem [0:1023];
+  wire [7:0] m = mem[3];
+  assign gclk = clk & en;
+  always #5 clk = ~clk;
+  always #37 en = ~en;
+  always_ff @(posedge clk) begin
+    q <= {2'bxz, q[127:0] + 128'd1};
+    mem[q[5:0]] <= q[7:0];
+  end
+  always_ff @(posedge gclk) g <= {q[129:128], g[127:0] + q[127:0]};
+  always @(posedge gclk) seen = seen + 8'd1;
+endmodule
+"#;
+        let build = || {
+            crate::Simulation::from_sv_sources(
+                vec![(SOURCE, std::path::Path::new("mixed.sv"))],
+                "Top",
+            )
+            .four_state(true)
+            .build_interpreter()
+            .unwrap()
+        };
+        for (native_eval, native_apply) in [(true, false), (false, true), (true, true)] {
+            let mut reference = build();
+            let mut mixed = build();
+            let options = SimulatorOptions {
+                four_state: true,
+                emit_triggers: true,
+                ..Default::default()
+            };
+            let backend = &mut mixed.simulator.backend;
+            backend.enable_hotspots(&options).unwrap();
+            let mut runtime = backend.hotspots.take().unwrap();
+            let mut jobs = Vec::new();
+            if native_eval {
+                for (addr, group) in &backend.eval_only_units {
+                    jobs.push((
+                        EntryKey::EvalOnly(backend.eval_only_event_map[addr].id()),
+                        group
+                            .units
+                            .iter()
+                            .map(|prepared| prepared.unit.as_ref().clone())
+                            .collect(),
+                    ));
+                }
+            }
+            if native_apply {
+                for (addr, group) in &backend.apply_units {
+                    jobs.push((
+                        EntryKey::Apply(backend.apply_event_map[addr].id()),
+                        group
+                            .units
+                            .iter()
+                            .map(|prepared| prepared.unit.as_ref().clone())
+                            .collect(),
+                    ));
+                }
+            }
+            assert!(!jobs.is_empty());
+            // Publish each selected group before driving the design. Poll
+            // through an absent entry so setup executes no simulation effects.
+            for (key, units) in jobs {
+                let count = runtime.stats().compiled_entries;
+                runtime.begin(key);
+                runtime.finish(key, None, Some(units));
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+                while runtime.stats().compiled_entries == count {
+                    assert!(
+                        runtime
+                            .try_run(EntryKey::Process(usize::MAX), backend.memory.as_mut_slice())
+                            .is_none()
+                    );
+                    assert_eq!(runtime.stats().failed_entries, 0, "{key:?}");
+                    assert!(std::time::Instant::now() < deadline, "{key:?}");
+                    std::thread::yield_now();
+                }
+            }
+            // Hold this exact mixed configuration throughout the comparison.
+            runtime.cancel();
+            backend.hotspots = Some(runtime);
+            for time in (0..1000).step_by(3) {
+                mixed.run_until(time).unwrap();
+                reference.run_until(time).unwrap();
+                for name in ["q", "g", "seen", "m"] {
+                    assert_eq!(
+                        mixed.get_four_state(mixed.signal(name)),
+                        reference.get_four_state(reference.signal(name)),
+                        "time={time}, signal={name}, native_eval={native_eval}, native_apply={native_apply}"
+                    );
+                }
+            }
+            assert!(
+                mixed
+                    .simulator
+                    .backend
+                    .hotspot_stats()
+                    .unwrap()
+                    .compiled_calls
+                    > 0
+            );
+        }
+    }
+
+    #[test]
+    fn snapshots_the_triggers_of_called_functions() {
+        let addr = |var| RegionedAbsoluteAddrBase {
+            region: STABLE_REGION,
+            instance_id: crate::ir::InstanceId(0),
+            var_id: celox_design::StateObjectId(var),
+        };
+        let call = celox_sir::SIRInstruction::Call {
+            function: FunctionId(0),
+            frame: celox_sir::RegisterId(0),
+            args: Vec::new(),
+            outputs: Vec::new(),
+            dst: None,
+            effects: Arc::new(celox_sir::CallEffects {
+                writes: vec![addr(3)],
+                triggers: vec![addr(3)],
+                ..Default::default()
+            }),
+        };
+        let unit = ExecutionUnit {
+            entry_block_id: celox_sir::BlockId(0),
+            blocks: [(
+                celox_sir::BlockId(0),
+                celox_sir::BasicBlock {
+                    id: celox_sir::BlockId(0),
+                    params: Vec::new(),
+                    instructions: vec![call],
+                    terminator: celox_sir::SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: Default::default(),
+        };
+        assert_eq!(
+            collect_trigger_addrs(&[unit]),
+            [(addr(3).absolute_addr(), STABLE_REGION)]
+        );
+    }
+
+    #[test]
+    fn frames_keep_slot_planes_apart_in_each_frame() {
+        let addr = |var| RegionedAbsoluteAddrBase {
+            region: FRAME_REGION,
+            instance_id: crate::ir::InstanceId(0),
+            var_id: celox_design::StateObjectId(var),
+        };
+        // A 4-state 12-bit slot at byte 1 of each 8-byte frame.
+        let slot = FrameSlot {
+            addr: addr(0),
+            offset: 1,
+            width: 12,
+            four_state: true,
+            handle: false,
+        };
+        let slots = [(slot.addr, slot.clone())].into_iter().collect();
+        let mut stack = vec![0xffu8; 16];
+        let mut frames = Frames {
+            functions: &[],
+            slots: &slots,
+            stack: &mut stack,
+            bases: vec![0],
+        };
+        let whole = SIROffset::Static(0);
+        fn at(offset: &SIROffset) -> ResolvedAccess<'_> {
+            ResolvedAccess {
+                offset,
+                dynamics: [None, None],
+            }
+        }
+        let value = SIRValue::new_four_state(BigUint::from(0xabcu32), BigUint::from(0x00fu32));
+        frames.store(&slot.addr, &at(&whole), 12, &value).unwrap();
+        frames.bases.push(8);
+        frames
+            .store(
+                &slot.addr,
+                &at(&whole),
+                12,
+                &SIRValue::new(BigUint::from(1u8)),
+            )
+            .unwrap();
+        // Bits 4..8 of the inner frame's slot.
+        let upper = SIROffset::Static(4);
+        assert_eq!(
+            frames.load(&slot.addr, &at(&upper), 4).unwrap(),
+            SIRValue::new_four_state(BigUint::zero(), BigUint::zero())
+        );
+        frames.bases.pop();
+        assert_eq!(frames.load(&slot.addr, &at(&whole), 12).unwrap(), value);
+        // An access past the slot fails instead of reaching its neighbours.
+        let past = SIROffset::Static(8);
+        assert!(frames.load(&slot.addr, &at(&past), 8).is_err());
+        assert!(frames.store(&slot.addr, &at(&past), 8, &value).is_err());
+        // The bytes around the slot's planes keep their contents.
+        assert_eq!(stack[0], 0xff);
+        assert_eq!(stack[5], 0xff);
+        assert_eq!(stack[2] >> 4, 0xf);
+    }
 
     #[test]
     fn narrow_packed_access_matches_biguint_reference() {

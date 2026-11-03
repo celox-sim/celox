@@ -1,5 +1,10 @@
 #![allow(clippy::disallowed_methods)] // This binary is the process environment boundary.
 
+// Frontend trees and background JIT passes allocate many short-lived objects.
+// Keep this choice at the CLI boundary so library/VPI hosts own their allocator.
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::{
     env,
     ffi::OsStr,
@@ -248,7 +253,9 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
         .map(|(text, path)| (text.as_str(), path.as_path()))
         .collect();
     let builder = celox::Simulation::from_sv_sources(source_refs, &arguments.design.top)
+        .diagnostics_from_env()
         .four_state(arguments.design.four_state.unwrap_or(false))
+        .hotspot_jit(arguments.execution.hotspot_jit)
         .threads(arguments.execution.threads as usize)
         .opt_level(arguments.opt_level)
         .diagnostic_policy(arguments.design.diagnostics.clone())

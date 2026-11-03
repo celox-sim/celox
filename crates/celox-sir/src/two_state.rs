@@ -30,6 +30,7 @@ pub fn canonicalize_program<EventAddr, StateAddr>(program: &mut SirProgram<Event
         apply_ffs,
         parallel,
         processes,
+        functions,
     } = program;
     let units = eval_comb
         .iter_mut()
@@ -43,7 +44,8 @@ pub fn canonicalize_program<EventAddr, StateAddr>(program: &mut SirProgram<Event
             .into_iter()
             .flat_map(|units| units.values_mut().flatten()),
         )
-        .chain(processes.iter_mut());
+        .chain(processes.iter_mut())
+        .chain(functions.iter_mut().map(|function| &mut function.unit));
     for unit in units {
         canonicalize_unit(unit);
     }

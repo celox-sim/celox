@@ -48,7 +48,33 @@ fn read_working_key(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<Worki
     }
 }
 
+/// The WORKING ranges `inst` reads: its one static access, or every
+/// WORKING object a call's effects read, each whole.
+fn read_working_keys(
+    inst: &SIRInstruction<RegionedAbsoluteAddr>,
+) -> impl Iterator<Item = WorkingKey> + '_ {
+    let objects = match inst.state_reads() {
+        StateAccess::Objects(objects) => objects,
+        _ => &[],
+    };
+    read_working_key(inst).into_iter().chain(
+        objects
+            .iter()
+            .filter(|object| object.region == WORKING_REGION)
+            .map(|object| WorkingKey {
+                addr: object.absolute_addr(),
+                offset: 0,
+                bits: usize::MAX,
+            }),
+    )
+}
+
+/// Whether `inst` may read WORKING bits this analysis does not name: at a
+/// dynamic offset, or as a native kernel, which may read any.
 fn is_dynamic_working_read(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
+    if matches!(inst.state_reads(), StateAccess::Everything) {
+        return true;
+    }
     match inst {
         SIRInstruction::Load(
             _,
@@ -173,6 +199,10 @@ fn transfer_block(
     for inst in block.instructions.iter().rev() {
         if is_dynamic_working_read(inst) {
             unknown = true;
+        } else if inst.has_opaque_state_access() {
+            for key in read_working_keys(inst) {
+                live.insert(read_index[&key]);
+            }
         } else if let Some(key) = read_working_key(inst) {
             live.insert(read_index[&key]);
         } else if let Some(key) = working_store_key(inst)
@@ -225,12 +255,11 @@ pub(in crate::optimizer) fn eliminate_dead_working_stores(
     let mut store_keys = HashSet::default();
     for block in eu.blocks.values() {
         for inst in &block.instructions {
-            if let Some(key) = read_working_key(inst)
-                && !read_index.contains_key(&key)
-            {
-                let index = read_keys.len();
-                read_keys.push(key);
-                read_index.insert(key, index);
+            for key in read_working_keys(inst) {
+                read_index.entry(key).or_insert_with(|| {
+                    read_keys.push(key);
+                    read_keys.len() - 1
+                });
             }
             if let Some(key) = working_store_key(inst) {
                 store_keys.insert(key);
@@ -328,6 +357,10 @@ pub(in crate::optimizer) fn eliminate_dead_working_stores(
             let inst = &body.instructions[index];
             if is_dynamic_working_read(inst) {
                 unknown = true;
+            } else if inst.has_opaque_state_access() {
+                for key in read_working_keys(inst) {
+                    live.insert(read_index[&key]);
+                }
             } else if let Some(key) = read_working_key(inst) {
                 live.insert(read_index[&key]);
             } else if let Some(key) = working_store_key(inst) {

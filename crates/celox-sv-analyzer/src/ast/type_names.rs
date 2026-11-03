@@ -532,12 +532,11 @@ fn enum_name(
         .members
         .iter()
         .map(|member| {
-            let sign = if member.value < 0 { "-" } else { "" };
-            format!(
-                "{}={sign}{width}'{signing}d{}",
-                member.name,
-                member.value.unsigned_abs()
-            )
+            let (sign, magnitude) = match domain.value_of(member) {
+                crate::ast::enums::MemberValue::Negative(value) => ("-", value.unsigned_abs()),
+                crate::ast::enums::MemberValue::NonNegative(value) => ("", value),
+            };
+            format!("{}={sign}{width}'{signing}d{magnitude}", member.name)
         })
         .collect::<Vec<_>>();
     name.push_str(&constants.join(","));

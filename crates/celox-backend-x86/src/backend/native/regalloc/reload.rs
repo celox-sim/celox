@@ -3320,7 +3320,10 @@ fn first_snapshot_difference(
                 }
             }
             (SnapshotAccess::Phi(expected_block), SnapshotAccess::Phi(actual_block))
-                if expected_block == actual_block =>
+                if expected_block == actual_block
+                    || memory_phi_factorings
+                        .get(&actual_block)
+                        .is_some_and(|factoring| factoring.successor == expected_block) =>
             {
                 let mut covered = start;
                 for (run_start, run_end, expected_inputs) in
@@ -3338,10 +3341,34 @@ fn first_snapshot_difference(
                             return Some((expected_access, actual_access));
                         }
                         actual_covered = piece_end;
+                        // Factoring all non-self inputs of a loop phi can
+                        // make that phi trivial: its remaining inputs carry
+                        // itself, and the rebuilt snapshot names the new phi.
+                        // Recreate only those proven unchanged self edges;
+                        // every factored incoming version is still compared.
+                        let restored_inputs;
+                        let actual_inputs = if expected_block != actual_block {
+                            let factoring = memory_phi_factorings[&actual_block];
+                            let mut inputs = vec![(actual_block, actual_access)];
+                            for &(predecessor, input) in expected_inputs {
+                                if factoring.predecessors.contains(&predecessor) {
+                                    continue;
+                                }
+                                if input != expected_access {
+                                    return Some((expected_access, actual_access));
+                                }
+                                inputs.push((predecessor, actual_access));
+                            }
+                            inputs.sort_unstable_by_key(|&(predecessor, _)| predecessor);
+                            restored_inputs = inputs;
+                            restored_inputs.as_slice()
+                        } else {
+                            actual_inputs
+                        };
                         let mut active = BTreeSet::new();
                         let Some(expansions) = expand_factored_snapshot_inputs(
                             actual,
-                            actual_block,
+                            expected_block,
                             actual_inputs,
                             piece_start,
                             piece_end,
@@ -5832,6 +5859,83 @@ mod tests {
         assert_eq!(
             first_snapshot_difference(&expected, &split_actual, &inserted_writes, &factorings),
             Some((SnapshotAccess::Phi(BlockId(10)), write(3)))
+        );
+    }
+
+    #[test]
+    fn snapshot_comparison_tracks_a_self_phi_collapsed_by_proven_factoring() {
+        let old_phi = SnapshotAccess::Phi(BlockId(10));
+        let new_phi = SnapshotAccess::Phi(BlockId(20));
+        let write = |block| SnapshotAccess::Write {
+            block: BlockId(block),
+            ordinal: 0,
+        };
+        let snapshot = |block, inputs: Vec<(BlockId, SnapshotAccess)>| {
+            MemorySnapshot::new(
+                vec![SnapshotSegment {
+                    start: 0,
+                    end: 8,
+                    access: SnapshotAccess::Phi(block),
+                }],
+                vec![SnapshotPhi {
+                    block,
+                    start: 0,
+                    end: 8,
+                    inputs: inputs.into_boxed_slice(),
+                }],
+            )
+        };
+        let expected = snapshot(
+            BlockId(10),
+            vec![
+                (BlockId(1), write(1)),
+                (BlockId(2), write(2)),
+                (BlockId(3), old_phi),
+            ],
+        );
+        let actual = snapshot(
+            BlockId(20),
+            vec![(BlockId(1), write(1)), (BlockId(2), write(2))],
+        );
+        let factoring = MemoryPhiFactoring {
+            block: BlockId(20),
+            successor: BlockId(10),
+            predecessors: vec![BlockId(1), BlockId(2)].into_boxed_slice(),
+        };
+        let factorings = BTreeMap::from([(factoring.block, &factoring)]);
+        assert!(stable_memory_snapshot_matches(
+            &expected,
+            &actual,
+            &BTreeMap::new(),
+            &factorings
+        ));
+        assert!(!stable_memory_snapshot_matches(
+            &expected,
+            &actual,
+            &BTreeMap::new(),
+            &BTreeMap::new()
+        ));
+        // A changed input or a write on the supposedly carried edge must
+        // still fail; the factoring certificate alone is not sufficient.
+        let changed = snapshot(
+            BlockId(20),
+            vec![(BlockId(1), write(1)), (BlockId(2), write(4))],
+        );
+        assert_eq!(
+            first_snapshot_difference(&expected, &changed, &BTreeMap::new(), &factorings),
+            Some((write(2), write(4)))
+        );
+        let written = snapshot(
+            BlockId(10),
+            vec![
+                (BlockId(1), write(1)),
+                (BlockId(2), write(2)),
+                (BlockId(3), write(3)),
+            ],
+        );
+        assert_eq!(
+            first_snapshot_difference(&written, &actual, &BTreeMap::new(), &factorings),
+            Some((old_phi, new_phi))
         );
     }
 

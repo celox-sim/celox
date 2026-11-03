@@ -2170,6 +2170,9 @@ fn build_effect_case_rewrite_plan(
             }
             let merge = *recipe.non_dominating_control_merges.first()?;
             let insertion_block = *parameter_blocks.get(&merge)?;
+            if !path_local_route_is_effect_free(eu, insertion_block, sink.0, &context.known) {
+                return None;
+            }
             if !recipe_is_available_at_entry(
                 eu,
                 &recipe,
@@ -2243,6 +2246,50 @@ fn build_effect_case_rewrite_plan(
         path_local_exits,
         estimated_saving,
     })
+}
+
+/// Replacing this route by the sink's publication is legal only when every
+/// specialized path reaches the sink without executing another effect. Cycles
+/// are rejected too: reachability alone does not prove eventual publication.
+fn path_local_route_is_effect_free(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    insertion_block: BlockId,
+    sink: BlockId,
+    known: &HashMap<RegisterId, bool>,
+) -> bool {
+    let mut active = BTreeSet::new();
+    let mut finished = BTreeSet::new();
+    let mut work = vec![(insertion_block, false)];
+    while let Some((id, leaving)) = work.pop() {
+        if id == sink || finished.contains(&id) {
+            continue;
+        }
+        if leaving {
+            active.remove(&id);
+            finished.insert(id);
+            continue;
+        }
+        if !active.insert(id) {
+            return false;
+        }
+        let Some(block) = eu.blocks.get(&id) else {
+            return false;
+        };
+        if block
+            .instructions
+            .iter()
+            .any(SIRInstruction::has_side_effects)
+        {
+            return false;
+        }
+        let successors = specialized_successors(&block.terminator, known);
+        if successors.is_empty() {
+            return false;
+        }
+        work.push((id, true));
+        work.extend(successors.into_iter().map(|next| (next, false)));
+    }
+    true
 }
 
 #[allow(clippy::too_many_arguments)]

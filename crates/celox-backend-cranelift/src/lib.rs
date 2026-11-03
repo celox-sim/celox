@@ -4,8 +4,8 @@ pub type HashMap<K, V> = fxhash::FxHashMap<K, V>;
 pub type HashSet<K> = fxhash::FxHashSet<K>;
 
 pub use celox_design::{
-    BinaryOp, DomainKind, InstanceId, RegionedAbsoluteAddrBase, SPARSE_WORKING_REGION,
-    STABLE_REGION, StateAddr, TriggerIdWithKind, UnaryOp, WORKING_REGION,
+    BinaryOp, DomainKind, FRAME_REGION, InstanceId, RegionedAbsoluteAddrBase,
+    SPARSE_WORKING_REGION, STABLE_REGION, StateAddr, TriggerIdWithKind, UnaryOp, WORKING_REGION,
 };
 pub use celox_sir::*;
 
@@ -14,6 +14,8 @@ pub type RegionedAbsoluteAddr = celox_design::RegionedStateAddr;
 
 const MEM_SHIFT_THRESHOLD: usize = 4;
 
+#[cfg(test)]
+mod call_tests;
 pub mod cost_model;
 mod cranelift_options;
 mod error;
@@ -28,6 +30,7 @@ pub use cranelift_options::{
 pub use error::CraneliftError;
 pub use jit_engine::JitEngine;
 pub use translator::SIRTranslator;
+pub use translator::call::{CALL_DEPTH_TRAP, STACK_OVERFLOW_TRAP};
 
 pub type MemoryLayout = celox_state_layout::MemoryLayout<celox_design::StateAddr>;
 pub use celox_state_layout::get_byte_size;

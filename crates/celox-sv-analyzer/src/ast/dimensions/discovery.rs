@@ -53,6 +53,7 @@ pub(in crate::ast) fn same_tables(a: &PackedDimensions, b: &PackedDimensions) ->
         && Arc::ptr_eq(&a.subroutine_param_names, &b.subroutine_param_names)
         && Arc::ptr_eq(&a.constant_types, &b.constant_types)
         && a.class_scope == b.class_scope
+        && a.constructor == b.constructor
 }
 
 /// The signature entries that discovering a scope's own declarations added

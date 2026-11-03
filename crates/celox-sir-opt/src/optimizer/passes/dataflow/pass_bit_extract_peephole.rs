@@ -1,5 +1,5 @@
 use super::pass_manager::ExecutionUnitPass;
-use super::shared::sir_value_to_u64;
+use super::shared::{StateWritePositions, sir_value_to_u64};
 use crate::HashMap;
 use crate::PassOptions;
 use crate::ir::*;
@@ -9,6 +9,10 @@ pub(in crate::optimizer) struct BitExtractPeepholePass;
 impl ExecutionUnitPass for BitExtractPeepholePass {
     fn name(&self) -> &'static str {
         "bit_extract_peephole"
+    }
+
+    fn handles_calls(&self) -> bool {
+        true
     }
 
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
@@ -49,6 +53,8 @@ fn optimize_bit_extracts(
     }
 
     optimize_slice_loads(instructions, register_map, global_use_count);
+
+    let writes = StateWritePositions::new(instructions);
 
     // Build def map: register -> instruction index
     let mut def_map: HashMap<RegisterId, usize> = HashMap::default();
@@ -131,6 +137,10 @@ fn optimize_bit_extracts(
         else {
             continue;
         };
+
+        if writes.written_between(*addr, src_def_idx, idx) {
+            continue;
+        }
 
         // Bounds check: base + k + w <= base + n (i.e., k + w <= n)
         if k + w > n {
@@ -274,6 +284,7 @@ fn optimize_slice_loads(
     register_map: &mut HashMap<RegisterId, RegisterType>,
     global_use_count: &HashMap<RegisterId, usize>,
 ) {
+    let writes = StateWritePositions::new(instructions);
     let mut def_map: HashMap<RegisterId, usize> = HashMap::default();
     for (idx, inst) in instructions.iter().enumerate() {
         match inst {
@@ -302,7 +313,7 @@ fn optimize_slice_loads(
         else {
             continue;
         };
-        if bit_offset + width > load_width {
+        if bit_offset + width > load_width || writes.written_between(addr, load_idx, idx) {
             continue;
         }
         replacements.push((

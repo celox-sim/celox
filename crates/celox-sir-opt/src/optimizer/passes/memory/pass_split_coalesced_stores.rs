@@ -19,6 +19,10 @@ impl ExecutionUnitPass for SplitCoalescedStoresPass {
         "split_coalesced_stores"
     }
 
+    fn handles_calls(&self) -> bool {
+        true
+    }
+
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
         split_coalesced_stores(eu, self.max_store_width);
     }
@@ -71,6 +75,15 @@ fn split_coalesced_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, max_stor
                 .flatten()
             {
                 last_access.insert(*access.addr, si);
+            }
+            // A call accesses any part of the objects its effects list.
+            match inst.opaque_accessed_objects() {
+                Some(objects) => {
+                    for object in objects {
+                        last_access.insert(*object, si);
+                    }
+                }
+                None => last_observable = Some(si),
             }
             if inst.is_observable() {
                 last_observable = Some(si);

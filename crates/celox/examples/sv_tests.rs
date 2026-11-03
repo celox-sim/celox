@@ -222,8 +222,11 @@ fn run(options: &Options) -> Result<(), String> {
             unreachable!("preprocessing and parsing returned before root selection")
         }
         // A Simulator rejects designs with processes, which it does not run.
+        // The driver is an application boundary for diagnostics such as
+        // `CELOX_SV_RECURSION_REPORT`.
         Mode::Elaboration => celox::Simulation::from_sv_sources(sources, &top)
             .four_state(options.four_state)
+            .diagnostics_from_env()
             .build()
             .map(|_| ())
             .map_err(|error| error.to_string()),
@@ -242,6 +245,7 @@ fn run(options: &Options) -> Result<(), String> {
             for plusargs in variants {
                 let sim = celox::Simulation::from_sv_sources(sources.clone(), &top)
                     .four_state(options.four_state)
+                    .diagnostics_from_env()
                     .plusargs(plusargs)
                     .build()
                     .map_err(|error| error.to_string())?;

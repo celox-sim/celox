@@ -3,9 +3,6 @@ name: Release Management
 on:
   push:
     branches: [master]
-  schedule:
-    # Monday 12:00 JST / 03:00 UTC. No releasable changes means a no-op.
-    - cron: "0 3 * * 1"
   workflow_dispatch:
 
 concurrency:
@@ -35,10 +32,10 @@ jobs:
         run: node scripts/release-issue.mjs
 
   release-please:
-    name: Prepare weekly release pull request
+    name: Prepare release pull request
     outputs:
       held: ${{ steps.release-issue.outputs.held }}
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch'
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -106,9 +103,9 @@ jobs:
         run: node scripts/release-issue.mjs
 
   queue-release:
-    name: Queue weekly release
+    name: Queue release
     needs: release-please
-    if: needs.release-please.outputs.held != 'true' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    if: needs.release-please.outputs.held != 'true' && github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: read

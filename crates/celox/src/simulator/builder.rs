@@ -1724,6 +1724,10 @@ mod host {
         /// Generated derived-edge units the tests run, recorded here.
         #[cfg(all(test, feature = "cranelift", feature = "systemverilog"))]
         pub(crate) derived_edge_units: Option<crate::derived_edge::TestEdgeUnits>,
+        /// A rewrite of the optimized SIR before layout, with which tests
+        /// build programs no frontend produces yet.
+        #[cfg(test)]
+        pub(crate) sir_transform: Option<fn(&mut crate::ir::SirProgram)>,
         /// Emit the additional combinational entries needed to reapply foreign
         /// force overrides between procedural store boundaries.
         pub native_force_support: bool,
@@ -1736,6 +1740,9 @@ mod host {
         pub dead_store_policy: DeadStorePolicy,
         /// When the tiered backend adopts background-compiled code.
         pub tier_promotion: TierPromotion,
+        /// Experimentally compile hot execution groups independently on x86-64.
+        /// The default remains whole-image tiered compilation.
+        pub hotspot_jit: bool,
         /// Allow Celox to lower function side effects that Veryl rejects in
         /// `always_ff` for SystemVerilog compatibility.
         pub allow_always_ff_function_effects: bool,
@@ -2046,11 +2053,14 @@ mod host {
                 emit_triggers: false,
                 #[cfg(all(test, feature = "cranelift", feature = "systemverilog"))]
                 derived_edge_units: None,
+                #[cfg(test)]
+                sir_transform: None,
                 settle_check: false,
                 native_force_support: false,
                 signal_access: crate::SignalAccessOptions::default(),
                 dead_store_policy: DeadStorePolicy::Off,
                 tier_promotion: TierPromotion::Always,
+                hotspot_jit: false,
                 allow_always_ff_function_effects: false,
                 allow_inferred_latches: false,
                 dpi: crate::DpiSymbols::default(),
@@ -2214,6 +2224,13 @@ mod host {
             sink: crate::derived_edge::TestEdgeUnits,
         ) -> Self {
             self.options.derived_edge_units = Some(sink);
+            self
+        }
+
+        /// Rewrite the optimized SIR with `transform` before layout.
+        #[cfg(test)]
+        pub(crate) fn transform_sir(mut self, transform: fn(&mut crate::ir::SirProgram)) -> Self {
+            self.options.sir_transform = Some(transform);
             self
         }
 
@@ -2558,6 +2575,13 @@ mod host {
         /// Set when the tiered backend adopts background-compiled code.
         pub fn tier_promotion(mut self, policy: TierPromotion) -> Self {
             self.options.tier_promotion = policy;
+            self
+        }
+
+        /// Enable experimental incremental compilation on the tiered backend.
+        /// Unsupported hosts retain the ordinary tiered execution policy.
+        pub fn hotspot_jit(mut self, enabled: bool) -> Self {
+            self.options.hotspot_jit = enabled;
             self
         }
 
@@ -3021,8 +3045,13 @@ mod host {
                     &self.sv_param_literals,
                 )
             };
-            let (program, mut warnings) = compiled
+            #[cfg_attr(not(test), allow(unused_mut))]
+            let (mut program, mut warnings) = compiled
                 .map_err(|error| error.apply_diagnostic_policy(&self.options.diagnostic_policy))?;
+            #[cfg(test)]
+            if let Some(transform) = self.options.sir_transform {
+                transform(&mut program.sir);
+            }
             self.options.diagnostic_policy.apply(&mut warnings)?;
             if let Some(start) = compile_start {
                 tracing::debug!("[phase-timing] compile_to_sir: {:?}", start.elapsed());

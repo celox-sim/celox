@@ -9,6 +9,13 @@ pub fn verify_memory_offset_contract(
     for block in eu.blocks.values() {
         for (index, instruction) in block.instructions.iter().enumerate() {
             let (address, offset, width, operation, explicit_memory_copy) = match instruction {
+                // A frame slot is no state object; `SirProgram::verify_functions`
+                // checks its accesses.
+                SIRInstruction::Load(_, address, ..) | SIRInstruction::Store(address, ..)
+                    if address.region == celox_design::FRAME_REGION =>
+                {
+                    continue;
+                }
                 SIRInstruction::Load(_, address, offset, width) => {
                     (address, offset, *width, "Load", false)
                 }

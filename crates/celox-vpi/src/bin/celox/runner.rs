@@ -35,6 +35,9 @@ pub(super) struct ExecutionArgs {
     /// cross-codegen builds.
     #[arg(long, value_enum)]
     backend: Option<Backend>,
+    /// Experimentally compile hot execution groups independently (x86-64 tiered).
+    #[arg(long, conflicts_with = "require_compiled")]
+    pub(super) hotspot_jit: bool,
     #[arg(long)]
     compile_only: bool,
     /// Write a pointer-free native image during compile-only mode.
@@ -102,6 +105,9 @@ impl ExecutionArgs {
 
     #[cfg(feature = "systemverilog")]
     pub(super) fn validate_sv(&self) -> Result<(), String> {
+        if self.hotspot_jit && (self.backend() != Backend::Tiered || self.threads != 1) {
+            return Err("--hotspot-jit requires --backend tiered and --threads 1".into());
+        }
         if self.compile_only
             || self.native_image_input.is_some()
             || self.native_image_output.is_some()
@@ -126,6 +132,7 @@ impl ExecutionArgs {
 
 struct Options {
     report: bool,
+    hotspot_jit: bool,
     require_compiled: bool,
     design: super::project::Design,
     project: PathBuf,
@@ -217,6 +224,7 @@ pub(super) fn run(
     let backend = cli.backend();
     let mut opts = Options {
         report: cli.report,
+        hotspot_jit: cli.hotspot_jit,
         require_compiled: cli.require_compiled,
         project: design.project_root.clone().unwrap_or_else(|| {
             design
@@ -260,6 +268,11 @@ pub(super) fn run(
         always_partition: cli.always_partition,
         design,
     };
+    if opts.hotspot_jit && (opts.backend != Backend::Tiered || opts.threads != 1) {
+        return Err(RunError::InvalidConfiguration {
+            message: "--hotspot-jit requires --backend tiered and --threads 1",
+        });
+    }
     if opts.require_compiled && opts.backend != Backend::Tiered {
         return Err(RunError::InvalidConfiguration {
             message: "--require-compiled requires --backend tiered",
@@ -487,6 +500,7 @@ pub(super) fn run(
         .diagnostic_policy(opts.design.diagnostics.clone())
         .signal_access(opts.design.signal_access.clone())
         .four_state(opts.four_state)
+        .hotspot_jit(opts.hotspot_jit)
         .threads(opts.threads as usize)
         .diagnostics_from_env();
     if let Some(path) = &opts.vcd {

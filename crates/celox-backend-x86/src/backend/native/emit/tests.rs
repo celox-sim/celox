@@ -2,6 +2,7 @@ mod arithmetic;
 mod control_flow;
 mod extern_calls;
 mod features;
+mod function_calls;
 mod memory;
 mod registers;
 mod shifts;

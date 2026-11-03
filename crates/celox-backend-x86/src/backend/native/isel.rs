@@ -9,6 +9,7 @@
 //! Runtime event writes and capture notifications live in `runtime_events`.
 
 mod bit_count;
+mod call;
 mod concat;
 mod dynamic_load_cache;
 mod extern_call;
@@ -16,6 +17,7 @@ mod four_state;
 mod instruction;
 mod memory;
 mod packed_bit_store;
+mod packed_state;
 mod runtime_events;
 mod slice;
 mod sparse;
@@ -1002,7 +1004,40 @@ fn lower_execution_unit_counting_verifications(
         four_state,
         diagnostics,
         super::features::X86Features::detect(),
+        None,
     )
+}
+
+/// Lower like [`lower_execution_unit_with_diagnostics`] a unit that may call
+/// the function units `functions`.
+pub fn lower_execution_unit_with_functions(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    layout: &MemoryLayout,
+    four_state: bool,
+    diagnostics: &crate::NativeDiagnostics,
+    functions: Option<&crate::NativeFunctions>,
+) -> MFunction {
+    lower_execution_unit_with_functions_for_target(
+        eu,
+        layout,
+        four_state,
+        diagnostics,
+        functions,
+        super::features::X86Features::detect(),
+    )
+}
+
+/// Lower like [`lower_execution_unit_with_functions`] for a host with
+/// `features`.
+pub(crate) fn lower_execution_unit_with_functions_for_target(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    layout: &MemoryLayout,
+    four_state: bool,
+    diagnostics: &crate::NativeDiagnostics,
+    functions: Option<&crate::NativeFunctions>,
+    features: super::features::X86Features,
+) -> MFunction {
+    lower_execution_unit_for_target(eu, layout, four_state, diagnostics, features, functions).0
 }
 
 fn lower_execution_unit_for_target(
@@ -1011,6 +1046,7 @@ fn lower_execution_unit_for_target(
     four_state: bool,
     diagnostics: &crate::NativeDiagnostics,
     features: super::features::X86Features,
+    functions: Option<&crate::NativeFunctions>,
 ) -> (MFunction, usize) {
     let expanded = strided::expand_strided_accesses(eu, layout);
     let eu = expanded.as_ref();
@@ -1132,6 +1168,9 @@ fn lower_execution_unit_for_target(
             .filter(|(_, uses)| uses.len() == 1)
             .map(|(register, _)| *register)
             .collect(),
+        associative_children: HashSet::default(),
+        case_compared_values: HashSet::default(),
+        packed_planes: HashMap::default(),
         consts: ConstMap::default(),
         low_zero_bits: crate::HashMap::default(),
         four_state,
@@ -1144,6 +1183,7 @@ fn lower_execution_unit_for_target(
         sparse_descriptor_table,
         trace_regs,
         wide_value_verifications: 0,
+        functions,
     };
     // Pre-seed wide block params so instructions in those blocks can read the
     // full chunked value before phi nodes are materialized in a later pass.
@@ -1257,6 +1297,8 @@ fn lower_execution_unit_for_target(
         let mut lookup_emit_cache = DenseLookupEmitCache::default();
         let mut packed_field_load_cache = PackedFieldLoadCache::default();
         let sir_defs = collect_sir_defs(sir_block);
+        ctx.associative_children = four_state::associative_children(&ctx, sir_block, &sir_defs);
+        ctx.case_compared_values = packed_state::compared_values(&ctx, sir_block, &sir_defs);
         ctx.transpose_tiles = transpose::plan_tiles(sir_block, &sir_defs, &eu.register_map);
 
         // Waveform observers share Store/Commit notification sites with clock
@@ -1278,7 +1320,11 @@ fn lower_execution_unit_for_target(
                 }
                 _ => None,
             };
-            if let Some(offsets) = target.and_then(|addr| layout.trace_notification_offsets(addr)) {
+            // A frame slot is no signal, and the waveform has no flag for it.
+            if let Some(offsets) = target
+                .filter(|addr| !super::function_unit::is_frame_slot(addr))
+                .and_then(|addr| layout.trace_notification_offsets(addr))
+            {
                 for offset in offsets {
                     if trace_marks.insert(offset) {
                         let one = ctx.alloc_vreg(SpillDesc::remat(1));
@@ -1813,6 +1859,9 @@ struct ISelContext<'a> {
     /// Block-local SSA tile results shared by bit-transpose Concat columns.
     transpose_tiles: transpose::TileCache,
     single_use_registers: HashSet<RegisterId>,
+    associative_children: HashSet<RegisterId>,
+    case_compared_values: HashSet<RegisterId>,
+    packed_planes: HashMap<RegisterId, packed_state::PackedPlanes>,
     /// Conservative lower bound for the number of low zero bits in a SIR value.
     /// This lets dynamic bit offsets that are known byte-aligned use indexed
     /// byte addressing without a dynamic intra-byte shift.
@@ -1841,6 +1890,8 @@ struct ISelContext<'a> {
     trace_regs: HashSet<RegisterId>,
     /// Wide values the debug invariant checks have verified.
     wide_value_verifications: usize,
+    /// The program's function units, which `Call`s run.
+    functions: Option<&'a crate::NativeFunctions>,
 }
 
 impl<'a> ISelContext<'a> {

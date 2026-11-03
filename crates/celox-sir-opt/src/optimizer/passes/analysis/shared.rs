@@ -2,6 +2,54 @@ use crate::HashMap;
 use crate::HashSet;
 use crate::ir::*;
 
+/// Block-local barriers to re-reading a previously loaded object. Use the
+/// central effect classification so commits, calls and native kernels count.
+/// Whole-object tracking is conservative for partial and dynamic writes.
+#[derive(Default)]
+pub(in crate::optimizer) struct StateWritePositions {
+    objects: HashMap<RegionedAbsoluteAddr, Vec<usize>>,
+    unknown: Vec<usize>,
+}
+
+impl StateWritePositions {
+    pub(in crate::optimizer) fn new(instructions: &[SIRInstruction<RegionedAbsoluteAddr>]) -> Self {
+        let mut result = Self::default();
+        for (index, instruction) in instructions.iter().enumerate() {
+            match instruction.state_writes() {
+                StateAccess::None => {}
+                StateAccess::Access(access) => {
+                    result.objects.entry(*access.addr).or_default().push(index)
+                }
+                StateAccess::Objects(objects) => {
+                    for address in objects {
+                        result.objects.entry(*address).or_default().push(index);
+                    }
+                }
+                StateAccess::Everything => result.unknown.push(index),
+            }
+        }
+        result
+    }
+
+    pub(in crate::optimizer) fn written_between(
+        &self,
+        address: RegionedAbsoluteAddr,
+        load: usize,
+        use_index: usize,
+    ) -> bool {
+        let intervenes = |positions: &[usize]| {
+            positions
+                .get(positions.partition_point(|&index| index <= load))
+                .is_some_and(|&index| index < use_index)
+        };
+        intervenes(&self.unknown)
+            || self
+                .objects
+                .get(&address)
+                .is_some_and(|positions| intervenes(positions))
+    }
+}
+
 fn next_register_id(
     register_map: &mut HashMap<RegisterId, RegisterType>,
     counter: &mut usize,
@@ -311,13 +359,9 @@ pub(in crate::optimizer) fn hoist_common_branch_loads(
                     if inst.is_host_interaction() {
                         return None;
                     }
-                    if let Some(write) = inst.memory_write()
-                        && *write.addr == c.addr
-                        && write.offset.constant_bit_offset().is_none_or(|offset| {
-                            offset < c.offset.saturating_add(c.bits)
-                                && c.offset < offset.saturating_add(write.width)
-                        })
-                    {
+                    // A write of the range since the earlier load, a
+                    // call's included, means it no longer holds the value.
+                    if inst.state_writes().overlaps(&c.addr, c.offset, c.bits) {
                         return None;
                     }
                     if let SIRInstruction::Load(dst, addr, SIROffset::Static(off), bits) = inst

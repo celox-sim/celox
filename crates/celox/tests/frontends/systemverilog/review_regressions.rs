@@ -2164,13 +2164,13 @@ fn rejects_ambiguous_multi_event_always_ff_roles() {
         r#"
         module Top(input logic clk, input logic rst, input logic d, output logic q);
             always_ff @(posedge rst or posedge clk)
-                if (rst) q <= 1'b0; else q <= d;
+                q <= d;
         endmodule
         "#,
         r#"
         module Top(input logic clk, input logic rst_n, input logic d, output logic q);
             always_ff @(posedge clk or negedge rst_n)
-                if (clk) q <= d; else q <= 1'b0;
+                if (clk) q <= d; else if (!rst_n) q <= 1'b0;
         endmodule
         "#,
     ] {
@@ -5632,7 +5632,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "nonblocking assignment inside always_latch",
+            "build a Simulation instead",
             r#"
             module Top(input logic a, output logic y); always_latch y <= a; endmodule
         "#,
@@ -9201,4 +9201,13 @@ fn rejects_hierarchical_unpacked_arrays_of_nonequivalent_elements() {
         "module Sub; byte b[2]; endmodule module Top; Sub u(); int a[2]; initial a = u.b; endmodule",
     );
     assert!(error.contains("is not assignment compatible"), "{error}");
+}
+
+sv_backends! {
+    fn blocking_write_preserves_extracted_snapshot(sim) {
+        @case "review_regressions::blocking_write_preserves_extracted_snapshot";
+    }
+    fn blocking_write_preserves_extracted_snapshot_four_state(sim) {
+        @case "review_regressions::blocking_write_preserves_extracted_snapshot_four_state";
+    }
 }
