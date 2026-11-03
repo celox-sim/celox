@@ -31,6 +31,7 @@
 //! and every design or kernel this module does not qualify, runs in the
 //! reference loop.
 
+mod ordered;
 mod slice;
 mod testbench;
 
@@ -359,6 +360,7 @@ struct Plan {
     /// Runtime event sites that record a `$finish`.
     finish_sites: HashSet<u32>,
     service_function: Option<u32>,
+    ordered: Option<ordered::Ordered>,
     service_processes: HashSet<usize>,
     nba_processes: HashSet<usize>,
     /// Native fixed-point work lists need runtime bounds, not a DAG restriction.
@@ -1508,6 +1510,7 @@ impl Plan {
             fallback,
             finish_sites,
             service_function,
+            ordered: None,
             service_processes,
             nba_processes,
             cyclic,
@@ -1566,11 +1569,14 @@ impl Plan {
                 }
             }
         }
-        // Active waves currently retain one pending result per domain. Keep
-        // cases that can generate a second edge of that domain in the host:
+        // Simple Active waves retain one pending result per domain. Select an
+        // ordered queue for cases that can generate a second edge:
         // mixed Active/NBA gate inputs, unknown-to-known edge sequences,
         // direct procedural clock writes, and Active-clock feedback need an
         // ordered queue rather than a domain mask.
+        let ordered_available = cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen")))
+            && plan.service_function.is_some();
+        let mut needs_ordered = false;
         if !plan.active.is_empty() {
             let mut active_stores: HashMap<AbsoluteAddr, Vec<usize>> = HashMap::default();
             for (index, event) in plan.events.iter().enumerate() {
@@ -1595,7 +1601,10 @@ impl Plan {
                 .keys()
                 .any(|address| event_storage.contains_key(address))
             {
-                return Err("an Active-region update directly drives an event".into());
+                if !ordered_available {
+                    return Err("an Active-region update directly drives an event".into());
+                }
+                needs_ordered = true;
             }
             let nba_stores: HashSet<_> =
                 sir.apply_ffs.values().flatten().flat_map(stores).collect();
@@ -1614,10 +1623,14 @@ impl Plan {
                             source = ?program.get_path(source),
                             clock = ?program.get_path(&clock.clock),
                             active_stores = ?active_stores.keys().map(|address| program.get_path(address)).collect::<Vec<_>>(),
-                            "compiled scheduler rejected an unknown Active clock cone");
-                        return Err(
-                            "an Active-region clock has an unknown combinational cone".into()
-                        );
+                            "Active clock cone requires ordered evaluation");
+                        if !ordered_available {
+                            return Err(
+                                "an Active-region clock has an unknown combinational cone".into()
+                            );
+                        }
+                        needs_ordered = true;
+                        continue;
                     };
                     let inputs: Vec<_> = gate
                         .iter()
@@ -1640,7 +1653,10 @@ impl Plan {
                                     .is_some_and(|writers| !writers.iter().all(primary))
                         })
                     {
-                        return Err("an Active-region clock requires ordered updates".into());
+                        if !ordered_available {
+                            return Err("an Active-region clock requires ordered updates".into());
+                        }
+                        needs_ordered = true;
                     }
                     if program.layout().four_state
                         && std::iter::once(&source).chain(&inputs).any(|input| {
@@ -1652,26 +1668,33 @@ impl Plan {
                                 .unwrap_or(true)
                         })
                     {
-                        return Err(
-                            "an Active-region clock may have repeated four-state edges".into()
-                        );
+                        if !ordered_available {
+                            return Err(
+                                "an Active-region clock may have repeated four-state edges".into(),
+                            );
+                        }
+                        needs_ordered = true;
                     }
                     if plan.kernels.iter().enumerate().any(|(index, kernel)| {
-                        kernel
-                            .as_ref()
-                            .is_some_and(|kernel| kernel.writes.contains(source_event.unwrap()))
-                            && instructions(&sir.processes[index])
-                                .filter(|inst| match inst {
-                                    SIRInstruction::Store(target, ..)
-                                    | SIRInstruction::Commit(_, target, ..) => {
-                                        storage(target.absolute_addr()) == source
-                                    }
-                                    _ => false,
-                                })
-                                .count()
-                                > 1
+                        kernel.as_ref().is_some_and(|kernel| {
+                            source_event.is_some_and(|source| kernel.writes.contains(source))
+                        }) && instructions(&sir.processes[index])
+                            .filter(|inst| match inst {
+                                SIRInstruction::Store(target, ..)
+                                | SIRInstruction::Commit(_, target, ..) => {
+                                    storage(target.absolute_addr()) == source
+                                }
+                                _ => false,
+                            })
+                            .count()
+                            > 1
                     }) {
-                        return Err("an Active-region clock has several procedural writes".into());
+                        if !ordered_available {
+                            return Err(
+                                "an Active-region clock has several procedural writes".into()
+                            );
+                        }
+                        needs_ordered = true;
                     }
                 }
             }
@@ -1790,11 +1813,8 @@ impl Plan {
                 })
                 .collect();
             if !candidates.is_empty() {
-                // A blocking FF write may move this clock before NBA
-                // publication, including several edges in one domain. Until
-                // those evaluations have an ordered queue, require the cone
-                // to be independent of all such writes, even ones the normal
-                // Active-observer pruning would otherwise discard.
+                // A blocking FF write may move this clock repeatedly before
+                // NBA. Use the ordered path when its cone reads such a write.
                 let active_stores: HashSet<_> = model
                     .active_commits
                     .iter()
@@ -1811,22 +1831,42 @@ impl Plan {
                         _ => None,
                     })
                     .collect();
-                let mut pending: Vec<_> = candidates
-                    .into_iter()
-                    .filter(|&index| {
-                        active_stores.is_empty()
-                            || comb_slicer
-                                .input_signals([plan.events[index].signal])
-                                .iter()
-                                .all(|input| !active_stores.contains(&storage(*input)))
-                    })
-                    .collect();
+                let mut pending = Vec::new();
+                for index in candidates {
+                    let active = !active_stores.is_empty()
+                        && comb_slicer
+                            .input_signals([plan.events[index].signal])
+                            .iter()
+                            .any(|input| active_stores.contains(&storage(*input)));
+                    if active && !ordered_available {
+                        continue;
+                    }
+                    needs_ordered |= active;
+                    pending.push(index);
+                }
                 while let Some(event) = pending.pop() {
                     if !edged.contains(&event) && derived.insert(event) {
                         pending.extend(derived_from(event));
                     }
                 }
             }
+        }
+        if needs_ordered {
+            // The topology-based observer pruning above predates orphan
+            // clocks. Ordered waves must preserve every real Active commit,
+            // including writers in a clock cone without a source domain.
+            plan.active = plan
+                .events
+                .iter()
+                .enumerate()
+                .filter(|(_, event)| event.active_commit)
+                .map(|(index, _)| index)
+                .collect();
+            plan.ordered = Some(ordered::Ordered::new(
+                program,
+                plan.events.len(),
+                plan.service_function.unwrap(),
+            ));
         }
         let unhandled_rtl_events: Vec<_> = rtl_written
             .difference(&derived)
@@ -3295,6 +3335,19 @@ impl Plan {
         pick: celox_sir::BlockId,
         wave: celox_sir::BlockId,
     ) {
+        if let Some(ordered) = self.ordered {
+            self.batch_ordered(
+                g,
+                ordered,
+                tracked,
+                slot_end,
+                finish_exit,
+                checks,
+                pick,
+                wave,
+            );
+            return;
+        }
         let slots = g.slots;
         let empty = g.constant(0, self.event_bits);
         g.store_at(slots.exit_arg, self.event_bits, self.event_bits, empty);
@@ -6131,7 +6184,12 @@ endmodule"#;
             assert!(simulation.is_finished());
             let edges = simulation.signal("edges");
             assert_eq!(simulation.get(edges), num_bigint::BigUint::from(2u8));
-            assert_eq!(simulation.scheduler_stats().compiled_slots, 0);
+            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+            assert!(
+                simulation.scheduler_stats().compiled_slots > 0,
+                "{:?}",
+                simulation.scheduler_stats()
+            );
         }
     }
 
@@ -6167,8 +6225,13 @@ endmodule"#
                 simulation.get(edges),
                 num_bigint::BigUint::from(expected as u8)
             );
+            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
             if four_state {
-                assert_eq!(simulation.scheduler_stats().compiled_slots, 0);
+                assert!(
+                    simulation.scheduler_stats().compiled_slots > 0,
+                    "{:?}",
+                    simulation.scheduler_stats()
+                );
             }
         }
     }
