@@ -250,6 +250,11 @@ fn run_final_pipeline(runner: &mut PassRunner<'_>) {
         runner.run("post_forward_copy_propagate", copy_propagate);
         runner.run("post_forward_dead_code_eliminate", dead_code_eliminate);
     }
+    runner.run("fold_increment_changes", increment_change::fold);
+    runner.run(
+        "lower_conditional_unit_steps",
+        increment_change::lower_unit_steps,
+    );
     runner.run("post_cfg_global_gvn", global_gvn);
     runner.run("post_cfg_copy_propagate", copy_propagate);
     runner.run(
@@ -263,6 +268,13 @@ fn run_final_pipeline(runner: &mut PassRunner<'_>) {
     );
     runner.run("balanced_copy_propagate", copy_propagate);
     runner.run("balanced_dead_code_eliminate", dead_code_eliminate);
+    // Earlier reductions keep comparison leaders live at their duplicate uses.
+    // Reconsider CSE with those live ranges, then remove idempotent tree nodes.
+    runner.run("balanced_global_gvn", global_gvn);
+    runner.run("balanced_gvn_copy_propagate", copy_propagate);
+    runner.run("balanced_algebraic_simplify", algebraic_simplify);
+    runner.run("balanced_final_copy_propagate", copy_propagate);
+    runner.run("balanced_final_dead_code_eliminate", dead_code_eliminate);
     // CFG simplification concatenates linear blocks. Re-place constants only
     // after that concatenation, otherwise a block-local constant can acquire a
     // very long artificial live range in the merged block.
