@@ -1,0 +1,1 @@
+Fix review r4460758039: widen host ClockBatch masks above 64 clocks, retain the allocation-free small path, and cover high-bit batches and duplicate fallback across native, Cranelift and Wasm.
