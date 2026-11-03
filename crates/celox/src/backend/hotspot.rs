@@ -14,7 +14,11 @@ mod region;
 pub(crate) use region::RegionSource;
 use region::{BlockCode, BlockRequest};
 
-use super::{SimulatorErrorCode, compile_cancel::CompileCancel, native::backend::HotspotCode};
+use super::{
+    SimulatorErrorCode,
+    compile_cancel::CompileCancel,
+    native::backend::{HotspotCode, PreparedHotspotScheduler},
+};
 use crate::{
     SimulatorOptions,
     ir::{ExecutionUnit, RegionedAbsoluteAddr},
@@ -91,17 +95,26 @@ impl EntryCode {
     }
 }
 
+enum Work {
+    Group(Vec<ExecutionUnit<RegionedAbsoluteAddr>>),
+    Block(BlockRequest),
+    Scheduler(SchedulerState, Arc<HotspotCode>),
+}
+
 struct Request {
     key: EntryKey,
-    units: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
-    block: Option<BlockRequest>,
-    scheduler: Option<(Arc<crate::ir::LaidOutProgram>, Arc<HotspotCode>)>,
+    work: Work,
 }
 
 struct Completed {
     key: EntryKey,
     code: Result<EntryCode, String>,
     elapsed: Duration,
+}
+
+enum SchedulerState {
+    Pending(Arc<crate::ir::LaidOutProgram>),
+    Prepared(Box<PreparedHotspotScheduler>),
 }
 
 pub(crate) struct HotspotRuntime {
@@ -113,8 +126,9 @@ pub(crate) struct HotspotRuntime {
     busy: bool,
     polls: u64,
     stats: HotspotStats,
-    scheduler: Option<Arc<crate::ir::LaidOutProgram>>,
+    scheduler: Option<SchedulerState>,
     scheduler_index: Option<usize>,
+    options: Arc<SimulatorOptions>,
 }
 
 impl HotspotRuntime {
@@ -127,32 +141,45 @@ impl HotspotRuntime {
         let cancel = CompileCancel::new();
         let worker_cancel = cancel.clone();
         let layout = layout.clone();
-        let options = options.clone();
+        let options = Arc::new(options.clone());
+        let worker_options = Arc::clone(&options);
         let worker = std::thread::Builder::new()
             .name("celox-jit-hotspot".into())
             .spawn(move || {
+                let options = worker_options;
                 while let Ok(request) = receiver.recv() {
                     if worker_cancel.is_cancelled() {
                         break;
                     }
                     let start = Instant::now();
-                    let code = if let Some((program, comb)) = request.scheduler {
-                        HotspotCode::compile_scheduler(&program, comb, &options, &worker_cancel)
-                            .map(Arc::new)
-                            .map(EntryCode::Group)
-                    } else {
-                        match request.block {
-                            Some(block) => block
-                                .compile(&layout, &options, &worker_cancel)
-                                .map(EntryCode::Block),
-                            None => HotspotCode::compile(
-                                &request.units,
-                                &layout,
-                                &options,
-                                &worker_cancel,
-                            )
-                            .map(Arc::new)
-                            .map(EntryCode::Group),
+                    let code = match request.work {
+                        Work::Scheduler(state, comb) => {
+                            let prepared = match state {
+                                SchedulerState::Pending(program) => {
+                                    PreparedHotspotScheduler::new(program, &options, &worker_cancel)
+                                        .map(Box::new)
+                                }
+                                SchedulerState::Prepared(prepared) => Ok(prepared),
+                            };
+                            prepared
+                                .and_then(|prepared| {
+                                    HotspotCode::compile_scheduler(
+                                        *prepared,
+                                        comb,
+                                        &options,
+                                        &worker_cancel,
+                                    )
+                                })
+                                .map(Arc::new)
+                                .map(EntryCode::Group)
+                        }
+                        Work::Block(block) => block
+                            .compile(&layout, &options, &worker_cancel)
+                            .map(EntryCode::Block),
+                        Work::Group(units) => {
+                            HotspotCode::compile(&units, &layout, &options, &worker_cancel)
+                                .map(Arc::new)
+                                .map(EntryCode::Group)
                         }
                     }
                     .map_err(|error| error.to_string());
@@ -182,6 +209,7 @@ impl HotspotRuntime {
             stats: HotspotStats::default(),
             scheduler: None,
             scheduler_index: None,
+            options,
         })
     }
 
@@ -193,7 +221,7 @@ impl HotspotRuntime {
             .as_ref()
             .and_then(|s| s.unit);
         if self.scheduler_index.is_some() {
-            self.scheduler = Some(Arc::new(program.clone()));
+            self.scheduler = Some(SchedulerState::Pending(Arc::new(program.clone())));
         }
     }
 
@@ -203,6 +231,38 @@ impl HotspotRuntime {
                 .get(&EntryKey::Process(index))
                 .is_some_and(|entry| entry.code.is_some())
         })
+    }
+
+    /// Use the owner thread for planning and allocation while the single worker
+    /// compiles an admitted large Comb. Doing this earlier on that worker would
+    /// delay useful small regions during initialization. Small groups keep the
+    /// original lazy worker path, so short simulations do no extra planning.
+    fn prepare_large_scheduler(&mut self) {
+        let Some(state) = self.scheduler.take() else {
+            return;
+        };
+        let SchedulerState::Pending(program) = state else {
+            self.scheduler = Some(state);
+            return;
+        };
+        let start = Instant::now();
+        let prepared = PreparedHotspotScheduler::new(program, &self.options, &self.cancel);
+        let elapsed = start.elapsed();
+        self.stats.compile_time += elapsed;
+        match prepared {
+            Ok(prepared) => {
+                tracing::debug!(?elapsed, "hotspot scheduler prepared");
+                self.scheduler = Some(SchedulerState::Prepared(Box::new(prepared)));
+            }
+            Err(error) => {
+                tracing::debug!(%error, "hotspot scheduler preparation failed");
+                self.stats.failed_entries += 1;
+                self.entries
+                    .entry(EntryKey::Process(self.scheduler_index.unwrap()))
+                    .or_default()
+                    .unavailable = true;
+            }
+        }
     }
 
     fn request_scheduler(&mut self) {
@@ -219,15 +279,21 @@ impl HotspotRuntime {
         let Some(sender) = &self.requests else {
             return;
         };
-        let program = self.scheduler.take().unwrap();
         let request = Request {
             key: EntryKey::Process(self.scheduler_index.unwrap()),
-            units: Vec::new(),
-            block: None,
-            scheduler: Some((program, Arc::clone(comb))),
+            work: Work::Scheduler(self.scheduler.take().unwrap(), Arc::clone(comb)),
         };
-        if sender.try_send(request).is_ok() {
-            self.busy = true;
+        match sender.try_send(request) {
+            Ok(()) => self.busy = true,
+            Err(mpsc::TrySendError::Full(request)) => {
+                let Work::Scheduler(state, _) = request.work else {
+                    unreachable!("only scheduler jobs are submitted here");
+                };
+                self.scheduler = Some(state);
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                self.cancel();
+            }
         }
     }
 
@@ -385,6 +451,7 @@ impl HotspotRuntime {
                 .estimated_cost
                 .saturating_add(start.elapsed().saturating_mul(weight));
         }
+        let prepare_scheduler = key == EntryKey::Comb && entry.large_attempted;
         // A region may have queued work or published this group while its
         // interpreted invocation was running. Never queue a second job behind
         // that work: `busy` represents exactly one outstanding completion.
@@ -394,11 +461,14 @@ impl HotspotRuntime {
             if let Some(sender) = &self.requests {
                 match sender.try_send(Request {
                     key,
-                    units,
-                    block: None,
-                    scheduler: None,
+                    work: Work::Group(units),
                 }) {
-                    Ok(()) => self.busy = true,
+                    Ok(()) => {
+                        self.busy = true;
+                        if prepare_scheduler {
+                            self.prepare_large_scheduler();
+                        }
+                    }
                     Err(mpsc::TrySendError::Disconnected(_)) => {
                         self.cancel();
                     }
@@ -454,9 +524,7 @@ impl HotspotRuntime {
                 if let Some(sender) = &self.requests {
                     match sender.try_send(Request {
                         key,
-                        units: Vec::new(),
-                        block: Some(block),
-                        scheduler: None,
+                        work: Work::Block(block),
                     }) {
                         Ok(()) => self.busy = true,
                         Err(mpsc::TrySendError::Disconnected(_)) => {

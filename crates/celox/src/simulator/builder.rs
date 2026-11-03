@@ -4302,6 +4302,106 @@ mod host {
         }
     }
 
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    #[test]
+    fn hotspot_scheduler_overlaps_large_comb_and_links_after_publication() {
+        use crate::backend::hotspot::{EntryKey, HotspotRuntime, SCRATCH_BYTES};
+        use std::time::{Duration, Instant};
+        let source = r#"`timescale 1ns/1ns
+module Top;
+  logic clk = 0;
+  logic [129:0] q = 0;
+  wire [129:0] observed = {q[129:128], q[127:0] ^ {128{clk}}};
+  always #5 clk = ~clk;
+  always_ff @(posedge clk) q <= {2'bxz, q[127:0] + 128'd1};
+endmodule"#;
+        let (program, _, options, _, _) = crate::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("early-scheduler.sv"))],
+            "Top",
+        )
+        .emit_triggers()
+        .four_state(true)
+        .settle_partition(crate::SettlePartition::Always)
+        .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false)
+        .unwrap();
+        assert!(!program.sir.eval_comb.is_empty());
+        for large in [false, true] {
+            for cancel_before_publication in [false, true] {
+                let mut runtime = HotspotRuntime::new(program.layout(), &options).unwrap();
+                runtime.prepare_scheduler(&program);
+                let mut memory =
+                    vec![0; program.layout().merged_total_size.div_ceil(8) + SCRATCH_BYTES / 8];
+                // Never execute a group against uninitialized simulation state.
+                let poll = EntryKey::Block(0, usize::MAX, 0, crate::ir::BlockId(0));
+                for _ in 0..128 {
+                    assert!(runtime.try_run(poll, &mut memory).is_none());
+                }
+                assert_eq!(runtime.stats().compile_time, Duration::ZERO);
+                assert_eq!(runtime.stats().compiled_entries, 0);
+                runtime.begin(EntryKey::Comb);
+                runtime.finish(
+                    EntryKey::Comb,
+                    Some(Instant::now() - Duration::from_secs(1)),
+                    None,
+                );
+                let (_, mut units) = runtime.begin(EntryKey::Comb);
+                assert!(units.is_some());
+                if large {
+                    // Exercise size-based escalation without a huge test circuit.
+                    let mut instructions = usize::MAX;
+                    runtime.collect(
+                        EntryKey::Comb,
+                        &mut units,
+                        &program.sir.eval_comb[0],
+                        &mut instructions,
+                    );
+                    assert!(units.is_none());
+                    runtime.finish(EntryKey::Comb, None, units);
+                    let (_, units) = runtime.begin(EntryKey::Comb);
+                    assert!(units.is_some());
+                }
+                runtime.finish(EntryKey::Comb, None, Some(program.sir.eval_comb.clone()));
+                // Large groups prepare on the owner while the worker compiles
+                // Comb; small groups retain lazy preparation on that worker.
+                assert_eq!(runtime.stats().compile_time.is_zero(), !large);
+                assert_eq!(runtime.stats().compiled_entries, 0);
+                assert_eq!(runtime.stats().code_bytes, 0);
+                assert_eq!(runtime.stats().failed_entries, 0);
+                assert!(!runtime.has_compiled_scheduler());
+                if cancel_before_publication {
+                    assert!(runtime.cancel());
+                    for _ in 0..128 {
+                        assert!(runtime.try_run(poll, &mut memory).is_none());
+                    }
+                    assert_eq!(runtime.stats().compiled_entries, 0);
+                    assert!(!runtime.has_compiled_scheduler());
+                } else {
+                    let deadline = Instant::now() + Duration::from_secs(15);
+                    while !runtime.has_compiled_scheduler() {
+                        assert!(runtime.try_run(poll, &mut memory).is_none());
+                        assert!(
+                            Instant::now() < deadline,
+                            "scheduler never linked: {:?}",
+                            runtime.stats()
+                        );
+                        std::thread::yield_now();
+                    }
+                    for _ in 0..128 {
+                        assert!(runtime.try_run(poll, &mut memory).is_none());
+                    }
+                    assert_eq!(runtime.stats().compiled_entries, 2);
+                    assert_eq!(runtime.stats().compiled_calls, 0);
+                    assert_eq!(runtime.stats().failed_entries, 0);
+                }
+            }
+        }
+    }
+
     fn validate_signal_access(
         program: &LaidOutProgram,
         access: &crate::SignalAccessOptions,
