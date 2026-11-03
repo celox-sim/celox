@@ -1975,6 +1975,16 @@ pub fn schedule_symbolic_rtl_reporting_loops(
     // Size the declared private variables before building either metadata
     // projection, so reflection and storage agree on the raw snapshot widths.
     if let Some(scheduler) = &scheduler_slots {
+        // The low plane holds event levels. Above it, preserve the reference
+        // loop's three occurrence-counter baselines per counted signal.
+        modules
+            .get_mut(&root_id)
+            .unwrap()
+            .variables
+            .get_mut(&scheduler.levels)
+            .expect("declared scheduler levels")
+            .metadata
+            .width += counted.len() * 3 * 32;
         let mut widths = vec![celox_design::SCHEDULER_FLAG_WIDTH; scheduler.baseline.len()];
         for site in &timing.wait_sites {
             let terms = site
@@ -1984,15 +1994,18 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                     let metadata = &modules[&instance_modules[&signal.instance_id]].variables
                         [&signal.var_id]
                         .metadata;
-                    metadata
-                        .array_dims
-                        .is_empty()
-                        .then_some((metadata.width, four_state && metadata.is_4state))
+                    // Aliased arrays and arrays with whole-value accesses
+                    // can use packed storage. Reserve their logical width
+                    // too; the laid-out scheduler decides whether a strided
+                    // representation can actually use this snapshot.
+                    (
+                        metadata.width,
+                        four_state && metadata.is_4state,
+                        counted.contains_key(signal),
+                    )
                 })
-                .collect::<Option<Vec<_>>>();
-            if let Some(layout) = terms
-                .as_deref()
-                .and_then(celox_design::schedule::CompiledWaitLayout::new)
+                .collect::<Vec<_>>();
+            if let Some(layout) = celox_design::schedule::CompiledWaitLayout::with_counters(&terms)
             {
                 widths[site.process] = widths[site.process].max(layout.bits);
             }
@@ -2876,13 +2889,14 @@ fn declare_scheduler_slots(
         SCHEDULER_CLOCKS as CLOCKS, SCHEDULER_FLAG_WIDTH as FLAG, SCHEDULER_TIME_WIDTH as TIME,
     };
     let events = expected_events.next_multiple_of(TIME).max(TIME);
+    let clocks = events.max(CLOCKS);
     Some(celox_design::SchedulerSlots {
         limit: declare("limit".into(), TIME),
         now: declare("now".into(), TIME),
         exit: declare("exit".into(), FLAG),
         exit_arg: declare("exit_arg".into(), events * 2),
         finish: declare("finish".into(), FLAG),
-        cont: declare("cont".into(), FLAG),
+        cont: declare("cont".into(), TIME),
         dirty: declare("dirty".into(), FLAG),
         defer_limit_settle: declare(
             "defer_limit_settle".into(),
@@ -2894,7 +2908,10 @@ fn declare_scheduler_slots(
         current: declare("current".into(), TIME),
         levels: declare("levels".into(), events),
         unknown_levels: declare("unknown_levels".into(), events),
-        ready: declare("ready".into(), TIME),
+        ready: declare(
+            "ready".into(),
+            process_count.next_multiple_of(TIME).max(TIME),
+        ),
         wake: (0..process_count)
             .map(|index| declare(format!("wake[{index}]"), TIME))
             .collect(),
@@ -2904,10 +2921,10 @@ fn declare_scheduler_slots(
         baseline: (0..process_count)
             .map(|index| declare(format!("baseline[{index}]"), FLAG))
             .collect(),
-        clock_next: declare("clock_next".into(), TIME * CLOCKS),
-        clock_period: declare("clock_period".into(), TIME * CLOCKS),
-        clock_value: declare("clock_value".into(), TIME),
-        clock_armed: declare("clock_armed".into(), TIME),
+        clock_next: declare("clock_next".into(), TIME * clocks),
+        clock_period: declare("clock_period".into(), TIME * clocks),
+        clock_value: declare("clock_value".into(), clocks),
+        clock_armed: declare("clock_armed".into(), clocks),
     })
 }
 

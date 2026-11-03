@@ -221,6 +221,8 @@ fn difference<B: SimBackend>(
         .backend
         .heap()
         .same_contents(shadow.simulator.backend.heap())
+        && (state.is_suspended()
+            || !live_heap(primary).same_contents(&live_heap(&shadow.simulator)))
     {
         return Some("the runtime heap (strings or objects)".to_string());
     }
@@ -234,6 +236,27 @@ fn difference<B: SimBackend>(
         ));
     }
     None
+}
+
+/// Compare the heap reachable from the same stable state that `first_difference`
+/// checks. FF working slots can retain intermediate handles that an inlined
+/// scheduler never stores. Those are not design state between completed slots.
+/// Collect only copies: the real heaps, allocation cursors and GC cadence are
+/// unchanged. `same_contents` still checks future handle allocation and the
+/// contents (including RNG state) of every reachable object.
+fn live_heap<B: SimBackend>(sim: &Simulator<B>) -> celox_heap::Heap {
+    let mut heap = sim.backend.heap().clone();
+    let slots = sim.handle_slots();
+    let roots = sim.handle_roots();
+    heap.collect(
+        slots
+            .iter()
+            .zip(roots)
+            .filter(|((offset, _), _)| *offset < sim.backend.layout().total_size)
+            .map(|(_, root)| root)
+            .chain(sim.process_heap_roots.iter().copied()),
+    );
+    heap
 }
 
 /// The first byte of design state outside `excluded` that differs between
@@ -1822,10 +1845,9 @@ mod tests {
     }
 
     /// A gate a waiting kernel writes changes after the pass that judged
-    /// its clock: the reference judges it again only after the commit, so
-    /// the design keeps the reference loop.
+    /// its clock: preserve that edge until the source domain commits.
     #[test]
-    fn gates_written_by_waiting_kernels_keep_the_reference_loop() {
+    fn gates_written_by_waiting_kernels_preserve_the_first_settle_edges() {
         let source = r#"
             `timescale 1ns/1ns
             module Top(output logic [7:0] y);
@@ -1842,21 +1864,32 @@ mod tests {
                 assign y = a ^ b;
             endmodule
         "#;
-        let mut reference = build_in(source, SchedulerMode::Reference);
-        reference.run_until(200).unwrap();
-        let expected = reference.save_state().unwrap();
-        for mode in MODES {
-            let mut sim = build_in(source, mode);
-            sim.run_until(200).unwrap();
-            assert_eq!(sim.save_state().unwrap(), expected, "{mode:?}");
+        for four_state in [false, true] {
+            let build = |mode| {
+                Simulation::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top")
+                    .scheduler_mode(mode)
+                    .four_state(four_state)
+                    .build()
+                    .unwrap()
+            };
+            let mut reference = build(SchedulerMode::Reference);
+            reference.run_until(200).unwrap();
+            let expected = reference.save_state().unwrap();
+            for mode in MODES {
+                let mut sim = build(mode);
+                sim.run_until(200).unwrap();
+                assert_eq!(
+                    sim.save_state().unwrap(),
+                    expected,
+                    "{mode:?}, {four_state}"
+                );
+                assert!(
+                    sim.scheduler_stats().compiled_slots > 0,
+                    "{mode:?}, {four_state}: {:?}",
+                    sim.scheduler_stats()
+                );
+            }
         }
-        let gate = crate::KernelSchedule::Reference(
-            "a waiting kernel writes what combinational logic of a gated clock reads".into(),
-        );
-        let kernels = build_in(source, SchedulerMode::Compiled)
-            .scheduler_stats()
-            .kernels;
-        assert!(kernels.iter().all(|kernel| *kernel == gate), "{kernels:?}");
     }
 
     /// A domain whose next state combinational logic computes runs its
@@ -2069,11 +2102,263 @@ mod tests {
         }
     }
 
+    #[test]
+    fn constant_rtl_clock_and_reset_cones_allow_compiled_slots() {
+        let source = r#"`timescale 1ns/1ns
+            module Top(output bit [7:0] n, output bit dormant, output bit dormant_pos);
+                bit clk;
+                wire tied_clock = 1'b0;
+                wire power_on_n = 1'b1;
+                wire power_on = ~power_on_n;
+                always #5 clk = ~clk;
+                always_ff @(posedge clk or posedge power_on)
+                    if (power_on) n <= 0; else n <= n + 1;
+                always @(negedge tied_clock) dormant <= ~dormant;
+                always @(posedge tied_clock) dormant_pos <= ~dormant_pos;
+            endmodule"#;
+        for partition in [
+            crate::SettlePartition::Estimated,
+            crate::SettlePartition::Always,
+        ] {
+            for four_state in [false, true] {
+                for mode in MODES {
+                    let mut sim = Simulation::from_sv_sources(
+                        vec![(source, Path::new("constant-clocks.sv"))],
+                        "Top",
+                    )
+                    .four_state(four_state)
+                    .settle_partition(partition)
+                    .scheduler_mode(mode)
+                    .build()
+                    .unwrap();
+                    assert_eq!(
+                        sim.program().runtime_schema.settle_partitions.is_some(),
+                        partition == crate::SettlePartition::Always
+                    );
+                    sim.run_until(100).unwrap();
+                    let n = sim.signal("n");
+                    assert_eq!(sim.get(n), 10u8.into());
+                    assert!(
+                        sim.scheduler_stats().compiled_slots > 0,
+                        "{mode:?} {partition:?} four_state={four_state}: {:?}",
+                        sim.scheduler_stats()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn counted_domain_pulses_compile_and_preserve_handover() {
+        let source = "`timescale 1ns/1ns\nmodule Top(output bit [7:0] n); bit clk; always #5 begin clk = 1; clk = 0; end always_ff @(posedge clk) n <= n + 1; endmodule";
+        let mut reference = build_in(source, SchedulerMode::Reference);
+        reference.run_until(100).unwrap();
+        let expected = reference.save_state().unwrap();
+        for mode in MODES {
+            let mut sim = build_in(source, mode);
+            assert!(
+                sim.program()
+                    .runtime_schema
+                    .scheduler
+                    .as_ref()
+                    .unwrap()
+                    .unit
+                    .is_some()
+            );
+            sim.run_until(45).unwrap();
+            let checkpoint = sim.save_state().unwrap();
+            sim.load_state(&checkpoint).unwrap();
+            sim.run_until(100).unwrap();
+            let n = sim.signal("n");
+            assert_eq!(sim.get(n), 20u8.into(), "{mode:?}");
+            assert_eq!(sim.save_state().unwrap(), expected, "{mode:?}");
+            assert!(sim.scheduler_stats().compiled_slots > 0, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn counted_wide_wait_snapshots_preserve_partial_words() {
+        let source = r#"`timescale 1ns/1ns
+            module Top(output bit [7:0] n);
+                logic [64:0] a = 0;
+                logic [8:0] b = 0;
+                bit select;
+                always #5 begin
+                    if (select) begin a[64] = 1; a[64] = 0; end
+                    else begin b = 1; b = 0; end
+                    select = ~select;
+                end
+                initial forever begin @(a or b); n++; end
+            endmodule"#;
+        for four_state in [false, true] {
+            let build = |mode| {
+                Simulation::from_sv_sources(vec![(source, Path::new("wide-counted.sv"))], "Top")
+                    .four_state(four_state)
+                    .scheduler_mode(mode)
+                    .build()
+                    .unwrap()
+            };
+            let mut reference = build(SchedulerMode::Reference);
+            reference.run_until(100).unwrap();
+            let expected = reference.save_state().unwrap();
+            for mode in MODES {
+                let mut sim = build(mode);
+                sim.run_until(45).unwrap();
+                let checkpoint = sim.save_state().unwrap();
+                sim.load_state(&checkpoint).unwrap();
+                sim.run_until(100).unwrap();
+                assert_eq!(
+                    sim.get(sim.signal("n")),
+                    20u8.into(),
+                    "{mode:?} four_state={four_state}"
+                );
+                assert_eq!(
+                    sim.save_state().unwrap(),
+                    expected,
+                    "{mode:?} four_state={four_state}"
+                );
+                assert!(
+                    sim.scheduler_stats().compiled_slots > 0,
+                    "{mode:?} four_state={four_state}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compiled_host_clock_masks_span_multiple_words() {
+        let mut source = String::from("`timescale 1ns/1ns\nmodule Top(");
+        for index in 0..70 {
+            if index != 0 {
+                source.push(',');
+            }
+            source.push_str(&format!("input bit c{index}, output bit [7:0] q{index}"));
+        }
+        source.push_str(");\n");
+        for index in 0..70 {
+            source.push_str(&format!(
+                "always_ff @(posedge c{index}) q{index} <= q{index} + 1;\n"
+            ));
+        }
+        source.push_str("endmodule");
+        for mode in MODES {
+            let mut sim = build_in(&source, mode);
+            for index in 0..70 {
+                sim.add_clock(&format!("c{index}"), 4 + 2 * (index % 3), 1 + index % 3);
+            }
+            for limit in [1, 41, 81] {
+                sim.run_until(limit).unwrap();
+                for index in [0, 63, 64, 69] {
+                    let signal = sim.signal(&format!("q{index}"));
+                    let delay = 1 + index % 3;
+                    let expected = if limit < delay {
+                        0
+                    } else {
+                        1 + (limit - delay) / (4 + 2 * (index % 3))
+                    };
+                    assert_eq!(
+                        sim.get(signal),
+                        expected.into(),
+                        "{mode:?} clock {index} at {limit}"
+                    );
+                }
+            }
+            assert!(sim.scheduler_stats().compiled_slots > 0, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn wide_ready_mask_survives_an_exit_mid_slot() {
+        let mut source = String::from("`timescale 1ns/1ns\nmodule Top;\n");
+        for index in 0..130 {
+            let finish = if index == 65 {
+                "if (!v65) $finish;"
+            } else {
+                ""
+            };
+            source.push_str(&format!("bit v{index}; initial begin v{index} = 0; forever begin #5 v{index} = ~v{index}; {finish} end end\n"));
+        }
+        source.push_str("endmodule");
+        let mut reference = build_in(&source, SchedulerMode::Reference);
+        reference.run_until(20).unwrap();
+        let expected = reference.save_state().unwrap();
+        for mode in MODES {
+            let mut sim = build_in(&source, mode);
+            sim.run_until(20).unwrap();
+            assert!(sim.is_finished());
+            assert!(sim.scheduler_stats().compiled_slots >= 2, "{mode:?}");
+            assert_eq!(sim.save_state().unwrap(), expected, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn ready_masks_span_multiple_words() {
+        let mut source = String::from("`timescale 1ns/1ns\nmodule Top;\n");
+        for index in 0..130 {
+            source.push_str(&format!(
+                "bit v{index}; initial begin v{index} = 0; forever #5 v{index} = ~v{index}; end\n"
+            ));
+        }
+        source.push_str("endmodule");
+        for mode in MODES {
+            let mut sim = build_in(&source, mode);
+            assert!(
+                sim.scheduler_stats()
+                    .kernels
+                    .iter()
+                    .all(|kernel| *kernel == crate::KernelSchedule::Compiled)
+            );
+            for limit in [5, 10, 15] {
+                sim.run_until(limit).unwrap();
+                for index in [0, 63, 64, 127, 128, 129] {
+                    let signal = sim.signal(&format!("v{index}"));
+                    assert_eq!(sim.get(signal), (limit / 5 % 2).into(), "{mode:?} {index}");
+                }
+            }
+            assert!(sim.scheduler_stats().compiled_slots >= 3, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn eager_comb_slices_preserve_counted_pulses_in_compiled_slots() {
+        let design =
+            celox_test_suite::sv::case("timing::intermediate_combinational_writes_wake_waiters")
+                .unwrap()
+                .design();
+        for four_state in [false, true] {
+            for mode in MODES {
+                let sources = design
+                    .sources
+                    .iter()
+                    .map(|source| (source.text.as_str(), source.path.as_path()))
+                    .collect();
+                let mut sim = Simulation::from_sv_sources(sources, &design.top)
+                    .four_state(four_state)
+                    .scheduler_mode(mode)
+                    .build()
+                    .unwrap();
+                sim.run_until(5000).unwrap();
+                assert!(sim.is_finished());
+                for name in ["n1", "n2"] {
+                    let signal = sim.signal(name);
+                    assert_eq!(
+                        sim.get(signal),
+                        3u8.into(),
+                        "{mode:?} four_state={four_state} {name}"
+                    );
+                }
+                assert!(
+                    sim.scheduler_stats().compiled_slots > 0,
+                    "{mode:?} four_state={four_state}"
+                );
+            }
+        }
+    }
+
     /// A delay-only kernel pulses the signal another kernel waits on within
     /// one activation, with two stores or in a loop: the frontend counts the
-    /// signal's occurrences, the waiting kernel wakes on every pulse, and a
-    /// design that counts occurrences keeps the reference loop in every
-    /// mode.
+    /// signal's occurrences and the compiled scheduler wakes the waiting
+    /// kernel even when the final signal level is unchanged.
     #[test]
     fn pulses_within_one_activation_wake_as_the_reference() {
         for pulse in [
@@ -2090,13 +2375,13 @@ mod tests {
                     initial begin n = 8'd0; forever @(posedge a) n = n + 8'd1; end
                 endmodule"
             );
-            let counted =
-                crate::KernelSchedule::Reference("the design counts event occurrences".into());
             let kernels = build_in(&source, SchedulerMode::Compiled)
                 .scheduler_stats()
                 .kernels;
             assert!(
-                kernels.iter().all(|kernel| *kernel == counted),
+                kernels
+                    .iter()
+                    .all(|kernel| *kernel == crate::KernelSchedule::Compiled),
                 "{pulse}: {kernels:?}"
             );
             let mut reference = build_in(&source, SchedulerMode::Reference);
@@ -2108,7 +2393,160 @@ mod tests {
                 let mut sim = build_in(&source, mode);
                 sim.run_until(100).unwrap();
                 assert_eq!(sim.save_state().unwrap(), expected, "{pulse} {mode:?}");
+                assert!(sim.scheduler_stats().compiled_slots > 0, "{pulse} {mode:?}");
             }
+        }
+    }
+
+    #[test]
+    fn compiled_assertions_drain_observed_before_reactive_actions() {
+        for name in [
+            "sampled_predicate_live_action",
+            "disable_iff_after_nba",
+            "predicates_before_all_actions",
+            "sampled_history_predicates",
+        ] {
+            let case = format!("concurrent_assertions::{name}");
+            let design = celox_test_suite::sv::case(&case).unwrap().design();
+            for four_state in [false, true] {
+                let build = |mode| {
+                    let sources = design
+                        .sources
+                        .iter()
+                        .map(|source| (source.text.as_str(), source.path.as_path()))
+                        .collect();
+                    Simulation::from_sv_sources(sources, &design.top)
+                        .four_state(four_state)
+                        .scheduler_mode(mode)
+                        .build()
+                        .unwrap()
+                };
+                let mut reference = build(SchedulerMode::Reference);
+                reference.run_until(10_000).unwrap();
+                let expected = reference.save_state().unwrap();
+                for mode in MODES {
+                    let mut sim = build(mode);
+                    sim.run_until(1_000).unwrap();
+                    let checkpoint = sim.checkpoint().unwrap();
+                    sim.run_until(10_000).unwrap();
+                    assert_eq!(
+                        sim.save_state().unwrap(),
+                        expected,
+                        "{case} {mode:?} four_state={four_state}"
+                    );
+                    assert!(
+                        sim.scheduler_stats().compiled_slots > 0,
+                        "{case} {mode:?} four_state={four_state}: {:?}",
+                        sim.scheduler_stats()
+                    );
+                    sim.restore(&checkpoint).unwrap();
+                    sim.run_until(10_000).unwrap();
+                    assert_eq!(
+                        sim.save_state().unwrap(),
+                        expected,
+                        "restored {case} {mode:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn packed_array_waits_have_complete_compiled_snapshots() {
+        let source = r#"`timescale 1ns/1ns
+            module Top(output int n);
+                logic [4:0] a [3];
+                wire [4:0] b [3];
+                assign b = a;
+                initial begin
+                    a = '{0, 0, 0};
+                    #5 a[0] = 1;
+                    #5 a[1] = 2;
+                    #5 a[2] = 3;
+                end
+                initial forever @(b) n++;
+            endmodule"#;
+        for four_state in [false, true] {
+            let build = |mode| {
+                Simulation::from_sv_sources(vec![(source, Path::new("array.sv"))], "Top")
+                    .scheduler_mode(mode)
+                    .four_state(four_state)
+                    .build()
+                    .unwrap()
+            };
+            let mut reference = build(SchedulerMode::Reference);
+            reference.run_until(20).unwrap();
+            let expected = reference.save_state().unwrap();
+            for mode in MODES {
+                let mut sim = build(mode);
+                sim.run_until(20).unwrap();
+                assert_eq!(
+                    sim.save_state().unwrap(),
+                    expected,
+                    "{mode:?} four_state={four_state}"
+                );
+                assert!(
+                    sim.scheduler_stats().compiled_slots > 0,
+                    "{mode:?} four_state={four_state}: {:?}",
+                    sim.scheduler_stats()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compiled_assertion_exits_preserve_pending_regions() {
+        for action in ["$finish;", "$fatal(1, \"reactive failure\");"] {
+            let source = format!(
+                r#"`timescale 1ns/1ns
+                module Top(output int first, second);
+                    bit clk;
+                    always #5 clk = ~clk;
+                    p: assert property (@(posedge clk) 1) begin first++; {action} end
+                    q: assert property (@(posedge clk) 1) second++;
+                endmodule"#
+            );
+            let mut reference = build_in(&source, SchedulerMode::Reference);
+            let expected = reference
+                .run_until(100)
+                .map(|_| ())
+                .map_err(|e| e.to_string());
+            for mode in MODES {
+                let mut sim = build_in(&source, mode);
+                let result = sim.run_until(100).map(|_| ()).map_err(|e| e.to_string());
+                assert_eq!(result, expected, "{mode:?} {action}");
+                for name in ["first", "second"] {
+                    assert_eq!(
+                        sim.get(sim.signal(name)),
+                        reference.get(reference.signal(name))
+                    );
+                }
+                assert!(
+                    sim.scheduler_stats().compiled_slots > 0,
+                    "{mode:?} {action}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn differential_heap_check_ignores_dead_ff_working_handles() {
+        let design = celox_test_suite::sv::case("string::strings_survive_heap_collections")
+            .unwrap()
+            .design();
+        for mode in [SchedulerMode::Differential, SchedulerMode::DifferentialRuns] {
+            let sources = design
+                .sources
+                .iter()
+                .map(|source| (source.text.as_str(), source.path.as_path()))
+                .collect();
+            let mut sim = Simulation::from_sv_sources(sources, &design.top)
+                .scheduler_mode(mode)
+                .build()
+                .unwrap();
+            sim.run_until(6_000_000).unwrap();
+            assert_eq!(sim.get(sim.signal("n")), 3000u32.into());
+            assert!(sim.scheduler_stats().compiled_slots > 0, "{mode:?}");
         }
     }
 

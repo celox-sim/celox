@@ -1427,25 +1427,25 @@ pub struct DerivedEdgeUnits<A> {
 
 /// Width of [`SchedulerSlots::limit`], [`SchedulerSlots::now`],
 /// [`SchedulerSlots::exit_arg`], [`SchedulerSlots::count`],
-/// [`SchedulerSlots::current`], [`SchedulerSlots::levels`],
-/// [`SchedulerSlots::unknown_levels`], [`SchedulerSlots::ready`], [`SchedulerSlots::clock_value`],
-/// [`SchedulerSlots::clock_armed`] and every
+/// [`SchedulerSlots::current`], [`SchedulerSlots::cont`] and every
 /// [`SchedulerSlots::wake`] object, and of each element of
 /// [`SchedulerSlots::clock_next`] and [`SchedulerSlots::clock_period`].
 pub const SCHEDULER_TIME_WIDTH: usize = 64;
-/// The most host periodic clocks a compiled scheduler runs: one element of
+/// The minimum capacity of host periodic clock storage: one element of
 /// [`SchedulerSlots::clock_next`] and [`SchedulerSlots::clock_period`], and
 /// one bit of the clock masks, per entry of [`SchedulerSchema::clocks`].
 pub const SCHEDULER_CLOCKS: usize = 64;
 /// Width of [`SchedulerSlots::exit`], [`SchedulerSlots::finish`],
-/// [`SchedulerSlots::cont`], [`SchedulerSlots::dirty`] and every [`SchedulerSlots::waiting`] and
-/// [`SchedulerSlots::baseline`] object.
+/// [`SchedulerSlots::dirty`] and every [`SchedulerSlots::waiting`] object.
+/// Wait baselines use at least this width; masks scale with the design.
 pub const SCHEDULER_FLAG_WIDTH: usize = 8;
 /// Width of the private control word at [`SchedulerSlots::defer_limit_settle`].
 /// Its low byte is the defer flag; the other fields are internal to a run.
 pub const SCHEDULER_CONTROL_WIDTH: usize = 128;
 /// Bit position of the private Active-wave continuation byte in that word.
 pub const SCHEDULER_ACTIVE_RESUME_BIT: usize = 8;
+/// Compiled region: 0 Active, 1 Observed, 2 Reactive.
+pub const SCHEDULER_ASSERTION_PHASE_BIT: usize = 16;
 /// Bit position of the borrowed synchronous host-services pointer in that word.
 pub const SCHEDULER_HOST_CONTEXT_BIT: usize = 64;
 
@@ -1490,7 +1490,9 @@ pub struct SchedulerSlots<A> {
     /// The kernel running when the run returned, `u64::MAX` for none.
     pub current: A,
     /// The levels of the event signals at the start of the last slot, one
-    /// bit per event in event order.
+    /// bit per event in event order. Above the level plane (whose capacity
+    /// is `unknown_levels`' width), three 32-bit occurrence-counter baselines
+    /// per counted signal preserve short pulses across native runs.
     pub levels: A,
     /// Which of [`Self::levels`] are unknown (x or z) in a four-state
     /// design, one bit per event as there; the level's bit then tells x
