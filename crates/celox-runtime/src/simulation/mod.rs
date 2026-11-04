@@ -300,6 +300,68 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
+        self.stopped = false;
+        let mut settled = None;
+        let mut native_time = None;
+        let mut native_rounds = 0u64;
+        let mut host_only = false;
+        while self.compiles_slots()
+            && self.finalizing.is_none()
+            && self.suspended.is_none()
+            && !self.declarations_pending
+        {
+            let Some(next) = self.next_event_time().filter(|&time| time <= limit) else {
+                return Ok(settled);
+            };
+            let Some(end) = self.compiled_limit(executor, limit, true) else {
+                break;
+            };
+            if next > self.scheduler.time && !self.leave_time(executor)? {
+                return Ok(Some(self.scheduler.time));
+            }
+            if native_time != Some(next) {
+                // Native reentry has consumed host_pending and may have queued
+                // same-time continuations. Classify the whole timestamp once.
+                host_only = self.host_pending && self.next_work_time() != Some(next);
+            }
+            executor.await_runtime_event_room();
+            // `end` bounds this run to the first timestamp. A zero delay
+            // may need several generated rounds to finish that timestamp.
+            let before = self.stats.compiled_slots;
+            settled = self.run_compiled(executor, end, u64::MAX)?;
+            let rounds = self.stats.compiled_slots - before;
+            native_rounds = if native_time == Some(next) {
+                native_rounds.saturating_add(rounds)
+            } else {
+                // Like the reference loop, charge rounds after the first.
+                rounds.saturating_sub(1)
+            };
+            native_time = Some(next);
+            // A backend safe point must not restart the timestamp's bound.
+            if let Err(Halt::Error(error)) = self.charge(native_rounds, None) {
+                let _ = self.finish_timed_boundary(executor, self.scheduler.time);
+                let _ = executor.flush_output();
+                return Err(error);
+            }
+            // Public step advances beyond host-only settling when another
+            // event is available, just like the reference step_time contract.
+            if self.stopped || self.finished || (!host_only && self.next_work_time() != Some(next))
+            {
+                return Ok(settled);
+            }
+        }
+        self.step_reference_until(executor, limit)
+            .map(|time| time.or(settled))
+    }
+
+    fn step_reference_until<E>(
+        &mut self,
+        executor: &mut E,
+        limit: u64,
+    ) -> Result<Option<u64>, SimulatorErrorCode>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
         self.stats.reference_steps = self.stats.reference_steps.saturating_add(1);
         executor.await_runtime_event_room();
         self.stopped = false;
@@ -442,7 +504,7 @@ impl<B: SimBackend> SimulationState<B> {
                     let budget = observer.budget(self);
                     self.run_compiled(executor, limit, budget)
                 }
-                None => self.step_until(executor, end),
+                None => self.step_reference_until(executor, end),
             };
             observer.after_step(self, executor, end, &result)?;
             result?;
