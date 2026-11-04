@@ -1,0 +1,1 @@
+post_randomize runs over the solver's recorded participants (VISIT_SOLVED), not a re-walk; tests for clear/replace/pre-allocated/nested randomize; 18.6.2 cites
