@@ -12,26 +12,32 @@ const HANDLE_VARIANTS = [
 	["NativeSimulationHandle", "simulation"],
 ] as const;
 const LIFETIME_ENDS = ["dispose", "gc"] as const;
+const PROBE_TIMEOUT_MS = 75_000;
 
 describe.each(HANDLE_VARIANTS)("%s shared memory lifetime", (_, handleKind) => {
-	test.each(LIFETIME_ENDS)("keeps existing views safe after %s", (mode) => {
-		const result = spawnSync(
-			process.execPath,
-			["--expose-gc", PROBE_PATH, handleKind, mode],
-			{
-				encoding: "utf8",
-				timeout: 75_000,
-				windowsHide: true,
-			},
-		);
-		const diagnostics = [
-			`status: ${String(result.status)}`,
-			`signal: ${String(result.signal)}`,
-			`error: ${String(result.error)}`,
-			`stdout: ${result.stdout}`,
-			`stderr: ${result.stderr}`,
-		].join("\n");
+	test.each(LIFETIME_ENDS)(
+		"keeps existing views safe after %s",
+		(mode) => {
+			const result = spawnSync(
+				process.execPath,
+				["--expose-gc", PROBE_PATH, handleKind, mode],
+				{
+					encoding: "utf8",
+					timeout: PROBE_TIMEOUT_MS,
+					windowsHide: true,
+				},
+			);
+			const diagnostics = [
+				`status: ${String(result.status)}`,
+				`signal: ${String(result.signal)}`,
+				`error: ${String(result.error)}`,
+				`stdout: ${result.stdout}`,
+				`stderr: ${result.stderr}`,
+			].join("\n");
 
-		expect(result.status, diagnostics).toBe(0);
-	});
+			expect(result.status, diagnostics).toBe(0);
+		},
+		// Let the child deadline produce diagnostics before Vitest times out.
+		PROBE_TIMEOUT_MS + 15_000,
+	);
 });

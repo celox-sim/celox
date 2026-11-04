@@ -8,6 +8,7 @@ use crate::RuntimeErrorCode;
 pub(crate) struct Header {
     pub nba: super::native_nba::Header,
     pub slot_observer: u64,
+    pub host_entry: u64,
     pub host_values: *mut u64,
     pub host_words: u64,
     pub observers: *mut u64,
@@ -38,6 +39,7 @@ impl Default for Header {
         Self {
             nba: Default::default(),
             slot_observer: 0,
+            host_entry: 0,
             host_values: std::ptr::null_mut(),
             host_words: 0,
             observers: std::ptr::null_mut(),

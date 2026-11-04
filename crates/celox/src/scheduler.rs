@@ -146,7 +146,8 @@ const MIXED_STATUSES: [ProcessStatus; 12] = [
 pub(crate) fn enable_native_services(program: &mut LaidOutProgram) {
     let schema = &mut program.runtime.runtime_schema;
     let name = crate::simulator::native_io::SYMBOL;
-    let needs_service = !schema.processes.is_empty()
+    let needs_service = schema.scheduler.is_some()
+        || !schema.processes.is_empty()
         || !schema.comb_observers.is_empty()
         || schema
             .host_request_sites
@@ -231,7 +232,7 @@ pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool) {
                     || !plan.clocks.is_empty()
                     || (cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen")))
                         && plan.service_function.is_some()
-                        && !program.runtime.runtime_schema.nba_sites.is_empty()))
+                        && program.runtime.runtime_schema.scheduler.is_some()))
                 .then(|| plan.generate(program, &schema.slots));
                 let tracked = plan.tracked();
                 let kernel_events = plan
@@ -392,6 +393,8 @@ struct CountedEvent {
 }
 
 struct Plan {
+    /// Direct host event writes, including asynchronous resets with no clock.
+    host_edges: Vec<usize>,
     /// Zero or computed delays require an Inactive pass before NBA publication.
     inactive: Vec<(usize, AbsoluteAddr)>,
     observers: Option<observers::Observers>,
@@ -1638,7 +1641,15 @@ impl Plan {
                 });
             }
         }
+        let host_edges = if ordered_available {
+            (0..events.len())
+                .filter(|event| !rtl_written.contains(event))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let mut plan = Self {
+            host_edges,
             inactive,
             observers: native_observers
                 .then(|| observers::Observers::new(program))
@@ -1993,7 +2004,7 @@ impl Plan {
         }
         let unhandled_rtl_events: Vec<_> = rtl_written
             .difference(&derived)
-            .filter(|event| !stable_host_events.contains(event))
+            .filter(|event| ordered_available || !stable_host_events.contains(event))
             .copied()
             .collect();
         if ordered_available && !unhandled_rtl_events.is_empty() {
@@ -2113,6 +2124,7 @@ impl Plan {
     fn edged(&self) -> Vec<usize> {
         let mut edged = self.written();
         edged.extend(&self.clocks);
+        edged.extend(&self.host_edges);
         edged.sort_unstable();
         edged.dedup();
         edged
@@ -2250,6 +2262,8 @@ impl Plan {
         // The caller supplies the dirty flag. Timed runs must start dirty:
         // checkpoint restores and partial-slot exits need a fresh settle.
         // A host clock batch may instead enter with already settled inputs.
+        let host_inputs = cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen")))
+            && self.service_function.is_some();
         let header = g.b.new_block();
         g.b.seal_block(SIRTerminator::Jump(header, Vec::new()));
 
@@ -2263,6 +2277,14 @@ impl Plan {
         let start = g.b.alloc_bit(SCHEDULER_TIME_WIDTH, false);
         g.b.emit(SIRInstruction::Mux(start, any, now, time));
         time = start;
+        if host_inputs {
+            let host = host_inputs::pending(&mut g);
+            let now = g.load(slots.now, SCHEDULER_TIME_WIDTH);
+            let next = g.b.alloc_bit(SCHEDULER_TIME_WIDTH, false);
+            g.b.emit(SIRInstruction::Mux(next, host, now, time));
+            time = next;
+            any = g.binary(1, any, BinaryOp::Or, host);
+        }
         for &(index, status) in &delays {
             let wake = g.load(slots.wake[index], SCHEDULER_TIME_WIDTH);
             let waiting = g.waiting_for_time(index, status);
@@ -2397,6 +2419,13 @@ impl Plan {
                     let after = g.binary(1, time, BinaryOp::GtU, latest);
                     observed = g.binary(1, observed, BinaryOp::Or, after);
                 }
+                if host_inputs {
+                    // Raw host pulses advance waiting baselines before the
+                    // first settle. The entry path below performs that settle.
+                    let host = host_inputs::pending(&mut g);
+                    let ordinary = g.equals(host, 0);
+                    observed = g.binary(1, observed, BinaryOp::And, ordinary);
+                }
                 let settle = g.b.new_block();
                 let slot = g.b.new_block();
                 g.b.seal_block(SIRTerminator::Branch {
@@ -2456,6 +2485,8 @@ impl Plan {
         // exit in the middle of the slot; those of the clocks' events below,
         // when the run has clocks, unless the slot's waves compare against
         // them: a host clock no clock drives keeps the level the host set.
+        let host_entry = host_inputs.then(|| host_inputs::pending(&mut g));
+        let host_levels = host_entry.map(|_| g.load_levels());
         let mut levels = g.no_levels();
         for (bit, &event) in tracked.iter().enumerate() {
             if self.clocks.contains(&event) && self.derived.is_empty() {
@@ -2464,7 +2495,25 @@ impl Plan {
             let level = g.level(&self.events[event]);
             levels = g.with_level(levels, level, bit);
         }
+        if let (Some(host), Some(prior)) = (host_entry, host_levels) {
+            let value = g.b.alloc_bit(self.event_bits, false);
+            g.b.emit(SIRInstruction::Mux(
+                value,
+                host,
+                prior.values,
+                levels.values,
+            ));
+            levels.values = value;
+            if let (Some(old), Some(current)) = (prior.unknown, levels.unknown) {
+                let unknown = g.b.alloc_bit(self.event_bits, false);
+                g.b.emit(SIRInstruction::Mux(unknown, host, old, current));
+                levels.unknown = Some(unknown);
+            }
+        }
         g.store_levels(levels);
+        if let Some(host) = host_entry {
+            g.if_bit(host, 0, |g| host_inputs::replay(program, g, &checks));
+        }
         // The host clocks due now set their levels, in event order, before
         // any kernel runs; their edges start the slot's edges, which
         // collect in `exit_arg`. A clock whose edge applied waits for its
@@ -2482,12 +2531,13 @@ impl Plan {
         }
         let finish_exit = g.exit_block(SchedulerExit::Finish);
         let pick = g.b.new_block();
+        let entry_done = pick;
         if let Some((armed, clocked)) = started {
             let apply = g.b.new_block();
             g.b.seal_block(SIRTerminator::Branch {
                 cond: clocked,
                 true_block: (apply, Vec::new()),
-                false_block: (pick, Vec::new()),
+                false_block: (entry_done, Vec::new()),
             });
             g.b.switch_to_block(apply);
             let values = g.load(slots.clock_value, clock_bits);
@@ -2501,15 +2551,24 @@ impl Plan {
                 let due = g.binary(1, next_edge, BinaryOp::Eq, time);
                 let due = g.binary(1, due, BinaryOp::And, on);
                 let value = g.mask_bit(values, bit);
-                let was = g.level(event);
+                let actual = g.level(event);
                 let position = tracked
                     .iter()
                     .position(|&tracked| tracked == index)
                     .expect("clocks are tracked");
+                let was = if let (Some(host), Some(prior)) = (host_entry, host_levels) {
+                    let old = g.saved_level(prior, position);
+                    let was =
+                        g.b.alloc_bit(if g.four_state.is_some() { 2 } else { 1 }, false);
+                    g.b.emit(SIRInstruction::Mux(was, host, old, actual));
+                    was
+                } else {
+                    actual
+                };
                 levels = g.with_level(levels, was, position);
                 let is = if g.four_state.is_none() {
                     let is = g.b.alloc_bit(1, false);
-                    g.b.emit(SIRInstruction::Mux(is, due, value, was));
+                    g.b.emit(SIRInstruction::Mux(is, due, value, actual));
                     g.store(event.signal, 1, is);
                     is
                 } else {
@@ -2527,12 +2586,12 @@ impl Plan {
                     let known = g.b.alloc_bit(2, false);
                     g.b.emit(SIRInstruction::Concat(known, vec![zero, value]));
                     let is = g.b.alloc_bit(2, false);
-                    g.b.emit(SIRInstruction::Mux(is, due, known, was));
+                    g.b.emit(SIRInstruction::Mux(is, due, known, actual));
                     is
                 };
                 // Counters sample iff gates at this write, before the next
                 // scheduled clock changes a gate (IEEE 1800-2023 9.4.2.3).
-                g.count_host_clock(schema, event.signal, was, is, due);
+                g.count_host_clock(schema, event.signal, actual, is, due);
                 let changed = g.binary(1, was, BinaryOp::Ne, is);
                 if let Some(aliases) = &event.aliases {
                     for unit in aliases {
@@ -2565,13 +2624,13 @@ impl Plan {
                 g.b.seal_block(SIRTerminator::Branch {
                     cond: applied,
                     true_block: (check, Vec::new()),
-                    false_block: (pick, Vec::new()),
+                    false_block: (entry_done, Vec::new()),
                 });
                 g.b.switch_to_block(check);
                 g.check_waits_at(&checks, false);
             }
         }
-        g.b.seal_block(SIRTerminator::Jump(pick, Vec::new()));
+        g.b.seal_block(SIRTerminator::Jump(entry_done, Vec::new()));
 
         // A pass of the process phase: the lowest ready kernel runs, and
         // the waits see its writes before the next one while kernels remain
@@ -3017,6 +3076,29 @@ impl Plan {
         // combinational logic. A deferred settle after a pass runs for the
         // kernels that may run in another.
         g.b.switch_to_block(pass_end);
+        if host_entry.is_some() {
+            let pending = host_inputs::pending(&mut g);
+            g.if_bit(pending, 0, |g| {
+                let zero = g.constant(0, 64);
+                g.arena_header_store(
+                    std::mem::offset_of!(crate::simulator::native_io::ArenaHeader, host_entry),
+                    zero,
+                );
+                // Raw host writes wake Active processes before the first settle.
+                // Judge host domains only after those processes have run, so a
+                // process can overwrite the host's level before any FF commits.
+                let mut edges = g.load(slots.exit_arg, self.event_bits);
+                let levels = g.load_levels();
+                for &index in &edged {
+                    let was = g.saved_level(levels, position(&tracked, index));
+                    let is = g.level(&self.events[index]);
+                    let edge = g.edge(&self.events[index], was, is);
+                    let bit = g.event_bit(edge, index);
+                    edges = g.binary(self.event_bits, edges, BinaryOp::Or, bit);
+                }
+                g.store(slots.exit_arg, self.event_bits, edges);
+            });
+        }
         if self.cyclic {
             if let Some(guards) = &mut guards {
                 guards.charge(
@@ -3241,7 +3323,13 @@ impl Plan {
                 // their domains as soon as without clock events.
                 g.b.switch_to_block(one_domain);
                 let written = self.written();
-                for &index in written.iter().chain(&self.clocks) {
+                let mut seen = HashSet::default();
+                for &index in written
+                    .iter()
+                    .chain(&self.clocks)
+                    .chain(&self.host_edges)
+                    .filter(|&&index| seen.insert(index))
+                {
                     let event = &self.events[index];
                     let bit = g.single(index, self.event_bits);
                     let this = g.binary(1, mask, BinaryOp::Eq, bit);

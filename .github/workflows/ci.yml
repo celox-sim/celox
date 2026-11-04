@@ -254,6 +254,12 @@ jobs:
           ref: ${{ inputs.validation_ref || github.sha }}
           submodules: recursive
 
+      - name: Free unused SDK space for Rust test binaries
+        if: runner.environment == 'github-hosted'
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet
+          df -h "$GITHUB_WORKSPACE"
+
       - uses: $/.github/actions/setup-rust
 
       - uses: Swatinem/rust-cache@v2

@@ -50,6 +50,24 @@ pub trait UnitExecutor {
     /// enforce them without entering the reference scheduler.
     fn set_compiled_host_budgets(&mut self, _rounds: u64, _returns: u64) {}
 
+    /// Replay raw host writes and settle the host's current-time changes in
+    /// generated code before resuming HDL processes.
+    fn compiled_host_inputs(&self) -> bool {
+        false
+    }
+
+    fn put_compiled_host_inputs(
+        &mut self,
+        pending: bool,
+        writes: Vec<(SignalRef, Value)>,
+    ) -> Result<(), SimulatorErrorCode> {
+        if !pending && writes.is_empty() {
+            Ok(())
+        } else {
+            Err(SimulatorErrorCode::InternalError)
+        }
+    }
+
     /// Import the current Active ready queue into the generated scheduler.
     fn compiled_ready_queue(&self) -> bool {
         false
