@@ -2471,6 +2471,45 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1))
 
+(case constrained_randomize_state_properties
+  (source "class.sv" #"
+module Top(output int sum, output bit done);
+    class Node;
+        int id;
+    endclass
+    class Base;
+        string name = "base";
+        Node next;
+    endclass
+    class Packet extends Base;
+        int queue[$];
+        bit [127:0] wide;
+        int low;
+        rand bit [7:0] x;
+        rand bit [3:0] y;
+        constraint range { x inside {[10:20]}; x > low; y == (x & 8'hf); }
+    endclass
+    Packet p;
+    initial begin
+        p = new;
+        p.next = new;
+        p.next.id = 5;
+        p.queue = '{1, 2, 3};
+        p.wide = {64'hdead_beef_0000_0001, 64'h2};
+        p.low = 17;
+        for (int i = 0; i < 20; i++) begin
+            if (!p.randomize()) $fatal(1, "randomize");
+            if (p.x < 18 || p.x > 20 || p.y != p.x[3:0]) $fatal(1, "constraint %0d %0d", p.x, p.y);
+        end
+        sum = p.next.id + p.queue.size() + p.queue[2] + int'(p.wide[127:96] == 32'hdeadbeef) + p.name.len();
+        $display("%s %0d", p.name, sum);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 16) (assert_eq done 1)
+  (expect_output "base 16\n"))
+
 (case constrained_randomize_inline
   (source "inline_constraints.sv" #"
 module Top(output bit done);

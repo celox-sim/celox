@@ -1135,9 +1135,12 @@ pub(super) fn random_selection(
     name: &str,
     arguments: &[celox_sv_syntax::Argument],
     native: &Declarations,
+    inline: bool,
 ) -> Converted<Expr> {
     let owner = name.strip_suffix("::randomize").expect("randomize method");
     let class = class(tree, session, dimensions, owner)?;
+    // A selected property the constraint program cannot hold.
+    let mut unsolvable = false;
     let mut bits = vec!['0'; class.properties.len() + 1];
     if !arguments.is_empty() {
         bits[0] = '1';
@@ -1179,6 +1182,7 @@ pub(super) fn random_selection(
                         "randomize arguments require integral properties with a supported enum domain",
                     ));
                 }
+                unsolvable |= !classes::constraints::constrainable(property);
                 bits[index + 1] = '1';
             }
             _ => {
@@ -1187,6 +1191,34 @@ pub(super) fn random_selection(
                 ));
             }
         }
+    }
+    // The program of the solver holds only the properties a constraint may
+    // name, and would leave another one unchanged. The solver randomizes
+    // the call's properties when the call has constraints, or the class of
+    // the object it dispatches to (18.6.2): this class or one derived from
+    // it.
+    if unsolvable
+        && (inline
+            || class.has_constraints
+            || classes::visible_classes(tree, session)
+                .into_iter()
+                .filter(|name| *name != class.name)
+                .any(|name| {
+                    self::class(tree, session, dimensions, &name).is_ok_and(|derived| {
+                        derived.has_constraints
+                            && derived.derives_from(
+                                tree,
+                                session,
+                                &class.name,
+                                &dimensions.const_env,
+                                &dimensions.type_aliases,
+                            )
+                    })
+                }))
+    {
+        return Err(unsupported(
+            "randomize argument wider than 64 bits under constraints",
+        ));
     }
     Ok(Expr::Literal(format!(
         "{}'b{}",
@@ -1557,7 +1589,15 @@ pub(super) fn randomize_with(
             .map_err(|reason| unsupported(format!("inline constraints: {reason}")))
         })
         .collect::<Converted<Vec<_>>>()?;
-    let selection = random_selection(tree, session, dimensions, &method_name, arguments, native)?;
+    let selection = random_selection(
+        tree,
+        session,
+        dimensions,
+        &method_name,
+        arguments,
+        native,
+        true,
+    )?;
     let handle = match receiver {
         Receiver::Handle(id) => bind_value(id, native, tree, session, dimensions, None)?,
         Receiver::This => this(),
