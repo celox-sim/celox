@@ -29,6 +29,10 @@ pub enum Expr {
     },
     Literal(u32, u64),
     Field(usize),
+    /// The size of array `0` of the program, a 32-bit `int` (IEEE 1800-2023
+    /// 7.5.2, 7.10.2.1): a solver variable while the array is random and a
+    /// constraint names its size (18.4).
+    Size(usize),
     /// Read-only scalar supplied by this call, never a solver variable.
     Input {
         index: usize,
@@ -60,7 +64,33 @@ pub struct Program {
     /// object's (IEEE 1800-2023 18.4).
     #[serde(default)]
     pub handles: Vec<u32>,
+    /// The object's dynamic arrays and queues of integral elements whose
+    /// size a constraint may name, and which are solved when random.
+    #[serde(default)]
+    pub arrays: Vec<Array>,
 }
+
+/// A dynamic array or queue property of a constraint program.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct Array {
+    /// The byte offset of the property, which holds the container handle.
+    pub offset: u32,
+    /// The heap parameter of the container (see [`crate::containers::parameter`]).
+    pub layout: u64,
+    /// The width of an element, 1 to 64 bits, for a random array.
+    pub width: u32,
+    pub random: bool,
+    /// The values a random enumeration element may take (18.3); empty for
+    /// others.
+    #[serde(default)]
+    pub domain: Vec<u64>,
+}
+
+/// The size up to which a random array's size is first sought; only when
+/// the constraints leave no such size is a larger one taken.
+const PREFERRED_ARRAY_SIZE: u64 = 1 << 12;
+/// The largest size a random array is resized to.
+const ARRAY_SIZE_LIMIT: u64 = 1 << 24;
 
 /// The objects a randomize call in progress runs the hooks of (IEEE
 /// 1800-2023 18.6.2), in order, each once.
@@ -148,7 +178,19 @@ fn boolean(value: Term) -> Term {
 }
 
 impl Expr {
-    fn term(&self, fields: &[Term], inputs: &[u64]) -> Result<Term, String> {
+    /// Whether the expression names the size of array `index`.
+    fn names_size(&self, index: usize) -> bool {
+        match self {
+            Self::Size(array) => *array == index,
+            Self::Enabled { value, .. }
+            | Self::Resize { value, .. }
+            | Self::Unary { value, .. } => value.names_size(index),
+            Self::Binary { left, right, .. } => left.names_size(index) || right.names_size(index),
+            Self::Literal(..) | Self::Field(_) | Self::Input { .. } => false,
+        }
+    }
+
+    fn term(&self, fields: &[Term], sizes: &[Term], inputs: &[u64]) -> Result<Term, String> {
         Ok(match self {
             Self::Enabled { .. } => return Err("nested constraint mode predicate".into()),
             Self::Literal(width, value) => bv(*width, *value),
@@ -165,12 +207,13 @@ impl Expr {
                 .get(*index)
                 .ok_or("invalid constraint field")?
                 .clone(),
+            Self::Size(index) => sizes.get(*index).ok_or("invalid constraint array")?.clone(),
             Self::Resize {
                 value,
                 width,
                 signed,
             } => {
-                let value = value.term(fields, inputs)?;
+                let value = value.term(fields, sizes, inputs)?;
                 let Sort::Bv(old) = value.0.sort else {
                     unreachable!()
                 };
@@ -190,7 +233,7 @@ impl Expr {
                 }
             }
             Self::Unary { op, value } => {
-                let value = value.term(fields, inputs)?;
+                let value = value.term(fields, sizes, inputs)?;
                 match op.as_str() {
                     "!" => boolean(not(truth(value))),
                     "~" => node(value.0.sort.clone(), "bvnot", vec![value]),
@@ -209,8 +252,8 @@ impl Expr {
                 right,
                 signed,
             } => {
-                let a = left.term(fields, inputs)?;
-                let b = right.term(fields, inputs)?;
+                let a = left.term(fields, sizes, inputs)?;
+                let b = right.term(fields, sizes, inputs)?;
                 let relation = match op.as_str() {
                     "==" => Some(eq(a.clone(), b.clone())),
                     "!=" => Some(not(eq(a.clone(), b.clone()))),
@@ -438,7 +481,30 @@ impl Heap {
             let mut cyclic = Vec::new();
             let mut formula = boolv(true);
             let mut bases = Vec::new();
+            let mut size_terms = Vec::new();
+            let mut size_bases = Vec::new();
+            let mut refills = Vec::new();
+            let mut preferred = boolv(true);
+            let mut bounded = false;
+            // The constraints of each object that take part, by their
+            // constraint modes (18.9), with those of the call: every
+            // decision below reads this one set.
+            let mut constraints: Vec<Vec<&Expr>> = Vec::new();
             for (object, current) in &members {
+                let mut enabled = Vec::new();
+                for constraint in &current.constraints {
+                    match constraint {
+                        Expr::Enabled { index, value } => {
+                            if self.constraint_mode(*object, *index) {
+                                enabled.push(value.as_ref());
+                            }
+                        }
+                        constraint => enabled.push(constraint),
+                    }
+                }
+                constraints.push(enabled);
+            }
+            for (position, (object, current)) in members.iter().enumerate() {
                 let (object, current) = (*object, current.as_ref());
                 bases.push(terms.len());
                 for field in &current.fields {
@@ -476,20 +542,73 @@ impl Heap {
                     }
                     terms.push(term);
                 }
-            }
-            for ((object, current), &base) in members.iter().zip(&bases) {
-                let object = *object;
-                let fields = &terms[base..base + current.fields.len()];
-                for constraint in &current.constraints {
-                    let constraint = if let Expr::Enabled { index, value } = constraint {
-                        if !self.constraint_mode(object, *index) {
-                            continue;
+                // The size of each array: a solver variable while the array
+                // is random and a constraint names its size, then resized to
+                // it; otherwise its size, kept (IEEE 1800-2023 18.4).
+                size_bases.push(size_terms.len());
+                for (index, array) in current.arrays.iter().enumerate() {
+                    let contents = self.load(object, array.offset as usize, crate::HANDLE_BYTES);
+                    let length = self.sequence_len(contents as Handle);
+                    let enabled =
+                        !check_only && array.random && self.random_mode(object, array.offset, true);
+                    if enabled && !(1..=64).contains(&array.width) {
+                        return Err("invalid random array element width".into());
+                    }
+                    let sized = enabled
+                        && constraints[position]
+                            .iter()
+                            .any(|constraint| constraint.names_size(index));
+                    let term = if sized {
+                        let name = format!("s{}", size_terms.len());
+                        let term = var(name.clone(), Sort::Bv(32));
+                        projection.insert(name.clone(), term.clone());
+                        formula = and(
+                            formula,
+                            node(Sort::Bool, "bvsle", vec![bv(32, 0), term.clone()]),
+                        );
+                        let capacity = crate::containers::Layout(array.layout).capacity();
+                        if capacity != usize::MAX {
+                            formula = and(
+                                formula,
+                                node(
+                                    Sort::Bool,
+                                    "bvule",
+                                    vec![term.clone(), bv(32, capacity as u64)],
+                                ),
+                            );
                         }
-                        value.as_ref()
+                        preferred = and(
+                            preferred,
+                            node(
+                                Sort::Bool,
+                                "bvule",
+                                vec![term.clone(), bv(32, PREFERRED_ARRAY_SIZE)],
+                            ),
+                        );
+                        bounded = true;
+                        Some(name)
                     } else {
-                        constraint
+                        None
                     };
-                    formula = and(formula, truth(constraint.term(fields, inputs)?));
+                    size_terms.push(match &term {
+                        Some(name) => var(name.clone(), Sort::Bv(32)),
+                        None => bv(32, length as u64),
+                    });
+                    if enabled {
+                        refills.push((object, array, term, length));
+                    }
+                }
+            }
+            for ((((_, current), &base), &size_base), enabled) in members
+                .iter()
+                .zip(&bases)
+                .zip(&size_bases)
+                .zip(&constraints)
+            {
+                let fields = &terms[base..base + current.fields.len()];
+                let sizes = &size_terms[size_base..size_base + current.arrays.len()];
+                for constraint in enabled {
+                    formula = and(formula, truth(constraint.term(fields, sizes, inputs)?));
                 }
             }
             let seed = if projection.is_empty() {
@@ -518,41 +637,49 @@ impl Heap {
                         remaining.into_iter().map(|entry| cycle_value(field, entry)),
                     )
                 };
-            let mut restarted = vec![false; cyclic.len()];
-            let solve_with = |heap: &mut Self, restarted: &[bool]| {
-                let mut attempt = formula.clone();
-                for ((object, field, term), restart) in cyclic.iter().zip(restarted) {
-                    attempt = and(attempt, restriction(heap, *object, field, term, *restart));
-                }
-                solve_seeded(&attempt, &projection, limits.clone(), seed)
-            };
-            let mut outcome = solve_with(self, &restarted);
-            if matches!(outcome.verdict, Verdict::Unsat) && !cyclic.is_empty() {
-                for (position, (object, field, term)) in cyclic.iter().enumerate() {
-                    let alone = and(
-                        formula.clone(),
-                        restriction(self, *object, field, term, false),
-                    );
-                    restarted[position] = matches!(
-                        solve_seeded(&alone, &projection, limits.clone(), seed).verdict,
-                        Verdict::Unsat
-                    );
-                }
-                let mut next = 0;
-                loop {
-                    if restarted.iter().any(|restart| *restart) {
-                        outcome = solve_with(self, &restarted);
-                        if !matches!(outcome.verdict, Verdict::Unsat) {
-                            break;
-                        }
+            // A size within the preferred bound is sought first.
+            let run = |heap: &mut Self, formula: &Term| {
+                let mut restarted = vec![false; cyclic.len()];
+                let solve_with = |heap: &mut Self, restarted: &[bool]| {
+                    let mut attempt = formula.clone();
+                    for ((object, field, term), restart) in cyclic.iter().zip(restarted) {
+                        attempt = and(attempt, restriction(heap, *object, field, term, *restart));
                     }
-                    let Some(position) = (next..cyclic.len()).find(|&index| !restarted[index])
-                    else {
-                        break;
-                    };
-                    restarted[position] = true;
-                    next = position + 1;
+                    solve_seeded(&attempt, &projection, limits.clone(), seed)
+                };
+                let mut outcome = solve_with(heap, &restarted);
+                if matches!(outcome.verdict, Verdict::Unsat) && !cyclic.is_empty() {
+                    for (position, (object, field, term)) in cyclic.iter().enumerate() {
+                        let alone = and(
+                            formula.clone(),
+                            restriction(heap, *object, field, term, false),
+                        );
+                        restarted[position] = matches!(
+                            solve_seeded(&alone, &projection, limits.clone(), seed).verdict,
+                            Verdict::Unsat
+                        );
+                    }
+                    let mut next = 0;
+                    loop {
+                        if restarted.iter().any(|restart| *restart) {
+                            outcome = solve_with(heap, &restarted);
+                            if !matches!(outcome.verdict, Verdict::Unsat) {
+                                break;
+                            }
+                        }
+                        let Some(position) = (next..cyclic.len()).find(|&index| !restarted[index])
+                        else {
+                            break;
+                        };
+                        restarted[position] = true;
+                        next = position + 1;
+                    }
                 }
+                (outcome, restarted)
+            };
+            let (mut outcome, mut restarted) = run(self, &and(formula.clone(), preferred));
+            if bounded && matches!(outcome.verdict, Verdict::Unsat) {
+                (outcome, restarted) = run(self, &formula);
             }
             match outcome.verdict {
                 Verdict::Unsat => Ok(false),
@@ -569,6 +696,26 @@ impl Heap {
                                 _ => Err("missing constraint field value".to_owned()),
                             },
                         )
+                        .collect::<Result<Vec<_>, _>>()?;
+                    // The size of each random array, checked like every
+                    // other value before anything changes.
+                    let resized = refills
+                        .into_iter()
+                        .map(|(object, array, size, length)| {
+                            let length = match size {
+                                Some(name) => match model.get(&name) {
+                                    Some(Scalar::Bv { value, .. }) => *value,
+                                    _ => return Err("missing constraint array size".to_owned()),
+                                },
+                                None => length as u64,
+                            };
+                            if length > ARRAY_SIZE_LIMIT {
+                                return Err(format!(
+                                    "random array size {length} above the limit of {ARRAY_SIZE_LIMIT}"
+                                ));
+                            }
+                            Ok((object, array, length))
+                        })
                         .collect::<Result<Vec<_>, _>>()?;
                     for ((object, field, _), restart) in cyclic.iter().zip(&restarted) {
                         if *restart {
@@ -588,6 +735,31 @@ impl Heap {
                             field.offset as usize,
                             field.width.div_ceil(8) as usize,
                             value,
+                        );
+                    }
+                    // Each random array, resized to its size, gets random
+                    // elements: a constraint names none of them yet.
+                    for (object, array, length) in resized {
+                        let mask = u64::MAX >> (64 - array.width);
+                        let elements = (0..length)
+                            .map(|_| {
+                                let draw = self.random_object(object);
+                                if array.domain.is_empty() {
+                                    draw & mask
+                                } else {
+                                    array.domain[(draw % array.domain.len() as u64) as usize]
+                                }
+                            })
+                            .collect();
+                        let contents =
+                            self.load(object, array.offset as usize, crate::HANDLE_BYTES);
+                        let contents =
+                            self.random_sequence(contents as Handle, array.layout, elements);
+                        self.store(
+                            object,
+                            array.offset as usize,
+                            crate::HANDLE_BYTES,
+                            contents.into(),
                         );
                     }
                     self.solved = participants;
@@ -627,6 +799,97 @@ mod tests {
             }],
             ..Default::default()
         }
+    }
+
+    /// The random 4-bit field at 0 of [`program`].
+    fn program_fields() -> Vec<Field> {
+        program().fields
+    }
+
+    /// A random array whose size a constraint names is resized to a size
+    /// the constraints allow and gets random elements; one without a size
+    /// constraint keeps its size, a disabled one is state (IEEE 1800-2023
+    /// 18.4), and a size above the preferred bound is taken only when the
+    /// constraints require it.
+    #[test]
+    fn random_arrays_take_the_sizes_their_constraints_allow() {
+        let mut heap = Heap::new();
+        let object = heap.new_object(1, 24);
+        let layout = crate::containers::parameter(8, true, 0, 0, 0, false, false, false);
+        let array = |offset| Array {
+            offset,
+            layout,
+            width: 8,
+            random: true,
+            domain: Vec::new(),
+        };
+        let size = |op: &str, value| Expr::Binary {
+            op: op.into(),
+            left: Box::new(Expr::Size(0)),
+            right: Box::new(Expr::Literal(32, value)),
+            signed: true,
+        };
+        let mut program = Program {
+            arrays: vec![array(8), array(16)],
+            constraints: vec![Expr::Binary {
+                op: "&&".into(),
+                left: Box::new(size(">", 2)),
+                right: Box::new(size("<", 6)),
+                signed: false,
+            }],
+            ..Program::default()
+        };
+        let length = |heap: &mut Heap, offset| {
+            let contents = heap.load(object, offset, crate::HANDLE_BYTES) as Handle;
+            heap.sequence_len(contents)
+        };
+        let mut nonzero = false;
+        for _ in 0..20 {
+            assert!(heap.randomize_object(object, &program, false));
+            assert!((3..6).contains(&length(&mut heap, 8)));
+            // No constraint names the second array's size.
+            assert_eq!(length(&mut heap, 16), 0);
+            let contents = heap.load(object, 8, crate::HANDLE_BYTES) as Handle;
+            nonzero |= heap.containers[&contents].contents
+                != crate::containers::Contents::Sequence(Default::default());
+        }
+        assert!(nonzero);
+        // A disabled array keeps its contents; a check reads its size.
+        let kept = heap.load(object, 8, crate::HANDLE_BYTES);
+        heap.set_random_mode(object, 8, false);
+        assert!(heap.randomize_object(object, &program, false));
+        assert_eq!(heap.load(object, 8, crate::HANDLE_BYTES), kept);
+        assert!(heap.randomize_object(object, &program, true));
+        heap.set_random_mode(object, 8, true);
+        // A size the preferred bound excludes.
+        program.constraints = vec![size("==", 5000)];
+        assert!(heap.randomize_object(object, &program, false));
+        assert_eq!(length(&mut heap, 8), 5000);
+        assert_eq!(heap.take_fault(), None);
+        // A disabled block names no size: the array keeps its size.
+        program.constraints = vec![Expr::Enabled {
+            index: 0,
+            value: Box::new(size("==", 3)),
+        }];
+        heap.set_constraint_mode(object, Some(0), false);
+        assert!(heap.randomize_object(object, &program, false));
+        assert_eq!(length(&mut heap, 8), 5000);
+        heap.set_constraint_mode(object, Some(0), true);
+        assert!(heap.randomize_object(object, &program, false));
+        assert_eq!(length(&mut heap, 8), 3);
+        // A size above the limit faults before anything changes: the
+        // scalar field and the arrays keep their values.
+        program.fields = program_fields();
+        program.constraints = vec![size("==", ARRAY_SIZE_LIMIT + 1)];
+        heap.store(object, 0, 1, 2);
+        let contents = heap.load(object, 8, crate::HANDLE_BYTES);
+        assert!(!heap.randomize_object(object, &program, false));
+        assert!(matches!(
+            heap.take_fault(),
+            Some(Fault::ConstraintRandomization(reason)) if reason.contains("above the limit")
+        ));
+        assert_eq!(heap.load(object, 0, 1), 2);
+        assert_eq!(heap.load(object, 8, crate::HANDLE_BYTES), contents);
     }
 
     /// The objects rand handles refer to are solved with the object, with
