@@ -1,0 +1,1 @@
+Codex: local parameters bound with their declared type, typedef bounds frozen in their scope; discovery uses the shared lexical scope walk
