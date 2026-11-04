@@ -574,6 +574,7 @@ fn generate(
         .map(|_| observers::Observers::new(program))
         .filter(|observers| !observers.groups.is_empty());
     let mut g = Generator {
+        program,
         nbas: None,
         observers: observers.as_ref(),
         observer_service,

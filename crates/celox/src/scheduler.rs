@@ -31,10 +31,12 @@
 //! and every design or kernel this module does not qualify, runs in the
 //! reference loop.
 
+pub(crate) mod host_inputs;
 mod nba;
 mod observers;
 mod ordered;
 mod slice;
+mod slot_observers;
 mod testbench;
 mod waits;
 
@@ -225,8 +227,12 @@ pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool) {
                 lazy = plan.lazy.is_some();
                 let fallback = plan.fallback.clone();
                 // Without kernels, slots of host clocks alone.
-                let unit = (plan.kernels.iter().any(Option::is_some) || !plan.clocks.is_empty())
-                    .then(|| plan.generate(program, &schema.slots));
+                let unit = (plan.kernels.iter().any(Option::is_some)
+                    || !plan.clocks.is_empty()
+                    || (cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen")))
+                        && plan.service_function.is_some()
+                        && !program.runtime.runtime_schema.nba_sites.is_empty()))
+                .then(|| plan.generate(program, &schema.slots));
                 let tracked = plan.tracked();
                 let kernel_events = plan
                     .kernels
@@ -803,9 +809,9 @@ impl Plan {
                     && !process.nbas.is_empty()
                     && process.nbas.iter().all(|site| {
                         let target = storage(site.target);
-                        site.delay == 0
-                            && (ordered_available
-                                || (!event_storage.contains_key(&target)
+                        ordered_available
+                            || (site.delay == 0
+                                && (!event_storage.contains_key(&target)
                                     && site.position.is_none()
                                     && !program
                                         .layout()
@@ -1868,9 +1874,7 @@ impl Plan {
                 model
                     .processes
                     .iter()
-                    .zip(&plan.kernels)
-                    .filter(|(_, kernel)| kernel.is_some())
-                    .flat_map(|(process, _)| process.nbas.iter().map(|site| storage(site.target))),
+                    .flat_map(|process| process.nbas.iter().map(|site| storage(site.target))),
             )
             .collect();
         let stable_input = |address| {
@@ -1980,7 +1984,6 @@ impl Plan {
         let nba_written: BTreeSet<_> = plan
             .nba_processes
             .iter()
-            .filter(|&&process| plan.kernels[process].is_some())
             .flat_map(|&process| &model.processes[process].nbas)
             .filter_map(|site| event_storage.get(&storage(site.target)).copied())
             .collect();
@@ -2141,9 +2144,10 @@ impl Plan {
         let nbas = cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen")))
             .then_some(self.service_function)
             .flatten()
-            .filter(|_| !self.nba_processes.is_empty())
+            .filter(|_| !schema.nba_sites.is_empty())
             .map(|service| nba::Sites::new(program, &native_nbas, service, &self.events));
         let mut g = Generator {
+            program,
             nbas: nbas.as_ref(),
             observers: self.observers.as_ref(),
             observer_service: self.service_function,
@@ -2262,6 +2266,9 @@ impl Plan {
             g.b.emit(SIRInstruction::Mux(next, earlier, wake, time));
             time = next;
             any = g.binary(1, any, BinaryOp::Or, waiting);
+        }
+        if let Some(nbas) = &nbas {
+            (time, any) = nbas.next_time(&mut g, time, any);
         }
         // Or the earliest next edge of a host clock, when the run has any.
         // The clocks armed at the start of the slot, which the re-arm at its
@@ -2397,6 +2404,9 @@ impl Plan {
             }
         }
         g.store(slots.now, SCHEDULER_TIME_WIDTH, time);
+        if let Some(nbas) = &nbas {
+            nbas.promote(&mut g, time);
+        }
         let fresh = g.constant(0, SCHEDULER_FLAG_WIDTH);
         g.store_at(
             slots.defer_limit_settle,
@@ -3019,6 +3029,23 @@ impl Plan {
                 );
             }
         }
+        if !self.cyclic
+            && let Some(service) = self.service_function
+        {
+            let enabled = g.arena_header_load(std::mem::offset_of!(
+                crate::simulator::native_io::ArenaHeader,
+                slot_observer
+            ));
+            g.if_bit(enabled, 0, |g| {
+                g.service_call(
+                    service,
+                    u64::MAX,
+                    crate::simulator::native_io::SCHEDULER_PASS,
+                    time,
+                    internal_exit,
+                );
+            });
+        }
         let none = g.constant(u64::MAX, SCHEDULER_TIME_WIDTH);
         g.store(slots.current, SCHEDULER_TIME_WIDTH, none);
         let settled = g.b.new_block();
@@ -3125,6 +3152,7 @@ impl Plan {
 
         // The domains the edges trigger, then the NBA region.
         g.b.switch_to_block(domains);
+        self.observe_slot(&mut g, &tracked, &checks, finish_exit, true);
         if !self.active.is_empty() || self.ordered.is_some() {
             self.batch_active(
                 &mut g,
@@ -3413,7 +3441,25 @@ impl Plan {
             g.b.seal_block(SIRTerminator::Jump(rearmed, Vec::new()));
             g.b.switch_to_block(rearmed);
         }
-        if waits.iter().any(|(_, wait)| wait.reactive) {
+        let reactive_waits = waits.iter().any(|(_, wait)| wait.reactive);
+        if reactive_waits || (self.service_function.is_some() && !waits.is_empty()) {
+            // A host callback can wake an otherwise undriven input wait. Its
+            // activation must drain natively after the domains too.
+            let observer_done = (!reactive_waits).then(|| g.b.new_block());
+            if let Some(done) = observer_done {
+                let enabled = g.arena_header_load(std::mem::offset_of!(
+                    crate::simulator::native_io::ArenaHeader,
+                    slot_observer
+                ));
+                let enabled = g.equals(enabled, 1);
+                let scan = g.b.new_block();
+                g.b.seal_block(SIRTerminator::Branch {
+                    cond: enabled,
+                    true_block: (scan, Vec::new()),
+                    false_block: (done, Vec::new()),
+                });
+                g.b.switch_to_block(scan);
+            }
             // NBA publication can wake data-sensitive kernels in this same
             // time slot. Their next pass must not evaluate the domains that
             // just ran a second time: compare against the levels now and
@@ -3462,6 +3508,10 @@ impl Plan {
             }
             g.b.seal_block(SIRTerminator::Jump(pick, Vec::new()));
             g.b.switch_to_block(drained);
+            if let Some(done) = observer_done {
+                g.b.seal_block(SIRTerminator::Jump(done, Vec::new()));
+                g.b.switch_to_block(done);
+            }
         }
         if assertions {
             // IEEE 1800-2023 4.4.2.5-6: drain all Observed evaluations,
@@ -3636,6 +3686,12 @@ impl Plan {
 
         // A wave after a commit: the domains not run yet whose clocks moved.
         g.b.switch_to_block(wave);
+        let pending = g.load_at(slots.exit_arg, self.event_bits, self.event_bits);
+        let zero = g.constant(0, self.event_bits);
+        let post = g.binary(1, pending, BinaryOp::Eq, zero);
+        g.if_bit(post, 0, |g| {
+            self.observe_slot(g, tracked, checks, finish_exit, false)
+        });
         if self
             .kernels
             .iter()
@@ -3848,6 +3904,7 @@ impl Plan {
 
         // A wave after a commit: the domains not run yet whose clocks moved.
         g.b.switch_to_block(wave);
+        self.observe_slot(g, tracked, checks, finish_exit, false);
         if self
             .kernels
             .iter()
@@ -4162,6 +4219,7 @@ enum Phase {
 }
 
 struct Generator<'a> {
+    program: &'a LaidOutProgram,
     nbas: Option<&'a nba::Sites>,
     observers: Option<&'a observers::Observers>,
     observer_service: Option<u32>,

@@ -1,0 +1,277 @@
+//! Host observation at a native domain-wave boundary. Only signal IO crosses
+//! the service ABI; wait activation, settling and domain dispatch stay native.
+use super::*;
+use crate::simulator::native_io::{self, ArenaHeader};
+use std::mem::offset_of;
+
+impl Plan {
+    pub(super) fn observe_slot(
+        &self,
+        g: &mut Generator<'_>,
+        tracked: &[usize],
+        checks: &[WaitCheck<'_>],
+        finish: celox_sir::BlockId,
+        first: bool,
+    ) {
+        let Some(service) = self.service_function else {
+            return;
+        };
+        let enabled = g.arena_header_load(offset_of!(ArenaHeader, slot_observer));
+        let enabled = g.equals(enabled, 1);
+        let begin = g.b.new_block();
+        let notify = g.b.new_block();
+        let done = g.b.new_block();
+        g.b.seal_block(SIRTerminator::Branch {
+            cond: enabled,
+            true_block: (begin, Vec::new()),
+            false_block: (done, Vec::new()),
+        });
+        g.b.switch_to_block(begin);
+        g.settle_then(notify);
+        g.b.switch_to_block(notify);
+        let before: Vec<_> = if first {
+            self.events.iter().map(|event| g.level(event)).collect()
+        } else {
+            Vec::new()
+        };
+        let context = g.load_at(
+            g.slots.defer_limit_settle,
+            celox_design::SCHEDULER_HOST_CONTEXT_BIT,
+            64,
+        );
+        let zero = g.constant(0, 64);
+        let request = g.constant(native_io::BEFORE_DOMAINS, 64);
+        let time = g.load(g.slots.now, 64);
+        let result = g.b.alloc_bit(64, false);
+        g.b.emit(SIRInstruction::ExternCall {
+            dst: Some(result),
+            func: service,
+            args: vec![context, zero, request, time, zero],
+        });
+        let error = g.mask_bit(result, 0);
+        let failed = g.exit_block(SchedulerExit::Internal);
+        let success = g.b.new_block();
+        g.b.seal_block(SIRTerminator::Branch {
+            cond: error,
+            true_block: (failed, Vec::new()),
+            false_block: (success, Vec::new()),
+        });
+        g.b.switch_to_block(success);
+        let stopped = g.mask_bit(result, 2);
+        let continued = g.b.new_block();
+        g.b.seal_block(SIRTerminator::Branch {
+            cond: stopped,
+            true_block: (finish, Vec::new()),
+            false_block: (continued, Vec::new()),
+        });
+        g.b.switch_to_block(continued);
+        let wrote = g.mask_bit(result, 1);
+        let writes = g.b.new_block();
+        g.b.seal_block(SIRTerminator::Branch {
+            cond: wrote,
+            true_block: (writes, Vec::new()),
+            false_block: (done, Vec::new()),
+        });
+        g.b.switch_to_block(writes);
+        g.mark_dirty();
+        host_inputs::replay(g.program, g, checks);
+        let mut edges = g.load(g.slots.exit_arg, self.event_bits);
+        for (index, (event, was)) in self.events.iter().zip(before).enumerate() {
+            let is = g.level(event);
+            let edge = g.edge(event, was, is);
+            let bit = g.event_bit(edge, index);
+            edges = g.binary(self.event_bits, edges, BinaryOp::Or, bit);
+        }
+        g.store(g.slots.exit_arg, self.event_bits, edges);
+        let settled = g.b.new_block();
+        g.settle_then(settled);
+        g.b.switch_to_block(settled);
+        g.check_waits(checks);
+        self.judge_gates(g, tracked);
+        g.b.seal_block(SIRTerminator::Jump(done, Vec::new()));
+        g.b.switch_to_block(done);
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "systemverilog",
+    target_arch = "x86_64",
+    not(feature = "arm64-codegen")
+))]
+mod tests {
+    use crate::{SchedulerMode, SignalRef, SimBackend, Simulation, SlotIo, SlotObserver};
+    use std::sync::{Arc, Mutex};
+
+    struct Drive {
+        clk: SignalRef,
+        data: SignalRef,
+        q: SignalRef,
+        last: bool,
+        finish: bool,
+        seen: Arc<Mutex<Vec<(u64, u64)>>>,
+    }
+
+    impl<B: SimBackend> SlotObserver<B> for Drive {
+        fn before_domains(&mut self, io: &mut SlotIo<'_, B>, time: u64) {
+            let high = io.get(self.clk) == 1u8.into();
+            if high && !self.last {
+                self.seen
+                    .lock()
+                    .unwrap()
+                    .push((time, u64::try_from(io.get(self.q)).unwrap()));
+                io.set(self.data, 17u32);
+                if self.finish {
+                    io.request_finish();
+                }
+            }
+            self.last = high;
+        }
+        fn end_of_slot(&mut self, _: &mut SlotIo<'_, B>, _: u64) {}
+    }
+
+    fn check<B: SimBackend + 'static>(
+        mut sim: Simulation<B>,
+        mode: SchedulerMode,
+        finish: bool,
+        expected: u8,
+        prepare: impl FnOnce(&mut B),
+    ) {
+        let clk = sim.signal("clk");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        sim.observe_slots(
+            Box::new(Drive {
+                clk,
+                data: sim.signal("d"),
+                q: sim.signal("q"),
+                last: false,
+                finish,
+                seen: seen.clone(),
+            }),
+            &[clk],
+        );
+        sim.run_until(1).unwrap();
+        prepare(&mut sim.simulator.backend);
+        let before = sim.scheduler_stats();
+        sim.run_until(6).unwrap();
+        assert_eq!(*seen.lock().unwrap(), vec![(5, 0)], "{mode:?}");
+        assert_eq!(
+            sim.get(sim.signal("q")),
+            if finish { 0u8 } else { expected }.into()
+        );
+        assert_eq!(
+            sim.get(sim.signal("wakes")),
+            if finish { 0u8 } else { 1u8 }.into(),
+            "backend={} mode={mode:?} finish={finish} expected={expected} stats={:?}",
+            std::any::type_name::<B>(),
+            sim.scheduler_stats()
+        );
+        if finish {
+            assert!(
+                sim.simulator.host_watch.has_log(),
+                "finished callback writes remain pending"
+            );
+        }
+        if mode == SchedulerMode::Compiled {
+            let after = sim.scheduler_stats();
+            assert_eq!(after.reference_steps, before.reference_steps, "{after:?}");
+            assert!(after.compiled_slots > before.compiled_slots);
+        }
+    }
+
+    #[test]
+    fn delayed_nba_observer_writes_precede_native_domains() {
+        for expression in ["d", "d * 3 + 1"] {
+            let source = format!(
+                r#"`timescale 1ns/1ns
+module Top;
+    bit clk = 0;
+    int d = 0, q = 0, wakes = 0;
+    wire [31:0] input_value = {expression};
+    initial begin #1; clk = 0; clk <= #4 1; end
+    always_ff @(posedge clk) q <= input_value;
+    initial forever begin @(d); wakes++; end
+endmodule"#
+            );
+            let expected = if expression == "d" { 17 } else { 52 };
+            for four_state in [false, true] {
+                for finish in [false, true] {
+                    for mode in [SchedulerMode::Reference, SchedulerMode::Compiled] {
+                        let make = || {
+                            Simulation::from_sv_sources(
+                                vec![(
+                                    source.as_str(),
+                                    std::path::Path::new("native-slot-observer.sv"),
+                                )],
+                                "Top",
+                            )
+                            .four_state(four_state)
+                            .scheduler_mode(mode)
+                        };
+                        check(
+                            make().build_native().unwrap(),
+                            mode,
+                            finish,
+                            expected,
+                            |_| {},
+                        );
+                        let sim = make().hotspot_jit(true).build_tiered().unwrap();
+                        check(sim, mode, finish, expected, |backend| {
+                            if mode == SchedulerMode::Compiled {
+                                backend.publish_scheduler_for_test();
+                            }
+                        });
+                    }
+                }
+            }
+        }
+    }
+    struct Feedback {
+        data: SignalRef,
+        calls: usize,
+    }
+
+    impl<B: SimBackend> SlotObserver<B> for Feedback {
+        fn before_domains(&mut self, io: &mut SlotIo<'_, B>, time: u64) {
+            if time == 5 {
+                self.calls += 1;
+                assert!(self.calls < 16, "callback loop escaped the native budget");
+                io.set(self.data, self.calls as u32);
+            }
+        }
+        fn end_of_slot(&mut self, _: &mut SlotIo<'_, B>, _: u64) {}
+    }
+
+    #[test]
+    fn callback_feedback_obeys_the_native_round_budget() {
+        let source = r#"`timescale 1ns/1ns
+module Top;
+    bit clk = 0;
+    int d = 0, q = 0, wakes = 0;
+    initial begin #1; clk = 0; clk <= #4 1; end
+    always_ff @(posedge clk) q <= d;
+    initial forever begin @(d); wakes++; end
+endmodule"#;
+        let mut sim = Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("native-observer-budget.sv"))],
+            "Top",
+        )
+        .scheduler_mode(SchedulerMode::Compiled)
+        .build_native()
+        .unwrap();
+        let clk = sim.signal("clk");
+        sim.observe_slots(
+            Box::new(Feedback {
+                data: sim.signal("d"),
+                calls: 0,
+            }),
+            &[clk],
+        );
+        sim.run_until(1).unwrap();
+        sim.state.set_slot_budgets(3, 64);
+        let before = sim.scheduler_stats().reference_steps;
+        let error = sim.run_until(6).unwrap_err().to_string();
+        assert!(error.contains("does not settle"), "{error}");
+        assert_eq!(sim.scheduler_stats().reference_steps, before);
+    }
+}

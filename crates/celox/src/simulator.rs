@@ -150,6 +150,7 @@ mod host {
         pub(crate) native_host_round_budget: u64,
         pub(crate) postponed_output: bool,
         pub(crate) native_nba_queue: std::collections::VecDeque<celox_runtime::NbaUpdate>,
+        pub(crate) native_delayed_nbas: std::collections::VecDeque<(u64, celox_runtime::NbaUpdate)>,
         pending_host_events: Arc<std::sync::Mutex<PendingRuntimeEvents>>,
         pub(crate) program: RuntimeProgram,
         /// The program's scheduling facts.
@@ -1403,6 +1404,7 @@ mod host {
                 // Active feedback; timed runs replace this with their budget.
                 native_host_round_budget: 1 << 20,
                 native_nba_queue: Default::default(),
+                native_delayed_nbas: Default::default(),
                 pending_host_events: Arc::new(std::sync::Mutex::new(PendingRuntimeEvents {
                     deferred: DeferredQueues {
                         sites: deferred_sites.clone(),
@@ -2625,6 +2627,10 @@ mod host {
             })
         }
 
+        pub(crate) fn has_native_scheduler_services(&self) -> bool {
+            self.native_file_io.is_some()
+        }
+
         pub(crate) fn run_process_checked(&mut self, index: usize) -> Result<(), RuntimeErrorCode> {
             let start = self.runtime_event_write_seq();
             let scheduler = self
@@ -2649,7 +2655,17 @@ mod host {
             }
             let result = if scheduler == Some(index) || generated {
                 if let Some(metadata) = &self.native_file_io {
+                    let prepared = self
+                        .slot_observer
+                        .as_ref()
+                        .and_then(|_| self.backend.prepare_process(index));
                     let (state, state_size) = self.backend.memory_as_ptr();
+                    let mut observer = native_io::SlotService {
+                        backend: &mut self.backend,
+                        observer: self.slot_observer.as_deref_mut(),
+                        watch: &mut self.host_watch,
+                        dirty: &mut self.dirty,
+                    };
                     let mut scope = native_io::Scope {
                         arena: &mut self.native_arena,
                         metadata,
@@ -2663,12 +2679,21 @@ mod host {
                         return_budget: self.native_host_return_budget,
                         round_budget: self.native_host_round_budget,
                         nbas: &mut self.native_nba_queue,
+                        delayed: &mut self.native_delayed_nbas,
                         pending_scan: 0,
                         comb_before: Vec::new(),
+                        observer: None,
                     };
-                    let (result, error) = scope.run(&mut self.backend, index);
+                    let ((result, error), elapsed) = match prepared {
+                        Some(call) => {
+                            scope.observer = Some(&mut observer);
+                            scope.run_prepared(call)
+                        }
+                        None => (scope.run(observer.backend, index), None),
+                    };
                     self.native_service_calls =
                         self.native_service_calls.saturating_add(scope.calls);
+                    observer.backend.complete_process(elapsed);
                     error.map_or(result, Err)
                 } else {
                     self.backend.run_process(index)
