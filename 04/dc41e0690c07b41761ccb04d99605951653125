@@ -1,1 +1,6 @@
-post_randomize runs over the solver's recorded participants (VISIT_SOLVED), not a re-walk; tests for clear/replace/pre-allocated/nested randomize; 18.6.2 cites
+Revision history for #3132:
+
+rev 2 (content) 2026-11-04 17:54 UTC — post_randomize runs over the solver's recorded participants (VISIT_SOLVED), not a re-walk; tests for clear/replace/pre-allocated/nested randomize; 18.6.2 cites
+rev 1 (initial) 2026-11-04 17:54 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3132,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"deb2ee4f212acf90ebeee2a1021e75aa65e14c8f","timestamp_iso":"2026-11-04T17:54:12Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"deb2ee4f212acf90ebeee2a1021e75aa65e14c8f","new_sha":"04dc41e0690c07b41761ccb04d99605951653125","timestamp_iso":"2026-11-04T17:54:12Z","reason":"post_randomize runs over the solver's recorded participants (VISIT_SOLVED), not a re-walk; tests for clear/replace/pre-allocated/nested randomize; 18.6.2 cites","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/deb2ee4f212acf90ebeee2a1021e75aa65e14c8f...04dc41e0690c07b41761ccb04d99605951653125"}]} -->
