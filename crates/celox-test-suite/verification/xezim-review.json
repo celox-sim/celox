@@ -1046,6 +1046,10 @@
     "sv_nested_bounded_queues": {
       "title": "Assigning a queue of queues to a queue of bounded queues loses elements below the bound: with a = '{'{1, 2, 3}, '{4}} and int c[$][$:1], c = a gives c[0] one element instead of the first two",
       "standard": "IEEE 1800-2023 7.6, 7.10.5"
+    },
+    "sv_inherited_constraint_members": {
+      "title": "In a module that another module instantiates, a constraint of a derived class that names a property of its base, `class SubLeaf extends Leaf; constraint d { v != 4; }`, fails to build with \"Undeclared identifier 'v' in class constraint\"; with that module as the top it builds",
+      "standard": "IEEE 1800-2023 8.13, 18.5"
     }
   },
   "cases": [
@@ -5646,6 +5650,14 @@
       "classification": "xezim_bug",
       "bug": "sv_nested_bounded_queues",
       "note": "Every container value made from another container is converted to the container's type (7.6), which keeps each queue to its bound (7.10.5): through an assignment, a return, an input argument, the source of new[] (7.5.1), the items of a concatenation (10.10), an associative array's default and a pattern's elements; the case prints 2 1 first. The pinned xezim gets the nested queues of every path wrong, also of the unbounded concatenation. See verification/repros/sv_nested_bounded_queues.json; Verilator 5.052 generates C++ that does not compile, and Celox prints the expected output."
+    },
+    {
+      "suite": "sv",
+      "name": "class::constrained_randomize_rand_objects",
+      "status": "compile_error",
+      "classification": "xezim_bug",
+      "bug": "sv_inherited_constraint_members",
+      "note": "SubLeaf extends Leaf and constrains Leaf's rand v (constraint d { v != 4; }), which a derived class may (8.13, 18.5). The suite's testbench instantiates Top, and xezim 0.11.4 then rejects the constraint with \"Undeclared identifier 'v' in class constraint\". The reduced source does the same with tb as the top and builds with -s Top. Run with Top as the top, the shared source also shows a second difference: when a nested object's constraints fail, xezim calls its pre_randomize once per internal retry (500 times) where randomize calls it once (18.6.1). See verification/repros/sv_inherited_constraint_members_xezim.json; Verilator 5.052 fails at run time on the null rand handle, which needs no randomization (18.4)."
     }
   ]
 }
