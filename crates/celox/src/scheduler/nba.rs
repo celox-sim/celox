@@ -2,6 +2,7 @@
 //! pages owned by the invocation's arena; allocation is the only host request.
 mod observations;
 mod sites;
+mod writes;
 use super::*;
 use crate::simulator::native_io::{self, ArenaHeader, NbaHeader};
 use celox_sir::native_memory::NativeMemoryOp as Memory;

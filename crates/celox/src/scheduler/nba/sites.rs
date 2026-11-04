@@ -10,6 +10,16 @@ pub(in crate::scheduler) struct Sites {
     site_count: usize,
     processes: Vec<Vec<usize>>,
     observations: Vec<observations::Observations>,
+    objects: Vec<(writes::Object, writes::Object)>,
+    edges: Vec<Vec<Edge>>,
+}
+
+#[derive(Clone, Copy)]
+struct Edge {
+    index: usize,
+    signal: AbsoluteAddr,
+    width: usize,
+    rising: bool,
 }
 
 impl Sites {
@@ -17,6 +27,7 @@ impl Sites {
         program: &LaidOutProgram,
         compiled: &HashSet<usize>,
         service: u32,
+        events: &[Event],
     ) -> Self {
         let mut sites = Vec::new();
         let mut global = Vec::new();
@@ -28,16 +39,80 @@ impl Sites {
                 global.push(id);
             }
         }
+        let shared = program.shared_storage();
+        let storage = |signal| shared.get(&signal).copied().unwrap_or(signal);
+        let mut by_signal: HashMap<_, Vec<Edge>> = HashMap::default();
+        for (index, event) in events.iter().enumerate() {
+            by_signal
+                .entry(storage(event.signal))
+                .or_default()
+                .push(Edge {
+                    index,
+                    signal: event.signal,
+                    width: event.width.min(8),
+                    rising: event.active != 0,
+                });
+        }
         Self {
             queue: Queue { service },
+            edges: sites
+                .iter()
+                .map(|site| {
+                    by_signal
+                        .get(&storage(site.target))
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .collect(),
             global,
             site_count: program.runtime.runtime_schema.nba_sites.len(),
+            objects: sites
+                .iter()
+                .map(|site| {
+                    let object = |signal, width| writes::Object {
+                        signal,
+                        width,
+                        element: program
+                            .layout()
+                            .unpacked_arrays
+                            .get(&signal)
+                            .map(|layout| layout.element_width),
+                    };
+                    (
+                        object(site.value, site.width),
+                        object(site.target, program.layout().widths[&site.target]),
+                    )
+                })
+                .collect(),
             observations: sites
                 .iter()
                 .map(|site| observations::Observations::new(program, site.target))
                 .collect(),
             sites,
             processes,
+        }
+    }
+
+    fn range(g: &mut Generator<'_>, site: &NbaSite<AbsoluteAddr>) -> (RegisterId, RegisterId) {
+        let base = g.constant(site.lsb as u64, 64);
+        let max = g.constant(site.width as u64, 64);
+        match site.position {
+            None => (base, max),
+            Some(position) => {
+                let offset = g.load(
+                    position.offset,
+                    celox_frontend_core::process::NBA_POSITION_WIDTH,
+                );
+                let width = g.load(
+                    position.width,
+                    celox_frontend_core::process::NBA_POSITION_WIDTH,
+                );
+                let lsb = g.binary(64, base, BinaryOp::Add, offset);
+                let smaller = g.binary(1, width, BinaryOp::LtU, max);
+                let count = g.b.alloc_bit(64, false);
+                g.b.emit(SIRInstruction::Mux(count, smaller, width, max));
+                (lsb, count)
+            }
         }
     }
 
@@ -71,13 +146,22 @@ impl Sites {
                 g.store(pending, 1, zero);
             }
             if site.width != 0 {
+                let (lsb, width) = Self::range(g, site);
+                if site.position.is_some() {
+                    let empty = g.equals(width, 0);
+                    let capture = g.b.new_block();
+                    g.b.seal_block(SIRTerminator::Branch {
+                        cond: empty,
+                        true_block: (done, Vec::new()),
+                        false_block: (capture, Vec::new()),
+                    });
+                    g.b.switch_to_block(capture);
+                }
                 let class = Self::class(site, g);
                 let record = self.queue.allocate(g, class);
                 let id = g.constant(self.global[site_index] as u64, 64);
                 self.queue.write(g, record, SITE, id);
-                let lsb = g.constant(site.lsb as u64, 64);
                 self.queue.write(g, record, LSB, lsb);
-                let width = g.constant(site.width as u64, 64);
                 self.queue.write(g, record, WIDTH, width);
                 for offset in (0..site.width).step_by(64) {
                     let width = (site.width - offset).min(64);
@@ -183,26 +267,64 @@ impl Sites {
     fn update(
         &self,
         g: &mut Generator<'_>,
-        site: &NbaSite<AbsoluteAddr>,
-        observation: &observations::Observations,
+        index: usize,
         record: Option<RegisterId>,
         checks: &[WaitCheck<'_>],
     ) {
+        let site = &self.sites[index];
+        let observation = &self.observations[index];
+        let objects = self.objects[index];
+        let edges = &self.edges[index];
+        let before: Vec<_> = edges
+            .iter()
+            .map(|edge| g.level_at(edge.signal, edge.width))
+            .collect();
         let snapshot = observation.before(g);
-        let mut changed = g.constant(0, 1);
-        for offset in (0..site.width).step_by(64) {
-            let width = (site.width - offset).min(64);
-            let before = g.load_state(site.target, site.lsb + offset, width);
-            let value = match record {
-                Some(record) => self.value(g, record, site, offset, width),
-                None => g.load_state(site.value, offset, width),
+        let (source, target) = objects;
+        let changed = if site.position.is_some()
+            || source.element.is_some()
+            || target.element.is_some()
+            || site
+                .lsb
+                .checked_add(site.width)
+                .is_none_or(|end| end > target.width)
+        {
+            let (lsb, width) = match record {
+                Some(record) => (
+                    self.queue.read(g, record, LSB),
+                    self.queue.read(g, record, WIDTH),
+                ),
+                None => Self::range(g, site),
             };
-            g.store_state(site.target, site.lsb + offset, width, value);
-            let after = g.load_state(site.target, site.lsb + offset, width);
-            let differs = g.binary(1, before, BinaryOp::NeCase, after);
-            changed = g.binary(1, changed, BinaryOp::Or, differs);
-        }
+            let width = writes::clip(g, lsb, width, target.width);
+            writes::write(g, source, target, record, lsb, width)
+        } else {
+            let mut changed = g.constant(0, 1);
+            for offset in (0..site.width).step_by(64) {
+                let width = (site.width - offset).min(64);
+                let before = g.load_state(site.target, site.lsb + offset, width);
+                let value = match record {
+                    Some(record) => self.value(g, record, site, offset, width),
+                    None => g.load_state(site.value, offset, width),
+                };
+                g.store_state(site.target, site.lsb + offset, width, value);
+                let after = g.load_state(site.target, site.lsb + offset, width);
+                let differs = g.binary(1, before, BinaryOp::NeCase, after);
+                changed = g.binary(1, changed, BinaryOp::Or, differs);
+            }
+            changed
+        };
         observation.after(g, snapshot);
+        if !edges.is_empty() {
+            let mut pulses = g.load_at(g.slots.exit_arg, g.event_bits, g.event_bits);
+            for (edge, was) in edges.iter().zip(before) {
+                let is = g.level_at(edge.signal, edge.width);
+                let active = g.level_edge(edge.rising, was, is);
+                let bit = g.event_bit(active, edge.index);
+                pulses = g.binary(g.event_bits, pulses, BinaryOp::Or, bit);
+            }
+            g.store_at(g.slots.exit_arg, g.event_bits, g.event_bits, pulses);
+        }
         g.if_bit(changed, 0, |g| {
             g.mark_dirty();
             g.check_waits_at(checks, false);
@@ -232,21 +354,22 @@ impl Sites {
             targets[id] = block;
         }
         g.dispatch_sites(site, &targets, bad);
-        for ((site, observation), block) in self.sites.iter().zip(&self.observations).zip(blocks) {
+        for (index, block) in blocks.into_iter().enumerate() {
+            let site = &self.sites[index];
             g.b.switch_to_block(block);
-            self.update(g, site, observation, Some(record), checks);
+            self.update(g, index, Some(record), checks);
             let class = Self::class(site, g);
             self.queue.release(g, record, class);
             g.b.seal_block(SIRTerminator::Jump(again, Vec::new()));
         }
         g.b.switch_to_block(flagged);
-        for (site, observation) in self.sites.iter().zip(&self.observations) {
+        for (index, site) in self.sites.iter().enumerate() {
             if let Some(pending) = site.pending {
                 let flag = g.load(pending, 1);
                 g.if_bit(flag, 0, |g| {
                     let zero = g.constant(0, 1);
                     g.store(pending, 1, zero);
-                    self.update(g, site, observation, None, checks);
+                    self.update(g, index, None, checks);
                 });
             }
         }

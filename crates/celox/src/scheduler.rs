@@ -804,11 +804,14 @@ impl Plan {
                     && process.nbas.iter().all(|site| {
                         let target = storage(site.target);
                         site.delay == 0
-                            && site.position.is_none()
-                            && !program.layout().unpacked_arrays.contains_key(&site.target)
-                            && !event_storage.contains_key(&target)
                             && (ordered_available
-                                || (!probed.contains(&target)
+                                || (!event_storage.contains_key(&target)
+                                    && site.position.is_none()
+                                    && !program
+                                        .layout()
+                                        .unpacked_arrays
+                                        .contains_key(&site.target)
+                                    && !probed.contains(&target)
                                     && !rtl_stores.contains(&target)
                                     && !kernel_stores
                                         .iter()
@@ -1974,6 +1977,17 @@ impl Plan {
                 }
             }
         }
+        let nba_written: BTreeSet<_> = plan
+            .nba_processes
+            .iter()
+            .filter(|&&process| plan.kernels[process].is_some())
+            .flat_map(|&process| &model.processes[process].nbas)
+            .filter_map(|site| event_storage.get(&storage(site.target)).copied())
+            .collect();
+        if !nba_written.is_empty() {
+            derived.extend(nba_written.iter().filter(|event| !edged.contains(event)));
+            needs_ordered = true;
+        }
         let unhandled_rtl_events: Vec<_> = rtl_written
             .difference(&derived)
             .filter(|event| !stable_host_events.contains(event))
@@ -2128,7 +2142,7 @@ impl Plan {
             .then_some(self.service_function)
             .flatten()
             .filter(|_| !self.nba_processes.is_empty())
-            .map(|service| nba::Sites::new(program, &native_nbas, service));
+            .map(|service| nba::Sites::new(program, &native_nbas, service, &self.events));
         let mut g = Generator {
             nbas: nbas.as_ref(),
             observers: self.observers.as_ref(),
