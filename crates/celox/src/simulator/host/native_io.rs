@@ -1,10 +1,11 @@
 //! File writes and loop checkpoints called by a native scheduler through the ordinary
 //! extern-function ABI. The active scope borrows host services separately from
 //! the backend; the callback never re-enters a Simulator or its scheduler.
+pub(crate) use super::native_arena::Header as ArenaHeader;
 use super::*;
 use celox_design::{HostRequestKind, HostRequestSite};
 
-pub(crate) const SYMBOL: &str = "__celox_native_services_v1";
+pub(crate) const SYMBOL: &str = "__celox_native_services_v3";
 
 pub(crate) const CHECKPOINT: u64 = u64::MAX;
 pub(crate) const SCHEDULER_RUN: u64 = u64::MAX - 1;
@@ -12,6 +13,10 @@ pub(crate) const SCHEDULER_PASS: u64 = u64::MAX - 2;
 pub(crate) const NBA_PUBLISH: u64 = u64::MAX - 3;
 pub(crate) const PROCESS_PHASE: u64 = u64::MAX - 4;
 pub(crate) const NBA_REQUEST: u64 = 1 << 63;
+pub(crate) const ARENA_RESERVE_RECORDS: u64 = u64::MAX - 5;
+pub(crate) const ARENA_RESERVE_IMAGES: u64 = u64::MAX - 6;
+pub(crate) const ARENA_WAVE_LIMIT: u64 = u64::MAX - 7;
+pub(crate) const GUARD_FAULT: u64 = u64::MAX - 8;
 
 pub(crate) fn signature() -> celox_design::ExternSignature {
     let integer = celox_design::ExternType::Integer {
@@ -166,7 +171,10 @@ impl Metadata {
     }
 }
 
+#[repr(C)]
 pub(super) struct Scope<'a> {
+    // Generated code reads this first pointer; Arena's first member is Header.
+    pub arena: &'a mut super::native_arena::Arena,
     pub metadata: &'a Metadata,
     pub state: *const u8,
     pub state_size: usize,
@@ -174,12 +182,9 @@ pub(super) struct Scope<'a> {
     pub pending: &'a Arc<std::sync::Mutex<PendingRuntimeEvents>>,
     pub read_seq: &'a AtomicU64,
     pub error: Option<RuntimeErrorCode>,
+    pub calls: u64,
     pub return_budget: u64,
-    pub returns: u64,
     pub round_budget: u64,
-    pub scheduler_time: Option<u64>,
-    pub passes: u64,
-    pub run_returns: u64,
     pub nbas: &'a mut std::collections::VecDeque<celox_runtime::NbaUpdate>,
     pub pending_scan: usize,
 }
@@ -192,6 +197,12 @@ impl Scope<'_> {
         backend: &mut B,
         index: usize,
     ) -> (Result<(), RuntimeErrorCode>, Option<RuntimeErrorCode>) {
+        self.arena.header.wave_limit = self.round_budget;
+        self.arena.header.guard_valid = 0;
+        self.arena.header.work_limit = self
+            .round_budget
+            .saturating_mul(self.metadata.process_names.len().max(1) as u64);
+        self.arena.header.return_limit = self.return_budget;
         let pointer = std::ptr::from_mut(self) as u64;
         let slot = self.metadata.context;
         let previous: u64 = backend.get_as(slot);
@@ -310,59 +321,76 @@ impl Scope<'_> {
         }
     }
 
-    fn charge_scheduler(&mut self, request: u64, timestamp: u64) -> Result<(), RuntimeErrorCode> {
-        if self.scheduler_time != Some(timestamp) {
-            self.scheduler_time = Some(timestamp);
-            self.passes = 0;
-            self.run_returns = 0;
-            self.returns = 0;
-        }
+    fn charge_scheduler(
+        &mut self,
+        process: u64,
+        request: u64,
+        timestamp: u64,
+    ) -> Result<(), RuntimeErrorCode> {
+        let header = &mut self.arena.header;
+        header.guard_timestamp(timestamp);
         if request == SCHEDULER_RUN {
-            self.run_returns = self.run_returns.saturating_add(1);
-            // Ordinary activations can suspend on an event or delay and do
-            // not consume the reference process-return budget. This guard is
-            // the separate bound on cycling through the native work list.
-            // A ready-list sweep may activate every registered process.
-            let work_budget = self
-                .round_budget
-                .saturating_mul(self.metadata.process_names.len().max(1) as u64);
-            if self.run_returns > work_budget {
-                return Err(Self::fault(format!(
-                    "time slot at {timestamp} does not settle within its work-list budget"
-                )));
+            header.recent[header.recent_next as usize] = process;
+            header.recent_next = (header.recent_next + 1) % header.recent.len() as u64;
+            header.work = header.work.saturating_add(1);
+            // Ordinary suspensions do not consume the process-return budget.
+            // This separate bound covers cycling through the native work list.
+            if header.work > header.work_limit {
+                return Err(self.scheduler_fault(timestamp, "work-list"));
             }
         } else {
-            self.passes = self.passes.saturating_add(1);
-            self.run_returns = 0;
-            if self.passes > self.round_budget {
-                return Err(Self::fault(format!(
-                    "time slot at {timestamp} does not settle within its round budget"
-                )));
+            header.passes = header.passes.saturating_add(1);
+            header.work = 0;
+            if header.passes > header.wave_limit {
+                return Err(self.scheduler_fault(timestamp, "round"));
             }
         }
         Ok(())
     }
 
+    fn scheduler_fault(&self, timestamp: u64, budget: &str) -> RuntimeErrorCode {
+        let mut processes = self.arena.header.recent.to_vec();
+        processes.retain(|&process| process != u64::MAX);
+        processes.sort_unstable();
+        processes.dedup();
+        let names: Vec<_> = processes
+            .into_iter()
+            .map(|process| {
+                self.metadata
+                    .process_names
+                    .get(process as usize)
+                    .cloned()
+                    .unwrap_or_else(|| format!("process {process}"))
+            })
+            .collect();
+        let origins = if names.is_empty() {
+            String::new()
+        } else {
+            format!(": processes keep resuming: {}", names.join(", "))
+        };
+        Self::fault(format!(
+            "time slot at {timestamp} does not settle within its {budget} budget{origins}"
+        ))
+    }
+
     fn charge_return(&mut self, process: u64, timestamp: u64) -> Result<(), RuntimeErrorCode> {
-        if self.scheduler_time != Some(timestamp) {
-            self.scheduler_time = Some(timestamp);
-            self.passes = 0;
-            self.run_returns = 0;
-            self.returns = 0;
-        }
-        self.returns = self.returns.saturating_add(1);
-        if self.returns > self.return_budget {
-            let name = self
-                .metadata
-                .process_names
-                .get(process as usize)
-                .cloned()
-                .unwrap_or_else(|| format!("process {process}"));
-            return Err(Self::fault(format!(
-                "{name} does not suspend within one time slot"
-            )));
+        let header = &mut self.arena.header;
+        header.guard_timestamp(timestamp);
+        header.returns = header.returns.saturating_add(1);
+        if header.returns > header.return_limit {
+            return Err(self.return_fault(process));
         }
         Ok(())
+    }
+
+    fn return_fault(&self, process: u64) -> RuntimeErrorCode {
+        let name = self
+            .metadata
+            .process_names
+            .get(process as usize)
+            .cloned()
+            .unwrap_or_else(|| format!("process {process}"));
+        Self::fault(format!("{name} does not suspend within one time slot"))
     }
 
     fn fault(message: impl Into<String>) -> RuntimeErrorCode {
@@ -519,7 +547,7 @@ pub(crate) extern "C" fn call(
     process: u64,
     encoded: u64,
     timestamp: u64,
-    _first: u64,
+    detail: u64,
 ) -> u64 {
     if context == 0 {
         return 1;
@@ -528,13 +556,29 @@ pub(crate) extern "C" fn call(
     // private context slot for this synchronous call and restores the slot
     // before returning or unwinding. No simulation-global state is used.
     let scope = unsafe { &mut *(context as *mut Scope<'_>) };
+    scope.calls = scope.calls.saturating_add(1);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if matches!(encoded, SCHEDULER_RUN | SCHEDULER_PASS) {
-            scope.charge_scheduler(encoded, timestamp)?;
+        if matches!(encoded, ARENA_RESERVE_RECORDS | ARENA_RESERVE_IMAGES) {
+            scope
+                .arena
+                .reserve(encoded == ARENA_RESERVE_IMAGES, process)?;
+        } else if encoded == ARENA_WAVE_LIMIT {
+            return Err(Scope::fault(
+                "native ordered domain waves exceeded the round budget",
+            ));
+        } else if encoded == GUARD_FAULT {
+            return Err(match detail {
+                SCHEDULER_RUN => scope.scheduler_fault(timestamp, "work-list"),
+                SCHEDULER_PASS => scope.scheduler_fault(timestamp, "round"),
+                CHECKPOINT => scope.return_fault(process),
+                _ => Scope::fault("invalid native budget guard"),
+            });
+        } else if matches!(encoded, SCHEDULER_RUN | SCHEDULER_PASS) {
+            scope.charge_scheduler(process, encoded, timestamp)?;
         } else if encoded == PROCESS_PHASE {
             // One counter spans every activation/pass of process_phase.
             // A new phase after NBA publication starts a fresh counter.
-            scope.returns = 0;
+            scope.arena.header.returns = 0;
         } else if encoded == NBA_PUBLISH {
             return scope.publish_nba();
         } else {
@@ -619,7 +663,9 @@ mod tests {
         let pending = Arc::default();
         let read_seq = AtomicU64::new(0);
         let mut queue = std::collections::VecDeque::new();
+        let mut arena = super::super::native_arena::Arena::default();
         let mut scope = Scope {
+            arena: &mut arena,
             metadata: &metadata,
             state: state.as_mut_ptr().cast_const(),
             state_size: state.len(),
@@ -627,12 +673,9 @@ mod tests {
             pending: &pending,
             read_seq: &read_seq,
             error: None,
+            calls: 0,
             return_budget: u64::MAX,
-            returns: 0,
             round_budget: u64::MAX,
-            scheduler_time: None,
-            passes: 0,
-            run_returns: 0,
             nbas: &mut queue,
             pending_scan: 0,
         };

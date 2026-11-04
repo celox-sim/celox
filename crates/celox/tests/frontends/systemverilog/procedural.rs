@@ -363,14 +363,27 @@ fn assert_does_not_settle(mut sim: celox::Simulation) {
 fn level_blocks_sharing_an_isolated_loop_index_can_settle() {
     // 4.7 permits other Active work between the body and the next @* wait.
     // Shared storage and event notifications remain; this is not privatization.
-    for four_state in [false, true] {
+    for (four_state, mode) in [false, true].into_iter().flat_map(|four_state| {
+        [
+            celox::SchedulerMode::Compiled,
+            celox::SchedulerMode::Differential,
+            celox::SchedulerMode::DifferentialRuns,
+        ]
+        .map(move |mode| (four_state, mode))
+    }) {
         let mut sim =
             celox::Simulation::from_sv_sources(vec![(SHARED_INDEX, Path::new("shared.sv"))], "top")
                 .four_state(four_state)
+                .scheduler_mode(mode)
                 .build()
                 .unwrap();
         assert!(sim.warnings().is_empty());
         sim.run_until(10).unwrap();
+        assert!(
+            sim.scheduler_stats().compiled_slots > 0,
+            "{mode:?} four_state={four_state}: {:?}",
+            sim.scheduler_stats()
+        );
         assert_eq!(display_lines(&mut sim), ["1 1"]);
         let j = sim.signal("j");
         assert_eq!(sim.get(j), BigUint::from(4u8));
@@ -387,13 +400,26 @@ fn shared_always_rearms_before_flip_flop_nba_updates() {
             "  initial begin",
             "  always @(posedge clk) b <= 4'b0010;\n  initial begin",
         );
-    for four_state in [false, true] {
+    for (four_state, mode) in [false, true].into_iter().flat_map(|four_state| {
+        [
+            celox::SchedulerMode::Compiled,
+            celox::SchedulerMode::Differential,
+            celox::SchedulerMode::DifferentialRuns,
+        ]
+        .map(move |mode| (four_state, mode))
+    }) {
         let mut sim =
             celox::Simulation::from_sv_sources(vec![(&source, Path::new("shared-nba.sv"))], "top")
                 .four_state(four_state)
+                .scheduler_mode(mode)
                 .build()
                 .unwrap();
         sim.run_until(10).unwrap();
+        assert!(
+            sim.scheduler_stats().compiled_slots > 0,
+            "{mode:?} four_state={four_state}: {:?}",
+            sim.scheduler_stats()
+        );
         assert_eq!(display_lines(&mut sim), ["1 1"]);
     }
 }

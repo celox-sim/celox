@@ -289,6 +289,9 @@ impl<B: SimBackend> SimulationState<B> {
                 continue;
             }
             round.edge_approved.remove(id);
+            // This occurrence has now evaluated. Keeping it until NBA would
+            // replay it when an unrelated publication triggers another wave.
+            round.occurrences.remove(id);
             committed |= self.model.active_commits.contains(info.canonical_id);
             self.evaluate_deferred(executor, current_time, round, info)?;
         }

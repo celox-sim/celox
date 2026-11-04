@@ -4310,6 +4310,106 @@ mod host {
         }
     }
 
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    #[test]
+    fn hotspot_scheduler_overlaps_large_comb_and_links_after_publication() {
+        use crate::backend::hotspot::{EntryKey, HotspotRuntime, SCRATCH_BYTES};
+        use std::time::{Duration, Instant};
+        let source = r#"`timescale 1ns/1ns
+module Top;
+  logic clk = 0;
+  logic [129:0] q = 0;
+  wire [129:0] observed = {q[129:128], q[127:0] ^ {128{clk}}};
+  always #5 clk = ~clk;
+  always_ff @(posedge clk) q <= {2'bxz, q[127:0] + 128'd1};
+endmodule"#;
+        let (program, _, options, _, _) = crate::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("early-scheduler.sv"))],
+            "Top",
+        )
+        .emit_triggers()
+        .four_state(true)
+        .settle_partition(crate::SettlePartition::Always)
+        .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false)
+        .unwrap();
+        assert!(!program.sir.eval_comb.is_empty());
+        for large in [false, true] {
+            for cancel_before_publication in [false, true] {
+                let mut runtime = HotspotRuntime::new(program.layout(), &options).unwrap();
+                runtime.prepare_scheduler(&program);
+                let mut memory =
+                    vec![0; program.layout().merged_total_size.div_ceil(8) + SCRATCH_BYTES / 8];
+                // Never execute a group against uninitialized simulation state.
+                let poll = EntryKey::Block(0, usize::MAX, 0, crate::ir::BlockId(0));
+                for _ in 0..128 {
+                    assert!(runtime.try_run(poll, &mut memory).is_none());
+                }
+                assert_eq!(runtime.stats().compile_time, Duration::ZERO);
+                assert_eq!(runtime.stats().compiled_entries, 0);
+                runtime.begin(EntryKey::Comb);
+                runtime.finish(
+                    EntryKey::Comb,
+                    Some(Instant::now() - Duration::from_secs(1)),
+                    None,
+                );
+                let (_, mut units) = runtime.begin(EntryKey::Comb);
+                assert!(units.is_some());
+                if large {
+                    // Exercise size-based escalation without a huge test circuit.
+                    let mut instructions = usize::MAX;
+                    runtime.collect(
+                        EntryKey::Comb,
+                        &mut units,
+                        &program.sir.eval_comb[0],
+                        &mut instructions,
+                    );
+                    assert!(units.is_none());
+                    runtime.finish(EntryKey::Comb, None, units);
+                    let (_, units) = runtime.begin(EntryKey::Comb);
+                    assert!(units.is_some());
+                }
+                runtime.finish(EntryKey::Comb, None, Some(program.sir.eval_comb.clone()));
+                // Large groups prepare on the owner while the worker compiles
+                // Comb; small groups retain lazy preparation on that worker.
+                assert_eq!(runtime.stats().compile_time.is_zero(), !large);
+                assert_eq!(runtime.stats().compiled_entries, 0);
+                assert_eq!(runtime.stats().code_bytes, 0);
+                assert_eq!(runtime.stats().failed_entries, 0);
+                assert!(!runtime.has_compiled_scheduler());
+                if cancel_before_publication {
+                    assert!(runtime.cancel());
+                    for _ in 0..128 {
+                        assert!(runtime.try_run(poll, &mut memory).is_none());
+                    }
+                    assert_eq!(runtime.stats().compiled_entries, 0);
+                    assert!(!runtime.has_compiled_scheduler());
+                } else {
+                    let deadline = Instant::now() + Duration::from_secs(15);
+                    while !runtime.has_compiled_scheduler() {
+                        assert!(runtime.try_run(poll, &mut memory).is_none());
+                        assert!(
+                            Instant::now() < deadline,
+                            "scheduler never linked: {:?}",
+                            runtime.stats()
+                        );
+                        std::thread::yield_now();
+                    }
+                    for _ in 0..128 {
+                        assert!(runtime.try_run(poll, &mut memory).is_none());
+                    }
+                    assert_eq!(runtime.stats().compiled_entries, 2);
+                    assert_eq!(runtime.stats().compiled_calls, 0);
+                    assert_eq!(runtime.stats().failed_entries, 0);
+                }
+            }
+        }
+    }
+
     fn validate_signal_access(
         program: &LaidOutProgram,
         access: &crate::SignalAccessOptions,
@@ -4892,6 +4992,89 @@ endmodule"#;
     #[test]
     fn dirty_clock_batch_evaluates_new_inputs_before_ff_update() {
         assert!(count_clean_clock_batch(false, false, true).0 > 0);
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    #[test]
+    fn native_scheduler_host_wait_scans_grow_linearly() {
+        for four_state in [false, true] {
+            let size = |processes| {
+                let mut source = String::from(
+                    "`timescale 1ns/1ns\nmodule Top; bit clk = 0; always #1 clk = ~clk;\n",
+                );
+                for index in 0..processes {
+                    source +=
+                        &format!("always @(posedge clk) $fwrite(1, \"process {index}\\n\");\n");
+                }
+                source += "endmodule\n";
+                let mut builder = crate::Simulation::from_sv_sources(
+                    vec![(source.as_str(), std::path::Path::new("host-waits.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .emit_triggers();
+                builder.native_file_calls = true;
+                let (program, _, _, _, _) = builder
+                    .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, true)
+                    .unwrap();
+                let scheduler = program.runtime.runtime_schema.scheduler.as_ref().unwrap();
+                assert!(scheduler.fallback.iter().all(Option::is_none));
+                let (unit, _) = crate::scheduler::hotspot_scheduler(&program).unwrap();
+                unit.blocks
+                    .values()
+                    .map(|block| block.instructions.len())
+                    .sum::<usize>()
+            };
+            let small = size(32);
+            let large = size(64);
+            assert!(
+                large < small * 3,
+                "quadratic wait scans: {small} -> {large}, four_state={four_state}"
+            );
+        }
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    #[test]
+    fn native_scheduler_host_wait_continuations_exceed_one_byte() {
+        let mut source =
+            String::from("`timescale 1ns/1ns\nmodule Top; bit clk = 0; always #1 clk = ~clk;\n");
+        for index in 0..260 {
+            source += &format!("always @(posedge clk) $fwrite(1, \"process {index}\\n\");\n");
+        }
+        source += "endmodule\n";
+        let mut results = Vec::new();
+        for mode in [
+            crate::SchedulerMode::Reference,
+            crate::SchedulerMode::DifferentialRuns,
+        ] {
+            let mut sim = crate::Simulation::from_sv_sources(
+                vec![(
+                    source.as_str(),
+                    std::path::Path::new("host-continuations.sv"),
+                )],
+                "Top",
+            )
+            .four_state(true)
+            .scheduler_mode(mode)
+            .build_native()
+            .unwrap();
+            sim.run_until(3).unwrap();
+            results.push(sim.drain_runtime_events());
+            if mode == crate::SchedulerMode::DifferentialRuns {
+                assert!(sim.scheduler_stats().compiled_slots > 0);
+            }
+        }
+        assert_eq!(results[0].len(), 520);
+        assert_eq!(results[0], results[1]);
     }
 
     /// A bit-level schedule may load a range before the bits it needs are
@@ -5851,6 +6034,11 @@ endmodule"#
                     num_bigint::BigUint::from(196611u32)
                 );
                 let stats = simulation.scheduler_stats();
+                if cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen"))) {
+                    assert_eq!(stats.native_service_calls, 0, "{stats:?}");
+                } else {
+                    assert!(stats.native_service_calls > 0, "{stats:?}");
+                }
                 assert!(
                     stats.compiled_slots > 0 && stats.checked_steps > 0,
                     "{stats:?}"
@@ -5880,6 +6068,158 @@ endmodule"#
                 );
             }
         }
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    #[test]
+    fn native_budget_guard_continuations_exceed_one_byte() {
+        let mut source =
+            String::from("`timescale 1ns/1ns\nmodule Top; bit clk = 0; always #1 clk = ~clk;\n");
+        for index in 0..260 {
+            source += &format!(
+                "int count_{index} = 0; initial forever begin @(posedge clk); repeat (65537) count_{index}++; end\n"
+            );
+        }
+        source += "endmodule\n";
+        for hotspot in [false, true] {
+            let mut sim = crate::Simulation::from_sv_sources(
+                vec![(
+                    source.as_str(),
+                    std::path::Path::new("guard-continuations.sv"),
+                )],
+                "Top",
+            )
+            .four_state(true)
+            .hotspot_jit(hotspot)
+            .scheduler_mode(crate::SchedulerMode::Compiled)
+            .build_native()
+            .unwrap();
+            sim.state.set_slot_budgets(u64::MAX, u64::MAX);
+            sim.run_until(3).unwrap();
+            for index in 0..260 {
+                assert_eq!(
+                    sim.get(sim.signal(&format!("count_{index}"))),
+                    131074u32.into(),
+                    "process {index}, hotspot={hotspot}"
+                );
+            }
+            let stats = sim.scheduler_stats();
+            assert!(stats.compiled_slots > 0, "{stats:?}");
+            assert_eq!(stats.native_service_calls, 0, "{stats:?}");
+        }
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    #[test]
+    fn native_budget_is_shared_by_checkpoints_and_file_calls() {
+        for file_first in [false, true] {
+            let checkpoint = "repeat (65537) count++;";
+            let file = "$fwrite(1, \"bounded\");";
+            let body = if file_first {
+                format!("{file} {checkpoint}")
+            } else {
+                format!("{checkpoint} {file}")
+            };
+            let source = format!(
+                "`timescale 1ns/1ns\nmodule Top; bit clk = 0; int count = 0; always #1 clk = ~clk; initial forever begin @(posedge clk); {body} end endmodule"
+            );
+            for four_state in [false, true] {
+                let mut results = Vec::new();
+                for mode in [
+                    crate::SchedulerMode::Reference,
+                    crate::SchedulerMode::Compiled,
+                ] {
+                    let mut sim = crate::Simulation::from_sv_sources(
+                        vec![(
+                            source.as_str(),
+                            std::path::Path::new("mixed-return-budget.sv"),
+                        )],
+                        "Top",
+                    )
+                    .four_state(four_state)
+                    .scheduler_mode(mode)
+                    .build_native()
+                    .unwrap();
+                    sim.state.set_slot_budgets(32, 1);
+                    let error = sim.run_until(2).unwrap_err();
+                    assert!(error.to_string().contains("does not suspend"), "{error}");
+                    results.push((
+                        sim.time(),
+                        sim.get(sim.signal("count")),
+                        sim.drain_runtime_events(),
+                    ));
+                    if mode == crate::SchedulerMode::Compiled {
+                        assert!(sim.scheduler_stats().compiled_slots > 0);
+                    }
+                }
+                assert_eq!(
+                    results[0], results[1],
+                    "file_first={file_first}, four_state={four_state}"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "systemverilog")]
+    #[test]
+    fn first_tier_scheduler_continuations_exceed_one_byte() {
+        let mut source = String::from("module Top(input bit [7:0] d");
+        for index in 0..260 {
+            source.push_str(&format!(", input bit c{index}, output bit [7:0] q{index}"));
+        }
+        source.push_str("); wire [7:0] next_value = d + 1;\n");
+        for index in 0..260 {
+            source.push_str(&format!(
+                "always_ff @(posedge c{index}) q{index} <= next_value;\n"
+            ));
+        }
+        source.push_str("endmodule");
+        let mut sim =
+            crate::Simulation::from_sv_sources(
+                vec![(
+                    source.as_str(),
+                    std::path::Path::new("many-continuations.sv"),
+                )],
+                "Top",
+            )
+            .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+            .build_with_backend(
+                crate::MemoryLayoutMode::Packed,
+                false,
+                |program, options| {
+                    let first = crate::scheduler::without_fused_domains(program.clone(), true);
+                    let unit = first
+                        .runtime
+                        .runtime_schema
+                        .scheduler
+                        .as_ref()
+                        .unwrap()
+                        .unit
+                        .unwrap();
+                    let cont = first.runtime.runtime_schema.scheduler.as_ref().unwrap().slots.cont;
+                    assert!(first.sir.processes[unit].blocks.values().flat_map(|block| &block.instructions).any(|inst| {
+                        matches!(inst, crate::ir::SIRInstruction::Load(_, address, crate::ir::SIROffset::Static(8), 8)
+                            if address.absolute_addr() == cont)
+                    }), "the fixture must dispatch the high byte of a continuation");
+                    crate::NativeBackend::new(&first, options)
+                },
+            )
+            .unwrap();
+        let d = sim.signal("d");
+        sim.modify(|io| io.set(d, 41u8)).unwrap();
+        sim.add_clock("c259", 10, 5);
+        sim.run_until(25).unwrap();
+        let q = sim.signal("q259");
+        assert_eq!(sim.get(q), 42u8.into());
+        assert!(sim.scheduler_stats().compiled_slots > 0);
     }
 
     /// A first tier settles before a domain instead of compiling a fused
@@ -6329,10 +6669,19 @@ endmodule"#
                             sim.run_until(10).unwrap();
                             assert_eq!(sim.get(sim.signal("count")), 8u8.into());
                             assert_eq!(sim.get(sim.signal("extra_19")), 1u8.into());
+                            if mode == crate::SchedulerMode::Compiled
+                                && cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen")))
+                            {
+                                assert_eq!(sim.scheduler_stats().native_service_calls, 0);
+                            }
                         } else {
                             let error = sim.run_until(10).unwrap_err();
                             assert!(error.to_string().contains("does not settle"), "{error}");
                             assert_eq!(sim.time(), 1);
+                            assert!(error.to_string().contains("native-feedback.sv"), "{error}");
+                            if cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen"))) {
+                                assert_eq!(sim.scheduler_stats().native_service_calls, 1);
+                            }
                         }
                         if mode == crate::SchedulerMode::Compiled {
                             assert!(

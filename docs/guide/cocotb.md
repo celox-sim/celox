@@ -76,7 +76,16 @@ celox run tb.v --top tb +iterations=9 --plusarg +trace
 languages. Both languages support `--backend native|tiered|interpreter|cranelift|wasm`
 (default: tiered; native when `--compile-only`, a native image, `--build-cache-dir` or an
 IR dump is requested). Tiered starts interpreted and adopts compiled code at a scheduler
-safe point while preserving pending events. For example:
+safe point while preserving pending events. The default `--jit auto` selects
+hotspot JIT for x86-64 tiered runs with one simulation thread and no force targets
+or native block profiling. It compiles frequently executed groups and keeps cold
+work interpreted. Other configurations retain whole-image tiering.
+
+Use `--jit whole-image` to select the previous compilation strategy, or
+`--jit hotspot` to require a supported hotspot configuration. The existing
+`--hotspot-jit` flag is an alias for `--jit hotspot`. Rust builders retain their
+existing backend and tiering defaults; this automatic selection applies to the CLI.
+For example:
 
 ```sh
 celox run test/Top.sv --top Top --backend tiered --threads 4
@@ -193,7 +202,16 @@ repeat it to select multiple files. Heliodor benchmarks invoke this same CLI
 with `--report --unlimited`; no separate Celox benchmark executable is used.
 The report preserves compile/execute/generated-code timing intervals, and tiered
 execution time includes background compilation and promotion. Short tiered runs
-need not promote unless `--require-compiled` is requested.
+need not compile unless `--require-compiled` is requested. That check accepts
+executed hotspot groups or regions as well as whole-image compiled execution;
+publishing code without executing it does not satisfy the check.
+`CELOX_JIT_CONFIG` reports the selected strategy and any automatic fallback reason.
+Hotspot runs also emit `CELOX_HOTSPOT_STATS` with interpreted/native calls,
+published, rejected and failed entries, code bytes, and completed compilation work time.
+Compilation work may overlap execution, so it is not an additional wall-time
+interval. `CELOX_TIERED_*` records retain their whole-image meaning. For individual
+compilation errors, unsupported groups, or memory/code-budget rejections,
+set `RUST_LOG=celox::backend::hotspot=debug`.
 
 ## Manage a multi-file project
 
