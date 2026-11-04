@@ -1,10 +1,11 @@
 //! File writes and loop checkpoints called by a native scheduler through the ordinary
 //! extern-function ABI. The active scope borrows host services separately from
 //! the backend; the callback never re-enters a Simulator or its scheduler.
+pub(crate) use super::native_arena::Header as ArenaHeader;
 use super::*;
 use celox_design::{HostRequestKind, HostRequestSite};
 
-pub(crate) const SYMBOL: &str = "__celox_native_services_v1";
+pub(crate) const SYMBOL: &str = "__celox_native_services_v2";
 
 pub(crate) const CHECKPOINT: u64 = u64::MAX;
 pub(crate) const SCHEDULER_RUN: u64 = u64::MAX - 1;
@@ -12,6 +13,9 @@ pub(crate) const SCHEDULER_PASS: u64 = u64::MAX - 2;
 pub(crate) const NBA_PUBLISH: u64 = u64::MAX - 3;
 pub(crate) const PROCESS_PHASE: u64 = u64::MAX - 4;
 pub(crate) const NBA_REQUEST: u64 = 1 << 63;
+pub(crate) const ARENA_RESERVE_RECORDS: u64 = u64::MAX - 5;
+pub(crate) const ARENA_RESERVE_IMAGES: u64 = u64::MAX - 6;
+pub(crate) const ARENA_WAVE_LIMIT: u64 = u64::MAX - 7;
 
 pub(crate) fn signature() -> celox_design::ExternSignature {
     let integer = celox_design::ExternType::Integer {
@@ -166,7 +170,10 @@ impl Metadata {
     }
 }
 
+#[repr(C)]
 pub(super) struct Scope<'a> {
+    // Generated code reads this first pointer; Arena's first member is Header.
+    pub arena: &'a mut super::native_arena::Arena,
     pub metadata: &'a Metadata,
     pub state: *const u8,
     pub state_size: usize,
@@ -195,6 +202,7 @@ impl Scope<'_> {
         backend: &mut B,
         index: usize,
     ) -> (Result<(), RuntimeErrorCode>, Option<RuntimeErrorCode>) {
+        self.arena.header.wave_limit = self.round_budget;
         let pointer = std::ptr::from_mut(self) as u64;
         let slot = self.metadata.context;
         let previous: u64 = backend.get_as(slot);
@@ -565,7 +573,15 @@ pub(crate) extern "C" fn call(
     let scope = unsafe { &mut *(context as *mut Scope<'_>) };
     scope.calls = scope.calls.saturating_add(1);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if matches!(encoded, SCHEDULER_RUN | SCHEDULER_PASS) {
+        if matches!(encoded, ARENA_RESERVE_RECORDS | ARENA_RESERVE_IMAGES) {
+            scope
+                .arena
+                .reserve(encoded == ARENA_RESERVE_IMAGES, process)?;
+        } else if encoded == ARENA_WAVE_LIMIT {
+            return Err(Scope::fault(
+                "native ordered domain waves exceeded the round budget",
+            ));
+        } else if matches!(encoded, SCHEDULER_RUN | SCHEDULER_PASS) {
             scope.charge_scheduler(process, encoded, timestamp)?;
         } else if encoded == PROCESS_PHASE {
             // One counter spans every activation/pass of process_phase.
@@ -655,7 +671,9 @@ mod tests {
         let pending = Arc::default();
         let read_seq = AtomicU64::new(0);
         let mut queue = std::collections::VecDeque::new();
+        let mut arena = super::super::native_arena::Arena::default();
         let mut scope = Scope {
+            arena: &mut arena,
             metadata: &metadata,
             state: state.as_mut_ptr().cast_const(),
             state_size: state.len(),

@@ -149,8 +149,7 @@ impl ClockBatch {
         armed.write(&mut sim.backend, self.slots.clock_armed);
         values.write(&mut sim.backend, self.slots.clock_value);
         let result = sim
-            .backend
-            .run_process(self.unit)
+            .run_process_checked(self.unit)
             .map_err(|e| e.to_string());
         sim.backend.clear_triggered_bits();
         if let Err(error) = result {
