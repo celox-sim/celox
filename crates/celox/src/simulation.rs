@@ -214,6 +214,14 @@ impl<B: SimBackend> UnitExecutor for Simulator<B> {
         Ok(())
     }
 
+    fn compiled_region_queues(&self) -> bool {
+        self.compiled_nba_queues()
+    }
+
+    fn put_compiled_region_entry(&mut self, pending: bool) {
+        self.set_native_region_entry(pending);
+    }
+
     fn compiled_ready_queue(&self) -> bool {
         self.compiled_nba_queues()
     }
