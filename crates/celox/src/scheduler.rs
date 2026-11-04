@@ -35,6 +35,7 @@ pub(crate) mod host_inputs;
 mod nba;
 mod observers;
 mod ordered;
+mod regions;
 mod slice;
 mod slot_observers;
 mod testbench;
@@ -2285,6 +2286,17 @@ impl Plan {
             time = next;
             any = g.binary(1, any, BinaryOp::Or, host);
         }
+        if host_inputs {
+            let entry = g.arena_header_load(std::mem::offset_of!(
+                crate::simulator::native_io::ArenaHeader,
+                region_entry
+            ));
+            let entry = g.equals(entry, 1);
+            let next = g.b.alloc_bit(SCHEDULER_TIME_WIDTH, false);
+            g.b.emit(SIRInstruction::Mux(next, entry, now, time));
+            time = next;
+            any = g.binary(1, any, BinaryOp::Or, entry);
+        }
         for &(index, status) in &delays {
             let wake = g.load(slots.wake[index], SCHEDULER_TIME_WIDTH);
             let waiting = g.waiting_for_time(index, status);
@@ -2386,11 +2398,30 @@ impl Plan {
             let wake = g.load(slots.wake[index], SCHEDULER_TIME_WIDTH);
             let waiting = g.waiting_for_time(index, status);
             let due = g.binary(1, wake, BinaryOp::Eq, time);
-            let due = g.binary(1, due, BinaryOp::And, waiting);
+            let mut due = g.binary(1, due, BinaryOp::And, waiting);
+            if host_inputs && self.inactive.iter().any(|&(process, _)| process == index) {
+                // Imported #0 work belongs to Inactive. A computed positive
+                // delay instead resumes in Active at its future timestamp.
+                let process = &schema.processes[index];
+                let status = g.load(process.status, celox_design::PROCESS_STATUS_WIDTH);
+                let inactive = g.equals(status, u64::from(ProcessStatus::InactiveDelay.code()));
+                let amount = g.load(process.delay, celox_design::PROCESS_DELAY_WIDTH);
+                let zero = g.equals(amount, 0);
+                let inactive = g.binary(1, inactive, BinaryOp::And, zero);
+                let active = g.equals(inactive, 0);
+                due = g.binary(1, due, BinaryOp::And, active);
+            }
             let bit = g.bit(due, ordinals[index]);
             ready = g.binary(g.ready_bits, ready, BinaryOp::Or, bit);
         }
         g.store(slots.ready, g.ready_bits, ready);
+        if host_inputs {
+            let zero = g.constant(0, 64);
+            g.arena_header_store(
+                std::mem::offset_of!(crate::simulator::native_io::ArenaHeader, region_entry),
+                zero,
+            );
+        }
         // A pending settle runs, as at the end of the last slot, before a
         // kernel that observes it may run: one due now, any waiting one,
         // which may wake in any pass, or any one in a slot after which a

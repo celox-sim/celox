@@ -2627,6 +2627,10 @@ mod host {
             })
         }
 
+        pub(crate) fn set_native_region_entry(&mut self, pending: bool) {
+            self.native_arena.header.region_entry = u64::from(pending);
+        }
+
         pub(crate) fn put_native_host_inputs(
             &mut self,
             pending: bool,

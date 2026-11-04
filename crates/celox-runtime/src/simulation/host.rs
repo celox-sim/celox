@@ -68,6 +68,13 @@ pub trait UnitExecutor {
         }
     }
 
+    /// Import static Inactive, deferred Active and assertion region queues.
+    fn compiled_region_queues(&self) -> bool {
+        false
+    }
+
+    fn put_compiled_region_entry(&mut self, _pending: bool) {}
+
     /// Import the current Active ready queue into the generated scheduler.
     fn compiled_ready_queue(&self) -> bool {
         false

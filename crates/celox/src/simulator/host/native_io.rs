@@ -7,7 +7,7 @@ pub(crate) use super::native_nba::Header as NbaHeader;
 use super::*;
 use celox_design::{HostRequestKind, HostRequestSite};
 
-pub(crate) const SYMBOL: &str = "__celox_native_services_v10";
+pub(crate) const SYMBOL: &str = "__celox_native_services_v11";
 
 pub(crate) const BEFORE_DOMAINS: u64 = u64::MAX - 14;
 
