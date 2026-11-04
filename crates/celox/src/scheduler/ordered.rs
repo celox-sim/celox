@@ -392,7 +392,13 @@ impl Plan {
         let commits = g.binary(1, commits, BinaryOp::Ne, zero);
         let phase = g.arena_header_load(std::mem::offset_of!(ArenaHeader, phase));
         let pre = g.equals(phase, 0);
-        let pre = g.binary(1, pre, BinaryOp::And, commits);
+        let pre = if self.inactive.is_empty() {
+            g.binary(1, pre, BinaryOp::And, commits)
+        } else {
+            // An Inactive continuation may cause another evaluation before
+            // any pending nonblocking result may become visible (LRM 4.5).
+            pre
+        };
         let post = g.equals(pre, 0);
         g.if_bit(post, 0, |g| {
             let phase = g.constant(1, 64);
@@ -430,6 +436,46 @@ impl Plan {
         let phase = g.arena_header_load(std::mem::offset_of!(ArenaHeader, phase));
         let pre = g.equals(phase, 0);
         g.if_bit(pre, 0, |g| self.ordered_save_levels(g, tracked));
+        if !self.inactive.is_empty() {
+            let ordinals = ordinals(&self.kernels);
+            let time = g.load(g.slots.now, SCHEDULER_TIME_WIDTH);
+            let mut ready = g.constant(0, g.ready_bits);
+            for &(index, status) in &self.inactive {
+                let waiting = g.waiting_for_time(index, Some(status));
+                // SDK Delay(0) resumes after NBA, whereas InactiveDelay(0)
+                // resumes before it. Computed delays can return either status.
+                let inactive = g.equals_at(status, ProcessStatus::InactiveDelay);
+                let waiting = g.binary(1, waiting, BinaryOp::And, inactive);
+                let wake = g.load(g.slots.wake[index], SCHEDULER_TIME_WIDTH);
+                let now = g.binary(1, wake, BinaryOp::Eq, time);
+                let due = g.binary(1, waiting, BinaryOp::And, now);
+                let bit = g.bit(due, ordinals[index]);
+                ready = g.binary(g.ready_bits, ready, BinaryOp::Or, bit);
+            }
+            let zero = g.constant(0, g.ready_bits);
+            let any = g.binary(1, ready, BinaryOp::Ne, zero);
+            let promote = g.binary(1, pre, BinaryOp::And, any);
+            let inactive = g.b.new_block();
+            let publish = g.b.new_block();
+            g.b.seal_block(SIRTerminator::Branch {
+                cond: promote,
+                true_block: (inactive, Vec::new()),
+                false_block: (publish, Vec::new()),
+            });
+            g.b.switch_to_block(inactive);
+            g.store(g.slots.ready, g.ready_bits, ready);
+            let one = g.constant(1, SCHEDULER_FLAG_WIDTH);
+            g.store_at(
+                g.slots.defer_limit_settle,
+                celox_design::SCHEDULER_ACTIVE_RESUME_BIT,
+                SCHEDULER_FLAG_WIDTH,
+                one,
+            );
+            // Keep the ordered pending records and their working images. The
+            // normal Active work loop returns to `wave` after the #0 kernels.
+            g.b.seal_block(SIRTerminator::Jump(pick, Vec::new()));
+            g.b.switch_to_block(publish);
+        }
         let zero = g.constant(0, SCHEDULER_FLAG_WIDTH);
         g.store_at(
             g.slots.defer_limit_settle,
@@ -862,5 +908,97 @@ endmodule
         let after = sim.scheduler_stats();
         assert_eq!(after.reference_steps, before.reference_steps);
         assert_eq!(after.native_service_calls, before.native_service_calls);
+    }
+    #[test]
+    fn inactive_and_computed_delays_keep_pending_domains_compiled() {
+        for body in [
+            "always #2 begin clk = 1; #0; seen = q; clk = 0; #0; turns++; end",
+            "always #2 begin clk = 1; #0; seen = q; clk = 0; #0; clk = 1; #0; clk = 0; turns++; end",
+            "always begin #(turns % 3); turns++; clk = !clk; #0; seen = q; end",
+        ] {
+            let source = format!(
+                r#"`timescale 1ns/1ns
+module Top;
+    bit clk = 0;
+    int q = 0;
+    int seen = 0;
+    int turns = 0;
+    always_ff @(posedge clk) q <= q + 1;
+    {body}
+endmodule"#
+            );
+            for (four_state, hotspot) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
+                let mut sim = Simulation::from_sv_sources(
+                    vec![(
+                        source.as_str(),
+                        std::path::Path::new("compiled-inactive.sv"),
+                    )],
+                    "Top",
+                )
+                .four_state(four_state)
+                .hotspot_jit(hotspot)
+                .scheduler_mode(SchedulerMode::DifferentialRuns)
+                .build_native()
+                .unwrap();
+                sim.run_until(1).unwrap();
+                let before = sim.scheduler_stats();
+                assert!(
+                    before
+                        .kernels
+                        .iter()
+                        .all(|k| *k == crate::KernelSchedule::Compiled),
+                    "{before:?}"
+                );
+                let reference_steps = before.reference_steps;
+                for end in [2, 3, 7, 12, 20] {
+                    sim.run_until(end).unwrap();
+                }
+                let after = sim.scheduler_stats();
+                assert_eq!(after.reference_steps, reference_steps, "{after:?}");
+                assert!(
+                    after.compiled_slots > 0 && after.checked_steps > 0,
+                    "{after:?}"
+                );
+                if body.starts_with("always #2") {
+                    assert_eq!(sim.get(sim.signal("q")), 10u8.into());
+                    assert_eq!(sim.get(sim.signal("seen")), 9u8.into());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inactive_nonconvergence_is_bounded_in_generated_code() {
+        let source = r#"`timescale 1ns/1ns
+module Top;
+    int turns = 0;
+    initial begin #1; forever begin #0; turns++; end end
+endmodule"#;
+        for four_state in [false, true] {
+            let mut sim = Simulation::from_sv_sources(
+                vec![(source, std::path::Path::new("compiled-inactive-loop.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+            .scheduler_mode(SchedulerMode::Compiled)
+            .build_native()
+            .unwrap();
+            sim.state.set_slot_budgets(8, 32);
+            sim.run_until(0).unwrap();
+            let before = sim.scheduler_stats();
+            let error = sim.run_until(2).unwrap_err();
+            assert!(error.to_string().contains("budget"), "{error}");
+            let after = sim.scheduler_stats();
+            assert_eq!(after.reference_steps, before.reference_steps, "{after:?}");
+            assert!(
+                after
+                    .kernels
+                    .iter()
+                    .all(|k| *k == crate::KernelSchedule::Compiled),
+                "{after:?}"
+            );
+        }
     }
 }

@@ -696,7 +696,7 @@ endmodule
 }
 
 #[test]
-fn source_delays_inside_level_sensitive_bodies_keep_their_scheduler_boundary() {
+fn source_delays_inside_level_sensitive_bodies_use_compiled_inactive_regions() {
     let source = r#"`timescale 1ns/1ns
 module Top;
     logic [7:0] count = 0, seen = 0;
@@ -711,13 +711,20 @@ endmodule
         .scheduler_mode(SchedulerMode::DifferentialRuns)
         .build_native()
         .unwrap();
+    sim.run_until(0).unwrap();
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    let before = sim.scheduler_stats().reference_steps;
     sim.run_until(20).unwrap();
-    assert!(
-        sim.scheduler_stats()
-            .kernels
-            .iter()
-            .any(|kernel| matches!(kernel, celox::KernelSchedule::Reference(_)))
-    );
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    {
+        assert!(
+            sim.scheduler_stats()
+                .kernels
+                .iter()
+                .all(|kernel| matches!(kernel, celox::KernelSchedule::Compiled))
+        );
+        assert_eq!(sim.scheduler_stats().reference_steps, before);
+    }
     assert_eq!(sim.get(sim.signal("seen")), 10u8.into());
 }
 
