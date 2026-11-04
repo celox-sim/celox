@@ -4115,6 +4115,29 @@ mod host {
             })
         }
 
+        #[cfg(all(
+            test,
+            feature = "systemverilog",
+            target_arch = "x86_64",
+            not(feature = "arm64-codegen")
+        ))]
+        pub(crate) fn build_scheduler_test(
+            mut self,
+        ) -> Result<crate::Simulation<crate::backend::TieredBackend>, SimulatorError> {
+            self.native_file_calls = true;
+            let publish = self.options.hotspot_jit
+                && self.options.scheduler != crate::SchedulerMode::Reference;
+            let mut simulation = self.build_with_backend(
+                crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
+                false,
+                crate::backend::TieredBackend::for_scheduler_test,
+            )?;
+            if publish {
+                simulation.simulator.backend.publish_scheduler_for_test();
+            }
+            Ok(simulation)
+        }
+
         fn build_with_backend<B: crate::SimBackend>(
             mut self,
             layout_mode: crate::backend::memory_layout::MemoryLayoutMode,

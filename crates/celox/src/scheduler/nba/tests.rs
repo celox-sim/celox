@@ -32,9 +32,10 @@ endmodule"#
             .four_state(four_state)
             .hotspot_jit(hotspot)
             .scheduler_mode(SchedulerMode::DifferentialRuns)
-            .build_native()
+            .build_scheduler_test()
             .unwrap();
-            sim.run_until(4).unwrap();
+            sim.run_until(4)
+                .unwrap_or_else(|e| panic!("four_state={four_state}, hotspot={hotspot}: {e:?}"));
             let before = sim.scheduler_stats();
             assert!(
                 before
@@ -134,9 +135,10 @@ endmodule"#
             .four_state(four_state)
             .hotspot_jit(hotspot)
             .scheduler_mode(SchedulerMode::DifferentialRuns)
-            .build_native()
+            .build_scheduler_test()
             .unwrap();
-            sim.run_until(4).unwrap();
+            sim.run_until(4)
+                .unwrap_or_else(|e| panic!("four_state={four_state}, hotspot={hotspot}: {e:?}"));
             let before = sim.scheduler_stats();
             assert!(
                 before
@@ -232,9 +234,10 @@ endmodule"#
             .four_state(four_state)
             .hotspot_jit(hotspot)
             .scheduler_mode(SchedulerMode::DifferentialRuns)
-            .build_native()
+            .build_scheduler_test()
             .unwrap();
-            sim.run_until(4).unwrap();
+            sim.run_until(4)
+                .unwrap_or_else(|e| panic!("four_state={four_state}, hotspot={hotspot}: {e:?}"));
             let before = sim.scheduler_stats();
             assert!(
                 before
@@ -288,7 +291,7 @@ endmodule"#;
                 .four_state(four_state)
                 .hotspot_jit(hotspot)
                 .scheduler_mode(mode)
-                .build_native()
+                .build_scheduler_test()
                 .unwrap()
             };
             let mut native = make(SchedulerMode::Compiled);
@@ -406,7 +409,7 @@ endmodule"#;
                 .four_state(four_state)
                 .hotspot_jit(hotspot)
                 .scheduler_mode(mode)
-                .build_native()
+                .build_scheduler_test()
                 .unwrap()
             };
             let mut reference = make(SchedulerMode::Reference);

@@ -288,14 +288,49 @@ fn first_difference<B: SimBackend>(
         let memory = unsafe { std::slice::from_raw_parts(ptr, len) };
         memory[range.clone()].to_vec()
     };
+    let primary_layout = primary.layout();
     let (primary, shadow) = (bytes(primary), bytes(shadow));
-    primary
+    // Native and interpreted stores may preserve different unused bits in a
+    // physical slot. Compare every declared stable value/mask bit, including
+    // anonymous process state, but not alignment or per-element padding.
+    let layout = primary_layout;
+    layout
+        .offsets
         .iter()
-        .zip(&shadow)
-        .enumerate()
-        .map(|(index, pair)| (range.start + index, pair))
-        .find(|(offset, (a, b))| a != b && !excluded.iter().any(|r| r.contains(offset)))
+        .flat_map(|(address, &base)| {
+            let width = layout.widths[address];
+            let (elements, stride, bits) = layout.unpacked_arrays.get(address).map_or(
+                (1, layout.plane_size(address), width),
+                |array| {
+                    (
+                        array.element_count,
+                        array.element_stride,
+                        array.element_width,
+                    )
+                },
+            );
+            let planes = if layout.four_state && layout.is_4states[address] {
+                2
+            } else {
+                1
+            };
+            (0..planes).flat_map(move |plane| {
+                (0..elements).flat_map(move |element| {
+                    (0..bits.div_ceil(8)).map(move |byte| {
+                        let offset =
+                            base + plane * layout.plane_size(address) + element * stride + byte;
+                        let mask = ((1u16 << (bits - byte * 8).min(8)) - 1) as u8;
+                        (offset, mask)
+                    })
+                })
+            })
+        })
+        .filter(|&(offset, mask)| {
+            (primary[offset - range.start] ^ shadow[offset - range.start]) & mask != 0
+                && !excluded.iter().any(|r| r.contains(&offset))
+        })
         .map(|(offset, _)| offset)
+        .min()
 }
 
 #[cfg(all(test, feature = "systemverilog"))]
@@ -322,6 +357,57 @@ mod tests {
             .scheduler_mode(mode)
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn differential_ignores_storage_padding_but_checks_each_value_and_mask_plane() {
+        use crate::SimBackend;
+        let source =
+            "module Top(output logic [12:0] scalar, output logic [12:0] words[3]); endmodule";
+        for four_state in [false, true] {
+            let make = || {
+                Simulation::from_sv_sources(
+                    vec![(source, Path::new("differential-padding.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .scheduler_mode(SchedulerMode::Reference)
+                .build_interpreter()
+                .unwrap()
+            };
+            let mut primary = make();
+            let reference = make();
+            for name in ["scalar", "words"] {
+                let signal = primary.signal(name);
+                let (elements, stride, plane_size) =
+                    signal.array_layout.map_or((1, 2, 2), |array| {
+                        (array.element_count, array.element_stride, array.plane_size)
+                    });
+                for plane in 0..if four_state { 2 } else { 1 } {
+                    for element in 0..elements {
+                        let offset = signal.offset + plane * plane_size + element * stride + 1;
+                        let backend = &mut primary.simulator.backend;
+                        let (pointer, len) = backend.memory_as_ptr();
+                        assert!(offset < len);
+                        // SAFETY: the allocation includes this element's upper byte.
+                        let old = unsafe { *pointer.add(offset) };
+                        backend.write_memory(offset, &[old ^ 0xe0]);
+                        assert_eq!(
+                            super::first_difference(backend, &reference.simulator.backend, &[]),
+                            None,
+                            "padding of {name}[{element}], plane {plane}"
+                        );
+                        backend.write_memory(offset, &[old ^ 0xe1]);
+                        assert_eq!(
+                            super::first_difference(backend, &reference.simulator.backend, &[]),
+                            Some(offset),
+                            "declared bit of {name}[{element}], plane {plane}"
+                        );
+                        backend.write_memory(offset, &[old]);
+                    }
+                }
+            }
+        }
     }
 
     #[test]

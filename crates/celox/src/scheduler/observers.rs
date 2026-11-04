@@ -302,9 +302,11 @@ endmodule"#
                 .four_state(four_state)
                 .hotspot_jit(hotspot)
                 .scheduler_mode(SchedulerMode::DifferentialRuns)
-                .build_native()
+                .build_scheduler_test()
                 .unwrap();
-                sim.run_until(1).unwrap();
+                sim.run_until(1).unwrap_or_else(|e| {
+                    panic!("four_state={four_state}, hotspot={hotspot}: {e:?}")
+                });
                 let before = sim.scheduler_stats();
                 assert!(
                     before

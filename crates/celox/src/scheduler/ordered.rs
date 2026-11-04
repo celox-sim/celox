@@ -720,7 +720,7 @@ endmodule
                     .hotspot_jit(hotspot)
                     .scheduler_mode(SchedulerMode::DifferentialRuns)
             };
-            let mut sim = build().build_native().unwrap();
+            let mut sim = build().build_scheduler_test().unwrap();
             sim.run_until(2).unwrap();
             assert_eq!(sim.get(sim.signal("a")), 200u16.into());
             assert_eq!(sim.get(sim.signal("q")), 200u16.into());
@@ -743,7 +743,7 @@ endmodule
             assert_eq!(after.reference_steps, before.reference_steps, "{after:?}");
             let mut bounded = build()
                 .scheduler_mode(SchedulerMode::Compiled)
-                .build_native()
+                .build_scheduler_test()
                 .unwrap();
             bounded.state.set_slot_budgets(32, 1024);
             let error = bounded.run_until(2).unwrap_err().to_string();
@@ -780,7 +780,7 @@ endmodule
                     .opt_level(level)
                     .hotspot_jit(hotspot)
                     .scheduler_mode(SchedulerMode::DifferentialRuns)
-                    .build_native()
+                    .build_scheduler_test()
                     .unwrap();
                     sim.run_until(2).unwrap();
                     assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
@@ -945,7 +945,7 @@ endmodule"#
                 .four_state(four_state)
                 .hotspot_jit(hotspot)
                 .scheduler_mode(SchedulerMode::DifferentialRuns)
-                .build_native()
+                .build_scheduler_test()
                 .unwrap();
                 sim.run_until(1).unwrap();
                 let before = sim.scheduler_stats();
@@ -1005,7 +1005,7 @@ endmodule"#
                     .four_state(four_state)
                     .hotspot_jit(hotspot)
                     .scheduler_mode(mode)
-                    .build_native()
+                    .build_scheduler_test()
                     .unwrap()
                 };
                 let mut sim = build(SchedulerMode::Compiled);

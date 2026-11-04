@@ -28,7 +28,7 @@ endmodule"#;
                     .four_state(four_state)
                     .hotspot_jit(hotspot)
                     .scheduler_mode(mode)
-                    .build_native()
+                    .build_scheduler_test()
                     .unwrap()
                 };
                 let mut reference = make(SchedulerMode::Reference);
@@ -120,7 +120,7 @@ endmodule"#;
                     .four_state(four_state)
                     .hotspot_jit(hotspot)
                     .scheduler_mode(mode)
-                    .build_native()
+                    .build_scheduler_test()
                     .unwrap()
                 };
                 let mut reference = make(SchedulerMode::Reference);
@@ -215,7 +215,7 @@ endmodule"#;
                     .four_state(four_state)
                     .hotspot_jit(hotspot)
                     .scheduler_mode(mode)
-                    .build_native()
+                    .build_scheduler_test()
                     .unwrap()
                 };
                 let mut reference = make(SchedulerMode::Reference);
