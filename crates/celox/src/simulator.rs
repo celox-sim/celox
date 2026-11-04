@@ -2612,8 +2612,15 @@ mod host {
                 if self.program.runtime_schema.runtime_event_sites.is_empty() {
                     return self.decorate_runtime_error(error);
                 }
+                let comb_fatal = matches!(&error,
+                    RuntimeErrorCode::DetectedTrueLoopCode(code) if self.comb_fatal_site(*code).is_some());
                 self.fatal_comb_capture_error(&self.peek_backend_runtime_events_from(start))
-                    .unwrap_or_else(|| self.decorate_runtime_error(error))
+                    .unwrap_or_else(|| if comb_fatal {
+                        RuntimeErrorCode::Fatal {
+                            message: "Fatal assertion (runtime event record overwritten)".into(),
+                            signals: Vec::new(),
+                        }
+                    } else { self.decorate_runtime_error(error) })
             })
         }
 
@@ -2626,6 +2633,19 @@ mod host {
                 .as_ref()
                 .and_then(|scheduler| scheduler.unit);
             let generated = index >= self.program.runtime_schema.processes.len();
+            let native_observers = self.native_file_io.is_some()
+                && generated
+                && !self.program.runtime_schema.comb_observers.is_empty();
+            if native_observers {
+                self.comb_observer_reads.pack(
+                    &self.comb_observer_snapshots,
+                    &mut self.native_arena.observers,
+                );
+                self.native_arena.header.observers = self.native_arena.observers.as_mut_ptr();
+                self.native_arena.header.observer_initial =
+                    u64::from(self.comb_observer_initial_eval);
+                self.native_arena.header.observer_evaluating = 0;
+            }
             let result = if scheduler == Some(index) || generated {
                 if let Some(metadata) = &self.native_file_io {
                     let (state, state_size) = self.backend.memory_as_ptr();
@@ -2643,6 +2663,7 @@ mod host {
                         round_budget: self.native_host_round_budget,
                         nbas: &mut self.native_nba_queue,
                         pending_scan: 0,
+                        comb_before: Vec::new(),
                     };
                     let (result, error) = scope.run(&mut self.backend, index);
                     self.native_service_calls =
@@ -2654,6 +2675,26 @@ mod host {
             } else {
                 self.backend.run_process(index)
             };
+            if native_observers {
+                if self.native_arena.header.observer_evaluating != 0 {
+                    // A finish or fault can leave the generated settle early.
+                    // The reference captures its final sensitivity even then.
+                    self.comb_observer_snapshots = self.snapshot_all_comb_observers();
+                    self.backend.set_comb_capture_event_enabled(&vec![
+                        false;
+                        self.program
+                            .runtime_schema
+                            .runtime_event_sites
+                            .len()
+                    ]);
+                } else {
+                    self.comb_observer_reads.unpack(
+                        &self.native_arena.observers,
+                        &mut self.comb_observer_snapshots,
+                    );
+                }
+                self.comb_observer_initial_eval = self.native_arena.header.observer_initial != 0;
+            }
             self.checked_kernel_result(result, start)
         }
 

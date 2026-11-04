@@ -3842,7 +3842,16 @@ impl NativeBackend {
         let runtime_event_buffer = Arc::new(RuntimeEventBuffer::new(
             shared.layout.runtime_event_buffer_size,
         ));
-        let comb_capture_enabled = vec![0; shared.layout.runtime_event_site_layouts.len().max(1)];
+        // Generated scheduler code clears these flags one complete word at a time.
+        let comb_capture_enabled = vec![
+            0;
+            shared
+                .layout
+                .runtime_event_site_layouts
+                .len()
+                .max(1)
+                .next_multiple_of(8)
+        ];
 
         // Initialize 4-state regions to X (v=1, m=1)
         for &(offset, allocated_size) in &shared.four_state_inits {
@@ -3882,9 +3891,18 @@ impl NativeBackend {
         shared: Arc<SharedNativeCode>,
         memory: MemoryImage,
         runtime_event_buffer: Arc<RuntimeEventBuffer>,
-        comb_capture_enabled: Vec<u8>,
+        mut comb_capture_enabled: Vec<u8>,
         heap: Box<celox_heap::Heap>,
     ) -> Self {
+        comb_capture_enabled.resize(
+            shared
+                .layout
+                .runtime_event_site_layouts
+                .len()
+                .max(1)
+                .next_multiple_of(8),
+            0,
+        );
         let slow_calls = shared.layout.settle_check();
         let mut backend = Self {
             compiled: shared,
@@ -4650,6 +4668,7 @@ impl super::super::SimBackend for NativeBackend {
     fn comb_capture_event_enabled(&self) -> Vec<bool> {
         self.comb_capture_enabled
             .iter()
+            .take(self.compiled.layout.runtime_event_site_layouts.len())
             .map(|&enabled| enabled != 0)
             .collect()
     }

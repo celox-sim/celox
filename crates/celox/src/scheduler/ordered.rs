@@ -133,7 +133,7 @@ impl Ordered {
 }
 
 impl Generator<'_> {
-    fn native_load(&mut self, op: Memory, args: Vec<RegisterId>) -> RegisterId {
+    pub(super) fn native_load(&mut self, op: Memory, args: Vec<RegisterId>) -> RegisterId {
         let dst = self.b.alloc_bit(64, false);
         self.b.emit(SIRInstruction::ExternCall {
             dst: Some(dst),
@@ -143,7 +143,7 @@ impl Generator<'_> {
         dst
     }
 
-    fn native_store(&mut self, op: Memory, args: Vec<RegisterId>) {
+    pub(super) fn native_store(&mut self, op: Memory, args: Vec<RegisterId>) {
         self.b.emit(SIRInstruction::ExternCall {
             dst: None,
             func: op.function(),
@@ -161,25 +161,25 @@ impl Generator<'_> {
         self.native_load(Memory::ReadIndirect, vec![context, offset])
     }
 
-    fn arena_header_load(&mut self, offset: usize) -> RegisterId {
+    pub(super) fn arena_header_load(&mut self, offset: usize) -> RegisterId {
         let pointer = self.arena_header();
         let offset = self.constant(offset as u64, 64);
         self.native_load(Memory::ReadIndirect, vec![pointer, offset])
     }
 
-    fn arena_header_store(&mut self, offset: usize, value: RegisterId) {
+    pub(super) fn arena_header_store(&mut self, offset: usize, value: RegisterId) {
         let pointer = self.arena_header();
         let offset = self.constant(offset as u64, 64);
         self.native_store(Memory::WriteIndirect, vec![pointer, offset, value]);
     }
 
-    fn arena_load(&mut self, pointer: RegisterId, word: RegisterId) -> RegisterId {
+    pub(super) fn arena_load(&mut self, pointer: RegisterId, word: RegisterId) -> RegisterId {
         let eight = self.constant(8, 64);
         let offset = self.binary(64, word, BinaryOp::Mul, eight);
         self.native_load(Memory::ReadIndirect, vec![pointer, offset])
     }
 
-    fn arena_store(&mut self, pointer: RegisterId, word: RegisterId, value: RegisterId) {
+    pub(super) fn arena_store(&mut self, pointer: RegisterId, word: RegisterId, value: RegisterId) {
         let eight = self.constant(8, 64);
         let offset = self.binary(64, word, BinaryOp::Mul, eight);
         self.native_store(Memory::WriteIndirect, vec![pointer, offset, value]);
@@ -215,7 +215,7 @@ impl Generator<'_> {
         self.arena_require(ok);
     }
 
-    fn words(&mut self, count: usize, body: impl FnOnce(&mut Self, RegisterId)) {
+    pub(super) fn words(&mut self, count: usize, body: impl FnOnce(&mut Self, RegisterId)) {
         let count = self.constant(count as u64, 64);
         self.word_range(count, body);
     }
