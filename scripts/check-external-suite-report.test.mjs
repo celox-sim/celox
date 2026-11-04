@@ -291,6 +291,7 @@ test("every retained baseline accepts only its existing failures", () => {
                 "class::constrained_enumerations_and_randc",
                 "class::constrained_randomize_rand_arrays",
                 "class::constrained_randomize_rand_objects",
+                "class::constrained_randomize_shifts",
                 "class::constrained_randomize_state_properties",
                 "class::container_type_aliases_of_classes",
                 "class::enumeration_constants_of_classes",
