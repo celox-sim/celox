@@ -34,6 +34,14 @@ impl<V> From<HashMap<String, V>> for ScopedMap<V> {
 }
 
 impl<V> ScopedMap<V> {
+    /// The shared table alone, without what the scope added or hid.
+    pub fn shared(&self) -> Self {
+        Self {
+            base: Arc::clone(&self.base),
+            overlay: Arc::default(),
+        }
+    }
+
     /// Identity of an immutable snapshot, valid while a borrower retains it.
     pub fn identity(&self) -> (usize, usize) {
         (

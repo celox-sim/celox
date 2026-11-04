@@ -30,6 +30,9 @@ pub(in crate::ast) struct State {
 /// A settled discovery of [`State::settled`]. `input` is held so that the
 /// identities of its tables stay unique.
 struct Settled {
+    /// Keeps the arena the key names from being freed for another arena at
+    /// the same address, which would take this entry for its own.
+    _arena: std::sync::Weak<celox_sv_syntax::Declarations>,
     input: PackedDimensions,
     specializations: usize,
     context: PackedDimensions,
@@ -1359,8 +1362,12 @@ pub(in crate::ast) fn query_operand_dimensions_id(
         overlay(&mut partial, input);
         return Ok(finish(partial));
     }
-    // Every query of a scope with the same input discovers the same
-    // declarations: a scope's queries settle them once.
+    // The scope's declarations are discovered from the scope's own inputs,
+    // without the locals the query's scope adds and the operand values of
+    // its statement. Every query of a scope with the same own inputs
+    // discovers the same declarations, so a scope's queries settle them once
+    // and each overlays its own context.
+    let own = scope_inputs(input);
     let specializations = session.class_specializations.len();
     let settled = session
         .dimensions
@@ -1369,17 +1376,18 @@ pub(in crate::ast) fn query_operand_dimensions_id(
         .filter(|settled| {
             !unshared_discovery()
                 && settled.specializations == specializations
-                && same_tables(&settled.input, input)
+                && settled.input == own
         })
         .map(|settled| settled.context.clone());
-    let context = match settled {
+    let mut context = match settled {
         Some(context) => context,
         None => {
-            let context = settle_scope(tree, session, &owners, &key, input)?;
+            let context = settle_scope(tree, session, &owners, &key, &own)?;
             session.dimensions.settled.insert(
                 key.clone(),
                 Settled {
-                    input: input.clone(),
+                    _arena: tree.declarations_incarnation(),
+                    input: own,
                     specializations: session.class_specializations.len(),
                     context: context.clone(),
                 },
@@ -1387,11 +1395,40 @@ pub(in crate::ast) fn query_operand_dimensions_id(
             context
         }
     };
+    with_query_context(&mut context, input);
     publish(&mut session.dimensions, &key, &context);
     // Reentrant queries see the published prefix until this one finishes.
     let result = query_published(root, tree, session, input, &owners, &key, context);
     session.dimensions.partial.remove(&key);
     result
+}
+
+/// The inputs of a query that its scope's declarations are discovered from:
+/// `input` without the locals and their signedness that the query's own
+/// scope adds to the shared tables, and without the operand values of the
+/// statement it is in.
+fn scope_inputs(input: &PackedDimensions) -> PackedDimensions {
+    PackedDimensions {
+        variables: input.variables.shared(),
+        expression_signedness: input.expression_signedness.shared(),
+        effect_values: Default::default(),
+        last_indices: Default::default(),
+        ..input.clone()
+    }
+}
+
+/// Give a scope's settled declarations the context of the query: the parts
+/// of `input` that [`scope_inputs`] leaves out. The query's locals follow
+/// from [`overlay`], which gives the query's tables precedence.
+fn with_query_context(context: &mut PackedDimensions, input: &PackedDimensions) {
+    context.effect_values = input.effect_values.clone();
+    context.last_indices = input.last_indices.clone();
+    context.expression_signedness.extend(
+        input
+            .expression_signedness
+            .iter()
+            .map(|(name, signed)| (name.clone(), *signed)),
+    );
 }
 
 fn query_published(
