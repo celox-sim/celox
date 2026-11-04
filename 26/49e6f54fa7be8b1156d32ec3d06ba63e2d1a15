@@ -1,0 +1,6 @@
+Revision history for #3143:
+
+rev 2 (content) 2026-11-04 20:24 UTC — commit only on success: array sizes validated with every other value before any change; one active-constraint set (constraint_mode, inline) decides solved sizes and emitted constraints; tests
+rev 1 (initial) 2026-11-04 20:24 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3143,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"ee4cd4692da4b53c046b600f6ce45fd4749d2599","timestamp_iso":"2026-11-04T20:24:43Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"ee4cd4692da4b53c046b600f6ce45fd4749d2599","new_sha":"3e981450c7642b7dd342daf2604fc244e8026880","timestamp_iso":"2026-11-04T20:24:43Z","reason":"commit only on success: array sizes validated with every other value before any change; one active-constraint set (constraint_mode, inline) decides solved sizes and emitted constraints; tests","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/ee4cd4692da4b53c046b600f6ce45fd4749d2599...3e981450c7642b7dd342daf2604fc244e8026880"}]} -->
