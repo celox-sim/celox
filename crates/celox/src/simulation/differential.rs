@@ -39,6 +39,7 @@ impl<B: SimBackend> Simulation<B> {
     #[doc(hidden)]
     pub fn scheduler_stats(&self) -> crate::SchedulerStats {
         crate::SchedulerStats {
+            native_service_calls: self.simulator.native_service_calls,
             checked_steps: self.checked_steps,
             unchecked: self.unchecked,
             ..self.state.scheduler_stats().clone()
@@ -418,16 +419,22 @@ mod tests {
             let stats = sim.scheduler_stats();
             if mode == SchedulerMode::Reference {
                 assert_eq!(stats.compiled_slots, 0);
+                assert_eq!(stats.compiled_runs, 0);
+                assert!(stats.reference_steps > 100);
             } else {
                 assert!(stats.compiled_slots > 0, "{mode:?}: {stats:?}");
+                assert!(stats.compiled_runs > 0, "{stats:?}");
+                assert!(stats.reference_steps < 10, "{stats:?}");
             }
+            assert_eq!(stats.native_service_calls, 0, "{stats:?}");
             match mode {
                 SchedulerMode::Differential => {
                     assert!(stats.checked_steps >= stats.compiled_slots)
                 }
                 // One run takes all the slots up to the target.
                 SchedulerMode::DifferentialRuns => {
-                    assert!(stats.checked_steps < stats.compiled_slots, "{stats:?}")
+                    assert!(stats.checked_steps < stats.compiled_slots, "{stats:?}");
+                    assert_eq!(stats.compiled_runs, 1, "{stats:?}");
                 }
                 _ => {}
             }

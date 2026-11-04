@@ -142,6 +142,7 @@ mod host {
         pub(crate) process_heap_roots: Vec<celox_heap::Root>,
         pub(super) file_io: celox_runtime::file_io::FileIo,
         native_file_io: Option<Arc<native_io::Metadata>>,
+        pub(crate) native_service_calls: u64,
         pub(crate) native_host_return_budget: u64,
         pub(crate) native_host_round_budget: u64,
         pub(crate) postponed_output: bool,
@@ -1392,6 +1393,7 @@ mod host {
                 file_io: Default::default(),
                 native_file_io,
                 postponed_output,
+                native_service_calls: 0,
                 native_host_return_budget: u64::MAX,
                 native_host_round_budget: u64::MAX,
                 native_nba_queue: Default::default(),
@@ -2630,6 +2632,7 @@ mod host {
                         pending: &self.pending_host_events,
                         read_seq: &self.runtime_event_read_seq,
                         error: None,
+                        calls: 0,
                         return_budget: self.native_host_return_budget,
                         returns: 0,
                         round_budget: self.native_host_round_budget,
@@ -2642,6 +2645,8 @@ mod host {
                         pending_scan: 0,
                     };
                     let (result, error) = scope.run(&mut self.backend, index);
+                    self.native_service_calls =
+                        self.native_service_calls.saturating_add(scope.calls);
                     error.map_or(result, Err)
                 } else {
                     self.backend.run_process(index)

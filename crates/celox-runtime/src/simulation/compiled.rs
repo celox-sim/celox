@@ -349,6 +349,7 @@ impl<B: SimBackend> SimulationState<B> {
             backend.set_wide(scheduler.clock_value, values);
         }
         let unit = scheduler.unit;
+        self.stats.compiled_runs = self.stats.compiled_runs.saturating_add(1);
         let result = executor.run_process(unit);
         self.process_state
             .nba_queue

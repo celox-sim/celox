@@ -419,8 +419,8 @@ fn report_sv_scheduler<B: celox::SimBackend>(
             celox::KernelSchedule::Compiled => None,
         })
         .collect();
-    writeln!(output, "CELOX_SCHEDULER phase={phase} mode={:?} total_slots={total_slots} compiled_slots={} kernel_compiled={} kernel_reference={} reasons_json={}",
-        stats.mode, stats.compiled_slots, compiled, stats.kernels.len()-compiled,
+    writeln!(output, "CELOX_SCHEDULER phase={phase} mode={:?} total_slots={total_slots} compiled_slots={} compiled_runs={} reference_steps={} native_service_calls={} kernel_compiled={} kernel_reference={} reasons_json={}",
+        stats.mode, stats.compiled_slots, stats.compiled_runs, stats.reference_steps, stats.native_service_calls, compiled, stats.kernels.len()-compiled,
         serde_json::to_string(&fallback).expect("scheduler reasons are serializable"))
         .map_err(|error| format!("failed to write scheduler report: {error}"))
 }
