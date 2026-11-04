@@ -1,0 +1,1 @@
+size search: limit 2^24 hard in every attempt (preferred tier, then limited), randc restart only after both tiers fail; oversize-only constraints fault; randomize(a) on a non-rand array uses the call's rand_mode selection (also on classes without the solver); tests
