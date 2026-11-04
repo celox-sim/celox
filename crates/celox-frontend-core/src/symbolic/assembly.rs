@@ -954,6 +954,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         extern_functions,
         next_runtime_error_code,
         mut processes,
+        functions,
     ) = timed_sub!(
         "relocate_units",
         relocate_units(
@@ -2254,6 +2255,54 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         );
         select_nba_paths(&mut timing, &staged, &mut processes);
     }
+    // The per-store instrumentation above (watch and occurrence counters,
+    // comb-observer captures, nonblocking staging, triggers) rewrites the
+    // stores of the units it sees, not those of function bodies, which a
+    // frontend therefore keeps clear of instrumented storage
+    // (`SimModule::instrumented_storage`). A body that stores there anyway
+    // is rejected rather than miscompiled.
+    if !functions.is_empty() {
+        let instrumented: HashSet<AbsoluteAddr> = instance_modules
+            .iter()
+            .flat_map(|(&instance, module)| {
+                modules[module]
+                    .instrumented_storage()
+                    .into_iter()
+                    .map(move |var_id| bindings.locate(instance, var_id))
+            })
+            .chain(
+                clock_domains
+                    .iter()
+                    .flat_map(|(&alias, &canonical)| [alias, canonical]),
+            )
+            .chain(topological_clocks.iter().copied())
+            .collect();
+        let instrumented_store = functions.iter().any(|function| {
+            function
+                .unit
+                .blocks
+                .values()
+                .flat_map(|block| &block.instructions)
+                .any(|instruction| match instruction {
+                    SIRInstruction::Store(_, _, _, _, triggers, captures)
+                        if !triggers.is_empty() || !captures.is_empty() =>
+                    {
+                        true
+                    }
+                    SIRInstruction::Commit(..) => true,
+                    instruction => instruction
+                        .memory_write()
+                        .is_some_and(|access| instrumented.contains(&access.addr.absolute_addr())),
+                })
+        });
+        if instrumented_store {
+            return Err(ParserError::illegal_context(
+                "function unit",
+                "a function body stores into instrumented state",
+                None,
+            ));
+        }
+    }
     let mut process_kernels = Vec::with_capacity(processes.len());
     let mut process_slots = Vec::with_capacity(processes.len());
     let mut process_frames = Vec::with_capacity(processes.len());
@@ -2283,23 +2332,11 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         eval_comb,
         parallel: parallel_sir,
         processes: process_kernels,
-        functions: Vec::new(),
+        functions,
     };
     // Calls carry their callees' effects from the start (see
     // `SirProgram::calls_summarized`).
     source_sir.summarize_calls();
-    // The one gate of the stages after this one (scheduling, settle, layout,
-    // testbench lowering, and the analyses above), which do not handle calls
-    // yet: each is converted before any frontend produces them.
-    if source_sir.has_calls() {
-        return Err(ParserError::unsupported(
-            2984,
-            crate::LoweringPhase::SimulatorParser,
-            "SIR function calls",
-            "the scheduler, settle, layout and testbench stages do not handle function calls yet",
-            None,
-        ));
-    }
     let mut source_addresses = state_objects.keys().copied().collect::<Vec<_>>();
     source_addresses.sort_unstable();
     let mut source_to_state = HashMap::default();
@@ -2320,11 +2357,38 @@ pub fn schedule_symbolic_rtl_reporting_loops(
     for (alias, target) in &bindings.targets {
         source_to_state.insert(*alias, source_to_state[target]);
     }
+    // Frame slots are no state objects: each gets an address of its own in
+    // the FRAME region, numbered in the order of the functions.
+    let frame_slots: HashMap<RegionedAbsoluteAddr, StateObjectId> = source_sir
+        .functions
+        .iter()
+        .flat_map(|function| &function.frame.slots)
+        .enumerate()
+        .map(|(index, slot)| {
+            u32::try_from(index)
+                .map(|index| (slot.addr, StateObjectId(index)))
+                .map_err(|_| {
+                    ParserError::illegal_context(
+                        "frame slot projection",
+                        "frame slot count exceeds u32",
+                        None,
+                    )
+                })
+        })
+        .collect::<Result<_, _>>()?;
     let project = |source: AbsoluteAddr| source_to_state[&source];
-    let project_regioned = |source: RegionedAbsoluteAddr| RegionedStateAddr {
+    let project_regioned_state = |source: RegionedAbsoluteAddr| RegionedStateAddr {
         region: source.region,
         instance_id: source.instance_id,
         var_id: source_to_state[&source.absolute_addr()].var_id,
+    };
+    let project_regioned = |source: RegionedAbsoluteAddr| match frame_slots.get(&source) {
+        Some(&var_id) => RegionedStateAddr {
+            region: source.region,
+            instance_id: source.instance_id,
+            var_id,
+        },
+        None => project_regioned_state(source),
     };
 
     let mut sir = source_sir.into_map_addr(project, project_regioned);
@@ -3199,6 +3263,7 @@ fn relocate_executation_unit_with_errors<A, B>(
     runtime_error_codes: &HashMap<i64, i64>,
     runtime_event_sites: &HashMap<u32, u32>,
     extern_functions: &HashMap<u32, u32>,
+    function_base: u32,
 ) -> ExecutionUnit<B> {
     ExecutionUnit {
         entry_block_id: eu.entry_block_id,
@@ -3249,6 +3314,16 @@ fn relocate_executation_unit_with_errors<A, B>(
                                         },
                                         args: args.clone(),
                                     }
+                                }
+                                // A module's units name its functions by their index
+                                // in the module; each instance has its own copies,
+                                // from `function_base` on.
+                                SIRInstruction::Call { .. } => {
+                                    let mut call = inst.map_addr(f);
+                                    if let SIRInstruction::Call { function, .. } = &mut call {
+                                        function.0 += function_base;
+                                    }
+                                    call
                                 }
                                 _ => inst.map_addr(f),
                             })
@@ -3818,6 +3893,7 @@ fn relocate_units(
         Vec<ExternFunction>,
         i64,
         Vec<RelocatedProcess>,
+        Vec<celox_sir::FunctionUnit<RegionedAbsoluteAddr>>,
     ),
     ParserError,
 > {
@@ -3839,6 +3915,7 @@ fn relocate_units(
     let mut extern_functions = Vec::<ExternFunction>::new();
     let mut extern_function_indices = HashMap::<String, usize>::default();
     let mut next_runtime_error_code = 2000;
+    let mut functions = Vec::new();
     let mut parallel_ff_units = parallel_ff_units;
     let mut startup_statuses: Vec<_> = expanded
         .values()
@@ -3968,6 +4045,51 @@ fn relocate_units(
             };
             extern_function_map.insert(local as u32, global as u32);
         }
+        let function_base = u32::try_from(functions.len()).map_err(|_| {
+            ParserError::illegal_context("function relocation", "function count exceeds u32", None)
+        })?;
+        for function in &sim_module.functions {
+            // Frame slots are no state: each copy of a function names its
+            // own, unique in the design because the instance is part of the
+            // address, and package or hierarchical bindings do not apply.
+            let locate = |addr: &RegionedVarAddr| {
+                if addr.region == celox_design::FRAME_REGION {
+                    RegionedAbsoluteAddr {
+                        region: addr.region,
+                        instance_id: *id,
+                        var_id: addr.var_id,
+                    }
+                } else {
+                    bindings.locate_regioned(addr.region, *id, addr.var_id)
+                }
+            };
+            functions.push(celox_sir::FunctionUnit {
+                unit: relocate_executation_unit_with_errors(
+                    &function.unit,
+                    &locate,
+                    &runtime_error_codes,
+                    &HashMap::default(),
+                    &extern_function_map,
+                    function_base,
+                ),
+                frame: celox_sir::FrameLayout {
+                    size: function.frame.size,
+                    slots: function
+                        .frame
+                        .slots
+                        .iter()
+                        .map(|slot| celox_sir::FrameSlot {
+                            addr: locate(&slot.addr),
+                            offset: slot.offset,
+                            width: slot.width,
+                            four_state: slot.four_state,
+                            handle: slot.handle,
+                        })
+                        .collect(),
+                },
+                effects: Default::default(),
+            });
+        }
         let mut runtime_event_site_map = HashMap::default();
         let scope = elaborated_scope_name(root_name, path, expanded, indexed_instances);
         let site_base = runtime_event_sites.len() as u32;
@@ -3994,6 +4116,7 @@ fn relocate_units(
                     &runtime_error_codes,
                     &runtime_event_site_map,
                     &extern_function_map,
+                    function_base,
                 )
             };
             let mut trigger_sets = sim_module.eval_only_ff_blocks.keys().collect::<Vec<_>>();
@@ -4064,6 +4187,7 @@ fn relocate_units(
                     &runtime_error_codes,
                     &runtime_event_site_map,
                     &extern_function_map,
+                    function_base,
                 );
                 if *after_initials && !startup_statuses.is_empty() {
                     **unit = after_initial_processes(unit, &startup_statuses);
@@ -4088,6 +4212,7 @@ fn relocate_units(
                     &runtime_error_codes,
                     &runtime_event_site_map,
                     &extern_function_map,
+                    function_base,
                 ),
             );
 
@@ -4104,6 +4229,7 @@ fn relocate_units(
                         &runtime_error_codes,
                         &runtime_event_site_map,
                         &extern_function_map,
+                        function_base,
                     ),
                 );
             }
@@ -4122,6 +4248,7 @@ fn relocate_units(
                     &runtime_error_codes,
                     &runtime_event_site_map,
                     &extern_function_map,
+                    function_base,
                 ),
             );
 
@@ -4138,6 +4265,7 @@ fn relocate_units(
                         &runtime_error_codes,
                         &runtime_event_site_map,
                         &extern_function_map,
+                        function_base,
                     ),
                 );
             }
@@ -4153,6 +4281,7 @@ fn relocate_units(
                         &runtime_error_codes,
                         &runtime_event_site_map,
                         &extern_function_map,
+                        function_base,
                     ),
                     slots: process.slots.map(|var_id| bindings.locate(*id, var_id)),
                     frame: process
@@ -4185,6 +4314,7 @@ fn relocate_units(
                         &runtime_error_codes,
                         &runtime_event_site_map,
                         &extern_function_map,
+                        function_base,
                     ),
                     nba: relocate_executation_unit_with_errors(
                         &split.nba,
@@ -4192,6 +4322,7 @@ fn relocate_units(
                         &runtime_error_codes,
                         &runtime_event_site_map,
                         &extern_function_map,
+                        function_base,
                     ),
                 });
             // Pushed like the apply units below: the clock, then each reset.
@@ -4217,6 +4348,7 @@ fn relocate_units(
                     &runtime_error_codes,
                     &runtime_event_site_map,
                     &extern_function_map,
+                    function_base,
                 ),
             );
 
@@ -4233,6 +4365,7 @@ fn relocate_units(
                         &runtime_error_codes,
                         &runtime_event_site_map,
                         &extern_function_map,
+                        function_base,
                     ),
                 );
             }
@@ -4283,6 +4416,7 @@ fn relocate_units(
             processes.sort_unstable_by_key(|(key, _)| *key);
             processes.into_iter().map(|(_, process)| process).collect()
         },
+        functions,
     ))
 }
 
