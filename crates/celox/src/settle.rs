@@ -251,6 +251,36 @@ impl<'a> Marker<'a> {
         }
     }
 
+    /// Mark `readers`, and the scheduler's settle as dirty, with the byte
+    /// `one`, whatever the write before changed.
+    fn mark_unconditionally(
+        &self,
+        instructions: &mut Vec<SIRInstruction<RegionedAbsoluteAddr>>,
+        one: RegisterId,
+        readers: Vec<u32>,
+    ) {
+        if let Some(dirty) = self.scheduler_dirty {
+            instructions.push(SIRInstruction::Store(
+                dirty,
+                SIROffset::Static(0),
+                8,
+                one,
+                Vec::new(),
+                Vec::new(),
+            ));
+        }
+        for partition in readers {
+            instructions.push(SIRInstruction::Store(
+                self.flags,
+                SIROffset::Static(partition as usize * 8),
+                8,
+                one,
+                Vec::new(),
+                Vec::new(),
+            ));
+        }
+    }
+
     fn instrument(&self, unit: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
         self.instrument_blocks(unit, |_| true);
     }
@@ -288,6 +318,32 @@ impl<'a> Marker<'a> {
             let mut one = None;
             let mut instructions = Vec::with_capacity(old_instructions.len());
             for instruction in old_instructions {
+                // A call may write any part of the objects its effects list,
+                // and its callee's stores are not instrumented: it marks the
+                // readers of all of them whenever it runs, as a store too
+                // wide to compare does. The listed writes of a call that
+                // reaches a native kernel are incomplete, but a native
+                // kernel's own unit is instrumented (`instrument_unit`).
+                if let Some(effects) = instruction.call_effects() {
+                    let mut readers: Vec<u32> = effects
+                        .writes
+                        .iter()
+                        .flat_map(|address| self.readers(address))
+                        .collect();
+                    readers.sort_unstable();
+                    readers.dedup();
+                    instructions.push(instruction);
+                    if readers.is_empty() {
+                        continue;
+                    }
+                    let one = *one.get_or_insert_with(|| {
+                        let register = alloc(unit, byte.clone());
+                        instructions.push(SIRInstruction::Imm(register, SIRValue::new(1u64)));
+                        register
+                    });
+                    self.mark_unconditionally(&mut instructions, one, readers);
+                    continue;
+                }
                 let target = match &instruction {
                     SIRInstruction::Store(address, offset, width, ..)
                     | SIRInstruction::Commit(_, address, offset, width, _) => {
@@ -313,26 +369,7 @@ impl<'a> Marker<'a> {
                     || self.spans_padded_elements(&address, &offset, width)
                 {
                     instructions.push(instruction);
-                    if let Some(dirty) = self.scheduler_dirty {
-                        instructions.push(SIRInstruction::Store(
-                            dirty,
-                            SIROffset::Static(0),
-                            8,
-                            one,
-                            Vec::new(),
-                            Vec::new(),
-                        ));
-                    }
-                    for partition in readers {
-                        instructions.push(SIRInstruction::Store(
-                            self.flags,
-                            SIROffset::Static(partition as usize * 8),
-                            8,
-                            one,
-                            Vec::new(),
-                            Vec::new(),
-                        ));
-                    }
+                    self.mark_unconditionally(&mut instructions, one, readers);
                     continue;
                 }
                 // Set the readers' flags only when the store changes the
@@ -414,3 +451,114 @@ impl<'a> Marker<'a> {
 /// The widest store compared before it marks the readers; wider ones mark
 /// them on every store, like stores across padded array elements.
 const MAX_COMPARED_WIDTH: usize = 4096;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{AbsoluteAddr, BasicBlock, BlockId};
+    use celox_state_layout::SettleObject;
+
+    /// A unit outside the partitioned settle marks the partitions that read
+    /// what a call of it writes, after the call, and only those.
+    #[test]
+    fn calls_mark_the_partitions_reading_what_they_write() {
+        let source = "module Top (a: input logic<8>, b: input logic<8>, f: input logic<8>, y: output logic<8>) { assign y = a + b + f; }";
+        let (program, _) = crate::compile_to_sir(
+            &[(source, std::path::Path::new("settle-calls.veryl"))],
+            "Top",
+            &[],
+            &[],
+            false,
+            &Default::default(),
+            None,
+            None,
+            None,
+            None,
+            &[],
+            &Default::default(),
+        )
+        .unwrap();
+        let [a, b, flags] = ["a", "b", "f"].map(|name| program.get_addr(&[], &[name]).unwrap());
+        let program = program.into_laid_out(false);
+        let layout = program.layout();
+        // Partition 0 reads `a`; nothing reads `b`.
+        let start = layout.offsets[&a];
+        let settle = SettleLayout::new(
+            layout.offsets[&flags],
+            1,
+            vec![SettleObject {
+                start,
+                end: start + 1,
+                partitions: vec![0],
+            }],
+        );
+        let flags = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, flags);
+        let marker = Marker {
+            settle: &settle,
+            layout,
+            flags,
+            scheduler_dirty: None,
+        };
+        let marks = |writes: Vec<AbsoluteAddr>| {
+            let call = SIRInstruction::Call {
+                function: celox_sir::FunctionId(0),
+                frame: RegisterId(0),
+                args: Vec::new(),
+                outputs: Vec::new(),
+                dst: None,
+                effects: std::sync::Arc::new(celox_sir::CallEffects {
+                    writes: writes
+                        .into_iter()
+                        .map(|address| {
+                            RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, address)
+                        })
+                        .collect(),
+                    ..Default::default()
+                }),
+            };
+            let mut unit = ExecutionUnit {
+                entry_block_id: BlockId(0),
+                blocks: [(
+                    BlockId(0),
+                    BasicBlock {
+                        id: BlockId(0),
+                        params: Vec::new(),
+                        instructions: vec![
+                            SIRInstruction::Imm(RegisterId(0), SIRValue::new(0u8)),
+                            call,
+                        ],
+                        terminator: celox_sir::SIRTerminator::Return,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                register_map: [(
+                    RegisterId(0),
+                    RegisterType::Bit {
+                        width: 32,
+                        signed: false,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            };
+            marker.instrument(&mut unit);
+            let instructions = &unit.blocks[&BlockId(0)].instructions;
+            let call = instructions
+                .iter()
+                .position(|instruction| instruction.call_effects().is_some())
+                .unwrap();
+            instructions[call..]
+                .iter()
+                .filter(|instruction| {
+                    matches!(instruction, SIRInstruction::Store(address, SIROffset::Static(0), 8, ..)
+                        if *address == flags)
+                })
+                .count()
+        };
+        assert_eq!(marks(vec![a]), 1);
+        assert_eq!(marks(vec![b, a]), 1);
+        assert_eq!(marks(vec![b]), 0);
+        assert_eq!(marks(Vec::new()), 0);
+    }
+}

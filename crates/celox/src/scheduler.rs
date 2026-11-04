@@ -42,7 +42,7 @@ use celox_design::{
     SCHEDULER_FLAG_WIDTH, SCHEDULER_TIME_WIDTH, STABLE_REGION, SchedulerExit, SchedulerSlots,
     TIME_SLOT_WIDTH, edges::LEVEL_UNKNOWN, schedule::ScheduleModel,
 };
-use celox_sir::{BinaryOp, SIRBuilder, SIRSwitchCase, SIRValue};
+use celox_sir::{BinaryOp, SIRBuilder, SIRSwitchCase, SIRValue, StateAccess};
 use num_bigint::BigUint;
 use std::collections::BTreeSet;
 
@@ -447,19 +447,40 @@ impl Plan {
             return Err("the scheduler slots do not match the kernels".into());
         }
         let sir = &program.sir;
-        let comb_fatal = sir.eval_comb.iter().any(|unit| {
-            instructions(unit).any(|inst| {
-                matches!(
-                    inst,
-                    SIRInstruction::CombCaptureEvent {
-                        fatal_error_code: Some(_),
-                        ..
-                    }
-                )
-            })
-        });
+        let comb_fatal = sir
+            .eval_comb
+            .iter()
+            .any(|unit| instructions(unit).any(crate::ir::may_raise_fatal_capture));
         if comb_fatal {
             return Err("combinational logic has fatal assertions".into());
+        }
+        let rtl_units = || {
+            sir.eval_comb
+                .iter()
+                .chain(sir.eval_apply_ffs.values().flatten())
+                .chain(sir.eval_only_ffs.values().flatten())
+                .chain(sir.apply_ffs.values().flatten())
+        };
+        let planned = || {
+            rtl_units()
+                .chain(sir.eval_comb_apply_ffs.values().flatten())
+                .chain(sir.processes.iter().take(schema.processes.len()))
+                .flat_map(instructions)
+        };
+        // A native kernel may read and write any state, which none of the
+        // storage sets below can name (see `read_storage`).
+        if planned().any(SIRInstruction::accesses_unknown_state) {
+            return Err("a unit may access any state".into());
+        }
+        // The scheduler instruments the runtime-event records of the RTL
+        // units it inlines to find `$finish` and count records; a callee's
+        // records are out of its reach.
+        if rtl_units()
+            .chain(sir.eval_comb_apply_ffs.values().flatten())
+            .flat_map(instructions)
+            .any(calls_runtime_events)
+        {
+            return Err("RTL logic calls a function that records runtime events".into());
         }
 
         let shared = program.shared_storage();
@@ -544,23 +565,12 @@ impl Plan {
         // Event signals change only where the scheduler sees them change.
         let written = |unit: &Unit| -> Vec<usize> {
             let mut written: Vec<usize> = instructions(unit)
-                .filter_map(|inst| match inst {
-                    SIRInstruction::Store(target, ..) | SIRInstruction::Commit(_, target, ..) => {
-                        event_storage.get(&storage(target.absolute_addr())).copied()
-                    }
-                    _ => None,
-                })
+                .flat_map(written_storage)
+                .filter_map(|target| event_storage.get(&storage(target.absolute_addr())).copied())
                 .collect();
             written.sort_unstable();
             written.dedup();
             written
-        };
-        let rtl_units = || {
-            sir.eval_comb
-                .iter()
-                .chain(sir.eval_apply_ffs.values().flatten())
-                .chain(sir.eval_only_ffs.values().flatten())
-                .chain(sir.apply_ffs.values().flatten())
         };
         // The events RTL logic drives: clocks derived from the events the
         // scheduler's slots change, and only those (checked below).
@@ -568,12 +578,8 @@ impl Plan {
         // The storage each unit writes.
         let stores = |unit: &Unit| -> HashSet<AbsoluteAddr> {
             instructions(unit)
-                .filter_map(|inst| match inst {
-                    SIRInstruction::Store(target, ..) | SIRInstruction::Commit(_, target, ..) => {
-                        Some(storage(target.absolute_addr()))
-                    }
-                    _ => None,
-                })
+                .flat_map(written_storage)
+                .map(|target| storage(target.absolute_addr()))
                 .collect()
         };
         let rtl_stores: HashSet<AbsoluteAddr> = rtl_units().flat_map(stores).collect();
@@ -659,14 +665,14 @@ impl Plan {
             .filter(|(_, event)| {
                 unknown_gate
                     || event.eval_only.as_ref().is_none_or(|units| {
-                        units.iter().flat_map(instructions).any(|inst| match inst {
-                            SIRInstruction::Store(target, ..)
-                            | SIRInstruction::Commit(_, target, ..) => {
+                        units
+                            .iter()
+                            .flat_map(instructions)
+                            .flat_map(written_storage)
+                            .any(|target| {
                                 target.region == STABLE_REGION
                                     && active_observers.contains(&storage(target.absolute_addr()))
-                            }
-                            _ => false,
-                        })
+                            })
                     })
             })
             .map(|(index, _)| index)
@@ -795,6 +801,10 @@ impl Plan {
                 Some("a declaration initializer")
             } else if slots.kind == celox_design::ProcessKind::Final {
                 Some("a final procedure")
+            } else if instructions(unit).any(calls_runtime_events) {
+                // Its `$finish` and records would be found at its own record
+                // instructions (see `Generator::instrument`).
+                Some("the process calls a function that records runtime events")
             } else if process.frame.is_some() {
                 Some("the process has dynamic activation frames")
             } else if slots.program.is_some() {
@@ -868,9 +878,7 @@ impl Plan {
                         (index < fallback.len() && fallback[index].is_none()).then_some(unit)
                     }),
             )
-            .any(|unit| {
-                instructions(unit).any(|inst| matches!(inst, SIRInstruction::ExternCall { .. }))
-            });
+            .any(|unit| instructions(unit).any(makes_extern_calls));
         for index in 0..schema.processes.len() {
             let process = &model.processes[index];
             if process.waits.is_empty() || fallback[index].is_some() {
@@ -1227,17 +1235,16 @@ impl Plan {
         };
         let effects = sir.eval_comb.iter().any(|unit| {
             instructions(unit).any(|inst| match inst {
-                SIRInstruction::RuntimeEvent { .. }
-                | SIRInstruction::CombCaptureEvent { .. }
-                | SIRInstruction::CombCaptureEnableIfChanged { .. }
-                | SIRInstruction::ExternCall { .. } => true,
                 SIRInstruction::Store(_, _, _, _, triggers, sites) => {
                     triggers.iter().any(|trigger| !internal_trigger(trigger)) || !sites.is_empty()
                 }
                 SIRInstruction::Commit(_, _, _, _, triggers) => {
                     triggers.iter().any(|trigger| !internal_trigger(trigger))
                 }
-                _ => false,
+                // Records, captures and external calls, a callee's too. A
+                // call's effects do not say which triggers it raises, so any
+                // is taken for one the scheduler does not compare itself.
+                _ => inst.host_effects() != celox_sir::HostEffects::default(),
             })
         });
         // Dirty tracking compares stable homes by their representative
@@ -1251,12 +1258,8 @@ impl Plan {
             sir.eval_comb
                 .iter()
                 .flat_map(instructions)
-                .filter_map(|inst| match inst {
-                    SIRInstruction::Load(_, source, ..) | SIRInstruction::Commit(source, ..) => {
-                        Some(storage(source.absolute_addr()))
-                    }
-                    _ => None,
-                })
+                .flat_map(read_storage)
+                .map(|source| storage(source.absolute_addr()))
                 .collect()
         });
         // A settle may wait for its readers only when it is a function of
@@ -1421,11 +1424,8 @@ impl Plan {
                 .eval_comb
                 .iter()
                 .flat_map(instructions)
-                .all(|instruction| {
-                    instruction
-                        .memory_read()
-                        .is_none_or(|read| read.addr.region == STABLE_REGION)
-                })
+                .flat_map(read_storage)
+                .all(|read| read.region == STABLE_REGION)
             && sir.eval_comb.iter().all(|unit| {
                 celox_sir::cfg::SirCfg::analyze(unit).is_ok_and(|cfg| cfg.loops.is_empty())
             }) {
@@ -1440,9 +1440,9 @@ impl Plan {
                         return None;
                     }
                     let sources: HashSet<_> = instructions(&sir.processes[index])
-                        .filter_map(|instruction| instruction.memory_write())
-                        .filter(|write| write.addr.region == STABLE_REGION)
-                        .map(|write| storage(write.addr.absolute_addr()))
+                        .flat_map(written_storage)
+                        .filter(|write| write.region == STABLE_REGION)
+                        .map(|write| storage(write.absolute_addr()))
                         .filter(|address| settle_reads.as_ref().unwrap().contains(address))
                         .collect();
                     // Read-before-write activations retain their existing
@@ -1584,11 +1584,8 @@ impl Plan {
                     continue;
                 }
                 for unit in event.eval_only.iter().flatten() {
-                    for inst in instructions(unit) {
-                        if let SIRInstruction::Store(target, ..)
-                        | SIRInstruction::Commit(_, target, ..) = inst
-                            && target.region == STABLE_REGION
-                        {
+                    for target in instructions(unit).flat_map(written_storage) {
+                        if target.region == STABLE_REGION {
                             active_stores
                                 .entry(storage(target.absolute_addr()))
                                 .or_default()
@@ -1679,14 +1676,17 @@ impl Plan {
                         kernel.as_ref().is_some_and(|kernel| {
                             source_event.is_some_and(|source| kernel.writes.contains(source))
                         }) && instructions(&sir.processes[index])
-                            .filter(|inst| match inst {
-                                SIRInstruction::Store(target, ..)
-                                | SIRInstruction::Commit(_, target, ..) => {
-                                    storage(target.absolute_addr()) == source
+                            .map(|inst| {
+                                let writes = written_storage(inst)
+                                    .any(|target| storage(target.absolute_addr()) == source);
+                                // A call may write it any number of times.
+                                match writes {
+                                    false => 0,
+                                    true if inst.call_effects().is_some() => 2,
+                                    true => 1,
                                 }
-                                _ => false,
                             })
-                            .count()
+                            .sum::<usize>()
                             > 1
                     }) {
                         if !ordered_available {
@@ -1821,15 +1821,9 @@ impl Plan {
                     .filter_map(|event| sir.eval_only_ffs.get(event))
                     .flatten()
                     .flat_map(instructions)
-                    .filter_map(|inst| match inst {
-                        SIRInstruction::Store(target, ..)
-                        | SIRInstruction::Commit(_, target, ..)
-                            if target.region == STABLE_REGION =>
-                        {
-                            Some(storage(target.absolute_addr()))
-                        }
-                        _ => None,
-                    })
+                    .flat_map(written_storage)
+                    .filter(|target| target.region == STABLE_REGION)
+                    .map(|target| storage(target.absolute_addr()))
                     .collect();
                 let mut pending = Vec::new();
                 for index in candidates {
@@ -2766,8 +2760,7 @@ impl Plan {
             });
             g.b.switch_to_block(check);
             if self.service_processes.contains(&index)
-                || instructions(&program.sir.processes[index])
-                    .any(|inst| matches!(inst, SIRInstruction::ExternCall { .. }))
+                || instructions(&program.sir.processes[index]).any(makes_extern_calls)
             {
                 // Every opaque writer needs the same scan and returns to
                 // `pick`. Share its body: copying every wait after every
@@ -4613,15 +4606,15 @@ impl Generator<'_> {
         unit: &Unit,
         time_slots: &[AbsoluteAddr],
     ) {
-        if instructions(unit).any(|inst| matches!(inst, SIRInstruction::ExternCall { .. })) {
+        if instructions(unit).any(makes_extern_calls) {
             self.check_waits(waits);
             return;
         }
         let storage = |address| self.shared.get(&address).copied().unwrap_or(address);
         let writes: HashSet<_> = instructions(unit)
-            .filter_map(SIRInstruction::memory_write)
-            .filter(|write| write.addr.region == STABLE_REGION)
-            .map(|write| storage(write.addr.absolute_addr()))
+            .flat_map(written_storage)
+            .filter(|write| write.region == STABLE_REGION)
+            .map(|write| storage(write.absolute_addr()))
             .chain(time_slots.iter().copied().map(storage))
             .collect();
         let affected: Vec<_> = waits
@@ -4848,7 +4841,8 @@ impl Generator<'_> {
             // slots.dirty. Preserve intermediate changes as well as X/Z-only
             // changes; do not snapshot its notification flags again.
             self.inline_with_exit(unit, finish_exit);
-            if instructions(unit).any(|inst| matches!(inst, SIRInstruction::ExternCall { .. })) {
+            // The instrumentation marks after a call's writes as well.
+            if instructions(unit).any(makes_extern_calls) {
                 self.mark_dirty();
             }
             return;
@@ -4891,12 +4885,9 @@ impl Generator<'_> {
                 }
                 self.store(self.slots.dirty, SCHEDULER_FLAG_WIDTH, dirty);
             }
-        } else if instructions(unit).any(|inst| match inst {
-            SIRInstruction::ExternCall { .. } => true,
-            SIRInstruction::Store(target, ..) | SIRInstruction::Commit(_, target, ..) => {
-                self.settle_reads(target.absolute_addr())
-            }
-            _ => false,
+        } else if instructions(unit).any(|inst| {
+            makes_extern_calls(inst)
+                || written_storage(inst).any(|target| self.settle_reads(target.absolute_addr()))
         }) {
             self.mark_dirty();
         }
@@ -4910,15 +4901,23 @@ impl Generator<'_> {
         let mut ranges = Vec::new();
         let mut bits = 0;
         for instruction in instructions(unit) {
-            let (target, offset, width) = match instruction {
-                SIRInstruction::Store(target, offset, width, ..)
-                | SIRInstruction::Commit(_, target, offset, width, ..)
-                    if self.settle_reads(target.absolute_addr()) =>
-                {
-                    (target, offset, *width)
+            // An opaque call can change state outside explicit Stores.
+            if makes_extern_calls(instruction) {
+                return None;
+            }
+            let (target, offset, width) = match instruction.state_writes() {
+                StateAccess::Access(access) if self.settle_reads(access.addr.absolute_addr()) => {
+                    (access.addr, access.offset, access.width)
                 }
-                // An opaque call can change state outside explicit Stores.
-                SIRInstruction::ExternCall { .. } => return None,
+                // A call may write any part of these objects, which the
+                // bounded snapshots do not cover.
+                StateAccess::Objects(objects)
+                    if objects
+                        .iter()
+                        .any(|target| self.settle_reads(target.absolute_addr())) =>
+                {
+                    return None;
+                }
                 _ => continue,
             };
             if target.region != STABLE_REGION {
@@ -5397,16 +5396,13 @@ fn homes_overlap_only_whole(layout: &crate::backend::MemoryLayout) -> bool {
 
 /// The storage `unit` reads.
 fn loads(unit: &Unit) -> impl Iterator<Item = AbsoluteAddr> + '_ {
-    instructions(unit).filter_map(loaded_address)
+    instructions(unit).flat_map(loaded_addresses)
 }
 
-fn loaded_address(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<AbsoluteAddr> {
-    match inst {
-        SIRInstruction::Load(_, source, ..) | SIRInstruction::Commit(source, ..) => {
-            Some(source.absolute_addr())
-        }
-        _ => None,
-    }
+fn loaded_addresses(
+    inst: &SIRInstruction<RegionedAbsoluteAddr>,
+) -> impl Iterator<Item = AbsoluteAddr> + '_ {
+    read_storage(inst).map(RegionedAbsoluteAddr::absolute_addr)
 }
 
 /// Whether a settle of `units` may read what an earlier settle left: a load
@@ -5465,6 +5461,17 @@ fn retained_storage(
     // covering write. Keep scanning so independent homes are analyzed once.
     let mut step = |block: &celox_sir::BasicBlock<RegionedAbsoluteAddr>, covered: &mut Covered| {
         for inst in &block.instructions {
+            // A call may read any part of what it reads before anything in
+            // the settle stored it, and what it writes it need not write on
+            // every path, so it covers nothing.
+            if let StateAccess::Objects(sources) = inst.state_reads() {
+                retained.extend(
+                    sources
+                        .iter()
+                        .map(|source| storage(source.absolute_addr()))
+                        .filter(|home| stores.contains(home)),
+                );
+            }
             match inst {
                 SIRInstruction::Load(_, source, offset, width)
                 | SIRInstruction::Commit(source, _, offset, width, _) => {
@@ -5558,11 +5565,13 @@ fn retained_storage(
     retained
 }
 
-/// Whether `unit` may end with an error.
+/// Whether `unit` may end with an error. A call may end its caller with
+/// the error of its callee.
 fn fails(unit: &Unit) -> bool {
     unit.blocks
         .values()
         .any(|block| matches!(block.terminator, SIRTerminator::Error(_)))
+        || instructions(unit).any(|inst| inst.call_effects().is_some())
 }
 
 /// The signals `statement` writes that may be reset events: those of
@@ -5596,6 +5605,7 @@ fn emits_finish(unit: &Unit, finish_sites: &HashSet<u32>) -> bool {
     instructions(unit).any(|inst| {
         matches!(inst, SIRInstruction::RuntimeEvent { site_id, .. }
             if finish_sites.contains(site_id))
+            || !finish_sites.is_empty() && calls_runtime_events(inst)
     })
 }
 
@@ -5620,6 +5630,10 @@ fn delay_bound(unit: &Unit, delay: AbsoluteAddr) -> u64 {
                 })
             }
             SIRInstruction::Commit(_, target, ..) if *target == delay => Some(u64::MAX),
+            // A call may store any delay.
+            _ if inst.call_effects().is_some() && inst.state_writes().touches(&delay) => {
+                Some(u64::MAX)
+            }
             _ => None,
         })
         .max()
@@ -5632,6 +5646,38 @@ fn stable(address: AbsoluteAddr) -> RegionedAbsoluteAddr {
 
 fn instructions(unit: &Unit) -> impl Iterator<Item = &SIRInstruction<RegionedAbsoluteAddr>> {
     unit.blocks.values().flat_map(|block| &block.instructions)
+}
+
+/// The storage `inst` may read: a Load's or Commit's source, or every object
+/// a call's effects read, each of which it may read in any part.
+/// [`Plan::new`] rejects units that may read any state (a native kernel),
+/// the one case no list names, so none is left out here.
+fn read_storage(
+    inst: &SIRInstruction<RegionedAbsoluteAddr>,
+) -> impl Iterator<Item = &RegionedAbsoluteAddr> {
+    inst.state_reads().objects().into_iter().flatten()
+}
+
+/// The storage `inst` may write: a Store's or Commit's destination, or
+/// every object a call's effects write (see [`read_storage`]).
+fn written_storage(
+    inst: &SIRInstruction<RegionedAbsoluteAddr>,
+) -> impl Iterator<Item = &RegionedAbsoluteAddr> {
+    inst.state_writes().objects().into_iter().flatten()
+}
+
+/// Whether `inst` makes an external call, itself or in a function it calls.
+/// The scheduler treats an external call as opaque: it may change state the
+/// SIR does not show.
+fn makes_extern_calls(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
+    inst.host_effects().extern_calls
+}
+
+/// Whether `inst` is a call whose callee may record runtime events. The
+/// scheduler finds `$finish` and counts records at the record instructions
+/// of the units it inlines, which a callee's are not.
+fn calls_runtime_events(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
+    inst.call_effects().is_some() && inst.host_effects().runtime_events
 }
 
 fn yielding_status(unit: &Unit, status: AbsoluteAddr) -> bool {
@@ -5647,10 +5693,14 @@ fn returns_status(unit: &Unit, status: AbsoluteAddr, wanted: ProcessStatus) -> b
             _ => None,
         })
         .collect();
-    instructions(unit).any(|inst| matches!(inst,
-        SIRInstruction::Store(target, SIROffset::Static(0), _, value, ..)
-            if *target == stable(status) && constants.get(value) == Some(&u64::from(wanted.code()))
-    ))
+    instructions(unit).any(|inst| {
+        matches!(inst,
+            SIRInstruction::Store(target, SIROffset::Static(0), _, value, ..)
+                if *target == stable(status) && constants.get(value) == Some(&u64::from(wanted.code()))
+        )
+            // A call may store any status.
+            || inst.call_effects().is_some() && inst.state_writes().touches(&stable(status))
+    })
 }
 
 /// Whether every status `unit` stores into `status` is a constant among
@@ -5674,6 +5724,8 @@ fn statuses_only(unit: &Unit, status: AbsoluteAddr, allowed: &[ProcessStatus]) -
             .get(value)
             .is_some_and(|code| allowed.contains(code)),
         SIRInstruction::Commit(_, target, ..) => *target != status,
+        // A call may store any status.
+        _ if inst.call_effects().is_some() => !inst.state_writes().touches(&status),
         _ => true,
     })
 }
@@ -5738,6 +5790,31 @@ pub(crate) fn count_test_settles(
     fused
 }
 
+/// What [`Plan::new`] decides for `program` that tests of call effects
+/// check: the storage the settle reads, why each kernel falls back, and the
+/// events RTL logic drives (`Plan::derived`).
+#[cfg(all(test, feature = "systemverilog"))]
+pub(crate) struct PlanSummary {
+    pub(crate) settle_reads: Option<HashSet<AbsoluteAddr>>,
+    pub(crate) fallback: Vec<Option<String>>,
+    pub(crate) derived: Vec<AbsoluteAddr>,
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+pub(crate) fn plan_for_test(program: &LaidOutProgram) -> Result<PlanSummary, String> {
+    let schema = program.runtime.runtime_schema.scheduler.clone().unwrap();
+    let plan = Plan::new(program, &schema.slots, true)?;
+    Ok(PlanSummary {
+        derived: plan
+            .derived
+            .iter()
+            .map(|&event| plan.events[event].signal)
+            .collect(),
+        settle_reads: plan.settle_reads,
+        fallback: plan.fallback,
+    })
+}
+
 /// Whether the compiled scheduler of `program` defers its settles, and
 /// whether its loads alone would have allowed that.
 #[cfg(test)]
@@ -5751,10 +5828,8 @@ pub(crate) fn defers_settles_for_test(program: &LaidOutProgram) -> (bool, bool) 
         .eval_comb
         .iter()
         .flat_map(instructions)
-        .filter_map(|inst| {
-            inst.memory_write()
-                .map(|write| storage(write.addr.absolute_addr()))
-        })
+        .flat_map(written_storage)
+        .map(|write| storage(write.absolute_addr()))
         .collect();
     (
         plan.lazy.is_some(),
