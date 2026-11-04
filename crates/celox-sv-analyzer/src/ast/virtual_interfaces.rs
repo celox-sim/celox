@@ -671,6 +671,72 @@ pub(super) fn read(
 /// An error unless evaluating virtual interface `handle` has no effects: a
 /// member access compares it with each instance, evaluating it again.
 fn check_pure(handle: &Expr) -> Converted<()> {
+    if pure(handle) {
+        Ok(())
+    } else {
+        Err(unsupported(
+            "virtual interface handle expression with a call that may have effects",
+        ))
+    }
+}
+
+/// The variable handle expression `expr` is read from, through selects,
+/// container element reads and checks; `None` for a handle that no
+/// variable holds, as a class property of an object or a call's result.
+pub(super) fn base_variable(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Ident(name) => Some(name),
+        Expr::Select { expr, .. } => base_variable(expr),
+        Expr::Call {
+            callee: Callee::Checked { .. },
+            args,
+            ..
+        } => match args.as_slice() {
+            [Some(_), Some(value)] => base_variable(value),
+            _ => None,
+        },
+        Expr::Call {
+            callee: Callee::Object(op),
+            args,
+            ..
+        } if matches!(
+            **op,
+            system_functions::ObjectOp::Container {
+                op: system_functions::ContainerOp::Get,
+                ..
+            }
+        ) =>
+        {
+            args.first()
+                .and_then(Option::as_ref)
+                .and_then(base_variable)
+        }
+        _ => None,
+    }
+}
+
+/// Whether expression `expr` reads storage only: it has no call but the
+/// read of a container element, whose container and index it reads too.
+/// A subroutine call, or a property of an object, is no storage of the
+/// design.
+pub(super) fn reads_storage_only(expr: &Expr) -> bool {
+    let mut storage = true;
+    visit_calls(expr, &mut |callee| {
+        storage &= matches!(callee, Callee::Checked { .. })
+            || matches!(callee, Callee::Object(op) if matches!(
+                **op,
+                system_functions::ObjectOp::Container {
+                    op: system_functions::ContainerOp::Get,
+                    ..
+                }
+            ));
+    });
+    storage
+}
+
+/// Whether evaluating virtual interface `handle` has no effects, so that
+/// evaluating it again gives the same handle.
+pub(super) fn pure(handle: &Expr) -> bool {
     let mut effect = false;
     visit_calls(handle, &mut |callee| {
         effect |= match callee {
@@ -686,12 +752,7 @@ fn check_pure(handle: &Expr) -> Converted<()> {
             _ => true,
         };
     });
-    if effect {
-        return Err(unsupported(
-            "virtual interface handle expression with a call that may have effects",
-        ));
-    }
-    Ok(())
+    !effect
 }
 
 /// `visit(callee)` for each call in `expr`, including its select indices.
@@ -1260,7 +1321,7 @@ pub(super) fn is_null(handle: &Expr) -> Expr {
 pub(super) fn event_block(mut stmts: Vec<Stmt>) -> Stmt {
     stmts.push(Stmt::Break);
     Stmt::Loop {
-        kind: crate::procedural::LoopKind::Forever,
+        kind: crate::procedural::LoopKind::EventBlock,
         init: Vec::new(),
         condition: None,
         step: Vec::new(),
@@ -1270,17 +1331,13 @@ pub(super) fn event_block(mut stmts: Vec<Stmt>) -> Stmt {
 
 /// Whether `stmt` is an [`event_block`].
 fn is_event_block(stmt: &Stmt) -> bool {
-    matches!(stmt, Stmt::Loop {
-        kind: crate::procedural::LoopKind::Forever,
-        body,
-        ..
-    } if matches!(body.first(), Some(Stmt::Eval(Expr::Call {
-        callee: Callee::Checked {
-            check: system_functions::AccessCheck::VirtualInterface,
+    matches!(
+        stmt,
+        Stmt::Loop {
+            kind: crate::procedural::LoopKind::EventBlock,
             ..
-        },
-        ..
-    }))))
+        }
+    )
 }
 
 /// `stmt` without the [`event_block`]s it contains, whose reads are those

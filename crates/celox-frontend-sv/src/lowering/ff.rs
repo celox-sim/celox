@@ -4905,7 +4905,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 op: sv::ir::BinaryOp::Ne,
                 right: Box::new(sv::ir::Expr::Literal("64'd0".to_string())),
             }),
-            (sv::ir::LoopKind::Forever, _) => None,
+            (sv::ir::LoopKind::Forever | sv::ir::LoopKind::EventBlock, _) => None,
             _ => condition.cloned(),
         };
         match test {
