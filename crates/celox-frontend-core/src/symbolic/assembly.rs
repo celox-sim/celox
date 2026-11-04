@@ -432,22 +432,16 @@ fn check_package_variable_drivers(
         for (group, (_, unit)) in units.enumerate() {
             for block in unit.blocks.values() {
                 for instruction in &block.instructions {
-                    let (address, offset, bits) = match instruction {
-                        SIRInstruction::Store(address, offset, bits, ..)
-                        | SIRInstruction::Commit(_, address, offset, bits, _) => {
-                            (bindings.locate(instance, address.var_id), offset, *bits)
+                    for (address, access) in written_bits(instruction) {
+                        let address = bindings.locate(instance, address.var_id);
+                        if !packages.contains(&address) {
+                            continue;
                         }
-                        _ => continue,
-                    };
-                    if !packages.contains(&address) {
-                        continue;
+                        let access = access.unwrap_or_else(|| {
+                            BitAccess::new(0, width(&address).saturating_sub(1))
+                        });
+                        ff_writes.push(((instance, group), address, access));
                     }
-                    let access = offset
-                        .constant_bit_offset()
-                        .zip(bits.checked_sub(1))
-                        .and_then(|(lsb, tail)| Some(BitAccess::new(lsb, lsb.checked_add(tail)?)))
-                        .unwrap_or_else(|| BitAccess::new(0, width(&address).saturating_sub(1)));
-                    ff_writes.push(((instance, group), address, access));
                 }
             }
         }
@@ -495,27 +489,18 @@ fn check_package_variable_drivers(
             );
             for block in process.kernel.blocks.values() {
                 for instruction in &block.instructions {
-                    let (SIRInstruction::Store(address, offset, bits, ..)
-                    | SIRInstruction::Commit(_, address, offset, bits, _)) = instruction
-                    else {
-                        continue;
-                    };
-                    let address = bindings.locate(instance, address.var_id);
-                    if packages.contains(&address) {
-                        // The bits the store writes, as for flip-flop
-                        // writes, so disjoint writers are not rejected.
-                        let access = offset
-                            .constant_bit_offset()
-                            .zip(bits.checked_sub(1))
-                            .and_then(|(lsb, tail)| {
-                                Some(BitAccess::new(lsb, lsb.checked_add(tail)?))
-                            })
-                            .unwrap_or_else(|| {
+                    for (address, access) in written_bits(instruction) {
+                        let address = bindings.locate(instance, address.var_id);
+                        if packages.contains(&address) {
+                            // The bits the store writes, as for flip-flop
+                            // writes, so disjoint writers are not rejected.
+                            let access = access.unwrap_or_else(|| {
                                 BitAccess::new(0, width(&address).saturating_sub(1))
                             });
-                        initial_writes.push(((instance, index), address, access));
-                        if restricted {
-                            restricted_writes.push(((instance, index), address, access));
+                            initial_writes.push(((instance, index), address, access));
+                            if restricted {
+                                restricted_writes.push(((instance, index), address, access));
+                            }
                         }
                     }
                 }
@@ -1198,11 +1183,8 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             )
             .flat_map(|unit| unit.blocks.values())
             .flat_map(|block| &block.instructions)
-            .filter_map(|instruction| match instruction {
-                SIRInstruction::Store(destination, ..)
-                | SIRInstruction::Commit(_, destination, ..) => Some(destination.absolute_addr()),
-                _ => None,
-            })
+            .flat_map(super::written_objects)
+            .map(|destination| destination.absolute_addr())
             .collect();
         let gated = gated_terms(&mut timing, &comb_blocks, &ff_written);
         let ff_units = eval_apply_ffs
@@ -1566,8 +1548,12 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             }
             for block in unit.blocks.values() {
                 for inst in &block.instructions {
-                    if let SIRInstruction::Store(address, ..) = inst {
-                        persistent_comb_state.insert(*address);
+                    // The stores of the process, and what its calls write.
+                    if matches!(
+                        inst,
+                        SIRInstruction::Store(..) | SIRInstruction::Call { .. }
+                    ) {
+                        persistent_comb_state.extend(super::written_objects(inst).copied());
                     }
                 }
             }
@@ -2477,32 +2463,20 @@ pub fn schedule_symbolic_rtl_reporting_loops(
     {
         for block in unit.blocks.values() {
             for instruction in &block.instructions {
-                let (address, offset, width) = match instruction {
-                    SIRInstruction::Store(address, offset, width, ..)
-                    | SIRInstruction::Commit(_, address, offset, width, _) => {
-                        (address.absolute_addr(), offset, *width)
-                    }
-                    _ => continue,
-                };
-                let access = offset
-                    .constant_bit_offset()
-                    .and_then(|lsb| {
-                        width
-                            .checked_sub(1)
-                            .and_then(|tail| lsb.checked_add(tail))
-                            .map(|msb| BitAccess::new(lsb, msb))
-                    })
-                    .or_else(|| {
+                for (address, access) in written_bits(instruction) {
+                    let address = address.absolute_addr();
+                    let access = access.or_else(|| {
                         state_objects
                             .get(&address)
                             .and_then(|object| object.width.checked_sub(1))
                             .map(|msb| BitAccess::new(0, msb))
                     });
-                if let Some(access) = access {
-                    rtl_writes.insert(VarAtomBase {
-                        id: address,
-                        access,
-                    });
+                    if let Some(access) = access {
+                        rtl_writes.insert(VarAtomBase {
+                            id: address,
+                            access,
+                        });
+                    }
                 }
             }
         }
@@ -4360,12 +4334,45 @@ fn comb_sources(
     sources
 }
 
-/// The variables `unit` loads.
+/// The objects `instruction` may write, each with the bits it writes when a
+/// constant offset gives them; `None` when it may write any bits: at a
+/// dynamic offset, or in a call. The frontend makes no native kernels (see
+/// [`super::written_objects`]).
+fn written_bits<A>(
+    instruction: &SIRInstruction<A>,
+) -> impl Iterator<Item = (&A, Option<BitAccess>)> {
+    let (exact, whole) = match instruction.state_writes() {
+        celox_sir::StateAccess::Access(write) => {
+            let bits = write
+                .offset
+                .constant_bit_offset()
+                .zip(write.width.checked_sub(1))
+                .and_then(|(lsb, tail)| Some(BitAccess::new(lsb, lsb.checked_add(tail)?)));
+            (Some((write.addr, bits)), None)
+        }
+        access => (
+            None,
+            Some(
+                access
+                    .objects()
+                    .expect("the frontend makes no native kernels"),
+            ),
+        ),
+    };
+    exact
+        .into_iter()
+        .chain(whole.into_iter().flatten().map(|object| (object, None)))
+}
+
+/// The variables `unit` loads, and those its calls read.
 fn unit_loads(unit: &ExecutionUnit<RegionedAbsoluteAddr>, loads: &mut HashSet<AbsoluteAddr>) {
     for block in unit.blocks.values() {
         for instruction in &block.instructions {
-            if let SIRInstruction::Load(_, addr, ..) = instruction {
-                loads.insert(addr.absolute_addr());
+            if matches!(
+                instruction,
+                SIRInstruction::Load(..) | SIRInstruction::Call { .. }
+            ) {
+                loads.extend(super::read_objects(instruction).map(|addr| addr.absolute_addr()));
             }
         }
     }
@@ -4483,12 +4490,7 @@ fn staged_nba_sites<'u>(
     for unit in units {
         for block in unit.blocks.values() {
             for instruction in &block.instructions {
-                match instruction {
-                    SIRInstruction::Store(dst, ..) | SIRInstruction::Commit(_, dst, ..) => {
-                        written.insert(dst.absolute_addr());
-                    }
-                    _ => {}
-                }
+                written.extend(super::written_objects(instruction).map(|dst| dst.absolute_addr()));
             }
         }
     }
@@ -5835,23 +5837,32 @@ fn analyze_clock_dependencies(
     for (domain_clock, eus) in &*eval_apply_ffs {
         for eu in eus {
             for bb in eu.blocks.values() {
-                for inst in &bb.instructions {
-                    if let SIRInstruction::Store(target_addr, ..) = inst {
-                        // Direct sequential dependency: the target is driven by this clock
-                        let abs = target_addr.absolute_addr();
-                        let canonical_target = clock_domains.get(&abs).copied().unwrap_or(abs);
+                // The domain's stores, and what its calls write.
+                let targets = bb
+                    .instructions
+                    .iter()
+                    .filter(|inst| {
+                        matches!(
+                            inst,
+                            SIRInstruction::Store(..) | SIRInstruction::Call { .. }
+                        )
+                    })
+                    .flat_map(super::written_objects);
+                for target_addr in targets {
+                    // Direct sequential dependency: the target is driven by this clock
+                    let abs = target_addr.absolute_addr();
+                    let canonical_target = clock_domains.get(&abs).copied().unwrap_or(abs);
 
-                        ff_outputs.insert(abs);
-                        ff_writers.entry(abs).or_default().insert(*domain_clock);
+                    ff_outputs.insert(abs);
+                    ff_writers.entry(abs).or_default().insert(*domain_clock);
 
-                        if canonical_target != *domain_clock
-                            && unique_clocks.contains(&canonical_target)
-                        {
-                            clock_deps
-                                .entry(canonical_target)
-                                .or_default()
-                                .insert(*domain_clock);
-                        }
+                    if canonical_target != *domain_clock
+                        && unique_clocks.contains(&canonical_target)
+                    {
+                        clock_deps
+                            .entry(canonical_target)
+                            .or_default()
+                            .insert(*domain_clock);
                     }
                 }
             }
@@ -6155,23 +6166,16 @@ fn analyze_clock_dependencies(
         for unit in eval_apply_ffs.get(domain).into_iter().flatten() {
             for block in unit.blocks.values() {
                 for instruction in &block.instructions {
-                    match instruction {
-                        SIRInstruction::Load(_, address, ..) => {
-                            reads.insert(address.absolute_addr());
-                        }
-                        SIRInstruction::Store(address, ..) => {
-                            writes.insert(address.absolute_addr());
-                        }
-                        SIRInstruction::Commit(source, target, ..) => {
-                            reads.insert(source.absolute_addr());
-                            writes.insert(target.absolute_addr());
-                        }
-                        SIRInstruction::RuntimeEvent { .. }
-                        | SIRInstruction::CombCaptureEvent { .. }
-                        | SIRInstruction::CombCaptureEnableIfChanged { .. }
-                        | SIRInstruction::ExternCall { .. } => return None,
-                        _ => {}
+                    // Records, captures and external calls, a callee's too.
+                    if instruction.is_host_interaction() {
+                        return None;
                     }
+                    reads.extend(
+                        super::read_objects(instruction).map(|address| address.absolute_addr()),
+                    );
+                    writes.extend(
+                        super::written_objects(instruction).map(|address| address.absolute_addr()),
+                    );
                 }
             }
         }
@@ -6188,12 +6192,10 @@ fn analyze_clock_dependencies(
                 .iter()
                 .flat_map(|unit| unit.blocks.values())
                 .flat_map(|block| &block.instructions)
-                .any(|instruction| match instruction {
-                    SIRInstruction::Load(_, address, ..) | SIRInstruction::Commit(address, ..) => {
-                        canonical(address.absolute_addr()) == domain
-                    }
-                    SIRInstruction::ExternCall { .. } => true,
-                    _ => false,
+                .any(|instruction| {
+                    instruction.host_effects().extern_calls
+                        || super::read_objects(instruction)
+                            .any(|address| canonical(address.absolute_addr()) == domain)
                 })
         })
         .map(|(domain, _)| canonical(*domain))
@@ -6281,14 +6283,10 @@ fn clock_cone_inputs(
         reads.extend(inputs.into_iter().map(|input| input.id));
         if let LogicPathTarget::Process { unit, .. } = &path.target {
             for instruction in unit.blocks.values().flat_map(|block| &block.instructions) {
-                match instruction {
-                    SIRInstruction::Load(_, source, ..) | SIRInstruction::Commit(source, ..) => {
-                        reads.insert(*source);
-                    }
-                    SIRInstruction::ExternCall { .. } => {
-                        opaque.insert(target.id);
-                    }
-                    _ => {}
+                reads.extend(super::read_objects(instruction).copied());
+                // An external call, a callee's too.
+                if instruction.host_effects().extern_calls {
+                    opaque.insert(target.id);
                 }
             }
         }
@@ -6590,6 +6588,120 @@ mod tests {
                 args: Vec::new(),
             });
         assert!(clock_cone_inputs(&[path, upstream], &arena, &clocks).is_empty());
+    }
+
+    /// A call of a function with these effects.
+    fn call<A>(reads: Vec<A>, writes: Vec<A>, extern_calls: bool) -> SIRInstruction<A> {
+        SIRInstruction::Call {
+            function: celox_sir::FunctionId(0),
+            frame: celox_sir::RegisterId(0),
+            args: Vec::new(),
+            outputs: Vec::new(),
+            dst: None,
+            effects: std::sync::Arc::new(celox_sir::CallEffects {
+                reads,
+                writes,
+                triggers: Vec::new(),
+                host: celox_sir::HostEffects {
+                    extern_calls,
+                    ..Default::default()
+                },
+                kernel: false,
+            }),
+        }
+    }
+
+    fn unit_of<A>(instructions: Vec<SIRInstruction<A>>) -> ExecutionUnit<A> {
+        ExecutionUnit {
+            entry_block_id: celox_sir::BlockId(0),
+            blocks: [(
+                celox_sir::BlockId(0),
+                BasicBlock {
+                    id: celox_sir::BlockId(0),
+                    params: Vec::new(),
+                    instructions,
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: HashMap::default(),
+        }
+    }
+
+    /// A clock cone reads what a procedural path's calls read, and an
+    /// external call in a callee makes it opaque as one in the path does.
+    #[test]
+    fn clock_cones_include_what_calls_read() {
+        let mut arena = SLTNodeArena::new();
+        let zero = arena
+            .alloc(celox_slt::SLTNode::Constant(
+                0u8.into(),
+                0u8.into(),
+                1,
+                false,
+            ))
+            .unwrap();
+        let path = |unit| LogicPath {
+            target: LogicPathTarget::Process {
+                process: addr(0),
+                after_initials: false,
+                sensitivity_counters: Vec::new(),
+                startup: None,
+                target: VarAtomBase::new(addr(0), 0, 0),
+                unit: Box::new(unit),
+            },
+            transparent_copy: false,
+            sources: HashSet::default(),
+            previous_sources: HashSet::default(),
+            address_sources: HashSet::default(),
+            local_inputs: Vec::new(),
+            order_before: HashSet::default(),
+            comb_capture_enable_sites: Vec::new(),
+            comb_capture_enable_always: false,
+            pre_lower_nodes: Vec::new(),
+            expr: zero,
+        };
+        let clocks = [addr(0)].into_iter().collect();
+        let reading = path(unit_of(vec![call(vec![addr(5)], vec![addr(6)], false)]));
+        assert_eq!(
+            clock_cone_inputs(&[reading], &arena, &clocks)[&addr(0)],
+            vec![addr(0), addr(5)]
+        );
+        let opaque = path(unit_of(vec![call(Vec::new(), Vec::new(), true)]));
+        assert!(clock_cone_inputs(&[opaque], &arena, &clocks).is_empty());
+    }
+
+    /// The loads and the written bits of a unit count a call's reads and
+    /// writes, each of a whole object.
+    #[test]
+    fn unit_loads_and_written_bits_include_calls() {
+        let stable = |var| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, addr(var));
+        let unit = unit_of(vec![
+            call(vec![stable(1)], vec![stable(2)], false),
+            SIRInstruction::Load(celox_sir::RegisterId(1), stable(3), SIROffset::Static(0), 1),
+        ]);
+        let mut loads = HashSet::default();
+        unit_loads(&unit, &mut loads);
+        assert_eq!(loads, [addr(1), addr(3)].into_iter().collect());
+        let instructions = &unit.blocks[&celox_sir::BlockId(0)].instructions;
+        assert_eq!(
+            written_bits(&instructions[0]).collect::<Vec<_>>(),
+            [(&stable(2), None)]
+        );
+        let store = SIRInstruction::Store(
+            stable(4),
+            SIROffset::Static(3),
+            2,
+            celox_sir::RegisterId(1),
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(
+            written_bits(&store).collect::<Vec<_>>(),
+            [(&stable(4), Some(BitAccess::new(3, 4)))]
+        );
+        assert_eq!(written_bits(&instructions[1]).count(), 0);
     }
 
     fn addr(var: u32) -> AbsoluteAddr {

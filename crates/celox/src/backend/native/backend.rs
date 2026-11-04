@@ -2319,11 +2319,22 @@ fn is_comb_runtime_effect(instruction: &SIRInstruction<RegionedAbsoluteAddr>) ->
     instruction.is_host_interaction()
 }
 
+/// Put the runtime effects of `unit` between its split `store_units`, each
+/// where it ran among the stores. The parts keep the unit's other
+/// instructions, so it must make no call (see `split_comb_execution_unit`),
+/// which would run in every part.
 fn interleave_comb_runtime_effects(
     unit: &ExecutionUnit<RegionedAbsoluteAddr>,
     ordered_stores: &[(BlockId, usize)],
     store_units: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
 ) -> Vec<ExecutionUnit<RegionedAbsoluteAddr>> {
+    debug_assert!(
+        unit.blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .all(|instruction| instruction.call_effects().is_none()),
+        "a unit with calls is not split"
+    );
     let ordered_sites = comb_block_execution_order(unit)
         .into_iter()
         .flat_map(|block_id| {
@@ -2387,6 +2398,18 @@ fn interleave_comb_runtime_effects(
 fn split_comb_execution_unit(
     unit: &ExecutionUnit<RegionedAbsoluteAddr>,
 ) -> Vec<ExecutionUnit<RegionedAbsoluteAddr>> {
+    // A unit is split at its Stores and Commits, each part recomputing what
+    // its store needs. A call is a writer the parts could neither split at
+    // nor repeat, so a unit that makes one stays whole: overrides are then
+    // reapplied after the unit rather than after each of its stores.
+    if unit
+        .blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+        .any(|instruction| instruction.call_effects().is_some())
+    {
+        return vec![unit.clone()];
+    }
     if unit.blocks.len() != 1 {
         let definitions = unit
             .blocks
@@ -4721,6 +4744,73 @@ mod tests {
             installed, new_table as u64,
             "generated code must use its own helper and kernel table"
         );
+    }
+
+    /// A unit is split at each of its stores, except one that makes a
+    /// call, which no part could repeat or leave out.
+    #[test]
+    fn units_with_calls_are_not_split_at_their_stores() {
+        let addr = |id| {
+            RegionedAbsoluteAddr::from_absolute_addr(
+                celox_design::STABLE_REGION,
+                crate::ir::AbsoluteAddr {
+                    instance_id: celox_design::InstanceId(0),
+                    var_id: celox_design::StateObjectId(id),
+                },
+            )
+        };
+        let store = |id, value| {
+            SIRInstruction::Store(
+                addr(id),
+                celox_sir::SIROffset::Static(0),
+                8,
+                RegisterId(value),
+                Vec::new(),
+                Vec::new(),
+            )
+        };
+        let unit = |instructions| ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [(
+                BlockId(0),
+                celox_sir::BasicBlock {
+                    id: BlockId(0),
+                    params: Vec::new(),
+                    instructions,
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: (0..2)
+                .map(|id| {
+                    (
+                        RegisterId(id),
+                        celox_sir::RegisterType::Bit {
+                            width: 8,
+                            signed: false,
+                        },
+                    )
+                })
+                .collect(),
+        };
+        let stores = vec![
+            SIRInstruction::Imm(RegisterId(0), celox_sir::SIRValue::new(1u8)),
+            store(1, 0),
+            store(2, 0),
+        ];
+        assert_eq!(split_comb_execution_unit(&unit(stores.clone())).len(), 2);
+        let mut calling = stores;
+        calling.push(SIRInstruction::Call {
+            function: celox_sir::FunctionId(0),
+            frame: RegisterId(1),
+            args: Vec::new(),
+            outputs: Vec::new(),
+            dst: None,
+            effects: Default::default(),
+        });
+        let calling = unit(calling);
+        assert_eq!(split_comb_execution_unit(&calling), vec![calling]);
     }
 
     #[test]

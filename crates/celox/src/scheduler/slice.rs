@@ -52,8 +52,8 @@ struct SelectedBlock {
 impl Selection<'_> {
     fn loads(&self) -> impl Iterator<Item = AbsoluteAddr> + '_ {
         self.blocks.iter().flat_map(|(id, block)| {
-            block.instructions.iter().filter_map(|&position| {
-                loaded_address(&self.source.blocks[id].instructions[position])
+            block.instructions.iter().flat_map(|&position| {
+                loaded_addresses(&self.source.blocks[id].instructions[position])
             })
         })
     }
@@ -281,9 +281,9 @@ impl<'a> CombSlicer<'a> {
         for (unit_index, unit) in units.iter().enumerate() {
             for (&id, block) in &unit.blocks {
                 for (position, inst) in block.instructions.iter().enumerate() {
-                    if let Some(write) = inst.memory_write() {
+                    for write in written_storage(inst) {
                         stores
-                            .entry(representative(write.addr.absolute_addr()))
+                            .entry(representative(write.absolute_addr()))
                             .or_default()
                             .push((unit_index, id, position));
                     }
@@ -353,16 +353,16 @@ impl<'a> CombSlicer<'a> {
                     let register = instruction
                         .defined_register()
                         .map(|register| Need::Register(unit, register));
-                    let storage = instruction.memory_write().map(|write| {
-                        Need::Storage(self.representative(write.addr.absolute_addr()))
-                    });
+                    // A call's every write depends on its every read.
+                    let storage = written_storage(instruction)
+                        .map(|write| Need::Storage(self.representative(write.absolute_addr())));
                     for target in register.into_iter().chain(storage) {
                         edge(block_need, target);
                         instruction
                             .for_each_use(|register| edge(Need::Register(unit, register), target));
-                        if let Some(read) = instruction.memory_read() {
+                        for read in read_storage(instruction) {
                             edge(
-                                Need::Storage(self.representative(read.addr.absolute_addr())),
+                                Need::Storage(self.representative(read.absolute_addr())),
                                 target,
                             );
                         }
@@ -439,12 +439,8 @@ impl<'a> CombSlicer<'a> {
         let writes: HashSet<_> = units
             .iter()
             .flat_map(instructions)
-            .filter_map(|inst| match inst {
-                SIRInstruction::Store(target, ..) | SIRInstruction::Commit(_, target, ..) => {
-                    Some(storage(target.absolute_addr()))
-                }
-                _ => None,
-            })
+            .flat_map(written_storage)
+            .map(|target| storage(target.absolute_addr()))
             .collect();
         let retained = retained_storage(&units, &storage, &writes);
         if !retained.is_empty() {
@@ -555,12 +551,7 @@ impl<'a> CombSlicer<'a> {
                     {
                         kept[unit].insert((block, position));
                         let inst = &self.units[unit].blocks[&block].instructions[position];
-                        inst.for_each_use(|register| work.push(Need::Register(unit, register)));
-                        if let Some(read) = inst.memory_read() {
-                            work.push(Need::Storage(
-                                self.representative(read.addr.absolute_addr()),
-                            ));
-                        }
+                        self.keep(unit, inst, work);
                         work.push(Need::Block(unit, block));
                     }
                 }
@@ -569,12 +560,7 @@ impl<'a> CombSlicer<'a> {
                         Some(&Definition::Instruction(block, position)) => {
                             kept[unit].insert((block, position));
                             let inst = &self.units[unit].blocks[&block].instructions[position];
-                            inst.for_each_use(|register| work.push(Need::Register(unit, register)));
-                            if let Some(read) = inst.memory_read() {
-                                work.push(Need::Storage(
-                                    self.representative(read.addr.absolute_addr()),
-                                ));
-                            }
+                            self.keep(unit, inst, work);
                             work.push(Need::Block(unit, block));
                         }
                         Some(&Definition::Parameter(block, position)) => {
@@ -607,6 +593,23 @@ impl<'a> CombSlicer<'a> {
                         work.push(Need::Block(unit, controller));
                     }
                 }
+            }
+        }
+    }
+
+    /// What a kept instruction of `unit` needs: its operands and the
+    /// storage it reads. A kept call writes all it writes, in a slice as in
+    /// the settle, so the slice needs the rest of the settle's writes of that
+    /// storage too: they and the call leave it as the settle does, where the
+    /// call alone could leave a value the settle overwrites.
+    fn keep(&self, unit: usize, inst: &SIRInstruction<RegionedAbsoluteAddr>, work: &mut Vec<Need>) {
+        inst.for_each_use(|register| work.push(Need::Register(unit, register)));
+        for read in read_storage(inst) {
+            work.push(Need::Storage(self.representative(read.absolute_addr())));
+        }
+        if inst.call_effects().is_some() {
+            for write in written_storage(inst) {
+                work.push(Need::Storage(self.representative(write.absolute_addr())));
             }
         }
     }
@@ -850,6 +853,125 @@ mod tests {
 
     fn stable(id: u32) -> RegionedAbsoluteAddr {
         RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, address(id))
+    }
+
+    /// A call with these effects, of no arguments and no result.
+    fn call(reads: Vec<u32>, writes: Vec<u32>) -> SIRInstruction<RegionedAbsoluteAddr> {
+        SIRInstruction::Call {
+            function: celox_sir::FunctionId(0),
+            frame: RegisterId(0),
+            args: Vec::new(),
+            outputs: Vec::new(),
+            dst: None,
+            effects: std::sync::Arc::new(celox_sir::CallEffects {
+                reads: reads.into_iter().map(stable).collect(),
+                writes: writes.into_iter().map(stable).collect(),
+                ..Default::default()
+            }),
+        }
+    }
+
+    /// A settle whose first unit calls a function that reads 0 and writes 1
+    /// and 2, and whose second stores 2 again from 3 and 3 into 4 and 5 from
+    /// 1.
+    fn calling_settle() -> [Unit; 2] {
+        let unit = |instructions: Vec<SIRInstruction<RegionedAbsoluteAddr>>| {
+            let mut b = Builder::new();
+            let frame = b.alloc_bit(32, false);
+            b.emit(SIRInstruction::Imm(frame, celox_sir::SIRValue::new(0u8)));
+            for instruction in instructions {
+                b.emit(instruction);
+            }
+            b.seal_block(SIRTerminator::Return);
+            let (blocks, mut register_map, _) = b.drain();
+            for register in 1..3 {
+                register_map.insert(
+                    RegisterId(register),
+                    celox_sir::RegisterType::Bit {
+                        width: 8,
+                        signed: false,
+                    },
+                );
+            }
+            Unit {
+                entry_block_id: BlockId(0),
+                blocks,
+                register_map,
+            }
+        };
+        let load = |register, id| {
+            SIRInstruction::Load(RegisterId(register), stable(id), SIROffset::Static(0), 8)
+        };
+        let store = |id, register| {
+            SIRInstruction::Store(
+                stable(id),
+                SIROffset::Static(0),
+                8,
+                RegisterId(register),
+                Vec::new(),
+                Vec::new(),
+            )
+        };
+        [
+            unit(vec![call(vec![0], vec![1, 2])]),
+            unit(vec![
+                load(1, 3),
+                store(2, 1),
+                store(4, 1),
+                load(2, 1),
+                store(5, 2),
+            ]),
+        ]
+    }
+
+    /// The slicer sees what a call reads and writes through its effects:
+    /// a slice of what it writes keeps it, with what it reads, and with the
+    /// settle's other writes of what else it writes; a slice of storage it
+    /// leaves alone does not.
+    #[test]
+    fn slices_keep_calls_by_their_effects() {
+        let units = calling_settle();
+        let slicer = CombSlicer::new(&units, HashMap::default());
+        assert!(slicer.stores(address(1)) && slicer.stores(address(2)));
+        let calls = |units: &[Unit]| {
+            units
+                .iter()
+                .flat_map(instructions)
+                .filter(|inst| inst.call_effects().is_some())
+                .count()
+        };
+        // Storage 5 is computed from 1, which only the call writes.
+        let slice = slicer.slice([address(5)]);
+        assert_eq!(calls(&slice), 1);
+        // The call writes 2 too, which the second unit overwrites: the slice
+        // keeps that store, so 2 ends as the settle leaves it.
+        assert!(slice.iter().flat_map(instructions).any(|inst| matches!(
+            inst,
+            SIRInstruction::Store(target, ..) if *target == stable(2)
+        )));
+        assert_eq!(
+            slicer.input_signals([address(5)]),
+            HashSet::from_iter([address(0), address(1), address(3)])
+        );
+        // Storage 4 is computed from 3 alone.
+        let slice = slicer.slice([address(4)]);
+        assert_eq!(calls(&slice), 0);
+        assert_eq!(
+            slicer.input_signals([address(4)]),
+            HashSet::from_iter([address(3)])
+        );
+        // A change of what the call reads changes all it writes.
+        let affected = slicer.affected_storage([address(0)]);
+        assert_eq!(
+            affected,
+            HashSet::from_iter([address(1), address(2), address(5)])
+        );
+        let (writes, inputs) = slicer.stateless_cone(address(4), None).unwrap();
+        assert_eq!(writes, HashSet::from_iter([address(4)]));
+        assert_eq!(inputs, HashSet::from_iter([address(3)]));
+        // 5 is computed from 1, which the call need not write on every path:
+        // its load may read what the last settle left.
+        assert!(slicer.stateless_cone(address(5), None).is_none());
     }
 
     #[test]

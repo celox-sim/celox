@@ -51,13 +51,17 @@ pub(crate) fn extract(
         let mut loads = HashMap::default();
         for block in unit.blocks.values() {
             for instruction in &block.instructions {
-                if matches!(
-                    instruction,
-                    SIRInstruction::ExternCall { .. }
-                        | SIRInstruction::RuntimeEvent { .. }
-                        | SIRInstruction::CombCaptureEvent { .. }
-                        | SIRInstruction::CombCaptureEnableIfChanged { .. }
-                ) {
+                if instruction.is_host_interaction() {
+                    return None;
+                }
+                // A call that reads or writes an alias is no wiring copy:
+                // it may read the clock's level or store an alias in any
+                // part, on any path.
+                if instruction.has_opaque_state_access()
+                    && instruction
+                        .opaque_accessed_objects()
+                        .is_none_or(|mut objects| objects.any(|address| is_alias(*address)))
+                {
                     return None;
                 }
                 if let Some(read) = instruction.memory_read() {
