@@ -1853,6 +1853,255 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1) (assert_eq total 11)
   (expect_output "3 10 20\n3 3\n2 2\n1 5 30\n11 2\n"))
+; A return statement's value is received by the function's result as an
+; assignment to it would be (IEEE 1800-2023 13.4.1), so an assignment
+; pattern takes its shape from the declared result type (10.9): a queue,
+; a dynamic or fixed array, an unpacked structure or a queue of them.
+(case returned_patterns_take_the_result_type
+  (source "returned_patterns.sv" #"
+module Top(output bit done);
+    typedef int queue_t[$];
+    typedef int array_t[];
+    typedef int fixed_t[3];
+    typedef struct { int x; byte y; } pair_t;
+    typedef pair_t pairs_t[$];
+    function automatic queue_t one(int data);
+        return '{data};
+    endfunction
+    function automatic array_t three(int v);
+        return '{v, 2 * v, 3 * v};
+    endfunction
+    function automatic fixed_t filled(int v);
+        return '{default: v};
+    endfunction
+    function automatic pair_t pair(int v);
+        return '{x: v, y: 8'd3};
+    endfunction
+    function automatic pairs_t pairs(int v);
+        return '{'{v, 1}, '{x: v + 1, y: 2}};
+    endfunction
+    class Cache;
+        function queue_t keys(int v);
+            return '{v, v + 1};
+        endfunction
+    endclass
+    initial begin
+        queue_t q;
+        array_t a;
+        fixed_t f;
+        pair_t p;
+        pairs_t ps;
+        Cache cache = new;
+        q = one(5);
+        $display("%0d %0d", q.size(), q[0]);
+        a = three(2);
+        $display("%0d %0d %0d", a.size(), a[0], a[2]);
+        f = filled(7);
+        $display("%0d %0d %0d", f[0], f[1], f[2]);
+        p = pair(9);
+        $display("%0d %0d", p.x, p.y);
+        ps = pairs(3);
+        $display("%0d %0d %0d %0d", ps.size(), ps[0].x, ps[1].x, ps[1].y);
+        q = cache.keys(6);
+        $display("%0d %0d %0d", q.size(), q[0], q[1]);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "1 5\n3 2 6\n7 7 7\n9 3\n2 3 4 2\n2 6 7\n"))
+; A container receives any value of a compatible container type, whatever
+; kind of expression gives it (IEEE 1800-2023 7.6, 13.4.1): a cast of a
+; stream or of another container, the result of a call, an element popped
+; from a queue of queues or a slice.
+(case containers_received_from_any_expression
+  (source "received.sv" #"
+module Top(output bit done);
+    typedef byte unsigned bytes_t[$];
+    typedef int queue_t[$];
+    typedef int array_t[];
+    typedef queue_t queues_t[$];
+    function automatic bytes_t to_bytes(int value);
+        return bytes_t'({>>{value}});
+    endfunction
+    function automatic queue_t from_array(array_t a);
+        return queue_t'(a);
+    endfunction
+    function automatic queue_t first(queues_t outer);
+        return outer.pop_front();
+    endfunction
+    function automatic queue_t tail(queue_t q);
+        return q[1:$];
+    endfunction
+    function automatic queue_t forward(queue_t q);
+        return tail(q);
+    endfunction
+    initial begin
+        bytes_t b;
+        queue_t q;
+        array_t a;
+        queues_t qs;
+        b = to_bytes(32'h01020304);
+        $display("%0d %0d %0d", b.size(), b[0], b[3]);
+        a = '{5, 6};
+        q = from_array(a);
+        $display("%0d %0d", q.size(), q[1]);
+        qs = '{'{7}, '{8, 9}};
+        q = first(qs);
+        $display("%0d %0d", q.size(), q[0]);
+        q = '{1, 2, 3};
+        q = forward(q);
+        $display("%0d %0d", q.size(), q[0]);
+        q = a;
+        $display("%0d %0d", q.size(), q[0]);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "4 1 4\n2 6\n1 7\n2 2\n2 5\n"))
+; A container assigned to one whose elements are bounded queues assigns
+; each element to its queue, which keeps the elements up to its bound (IEEE
+; 1800-2023 7.6, 7.10.5), at every level, through a return too; the copy
+; leaves the source unchanged.
+(case nested_bounded_queues_are_assigned_elementwise
+  (source "nested.sv" #"
+module Top(output bit done);
+    typedef int bounded_t[$][$:1];
+    function automatic bounded_t limit(int q[$][$]);
+        return q;
+    endfunction
+    initial begin
+        int a[$][$], b[$][$];
+        int c[$][$:1];
+        int d[][$:1];
+        int s[$][$][$], t[$][$][$:1];
+        int n[string][$], m[string][$:1];
+        bounded_t r;
+        a = '{'{1, 2, 3}, '{4}};
+        c = a;
+        $display("%0d %0d %0d %0d %0d", c.size(), c[0].size(), c[1].size(), c[0][1], a[0].size());
+        d = a;
+        $display("%0d %0d", d.size(), d[0].size());
+        s = '{'{'{1, 2, 3}}, '{'{4, 5}, '{6}}};
+        t = s;
+        $display("%0d %0d %0d %0d", t[0][0].size(), t[1][0].size(), t[1][1].size(), t[1][0][1]);
+        n["x"] = '{1, 2, 3};
+        m = n;
+        $display("%0d %0d", m["x"].size(), m["x"][1]);
+        r = limit(a);
+        $display("%0d %0d", r[0].size(), r[1].size());
+        b = c;
+        b[0][0] = 9;
+        $display("%0d %0d %0d", b[0].size(), b[0][0], c[0][0]);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "2 2 1 2 3\n2 2\n2 2 1 5\n2 2\n2 1\n2 9 1\n"))
+; Every value of a container made from another container is converted to
+; the container's type, which keeps each queue to its bound (IEEE 1800-2023
+; 7.6, 7.10.5): an assignment, a return, an input argument, the source of
+; new[] (7.5.1), the items of a concatenation (10.10), the default of an
+; associative array and the elements of a pattern.
+(case container_values_are_converted_on_every_path
+  (source "paths.sv" #"
+module Top(output bit done);
+    typedef int bounded_t[$][$:1];
+    function automatic int sizes(bounded_t q);
+        return q[0].size() * 10 + q[1].size();
+    endfunction
+    function automatic bounded_t back(int q[$][$]);
+        return q;
+    endfunction
+    initial begin
+        int a[$][$], b[$][$];
+        bounded_t c;
+        int d[][$:1];
+        int n[string][$], m[string][$:1];
+        a = '{'{1, 2, 3}, '{4}};
+        c = a;
+        $display("%0d %0d", c[0].size(), c[1].size());
+        c = back(a);
+        $display("%0d %0d", sizes(c), sizes(a));
+        d = new[2](a);
+        $display("%0d %0d", d[0].size(), d[1].size());
+        b = {a, a};
+        c = {a, a};
+        $display("%0d %0d %0d %0d", b[2].size(), c.size(), c[0].size(), c[2].size());
+        c = {a[0], a[1], a[0]};
+        $display("%0d %0d %0d", c.size(), c[0].size(), c[2][1]);
+        n = '{default: '{7, 8, 9}};
+        m = n;
+        $display("%0d", m["z"].size());
+        m = '{default: '{7, 8, 9}};
+        $display("%0d", m["z"].size());
+        c = '{a[0], '{5, 6, 7}};
+        $display("%0d %0d", c[0].size(), c[1].size());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "2 1\n21 21\n2 1\n3 4 2 2\n3 2 2\n2\n2\n2 2\n"))
+; The operands of a conditional received by a container are received by it
+; as the conditional is (IEEE 1800-2023 10.8): the condition selects the one
+; evaluated (11.4.11), an assignment pattern takes the container's shape, and
+; the container receives a copy, whether it is assigned or returned.
+(case conditionals_received_by_containers
+  (source "conditionals.sv" #"
+module Top(output bit done);
+    typedef int queue_t[$];
+    class Item;
+    endclass
+    function automatic queue_t pick(bit c, queue_t a, queue_t b);
+        return c ? a : b;
+    endfunction
+    function automatic queue_t make(bit c, int v);
+        return c ? '{v, v + 1} : '{v};
+    endfunction
+    initial begin
+        queue_t a, b, q;
+        bit c = 1;
+        Item h;
+        chandle ch;
+        real r;
+        a = '{1, 2};
+        b = '{3};
+        q = c ? a : b;
+        $display("%0d %0d", q.size(), q[0]);
+        q = !c ? a : b;
+        $display("%0d %0d", q.size(), q[0]);
+        q = pick(1, a, b);
+        a[0] = 9;
+        $display("%0d %0d", q.size(), q[0]);
+        q = pick(0, a, b);
+        $display("%0d %0d", q.size(), q[0]);
+        q = make(1, 4);
+        $display("%0d %0d %0d", q.size(), q[0], q[1]);
+        q = make(0, 4);
+        $display("%0d %0d", q.size(), q[0]);
+        q = c ? '{7} : b;
+        $display("%0d %0d", q.size(), q[0]);
+        // The condition is a Boolean test of any type (11.4.11, 12.4).
+        h = new;
+        q = h ? a : b;
+        $display("%0d", q.size());
+        h = null;
+        r = 0.5;
+        q = h ? a : (r ? b : '{6, 7, 8});
+        $display("%0d %0d", q.size(), q[0]);
+        r = 0.0;
+        ch = null;
+        q = r ? a : ch ? b : '{6, 7, 8};
+        $display("%0d %0d", q.size(), q[0]);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "2 1\n1 3\n2 1\n1 3\n2 4 5\n1 4\n1 7\n2\n1 3\n3 6\n"))
 ; The loop variable of a foreach over an enumeration-indexed associative
 ; array has the index type (IEEE 1800-2023 12.7.3), so its enumeration
 ; methods apply (6.19.5).

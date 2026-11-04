@@ -88,10 +88,10 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
     /// Whether the body's variables are automatic by default.
     automatic: bool,
     task_timing: bool,
+    /// The shape of the function's result, the target of its return values:
+    /// patterns take their shape from it (10.9) and streams align to it
+    /// (11.4.14).
     return_shape: Option<VariableDimensions>,
-    /// The shape of any return type, which a returned stream is aligned to
-    /// (IEEE 1800-2023 11.4.14).
-    stream_return_shape: Option<VariableDimensions>,
     /// Whether the function's result is a chandle, `None` without a result.
     return_chandle: Option<bool>,
     pub(super) sensitivity_body: Vec<Stmt>,
@@ -455,7 +455,6 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             automatic,
             task_timing: false,
             return_shape: None,
-            stream_return_shape: None,
             return_chandle: None,
             sensitivity_body: Vec::new(),
             tree,
@@ -4378,11 +4377,11 @@ pub(super) fn lower_subroutine(
     if let (Some(name), Some(ty)) = (&return_var, &return_type) {
         formal_types.insert(name.clone(), scoped_type(ty.clone(), declaration_env));
     }
-    builder.stream_return_shape = return_type.as_ref().map(dimensions_from_type);
-    builder.return_shape = return_type
-        .as_ref()
-        .filter(|ty| ty.tagged_identity().is_some() || ty.unpacked_struct().is_some())
-        .map(dimensions_from_type);
+    // A return statement's value is received by the result as an assignment
+    // to it receives its value (IEEE 1800-2023 13.4.1): the declared result
+    // type is the target its patterns and other contextual operands take
+    // their shape from (10.9).
+    builder.return_shape = return_type.as_ref().map(dimensions_from_type);
     // An argument of unpacked structure type is passed as its flat value;
     // the body works on its members (see `unpacked_structs`).
     let mut aggregate_prologue = Vec::new();

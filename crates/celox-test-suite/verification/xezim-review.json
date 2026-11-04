@@ -1034,6 +1034,18 @@
     "sv_procedural_enum_typedef_specializations": {
       "title": "In a class method, a variable of an enumeration typedef declared in a begin-end block reads 0 after `e = Z`, and the static property of `Box #(local_e)` named in a later block with its own enumeration typedef `local_e` counts the calls of other specializations",
       "standard": "IEEE 1800-2023 6.19, 6.22.1, 8.25"
+    },
+    "sv_return_pattern_shapes": {
+      "title": "A function returning an assignment pattern drops elements that the declared result type gives the pattern: return '{default: v} for a result of type int [3] leaves elements 1 and 2 zero, and return '{'{v, 1}, '{x: v + 1, y: 2}} for a queue of unpacked structures gives two elements of zero members",
+      "standard": "IEEE 1800-2023 13.4.1, 10.9"
+    },
+    "sv_container_expression_values": {
+      "title": "A queue receiving the value of a conditional of queues or a queue slice returned by a function gets one element instead of the queue: with a = '{1, 2}, b = '{3} and c = 1, q = c ? a : b leaves q with the single element 0, as does q = tail('{1, 2, 3}) for a function returning q[1:$]",
+      "standard": "IEEE 1800-2023 11.4.11, 10.8, 7.10, 13.4.1"
+    },
+    "sv_nested_bounded_queues": {
+      "title": "Assigning a queue of queues to a queue of bounded queues loses elements below the bound: with a = '{'{1, 2, 3}, '{4}} and int c[$][$:1], c = a gives c[0] one element instead of the first two",
+      "standard": "IEEE 1800-2023 7.6, 7.10.5"
     }
   },
   "cases": [
@@ -5586,6 +5598,54 @@
       "classification": "xezim_bug",
       "bug": "sv_procedural_enum_typedef_specializations",
       "note": "User::sum names Box with the enumeration, structure and union typedefs of a begin-end block and with a bit vector typedef of the method, and a later block declares its own enumeration local_e: a typedef of an enumeration matches only itself (6.22.1 d), so it is another specialization (8.25), whose made is 1. With e = Z (2), sum is 3000 + 300 + 80 + 1 + 2 + 30000 + 100000 = 133383. xezim 0.11.4 gives 933381: e reads 0, and Box #(local_e)::made of the second block is 9. Printing the parts shows widths 3, 3, 8 and 6 as expected, e = 0, and made = 8 where the case calls that specialization once. Verilator 5.052 gives 333383: it takes the two local_e typedefs as one type (made 3)."
+    },
+    {
+      "suite": "sv",
+      "name": "containers::returned_patterns_take_the_result_type",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_return_pattern_shapes",
+      "note": "A return statement's value is received by the function's result as an assignment to it would be (13.4.1), so each pattern takes its shape from the declared result type (10.9): '{default: 7} returned as int [3] is 7 7 7 and the queue of structures is 2 3 4 2. The pinned xezim leaves the default elements after the first zero and the structure members zero; in the shared case its other returned patterns are wrong too. The adapter-free source prints [7 0 0] [2 0 0 0]; see verification/repros/sv_return_pattern_shapes_xezim.json. Verilator 5.052 passes the shared case and Celox prints [7 7 7] [2 3 4 2]."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::rejects_package_results_of_other_interfaces",
+      "status": "unexpected_accept",
+      "classification": "xezim_bug",
+      "bug": "sv_vif-X1",
+      "note": "25.9 allows assigning a virtual interface only from one of the same interface, and a return value is assigned to the result (13.4.1); a `virtual other_if` returned as `virtual bus_if` is not. xezim 0.11.3 elaborates `return other` without a diagnostic; Verilator 5.052 and Celox reject it."
+    },
+    {
+      "suite": "sv",
+      "name": "containers::conditionals_received_by_containers",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_container_expression_values",
+      "note": "The operands of a conditional received by a queue are received by it as the conditional is (10.8), and the condition selects the one returned (11.4.11), so q = c ? a : b with c = 1 copies a = '{1, 2}; the case prints 2 1 first. The pinned xezim gives q one element, 0 or 1, for every conditional of the case, assigned or returned. The adapter-free source prints [1 0] [1 0] [2 5] where [2 1] [2 2] [2 5] is required; see verification/repros/sv_container_expression_values_xezim.json. Verilator 5.052 passes the shared case and Celox prints [2 1]."
+    },
+    {
+      "suite": "sv",
+      "name": "containers::containers_received_from_any_expression",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_container_expression_values",
+      "note": "A container receives any value of a compatible container type (7.6), here returned by functions (13.4.1): a cast of a stream, a cast of a dynamic array, an element popped from a queue of queues and a slice, so the case prints 4 1 4 first. The pinned xezim gives each received queue one element, also for the direct assignment of the dynamic array in the shared case. The adapter-free source shows the conditional and the returned slice; see verification/repros/sv_container_expression_values_xezim.json. Verilator 5.052 rejects the static cast of a dynamic array to a queue as unsupported; Celox prints the expected output."
+    },
+    {
+      "suite": "sv",
+      "name": "containers::nested_bounded_queues_are_assigned_elementwise",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_nested_bounded_queues",
+      "note": "A container may be assigned one whose elements are of an equivalent type (7.6), and each element assigned to a bounded queue keeps the elements up to its bound (7.10.5), so c = a with int c[$][$:1] gives c[0] = '{1, 2}; the case prints 2 2 1 2 3 first. The pinned xezim gives c[0] one element, and the other levels, the associative array and the returned queue are wrong too. The adapter-free source prints [2 1 1 1] where [2 2 1 2] is required; see verification/repros/sv_nested_bounded_queues.json. Verilator 5.052 generates C++ that does not compile; Celox prints [2 2 1 2]."
+    },
+    {
+      "suite": "sv",
+      "name": "containers::container_values_are_converted_on_every_path",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_nested_bounded_queues",
+      "note": "Every container value made from another container is converted to the container's type (7.6), which keeps each queue to its bound (7.10.5): through an assignment, a return, an input argument, the source of new[] (7.5.1), the items of a concatenation (10.10), an associative array's default and a pattern's elements; the case prints 2 1 first. The pinned xezim gets the nested queues of every path wrong, also of the unbounded concatenation. See verification/repros/sv_nested_bounded_queues.json; Verilator 5.052 generates C++ that does not compile, and Celox prints the expected output."
     }
   ]
 }

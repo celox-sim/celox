@@ -1042,6 +1042,50 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "execute",
                             "assert_eq sum: expected 0x20907, got 0x51647",
                         ),
+                        ("icarus", "containers::returned_patterns_take_the_result_type") => (
+                            "compile_error",
+                            "compile",
+                            "Unpacked structs not supported.",
+                        ),
+                        ("xezim", "containers::returned_patterns_take_the_result_type") => (
+                            "mismatch",
+                            "execute",
+                            "54, 52, 32, 50, 10, 49, 32, 49, 32, 49, 10]",
+                        ),
+                        ("icarus", "containers::conditionals_received_by_containers") => {
+                            ("compile_error", "compile", "source_0.sv:16: syntax error")
+                        }
+                        ("xezim", "containers::conditionals_received_by_containers") => (
+                            "mismatch",
+                            "execute",
+                            "49, 10, 49, 32, 49, 10, 49, 32, 48, 10]",
+                        ),
+                        ("verilator", "containers::containers_received_from_any_expression") => (
+                            "compile_error",
+                            "compile",
+                            "Unsupported: static cast to 'int$[$]' from 'int$[]'",
+                        ),
+                        ("icarus", "containers::containers_received_from_any_expression") => (
+                            "compile_error",
+                            "compile",
+                            "Streaming concatenation not supported.",
+                        ),
+                        ("xezim", "containers::containers_received_from_any_expression") => {
+                            ("mismatch", "execute", "49, 32, 49, 10, 49, 32, 48, 10]")
+                        }
+                        (
+                            "icarus",
+                            "containers::nested_bounded_queues_are_assigned_elementwise",
+                        ) => ("compile_error", "compile", "is not yet supported."),
+                        ("xezim", "containers::nested_bounded_queues_are_assigned_elementwise") => {
+                            ("mismatch", "execute", "10, 49, 32, 49, 32, 49, 10]")
+                        }
+                        ("icarus", "containers::container_values_are_converted_on_every_path") => {
+                            ("compile_error", "compile", "source_0.sv:30: syntax error")
+                        }
+                        ("xezim", "containers::container_values_are_converted_on_every_path") => {
+                            ("mismatch", "execute", "10, 48, 10, 49, 32, 49, 10]")
+                        }
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

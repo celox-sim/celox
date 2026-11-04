@@ -34,6 +34,7 @@ pub(in crate::ast) fn of_type(
             .map(|range| (range.left(), range.right()))
             .collect(),
         keyword: ty.spelling.keyword_of(),
+        chandle: ty.chandle,
     };
     let unpacked = ty
         .unpacked_ranges
@@ -84,6 +85,7 @@ pub(in crate::ast) fn of_shape(
             .map(|dimension| (&dimension.left, &dimension.right))
             .collect(),
         keyword: None,
+        chandle: shape.chandle,
     };
     let unpacked = shape
         .unpacked
@@ -110,6 +112,7 @@ struct Parts<'a> {
     signed_element_depth: Option<usize>,
     packed: Vec<(&'a ConstExpr, &'a ConstExpr)>,
     keyword: Option<&'static str>,
+    chandle: bool,
 }
 
 impl Parts<'_> {
@@ -187,6 +190,9 @@ impl Parts<'_> {
             return Some(TyData::UnpackedStruct(
                 self.aggregate_decl(aggregate.identity(), members),
             ));
+        }
+        if self.chandle {
+            return Some(TyData::Chandle);
         }
         let four_state = match self.kind {
             TypeKind::Real => return Some(TyData::Real),

@@ -166,7 +166,8 @@ impl Heap {
             | crate::containers::CONCAT
             | crate::containers::SLICE
             | crate::containers::WITH_DEFAULT
-            | crate::containers::SHUFFLE) => self.container_call(op, parameter, a, b, c),
+            | crate::containers::SHUFFLE
+            | crate::containers::BOUND) => self.container_call(op, parameter, a, b, c),
             op @ crate::streams::NEW..=crate::streams::TRUNCATE => {
                 self.stream_call(op, parameter, a, b, c)
             }

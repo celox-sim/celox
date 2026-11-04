@@ -163,18 +163,23 @@ pub(super) fn with_dimensions(
         ) || handle.is_some(),
         handle,
     };
+    Ok(of(ContainerType {
+        key: index_type,
+        layout,
+        element: base,
+        record,
+    }))
+}
+
+/// The type of a container of type `container`: a heap handle.
+fn of(container: ContainerType) -> Type {
     let mut ty = Type::new(TypeKind::Object);
     ty.packed_ranges.push(PackedRange::new(
         ConstExpr::Literal("31".into()),
         ConstExpr::Literal("0".into()),
     ));
-    ty.container = Some(Arc::new(ContainerType {
-        key: index_type,
-        layout,
-        element: base,
-        record,
-    }));
-    Ok(ty)
+    ty.container = Some(Arc::new(container));
+    ty
 }
 
 pub(super) fn native_type(
@@ -330,6 +335,20 @@ pub(super) fn assignment(
 ) -> Converted<Expr> {
     let native = tree.declarations();
     let root = expression_binding::ungroup(root, native);
+    // The operands of a conditional received by a container are received by
+    // it as the conditional is (IEEE 1800-2023 10.8): the conditional is
+    // bound as any other, its condition a Boolean test, with the container
+    // as the target of its operands.
+    if matches!(native.expression(root).kind, ExprKind::Conditional { .. }) {
+        return expression_binding::bind_value(
+            root,
+            native,
+            tree,
+            session,
+            dims,
+            Some(&procedural::dimensions_from_type(&of(target.clone()))),
+        );
+    }
     if let Some((dimension, initializer)) = dynamic_array_new(root, native) {
         if target.layout.kind != ContainerKind::Dynamic {
             return Err(unsupported("new[] requires a dynamic array"));
@@ -345,7 +364,12 @@ pub(super) fn assignment(
             }
             None => Expr::Literal("0".into()),
         };
-        return Ok(call(ContainerOp::New, target.layout, vec![size, init]));
+        // The elements copied from `src` are assigned to the elements of
+        // the new array (7.5.1), converted as any container value is.
+        return Ok(inner_levels(
+            call(ContainerOp::New, target.layout, vec![size, init]),
+            target,
+        ));
     }
     if matches!(target.layout.kind, ContainerKind::Associative { .. })
         && let ExprKind::Pattern {
@@ -388,7 +412,14 @@ pub(super) fn assignment(
         let mut values = Vec::with_capacity(items.len());
         for id in items {
             match native_type(id, native, tree, session, dims)? {
-                Some(item) if concatenation && target.element.container.is_none() => {
+                // An item that is itself an array of the target's elements
+                // contributes them; of a target whose elements are
+                // containers, an item of the element type is one element.
+                Some(item)
+                    if concatenation
+                        && (target.element.container.is_none()
+                            || array_item(id, native, tree, session, dims, target)) =>
+                {
                     if matches!(item.layout.kind, ContainerKind::Associative { .. }) {
                         return Err(unsupported(
                             "associative array in an unpacked array concatenation",
@@ -405,24 +436,79 @@ pub(super) fn assignment(
             }
         }
         if parts.iter().any(Option::is_some) {
-            return Ok(classes::object_call(
-                ObjectOp::Concat(Box::new(ContainerConcat {
-                    result: target.layout,
-                    parts,
-                })),
-                values,
+            return Ok(inner_levels(
+                classes::object_call(
+                    ObjectOp::Concat(Box::new(ContainerConcat {
+                        result: target.layout,
+                        parts,
+                    })),
+                    values,
+                ),
+                target,
             ));
         }
         return Ok(call(ContainerOp::Literal, target.layout, values));
     }
     check_compatible(root, native, tree, session, dims, target)?;
-    Ok(call(
-        ContainerOp::Convert,
-        target.layout,
-        vec![expression_binding::value(
-            root, native, tree, session, dims,
-        )?],
+    Ok(convert(
+        expression_binding::value(root, native, tree, session, dims)?,
+        target,
     ))
+}
+
+/// Whether item `id` of an unpacked array concatenation received by
+/// `target` is an array whose elements it contributes (10.10): one that
+/// may be assigned to `target` itself.
+fn array_item(
+    id: ExprId,
+    native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+    target: &ContainerType,
+) -> bool {
+    let Ok(source) = expression_types::type_of(tree, session, id, native, dims) else {
+        return false;
+    };
+    let Some(target) = semantic_types::of_type(
+        &mut session.types,
+        &tree.functions,
+        &of(target.clone()),
+        &dims.const_env,
+    ) else {
+        return false;
+    };
+    session.types.assignable_array(source, target).is_ok()
+}
+
+/// Container `value`, of a type that may be assigned to `target` (7.6),
+/// converted to `target`: every path that makes a container value of
+/// `target` from another container's goes through this or, when its
+/// operation already makes the outer container of `target`, through
+/// [`inner_levels`].
+pub(super) fn convert(value: Expr, target: &ContainerType) -> Expr {
+    inner_levels(
+        call(ContainerOp::Convert, target.layout, vec![value]),
+        target,
+    )
+}
+
+/// Container `value`, converted to `target` at its outer level, converted
+/// at each inner level too: a container whose elements are equivalent to
+/// the target's (7.6) differs from them at most in the bounds of queues,
+/// and each element assigned to a bounded queue is kept to its bound
+/// (IEEE 1800-2023 7.10.5), the default of an associative array included.
+fn inner_levels(mut value: Expr, target: &ContainerType) -> Expr {
+    let mut depth = 0;
+    let mut level = target;
+    while let Some(inner) = level.element.container.as_deref() {
+        depth += 1;
+        if matches!(inner.layout.kind, ContainerKind::Queue { capacity } if capacity != 0) {
+            value = call(ContainerOp::Bound { depth }, inner.layout, vec![value]);
+        }
+        level = inner;
+    }
+    value
 }
 /// An output or inout container formal is copied back to its actual, and an
 /// inout one is copied in from it, as the handle of its value: the actual is
@@ -438,19 +524,37 @@ pub(super) fn check_written_actual(
 ) -> Converted<()> {
     let native = tree.declarations();
     check_compatible(id, native, tree, session, dims, formal)?;
-    let actual =
-        native_type(id, native, tree, session, dims)?.expect("checked by `check_compatible`");
+    let actual = native_type(id, native, tree, session, dims)?
+        .ok_or_else(|| unsupported("output or inout container argument that is not a variable"))?;
     let bound = |kind| match kind {
         ContainerKind::Queue { capacity } => capacity,
         _ => 0,
     };
-    let (actual, formal) = (bound(actual.layout.kind), bound(formal.layout.kind));
-    if actual != 0 && actual != formal || inout && formal != 0 && formal != actual {
-        return Err(unsupported(
-            "output or inout container argument of another queue bound",
-        ));
+    // The formal is copied out as it is, without the conversion an
+    // assignment makes (see `convert`): its inner queues must have the
+    // actual's bounds.
+    let (mut actual, mut formal) = (&*actual, formal);
+    let mut outer = true;
+    loop {
+        let (a, f) = (bound(actual.layout.kind), bound(formal.layout.kind));
+        if if outer {
+            a != 0 && a != f || inout && f != 0 && f != a
+        } else {
+            a != f
+        } {
+            return Err(unsupported(
+                "output or inout container argument of another queue bound",
+            ));
+        }
+        match (
+            actual.element.container.as_deref(),
+            formal.element.container.as_deref(),
+        ) {
+            (Some(a), Some(f)) => (actual, formal) = (a, f),
+            _ => return Ok(()),
+        }
+        outer = false;
     }
-    Ok(())
 }
 
 fn check_compatible(
@@ -461,35 +565,38 @@ fn check_compatible(
     dims: &PackedDimensions,
     target: &ContainerType,
 ) -> Converted<()> {
-    let Some(source) = native_type(id, native, tree, session, dims)? else {
-        return Err(unsupported(
-            "container assignment requires a compatible container",
-        ));
-    };
-    // `logic` and `reg` denote the same type (IEEE 1800-2023 6.11.1).
-    let same = |a: &Option<Type>, b: &Option<Type>| {
-        let normal = |ty: &Option<Type>| {
-            ty.clone().map(|mut ty| {
-                if ty.kind == TypeKind::Reg {
-                    ty.kind = TypeKind::Logic;
-                }
-                ty
-            })
-        };
-        normal(a) == normal(b)
-    };
-    if !same(&source.key, &target.key)
-        || !same(&Some(source.element.clone()), &Some(target.element.clone()))
-        || match (source.layout.kind, target.layout.kind) {
-            (ContainerKind::Associative { .. }, _) | (_, ContainerKind::Associative { .. }) => {
-                source.layout.kind != target.layout.kind
-            }
-            _ => false,
+    // The type system decides, from the value's own type whatever the kind
+    // of expression it is: a container is assigned a dynamic array, queue or
+    // associative array whose elements are equivalent to its elements, and
+    // an associative array only one with an equivalent index type (IEEE
+    // 1800-2023 7.6, 7.9.9).
+    let incompatible = || unsupported("container assignment requires a compatible container");
+    let source =
+        expression_types::type_of(tree, session, id, native, dims).map_err(|_| incompatible())?;
+    // A fixed-size array is not a heap container to convert from.
+    if !matches!(
+        session.types.data(source),
+        semantic_types::TyData::Array {
+            kind: semantic_types::ArrayKind::Dynamic
+                | semantic_types::ArrayKind::Queue { .. }
+                | semantic_types::ArrayKind::Associative { .. },
+            ..
         }
-    {
-        return Err(unsupported("incompatible dynamic container assignment"));
+    ) {
+        return Err(incompatible());
     }
-    Ok(())
+    let target = semantic_types::of_type(
+        &mut session.types,
+        &tree.functions,
+        &of(target.clone()),
+        &dims.const_env,
+    )
+    .ok_or_else(|| unsupported("type of a container"))?;
+    session
+        .types
+        .assignable_array(source, target)
+        .map(|_| ())
+        .map_err(|_| unsupported("incompatible dynamic container assignment"))
 }
 
 fn element_value(

@@ -552,7 +552,7 @@ impl BodyBuilder<'_, '_, '_> {
                             // A result of an unpacked array type is assigned
                             // like any array (IEEE 1800-2023 7.6, 13.4.1).
                             if let Some(target) = self
-                                .stream_return_shape
+                                .return_shape
                                 .as_ref()
                                 .filter(|shape| !shape.unpacked.is_empty())
                             {
@@ -589,11 +589,7 @@ impl BodyBuilder<'_, '_, '_> {
                                     self.tree,
                                     self.session,
                                     &self.dims,
-                                    if expression_binding::is_stream(id, native) {
-                                        self.stream_return_shape.as_ref()
-                                    } else {
-                                        self.return_shape.as_ref()
-                                    },
+                                    self.return_shape.as_ref(),
                                 )?;
                                 self.rename_expr(&mut value);
                                 Ok(value)
