@@ -45,6 +45,7 @@ mod host {
     mod format;
     mod fread;
     mod monitor;
+    mod native_arena;
     pub(crate) mod native_io;
     mod scan;
     mod strobe;
@@ -142,6 +143,7 @@ mod host {
         pub(crate) process_heap_roots: Vec<celox_heap::Root>,
         pub(super) file_io: celox_runtime::file_io::FileIo,
         native_file_io: Option<Arc<native_io::Metadata>>,
+        native_arena: native_arena::Arena,
         pub(crate) native_service_calls: u64,
         pub(crate) native_host_return_budget: u64,
         pub(crate) native_host_round_budget: u64,
@@ -1392,10 +1394,13 @@ mod host {
                 process_heap_roots: Vec::new(),
                 file_io: Default::default(),
                 native_file_io,
+                native_arena: Default::default(),
                 postponed_output,
                 native_service_calls: 0,
                 native_host_return_budget: u64::MAX,
-                native_host_round_budget: u64::MAX,
+                // Standalone native testbenches also need a finite bound on
+                // Active feedback; timed runs replace this with their budget.
+                native_host_round_budget: 1 << 20,
                 native_nba_queue: Default::default(),
                 pending_host_events: Arc::new(std::sync::Mutex::new(PendingRuntimeEvents {
                     deferred: DeferredQueues {
@@ -2625,6 +2630,7 @@ mod host {
                 if let Some(metadata) = &self.native_file_io {
                     let (state, state_size) = self.backend.memory_as_ptr();
                     let mut scope = native_io::Scope {
+                        arena: &mut self.native_arena,
                         metadata,
                         state,
                         state_size,
