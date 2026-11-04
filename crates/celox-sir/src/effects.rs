@@ -510,6 +510,15 @@ impl<A> SIRInstruction<A> {
         }
     }
 
+    /// Whether executing the instruction may end its unit with an error
+    /// instead of going on: a call whose callee may fail
+    /// ([`crate::CallEffects::may_fail`]). Error exits are otherwise the
+    /// unit's own terminators.
+    pub fn may_fail(&self) -> bool {
+        self.call_effects()
+            .is_some_and(|effects| effects.may_fail || effects.kernel)
+    }
+
     /// Whether executing the instruction matters beyond the register it
     /// defines. Such an instruction is kept even when its result is unused,
     /// and is not duplicated, merged, or moved across other effects.

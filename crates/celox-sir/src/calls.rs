@@ -19,6 +19,7 @@ struct Collected<A> {
     triggers: BTreeSet<A>,
     host: crate::HostEffects,
     kernel: bool,
+    may_fail: bool,
 }
 
 impl<A: Ord> Default for Collected<A> {
@@ -29,6 +30,7 @@ impl<A: Ord> Default for Collected<A> {
             triggers: BTreeSet::new(),
             host: crate::HostEffects::default(),
             kernel: false,
+            may_fail: false,
         }
     }
 }
@@ -40,6 +42,7 @@ impl<A: Ord + Clone> Collected<A> {
         self.triggers.extend(other.triggers.iter().cloned());
         self.host = self.host.union(other.host);
         self.kernel |= other.kernel;
+        self.may_fail |= other.may_fail;
     }
 
     fn into_effects(self) -> CallEffects<A> {
@@ -49,6 +52,7 @@ impl<A: Ord + Clone> Collected<A> {
             triggers: self.triggers.into_iter().collect(),
             host: self.host,
             kernel: self.kernel,
+            may_fail: self.may_fail || self.kernel,
         }
     }
 }
@@ -62,6 +66,7 @@ fn own_effects<A: Ord + Clone + Hash>(
 ) -> Collected<A> {
     let mut collected = Collected::default();
     for block in unit.blocks.values() {
+        collected.may_fail |= matches!(block.terminator, crate::SIRTerminator::Error(_));
         for instruction in &block.instructions {
             if let SIRInstruction::Call { function, .. } = instruction {
                 callees.push(function.0 as usize);
@@ -330,6 +335,7 @@ mod tests {
                 ..Default::default()
             },
             kernel: false,
+            may_fail: false,
         };
         assert_eq!(*program.functions[0].effects, recursive);
         assert_eq!(*program.functions[1].effects, recursive);
@@ -349,6 +355,57 @@ mod tests {
         program.eval_comb.clear();
         program.processes.clear();
         assert!(!program.has_calls() && program.calls_summarized());
+    }
+
+    /// A function may fail when its body may end in an error, or a function
+    /// it calls may fail, or it may reach a native kernel; one that does none
+    /// of these may not.
+    #[test]
+    fn a_call_may_fail_where_its_callees_may() {
+        let failing = |instructions| {
+            let mut function = function(instructions, 100);
+            function
+                .unit
+                .blocks
+                .get_mut(&BlockId(0))
+                .unwrap()
+                .terminator = SIRTerminator::Error(1);
+            function
+        };
+        let kernel = SIRInstruction::ExternCall {
+            dst: None,
+            func: crate::extern_abi::NATIVE_KERNEL_CALL_TAG,
+            args: Vec::new(),
+        };
+        // fn0 fails itself, fn1 calls fn0, fn2 calls a native kernel, and
+        // fn3 only stores.
+        let mut program = SirProgram::<u32, u32> {
+            eval_comb: vec![unit(vec![call(1)])],
+            eval_apply_ffs: HashMap::default(),
+            eval_comb_apply_ffs: HashMap::default(),
+            merge_comb_apply: false,
+            eval_comb_stateful: None,
+            eval_only_ffs: HashMap::default(),
+            apply_ffs: HashMap::default(),
+            parallel: None,
+            processes: Vec::new(),
+            functions: vec![
+                failing(Vec::new()),
+                function(vec![call(0)], 101),
+                function(vec![kernel], 102),
+                function(vec![store(1, Vec::new())], 103),
+            ],
+        };
+        program.summarize_calls();
+        let fails: Vec<bool> = program
+            .functions
+            .iter()
+            .map(|function| function.effects.may_fail)
+            .collect();
+        assert_eq!(fails, [true, true, true, false]);
+        let instruction = &program.eval_comb[0].blocks[&BlockId(0)].instructions[0];
+        assert!(instruction.may_fail());
+        assert!(!store(1, Vec::new()).may_fail());
     }
 
     #[test]
