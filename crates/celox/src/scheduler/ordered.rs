@@ -970,6 +970,74 @@ endmodule"#
     }
 
     #[test]
+    fn service_continuations_preserve_event_writes_in_native_code() {
+        for body in [
+            "always #2 begin clk = 1; $fwrite(1, \"up\"); clk = 0; $fwrite(1, \"down\"); turns++; end",
+            "always #2 begin clk = !clk; $fwrite(1, \"level %b\", clk); turns++; end",
+            "always #2 turns++; always @(turns) begin clk = 1; $fwrite(1, \"up\"); clk = 0; $fwrite(1, \"down\"); end",
+        ] {
+            let source = format!(
+                r#"`timescale 1ns/1ns
+module Top;
+    bit clk = 0;
+    int q = 0;
+    int turns = 0;
+    always_ff @(posedge clk) q <= q + 1;
+    {body}
+endmodule"#
+            );
+            for (four_state, hotspot) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
+                let build = |mode| {
+                    Simulation::from_sv_sources(
+                        vec![(
+                            source.as_str(),
+                            std::path::Path::new("compiled-service-events.sv"),
+                        )],
+                        "Top",
+                    )
+                    .four_state(four_state)
+                    .hotspot_jit(hotspot)
+                    .scheduler_mode(mode)
+                    .build_native()
+                    .unwrap()
+                };
+                let mut sim = build(SchedulerMode::Compiled);
+                let mut reference = build(SchedulerMode::Reference);
+                sim.run_until(1).unwrap();
+                reference.run_until(1).unwrap();
+                let before = sim.scheduler_stats();
+                assert!(
+                    before
+                        .kernels
+                        .iter()
+                        .all(|k| *k == crate::KernelSchedule::Compiled),
+                    "{before:?}"
+                );
+                let reference_steps = before.reference_steps;
+                for end in [2, 3, 7, 12, 20] {
+                    sim.run_until(end).unwrap();
+                    reference.run_until(end).unwrap();
+                    assert_eq!(sim.time(), reference.time());
+                    for name in ["clk", "q", "turns"] {
+                        assert_eq!(
+                            sim.get(sim.signal(name)),
+                            reference.get(reference.signal(name)),
+                            "{name}: {body}"
+                        );
+                    }
+                    assert_eq!(sim.drain_runtime_events(), reference.drain_runtime_events());
+                }
+                let after = sim.scheduler_stats();
+                assert_eq!(after.reference_steps, reference_steps, "{after:?}");
+                assert!(after.compiled_slots > 0, "{after:?}");
+                assert_eq!(sim.get(sim.signal("turns")), 10u8.into());
+            }
+        }
+    }
+
+    #[test]
     fn inactive_nonconvergence_is_bounded_in_generated_code() {
         let source = r#"`timescale 1ns/1ns
 module Top;
