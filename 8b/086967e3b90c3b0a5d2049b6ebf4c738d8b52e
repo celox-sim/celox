@@ -1,0 +1,3 @@
+Fix both findings in review 5766239395: normalize legacy restored iff baselines and count occurrences after each scheduled host clock write, with regressions.
+
+Rebase onto current master to resolve the merge conflict reported by GitHub, then publish and merge only the bottom PR as requested.
