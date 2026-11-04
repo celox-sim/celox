@@ -95,16 +95,7 @@ impl Ff<'_, '_> {
                 let object = self.handle(&args[0])?;
                 let check = self.integer_of_width(&args[1], 1, false)?;
                 let bytes = serde_json::to_vec(program).expect("constraint program serialization");
-                let mut buffer = self.heap_call(ops::NEW, &[]);
-                for chunk in bytes.chunks(8) {
-                    let value = chunk
-                        .iter()
-                        .fold(0u64, |value, byte| (value << 8) | u64::from(*byte));
-                    let value = self.constant64(value);
-                    let count = self.constant64(chunk.len() as u64);
-                    buffer = self.heap_call(ops::APPEND_BYTES, &[buffer, value, count]);
-                }
-                let program = self.heap_call(ops::FREEZE, &[buffer]);
+                let program = self.frozen_bytes(&bytes);
                 if args.len() == 2 {
                     self.heap_call(ops::OBJECT_RANDOMIZE, &[object, program, check])
                 } else {
@@ -334,6 +325,30 @@ impl Ff<'_, '_> {
                 let object = self.handle(&args[0])?;
                 self.heap_call(ops::OBJECT_CLASS, &[object])
             }
+            ObjectOp::RegisterProgram(class, program) => {
+                let class = self.constant64(u64::from(*class));
+                let bytes = serde_json::to_vec(program).expect("constraint program serialization");
+                let program = self.frozen_bytes(&bytes);
+                self.heap_call(ops::OBJECT_REGISTER_PROGRAM, &[class, program])
+            }
+            ObjectOp::ProgramRegistered(class) => {
+                let class = self.constant64(u64::from(*class));
+                self.heap_call(ops::OBJECT_PROGRAM_REGISTERED, &[class])
+            }
+            ObjectOp::VisitBegin => {
+                let object = self.handle(&args[0])?;
+                self.heap_call(ops::OBJECT_VISIT_BEGIN, &[object])
+            }
+            ObjectOp::Visit => {
+                let index = self.integer_of_width(&args[0], 64, false)?;
+                self.heap_call(ops::OBJECT_VISIT, &[index])
+            }
+            ObjectOp::VisitSolved => self.heap_call(ops::OBJECT_VISIT_SOLVED, &[]),
+            ObjectOp::VisitExpand => {
+                let object = self.handle(&args[0])?;
+                self.heap_call(ops::OBJECT_VISIT_EXPAND, &[object])
+            }
+            ObjectOp::VisitEnd => self.heap_call(ops::OBJECT_VISIT_END, &[]),
             ObjectOp::Copy => {
                 let object = self.handle(&args[0])?;
                 self.heap_call(ops::OBJECT_COPY, &[object])
@@ -349,7 +364,7 @@ impl Ff<'_, '_> {
             ObjectOp::Pattern(_) => unreachable!("handled by aggregate_pattern"),
             ObjectOp::Concat(_) => unreachable!("handled by container_concat"),
             ObjectOp::Stream(_) => unreachable!("handled by stream_call"),
-            ObjectOp::New { .. } | ObjectOp::Copy | ObjectOp::Box(_) => {
+            ObjectOp::New { .. } | ObjectOp::Copy | ObjectOp::Box(_) | ObjectOp::Visit => {
                 Some(celox_design::ValueKind::ObjRef)
             }
             ObjectOp::Unbox(_) => unreachable!("lowered to its own temporary"),
@@ -358,6 +373,12 @@ impl Ff<'_, '_> {
                 HandleProperty::Object => celox_design::ValueKind::ObjRef,
             }),
             ObjectOp::Randomize(_)
+            | ObjectOp::RegisterProgram(..)
+            | ObjectOp::ProgramRegistered(_)
+            | ObjectOp::VisitBegin
+            | ObjectOp::VisitSolved
+            | ObjectOp::VisitExpand
+            | ObjectOp::VisitEnd
             | ObjectOp::ConstraintModeGet(_)
             | ObjectOp::ConstraintModeSet(_)
             | ObjectOp::Store(_)

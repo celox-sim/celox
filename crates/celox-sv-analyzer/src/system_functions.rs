@@ -1207,6 +1207,23 @@ impl ContainerOp {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ObjectOp {
     Randomize(celox_heap::randomization::Program),
+    /// Register the constraint program of class `0` for the objects of it
+    /// that rand handles reach (IEEE 1800-2023 18.4).
+    RegisterProgram(u32, celox_heap::randomization::Registered),
+    /// Whether class `0` registered its constraint program.
+    ProgramRegistered(u32),
+    /// The number of objects the enabled rand object handles of the object
+    /// in the argument refer to, whose pre_randomize hooks run (18.6.2);
+    /// `VisitExpand` adds those of the visited object in the argument once
+    /// its hook ran, giving the number of objects now; `VisitSolved` begins
+    /// visits of the objects the last successful solve took, whose
+    /// post_randomize hooks run; `Visit` gives the object at the index in
+    /// the argument, and `VisitEnd` ends them.
+    VisitBegin,
+    VisitExpand,
+    VisitSolved,
+    Visit,
+    VisitEnd,
     Container {
         op: ContainerOp,
         layout: ContainerLayout,
@@ -1397,7 +1414,14 @@ impl ObjectOp {
         match self {
             Self::Container { op, layout } => op.result_type(*layout),
             Self::Random | Self::RandomCyclic { .. } => (64, false),
+            Self::ProgramRegistered(_) => (1, false),
             Self::Randomize(_)
+            | Self::RegisterProgram(..)
+            | Self::VisitBegin
+            | Self::VisitExpand
+            | Self::VisitSolved
+            | Self::Visit
+            | Self::VisitEnd
             | Self::Seed
             | Self::Check(_)
             | Self::ConstraintModeSet(_)
@@ -1437,6 +1461,13 @@ impl fmt::Display for ObjectOp {
             Self::ClassOf => "class query",
             Self::Random => "object random bits",
             Self::Randomize(_) => "constrained object randomization",
+            Self::RegisterProgram(..) => "constraint program registration",
+            Self::ProgramRegistered(_) => "constraint program query",
+            Self::VisitBegin => "begin randomization visits",
+            Self::VisitSolved => "begin solved randomization visits",
+            Self::VisitExpand => "expand randomization visits",
+            Self::Visit => "randomization visit",
+            Self::VisitEnd => "end randomization visits",
             Self::RandomCyclic { .. } => "object random cyclic index",
             Self::Seed => "object random seed",
             Self::Check(_) => "object receiver check",

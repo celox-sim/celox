@@ -1199,13 +1199,13 @@ pub(super) fn random_selection(
     // it.
     if unsolvable
         && (inline
-            || class.has_constraints
+            || class.solved()
             || classes::visible_classes(tree, session)
                 .into_iter()
                 .filter(|name| *name != class.name)
                 .any(|name| {
                     self::class(tree, session, dimensions, &name).is_ok_and(|derived| {
-                        derived.has_constraints
+                        derived.solved()
                             && derived.derives_from(
                                 tree,
                                 session,
@@ -1490,7 +1490,7 @@ pub(super) fn randomize_with(
     let owner = method_name.strip_suffix("::randomize").unwrap();
     let class = class(tree, session, dimensions, owner)?;
     // Inline constraints need the solver even on otherwise unconstrained classes.
-    class.constraint_program()?;
+    class.check_constraint_program()?;
     let constraint_ids = constraints.ok_or_else(|| unsupported("inline constraint form"))?;
     let mut inputs = HashMap::default();
     let mut input_types = Vec::new();

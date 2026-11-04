@@ -289,6 +289,7 @@ test("every retained baseline accepts only its existing failures", () => {
                 "array_locators::ordering_methods_with_expressions",
                 "class::casts_to_class_properties",
                 "class::constrained_enumerations_and_randc",
+                "class::constrained_randomize_rand_objects",
                 "class::constrained_randomize_state_properties",
                 "class::container_type_aliases_of_classes",
                 "class::enumeration_constants_of_classes",
@@ -467,6 +468,7 @@ test("every retained baseline accepts only its existing failures", () => {
               ]
             : [
                 "class::constrained_enumerations_and_randc",
+                "class::constrained_randomize_rand_objects",
                 "class::failing_casts_evaluate_their_sources",
                 "class::foreign_generic_constructor_lexical_scope",
                 "class::foreign_generic_declaration_scope_and_equivalent_defaults",

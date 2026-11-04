@@ -1091,6 +1091,14 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "compile",
                             "Constraint declarations not supported",
                         ),
+                        ("icarus", "class::constrained_randomize_rand_objects") => (
+                            "compile_error",
+                            "compile",
+                            "Constraint declarations not supported",
+                        ),
+                        ("verilator", "class::constrained_randomize_rand_objects") => {
+                            ("runtime_error", "execute", "native testbench failed")
+                        }
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

@@ -178,6 +178,20 @@ impl Ff<'_, '_> {
 
     /// Call the heap helper with `code` and up to three operands; the result
     /// is a 64-bit register.
+    /// A frozen string of `bytes`, built eight bytes per heap call.
+    pub(super) fn frozen_bytes(&mut self, bytes: &[u8]) -> RegisterId {
+        let mut buffer = self.heap_call(ops::NEW, &[]);
+        for chunk in bytes.chunks(8) {
+            let value = chunk
+                .iter()
+                .fold(0u64, |value, byte| (value << 8) | u64::from(*byte));
+            let value = self.constant64(value);
+            let count = self.constant64(chunk.len() as u64);
+            buffer = self.heap_call(ops::APPEND_BYTES, &[buffer, value, count]);
+        }
+        self.heap_call(ops::FREEZE, &[buffer])
+    }
+
     pub(super) fn heap_call(&mut self, code: u64, operands: &[RegisterId]) -> RegisterId {
         let mut args = vec![self.constant64(code)];
         args.extend_from_slice(operands);

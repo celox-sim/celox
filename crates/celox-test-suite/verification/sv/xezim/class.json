@@ -101,6 +101,17 @@
     },
     {
       "category": "Types",
+      "detail": "xezim build exit status: 1; see <case>/build.log\nParsed 3 file(s): 3 descriptions, 0 errors, 0 warnings\nSimulation error: Undeclared identifier 'v' in class constraint\n",
+      "expectation": "Simulation",
+      "name": "class::constrained_randomize_rand_objects",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "the simulation ended before the script did",
       "expectation": "Simulation",
       "name": "class::constructors_chain_to_base",
