@@ -1,0 +1,1 @@
+event blocks marked by LoopKind::EventBlock (no first-statement pattern); handles with calls never shared, each item reads its own; staggered clocks in the shared case; tests for timed always @* through a property handle and an index call selecting different interfaces
