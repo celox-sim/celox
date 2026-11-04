@@ -2256,7 +2256,13 @@ impl Plan {
         // The next slot: the earliest wake time of a kernel waiting for one.
         g.b.switch_to_block(header);
         let mut time = g.constant(u64::MAX, SCHEDULER_TIME_WIDTH);
-        let mut any = g.constant(0, 1);
+        let ready = g.load(slots.ready, g.ready_bits);
+        let zero = g.constant(0, g.ready_bits);
+        let mut any = g.binary(1, ready, BinaryOp::Ne, zero);
+        let now = g.load(slots.now, SCHEDULER_TIME_WIDTH);
+        let start = g.b.alloc_bit(SCHEDULER_TIME_WIDTH, false);
+        g.b.emit(SIRInstruction::Mux(start, any, now, time));
+        time = start;
         for &(index, status) in &delays {
             let wake = g.load(slots.wake[index], SCHEDULER_TIME_WIDTH);
             let waiting = g.waiting_for_time(index, status);
@@ -2353,7 +2359,7 @@ impl Plan {
                 );
             }
         }
-        let mut ready = g.constant(0, g.ready_bits);
+        let mut ready = g.load(slots.ready, g.ready_bits);
         for &(index, status) in &delays {
             let wake = g.load(slots.wake[index], SCHEDULER_TIME_WIDTH);
             let waiting = g.waiting_for_time(index, status);
@@ -2908,10 +2914,10 @@ impl Plan {
                 });
                 g.b.switch_to_block(in_range);
                 g.store(slots.wake[index], SCHEDULER_TIME_WIDTH, wake);
-                if kernel.wait.is_some() {
-                    let flag = g.constant(1, SCHEDULER_FLAG_WIDTH);
-                    g.store(slots.waiting[index], SCHEDULER_FLAG_WIDTH, flag);
-                }
+                // Restored Active work need not have an armed wakeup, even
+                // for kernels that only delay. Each new delay arms its slot.
+                let flag = g.constant(1, SCHEDULER_FLAG_WIDTH);
+                g.store(slots.waiting[index], SCHEDULER_FLAG_WIDTH, flag);
                 g.b.seal_block(SIRTerminator::Jump(resumed, Vec::new()));
                 g.b.switch_to_block(other);
             }

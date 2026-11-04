@@ -50,8 +50,13 @@ pub trait UnitExecutor {
     /// enforce them without entering the reference scheduler.
     fn set_compiled_host_budgets(&mut self, _rounds: u64, _returns: u64) {}
 
-    /// The native scheduler can import portable NBA queues at invocation
-    /// boundaries and schedule their publication without the reference loop.
+    /// Import the current Active ready queue into the generated scheduler.
+    fn compiled_ready_queue(&self) -> bool {
+        false
+    }
+
+    /// Import portable NBA queues at invocation boundaries and schedule their
+    /// publication without the reference loop.
     fn compiled_nba_queues(&self) -> bool {
         false
     }
