@@ -94,6 +94,13 @@ pub enum ExprKind {
         expression: ExprId,
         predicate: ExprId,
     },
+    /// A constraint `foreach (array[variables]) body` (IEEE 1800-2023
+    /// 18.5.8.1), one for each constraint of the body.
+    ConstraintForeach {
+        array: ExprId,
+        variables: Vec<Option<Name>>,
+        body: ExprId,
+    },
     /// Per-call class constraints (IEEE 1800-2023 18.7).
     RandomizeWith {
         expression: ExprId,

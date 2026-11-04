@@ -33,6 +33,30 @@ pub enum Expr {
     /// 7.5.2, 7.10.2.1): a solver variable while the array is random and a
     /// constraint names its size (18.4).
     Size(usize),
+    /// `body` for each element of array `array` of the program, a state
+    /// array whose elements are known when solving (IEEE 1800-2023
+    /// 18.5.8.1): the conjunction of `body` for each, where
+    /// [`Expr::Index`] and [`Expr::Element`] of the loop's `level` (its
+    /// nesting, from 0 outermost) are the element's index and value.
+    Foreach {
+        array: usize,
+        body: Box<Expr>,
+    },
+    /// The index of the element of loop `level`, a 32-bit `int`.
+    Index {
+        level: u32,
+    },
+    /// Solver variable `0` of the call, among those of every object it
+    /// solves: a member of a loop element that is one of them. Only the
+    /// unrolling of a loop makes it; a program never holds it.
+    Solved(usize),
+    /// The element of loop `level`, or with `member`, the `width`-bit
+    /// property at that byte offset of the object the element refers to.
+    Element {
+        level: u32,
+        member: Option<u32>,
+        width: u32,
+    },
     /// Read-only scalar supplied by this call, never a solver variable.
     Input {
         index: usize,
@@ -232,11 +256,25 @@ impl Expr {
             | Self::Resize { value, .. }
             | Self::Unary { value, .. } => value.names_size(index),
             Self::Binary { left, right, .. } => left.names_size(index) || right.names_size(index),
-            Self::Literal(..) | Self::Field(_) | Self::Input { .. } => false,
+            Self::Foreach { body, .. } => body.names_size(index),
+            Self::Literal(..)
+            | Self::Field(_)
+            | Self::Input { .. }
+            | Self::Index { .. }
+            | Self::Solved(_)
+            | Self::Element { .. } => false,
         }
     }
 
-    fn term(&self, fields: &[Term], sizes: &[Term], inputs: &[u64]) -> Result<Term, String> {
+    /// The term of the constraint of the object whose fields are those of
+    /// `terms` from `base` on.
+    fn term(
+        &self,
+        terms: &[Term],
+        base: usize,
+        sizes: &[Term],
+        inputs: &[u64],
+    ) -> Result<Term, String> {
         Ok(match self {
             Self::Enabled { .. } => return Err("nested constraint mode predicate".into()),
             Self::Literal(width, value) => bv(*width, *value),
@@ -249,17 +287,21 @@ impl Expr {
                     *inputs.get(*index).ok_or("missing constraint input")?,
                 )
             }
-            Self::Field(index) => fields
-                .get(*index)
+            Self::Field(index) => terms
+                .get(base + *index)
                 .ok_or("invalid constraint field")?
                 .clone(),
+            Self::Solved(index) => terms.get(*index).ok_or("invalid solver variable")?.clone(),
             Self::Size(index) => sizes.get(*index).ok_or("invalid constraint array")?.clone(),
+            Self::Foreach { .. } | Self::Index { .. } | Self::Element { .. } => {
+                return Err("constraint loop outside its array".into());
+            }
             Self::Resize {
                 value,
                 width,
                 signed,
             } => {
-                let value = value.term(fields, sizes, inputs)?;
+                let value = value.term(terms, base, sizes, inputs)?;
                 let Sort::Bv(old) = value.0.sort else {
                     unreachable!()
                 };
@@ -279,7 +321,7 @@ impl Expr {
                 }
             }
             Self::Unary { op, value } => {
-                let value = value.term(fields, sizes, inputs)?;
+                let value = value.term(terms, base, sizes, inputs)?;
                 match op.as_str() {
                     "!" => boolean(not(truth(value))),
                     "~" => node(value.0.sort.clone(), "bvnot", vec![value]),
@@ -298,8 +340,8 @@ impl Expr {
                 right,
                 signed,
             } => {
-                let a = left.term(fields, sizes, inputs)?;
-                let b = right.term(fields, sizes, inputs)?;
+                let a = left.term(terms, base, sizes, inputs)?;
+                let b = right.term(terms, base, sizes, inputs)?;
                 let relation = match op.as_str() {
                     "==" => Some(eq(a.clone(), b.clone())),
                     "!=" => Some(not(eq(a.clone(), b.clone()))),
@@ -346,6 +388,137 @@ impl Expr {
 }
 
 impl Heap {
+    /// `constraint` of object `object` with each loop over a state array
+    /// replaced by the conjunction of its body for each element, which
+    /// `loops` gives for the enclosing loops: (array, index).
+    fn unroll(
+        &mut self,
+        object: Handle,
+        program: &Program,
+        constraint: &Expr,
+        loops: &mut Vec<(usize, u64)>,
+        solved: &fxhash::FxHashMap<Handle, (usize, &Program)>,
+        check_only: bool,
+    ) -> Result<Expr, String> {
+        let boxed = |value: Expr| Box::new(value);
+        Ok(match constraint {
+            Expr::Foreach { array, body } => {
+                let looped = program
+                    .arrays
+                    .get(*array)
+                    .ok_or("invalid constraint array")?;
+                let offset = looped.offset;
+                // An array the call randomizes, as `randomize(a)` selects it
+                // (18.11), would have its elements constrained, which the
+                // solver does not take yet.
+                if !check_only && self.random_mode(object, offset, looped.random) {
+                    return Err("a constraint loop over an array the call randomizes".into());
+                }
+                let contents = self.load(object, offset as usize, crate::HANDLE_BYTES) as Handle;
+                let mut each = Vec::new();
+                for index in 0..self.sequence_len(contents) as u64 {
+                    loops.push((*array, index));
+                    each.push(self.unroll(object, program, body, loops, solved, check_only)?);
+                    loops.pop();
+                }
+                // A balanced conjunction stays within the solver's depth.
+                fn all(mut each: Vec<Expr>) -> Expr {
+                    match each.len() {
+                        0 => Expr::Literal(1, 1),
+                        1 => each.pop().expect("one constraint"),
+                        len => {
+                            let right = each.split_off(len / 2);
+                            Expr::Binary {
+                                op: "&&".into(),
+                                left: Box::new(all(each)),
+                                right: Box::new(all(right)),
+                                signed: false,
+                            }
+                        }
+                    }
+                }
+                all(each)
+            }
+            Expr::Index { level } => {
+                let &(_, index) = loops
+                    .get(*level as usize)
+                    .ok_or("invalid constraint loop")?;
+                Expr::Literal(32, index)
+            }
+            Expr::Element {
+                level,
+                member,
+                width,
+            } => {
+                if !(1..=64).contains(width) {
+                    return Err("invalid constraint element width".into());
+                }
+                let &(array, index) = loops
+                    .get(*level as usize)
+                    .ok_or("invalid constraint loop")?;
+                let offset = program.arrays[array].offset;
+                let contents = self.load(object, offset as usize, crate::HANDLE_BYTES) as Handle;
+                let value = self
+                    .sequence_element(contents, index as usize)
+                    .ok_or("constraint array element")?;
+                let value = match member {
+                    None => value,
+                    Some(member) => {
+                        let element = value as Handle;
+                        if element == crate::objects::NULL {
+                            return Err("a null object handle in a constraint".into());
+                        }
+                        // A member of an object the call solves is its
+                        // solver variable.
+                        if let Some(&(base, program)) = solved.get(&element)
+                            && let Some(field) = program
+                                .fields
+                                .iter()
+                                .position(|field| field.offset == *member)
+                        {
+                            return Ok(Expr::Solved(base + field));
+                        }
+                        self.load(element, *member as usize, width.div_ceil(8) as usize)
+                    }
+                };
+                Expr::Literal(*width, value & (u64::MAX >> (64 - width)))
+            }
+            Expr::Enabled { index, value } => Expr::Enabled {
+                index: *index,
+                value: boxed(self.unroll(object, program, value, loops, solved, check_only)?),
+            },
+            Expr::Resize {
+                value,
+                width,
+                signed,
+            } => Expr::Resize {
+                value: boxed(self.unroll(object, program, value, loops, solved, check_only)?),
+                width: *width,
+                signed: *signed,
+            },
+            Expr::Unary { op, value } => Expr::Unary {
+                op: op.clone(),
+                value: boxed(self.unroll(object, program, value, loops, solved, check_only)?),
+            },
+            Expr::Binary {
+                op,
+                left,
+                right,
+                signed,
+            } => Expr::Binary {
+                op: op.clone(),
+                left: boxed(self.unroll(object, program, left, loops, solved, check_only)?),
+                right: boxed(self.unroll(object, program, right, loops, solved, check_only)?),
+                signed: *signed,
+            },
+            Expr::Literal(..)
+            | Expr::Field(_)
+            | Expr::Input { .. }
+            | Expr::Size(_)
+            | Expr::Solved(_) => constraint.clone(),
+        })
+    }
+
     /// Register `program` for the objects of class `class`, once: the class
     /// of an object rand handles reach is known only at run time, and an
     /// object was constructed, which registers the program of its class.
@@ -656,16 +829,32 @@ impl Heap {
                     }
                 }
             }
-            for ((((_, current), &base), &size_base), enabled) in members
+            // The first solver variable of each object the call solves.
+            let solved: fxhash::FxHashMap<Handle, (usize, &Program)> = members
+                .iter()
+                .zip(&bases)
+                .map(|((object, current), &base)| (*object, (base, current.as_ref())))
+                .collect();
+            for ((((object, current), &base), &size_base), enabled) in members
                 .iter()
                 .zip(&bases)
                 .zip(&size_bases)
                 .zip(&constraints)
             {
-                let fields = &terms[base..base + current.fields.len()];
                 let sizes = &size_terms[size_base..size_base + current.arrays.len()];
                 for constraint in enabled {
-                    formula = and(formula, truth(constraint.term(fields, sizes, inputs)?));
+                    let constraint = self.unroll(
+                        *object,
+                        current,
+                        constraint,
+                        &mut Vec::new(),
+                        &solved,
+                        check_only,
+                    )?;
+                    formula = and(
+                        formula,
+                        truth(constraint.term(&terms, base, sizes, inputs)?),
+                    );
                 }
             }
             let seed = if projection.is_empty() {

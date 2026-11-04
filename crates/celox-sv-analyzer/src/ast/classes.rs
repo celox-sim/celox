@@ -1188,6 +1188,9 @@ pub(super) fn shared_class(
         .as_ref()
         .map(|base| base.constraints.clone())
         .unwrap_or_default();
+    let scope = (name.to_owned(), base.as_ref().map(|base| base.name.clone()));
+    session.constraint_owners.push(scope.clone());
+    session.constraint_scopes.push(scope);
     for block in &declaration.constraints {
         let block_name = block.name.spelling.clone();
 
@@ -1208,6 +1211,8 @@ pub(super) fn shared_class(
             constraints.push((block_name, expressions));
         }
     }
+    session.constraint_owners.pop();
+    session.constraint_scopes.pop();
     let mut class = Class {
         name: name.to_owned(),
         id: class_id(name),
@@ -1227,7 +1232,7 @@ pub(super) fn shared_class(
         declarations: Vec::new(),
         size: size.max(1),
     };
-    class.program = class.build_constraint_program();
+    class.program = class.build_constraint_program(tree, session, env);
     let class = Rc::new(class);
     session.classes.insert(name.to_owned(), class.clone());
     Ok(class)

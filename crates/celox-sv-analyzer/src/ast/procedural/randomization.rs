@@ -362,9 +362,19 @@ fn lower_methods(
                         for property in &class.properties {
                             // An array a call selects (18.11): its elements
                             // are randomized at its size.
-                            if classes::constraints::random_array(property) {
+                            if classes::constraints::random_array(
+                                property,
+                                tree,
+                                builder.session,
+                                env,
+                            ) {
                                 let program = celox_heap::randomization::Program {
-                                    arrays: vec![classes::constraints::array(property)?],
+                                    arrays: vec![classes::constraints::array(
+                                        property,
+                                        tree,
+                                        builder.session,
+                                        env,
+                                    )?],
                                     ..Default::default()
                                 };
                                 body.push(Stmt::If {
