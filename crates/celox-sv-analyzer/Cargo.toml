@@ -15,6 +15,7 @@ celox-heap = { workspace = true }
 celox-design = { workspace = true }
 celox-sv-syntax = { workspace = true }
 fxhash    = { workspace = true }
+imbl      = "7"
 miette    = { workspace = true }
 num-bigint = { workspace = true }
 thiserror = { workspace = true }

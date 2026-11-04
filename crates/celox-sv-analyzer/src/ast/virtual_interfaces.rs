@@ -117,7 +117,7 @@ impl VirtualInterfaces {
                 .filter_map(|parameter| {
                     Some((parameter.name().to_owned(), parameter.resolved_value()?))
                 })
-                .collect::<HashMap<_, _>>();
+                .collect::<ConstEnv>();
             // The signature is a module with a port of the interface, whose
             // members are its ports `<port>$<member>`.
             let members = module
@@ -165,7 +165,7 @@ impl VirtualInterfaces {
 
 /// `r#type` of a member of a non-parameterized interface, whose bounds are
 /// constants, possibly the interface's `constants`.
-fn resolved_type(r#type: &crate::ir::Type, constants: &HashMap<String, i128>) -> Option<Type> {
+fn resolved_type(r#type: &crate::ir::Type, constants: &ConstEnv) -> Option<Type> {
     let kind = match r#type.kind() {
         crate::ir::TypeKind::Bit => TypeKind::Bit,
         crate::ir::TypeKind::Logic => TypeKind::Logic,
@@ -651,7 +651,7 @@ pub(super) fn read(
                 .unwrap_or(false),
         ),
         None => {
-            let shape = casts::expr_type_from_type(functions, &found.r#type, &HashMap::default());
+            let shape = casts::expr_type_from_type(functions, &found.r#type, &ConstEnv::default());
             (shape.map(|shape| shape.width), found.r#type.is_signed())
         }
     };
@@ -1208,7 +1208,7 @@ pub(super) fn watched(
 ) -> Converted<Expr> {
     let functions = &tree.functions;
     let (found, signals) = self::member(session, ty, member)?;
-    let width = casts::expr_type_from_type(functions, &found.r#type, &HashMap::default())
+    let width = casts::expr_type_from_type(functions, &found.r#type, &ConstEnv::default())
         .map(|shape| shape.width)
         .ok_or_else(|| unsupported(format!("width of virtual interface member `{member}`")))?;
     let mut value = Expr::Literal(format!("{width}'d0"));

@@ -286,7 +286,7 @@ fn generate_member_shadows_keep_definition_site_base_bounds() {
     let syntax=crate::source_tree::parse_scope_fixture("module M; parameter int W=5; if(1) begin:g typedef enum bit[W-1:0] {W=1,X=2} E; assign out=W; end endmodule",Path::new("generate-enum-base.sv")).unwrap();
     let tree = AnalysisContext::unspecialized(&syntax);
     let mut session = Session::default();
-    let env = HashMap::from_iter([("W".into(), 5)]);
+    let env = ConstEnv::from_iter([("W".into(), 5)]);
     let items = generate::items(&tree, &mut session, &env, &HashMap::default()).unwrap();
     let base = PackedDimensions::new(HashMap::default(), &env, &HashMap::default());
     let dims = items.last().unwrap().dimensions(&base);

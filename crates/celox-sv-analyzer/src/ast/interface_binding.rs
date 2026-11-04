@@ -653,7 +653,7 @@ pub(super) fn analyze_module(
                         let unpacked_sizes =
                             |shape: &VariableDimensions,
                              functions: &const_functions::ConstantFunctions,
-                             env: &HashMap<String, i128>| {
+                             env: &ConstEnv| {
                                 shape
                                     .unpacked
                                     .iter()
@@ -1360,7 +1360,7 @@ fn instance_elements(
     dimensions: &[celox_sv_syntax::Dimension],
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
 ) -> Converted<ArrayBinding> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
@@ -1415,7 +1415,7 @@ fn connection_array(
     implicit: &str,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     scope: &scope::ScopeSymbols,
 ) -> Converted<ArrayBinding> {
     use celox_sv_syntax::ExprKind;
@@ -1593,7 +1593,7 @@ pub(super) fn actual_handle_key(
     root: celox_sv_syntax::ExprId,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
 ) -> Converted<String> {
     use celox_sv_syntax::{DimensionKind, ExprKind};

@@ -1,8 +1,8 @@
 //! Declaration-bound constant types shared by parameters and enumerators.
 use super::*;
 use crate::ast::{
-    Type, TypeKind, const_functions::ConstantFunctions, enums::EnumDomain, expr_type_from_type,
-    types,
+    ConstEnv, Type, TypeKind, const_functions::ConstantFunctions, enums::EnumDomain,
+    expr_type_from_type, types,
 };
 
 /// A frozen declaration type plus an owner-checked interned semantic node.
@@ -17,7 +17,7 @@ impl ConstantType {
         mut declared: Type,
         functions: &ConstantFunctions,
         table: &mut TyTable,
-        env: &HashMap<String, i128>,
+        env: &ConstEnv,
     ) -> Option<Self> {
         types::freeze_bounds(&mut declared, functions, env);
         let id = super::of_type(table, functions, &declared, env)?;
@@ -53,7 +53,7 @@ impl ConstantType {
         declaration: &Type,
         functions: &ConstantFunctions,
         table: &mut TyTable,
-        env: &HashMap<String, i128>,
+        env: &ConstEnv,
     ) -> Option<Self> {
         let mut declaration = declaration;
         while let Some(container) = &declaration.container {

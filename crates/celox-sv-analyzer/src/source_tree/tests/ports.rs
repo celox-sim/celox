@@ -1,5 +1,6 @@
 //! ANSI port production regressions; no original port identity index.
 use super::*;
+use crate::ast::ConstEnv;
 use celox_sv_syntax::{Declarations, PortKind};
 #[cfg(test)]
 mod tests {
@@ -7,7 +8,7 @@ mod tests {
     use crate::ast::{ConstExpr, PortDirection, Source, TypeKind};
     use celox_sv_syntax::{DataTypeKind, Direction, ExprKind};
     fn number(value: &ConstExpr) -> i128 {
-        crate::typecheck::eval_const_expr(&value.clone().into(), &HashMap::default()).unwrap()
+        crate::typecheck::eval_const_expr(&value.clone().into(), &ConstEnv::default()).unwrap()
     }
     fn subtract(tree: &mut SourceTree) {
         for expression in &mut tree.declarations.expressions {

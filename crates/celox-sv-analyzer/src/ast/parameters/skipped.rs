@@ -1410,7 +1410,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(
-                eval_ast_const_expr(&tree.functions, &value, &HashMap::default()),
+                eval_ast_const_expr(&tree.functions, &value, &ConstEnv::default()),
                 Some(expected)
             );
         }

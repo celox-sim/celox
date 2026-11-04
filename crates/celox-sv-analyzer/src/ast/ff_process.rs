@@ -5,7 +5,7 @@ use super::*;
 pub(super) fn ff_processes_from_scope(
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     parameter_literals: &HashMap<String, Expr>,
     packed_dimensions: &PackedDimensions,
     state: &mut procedural::BodyState<'_>,
@@ -63,7 +63,7 @@ fn ff_process_from_procedure(
     procedure: &celox_sv_syntax::Procedure,
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     parameter_literals: &HashMap<String, Expr>,
     packed_dimensions: &PackedDimensions,
     state: &mut procedural::BodyState<'_>,

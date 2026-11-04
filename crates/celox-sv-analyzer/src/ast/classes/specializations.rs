@@ -20,7 +20,7 @@ pub(in crate::ast) struct Specialization {
     /// The name of the class declaration.
     pub generic: String,
     /// The values of the value parameters, with their markers.
-    pub env: HashMap<String, i128>,
+    pub env: ConstEnv,
     /// The constants the value parameters hide without a value of their
     /// own, as a string or four-state value does.
     pub hidden: Vec<String>,
@@ -142,9 +142,9 @@ pub(in crate::ast) fn of(session: &mut Session, generic: &str) -> Vec<String> {
 pub(in crate::ast) fn scope(
     session: &mut Session,
     name: &str,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
-) -> (HashMap<String, i128>, HashMap<String, Type>) {
+) -> (ConstEnv, HashMap<String, Type>) {
     let (env, aliases) = shared_scope(session, name, &env.clone().into(), &aliases.clone().into());
     (env.into_iter().collect(), aliases.into_iter().collect())
 }
@@ -154,9 +154,9 @@ pub(in crate::ast) fn scope(
 pub(in crate::ast) fn shared_scope(
     session: &mut Session,
     name: &str,
-    env: &SharedMap<i128>,
+    env: &SharedEnv,
     aliases: &SharedMap<Type>,
-) -> (SharedMap<i128>, SharedMap<Type>) {
+) -> (SharedEnv, SharedMap<Type>) {
     let mut env = env.clone();
     let mut aliases = aliases.clone();
     let edits = ScopeEdits::of(session, name);
@@ -225,13 +225,13 @@ impl ScopeEdits {
 /// making the scope of each specialization costs what the class adds, not
 /// a copy of the tables around it.
 pub(in crate::ast) struct ClassScopes {
-    base: (SharedMap<i128>, SharedMap<Type>),
-    env: SharedMap<i128>,
+    base: (SharedEnv, SharedMap<Type>),
+    env: SharedEnv,
     aliases: SharedMap<Type>,
 }
 
 impl ClassScopes {
-    pub(in crate::ast) fn new(env: &SharedMap<i128>, aliases: &SharedMap<Type>) -> Self {
+    pub(in crate::ast) fn new(env: &SharedEnv, aliases: &SharedMap<Type>) -> Self {
         Self {
             base: (env.clone(), aliases.clone()),
             env: env.clone(),
@@ -245,9 +245,9 @@ impl ClassScopes {
         &mut self,
         session: &mut Session,
         name: &str,
-        env: &SharedMap<i128>,
+        env: &SharedEnv,
         aliases: &SharedMap<Type>,
-        f: impl FnOnce(&mut Session, &SharedMap<i128>, &SharedMap<Type>) -> R,
+        f: impl FnOnce(&mut Session, &SharedEnv, &SharedMap<Type>) -> R,
     ) -> R {
         // The copy follows the tables it was made from.
         if self.base.0.identity() != env.identity() || self.base.1.identity() != aliases.identity()
@@ -300,7 +300,7 @@ fn inherit(
     session: &mut Session,
     name: &str,
     own: &str,
-    env: &mut HashMap<String, i128>,
+    env: &mut ConstEnv,
     aliases: &mut HashMap<String, Type>,
 ) {
     if lookup(session, name).is_none() {
@@ -590,7 +590,7 @@ fn bind_nested_specialization(
 struct PendingSpecialization {
     name: String,
     parameters: Parameters,
-    env: HashMap<String, i128>,
+    env: ConstEnv,
     aliases: HashMap<String, Type>,
 }
 
@@ -606,13 +606,13 @@ enum Preparation {
 #[derive(Debug)]
 pub(in crate::ast) struct Named {
     arguments: BoundArguments,
-    env: std::sync::Weak<HashMap<String, i128>>,
+    env: std::sync::Weak<ConstEnv>,
     aliases: std::sync::Weak<HashMap<String, Type>>,
     name: String,
 }
 
 impl Named {
-    fn of(&self, env: &SharedMap<i128>, aliases: &SharedMap<Type>) -> bool {
+    fn of(&self, env: &SharedEnv, aliases: &SharedMap<Type>) -> bool {
         self.env.as_ptr() as usize == env.identity()
             && self.aliases.as_ptr() as usize == aliases.identity()
     }
@@ -862,7 +862,7 @@ fn bind_bases(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     generic: &str,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
 ) -> Converted<Vec<String>> {
     let native = tree.declarations();
@@ -1005,7 +1005,7 @@ fn finish_specialization(
                                 env.remove(&key);
                                 parameters.own_env.insert(key, None);
                             }
-                            let mut constants = HashMap::default();
+                            let mut constants = ConstEnv::default();
                             constants.insert(member.name.clone(), member.value);
                             constants.insert(dimensions::enum_marker(&member.name), member.value);
                             dimensions::insert_parameter_type_markers(
@@ -1117,7 +1117,7 @@ impl Parameters {
         session: &mut Session,
         parameter: &celox_sv_syntax::Parameter,
         first: usize,
-        env: &HashMap<String, i128>,
+        env: &ConstEnv,
         aliases: &HashMap<String, Type>,
     ) {
         let ParameterKind::Value {
@@ -1167,7 +1167,7 @@ impl Parameters {
         declaration: &celox_sv_syntax::ClassDeclaration,
         id: celox_sv_syntax::ParameterDeclarationId,
         port: bool,
-        env: &mut HashMap<String, i128>,
+        env: &mut ConstEnv,
         aliases: &mut HashMap<String, Type>,
     ) -> Converted<Option<String>> {
         let native = tree.declarations();
@@ -1274,7 +1274,7 @@ impl Parameters {
 pub(in crate::ast) fn declare_scopes(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
 ) {
     let native = tree.declarations();
@@ -1294,10 +1294,7 @@ pub(in crate::ast) fn declare_scopes(
 
 /// The constants and types of the scope that declares class `generic`,
 /// which [`collect`] records.
-fn declaration_scope(
-    session: &mut Session,
-    generic: &str,
-) -> Option<(SharedMap<i128>, SharedMap<Type>)> {
+fn declaration_scope(session: &mut Session, generic: &str) -> Option<(SharedEnv, SharedMap<Type>)> {
     session.class_declaration_scopes.get(generic).cloned()
 }
 

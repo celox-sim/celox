@@ -201,7 +201,7 @@ fn equivalent(
     tree: &AnalysisContext<'_>,
     a: &VariableDimensions,
     b: &VariableDimensions,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
 ) -> bool {
     let functions = &tree.functions;
     // A chandle is equivalent only to a chandle (IEEE 1800-2023 6.14).

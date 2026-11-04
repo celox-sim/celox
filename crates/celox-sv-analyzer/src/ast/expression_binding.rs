@@ -242,7 +242,7 @@ mod tests {
                 expr_to_const(session, value).and_then(|value| eval_ast_const_expr(
                     &tree.functions,
                     &value,
-                    &HashMap::default()
+                    &ConstEnv::default()
                 )),
                 Some(expected)
             );

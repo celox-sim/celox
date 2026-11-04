@@ -1,5 +1,6 @@
 //! Production native constant-selection ownership/compatibility regressions.
 use super::*;
+use crate::ast::ConstEnv;
 use crate::ast::{BinaryOp, ConstExpr, Source};
 use celox_sv_syntax::{Declarations, DimensionKind, ExprKind};
 fn subtract(tree: &mut SourceTree) {
@@ -17,7 +18,7 @@ fn native_constant_indices_drive_header_values_widths_and_overrides() {
     subtract(&mut tree);
     for (override_, expected) in [(None, 1), (Some(4), 0)] {
         let overrides = override_
-            .map(|value| HashMap::from_iter([("I".into(), value)]))
+            .map(|value| ConstEnv::from_iter([("I".into(), value)]))
             .unwrap_or_default();
         let source =
             Source::from_syntax_with_module_parameter_overrides(&tree, "M", &overrides).unwrap();
@@ -93,7 +94,7 @@ fn native_lightweight_value_indices_drive_instance_overrides() {
         _ => panic!("{value:?}"),
     };
     assert_eq!(
-        crate::typecheck::eval_const_expr(&value.clone().into(), &HashMap::default()),
+        crate::typecheck::eval_const_expr(&value.clone().into(), &ConstEnv::default()),
         Some(1)
     );
     assert!(matches!(
@@ -172,7 +173,7 @@ fn native_constant_selects_follow_native_name_count_and_index_class() {
                         .left()
                         .clone()
                         .into(),
-                    &HashMap::default()
+                    &ConstEnv::default()
                 ),
                 Some(10)
             );

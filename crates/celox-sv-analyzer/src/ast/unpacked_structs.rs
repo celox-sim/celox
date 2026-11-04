@@ -203,7 +203,7 @@ pub(in crate::ast) fn native_type(
     functions: &const_functions::ConstantFunctions,
     owner: Arc<str>,
     fields: Vec<(String, Type, Option<Expr>)>,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
 ) -> Option<Type> {
     let members = fields
         .into_iter()
@@ -729,7 +729,7 @@ pub(in crate::ast) fn leaf_parts(aggregate: &UnpackedStruct, value: &Expr) -> Op
 pub(in crate::ast) fn record(
     functions: &const_functions::ConstantFunctions,
     aggregate: &UnpackedStruct,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
 ) -> Converted<Option<crate::system_functions::Record>> {
     if aggregate.has_array_members() {
         return Err(unsupported(

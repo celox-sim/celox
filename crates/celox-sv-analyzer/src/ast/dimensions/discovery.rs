@@ -60,7 +60,7 @@ pub(in crate::ast) fn same_tables(a: &PackedDimensions, b: &PackedDimensions) ->
 /// or changed, and the tables of the context they were bound in, held so
 /// that their identities stay unique.
 struct ClassSignatures {
-    const_env: SharedMap<i128>,
+    const_env: SharedEnv,
     type_aliases: SharedMap<Type>,
     function_return_types: SharedMap<FunctionReturnMetadata>,
     specializations: usize,
@@ -555,7 +555,7 @@ fn class_signatures(
         class_name,
         &env,
         &aliases,
-        |session: &mut Session, env: &SharedMap<i128>, aliases: &SharedMap<Type>| {
+        |session: &mut Session, env: &SharedEnv, aliases: &SharedMap<Type>| {
             let mut scope = context.clone();
             scope.const_env = env.clone();
             scope.type_aliases = aliases.clone();
@@ -1539,9 +1539,7 @@ mod tests {
         let tree = AnalysisContext::unspecialized(&tree);
         let input = PackedDimensions::new(
             HashMap::default(),
-            &[("N".to_string(), 16)]
-                .into_iter()
-                .collect::<HashMap<_, _>>(),
+            &[("N".to_string(), 16)].into_iter().collect::<ConstEnv>(),
             &HashMap::default(),
         );
         let context = query_operand_dimensions_id(argument(&tree), &tree, session, &input).unwrap();
@@ -1567,8 +1565,11 @@ mod tests {
             "module M;import \"DPI-C\" function int f();if(1)begin:g import \"DPI-C\" function byte f();localparam N=$bits(f());end endmodule",
         );
         let tree = AnalysisContext::unspecialized(&tree);
-        let input =
-            PackedDimensions::new(HashMap::default(), &HashMap::default(), &HashMap::default());
+        let input = PackedDimensions::new(
+            HashMap::default(),
+            &ConstEnv::default(),
+            &HashMap::default(),
+        );
         let context = query_operand_dimensions_id(argument(&tree), &tree, session, &input).unwrap();
         assert_eq!(context.function_return_types["f"].width, Some(8));
         assert!(context.functions.is_empty());
@@ -1581,8 +1582,11 @@ mod tests {
             "module M;function int f();logic[7:0]a[0:3];begin logic[2:0]a[0:1];return $bits(a);end endfunction endmodule",
         );
         let tree = AnalysisContext::unspecialized(&tree);
-        let input =
-            PackedDimensions::new(HashMap::default(), &HashMap::default(), &HashMap::default());
+        let input = PackedDimensions::new(
+            HashMap::default(),
+            &ConstEnv::default(),
+            &HashMap::default(),
+        );
         let context = query_operand_dimensions_id(argument(&tree), &tree, session, &input).unwrap();
         let shape = context.get("a").unwrap();
         assert_eq!(width(&tree.functions, shape, &context), Some(3));

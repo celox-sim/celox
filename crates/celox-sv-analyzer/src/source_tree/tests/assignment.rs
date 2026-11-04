@@ -1,4 +1,5 @@
 use super::*;
+use crate::ast::ConstEnv;
 use crate::ast::{BinaryOp, ConstExpr, Expr, LValue, Source, Stmt};
 
 #[test]
@@ -97,7 +98,7 @@ fn native_continuous_assignment_ids_preserve_selected_generate_and_loop_scopes()
     assert_eq!(assignments.len(), 4);
     for (i, assignment) in assignments.iter().enumerate() {
         assert!(
-            matches!(assignment.lhs_value(),LValue::Select{name,msb:ConstExpr::Literal(index),lsb:ConstExpr::Literal(last),..} if name=="y" && crate::typecheck::eval_const_expr(&ConstExpr::Literal(index.clone()).into(), &HashMap::default()) == Some(i as i128) && index==last),
+            matches!(assignment.lhs_value(),LValue::Select{name,msb:ConstExpr::Literal(index),lsb:ConstExpr::Literal(last),..} if name=="y" && crate::typecheck::eval_const_expr(&ConstExpr::Literal(index.clone()).into(), &ConstEnv::default()) == Some(i as i128) && index==last),
             "{assignment:?}"
         );
         assert_eq!(assignment.rhs(), &Expr::Literal(format!("32'sd{i}")));
@@ -121,7 +122,7 @@ fn native_continuous_assignment_delay_restrictions_preserve_captured_scopes() {
         let code = format!("module M(output wire y);{body} endmodule");
         let tree = parse_source(&code, Path::new("native-assign-delay-validation.sv")).unwrap();
         let Err(error) =
-            Source::from_syntax_module_with_parameter_overrides(&tree, "M", &HashMap::default())
+            Source::from_syntax_module_with_parameter_overrides(&tree, "M", &ConstEnv::default())
         else {
             panic!("accepted unsupported delay: {body}");
         };
@@ -153,7 +154,8 @@ fn assert_subtracted_index(lhs: &LValue) {
                 op: BinaryOp::Sub,
                 ..
             }
-        ) || crate::typecheck::eval_const_expr(&lsb.clone().into(), &HashMap::default()) == Some(0),
+        ) || crate::typecheck::eval_const_expr(&lsb.clone().into(), &ConstEnv::default())
+            == Some(0),
         "{lsb:?}"
     );
 }
@@ -265,7 +267,7 @@ fn native_net_delay_connections_ignore_formal_name_fallbacks() {
              module Top(input bit a,b); wire #1 w; assign w=a; Child c({connection}); endmodule"
         );
         let tree = parse_source(&code, Path::new("net-delay-formal-fallback.sv")).unwrap();
-        Source::from_syntax_module_with_parameter_overrides(&tree, "Top", &HashMap::default())
+        Source::from_syntax_module_with_parameter_overrides(&tree, "Top", &ConstEnv::default())
             .unwrap_or_else(|error| panic!("unrelated connection {connection}: {error}"));
     }
 }

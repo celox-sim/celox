@@ -226,7 +226,7 @@ pub(super) fn bound_dimensions_from_type(
     ty: &Type,
     functions: &const_functions::ConstantFunctions,
     table: &mut semantic_types::TyTable,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
 ) -> VariableDimensions {
     let shape = dimensions_from_type(ty);
     shape.bind_type(table, functions, env);
@@ -235,7 +235,7 @@ pub(super) fn bound_dimensions_from_type(
 
 /// `r#type` with the constants of its declaration scope substituted into its
 /// ranges, so it keeps its meaning outside that scope.
-pub(super) fn scoped_type(mut r#type: Type, const_env: &HashMap<String, i128>) -> Type {
+pub(super) fn scoped_type(mut r#type: Type, const_env: &ConstEnv) -> Type {
     for range in &mut r#type.packed_ranges {
         range.left = substitute_dimension_constants(range.left.clone(), const_env);
         range.right = substitute_dimension_constants(range.right.clone(), const_env);
@@ -2340,7 +2340,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         let local = *self.state.counter;
         *self.state.counter += 1;
         let aliases: SharedMap<Type> = self.type_aliases.clone().into();
-        let dimension_env: SharedMap<i128> = dimension_env.into();
+        let dimension_env: SharedEnv = dimension_env.into();
         let mut ty = types::bind_alias(
             self.tree,
             self.session,
@@ -3721,7 +3721,7 @@ pub(super) fn subroutine_param_declarations(
     native: &celox_sv_syntax::Subroutine,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: impl ToShared<i128>,
+    env: impl ToShared<i128, ConstEnv>,
     aliases: impl ToShared<Type>,
 ) -> Converted<
     Vec<(
@@ -3744,7 +3744,7 @@ pub(super) fn subroutine_param_declarations(
 pub(super) fn subroutine_argument_names(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     type_aliases: &SharedMap<Type>,
 ) -> Result<
     (
@@ -3923,7 +3923,7 @@ pub(super) fn subroutine_argument_names(
 pub(super) fn subroutines_from_scope(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     packed_dimensions: &PackedDimensions,
     parameter_literals: &HashMap<String, Expr>,
     state: &mut BodyState<'_>,
@@ -3945,7 +3945,7 @@ pub(super) fn subroutines_from_scope(
 pub(super) fn subroutines_from_scope_with(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     packed_dimensions: &PackedDimensions,
     parameter_literals: &HashMap<String, Expr>,
     state: &mut BodyState<'_>,
@@ -3967,7 +3967,7 @@ pub(super) fn subroutines_from_scope_with(
 pub(super) fn subroutines_with_symbolic_parameters(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     packed_dimensions: &PackedDimensions,
     parameter_literals: &HashMap<String, Expr>,
     state: &mut BodyState<'_>,
@@ -3997,7 +3997,7 @@ pub(super) fn subroutines_with_symbolic_parameters(
             };
             let item_dimensions = &*item_dimensions;
 
-            let declaration_env: SharedMap<i128> = if symbolic_parameters.is_empty() {
+            let declaration_env: SharedEnv = if symbolic_parameters.is_empty() {
                 item.env.clone()
             } else {
                 item.env
@@ -4161,7 +4161,7 @@ pub(super) fn lower_subroutine(
     native_id: celox_sv_syntax::SubroutineId,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    declaration_env: &SharedMap<i128>,
+    declaration_env: &SharedEnv,
     type_aliases: &SharedMap<Type>,
     item_dimensions: &PackedDimensions,
     literals: &HashMap<String, Expr>,
@@ -5528,7 +5528,7 @@ fn lower_class(
     name: &str,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    declaration_env: &HashMap<String, i128>,
+    declaration_env: &ConstEnv,
     type_aliases: &HashMap<String, Type>,
     item_dimensions: &PackedDimensions,
     literals: &HashMap<String, Expr>,
@@ -5538,7 +5538,7 @@ fn lower_class(
     // A specialization's methods see its parameters (IEEE 1800-2023 8.25).
     let (declaration_env, type_aliases) =
         classes::specializations::scope(session, name, declaration_env, type_aliases);
-    let (declaration_env, type_aliases): (SharedMap<i128>, SharedMap<Type>) =
+    let (declaration_env, type_aliases): (SharedEnv, SharedMap<Type>) =
         (declaration_env.into(), type_aliases.into());
     let (item_dimensions, literals) =
         classes::specializations::body_scope(session, name, item_dimensions, literals);
@@ -5692,7 +5692,7 @@ fn lower_cast(
     name: &str,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    declaration_env: &HashMap<String, i128>,
+    declaration_env: &ConstEnv,
     type_aliases: &HashMap<String, Type>,
     item_dimensions: &PackedDimensions,
     state: &mut BodyState<'_>,
@@ -5806,7 +5806,7 @@ pub(super) fn substitute_stmt_constants(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     stmt: &mut Stmt,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     literals: &HashMap<String, Expr>,
 ) {
     stmt.visit_mut(
@@ -5830,7 +5830,7 @@ pub(super) fn substitute_stmt_constants(
 pub(super) fn initial_processes_from_scope(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     packed_dimensions: &PackedDimensions,
     parameter_literals: &HashMap<String, Expr>,
     state: &mut BodyState<'_>,

@@ -312,7 +312,7 @@ impl Class {
         tree: &AnalysisContext<'_>,
         session: &mut Session,
         ancestor: &str,
-        env: &HashMap<String, i128>,
+        env: &ConstEnv,
         aliases: &HashMap<String, Type>,
     ) -> bool {
         let mut pending = vec![self.name.clone()];
@@ -336,7 +336,7 @@ impl Class {
         &self,
         tree: &AnalysisContext<'_>,
         session: &mut Session,
-        env: &HashMap<String, i128>,
+        env: &ConstEnv,
         aliases: &HashMap<String, Type>,
     ) -> HashSet<String> {
         let mut pending = vec![self.name.clone()];
@@ -459,7 +459,7 @@ pub(super) fn scope_declarations<'a>(
 pub(super) fn scope_classes(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
 ) -> Vec<Class> {
     let names = scope_declarations(tree)
         .flat_map(|declaration| specializations_of(tree, session, declaration))
@@ -679,7 +679,7 @@ pub(super) fn item_statics(
     item: celox_sv_syntax::BodyItemId,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
 ) -> Vec<StaticProperty> {
     item_classes(item, tree, session)
@@ -782,7 +782,7 @@ pub(super) fn class(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     name: &str,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
 ) -> Converted<Rc<Class>> {
     if let Some(class) = session.classes.get(name) {
@@ -802,7 +802,7 @@ pub(super) fn class(
 pub(super) fn shared_class(
     tree: &AnalysisContext<'_>,
     name: &str,
-    env: &SharedMap<i128>,
+    env: &SharedEnv,
     aliases: &SharedMap<Type>,
     session: &mut Session,
 ) -> Converted<Rc<Class>> {
@@ -1156,7 +1156,7 @@ fn interface_name(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     interface: celox_sv_syntax::TypeId,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
 ) -> Converted<String> {
     let native = tree.declarations();
@@ -1185,7 +1185,7 @@ fn interface_class(
     name: &str,
     declaration: &celox_sv_syntax::ClassDeclaration,
     interfaces: Vec<String>,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     context: &PackedDimensions,
 ) -> Converted<Rc<Class>> {
     let aliases = &*context.type_aliases;
@@ -1383,7 +1383,7 @@ fn out_of_block_definition(
 pub(super) fn field(
     functions: &const_functions::ConstantFunctions,
     ty: &Type,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     offset: u32,
 ) -> Converted<ObjectField> {
     if ty.unpacked_struct().is_some() {
@@ -1435,7 +1435,7 @@ fn object_classes(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     ancestor: &str,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
 ) -> Converted<Vec<Rc<Class>>> {
     let concrete = ConcreteClasses::of(tree, session, env, aliases);
@@ -1470,7 +1470,7 @@ impl ConcreteClasses {
     fn of(
         tree: &AnalysisContext<'_>,
         session: &mut Session,
-        env: &HashMap<String, i128>,
+        env: &ConstEnv,
         aliases: &HashMap<String, Type>,
     ) -> Rc<Self> {
         let generation =
@@ -1513,7 +1513,7 @@ pub(super) fn dispatch_targets(
     session: &mut Session,
     owner: &str,
     method: &str,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
 ) -> Converted<Vec<(String, Vec<u32>)>> {
     let mut targets: Vec<(String, Vec<u32>)> = Vec::new();
@@ -1536,7 +1536,7 @@ pub(super) fn cast_targets(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     name: &str,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
 ) -> Converted<Vec<u32>> {
     Ok(object_classes(tree, session, name, env, aliases)?

@@ -1,4 +1,5 @@
 use super::*;
+use crate::ast::ConstEnv;
 use crate::ast::{BinaryOp, ConstExpr, Expr, Stmt};
 use celox_sv_syntax::DataDeclaration;
 
@@ -57,7 +58,7 @@ fn explicit_constructed_body_data_keeps_existing_ordinary_siblings() {
 }
 fn number(value: &ConstExpr) -> i128 {
     let value: crate::ir::ConstExpr = value.clone().into();
-    crate::typecheck::eval_const_expr(&value, &HashMap::default()).unwrap()
+    crate::typecheck::eval_const_expr(&value, &ConstEnv::default()).unwrap()
 }
 #[test]
 fn native_body_variable_types_dimensions_and_initializers_drive_production() {
