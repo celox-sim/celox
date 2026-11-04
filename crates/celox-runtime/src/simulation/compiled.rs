@@ -88,7 +88,10 @@ impl<B: SimBackend> SimulationState<B> {
                 }))
             || !pending.observed.is_empty()
             || self.reactive_pending()
-            || !pending.ready.is_empty()
+            || (!pending.ready.is_empty() && (!executor.compiled_ready_queue() || pending.ready.iter().any(|&process| {
+                scheduler.ordinals.get(process).is_none_or(Option::is_none)
+                    || self.writes_observed(scheduler, process)
+            })))
             || !pending.deferred_ready.is_empty()
             || !pending.inactive.is_empty()
             || (!native_nbas && (!pending.nba_queue.is_empty() || !pending.delayed_nba.is_empty()))
@@ -104,7 +107,7 @@ impl<B: SimBackend> SimulationState<B> {
         {
             return None;
         }
-        let mut first = if pending.nba_queue.is_empty() {
+        let mut first = if pending.nba_queue.is_empty() && pending.ready.is_empty() {
             u64::MAX
         } else {
             self.scheduler.time
@@ -248,7 +251,17 @@ impl<B: SimBackend> SimulationState<B> {
         for &(_, waiting) in scheduler.wake.iter().flatten() {
             backend.set(waiting, 0u8);
         }
-        backend.set(scheduler.ready, 0u64);
+        let mut ready = num_bigint::BigUint::default();
+        for process in std::mem::take(&mut self.process_state.ready) {
+            let ordinal = scheduler
+                .ordinals
+                .get(process)
+                .copied()
+                .flatten()
+                .ok_or(SimulatorErrorCode::InternalError)?;
+            ready.set_bit(ordinal as u64, true);
+        }
+        backend.set_wide(scheduler.ready, ready);
         for (index, counted) in self.model.counted.iter().enumerate() {
             for &(_, kind) in &counted.domains {
                 backend.set(
