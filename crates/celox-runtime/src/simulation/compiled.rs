@@ -70,6 +70,14 @@ impl<B: SimBackend> SimulationState<B> {
         let scheduler = self.model.scheduler.as_ref()?;
         let pending = &self.process_state;
         let native_nbas = executor.compiled_nba_queues();
+        let regions = [
+            &pending.inactive,
+            &pending.deferred_ready,
+            &pending.observed,
+            &pending.reactive,
+        ];
+        let region_pending = regions.iter().any(|queue| !queue.is_empty());
+        let native_regions = executor.compiled_region_queues();
         if self.finished
             || self.stopped
             || self.suspended.is_some()
@@ -86,14 +94,17 @@ impl<B: SimBackend> SimulationState<B> {
                             .flatten()
                             .any(|term| term.driven)
                 }))
-            || !pending.observed.is_empty()
-            || self.reactive_pending()
+            || (region_pending && (!native_regions || regions.iter().flat_map(|queue| queue.iter()).any(|&process| {
+                self.model.processes[process].program.is_some()
+                    || scheduler.ordinals.get(process).is_none_or(Option::is_none)
+                    || self.writes_observed(scheduler, process)
+            })))
+            || !pending.re_inactive.is_empty()
+            || !pending.re_nba_queue.is_empty()
             || (!pending.ready.is_empty() && (!executor.compiled_ready_queue() || pending.ready.iter().any(|&process| {
                 scheduler.ordinals.get(process).is_none_or(Option::is_none)
                     || self.writes_observed(scheduler, process)
             })))
-            || !pending.deferred_ready.is_empty()
-            || !pending.inactive.is_empty()
             || (!native_nbas && (!pending.nba_queue.is_empty() || !pending.delayed_nba.is_empty()))
             || pending.delayed_nba.values().flatten().any(|(program, _)| *program)
             || !pending.nba_events.is_empty()
@@ -107,12 +118,15 @@ impl<B: SimBackend> SimulationState<B> {
         {
             return None;
         }
-        let mut first =
-            if pending.nba_queue.is_empty() && pending.ready.is_empty() && !self.host_pending {
-                u64::MAX
-            } else {
-                self.scheduler.time
-            };
+        let mut first = if pending.nba_queue.is_empty()
+            && pending.ready.is_empty()
+            && !self.host_pending
+            && !region_pending
+        {
+            u64::MAX
+        } else {
+            self.scheduler.time
+        };
         if let Some((&time, _)) = pending.delayed_nba.first_key_value() {
             first = first.min(time);
         }
@@ -255,12 +269,24 @@ impl<B: SimBackend> SimulationState<B> {
                 .collect();
             executor.put_compiled_nbas(immediate, delayed)?;
         }
+        let regions = &mut self.process_state;
+        let region_entry = !regions.inactive.is_empty()
+            || !regions.deferred_ready.is_empty()
+            || !regions.observed.is_empty()
+            || !regions.reactive.is_empty();
+        if executor.compiled_region_queues() {
+            executor.put_compiled_region_entry(region_entry);
+            regions.deferred_ready.clear();
+            regions.observed.clear();
+            regions.reactive.clear();
+        }
         executor.set_compiled_host_budgets(self.round_budget, self.return_budget);
         let scheduler = self
             .model
             .scheduler
             .as_ref()
             .ok_or(SimulatorErrorCode::InternalError)?;
+        let native_regions = executor.compiled_region_queues();
         let backend = executor.backend_mut();
         if host_entry {
             let mut values = num_bigint::BigUint::default();
@@ -407,6 +433,14 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
         self.process_wakeups.extend(kept);
+        if native_regions {
+            for process in std::mem::take(&mut self.process_state.inactive) {
+                let (wake, waiting) =
+                    scheduler.wake[process].ok_or(SimulatorErrorCode::InternalError)?;
+                backend.set(wake, self.scheduler.time);
+                backend.set(waiting, 1u8);
+            }
+        }
         // The host clocks it runs wait in its clock slots during the run.
         let mut clocks = Vec::new();
         if !scheduler.clocks.is_empty() {
