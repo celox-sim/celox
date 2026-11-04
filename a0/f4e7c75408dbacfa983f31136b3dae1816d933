@@ -1,0 +1,1 @@
+Review fixes: function units are built from the subroutine's declared variables, not an inlined activation's copies; subroutines storing into SimModule::instrumented_storage (one query shared with assembly's check) stay inlined, by re-lowering the module. Two new tests.
