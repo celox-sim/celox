@@ -1,1 +1,6 @@
-Review fixes: function units are built from the subroutine's declared variables, not an inlined activation's copies; subroutines storing into SimModule::instrumented_storage (one query shared with assembly's check) stay inlined, by re-lowering the module. Two new tests.
+Revision history for #3103:
+
+rev 2 (content) 2026-11-04 09:08 UTC — Review fixes: function units are built from the subroutine's declared variables, not an inlined activation's copies; subroutines storing into SimModule::instrumented_storage (one query shared with assembly's check) stay inlined, by re-lowering the module. Two new tests.
+rev 1 (initial) 2026-11-04 09:08 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3103,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"1d8a70c0e836ecde715959ce07e7911634e567cc","timestamp_iso":"2026-11-04T09:08:05Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"1d8a70c0e836ecde715959ce07e7911634e567cc","new_sha":"a0f4e7c75408dbacfa983f31136b3dae1816d933","timestamp_iso":"2026-11-04T09:08:05Z","reason":"Review fixes: function units are built from the subroutine's declared variables, not an inlined activation's copies; subroutines storing into SimModule::instrumented_storage (one query shared with assembly's check) stay inlined, by re-lowering the module. Two new tests.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/1d8a70c0e836ecde715959ce07e7911634e567cc...a0f4e7c75408dbacfa983f31136b3dae1816d933"}]} -->
