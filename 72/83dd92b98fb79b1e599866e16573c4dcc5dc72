@@ -1,0 +1,1 @@
+shift count self-determined (nested >>> stays arithmetic), unsigned only as a value; tests 8'h1 << (8'sh80 >>> 2) and 64'h1 << (8'sh80 >>> 6)
