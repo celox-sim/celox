@@ -384,6 +384,8 @@ struct CountedEvent {
 }
 
 struct Plan {
+    /// Zero or computed delays require an Inactive pass before NBA publication.
+    inactive: Vec<(usize, AbsoluteAddr)>,
     observers: Option<observers::Observers>,
     counted: Vec<CountedEvent>,
     /// In event-id order, which the reference loop visits several triggered
@@ -862,7 +864,7 @@ impl Plan {
                 Some("a loop checkpoint requires native services")
             } else if !process.waits.is_empty() {
                 None
-            } else if !slots.const_delays {
+            } else if !slots.const_delays && !ordered_available {
                 Some("a delay is not a constant of at least one time unit")
             } else if !process.nbas.is_empty() {
                 Some("the process has nonblocking assignments")
@@ -1059,7 +1061,8 @@ impl Plan {
                 }
                 let delays = !statuses_only(unit, slots.status, &WAIT_STATUSES);
                 if delays
-                    && (!slots.const_delays || !statuses_only(unit, slots.status, &MIXED_STATUSES))
+                    && ((!slots.const_delays && !ordered_available)
+                        || !statuses_only(unit, slots.status, &MIXED_STATUSES))
                 {
                     tracing::debug!(target: "celox::scheduler", process = index,
                         status_definitions = ?instructions(unit).filter_map(|inst| match inst {
@@ -1292,8 +1295,18 @@ impl Plan {
         } else {
             tracing::debug!(target: "celox::scheduler", possible_wait_feedback, nba_processes = nba_processes.len(), "individual wait dependency slices are unnecessary");
         }
-        let cyclic =
-            service_function.is_some() && (possible_wait_feedback || !nba_processes.is_empty());
+        let inactive: Vec<_> = kernels
+            .iter()
+            .enumerate()
+            .filter_map(|(index, kernel)| {
+                (ordered_available
+                    && kernel.as_ref().is_some_and(|kernel| kernel.delays)
+                    && !schema.processes[index].const_delays)
+                    .then_some((index, schema.processes[index].status))
+            })
+            .collect();
+        let cyclic = service_function.is_some()
+            && (possible_wait_feedback || !nba_processes.is_empty() || !inactive.is_empty());
         for index in remaining {
             if !cyclic
                 && kernels[index]
@@ -1607,6 +1620,7 @@ impl Plan {
             }
         }
         let mut plan = Self {
+            inactive,
             observers: native_observers
                 .then(|| observers::Observers::new(program))
                 .filter(|observers| !observers.groups.is_empty()),
@@ -1681,7 +1695,7 @@ impl Plan {
         // mixed Active/NBA gate inputs, unknown-to-known edge sequences,
         // direct procedural clock writes, and Active-clock feedback need an
         // ordered queue rather than a domain mask.
-        let mut needs_ordered = event_writing_waits;
+        let mut needs_ordered = event_writing_waits || !plan.inactive.is_empty();
         if !plan.active.is_empty() {
             let mut active_stores: HashMap<AbsoluteAddr, Vec<usize>> = HashMap::default();
             for (index, event) in plan.events.iter().enumerate() {
