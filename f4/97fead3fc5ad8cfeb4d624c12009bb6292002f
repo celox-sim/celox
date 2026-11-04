@@ -1,3 +1,5 @@
 Describe the completed native host-observer review fix and its independent regressions plus integrated consumer validation.
 
 Address review r4469905268: execute Active processes awakened by raw host inputs before settling derived combinational values; add native and real Hotspot ordering regressions.
+
+Fix CI shared-memory lifetime test timeout: the child is allowed 75 seconds but Vitest aborts successful simulation probes at its default five seconds.
