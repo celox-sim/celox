@@ -748,7 +748,7 @@ mod tests {
         let root = tree.declarations().assign_statements[0].assignments[0].right;
         let dims = PackedDimensions::new(
             HashMap::default(),
-            &HashMap::default(),
+            &ConstEnv::default(),
             &HashMap::from_iter([("T".into(), Type::new(TypeKind::Logic))]),
         );
         let result = bind_native(root, tree.declarations(), tree, session, &dims, None).map(Some);
@@ -784,8 +784,11 @@ mod tests {
         let tree = &context;
         let root = tree.declarations().assign_statements[0].assignments[0].right;
         let shape = procedural::dimensions_from_type(&Type::new(TypeKind::Logic));
-        let dims =
-            PackedDimensions::new(HashMap::default(), &HashMap::default(), &HashMap::default());
+        let dims = PackedDimensions::new(
+            HashMap::default(),
+            &ConstEnv::default(),
+            &HashMap::default(),
+        );
         let result = expression(root, &shape, tree, session, &dims);
         let mut ty = Type::new(TypeKind::Logic);
         ty.packed_ranges = vec![

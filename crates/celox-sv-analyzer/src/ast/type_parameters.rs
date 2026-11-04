@@ -69,12 +69,12 @@ pub(super) fn bind(
 pub(super) fn resolve(
     functions: &const_functions::ConstantFunctions,
     mut ty: Type,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
 ) -> Option<Type> {
     fn bound(
         functions: &const_functions::ConstantFunctions,
         expr: &ConstExpr,
-        env: &HashMap<String, i128>,
+        env: &ConstEnv,
     ) -> Option<ConstExpr> {
         let value = eval_ast_const_expr(functions, expr, env)?;
         Some(if value >= 0 {

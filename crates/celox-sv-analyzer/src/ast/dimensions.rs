@@ -52,7 +52,7 @@ fn bound_query_type(
     expression: &Expr,
     width: usize,
     packed_dimensions: &PackedDimensions,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
 ) -> Option<ExprType> {
     let signed = expression_signedness(expression, packed_dimensions, const_env)?;
     Some(ExprType {
@@ -65,7 +65,7 @@ fn bound_query_type(
 pub(super) fn expression_signedness(
     expression: &Expr,
     dimensions: &PackedDimensions,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
 ) -> Option<bool> {
     expr_signedness_with_return_types(
         expression,
@@ -82,7 +82,7 @@ pub(super) fn expression_signedness(
 /// looking up only the identifiers used by the query operand.
 struct SizeQuerySignedness<'a> {
     dimensions: &'a PackedDimensions,
-    const_env: &'a HashMap<String, i128>,
+    const_env: &'a ConstEnv,
 }
 
 impl Signedness for SizeQuerySignedness<'_> {
@@ -125,7 +125,7 @@ pub(super) fn extend_query_local_dimensions(
 pub(super) fn packed_dimensions_from_ports_and_signals(
     ports: &[Port],
     signals: &[Signal],
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     type_aliases: &HashMap<String, Type>,
 ) -> PackedDimensions {
     let mut dimensions = HashMap::default();
@@ -357,10 +357,7 @@ pub(super) fn variable_dimension_marker(name: &str, index: usize, bound: &str) -
 /// Preliminary module discovery cannot see unqualified generate-local names.
 /// Restore their declared ranges before lowering selections, so an unpacked
 /// index removes an array dimension rather than selecting one packed bit.
-fn extend_variable_dimensions_from_const_env(
-    context: &mut PackedDimensions,
-    const_env: &HashMap<String, i128>,
-) {
+fn extend_variable_dimensions_from_const_env(context: &mut PackedDimensions, const_env: &ConstEnv) {
     for (key, count) in const_env {
         let Some(name) = key.strip_prefix("__variable::dimensions::") else {
             continue;
@@ -425,7 +422,7 @@ fn extend_variable_dimensions_from_const_env(
 }
 
 pub(super) fn variable_size_function_width(
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     name: &str,
     first_dimension_only: bool,
 ) -> Option<usize> {
@@ -437,7 +434,7 @@ pub(super) fn variable_size_function_width(
     usize::try_from(*const_env.get(&marker)?).ok()
 }
 
-fn variable_type_is_signed(const_env: &HashMap<String, i128>, name: &str) -> bool {
+fn variable_type_is_signed(const_env: &ConstEnv, name: &str) -> bool {
     const_env
         .get(&variable_signed_marker(name))
         .is_some_and(|signed| *signed != 0)
@@ -445,7 +442,7 @@ fn variable_type_is_signed(const_env: &HashMap<String, i128>, name: &str) -> boo
 
 pub(super) fn extend_const_env_with_variable_types<'a>(
     functions: &const_functions::ConstantFunctions,
-    const_env: &mut HashMap<String, i128>,
+    const_env: &mut ConstEnv,
     variables: impl Iterator<Item = (&'a str, &'a Type)>,
 ) {
     for (name, r#type) in variables {
@@ -520,7 +517,7 @@ pub(super) fn extend_const_env_with_variable_types<'a>(
 }
 
 pub(super) fn insert_parameter_type_markers(
-    const_env: &mut HashMap<String, i128>,
+    const_env: &mut ConstEnv,
     name: &str,
     r#type: ExprType,
 ) {
@@ -530,9 +527,7 @@ pub(super) fn insert_parameter_type_markers(
     }
 }
 
-pub(super) fn parameter_types_from_const_env(
-    const_env: &HashMap<String, i128>,
-) -> HashMap<String, ExprType> {
+pub(super) fn parameter_types_from_const_env(const_env: &ConstEnv) -> HashMap<String, ExprType> {
     #[cfg(test)]
     PARAMETER_TYPE_SCAN_ENTRIES.with(|count| count.set(count.get() + const_env.len()));
     const PREFIX: &str = "__parameter::width::";
@@ -550,10 +545,7 @@ pub(super) fn parameter_types_from_const_env(
 }
 
 /// Read one parameter's type without reconstructing the whole environment.
-pub(super) fn parameter_type_from_const_env(
-    const_env: &HashMap<String, i128>,
-    name: &str,
-) -> Option<ExprType> {
+pub(super) fn parameter_type_from_const_env(const_env: &ConstEnv, name: &str) -> Option<ExprType> {
     parameter_type_from_lookup(name, &|marker| const_env.get(marker).copied())
 }
 

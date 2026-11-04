@@ -83,7 +83,7 @@ mod tests {
                 crate::source_tree::parse_scope_fixture(&code, Path::new("scope_scaling.sv"))
                     .unwrap();
             let tree = AnalysisContext::unspecialized(&tree);
-            let active = items(&tree, session, &HashMap::default(), &HashMap::default()).unwrap();
+            let active = items(&tree, session, &ConstEnv::default(), &HashMap::default()).unwrap();
             let dimensions = PackedDimensions::default();
             let mut views = ScopeViews::new(&dimensions);
             for item in &active {
@@ -104,11 +104,11 @@ mod tests {
         ).unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
         let source = Source::from_syntax(&tree).unwrap();
-        let active = items(&tree, session, &HashMap::default(), &HashMap::default()).unwrap();
+        let active = items(&tree, session, &ConstEnv::default(), &HashMap::default()).unwrap();
         let dimensions = packed_dimensions_from_ports_and_signals(
             source.modules()[0].ports(),
             source.modules()[0].signals(),
-            &HashMap::default(),
+            &ConstEnv::default(),
             &HashMap::default(),
         );
         let inherited = HashMap::from_iter([("P".into(), Expr::Literal("99".into()))]);

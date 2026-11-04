@@ -6,7 +6,7 @@ mod connections;
 pub(super) fn instances_from_scope(
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     packed_dimensions: &PackedDimensions,
     interfaces: &InterfaceLookup<'_>,
 ) -> Result<Vec<Instance>, AnalyzerError> {
@@ -69,7 +69,7 @@ fn instances_from_native_declaration(
     condition: Option<ConstExpr>,
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     packed_dimensions: &PackedDimensions,
     interfaces: &InterfaceLookup<'_>,
     instances: &mut Vec<Instance>,
@@ -312,7 +312,7 @@ pub(super) fn instance_ranges(
     native: &celox_sv_syntax::InstanceDeclarator,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
 ) -> Result<Vec<UnpackedRange>, AnalyzerError> {
     constant_binding::unpacked_ranges(&native.dimensions, tree, session, env, aliases)

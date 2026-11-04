@@ -799,6 +799,7 @@ dependencies = [
  "celox-heap",
  "celox-sv-syntax",
  "fxhash",
+ "imbl",
  "miette",
  "num-bigint",
  "thiserror",

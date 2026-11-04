@@ -2,9 +2,9 @@
 //! [`VariableDimensions`] of variables.
 use super::*;
 use crate::ast::{
-    ConstExpr, ContainerKind, ContainerType, Type, TypeKind, VariableDimensions, const_functions,
-    enums::EnumDomain, eval_ast_const_expr, packed_structs::PackedMember, type_names,
-    unpacked_structs::UnpackedStruct, virtual_interfaces::VirtualInterface,
+    ConstEnv, ConstExpr, ContainerKind, ContainerType, Type, TypeKind, VariableDimensions,
+    const_functions, enums::EnumDomain, eval_ast_const_expr, packed_structs::PackedMember,
+    type_names, unpacked_structs::UnpackedStruct, virtual_interfaces::VirtualInterface,
 };
 
 /// The semantic type of `ty`, whose ranges name constants of `env`; `None`
@@ -13,7 +13,7 @@ pub(in crate::ast) fn of_type(
     table: &mut TyTable,
     functions: &const_functions::ConstantFunctions,
     ty: &Type,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
 ) -> Option<TyId> {
     let parts = Parts {
         container: ty.container.as_deref(),
@@ -49,7 +49,7 @@ pub(in crate::ast) fn of_shape(
     table: &mut TyTable,
     functions: &const_functions::ConstantFunctions,
     shape: &VariableDimensions,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
 ) -> Option<TyId> {
     let kind = if shape.string {
         TypeKind::String
@@ -119,7 +119,7 @@ impl Parts<'_> {
         &self,
         table: &mut TyTable,
         functions: &const_functions::ConstantFunctions,
-        env: &HashMap<String, i128>,
+        env: &ConstEnv,
         unpacked: impl DoubleEndedIterator<Item = (&'b ConstExpr, &'b ConstExpr)>,
     ) -> Option<TyId> {
         let range = |left: &ConstExpr, right: &ConstExpr| {
@@ -144,7 +144,7 @@ impl Parts<'_> {
         &self,
         table: &mut TyTable,
         functions: &const_functions::ConstantFunctions,
-        env: &HashMap<String, i128>,
+        env: &ConstEnv,
         range: &dyn Fn(&ConstExpr, &ConstExpr) -> Option<Range>,
     ) -> Option<TyData> {
         if let Some(container) = self.container {

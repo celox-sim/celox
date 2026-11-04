@@ -5,7 +5,7 @@ use super::*;
 pub(super) fn expr_type_from_type(
     functions: &const_functions::ConstantFunctions,
     r#type: &Type,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
 ) -> Option<ExprType> {
     if !r#type.unpacked_ranges().is_empty() {
         return None;
@@ -141,7 +141,7 @@ pub(super) fn cast_constant_target(
     session: &mut Session,
     operand: ConstExpr,
     target: RuntimeCastTarget,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
 ) -> Option<ConstExpr> {
     if let RuntimeCastTarget::Real { short } = target {
         let kind = if short {

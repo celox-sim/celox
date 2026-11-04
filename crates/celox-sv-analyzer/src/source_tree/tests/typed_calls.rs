@@ -1,5 +1,6 @@
 //! Typed initializer calls consume native actual identities and value structure.
 use super::*;
+use crate::ast::ConstEnv;
 use crate::ast::Source;
 use celox_sv_syntax::{Declarations, DimensionKind, ExprKind};
 fn subtract(tree: &mut SourceTree) {
@@ -71,7 +72,7 @@ fn native_typed_calls_specialize_actual_indices_after_overrides() {
         let source = Source::from_syntax_with_module_parameter_overrides(
             &tree,
             "M",
-            &HashMap::from_iter([("I".into(), i)]),
+            &ConstEnv::from_iter([("I".into(), i)]),
         )
         .unwrap();
         let ir = crate::analyze::analyze_source(source).unwrap();

@@ -410,7 +410,7 @@ pub fn analyze_source_with_module_parameter_overrides(
         let source = ast::Source::from_syntax_with_module_parameter_overrides(
             &syntax_tree,
             module_name,
-            parameter_overrides,
+            &ast::ConstEnv::from(parameter_overrides),
         )?;
         analyze::analyze_source(source)
     })
@@ -538,7 +538,7 @@ pub fn analyze_source_module_with_parameter_overrides(
         let source = ast::Source::from_syntax_module_with_parameter_overrides(
             &syntax_tree,
             module_name,
-            parameter_overrides,
+            &ast::ConstEnv::from(parameter_overrides),
         )?;
         analyze::analyze_source(source)
     })

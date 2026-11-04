@@ -113,7 +113,7 @@ pub(in crate::ast) fn bind(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     properties: &[Property],
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
 ) -> Result<ConstraintExpr, String> {
     bind_inputs(id, tree, session, properties, env, &HashMap::default())
 }
@@ -123,7 +123,7 @@ pub(in crate::ast) fn bind_inputs(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     properties: &[Property],
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     inputs: &HashMap<String, (usize, u32, bool)>,
 ) -> Result<ConstraintExpr, String> {
     fn expression(
@@ -131,7 +131,7 @@ pub(in crate::ast) fn bind_inputs(
         tree: &AnalysisContext<'_>,
         session: &mut Session,
         properties: &[Property],
-        env: &HashMap<String, i128>,
+        env: &ConstEnv,
         inputs: &HashMap<String, (usize, u32, bool)>,
         depth: usize,
         budget: &mut usize,

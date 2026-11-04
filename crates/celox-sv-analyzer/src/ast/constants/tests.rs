@@ -1,7 +1,7 @@
 use super::*;
 use std::{fmt::Write, path::Path};
 
-fn environment(count: usize) -> HashMap<String, i128> {
+fn environment(count: usize) -> ConstEnv {
     let session = &mut Session::default();
     let syntax = crate::source_tree::SourceTree::empty();
     let tree = AnalysisContext::unspecialized(&syntax);

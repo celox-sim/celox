@@ -11,7 +11,7 @@ pub(super) fn simplify_constant_mux_conditions(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     expr: Expr,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
 ) -> Expr {
     let functions = &tree.functions;
     match expr {
@@ -252,7 +252,7 @@ pub(super) fn fold_const_integral_expr_preserving_mask(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     expr: Expr,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
 ) -> Expr {
     // Keep unbased fill literals available for their later comparison context.
     // Literal expressions already retain their value, type, and X/Z mask.
@@ -272,7 +272,7 @@ fn eval_const_integral_expr_preserving_mask(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     expr: &Expr,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     parameter_types: &impl Fn(&str) -> Option<(usize, bool)>,
 ) -> Option<typecheck::IntegralLiteral> {
     let functions = &tree.functions;
@@ -397,7 +397,7 @@ pub(super) fn constant_with_folded_selections(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     expr: &Expr,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Option<ConstExpr> {
     constant_with_folded_selections_with_lookup(tree, session, expr, const_env, &|name| {
@@ -409,7 +409,7 @@ fn constant_with_folded_selections_with_lookup(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     expr: &Expr,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     parameter_types: &impl Fn(&str) -> Option<(usize, bool)>,
 ) -> Option<ConstExpr> {
     let functions = &tree.functions;
@@ -491,7 +491,7 @@ fn concat_integral_literals(
     })
 }
 
-fn expr_is_intrinsically_two_state(expr: &Expr, const_env: &HashMap<String, i128>) -> bool {
+fn expr_is_intrinsically_two_state(expr: &Expr, const_env: &ConstEnv) -> bool {
     match expr {
         Expr::Ident(name) => const_env.contains_key(name),
         Expr::Literal(value) => typecheck::parse_integral_literal(value)
@@ -521,7 +521,7 @@ fn equivalent_constant_mux_value(
     state: &mut Session,
     then_expr: &Expr,
     else_expr: &Expr,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
 ) -> Option<Expr> {
     let parameter_types = parameter_types_from_const_env(const_env);
     let ir_parameter_types = parameter_types
@@ -563,7 +563,7 @@ mod constant_concat_limits_tests {
                 &tree,
                 session,
                 &expr,
-                &HashMap::default(),
+                &ConstEnv::default(),
                 &|_| None,
             );
             assert_eq!(result.is_some(), accepted);
@@ -581,7 +581,7 @@ mod constant_concat_limits_tests {
                 &tree,
                 session,
                 &expr,
-                &HashMap::default(),
+                &ConstEnv::default(),
                 &|_| None
             )
             .is_none()

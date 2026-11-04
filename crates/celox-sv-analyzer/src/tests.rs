@@ -1,4 +1,5 @@
 use super::*;
+use crate::ast::ConstEnv;
 
 fn eval_test_const_expr(expr: &ir::ConstExpr) -> Option<i128> {
     match expr {
@@ -5276,7 +5277,7 @@ fn interface_signatures_preserve_declaration_dependencies_without_lowering_proce
     let module = &signatures[0].module;
     let port = &module.ports()[0];
     assert_eq!(port.name(), "h$data");
-    let values = fxhash::FxHashMap::from_iter([("h$N".to_string(), 64)]);
+    let values = crate::ast::ConstEnv::from_iter([("h$N".to_string(), 64)]);
     assert_eq!(
         typecheck::eval_const_expr(port.r#type().packed_ranges()[0].left(), &values),
         Some(63),
@@ -6085,7 +6086,7 @@ fn native_indexed_ranges_preserve_declared_direction_for_dynamic_bases() {
         else {
             panic!()
         };
-        let env = HashMap::from_iter([("i".into(), 3)]);
+        let env = ConstEnv::from_iter([("i".into(), 3)]);
         assert_eq!(typecheck::eval_const_expr(msb, &env), Some(high));
         assert_eq!(typecheck::eval_const_expr(lsb, &env), Some(low));
         assert!(!signed);
@@ -6328,7 +6329,7 @@ fn unpacked_constant_function_bounds_survive_analysis_without_losing_the_contrac
     assert_eq!(ty.resolved_width(), Some(48));
     // Call expressions must remain symbolic for interface declaration
     // contracts, even though lowering no longer owns their function bodies.
-    assert!(typecheck::eval_const_expr(range.right(), &HashMap::default()).is_none());
+    assert!(typecheck::eval_const_expr(range.right(), &ConstEnv::default()).is_none());
 }
 
 #[test]
@@ -6836,7 +6837,7 @@ endmodule
 #[test]
 fn tagged_constant_checks_preserve_guard_width_and_sign() {
     use ir::{Callee, ConstExpr};
-    let constants = HashMap::default();
+    let constants = ConstEnv::default();
     for (guard, payload, width, signed, expected) in [
         ("1'b1", "16'h1ff", 8, false, Some(255)),
         ("1'b1", "8'hfe", 8, true, Some(-2)),
@@ -7688,7 +7689,7 @@ fn interface_header_members_preserve_parameter_dependent_types() {
     let signatures = crate::interface_prototypes(&[(source, Path::new("bus.sv"))]).unwrap();
     let port = &signatures[0].module.ports()[0];
     assert_eq!(port.name(), "h$data");
-    let values = fxhash::FxHashMap::from_iter([("h$W".to_string(), 12)]);
+    let values = crate::ast::ConstEnv::from_iter([("h$W".to_string(), 12)]);
     assert_eq!(
         typecheck::eval_const_expr(port.r#type().packed_ranges()[0].left(), &values),
         Some(11),

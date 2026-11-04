@@ -20,7 +20,7 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
         let tree = &module.constant_context(&syntax);
         let session = &mut ast::Session::default();
         let id = module_table.insert(module)?;
-        let mut constants = HashMap::default();
+        let mut constants = crate::ast::ConstEnv::default();
         let mut parameter_types = HashMap::default();
         let mut parameter_signedness = HashMap::default();
         let mut parameter_literals = HashMap::default();

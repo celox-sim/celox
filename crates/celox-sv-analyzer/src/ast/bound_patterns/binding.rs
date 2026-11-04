@@ -218,8 +218,11 @@ mod tests {
             .unwrap()[0]
             .value
             .unwrap();
-        let dims =
-            PackedDimensions::new(HashMap::default(), &HashMap::default(), &HashMap::default());
+        let dims = PackedDimensions::new(
+            HashMap::default(),
+            &ConstEnv::default(),
+            &HashMap::default(),
+        );
         let result = super::super::from_param(root, tree, session, &dims);
         drop(context);
         drop(original);

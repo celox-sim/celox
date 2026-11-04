@@ -6,7 +6,7 @@ pub(super) fn bind(
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
 ) -> Converted<Option<Type>> {
     binding::bind_in(
@@ -48,7 +48,7 @@ mod tests {
             &native,
             &tree,
             session,
-            &HashMap::default(),
+            &ConstEnv::default(),
             &HashMap::default(),
         )
         .unwrap()
@@ -99,7 +99,7 @@ mod tests {
             native,
             &tree,
             &mut Session::default(),
-            &HashMap::default(),
+            &ConstEnv::default(),
             &HashMap::default(),
         );
         drop(tree);
@@ -116,7 +116,7 @@ mod tests {
             expr_type_from_type(
                 &const_functions::ConstantFunctions::default(),
                 &ty,
-                &HashMap::default()
+                &ConstEnv::default()
             )
             .unwrap()
             .width,

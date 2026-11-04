@@ -373,7 +373,7 @@ pub(super) fn type_name(
     r#type: &Type,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
 ) -> Converted<String> {
     let range = |left: &ConstExpr, right: &ConstExpr| -> Converted<String> {
         let bound = |bound: &ConstExpr| {
@@ -420,7 +420,7 @@ fn element_name(
     r#type: &Type,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     range: &dyn Fn(&ConstExpr, &ConstExpr) -> Converted<String>,
 ) -> Converted<String> {
     // An event is a handle of a built-in class that has no class name.
@@ -461,7 +461,7 @@ fn element_name(
 fn vector_name(
     r#type: &Type,
     tree: &AnalysisContext<'_>,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     range: &dyn Fn(&ConstExpr, &ConstExpr) -> Converted<String>,
 ) -> Converted<String> {
     let keyword = r#type.spelling.keyword_of().filter(|keyword| {
@@ -506,7 +506,7 @@ fn enum_name(
     r#type: &Type,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     range: &dyn Fn(&ConstExpr, &ConstExpr) -> Converted<String>,
 ) -> Converted<String> {
     if r#type.packed_enum {
@@ -556,7 +556,7 @@ fn aggregate_name(
     r#type: &Type,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     range: &dyn Fn(&ConstExpr, &ConstExpr) -> Converted<String>,
 ) -> Converted<String> {
     let aggregate = r#type
@@ -604,7 +604,7 @@ fn unpacked_struct_name(
     aggregate: &unpacked_structs::UnpackedStruct,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
 ) -> Converted<String> {
     let mut name = "struct{".to_owned();
     for member in aggregate.members() {
@@ -637,7 +637,7 @@ fn typedef_name(
     anonymous: &str,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
 ) -> Converted<String> {
     match r#type.spelling.name_of() {
         Some(TypedefName::Scope(name)) => Ok(name.to_string()),
@@ -655,7 +655,7 @@ fn class_name(
     class: &str,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
 ) -> Converted<String> {
     if class == processes::CLASS {
         return Ok("std::process".to_owned());

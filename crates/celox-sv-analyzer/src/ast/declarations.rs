@@ -5,7 +5,7 @@ use super::*;
 pub(super) fn ports_from_scope(
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     type_aliases: &HashMap<String, Type>,
     selected: Option<&port_owners::Selection<'_>>,
 ) -> Result<Vec<Port>, AnalyzerError> {
@@ -223,7 +223,7 @@ pub(super) fn parameters_from_scope(
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
     type_aliases: &HashMap<String, Type>,
-    base_const_env: &HashMap<String, i128>,
+    base_const_env: &ConstEnv,
     parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Result<Vec<Parameter>, AnalyzerError> {
     let mut parameters = Vec::new();
@@ -310,7 +310,7 @@ pub(super) fn parameters_from_scope(
 pub(super) fn signals_from_scope(
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     type_aliases: &HashMap<String, Type>,
 ) -> Result<Vec<Signal>, AnalyzerError> {
     signals_from_scope_with_declaration_ranges(syntax_tree, session, const_env, type_aliases, false)
@@ -319,7 +319,7 @@ pub(super) fn signals_from_scope(
 pub(super) fn signals_from_scope_with_declaration_ranges(
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     type_aliases: &HashMap<String, Type>,
     preserve_parameters: bool,
 ) -> Result<Vec<Signal>, AnalyzerError> {
@@ -365,7 +365,7 @@ pub(super) fn signals_from_body_item(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     aliases: &HashMap<String, Type>,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     selected_name: Option<&str>,
     signals: &mut Vec<Signal>,
 ) -> Converted<()> {
@@ -489,7 +489,7 @@ pub(super) fn signals_from_body_item(
     Ok(())
 }
 
-fn substitute_signal_local_constants(signals: &mut [Signal], const_env: &HashMap<String, i128>) {
+fn substitute_signal_local_constants(signals: &mut [Signal], const_env: &ConstEnv) {
     for signal in signals {
         for range in &mut signal.r#type.packed_ranges {
             range.left = substitute_dimension_constants(range.left.clone(), const_env);

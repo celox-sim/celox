@@ -1,4 +1,5 @@
 use super::*;
+use crate::ast::ConstEnv;
 use celox_sv_syntax::{Declarations, InstanceConnectionKind};
 #[cfg(test)]
 mod tests {
@@ -288,7 +289,7 @@ mod parameter_tests {
     use crate::ast::{ConstExpr, Source};
     fn number(value: &ConstExpr) -> i128 {
         let value: crate::ir::ConstExpr = value.clone().into();
-        crate::typecheck::eval_const_expr(&value, &HashMap::default()).unwrap()
+        crate::typecheck::eval_const_expr(&value, &ConstEnv::default()).unwrap()
     }
     fn subtract(tree: &mut SourceTree) {
         for expression in &mut tree.declarations.expressions {

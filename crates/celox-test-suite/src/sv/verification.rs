@@ -4,7 +4,7 @@ use crate::script::sv::{Bounds, DesignInfo, Port};
 use crate::verification::{Suite, Tool};
 use crate::{Design, Frontend, PreparedDesign, Result};
 use celox_sv_analyzer::ir::{FfEdge, Module, PortDirection, Type, UnpackedRange};
-use celox_sv_analyzer::typecheck::eval_const_expr;
+use celox_sv_analyzer::typecheck::{Constants, eval_const_expr};
 use std::collections::BTreeMap;
 
 /// Builds SystemVerilog designs for the external simulators: the sources are
@@ -13,8 +13,18 @@ use std::collections::BTreeMap;
 /// declarations here; a design it cannot analyze gets no generated testbench.
 pub struct SvFrontend;
 
+/// The constants an unpacked range's bounds may name: none, as only literal
+/// bounds are read.
+struct NoConstants;
+
+impl Constants for NoConstants {
+    fn constant(&self, _: &str) -> Option<&i128> {
+        None
+    }
+}
+
 fn bounds(range: &UnpackedRange) -> Option<Bounds> {
-    let constants = Default::default();
+    let constants = NoConstants;
     Some(Bounds {
         left: i64::try_from(eval_const_expr(range.left(), &constants)?).ok()?,
         right: i64::try_from(eval_const_expr(range.right(), &constants)?).ok()?,
