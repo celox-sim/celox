@@ -2063,6 +2063,7 @@ sv_backends! {
     fn constrained_randomize_state_properties(sim) { @case "class::constrained_randomize_state_properties"; }
     fn constrained_randomize_rand_objects(sim) { @case "class::constrained_randomize_rand_objects"; }
     fn constrained_randomize_rand_arrays(sim) { @case "class::constrained_randomize_rand_arrays"; }
+    fn constrained_randomize_shifts(sim) { @case "class::constrained_randomize_shifts"; }
 }
 
 sv_backends! {
