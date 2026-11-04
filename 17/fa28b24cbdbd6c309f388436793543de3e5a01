@@ -1,1 +1,1 @@
-Sync after #3083 and #3085 merged; preserve the remaining changes on the updated base.
+Fix both findings in review 5766239395: normalize legacy restored iff baselines and count occurrences after each scheduled host clock write, with regressions.
