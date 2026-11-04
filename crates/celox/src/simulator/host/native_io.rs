@@ -5,7 +5,7 @@ pub(crate) use super::native_arena::Header as ArenaHeader;
 use super::*;
 use celox_design::{HostRequestKind, HostRequestSite};
 
-pub(crate) const SYMBOL: &str = "__celox_native_services_v3";
+pub(crate) const SYMBOL: &str = "__celox_native_services_v4";
 
 pub(crate) const CHECKPOINT: u64 = u64::MAX;
 pub(crate) const SCHEDULER_RUN: u64 = u64::MAX - 1;
@@ -17,6 +17,8 @@ pub(crate) const ARENA_RESERVE_RECORDS: u64 = u64::MAX - 5;
 pub(crate) const ARENA_RESERVE_IMAGES: u64 = u64::MAX - 6;
 pub(crate) const ARENA_WAVE_LIMIT: u64 = u64::MAX - 7;
 pub(crate) const GUARD_FAULT: u64 = u64::MAX - 8;
+pub(crate) const COMB_BEFORE: u64 = u64::MAX - 9;
+pub(crate) const COMB_AFTER: u64 = u64::MAX - 10;
 
 pub(crate) fn signature() -> celox_design::ExternSignature {
     let integer = celox_design::ExternType::Integer {
@@ -45,6 +47,7 @@ pub(super) struct Metadata {
     pub process_names: Vec<String>,
     pub nbas: Vec<Vec<celox_design::NbaSite<SignalRef>>>,
     pub flagged: Vec<(usize, usize)>,
+    pub deferred_groups: Vec<(u32, usize)>,
 }
 
 pub(crate) fn supported<A>(site: &HostRequestSite<A>) -> bool {
@@ -148,7 +151,20 @@ impl Metadata {
                     .map(move |(site, _)| (process, site))
             })
             .collect();
+        let mut deferred_groups = Vec::new();
+        for observer in &program.runtime_schema.comb_observers {
+            if matches!(
+                program.runtime_schema.runtime_event_sites[observer.site_id as usize].deferred,
+                Some(celox_design::DeferredSite::Action { .. })
+            ) && !deferred_groups
+                .iter()
+                .any(|&(group, _)| group == observer.activation_group)
+            {
+                deferred_groups.push((observer.activation_group, observer.site_id as usize));
+            }
+        }
         Some(Arc::new(Self {
+            deferred_groups,
             nbas,
             flagged,
             layout: backend.layout().clone(),
@@ -187,6 +203,7 @@ pub(super) struct Scope<'a> {
     pub round_budget: u64,
     pub nbas: &'a mut std::collections::VecDeque<celox_runtime::NbaUpdate>,
     pub pending_scan: usize,
+    pub comb_before: Vec<bool>,
 }
 
 impl Scope<'_> {
@@ -429,6 +446,93 @@ impl Scope<'_> {
         Ok((value, mask))
     }
 
+    fn drain_events(&self, pending: &mut PendingRuntimeEvents) -> Result<(), RuntimeErrorCode> {
+        let offset = celox_state_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET;
+        if offset + 8 > self.state_size {
+            return Err(Self::fault("native state has no runtime-event header"));
+        }
+        // SAFETY: the native ABI installs this live event-buffer pointer before
+        // entering compiled code; this callback executes synchronously after
+        // earlier records have been committed.
+        let pointer = unsafe { self.state.add(offset).cast::<*const u8>().read_unaligned() };
+        let layout = &self.metadata.layout;
+        let mut read_seq = self.read_seq.load(Ordering::Acquire);
+        let mut events = if pointer.is_null() {
+            Vec::new()
+        } else {
+            let size = celox_state_layout::RUNTIME_EVENT_HEADER_SIZE
+                + layout.runtime_event_capacity * layout.runtime_event_slot_size;
+            collect_runtime_events(
+                layout,
+                &self.metadata.runtime_sites,
+                &mut read_seq,
+                size,
+                |offset| unsafe { pointer.add(offset).cast::<u64>().read_volatile() },
+                |offset| unsafe {
+                    (&*pointer.add(offset).cast::<AtomicU64>()).load(Ordering::Acquire)
+                },
+            )
+        };
+        self.read_seq.store(read_seq, Ordering::Release);
+        // The active native backend installs its heap after code adoption;
+        // read the current pointer rather than retaining the earlier tier's.
+        let heap = unsafe {
+            self.state
+                .add(celox_state_layout::STATE_HEADER_HEAP_ADDR_OFFSET)
+                .cast::<*const celox_heap::Heap>()
+                .read_unaligned()
+                .as_ref()
+        }
+        .ok_or_else(|| Self::fault("native state has no active heap"))?;
+        for event in &mut events {
+            event.resolve_handles(heap);
+        }
+        pending.extend(events, layout.runtime_event_capacity);
+        pending.resolve_deferred_handles(heap);
+        Ok(())
+    }
+
+    fn capture_enabled(&self, site: usize) -> bool {
+        // SAFETY: the backend installs a live flags array for every event site;
+        // this scope and its metadata belong to that same state image.
+        unsafe {
+            let pointer = self
+                .state
+                .add(celox_state_layout::STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET)
+                .cast::<*const u8>()
+                .read_unaligned();
+            *pointer.add(site) != 0
+        }
+    }
+
+    fn before_comb(&mut self) -> Result<(), RuntimeErrorCode> {
+        self.comb_before = self
+            .metadata
+            .deferred_groups
+            .iter()
+            .map(|&(_, site)| self.capture_enabled(site))
+            .collect();
+        let mut pending = self.pending.lock().unwrap();
+        self.drain_events(&mut pending)?;
+        for (&(group, _), &active) in self.metadata.deferred_groups.iter().zip(&self.comb_before) {
+            if active {
+                pending.flush(group);
+            }
+        }
+        Ok(())
+    }
+
+    fn after_comb(&self) {
+        let mut pending = self.pending.lock().unwrap();
+        // Do not collect the new records before cancelling the prior activation.
+        for (&(group, site), &active) in self.metadata.deferred_groups.iter().zip(&self.comb_before)
+        {
+            if !active && self.capture_enabled(site) {
+                pending.flush(group);
+            }
+        }
+    }
+
     fn write(
         &mut self,
         process: u64,
@@ -483,48 +587,8 @@ impl Scope<'_> {
         args: Vec<RuntimeEventArgValue>,
     ) -> Result<(), RuntimeErrorCode> {
         let mut pending = self.pending.lock().unwrap();
-        let offset = celox_state_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET;
-        if offset + 8 > self.state_size {
-            return Err(Self::fault("native state has no runtime-event header"));
-        }
-        // SAFETY: the native ABI installs this live event-buffer pointer before
-        // entering compiled code; this callback executes synchronously after
-        // earlier records have been committed.
-        let pointer = unsafe { self.state.add(offset).cast::<*const u8>().read_unaligned() };
+        self.drain_events(&mut pending)?;
         let layout = &self.metadata.layout;
-        let mut read_seq = self.read_seq.load(Ordering::Acquire);
-        let mut events = if pointer.is_null() {
-            Vec::new()
-        } else {
-            let size = celox_state_layout::RUNTIME_EVENT_HEADER_SIZE
-                + layout.runtime_event_capacity * layout.runtime_event_slot_size;
-            collect_runtime_events(
-                layout,
-                &self.metadata.runtime_sites,
-                &mut read_seq,
-                size,
-                |offset| unsafe { pointer.add(offset).cast::<u64>().read_volatile() },
-                |offset| unsafe {
-                    (&*pointer.add(offset).cast::<AtomicU64>()).load(Ordering::Acquire)
-                },
-            )
-        };
-        self.read_seq.store(read_seq, Ordering::Release);
-        // The active native backend installs its heap after code adoption;
-        // read the current pointer rather than retaining the earlier tier's.
-        let heap = unsafe {
-            self.state
-                .add(celox_state_layout::STATE_HEADER_HEAP_ADDR_OFFSET)
-                .cast::<*const celox_heap::Heap>()
-                .read_unaligned()
-                .as_ref()
-        }
-        .ok_or_else(|| Self::fault("native state has no active heap"))?;
-        for event in &mut events {
-            event.resolve_handles(heap);
-        }
-        pending.extend(events, layout.runtime_event_capacity);
-        pending.resolve_deferred_handles(heap);
         pending.push(
             RawRuntimeEvent::Host {
                 site: Box::new(site),
@@ -579,6 +643,10 @@ pub(crate) extern "C" fn call(
             // One counter spans every activation/pass of process_phase.
             // A new phase after NBA publication starts a fresh counter.
             scope.arena.header.returns = 0;
+        } else if encoded == COMB_BEFORE {
+            scope.before_comb()?;
+        } else if encoded == COMB_AFTER {
+            scope.after_comb();
         } else if encoded == NBA_PUBLISH {
             return scope.publish_nba();
         } else {
@@ -641,6 +709,7 @@ mod tests {
             runtime_sites: vec![],
             process_names: vec![],
             flagged: vec![(0, 0), (0, 1)],
+            deferred_groups: Vec::new(),
             nbas: vec![
                 staged
                     .iter()
@@ -678,6 +747,7 @@ mod tests {
             round_budget: u64::MAX,
             nbas: &mut queue,
             pending_scan: 0,
+            comb_before: Vec::new(),
         };
         let value = |bits: u8, mask: u8| (BigUint::from(bits), BigUint::from(mask));
         let update = |target, lsb, width, bits, mask| celox_runtime::NbaUpdate {

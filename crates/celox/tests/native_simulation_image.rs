@@ -360,6 +360,54 @@ endmodule"#;
     }
 }
 
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[test]
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+fn compiled_observers_survive_image_reload_and_state_restore() {
+    let source = r#"`timescale 1ns/1ns
+module Top;
+    int count = 0;
+    logic [72:0] wide = 0;
+    logic [12:0] words[3];
+    initial begin words[0] = 0; words[1] = 1; words[2] = 0; end
+    always #1 begin
+        count = count + 1;
+        wide = count[1] ? 'x : (wide << 17) + count;
+        words[0] = count;
+        words[1] = count[1] ? 'z : count;
+    end
+    always_comb begin
+        if (count[0]) $display("count %0d", count);
+        if (count[1]) $display("wide %h", wide[68:3]);
+    end
+    always_comb if (words[0][0]) $display("array %h", words[1]);
+endmodule"#;
+    for four_state in [false, true] {
+        let make = || builder(source).four_state(four_state);
+        let image = reloaded(&make().compile_native().unwrap().into_program_image());
+        let mut sim = Simulation::from_sv_sources(Vec::new(), "Top")
+            .four_state(four_state)
+            .scheduler_mode(SchedulerMode::DifferentialRuns)
+            .build_native_from_image(image)
+            .unwrap();
+        sim.run_until(3).unwrap();
+        sim.drain_runtime_events();
+        let saved = sim.save_state().unwrap();
+        let before = sim.scheduler_stats().reference_steps;
+        sim.run_until(9).unwrap();
+        let events = sim.drain_runtime_events();
+        let state = sim.save_state().unwrap();
+        assert_eq!(sim.scheduler_stats().reference_steps, before);
+        sim.load_state(&saved).unwrap();
+        let before = sim.scheduler_stats().reference_steps;
+        sim.run_until(9).unwrap();
+        assert_eq!(sim.drain_runtime_events(), events);
+        assert_eq!(sim.save_state().unwrap(), state);
+        assert_eq!(sim.scheduler_stats().reference_steps, before);
+        assert!(sim.scheduler_stats().checked_steps > 0);
+    }
+}
+
 #[test]
 fn reactive_waits_survive_gated_clock_image_reload() {
     let source = r#"`timescale 1ns/1ns

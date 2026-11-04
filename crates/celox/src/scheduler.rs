@@ -31,6 +31,7 @@
 //! and every design or kernel this module does not qualify, runs in the
 //! reference loop.
 
+mod observers;
 mod ordered;
 mod slice;
 mod testbench;
@@ -142,6 +143,7 @@ pub(crate) fn enable_native_services(program: &mut LaidOutProgram) {
     let schema = &mut program.runtime.runtime_schema;
     let name = crate::simulator::native_io::SYMBOL;
     let needs_service = !schema.processes.is_empty()
+        || !schema.comb_observers.is_empty()
         || schema
             .host_request_sites
             .iter()
@@ -189,7 +191,7 @@ fn instrument_recording_functions(
             .any(|inst| matches!(inst, SIRInstruction::RuntimeEvent { .. }))
         {
             function.unit =
-                Generator::instrument_records(&function.unit, &finish_sites, slots, true);
+                Generator::instrument_records(&function.unit, &finish_sites, slots, true, false);
             changed = true;
         }
     }
@@ -382,6 +384,7 @@ struct CountedEvent {
 }
 
 struct Plan {
+    observers: Option<observers::Observers>,
     counted: Vec<CountedEvent>,
     /// In event-id order, which the reference loop visits several triggered
     /// domains in.
@@ -476,7 +479,12 @@ impl Plan {
         let schema = &program.runtime.runtime_schema;
         let model = ScheduleModel::derive(&program.design, schema);
         let topology = &model.events;
-        if !schema.comb_observers.is_empty() {
+        let native_observers = cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen")))
+            && schema
+                .extern_functions
+                .iter()
+                .any(|function| function.name == crate::simulator::native_io::SYMBOL);
+        if !native_observers && !schema.comb_observers.is_empty() {
             return Err("the design observes combinational processes".into());
         }
         if slots.wake.len() != schema.processes.len() {
@@ -487,7 +495,7 @@ impl Plan {
             .eval_comb
             .iter()
             .any(|unit| instructions(unit).any(crate::ir::may_raise_fatal_capture));
-        if comb_fatal {
+        if comb_fatal && !native_observers {
             return Err("combinational logic has fatal assertions".into());
         }
         let rtl_units = || {
@@ -1599,6 +1607,9 @@ impl Plan {
             }
         }
         let mut plan = Self {
+            observers: native_observers
+                .then(|| observers::Observers::new(program))
+                .filter(|observers| !observers.groups.is_empty()),
             counted: counted_events,
             events,
             kernels,
@@ -2084,6 +2095,8 @@ impl Plan {
         let mut b = Builder::new();
         let comb = b.new_block();
         let mut g = Generator {
+            observers: self.observers.as_ref(),
+            observer_service: self.service_function,
             outlined,
             outline_base,
             b,
@@ -4078,6 +4091,8 @@ enum Phase {
 }
 
 struct Generator<'a> {
+    observers: Option<&'a observers::Observers>,
+    observer_service: Option<u32>,
     outlined: Option<&'a mut Vec<Unit>>,
     outline_base: u32,
     b: Builder,
@@ -4958,10 +4973,7 @@ impl Generator<'_> {
         for unit in units {
             self.inline_writer_with_exit(unit, None);
         }
-        if units
-            .iter()
-            .any(|unit| emits_finish(unit, self.finish_sites))
-        {
+        if units.iter().any(|unit| self.unit_finishes(unit)) {
             self.check_finish(finish_exit);
         }
     }
@@ -5175,7 +5187,10 @@ impl Generator<'_> {
         });
         self.b.switch_to_block(run);
         for unit in eager {
-            self.inline(unit, finish_exit);
+            self.inline_with_exit(unit, None);
+        }
+        if eager.iter().any(|unit| self.unit_finishes(unit)) {
+            self.check_finish(finish_exit);
         }
         self.b.seal_block(SIRTerminator::Jump(done, Vec::new()));
         self.b.switch_to_block(done);
@@ -5210,6 +5225,7 @@ impl Generator<'_> {
         internal_exit: celox_sir::BlockId,
     ) {
         self.b.switch_to_block(self.comb);
+        self.observers_before(internal_exit);
         if self.settle_reads.is_some() {
             let dirty = self.load(self.slots.dirty, SCHEDULER_FLAG_WIDTH);
             let zero = self.constant(0, SCHEDULER_FLAG_WIDTH);
@@ -5234,18 +5250,18 @@ impl Generator<'_> {
                 });
                 self.b.switch_to_block(partial);
                 for unit in &cone.units {
-                    self.inline(unit, finish_exit);
+                    self.inline_with_exit(unit, None);
                 }
                 self.b.seal_block(SIRTerminator::Jump(done, Vec::new()));
                 self.b.switch_to_block(full);
                 for unit in units {
-                    self.inline(unit, finish_exit);
+                    self.inline_with_exit(unit, None);
                 }
                 self.b.seal_block(SIRTerminator::Jump(done, Vec::new()));
                 self.b.switch_to_block(done);
             } else {
                 for unit in units {
-                    self.inline(unit, finish_exit);
+                    self.inline_with_exit(unit, None);
                 }
             }
             let clean = self.constant(0, SCHEDULER_FLAG_WIDTH);
@@ -5254,8 +5270,18 @@ impl Generator<'_> {
             self.b.switch_to_block(settled);
         } else {
             for unit in units {
-                self.inline(unit, finish_exit);
+                self.inline_with_exit(unit, None);
             }
+        }
+        self.observers_after(internal_exit);
+        // Match the backend's phase boundary: a captured finish must not
+        // skip later combinational writes, captures or observer snapshots.
+        if units.iter().any(|unit| self.unit_finishes(unit))
+            || self
+                .incremental
+                .is_some_and(|cone| cone.units.iter().any(|unit| self.unit_finishes(unit)))
+        {
+            self.check_finish(finish_exit);
         }
         let targets = self.continuations.clone();
         self.dispatch_continuations(&targets, internal_exit);
@@ -5323,10 +5349,22 @@ impl Generator<'_> {
         self.inline_with_exit(unit, Some(finish_exit));
     }
 
+    fn unit_finishes(&self, unit: &Unit) -> bool {
+        !self.finish_sites.is_empty()
+            && (emits_finish(unit, self.finish_sites)
+                || self.observers.is_some()
+                    && instructions(unit).any(|inst| matches!(inst,
+                        SIRInstruction::CombCaptureEvent { site_id, .. } if self.finish_sites.contains(site_id))))
+    }
+
     fn inline_with_exit(&mut self, unit: &Unit, finish_exit: Option<celox_sir::BlockId>) {
-        let finishes = !self.finish_sites.is_empty() && emits_finish(unit, self.finish_sites);
+        let captures = self.observers.is_some();
+        let finishes = self.unit_finishes(unit);
         let counts = self.event_batch.is_some()
-            && instructions(unit).any(|inst| matches!(inst, SIRInstruction::RuntimeEvent { .. }));
+            && instructions(unit).any(|inst| {
+                matches!(inst, SIRInstruction::RuntimeEvent { .. })
+                    || captures && matches!(inst, SIRInstruction::CombCaptureEvent { .. })
+            });
         if !finishes && !counts {
             self.inline_body(unit);
             return;
@@ -5376,7 +5414,13 @@ impl Generator<'_> {
     /// A copy of `unit` that sets the finish slot after every `$finish`
     /// record, and when `counts`, counts every record in the events slot.
     fn instrument(&self, unit: &Unit, counts: bool) -> Unit {
-        Self::instrument_records(unit, self.finish_sites, self.slots, counts)
+        Self::instrument_records(
+            unit,
+            self.finish_sites,
+            self.slots,
+            counts,
+            self.observers.is_some(),
+        )
     }
 
     /// [`Self::instrument`] of `unit`, for a scheduler of `slots` whose
@@ -5386,6 +5430,7 @@ impl Generator<'_> {
         finish_sites: &HashSet<u32>,
         slots: &SchedulerSlots<AbsoluteAddr>,
         counts: bool,
+        captures: bool,
     ) -> Unit {
         let mut unit = unit.clone();
         let mut next = unit
@@ -5399,9 +5444,47 @@ impl Generator<'_> {
         for block in unit.blocks.values_mut() {
             let mut instructions = Vec::with_capacity(block.instructions.len());
             for inst in block.instructions.drain(..) {
+                let capture = match &inst {
+                    SIRInstruction::CombCaptureEvent { site_id, .. } if captures => Some(*site_id),
+                    _ => None,
+                };
+                let enabled = capture.map(|site| {
+                    use celox_sir::native_memory::NativeMemoryOp as Memory;
+                    let [header, pointer, offset, word, shift, shifted, mask, enabled] =
+                        std::array::from_fn(|i| RegisterId(next + i));
+                    next += 8;
+                    wide.extend([header, pointer, offset, word, shift, shifted, mask, enabled]);
+                    instructions.extend([
+                        SIRInstruction::Imm(
+                            header,
+                            SIRValue::new(
+                                celox_state_layout::STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET
+                                    as u64,
+                            ),
+                        ),
+                        SIRInstruction::ExternCall {
+                            dst: Some(pointer),
+                            func: Memory::ReadState.function(),
+                            args: vec![header],
+                        },
+                        SIRInstruction::Imm(offset, SIRValue::new(u64::from(site / 8) * 8)),
+                        SIRInstruction::ExternCall {
+                            dst: Some(word),
+                            func: Memory::ReadIndirect.function(),
+                            args: vec![pointer, offset],
+                        },
+                        SIRInstruction::Imm(shift, SIRValue::new(u64::from(site % 8) * 8)),
+                        SIRInstruction::Binary(shifted, word, BinaryOp::Shr, shift),
+                        SIRInstruction::Imm(mask, SIRValue::new(255u64)),
+                        SIRInstruction::Binary(enabled, shifted, BinaryOp::And, mask),
+                    ]);
+                    enabled
+                });
                 let finish = matches!(&inst, SIRInstruction::RuntimeEvent { site_id, .. }
-                    if finish_sites.contains(site_id));
-                let record = matches!(&inst, SIRInstruction::RuntimeEvent { .. });
+                    if finish_sites.contains(site_id))
+                    || capture.is_some_and(|site| finish_sites.contains(&site));
+                let record =
+                    matches!(&inst, SIRInstruction::RuntimeEvent { .. }) || capture.is_some();
                 instructions.push(inst);
                 if counts && record {
                     let [count, one, sum] = std::array::from_fn(|index| RegisterId(next + index));
@@ -5416,7 +5499,7 @@ impl Generator<'_> {
                             SCHEDULER_TIME_WIDTH,
                         ),
                         SIRInstruction::Imm(one, SIRValue::new(1u64)),
-                        SIRInstruction::Binary(sum, count, BinaryOp::Add, one),
+                        SIRInstruction::Binary(sum, count, BinaryOp::Add, enabled.unwrap_or(one)),
                         SIRInstruction::Store(
                             events,
                             SIROffset::Static(0),
@@ -5428,19 +5511,32 @@ impl Generator<'_> {
                     ]);
                 }
                 if finish {
-                    // Each site defines its own register.
-                    let one = RegisterId(next);
-                    next += 1;
-                    registers.push(one);
-                    instructions.push(SIRInstruction::Imm(one, SIRValue::new(1u8)));
-                    instructions.push(SIRInstruction::Store(
-                        stable(slots.finish),
-                        SIROffset::Static(0),
-                        SCHEDULER_FLAG_WIDTH,
-                        one,
-                        Vec::new(),
-                        Vec::new(),
-                    ));
+                    let [one, previous, result] = std::array::from_fn(|i| RegisterId(next + i));
+                    next += 3;
+                    registers.extend([one, previous, result]);
+                    instructions.push(match enabled {
+                        Some(enabled) => {
+                            SIRInstruction::Slice(one, enabled, 0, SCHEDULER_FLAG_WIDTH)
+                        }
+                        None => SIRInstruction::Imm(one, SIRValue::new(1u8)),
+                    });
+                    instructions.extend([
+                        SIRInstruction::Load(
+                            previous,
+                            stable(slots.finish),
+                            SIROffset::Static(0),
+                            SCHEDULER_FLAG_WIDTH,
+                        ),
+                        SIRInstruction::Binary(result, previous, BinaryOp::Or, one),
+                        SIRInstruction::Store(
+                            stable(slots.finish),
+                            SIROffset::Static(0),
+                            SCHEDULER_FLAG_WIDTH,
+                            result,
+                            Vec::new(),
+                            Vec::new(),
+                        ),
+                    ]);
                 }
             }
             block.instructions = instructions;

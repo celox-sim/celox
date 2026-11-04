@@ -46,6 +46,77 @@ pub(crate) struct ObserverSnapshot {
 }
 
 impl ObserverReads {
+    /// Transfer snapshots only at generated-scheduler entry/exit. Inside a
+    /// run, generated loads compare and replace these fixed-size words.
+    pub(crate) fn pack(&self, snapshots: &[ObserverSnapshot], packed: &mut Vec<u64>) {
+        packed.clear();
+        for (index, reads) in self.observers.iter().enumerate() {
+            let empty = ObserverSnapshot::default();
+            let snapshot = snapshots.get(index).unwrap_or(&empty);
+            let (mut word, mut wide) = (0, 0);
+            for read in reads {
+                match read {
+                    Read::Word { mask, .. } => {
+                        for _ in 0..1 + usize::from(mask.is_some()) {
+                            packed.push(snapshot.words.get(word).copied().unwrap_or(0));
+                            word += 1;
+                        }
+                    }
+                    Read::Counter(_) => {
+                        packed.push(snapshot.words.get(word).copied().unwrap_or(0));
+                        word += 1;
+                    }
+                    Read::Wide { lsb, msb, .. } => {
+                        let words = msb.checked_sub(*lsb).map_or(0, |n| (n + 1).div_ceil(64));
+                        let zero = (BigUint::default(), BigUint::default());
+                        let (value, mask) = snapshot.wide.get(wide).unwrap_or(&zero);
+                        for plane in [value, mask] {
+                            let at = packed.len();
+                            packed.extend(plane.iter_u64_digits().take(words));
+                            packed.resize(at + words, 0);
+                        }
+                        wide += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn unpack(&self, packed: &[u64], snapshots: &mut Vec<ObserverSnapshot>) {
+        snapshots.resize_with(self.observers.len(), Default::default);
+        let mut at = 0;
+        for (reads, snapshot) in self.observers.iter().zip(snapshots) {
+            snapshot.words.clear();
+            snapshot.wide.clear();
+            for read in reads {
+                match read {
+                    Read::Word { mask, .. } => {
+                        let n = 1 + usize::from(mask.is_some());
+                        snapshot.words.extend_from_slice(&packed[at..at + n]);
+                        at += n;
+                    }
+                    Read::Counter(_) => {
+                        snapshot.words.push(packed[at]);
+                        at += 1;
+                    }
+                    Read::Wide { lsb, msb, .. } => {
+                        let words = msb.checked_sub(*lsb).map_or(0, |n| (n + 1).div_ceil(64));
+                        let mut plane = || {
+                            let bytes: Vec<_> = packed[at..at + words]
+                                .iter()
+                                .flat_map(|word| word.to_le_bytes())
+                                .collect();
+                            at += words;
+                            BigUint::from_bytes_le(&bytes)
+                        };
+                        snapshot.wide.push((plane(), plane()));
+                    }
+                }
+            }
+        }
+        debug_assert_eq!(at, packed.len());
+    }
+
     pub(crate) fn new<B: SimBackend>(
         backend: &B,
         observers: &[RuntimeCombObserver<AbsoluteAddr>],
