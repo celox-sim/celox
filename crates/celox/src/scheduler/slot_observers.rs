@@ -78,7 +78,7 @@ impl Plan {
         let mut edges = g.load(g.slots.exit_arg, self.event_bits);
         for (index, (event, was)) in self.events.iter().zip(before).enumerate() {
             let is = g.level(event);
-            let edge = g.edge(event, was, is);
+            let edge = g.settled_edge(event, was, is);
             let bit = g.event_bit(edge, index);
             edges = g.binary(self.event_bits, edges, BinaryOp::Or, bit);
         }
