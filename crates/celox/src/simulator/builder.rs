@@ -6931,8 +6931,10 @@ module Top;
     logic [12:0] a = 0;
     logic [16:0] b = 0;
     logic [16:0] z, q = 0;
+    logic [10:0] n = 0;
     assign z = b + 17'd1;
     always_ff @(posedge clk) q <= z;
+    always #1 n = n + 11'd1;
     initial begin
         #1 a = 13'd5;
         #1 if (z != 17'd106) $fatal(1, "stale z %0d", z);
@@ -6961,34 +6963,6 @@ endmodule
             let clk = clock(sir);
             let clearer = push_clearer(sir, clk);
             sir.eval_comb.push(caller(clearer));
-            timed_adder(sir);
-        }
-
-        /// ...and records a runtime event in the settle's function.
-        fn timed_adder_recording(sir: &mut SirProgram) {
-            let a = object(&sir.processes, INPUT, true);
-            let b = object(&sir.eval_comb, OUTPUT, false);
-            let event = SIRInstruction::RuntimeEvent {
-                site_id: 0,
-                args: Vec::new(),
-            };
-            let adder = push_adder(sir, a, b, vec![event]);
-            settle_first(sir, adder);
-            sir.summarize_calls();
-        }
-
-        /// The settle as in `timed_adder`, and the process that writes `a`
-        /// calls a function that records a runtime event.
-        fn timed_adder_with_recording_process(sir: &mut SirProgram) {
-            let a = object(&sir.processes, INPUT, true);
-            let b = object(&sir.eval_comb, OUTPUT, false);
-            let event = SIRInstruction::RuntimeEvent {
-                site_id: 0,
-                args: Vec::new(),
-            };
-            let recorder = push_adder(sir, a, b, vec![event]);
-            let process = writer_of(sir, a);
-            prepend_call(&mut sir.processes[process], recorder);
             timed_adder(sir);
         }
 
@@ -7084,23 +7058,266 @@ endmodule
             );
         }
 
-        /// Records a callee makes are out of the reach of the scheduler's
-        /// record instrumentation: the settle's reject the plan, a
-        /// process's leave it to the reference loop.
+        /// The width of the counter the free-running process increments.
+        const COUNTER: usize = 11;
+
+        /// Append a function that fails.
+        fn push_failing(sir: &mut SirProgram) -> FunctionId {
+            let mut unit = block(Vec::new());
+            unit.blocks.get_mut(&BlockId(0)).unwrap().terminator = SIRTerminator::Error(1);
+            push_function(sir, unit)
+        }
+
+        /// The process that increments the counter: the one that loads it.
+        fn incrementer(sir: &SirProgram) -> usize {
+            let n = object(&sir.processes, COUNTER, false);
+            (0..sir.processes.len())
+                .find(|&index| {
+                    sir.processes[index]
+                        .blocks
+                        .values()
+                        .flat_map(|block| &block.instructions)
+                        .any(|instruction| matches!(instruction, SIRInstruction::Load(_, addr, ..) if *addr == n))
+                })
+                .unwrap()
+        }
+
+        fn no_calls(_: &mut SirProgram) {}
+
+        /// The counter's process calls a function that cannot fail.
+        fn process_calls_a_quiet_function(sir: &mut SirProgram) {
+            let a = object(&sir.processes, INPUT, true);
+            let b = object(&sir.eval_comb, OUTPUT, false);
+            let adder = push_adder(sir, a, b, Vec::new());
+            let process = incrementer(sir);
+            prepend_call(&mut sir.processes[process], adder);
+            sir.summarize_calls();
+        }
+
+        /// The counter's process calls a function that may fail.
+        fn process_calls_a_failing_function(sir: &mut SirProgram) {
+            let failing = push_failing(sir);
+            let process = incrementer(sir);
+            prepend_call(&mut sir.processes[process], failing);
+            sir.summarize_calls();
+        }
+
+        /// The settle calls a function that may fail.
+        fn settle_calls_a_failing_function(sir: &mut SirProgram) {
+            let failing = push_failing(sir);
+            sir.eval_comb.push(caller(failing));
+            sir.summarize_calls();
+        }
+
+        /// A call that cannot fail costs no settle its laziness; one that may
+        /// fail costs it only the unit that makes it: a process that makes
+        /// it observes the settled state, and only a settle that makes it
+        /// runs where the reference's does.
         #[test]
-        fn records_of_callees_keep_their_units_out_of_the_scheduler() {
-            let (_, summary) = plan(timed_adder_recording);
-            let error = summary.err().unwrap();
-            assert!(error.contains("records runtime events"), "{error}");
-            let (_, summary) = plan(timed_adder_with_recording_process);
-            let fallback = summary.unwrap().fallback;
-            assert!(
-                fallback
-                    .iter()
-                    .flatten()
-                    .any(|reason| reason.contains("records runtime events")),
-                "{fallback:?}"
-            );
+        fn only_units_with_failing_calls_lose_lazy_settles() {
+            let (program, base) = plan(no_calls);
+            let base = base.unwrap();
+            let kernels = base.lazy.clone().expect("the fixture defers its settles");
+            let counter = incrementer(&program.sir);
+            assert!(!kernels[counter], "the counter does not observe the settle");
+            for transform in [timed_adder, process_calls_a_quiet_function] {
+                let summary = plan(transform).1.unwrap();
+                assert_eq!(summary.lazy, base.lazy);
+                assert_eq!(summary.incremental, base.incremental);
+            }
+            let summary = plan(process_calls_a_failing_function).1.unwrap();
+            assert_eq!(summary.incremental, base.incremental);
+            let lazy = summary.lazy.unwrap();
+            for (index, (&observes, &before)) in lazy.iter().zip(&kernels).enumerate() {
+                assert_eq!(observes, before || index == counter, "kernel {index}");
+            }
+            let summary = plan(settle_calls_a_failing_function).1.unwrap();
+            assert!(summary.lazy.is_none() && !summary.incremental);
+        }
+
+        /// The settle's function records a runtime event, and the process
+        /// that writes `a` calls one that records one too.
+        fn recording_calls(sir: &mut SirProgram) {
+            let a = object(&sir.processes, INPUT, true);
+            let b = object(&sir.eval_comb, OUTPUT, false);
+            let event = || SIRInstruction::RuntimeEvent {
+                site_id: 0,
+                args: Vec::new(),
+            };
+            let recorder = push_adder(sir, a, b, vec![event()]);
+            let process = writer_of(sir, a);
+            prepend_call(&mut sir.processes[process], recorder);
+            let adder = push_adder(sir, a, b, vec![event()]);
+            settle_first(sir, adder);
+            sir.summarize_calls();
+        }
+
+        /// Callees that record runtime events keep their callers compiled:
+        /// no kernel falls back for them and the plan stands.
+        #[test]
+        fn records_of_callees_stay_in_the_scheduler() {
+            let base = plan(no_calls).1.unwrap();
+            let summary = plan(recording_calls).1.unwrap();
+            assert_eq!(summary.fallback, base.fallback);
+        }
+
+        const FINISHING: &str = r#"
+`timescale 1ns/1ns
+module Top;
+    logic clk = 0;
+    logic [10:0] n = 0;
+    logic [3:0] count = 0;
+    always #1 clk = ~clk;
+    always #1 n = n + 11'd1;
+    always_ff @(posedge clk) begin
+        count <= count + 4'd1;
+        if (count == 4'd2) $finish;
+    end
+endmodule
+"#;
+
+        /// The flip-flop's `$finish` record moves into a function it calls
+        /// there instead, which gets the record's arguments in frame slots.
+        fn ff_finish_in_a_function(sir: &mut SirProgram) {
+            let mut recorder = None;
+            let units = sir
+                .eval_apply_ffs
+                .values_mut()
+                .chain(sir.eval_comb_apply_ffs.values_mut())
+                .chain(sir.eval_only_ffs.values_mut())
+                .chain(sir.apply_ffs.values_mut())
+                .flatten();
+            let mut functions = Vec::new();
+            for unit in units {
+                let mut frame = unit.register_map.keys().map(|r| r.0 + 1).max().unwrap_or(0);
+                let mut new_registers = Vec::new();
+                for block in unit.blocks.values_mut() {
+                    let old = std::mem::take(&mut block.instructions);
+                    for instruction in old {
+                        let SIRInstruction::RuntimeEvent { site_id, args } = &instruction else {
+                            block.instructions.push(instruction);
+                            continue;
+                        };
+                        let function = *recorder.get_or_insert_with(|| {
+                            let id = FunctionId(functions.len() as u32);
+                            functions.push(recording_function(*site_id, args, &unit.register_map));
+                            id
+                        });
+                        new_registers.push(RegisterId(frame));
+                        let [
+                            imm,
+                            SIRInstruction::Call {
+                                function,
+                                frame: frame_register,
+                                outputs,
+                                dst,
+                                effects,
+                                ..
+                            },
+                        ] = call(function, frame)
+                        else {
+                            unreachable!()
+                        };
+                        frame += 1;
+                        block.instructions.push(imm);
+                        block.instructions.push(SIRInstruction::Call {
+                            function,
+                            frame: frame_register,
+                            args: args.iter().copied().enumerate().collect(),
+                            outputs,
+                            dst,
+                            effects,
+                        });
+                    }
+                }
+                for register in new_registers {
+                    unit.register_map.insert(register, bits(32));
+                }
+            }
+            assert!(recorder.is_some(), "the `$finish` record");
+            assert!(sir.functions.is_empty());
+            sir.functions = functions;
+            sir.summarize_calls();
+        }
+
+        /// A function that records site `site_id` with `args` of the types
+        /// `types` gives them, passed in its frame slots.
+        fn recording_function(
+            site_id: u32,
+            args: &[RegisterId],
+            types: &HashMap<RegisterId, RegisterType>,
+        ) -> FunctionUnit<RegionedAbsoluteAddr> {
+            let mut slots = Vec::new();
+            let mut body = Vec::new();
+            let mut registers = Vec::new();
+            let mut offset = 0;
+            for (index, arg) in args.iter().enumerate() {
+                let ty = types[arg].clone();
+                let addr = RegionedAbsoluteAddr {
+                    region: celox_design::FRAME_REGION,
+                    instance_id: celox_design::InstanceId(0),
+                    var_id: celox_design::StateObjectId(index as u32),
+                };
+                let slot = FrameSlot {
+                    addr,
+                    offset,
+                    width: ty.width(),
+                    four_state: matches!(ty, RegisterType::Logic { .. }),
+                    handle: false,
+                };
+                offset += slot.size().next_multiple_of(8);
+                slots.push(slot);
+                body.push(SIRInstruction::Load(
+                    RegisterId(index),
+                    addr,
+                    SIROffset::Static(0),
+                    ty.width(),
+                ));
+                registers.push((RegisterId(index), ty));
+            }
+            body.push(SIRInstruction::RuntimeEvent {
+                site_id,
+                args: (0..args.len()).map(RegisterId).collect(),
+            });
+            let mut unit = block(body);
+            unit.register_map.extend(registers);
+            FunctionUnit {
+                unit,
+                frame: FrameLayout {
+                    size: offset.max(8),
+                    slots,
+                },
+                effects: Default::default(),
+            }
+        }
+
+        /// A `$finish` a callee of a flip-flop records ends a compiled run
+        /// where it ends the reference's: the scheduler checks for it after
+        /// the domain, as for a record of the flip-flop's own.
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        #[test]
+        fn a_callee_finish_ends_the_compiled_run() {
+            let run = |mode| {
+                let mut simulation = crate::Simulation::from_sv_sources(
+                    vec![(FINISHING, std::path::Path::new("finishing.sv"))],
+                    "Top",
+                )
+                .four_state(false)
+                .transform_sir(ff_finish_in_a_function)
+                .scheduler_mode(mode)
+                .build_native()
+                .unwrap();
+                simulation.run_until(40).unwrap();
+                assert!(simulation.is_finished(), "{mode:?}");
+                let n = simulation.signal("n");
+                let compiled = simulation.scheduler_stats().compiled_slots;
+                (simulation.time(), simulation.get(n), compiled)
+            };
+            let (time, n, _) = run(crate::SchedulerMode::Reference);
+            let (compiled_time, compiled_n, slots) = run(crate::SchedulerMode::Compiled);
+            assert!(slots > 0);
+            assert_eq!((compiled_time, compiled_n), (time, n));
+            assert!(time < 40, "{time}");
         }
 
         const ALIASED: &str = r#"
