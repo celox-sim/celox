@@ -837,7 +837,23 @@ fn constraints_on_handle_and_string_properties_are_rejected() {
             "a handle, string, container or property wider than 64 bits in a constraint",
         ),
         (
-            "class C; rand bit [3:0] x; rand int q[$]; constraint k { x < 5; } endclass",
+            "class C; rand bit [3:0] x; rand string q[$]; constraint k { x < 5; } endclass",
+            "c.randomize()",
+            "rand dynamic arrays and queues currently require 2-state integral elements",
+        ),
+        (
+            "class C; rand bit [3:0] x; rand logic [3:0] d[]; constraint k { x < 5; } endclass",
+            "c.randomize()",
+            "rand dynamic arrays and queues currently require 2-state integral elements",
+        ),
+        (
+            "class C; rand bit [3:0] x; randc bit [3:0] d[]; constraint k { x < 5; } endclass",
+            "c.randomize()",
+            "a randc dynamic array or queue",
+        ),
+        // The size and indices of an associative array are not random (18.4).
+        (
+            "class C; rand bit [3:0] x; rand int a[int]; constraint k { x < 5; } endclass",
             "c.randomize()",
             "constraints currently require scalar integral rand properties",
         ),
@@ -1090,6 +1106,79 @@ fn pre_randomize_discovers_members_at_every_depth() {
 endmodule
 "#;
     let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("depth.sv"))], "Top")
+        .build()
+        .unwrap();
+    let (bad, done) = (sim.signal("bad"), sim.signal("done"));
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(done), BigUint::from(1u8));
+    assert_eq!(sim.get(bad), BigUint::from(0u8));
+}
+
+/// A rand array whose rand_mode is off keeps its size and elements (IEEE
+/// 1800-2023 18.8), an inline constraint may name its size (18.7), and
+/// randomize(null) checks its size constraint against its size and changes
+/// nothing (18.11.1); a disabled block names no size (18.9); a selected
+/// array is random for the call (18.11); a bounded queue takes at most its bound plus one
+/// elements (7.10). Verilator 5.052 resizes an array whose rand_mode is
+/// off, ignores the inline size constraint, does not support
+/// randomize(null) on a class with a rand container and does not finish
+/// randomizing a bounded queue; xezim 0.11.4 grows a bounded queue past its
+/// bound.
+#[test]
+fn rand_array_modes_inline_sizes_and_checks() {
+    let source = r#"module Top(output int bad, output bit done);
+    class Item;
+        rand bit [63:0] value[];
+        constraint max_values { value.size() > 0 && value.size() < 10; }
+        bit [7:0] other[];
+    endclass
+    class Plain;
+        int unsigned d[];
+        bit [3:0] x;
+    endclass
+    class Bounded;
+        rand bit few[$:2];
+        constraint c { few.size() >= 0; }
+    endclass
+    Item item;
+    Bounded b;
+    initial begin
+        item = new;
+        b = new;
+        for (int i = 0; i < 20; i++) if (b.randomize() == 0 || b.few.size() > 3) bad++;
+        item.value = '{7};
+        item.value.rand_mode(0);
+        if (item.randomize() == 0 || item.value.size() != 1 || item.value[0] != 7) bad++;
+        item.value.rand_mode(1);
+        if ((item.randomize() with { value.size() == 2; }) == 0 || item.value.size() != 2) bad++;
+        // A selected array is random for the call (18.11): at its size, or
+        // the size the call's constraints give.
+        begin
+            Plain plain = new;
+            int changed = 0;
+            plain.d = new[4];
+            for (int i = 0; i < 10; i++) begin
+                if (plain.randomize(d) == 0 || plain.d.size() != 4 || plain.x != 0) bad++;
+                foreach (plain.d[j]) if (plain.d[j] != 0) changed++;
+            end
+            if (changed == 0) bad++;
+            if ((item.randomize(other) with { other.size() == 3; }) == 0 || item.other.size() != 3)
+                bad++;
+        end
+        // Without its block, no constraint names the size: it is kept.
+        item.max_values.constraint_mode(0);
+        item.value = new[12];
+        if (item.randomize() == 0 || item.value.size() != 12) bad++;
+        item.max_values.constraint_mode(1);
+        item.value.delete();
+        if (item.randomize(null) != 0) bad++;
+        item.value = new[3];
+        if (item.randomize(null) != 1 || item.value.size() != 3 || item.value[0] != 0) bad++;
+        done = 1;
+    end
+endmodule
+"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("check.sv"))], "Top")
         .build()
         .unwrap();
     let (bad, done) = (sim.signal("bad"), sim.signal("done"));
@@ -1973,6 +2062,7 @@ sv_backends! {
     fn constrained_randomize_nested_guards(sim) { @case "class::constrained_randomize_nested_guards"; }
     fn constrained_randomize_state_properties(sim) { @case "class::constrained_randomize_state_properties"; }
     fn constrained_randomize_rand_objects(sim) { @case "class::constrained_randomize_rand_objects"; }
+    fn constrained_randomize_rand_arrays(sim) { @case "class::constrained_randomize_rand_arrays"; }
 }
 
 sv_backends! {

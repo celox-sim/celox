@@ -1173,7 +1173,10 @@ pub(super) fn random_selection(
                 if property.field.four_state {
                     return Err(unsupported("randomization of a 4-state class property"));
                 }
-                if property.field.handle.is_some()
+                // A selected array is random for the call, as a rand one
+                // (18.11).
+                let array = classes::constraints::random_array(property);
+                if (property.field.handle.is_some() && !array)
                     || property.r#type.holds_chandle()
                     || (property.r#type.is_enum && property.r#type.enum_domain.is_none())
                     || (property.randc && property.cyclic_domain_size().is_none())
@@ -1182,7 +1185,7 @@ pub(super) fn random_selection(
                         "randomize arguments require integral properties with a supported enum domain",
                     ));
                 }
-                unsolvable |= !classes::constraints::constrainable(property);
+                unsolvable |= !classes::constraints::constrainable(property) && !array;
                 bits[index + 1] = '1';
             }
             _ => {

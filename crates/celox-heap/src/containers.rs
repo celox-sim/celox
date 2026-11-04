@@ -295,6 +295,41 @@ impl Container {
 }
 
 impl Heap {
+    /// The number of elements of sequence `handle`; 0 for the empty one.
+    pub(crate) fn sequence_len(&self, handle: Handle) -> usize {
+        match self
+            .containers
+            .get(&handle)
+            .map(|container| &container.contents)
+        {
+            Some(Contents::Sequence(elements)) => elements.len(),
+            _ => 0,
+        }
+    }
+
+    /// A sequence with the two-state `elements`, of the layout of sequence
+    /// `handle`, or of `layout` when it is empty.
+    pub(crate) fn random_sequence(
+        &mut self,
+        handle: Handle,
+        layout: u64,
+        elements: Vec<u64>,
+    ) -> Handle {
+        let layout = Layout(
+            self.containers
+                .get(&handle)
+                .map_or(layout, |container| container.layout),
+        );
+        let mut container = Container::empty(layout);
+        container.contents = Contents::Sequence(
+            elements
+                .into_iter()
+                .map(|value| Element { value, mask: 0 })
+                .collect(),
+        );
+        self.publish_container(container, true)
+    }
+
     pub(crate) fn publish_container(&mut self, container: Container, complete: bool) -> Handle {
         if container.len() == 0 && container.default.is_none() {
             return 0;

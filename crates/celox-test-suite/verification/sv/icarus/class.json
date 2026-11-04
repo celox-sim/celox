@@ -544,6 +544,17 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 8; see <case>/build.log\n<case>/source_0.sv:6: sorry: Constraint declarations not supported.\n<case>/source_0.sv:11: sorry: Constraint declarations not supported.\n<case>/source_0.sv:18: sorry: \"inside\" expressions not supported yet.\n<case>/source_0.sv:18: sorry: Constraint declarations not supported.\n<case>/source_0.sv:31: syntax error\n<case>/source_0.sv:31: error: Malformed statement\n<case>/source_0.sv:35: syntax error\n<case>/source_0.sv:35: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::constrained_randomize_rand_arrays",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus build exit status: 7; see <case>/build.log\n<case>/source_0.sv:6: sorry: \"inside\" expressions not supported yet.\n<case>/source_0.sv:6: sorry: Constraint declarations not supported.\n<case>/source_0.sv:11: sorry: Constraint declarations not supported.\n<case>/source_0.sv:14: sorry: Constraint declarations not supported.\n<case>/source_0.sv:21: sorry: Constraint declarations not supported.\n<case>/source_0.sv:37: sorry: \"inside\" expressions not supported yet.\n<case>/source_0.sv:44: sorry: \"inside\" expressions not supported yet.\n<case>/source_0.sv:48: warning: Static variable initialization requires explicit lifetime in this context.\n",
       "expectation": "Simulation",
       "name": "class::constrained_randomize_rand_objects",
