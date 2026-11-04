@@ -47,6 +47,7 @@ mod host {
     mod monitor;
     mod native_arena;
     pub(crate) mod native_io;
+    mod native_nba;
     mod scan;
     mod strobe;
     pub(crate) use monitor::MonitorState;

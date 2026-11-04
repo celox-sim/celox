@@ -185,7 +185,7 @@ impl Generator<'_> {
         self.native_store(Memory::WriteIndirect, vec![pointer, offset, value]);
     }
 
-    fn arena_require(&mut self, condition: RegisterId) {
+    pub(super) fn arena_require(&mut self, condition: RegisterId) {
         let next = self.b.new_block();
         let failed = self.exit_block(SchedulerExit::Internal);
         self.b.seal_block(SIRTerminator::Branch {
@@ -196,7 +196,7 @@ impl Generator<'_> {
         self.b.switch_to_block(next);
     }
 
-    fn arena_service(&mut self, function: u32, request: u64, argument: RegisterId) {
+    pub(super) fn arena_service(&mut self, function: u32, request: u64, argument: RegisterId) {
         let context = self.load_at(
             self.slots.defer_limit_settle,
             celox_design::SCHEDULER_HOST_CONTEXT_BIT,
