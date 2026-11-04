@@ -1,0 +1,1 @@
+Preserve semantic regression coverage on ARM; require native scheduler residency only on the x86 implementation supported by this change.
