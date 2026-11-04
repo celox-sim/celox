@@ -500,11 +500,19 @@ fn bind_value_in(
                     }
                 }
                 // A container formal passed by value receives a copy of a
-                // container value, as an assignment does (13.5.1, 7.6).
+                // container value, as an assignment does (13.5.1, 7.6). A
+                // conditional is bound below, its operands receiving the
+                // container in turn.
                 if let Some(container) = target
                     .as_deref()
                     .filter(|shape| shape.unpacked.is_empty())
                     .and_then(|shape| shape.container.as_deref())
+                    .filter(|_| {
+                        !matches!(
+                            native.expression(ungroup(id, native)).kind,
+                            ExprKind::Conditional { .. }
+                        )
+                    })
                 {
                     if containers::dynamic_array_new(id, native).is_some() {
                         return Err(AnalyzerError::Parse(

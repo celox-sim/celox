@@ -1,0 +1,28 @@
+{
+  "case": "containers::returned_patterns_take_the_result_type",
+  "source": "src/sv/cases/containers.vtest",
+  "standard": "IEEE 1800-2023 13.4.1: a return statement's value is received by the function's result; 10.9: an assignment pattern takes its shape from the type of its target, here the declared result type.",
+  "method": "The shared case runs unchanged in verify-sv-verilator, verify-sv-icarus and verify-sv-xezim; the reduced source below runs without the adapters (verilator --binary, iverilog -g2012 -s Top, xezim -s Top, and the Celox sv_tests driver in simulation mode).",
+  "reduced_source": "module Top;\n  typedef int fixed_t[3];\n  typedef struct { int x; byte y; } pair_t;\n  typedef pair_t pairs_t[$];\n  function automatic fixed_t filled(int v);\n    return '{default: v};\n  endfunction\n  function automatic pairs_t pairs(int v);\n    return '{'{v, 1}, '{x: v + 1, y: 2}};\n  endfunction\n  initial begin\n    fixed_t f; pairs_t ps;\n    f = filled(7);\n    ps = pairs(3);\n    $display(\"[%0d %0d %0d] [%0d %0d %0d %0d]\", f[0], f[1], f[2], ps.size(), ps[0].x, ps[1].x, ps[1].y);\n  end\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "stdout": "[7 7 7] [2 3 4 2]\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "stderr": "rp2.sv:3: sorry: Unpacked structs not supported.\nrp2.sv:6: syntax error\nrp2.sv:6: error: Malformed statement\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "[7 0 0] [2 0 0 0]\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "[7 7 7] [2 3 4 2]\n"
+    }
+  ]
+}

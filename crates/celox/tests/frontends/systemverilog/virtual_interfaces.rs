@@ -57,6 +57,10 @@ sv_backends! {
         @case "virtual_interfaces::class_call_arguments_and_package_results";
     }
 
+    fn rejects_package_results_of_other_interfaces(sim) {
+        @case "virtual_interfaces::rejects_package_results_of_other_interfaces";
+    }
+
     fn rejects_integers_as_class_call_arguments(sim) {
         @case "virtual_interfaces::rejects_integers_as_class_call_arguments";
     }

@@ -1016,6 +1016,12 @@ pub(super) fn check_assignment(
     dimensions: &PackedDimensions,
     target: &VirtualInterface,
 ) -> Converted<()> {
+    // The packages are analyzed once to find the interfaces before their
+    // declarations exist; the analysis that has them checks the values, as
+    // it checks the types (see `bind_type`).
+    if declarations(session).is_none() {
+        return Ok(());
+    }
     // Each branch of a conditional may be the value.
     if let celox_sv_syntax::ExprKind::Conditional {
         then_expression,

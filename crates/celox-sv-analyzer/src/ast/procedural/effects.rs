@@ -694,6 +694,7 @@ impl BodyBuilder<'_, '_, '_> {
             }
             // `null` is a handle literal, no integral value (6.24.2).
             Some(semantic_types::TyData::Null) => Ok(CastSource::Null),
+            Some(semantic_types::TyData::Chandle) => Ok(CastSource::Chandle),
             None => Err(unsupported(
                 "`$cast` source of an unresolved type to an enumerated type",
             )),
