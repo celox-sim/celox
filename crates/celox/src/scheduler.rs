@@ -168,12 +168,47 @@ pub(crate) fn enable_native_services(program: &mut LaidOutProgram) {
     });
 }
 
+/// Flag the `$finish` records of every function that makes records, and
+/// count all its records, as [`Generator::instrument`] does for the units
+/// the scheduler inlines: the scheduler inlines a callee's calls, not its
+/// body, so the callee does it itself. Only a compiled run reads the slots
+/// this writes, and it clears them when it starts.
+fn instrument_recording_functions(
+    program: &mut LaidOutProgram,
+    slots: &SchedulerSlots<AbsoluteAddr>,
+) {
+    let finish_sites: HashSet<u32> = program
+        .runtime
+        .runtime_schema
+        .runtime_event_sites
+        .iter()
+        .enumerate()
+        .filter(|(_, site)| matches!(site.kind, RuntimeEventKind::Finish))
+        .map(|(index, _)| index as u32)
+        .collect();
+    let mut changed = false;
+    for function in &mut program.sir.functions {
+        if instructions(&function.unit)
+            .any(|inst| matches!(inst, SIRInstruction::RuntimeEvent { .. }))
+        {
+            function.unit =
+                Generator::instrument_records(&function.unit, &finish_sites, slots, true);
+            changed = true;
+        }
+    }
+    // The calls of a function now write the slots too.
+    if changed {
+        program.sir.summarize_calls();
+    }
+}
+
 /// Generate the compiled scheduler of `program`, if it qualifies, and record
 /// for every process kernel whether the scheduler runs it.
 pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool) {
     let Some(schema) = program.runtime.runtime_schema.scheduler.clone() else {
         return;
     };
+    instrument_recording_functions(program, &schema.slots);
     let kernels = program.runtime.runtime_schema.processes.len();
     let mut lazy = false;
     let (fallback, unit, events, clocks, kernel_events) =
@@ -471,16 +506,6 @@ impl Plan {
         // storage sets below can name (see `read_storage`).
         if planned().any(SIRInstruction::accesses_unknown_state) {
             return Err("a unit may access any state".into());
-        }
-        // The scheduler instruments the runtime-event records of the RTL
-        // units it inlines to find `$finish` and count records; a callee's
-        // records are out of its reach.
-        if rtl_units()
-            .chain(sir.eval_comb_apply_ffs.values().flatten())
-            .flat_map(instructions)
-            .any(calls_runtime_events)
-        {
-            return Err("RTL logic calls a function that records runtime events".into());
         }
 
         let shared = program.shared_storage();
@@ -801,10 +826,6 @@ impl Plan {
                 Some("a declaration initializer")
             } else if slots.kind == celox_design::ProcessKind::Final {
                 Some("a final procedure")
-            } else if instructions(unit).any(calls_runtime_events) {
-                // Its `$finish` and records would be found at its own record
-                // instructions (see `Generator::instrument`).
-                Some("the process calls a function that records runtime events")
             } else if process.frame.is_some() {
                 Some("the process has dynamic activation frames")
             } else if slots.program.is_some() {
@@ -5244,6 +5265,17 @@ impl Generator<'_> {
     /// A copy of `unit` that sets the finish slot after every `$finish`
     /// record, and when `counts`, counts every record in the events slot.
     fn instrument(&self, unit: &Unit, counts: bool) -> Unit {
+        Self::instrument_records(unit, self.finish_sites, self.slots, counts)
+    }
+
+    /// [`Self::instrument`] of `unit`, for a scheduler of `slots` whose
+    /// `$finish` records are `finish_sites`.
+    fn instrument_records(
+        unit: &Unit,
+        finish_sites: &HashSet<u32>,
+        slots: &SchedulerSlots<AbsoluteAddr>,
+        counts: bool,
+    ) -> Unit {
         let mut unit = unit.clone();
         let mut next = unit
             .register_map
@@ -5257,14 +5289,14 @@ impl Generator<'_> {
             let mut instructions = Vec::with_capacity(block.instructions.len());
             for inst in block.instructions.drain(..) {
                 let finish = matches!(&inst, SIRInstruction::RuntimeEvent { site_id, .. }
-                    if self.finish_sites.contains(site_id));
+                    if finish_sites.contains(site_id));
                 let record = matches!(&inst, SIRInstruction::RuntimeEvent { .. });
                 instructions.push(inst);
                 if counts && record {
                     let [count, one, sum] = std::array::from_fn(|index| RegisterId(next + index));
                     next += 3;
                     wide.extend([count, one, sum]);
-                    let events = stable(self.slots.events);
+                    let events = stable(slots.events);
                     instructions.extend([
                         SIRInstruction::Load(
                             count,
@@ -5291,7 +5323,7 @@ impl Generator<'_> {
                     registers.push(one);
                     instructions.push(SIRInstruction::Imm(one, SIRValue::new(1u8)));
                     instructions.push(SIRInstruction::Store(
-                        stable(self.slots.finish),
+                        stable(slots.finish),
                         SIROffset::Static(0),
                         SCHEDULER_FLAG_WIDTH,
                         one,
@@ -5565,13 +5597,13 @@ fn retained_storage(
     retained
 }
 
-/// Whether `unit` may end with an error. A call may end its caller with
-/// the error of its callee.
+/// Whether `unit` may end with an error: at one of its own error exits, or
+/// at a call whose callee may fail and ends it with the callee's error.
 fn fails(unit: &Unit) -> bool {
     unit.blocks
         .values()
         .any(|block| matches!(block.terminator, SIRTerminator::Error(_)))
-        || instructions(unit).any(|inst| inst.call_effects().is_some())
+        || instructions(unit).any(SIRInstruction::may_fail)
 }
 
 /// The signals `statement` writes that may be reset events: those of
@@ -5673,9 +5705,9 @@ fn makes_extern_calls(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
     inst.host_effects().extern_calls
 }
 
-/// Whether `inst` is a call whose callee may record runtime events. The
-/// scheduler finds `$finish` and counts records at the record instructions
-/// of the units it inlines, which a callee's are not.
+/// Whether `inst` is a call whose callee may record runtime events, and so
+/// may record a `$finish`, which the callee flags itself
+/// (`instrument_recording_functions`).
 fn calls_runtime_events(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
     inst.call_effects().is_some() && inst.host_effects().runtime_events
 }
@@ -5798,6 +5830,10 @@ pub(crate) struct PlanSummary {
     pub(crate) settle_reads: Option<HashSet<AbsoluteAddr>>,
     pub(crate) fallback: Vec<Option<String>>,
     pub(crate) derived: Vec<AbsoluteAddr>,
+    /// With deferred settles, per kernel whether its runs observe the
+    /// settled state (`Lazy::kernels`).
+    pub(crate) lazy: Option<Vec<bool>>,
+    pub(crate) incremental: bool,
 }
 
 #[cfg(all(test, feature = "systemverilog"))]
@@ -5810,6 +5846,8 @@ pub(crate) fn plan_for_test(program: &LaidOutProgram) -> Result<PlanSummary, Str
             .iter()
             .map(|&event| plan.events[event].signal)
             .collect(),
+        lazy: plan.lazy.as_ref().map(|lazy| lazy.kernels.clone()),
+        incremental: plan.incremental.is_some(),
         settle_reads: plan.settle_reads,
         fallback: plan.fallback,
     })

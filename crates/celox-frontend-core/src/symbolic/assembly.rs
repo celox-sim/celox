@@ -6607,6 +6607,7 @@ mod tests {
                     ..Default::default()
                 },
                 kernel: false,
+                may_fail: false,
             }),
         }
     }

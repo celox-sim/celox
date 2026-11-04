@@ -102,6 +102,10 @@ pub struct CallEffects<A> {
     /// Whether it may call a native kernel, which can read and write any
     /// state: the lists above are then incomplete.
     pub kernel: bool,
+    /// Whether it may end its caller with an error: its body, or a function
+    /// it calls, may end in an [`SIRTerminator::Error`], or it may call a
+    /// native kernel, whose status nothing here knows.
+    pub may_fail: bool,
 }
 
 impl<A> Default for CallEffects<A> {
@@ -112,6 +116,7 @@ impl<A> Default for CallEffects<A> {
             triggers: Vec::new(),
             host: HostEffects::default(),
             kernel: false,
+            may_fail: false,
         }
     }
 }
@@ -177,6 +182,7 @@ impl<A> CallEffects<A> {
             triggers: self.triggers.iter().map(&mut map).collect(),
             host: self.host,
             kernel: self.kernel,
+            may_fail: self.may_fail,
         }
     }
 }
