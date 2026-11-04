@@ -510,3 +510,61 @@ fn compiled_scheduler_coverage() {
         "only {compiled} of {total} kernels compile"
     );
 }
+
+/// Without the test switch `force_out_of_line_calls`, every subroutine
+/// stays inlined: no suite case that declares one lowers to a function
+/// unit, so designs keep the SIR, and the code, they had before calls.
+#[test]
+fn subroutines_stay_inlined_without_the_switch() {
+    let (checked, out_of_line) = std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn_scoped(scope, || {
+                let mut checked = 0;
+                let mut out_of_line = Vec::new();
+                for case in celox_test_suite::sv::cases() {
+                    let design = case.design();
+                    if !design.sources.iter().any(|source| {
+                        source.text.contains("function") || source.text.contains("task")
+                    }) {
+                        continue;
+                    }
+                    let sources = design
+                        .sources
+                        .iter()
+                        .map(|source| (source.text.as_str(), source.path.as_path()))
+                        .collect::<Vec<_>>();
+                    // A case that does not compile has no SIR to check.
+                    let Ok((sir, _)) = celox::compile_sv_to_sir(
+                        &sources,
+                        &design.top,
+                        &[],
+                        &[],
+                        design.four_state,
+                        &celox::TraceOptions::default(),
+                        None,
+                        None,
+                        None,
+                        None,
+                        &design.parameters,
+                        &celox::OptimizeOptions::default(),
+                    ) else {
+                        continue;
+                    };
+                    checked += 1;
+                    if !sir.sir.functions.is_empty() {
+                        out_of_line.push(case.name);
+                    }
+                }
+                (checked, out_of_line)
+            })
+            .unwrap()
+            .join()
+            .unwrap()
+    });
+    assert!(
+        checked > 100,
+        "only {checked} cases with subroutines compile"
+    );
+    assert!(out_of_line.is_empty(), "function units in {out_of_line:?}");
+}

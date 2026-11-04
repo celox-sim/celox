@@ -2623,7 +2623,11 @@ mod host {
 
         /// Configure runtime and optimizer diagnostics explicitly for this build.
         pub fn diagnostics(mut self, diagnostics: crate::DiagnosticsOptions) -> Self {
+            // A switch the builder set stays set, whatever order the calls
+            // come in.
+            let force_out_of_line = self.options.diagnostics.sv_force_out_of_line;
             self.options.diagnostics = diagnostics.runtime;
+            self.options.diagnostics.sv_force_out_of_line |= force_out_of_line;
             self.options.optimize_options.diagnostics = diagnostics.sir;
             self.options.cranelift_options.diagnostics = diagnostics.cranelift;
             #[cfg(any(
@@ -2637,6 +2641,17 @@ mod host {
                     self.options.x86_options.native_tick_loop = enabled;
                 }
             }
+            self
+        }
+
+        /// Lower every SystemVerilog subroutine that can be into a function
+        /// unit and call it, instead of inlining it at each call: a test
+        /// switch for the out-of-line call path, which leaves the
+        /// subroutines that cannot be lowered so inlined (see
+        /// `RuntimeDiagnostics::sv_force_out_of_line`).
+        #[doc(hidden)]
+        pub fn force_out_of_line_calls(mut self) -> Self {
+            self.options.diagnostics.sv_force_out_of_line = true;
             self
         }
 
@@ -4298,6 +4313,99 @@ mod host {
                     Ok(simulation)
                 }
                 Err(error) => Err(SimulatorError::from(error).with_warnings(warnings)),
+            }
+        }
+    }
+
+    /// Lane units that call functions share the call stack, so the lane
+    /// plan orders them, on one lane or by a wait; the call-free units of
+    /// the same kernel still spread over several lanes.
+    #[cfg(all(test, feature = "systemverilog"))]
+    #[test]
+    fn lane_plans_order_the_units_that_call() {
+        let source = r#"module Top(input logic clk, input logic [31:0] a, input logic [31:0] b,
+           output logic [31:0] q0, output logic [31:0] q1, output logic [31:0] q2,
+           output logic [31:0] q3, output logic [31:0] c0, output logic [31:0] c1);
+    function automatic logic [31:0] mix(input logic [31:0] x, input logic [31:0] y);
+        return (x ^ (y << 3)) + (x >> 2);
+    endfunction
+    always_ff @(posedge clk) q0 <= a + b;
+    always_ff @(posedge clk) q1 <= a * 3;
+    always_ff @(posedge clk) q2 <= b - a;
+    always_ff @(posedge clk) q3 <= a ^ b;
+    always_ff @(posedge clk) c0 <= mix(a, b);
+    always_ff @(posedge clk) c1 <= mix(b, a);
+endmodule"#;
+        let (program, ..) = crate::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("lanes.sv"))],
+            "Top",
+        )
+        .force_out_of_line_calls()
+        .threads(4)
+        .parallel_partition(crate::ParallelPartition::Always)
+        .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false)
+        .unwrap();
+        assert_eq!(program.sir.functions.len(), 1);
+        for codegen in [
+            celox_sir_opt::parallel::CodegenFootprint::Native,
+            celox_sir_opt::parallel::CodegenFootprint::Cranelift,
+        ] {
+            let (_, planned) = crate::backend::lanes::plan_lane_kernels(&program, codegen).unwrap();
+            assert!(!planned.is_empty(), "{codegen:?}: no kernel runs on lanes");
+            for kernel in &planned {
+                let units = kernel.units();
+                let calls = |item: usize| {
+                    units[item].blocks.values().any(|block| {
+                        block.instructions.iter().any(|instruction| {
+                            matches!(instruction, crate::ir::SIRInstruction::Call { .. })
+                        })
+                    })
+                };
+                let task_of = |item: usize| {
+                    kernel
+                        .tasks
+                        .iter()
+                        .position(|task| task.items.contains(&item))
+                        .expect("every item is in a task")
+                };
+                // The tasks each task runs after: earlier tasks of its lane,
+                // and those its waits cover, transitively.
+                let before = |task: usize| {
+                    let mut seen = std::collections::BTreeSet::new();
+                    let mut work = vec![task];
+                    while let Some(task) = work.pop() {
+                        let current = &kernel.tasks[task];
+                        for (other, candidate) in kernel.tasks.iter().enumerate() {
+                            let earlier = candidate.lane == current.lane
+                                && candidate.sequence < current.sequence;
+                            let awaited = current.waits.iter().any(|wait| {
+                                wait.lane == candidate.lane
+                                    && candidate.sequence < wait.completed_tasks
+                            });
+                            if (earlier || awaited) && seen.insert(other) {
+                                work.push(other);
+                            }
+                        }
+                    }
+                    seen
+                };
+                let calling: Vec<usize> = (0..units.len()).filter(|&item| calls(item)).collect();
+                for (position, &first) in calling.iter().enumerate() {
+                    for &second in &calling[position + 1..] {
+                        let (first, second) = (task_of(first), task_of(second));
+                        assert!(
+                            first == second
+                                || before(second).contains(&first)
+                                || before(first).contains(&second),
+                            "{codegen:?}: calling units run unordered"
+                        );
+                    }
+                }
+                let lanes: std::collections::BTreeSet<u32> = (0..units.len())
+                    .filter(|&item| !calls(item))
+                    .map(|item| kernel.tasks[task_of(item)].lane)
+                    .collect();
+                assert!(lanes.len() > 1, "{codegen:?}: call-free units on {lanes:?}");
             }
         }
     }

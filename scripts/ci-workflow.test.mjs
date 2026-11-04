@@ -558,6 +558,16 @@ test("CI builds tests with the executor's profile and warms each platform's cach
   assert.match(warm, /rust-default-tests:[\s\S]*cargo test --locked -p celox --lib --no-run/);
 });
 
+test("the suite with out-of-line calls runs only in full validation", () => {
+  const forced = job("sv-out-of-line-calls");
+  assert.match(forced, /\n    if: \$\{\{ !cancelled\(\) && needs\.changes\.outputs\.full_validation != 'false' && \(/);
+  assert.match(forced, /CELOX_SV_FORCE_OUT_OF_LINE: "1"/);
+  assert.match(forced, /run: node scripts\/run-vtest\.mjs --test systemverilog --no-fail-fast/);
+  assert.match(job("full-validation"), /sv-out-of-line-calls,/);
+  assert.match(job("report-full-validation"), /sv-out-of-line-calls,/);
+  assert.doesNotMatch(job("rust"), /sv-out-of-line-calls/);
+});
+
 test("full Clippy validation excludes the disabled bridge", () => {
   assert.match(job("lint"), /run: cargo clippy --locked --workspace --exclude lydite-celox --all-targets --features/);
 });

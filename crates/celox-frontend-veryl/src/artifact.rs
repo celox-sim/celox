@@ -684,6 +684,7 @@ pub(crate) fn project_module_with_ids(
                 .map(|(reset, clock)| (ids[reset], ids[clock]))
                 .collect(),
             processes: Vec::new(),
+            functions: Vec::new(),
             package_bindings: HashMap::default(),
             hierarchical_bindings: HashMap::default(),
             counter_slots: Vec::new(),
