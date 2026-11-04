@@ -174,6 +174,7 @@ pub(super) struct Scope<'a> {
     pub pending: &'a Arc<std::sync::Mutex<PendingRuntimeEvents>>,
     pub read_seq: &'a AtomicU64,
     pub error: Option<RuntimeErrorCode>,
+    pub calls: u64,
     pub return_budget: u64,
     pub returns: u64,
     pub round_budget: u64,
@@ -562,6 +563,7 @@ pub(crate) extern "C" fn call(
     // private context slot for this synchronous call and restores the slot
     // before returning or unwinding. No simulation-global state is used.
     let scope = unsafe { &mut *(context as *mut Scope<'_>) };
+    scope.calls = scope.calls.saturating_add(1);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if matches!(encoded, SCHEDULER_RUN | SCHEDULER_PASS) {
             scope.charge_scheduler(process, encoded, timestamp)?;
@@ -661,6 +663,7 @@ mod tests {
             pending: &pending,
             read_seq: &read_seq,
             error: None,
+            calls: 0,
             return_budget: u64::MAX,
             returns: 0,
             round_budget: u64::MAX,

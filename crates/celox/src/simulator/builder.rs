@@ -6026,6 +6026,7 @@ endmodule"#
                     num_bigint::BigUint::from(196611u32)
                 );
                 let stats = simulation.scheduler_stats();
+                assert!(stats.native_service_calls > 0, "{stats:?}");
                 assert!(
                     stats.compiled_slots > 0 && stats.checked_steps > 0,
                     "{stats:?}"

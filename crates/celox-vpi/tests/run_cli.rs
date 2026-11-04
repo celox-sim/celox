@@ -1059,6 +1059,16 @@ fn sv_report_exposes_actual_compiled_scheduler_execution() {
         .parse()
         .unwrap();
     assert!(slots > 0, "{stdout}");
+    let field = |name| -> u64 {
+        line.split_whitespace()
+            .find_map(|field| field.strip_prefix(name))
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    assert!(field("compiled_runs=") > 0, "{stdout}");
+    assert!(field("reference_steps=") > 0, "{stdout}");
+    assert_eq!(field("native_service_calls="), 0, "{stdout}");
 }
 
 fn waveform_body(text: &str) -> &str {
