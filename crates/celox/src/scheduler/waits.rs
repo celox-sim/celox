@@ -249,7 +249,7 @@ endmodule"#
                 .scheduler_mode(SchedulerMode::DifferentialRuns);
                 // SAFETY: the imported signature is int increment(int).
                 let build = unsafe { build.dpi_function("increment", increment as *const ()) };
-                check(build.build_native().unwrap(), 24);
+                check(build.build_scheduler_test().unwrap(), 24);
             }
         }
     }
@@ -307,7 +307,7 @@ endmodule"#
                 .four_state(four_state)
                 .hotspot_jit(hotspot)
                 .scheduler_mode(SchedulerMode::DifferentialRuns)
-                .build_native()
+                .build_scheduler_test()
                 .unwrap();
                 check(simulation, 24);
             }

@@ -870,6 +870,34 @@ impl TieredBackend {
         }
     }
 
+    /// A deterministic scheduler test: either the ordinary native executor,
+    /// or the real mixed executor after its scheduler has been published.
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    pub(crate) fn for_scheduler_test(
+        laid_out: &LaidOutProgram,
+        options: &SimulatorOptions,
+    ) -> Result<Self, SimulatorError> {
+        if options.hotspot_jit {
+            Ok(Self::new(laid_out, options))
+        } else {
+            let mut interpreting = options.clone();
+            interpreting.tier_promotion = crate::TierPromotion::Never;
+            let mut backend =
+                Self::with_compiler(laid_out, &interpreting, |_, _, _| unreachable!());
+            backend.phase = Phase::Compiled(CompiledTier::Native(Box::new(
+                crate::NativeBackend::new(laid_out, options)?,
+            )));
+            backend.promotion = Promotion::Promoted;
+            backend.derived_edges_live = true;
+            Ok(backend)
+        }
+    }
+
     /// Build a tiered simulation with a custom compilation step.
     ///
     /// `compile` runs on the worker thread and receives the backend's
