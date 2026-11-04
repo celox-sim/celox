@@ -11,3 +11,5 @@ Address review r4469875852: preserve scheduled rising-edge rules for unspecified
 Refresh validation counts after independently tested combinational finish and host Active ordering review fixes.
 
 Sync merged PRs through #3111: stack sync failed because Git already omits merged commits from the todo; use a normal noninteractive rebase onto updated origin/master.
+
+Preserve the published, green #3113/#3114 heads while fixing #3115 CI. Retain their published parent for this update; current-master integration has been validated locally.
