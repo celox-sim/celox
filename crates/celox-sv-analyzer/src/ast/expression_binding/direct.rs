@@ -274,7 +274,9 @@ enum Finish {
     Tagged(packed_structs::Construction),
     Unary(String),
     Binary(String),
-    Mux,
+    /// A conditional; with the layout of the container that receives it
+    /// when its condition may be ambiguous, see [`containers::conditional`].
+    Mux(Option<crate::system_functions::ContainerLayout>),
     Bits,
     Concat,
     Call {
@@ -759,27 +761,42 @@ fn bind_value_in(
                         condition,
                         then_expression,
                         else_expression,
-                    } => (
-                        {
-                            // The condition is a Boolean test; the branches
-                            // are values where the conditional is one.
-                            permits.grant(*condition);
-                            permits.conditional(
-                                session,
-                                permitted,
-                                [*then_expression, *else_expression],
+                    } => {
+                        // The condition is a Boolean test; the branches are
+                        // values where the conditional is one.
+                        permits.grant(*condition);
+                        permits.conditional(
+                            session,
+                            permitted,
+                            [*then_expression, *else_expression],
+                            tree,
+                            native,
+                            dimensions,
+                        )?;
+                        // Without a target, a conditional of containers has
+                        // the type of its operands (IEEE 1800-2023 11.4.11),
+                        // which receives them as a target would.
+                        let target = match target.clone() {
+                            Some(target) => Some(target),
+                            None => containers::native_type(id, native, tree, session, dimensions)?
+                                .map(|container| Rc::new(containers::shape(&container))),
+                        };
+                        (
+                            Finish::Mux(containers::conditional(
+                                *condition,
+                                target.as_deref(),
                                 tree,
+                                session,
                                 native,
                                 dimensions,
-                            )?;
-                            Finish::Mux
-                        },
-                        vec![
-                            (*condition, None),
-                            (*then_expression, target.clone()),
-                            (*else_expression, target.clone()),
-                        ],
-                    ),
+                            )),
+                            vec![
+                                (*condition, None),
+                                (*then_expression, target.clone()),
+                                (*else_expression, target),
+                            ],
+                        )
+                    }
                     ExprKind::Concatenation(parts) if !parts.is_empty() => {
                         (Finish::Concat, parts.iter().map(|id| (*id, None)).collect())
                     }
@@ -1667,7 +1684,7 @@ fn bind_value_in(
                             .ok_or_else(|| unsupported("operand of `$bits`"))?;
                         Expr::Literal(ty.width.to_string())
                     }
-                    Finish::Mux => {
+                    Finish::Mux(container) => {
                         let mut else_expr = operands.pop().ok_or_else(disagreement)?;
                         let mut then_expr = operands.pop().ok_or_else(disagreement)?;
                         let condition = operands.pop().ok_or_else(disagreement)?;
@@ -1677,10 +1694,16 @@ fn bind_value_in(
                             then_expr = strings::to_string(then_expr, dimensions);
                             else_expr = strings::to_string(else_expr, dimensions);
                         }
-                        Expr::Mux {
+                        let value = Expr::Mux {
                             condition: Box::new(condition),
                             then_expr: Box::new(then_expr),
                             else_expr: Box::new(else_expr),
+                        };
+                        match container {
+                            Some(layout) => {
+                                containers::call(ContainerOp::Conditional, layout, vec![value])
+                            }
+                            None => value,
                         }
                     }
                     Finish::Concat

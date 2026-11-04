@@ -266,6 +266,50 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "containers::associative_patterns_with_keys at 2086:3: expect_output: expected [50, 32, 49, 32, 50, 32, 57, 10, 49, 32, 53, 32, 48, 10, 49, 32, 51, 10, 50, 32, 52, 32, 56, 10, 45, 50, 32, 49, 32, 50, 10, 50, 32, 53, 10, 49, 32, 53, 10], got [49, 32, 120, 32, 120, 32, 120, 10, 48, 32, 120, 32, 120, 10, 49, 32, 120, 10, 50, 32, 52, 32, 56, 10, 45, 50, 32, 49, 32, 50, 10, 50, 32, 53, 10, 50, 32, 53, 10]",
+      "expectation": "Simulation",
+      "name": "containers::associative_patterns_with_keys",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "containers::ambiguous_conditions_of_containers at 2139:3: expect_output: expected [50, 32, 50, 10, 50, 32, 49, 32, 120, 10, 50, 32, 49, 32, 48, 10, 48, 10, 48, 10, 49, 10, 49, 32, 55, 10, 50, 10], got [49, 32, 49, 10, 49, 32, 120, 32, 49, 10, 49, 32, 48, 32, 49, 10, 49, 10, 48, 10, 48, 10, 49, 32, 49, 10, 49, 10]",
+      "expectation": "Simulation",
+      "name": "containers::ambiguous_conditions_of_containers",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "containers::conversions_before_ambiguous_merges at 2181:3: expect_output: expected [50, 32, 49, 48, 32, 50, 32, 57, 48, 32, 50, 48, 10, 50, 32, 51, 10, 50, 32, 49, 10, 49, 32, 50, 10, 50, 10, 51, 32, 54, 10, 51, 32, 52, 32, 57, 10], got [50, 32, 49, 48, 32, 50, 32, 57, 48, 32, 50, 48, 10, 48, 32, 48, 10, 48, 32, 48, 10, 48, 32, 48, 10, 45, 49, 10, 48, 32, 48, 10, 48, 32, 48, 32, 48, 10]",
+      "expectation": "Simulation",
+      "name": "containers::conversions_before_ambiguous_merges",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "containers::untargeted_and_nested_container_merges at 2180:3: expect_output: expected [48, 32, 49, 32, 48, 10, 49, 10, 48, 32, 48, 10, 120, 32, 49, 10, 49, 32, 48, 10, 48, 10], got [120, 32, 120, 32, 120, 10, 49, 10, 49, 32, 49, 10, 48, 32, 49, 10, 49, 32, 48, 10, 120, 10]",
+      "expectation": "Simulation",
+      "name": "containers::untargeted_and_nested_container_merges",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

@@ -1120,6 +1120,34 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "compile",
                             "Constraint declarations not supported",
                         ),
+                        ("icarus", "containers::associative_patterns_with_keys") => {
+                            ("compile_error", "compile", "source_0.sv:5: syntax error")
+                        }
+                        ("icarus", "containers::ambiguous_conditions_of_containers") => (
+                            "compile_error",
+                            "compile",
+                            "Type names are not valid expressions here.",
+                        ),
+                        ("xezim", "containers::associative_patterns_with_keys") => {
+                            ("mismatch", "execute", "50, 32, 53, 10, 50, 32, 53, 10]")
+                        }
+                        ("xezim", "containers::ambiguous_conditions_of_containers") => {
+                            ("mismatch", "execute", "49, 32, 49, 10, 49, 10]")
+                        }
+                        ("icarus", "containers::conversions_before_ambiguous_merges") => {
+                            ("compile_error", "compile", "source_0.sv:13: syntax error")
+                        }
+                        ("xezim", "containers::conversions_before_ambiguous_merges") => {
+                            ("mismatch", "execute", "48, 32, 48, 32, 48, 10]")
+                        }
+                        ("icarus", "containers::untargeted_and_nested_container_merges") => (
+                            "compile_error",
+                            "compile",
+                            "source_0.sv:17: error: The expression 'row' cannot be implicitly cast",
+                        ),
+                        ("xezim", "containers::untargeted_and_nested_container_merges") => {
+                            ("mismatch", "execute", "49, 32, 48, 10, 120, 10]")
+                        }
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

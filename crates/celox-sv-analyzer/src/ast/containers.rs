@@ -182,6 +182,11 @@ fn of(container: ContainerType) -> Type {
     ty
 }
 
+/// The shape of a value of container type `container`.
+pub(super) fn shape(container: &ContainerType) -> VariableDimensions {
+    procedural::dimensions_from_type(&of(container.clone()))
+}
+
 pub(super) fn native_type(
     id: ExprId,
     native: &celox_sv_syntax::Declarations,
@@ -213,6 +218,21 @@ pub(super) fn native_type(
         && let Some(shape) = dims.get(&name)
     {
         return Ok(shape.container.clone());
+    }
+    // A conditional of containers, whose operands have equivalent types
+    // (IEEE 1800-2023 11.4.11), has their type.
+    if let ExprKind::Conditional {
+        then_expression,
+        else_expression,
+        ..
+    } = &native.expression(ungrouped).kind
+    {
+        for operand in [*then_expression, *else_expression] {
+            if let Some(container) = native_type(operand, native, tree, session, dims)? {
+                return Ok(Some(container));
+            }
+        }
+        return Ok(None);
     }
     // An element popped from a queue of containers.
     let callee = match &native
@@ -296,6 +316,31 @@ fn returned_container(
     dims.function_return_types.get(&name)?.container.clone()
 }
 
+/// The layout of the container `target` that receives a conditional when its
+/// `condition` may be ambiguous: a condition with X or Z bits evaluates both
+/// operands, which the target receives converted, and merges them rather
+/// than selecting one (IEEE 1800-2023 11.4.11), see `ContainerOp::Conditional`.
+pub(super) fn conditional(
+    condition: ExprId,
+    target: Option<&VariableDimensions>,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    native: &celox_sv_syntax::Declarations,
+    dims: &PackedDimensions,
+) -> Option<ContainerLayout> {
+    let target = target
+        .filter(|shape| shape.unpacked.is_empty())
+        .and_then(|shape| shape.container.as_deref())?;
+    expression_types::type_of(tree, session, condition, native, dims)
+        .is_ok_and(|ty| {
+            matches!(
+                session.types.data(ty),
+                semantic_types::TyData::Packed(packed) if packed.four_state
+            )
+        })
+        .then_some(target.layout)
+}
+
 pub(super) fn call(op: ContainerOp, layout: ContainerLayout, args: Vec<Expr>) -> Expr {
     classes::object_call(ObjectOp::Container { op, layout }, args)
 }
@@ -340,8 +385,9 @@ pub(super) fn assignment(
     // The operands of a conditional received by a container are received by
     // it as the conditional is (IEEE 1800-2023 10.8): the conditional is
     // bound as any other, its condition a Boolean test, with the container
-    // as the target of its operands.
-    if matches!(native.expression(root).kind, ExprKind::Conditional { .. }) {
+    // as the target of its operands, each converted to it as any container
+    // value (see `conditional`).
+    if let ExprKind::Conditional { .. } = &native.expression(root).kind {
         return expression_binding::bind_value(
             root,
             native,
@@ -373,23 +419,50 @@ pub(super) fn assignment(
             target,
         ));
     }
+    // An associative array pattern: a value for each key, and one for the
+    // keys it does not name with `default` (IEEE 1800-2023 10.9.1).
     if matches!(target.layout.kind, ContainerKind::Associative { .. })
         && let ExprKind::Pattern {
             target: None,
             items,
         } = &native.expression(root).kind
-        && items.len() == 1
-        && items[0].key.is_some_and(|key| {
+        && !items.is_empty()
+        && items.iter().all(|item| item.key.is_some())
+    {
+        let is_default = |key: ExprId| {
             matches!(
                 &native.expression(expression_binding::ungroup(key, native)).kind,
                 ExprKind::Literal(text) if text == "default"
             )
-        })
-    {
+        };
+        let mut default = None;
+        let mut pairs = Vec::new();
+        for item in items {
+            let key = item.key.expect("checked: every item is keyed");
+            if is_default(key) {
+                if default.is_some() {
+                    return Err(unsupported("assignment pattern with two defaults"));
+                }
+                default = Some(element_value(item.value, tree, session, dims, target)?);
+            } else {
+                pairs.push(index_value(key, root, tree, session, dims, target)?);
+                pairs.push(element_value(item.value, tree, session, dims, target)?);
+            }
+        }
+        if pairs.is_empty() {
+            return Ok(call(
+                ContainerOp::WithDefault,
+                target.layout,
+                default.into_iter().collect(),
+            ));
+        }
+        let keyed = ContainerOp::Keyed {
+            default: default.is_some(),
+        };
         return Ok(call(
-            ContainerOp::WithDefault,
+            keyed,
             target.layout,
-            vec![element_value(items[0].value, tree, session, dims, target)?],
+            default.into_iter().chain(pairs).collect(),
         ));
     }
     let items = match &native.expression(root).kind {
@@ -790,14 +863,16 @@ pub(super) fn value(
                 ));
             }
 
-            if target.record.is_some() {
-                return Err(unsupported(
-                    "comparison of dynamic containers of unpacked structures or of elements wider than 64 bits",
-                ));
-            }
-            // The elements are inner containers' handles, not their values.
-            if target.element.container.is_some() {
-                return Err(unsupported("comparison of nested dynamic containers"));
+            // Inner containers compare by their elements (IEEE 1800-2023
+            // 7.6, 11.4.5), which the heap compares through their handles.
+            let mut level = Some(&target);
+            while let Some(container) = level {
+                if container.record.is_some() {
+                    return Err(unsupported(
+                        "comparison of dynamic containers of unpacked structures or of elements wider than 64 bits",
+                    ));
+                }
+                level = container.element.container.as_ref();
             }
             let op = match operator.as_str() {
                 "==" | "!=" => ContainerOp::Equal,
@@ -1495,10 +1570,6 @@ mod tests {
             (
                 "module Top; int a[][2]; endmodule",
                 "dynamic container of fixed-size unpacked arrays",
-            ),
-            (
-                "module Top; int a[][], b[][]; bit x; initial x = a == b; endmodule",
-                "comparison of nested dynamic containers",
             ),
             (
                 "module Top; class A; endclass class B; endclass int m[A]; B b; initial begin b = new; m[b] = 1; end endmodule",

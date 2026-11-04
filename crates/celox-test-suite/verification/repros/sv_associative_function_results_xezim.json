@@ -1,0 +1,28 @@
+{
+  "case": "containers::associative_patterns_with_keys",
+  "source": "src/sv/cases/containers.vtest",
+  "standard": "IEEE 1800-2023 10.9.1: an associative array pattern gives each key its value and the keys it does not name the default; 13.4.1: a function's result is the value of its return statement, which an assignment of the call gives the target (7.9.9).",
+  "method": "The shared case runs unchanged in verify-sv-verilator, verify-sv-icarus and verify-sv-xezim; the reduced source below runs without the adapters (verilator --binary, iverilog -g2012 -s Top, xezim -s Top, and the Celox sv_tests driver in simulation mode).",
+  "reduced_source": "module Top;\n  typedef int map_t[string];\n  function automatic map_t make(int v);\n    return '{\"a\": v, default: 0};\n  endfunction\n  initial begin\n    map_t m;\n    m = '{\"a\": 1, \"b\": 2, default: 9};\n    $display(\"[%0d %0d %0d %0d]\", m.size(), m[\"a\"], m[\"b\"], m[\"zz\"]);\n    m = make(5);\n    $display(\"[%0d %0d %0d]\", m.size(), m[\"a\"], m[\"q\"]);\n  end\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "stdout": "[2 1 2 9]\n[1 5 0]\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "stderr": "kp2.sv:4: syntax error\nkp2.sv:4: error: Malformed statement\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "[2 1 2 9]\n[2 1 9]\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "[2 1 2 9]\n[1 5 0]\n"
+    }
+  ]
+}
