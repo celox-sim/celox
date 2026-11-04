@@ -30,6 +30,7 @@ pub(super) fn attach(program: &mut LaidOutProgram, deferred: bool) {
 
 /// The parts of the settle that compute what TB reads load.
 struct Cones<'a> {
+    observed: bool,
     slicer: CombSlicer<'a>,
     size: usize,
     /// What keeps state from one settle to the next: a settle the TB
@@ -42,7 +43,7 @@ impl Cones<'_> {
     /// `None` when the reads need (nearly) the whole settle, or none are
     /// named: the settle itself runs then.
     fn cone(&mut self, reads: &[AbsoluteAddr]) -> Option<Vec<Unit>> {
-        if reads.is_empty() {
+        if self.observed || reads.is_empty() {
             return None;
         }
         let (slicer, size, stateful) = (&self.slicer, self.size, &self.stateful);
@@ -128,9 +129,11 @@ fn emit_settle(g: &mut Generator<'_>, m: &Meta, units: &[Unit], finish: BlockId,
     let settled = g.b.new_block();
     branch(g, clean, settled, evaluate);
     g.b.switch_to_block(evaluate);
+    g.observers_before(invalid);
     for unit in units {
         g.inline(unit, finish);
     }
+    g.observers_after(invalid);
     let zero = g.constant(0, 8);
     g.store(g.slots.dirty, 8, zero);
     jump(g, settled);
@@ -539,6 +542,7 @@ fn generate(
         .map(|(i, _)| i as u32)
         .collect();
     let mut cones = Cones {
+        observed: !program.runtime.runtime_schema.comb_observers.is_empty(),
         slicer: CombSlicer::new(&program.sir.eval_comb, program.shared_storage()),
         size: program
             .sir
@@ -555,7 +559,23 @@ fn generate(
             .collect(),
         known: HashMap::default(),
     };
+    let observer_service = cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen")))
+        .then(|| {
+            program
+                .runtime
+                .runtime_schema
+                .extern_functions
+                .iter()
+                .position(|f| f.name == crate::simulator::native_io::SYMBOL)
+        })
+        .flatten()
+        .map(|i| i as u32);
+    let observers = observer_service
+        .map(|_| observers::Observers::new(program))
+        .filter(|observers| !observers.groups.is_empty());
     let mut g = Generator {
+        observers: observers.as_ref(),
+        observer_service,
         outlined: None,
         outline_base: 0,
         b,
