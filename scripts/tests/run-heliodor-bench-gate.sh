@@ -718,5 +718,40 @@ MOCK_MUTATE_RUNNER=1
 run_gate_fixture runner-mutation 0
 MOCK_MUTATE_RUNNER=0
 
+# Incremental execution has no whole-image promotion. Require real native calls,
+# matching test identities, and unambiguous, successful publication evidence.
+mixed_stats='CELOX_TIERED_STATS test=hot tier=interpreter promotion=disabled interpreted_evaluations=10 compiled_evaluations=0 promoted_after_interpreted_evaluations=NA promotion_elapsed_ns=NA safe_point_polls=11 split_apply_deferrals=0 threshold_deferrals=0'
+hotspot_stats='CELOX_HOTSPOT_STATS test=hot interpreted_calls=10 compiled_calls=20 compiled_block_calls=0 compiled_entries=2 rejected_entries=0 failed_entries=0 code_bytes=128 compile_ns=1000 frame_bytes_transferred=0'
+hotspot_log="$TMP/hotspot.log"
+printf '%s\n' "$mixed_stats" "$hotspot_stats" >"$hotspot_log"
+validate_gate_tiered_stats "$hotspot_log" hot || fail "gate rejected hotspot native calls"
+printf '%s\n' "$mixed_stats" "${hotspot_stats/compiled_calls=20 compiled_block_calls=0/compiled_calls=0 compiled_block_calls=20}" >"$hotspot_log"
+validate_gate_tiered_stats "$hotspot_log" hot || fail "gate rejected hotspot native regions"
+for invalid in \
+    "${hotspot_stats/compiled_calls=20/compiled_calls=0}" \
+    "${hotspot_stats/compiled_entries=2/compiled_entries=0}" \
+    "${hotspot_stats/failed_entries=0/failed_entries=1}" \
+    "${hotspot_stats/test=hot/test=wrong}" \
+    "${hotspot_stats/code_bytes=128/code_bytes=0}"; do
+    printf '%s\n' "$mixed_stats" "$invalid" >"$hotspot_log"
+    if validate_gate_tiered_stats "$hotspot_log" hot 2>/dev/null; then
+        fail "gate accepted invalid hotspot evidence: $invalid"
+    fi
+done
+for invalid in "$mixed_stats" "${mixed_stats/promotion=disabled/promotion=failed}"; do
+    printf '%s\n' "$invalid" "$hotspot_stats" "$hotspot_stats" >"$hotspot_log"
+    if validate_gate_tiered_stats "$hotspot_log" hot 2>/dev/null; then
+        fail "gate accepted ambiguous hotspot evidence"
+    fi
+done
+printf '%s\n' "${mixed_stats/promotion=disabled/promotion=failed}" "$hotspot_stats" >"$hotspot_log"
+if validate_gate_tiered_stats "$hotspot_log" hot 2>/dev/null; then
+    fail "gate accepted a failed tier alongside hotspot calls"
+fi
+printf '%s\n' "$hotspot_stats" >"$hotspot_log"
+if validate_gate_tiered_stats "$hotspot_log" hot 2>/dev/null; then
+    fail "gate accepted a missing tiered record"
+fi
+
 CELOX_ROOT="$REAL_CELOX_ROOT"
 echo "run-heliodor-bench gate fixture tests: PASS"

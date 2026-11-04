@@ -300,6 +300,7 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
+        self.stats.reference_steps = self.stats.reference_steps.saturating_add(1);
         executor.await_runtime_event_room();
         self.stopped = false;
         if self.finalizing.is_some() {

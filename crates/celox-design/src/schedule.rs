@@ -229,6 +229,8 @@ pub struct CompiledWaitTerm {
     pub value_offset: usize,
     pub mask_offset: Option<usize>,
     pub plane_bits: usize,
+    /// Saved occurrence counter, independent of the last visible value.
+    pub counter_offset: Option<usize>,
 }
 
 impl CompiledWaitLayout {
@@ -236,16 +238,26 @@ impl CompiledWaitLayout {
     /// raw value/mask planes in complete words, so generated comparisons can
     /// distinguish X and Z without constructing a runtime BigUint per slot.
     pub fn new(terms: &[(usize, bool)]) -> Option<Self> {
-        if terms.is_empty() || terms.iter().any(|&(width, _)| width == 0) {
+        Self::with_counters(
+            &terms
+                .iter()
+                .map(|&(w, m)| (w, m, false))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    pub fn with_counters(terms: &[(usize, bool, bool)]) -> Option<Self> {
+        if terms.is_empty() || terms.iter().any(|&(width, _, _)| width == 0) {
             return None;
         }
-        if let &[(1, mask)] = terms {
+        if let &[(1, mask, false)] = terms {
             return Some(Self {
                 terms: vec![CompiledWaitTerm {
                     width: 1,
                     value_offset: 0,
                     mask_offset: mask.then_some(1),
                     plane_bits: 1,
+                    counter_offset: None,
                 }],
                 bits: 8,
                 scalar_byte: true,
@@ -254,7 +266,7 @@ impl CompiledWaitLayout {
         let mut offset = 0usize;
         let terms = terms
             .iter()
-            .map(|&(width, mask)| {
+            .map(|&(width, mask, counted)| {
                 let plane_bits = width.div_ceil(64).checked_mul(64)?;
                 let value_offset = offset;
                 offset = offset.checked_add(plane_bits)?;
@@ -265,11 +277,19 @@ impl CompiledWaitLayout {
                 } else {
                     None
                 };
+                let counter_offset = if counted {
+                    let at = offset;
+                    offset = offset.checked_add(32)?;
+                    Some(at)
+                } else {
+                    None
+                };
                 Some(CompiledWaitTerm {
                     width,
                     value_offset,
                     mask_offset,
                     plane_bits,
+                    counter_offset,
                 })
             })
             .collect::<Option<Vec<_>>>()?;

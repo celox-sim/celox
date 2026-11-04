@@ -168,6 +168,21 @@ impl SchedulerRefs {
         }
     }
 
+    pub(crate) fn counter_baseline(
+        &self,
+        signal: usize,
+        kind: celox_design::CounterKind,
+    ) -> SignalRef {
+        SignalRef {
+            offset: self.levels.offset
+                + self.unknown_levels.width / 8
+                + (signal * 3 + crate::timing::kind_index(kind)) * 4,
+            width: 32,
+            is_4state: false,
+            array_layout: None,
+        }
+    }
+
     /// Element `bit` of the per-clock slot `slots`.
     pub(crate) fn clock_element(slots: SignalRef, bit: usize) -> SignalRef {
         let width = celox_design::SCHEDULER_TIME_WIDTH;
@@ -531,6 +546,11 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                                 return None;
                             }
                             let process = &model.processes[index];
+                            if process.wait_terms().is_some_and(|(terms, _)| {
+                                terms.iter().all(|(signal, _)| resolve(signal).width == 1)
+                            }) {
+                                return None;
+                            }
                             let terms = process.common_wait_terms()?;
                             let dimensions = terms
                                 .iter()
@@ -539,11 +559,16 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                                     (
                                         signal.width,
                                         backend.layout().four_state && signal.is_4state,
+                                        model
+                                            .counted
+                                            .iter()
+                                            .any(|counted| counted.slots.signal == term.signal),
                                     )
                                 })
                                 .collect::<Vec<_>>();
-                            let layout =
-                                celox_design::schedule::CompiledWaitLayout::new(&dimensions)?;
+                            let layout = celox_design::schedule::CompiledWaitLayout::with_counters(
+                                &dimensions,
+                            )?;
                             (!layout.scalar_byte).then_some(layout)
                         })
                         .collect(),

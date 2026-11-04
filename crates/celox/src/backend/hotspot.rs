@@ -14,7 +14,11 @@ mod region;
 pub(crate) use region::RegionSource;
 use region::{BlockCode, BlockRequest};
 
-use super::{SimulatorErrorCode, compile_cancel::CompileCancel, native::backend::HotspotCode};
+use super::{
+    SimulatorErrorCode,
+    compile_cancel::CompileCancel,
+    native::backend::{HotspotCode, PreparedHotspotScheduler},
+};
 use crate::{
     SimulatorOptions,
     ir::{ExecutionUnit, RegionedAbsoluteAddr},
@@ -24,7 +28,9 @@ pub(crate) const SCRATCH_BYTES: usize = 1024 * 1024;
 const MAX_INSTRUCTIONS: usize = 32_768;
 const MAX_LARGE_INSTRUCTIONS: usize = 1_048_576;
 const LARGE_HOT_COST: Duration = Duration::from_millis(500);
-const MAX_CODE_BYTES: usize = 16 * 1024 * 1024;
+// Large four-state RTL needs room for both Comb and its compiled scheduler
+// (including outlined kernels), in addition to startup block regions.
+const MAX_CODE_BYTES: usize = 64 * 1024 * 1024;
 const HOT_COST: Duration = Duration::from_millis(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -91,17 +97,26 @@ impl EntryCode {
     }
 }
 
+enum Work {
+    Group(Vec<ExecutionUnit<RegionedAbsoluteAddr>>),
+    Block(BlockRequest),
+    Scheduler(SchedulerState, Arc<HotspotCode>),
+}
+
 struct Request {
     key: EntryKey,
-    units: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
-    block: Option<BlockRequest>,
-    scheduler: Option<(Arc<crate::ir::LaidOutProgram>, Arc<HotspotCode>)>,
+    work: Work,
 }
 
 struct Completed {
     key: EntryKey,
     code: Result<EntryCode, String>,
     elapsed: Duration,
+}
+
+enum SchedulerState {
+    Pending(Arc<crate::ir::LaidOutProgram>),
+    Prepared(Box<PreparedHotspotScheduler>),
 }
 
 pub(crate) struct HotspotRuntime {
@@ -113,8 +128,9 @@ pub(crate) struct HotspotRuntime {
     busy: bool,
     polls: u64,
     stats: HotspotStats,
-    scheduler: Option<Arc<crate::ir::LaidOutProgram>>,
+    scheduler: Option<SchedulerState>,
     scheduler_index: Option<usize>,
+    options: Arc<SimulatorOptions>,
 }
 
 impl HotspotRuntime {
@@ -127,32 +143,45 @@ impl HotspotRuntime {
         let cancel = CompileCancel::new();
         let worker_cancel = cancel.clone();
         let layout = layout.clone();
-        let options = options.clone();
+        let options = Arc::new(options.clone());
+        let worker_options = Arc::clone(&options);
         let worker = std::thread::Builder::new()
             .name("celox-jit-hotspot".into())
             .spawn(move || {
+                let options = worker_options;
                 while let Ok(request) = receiver.recv() {
                     if worker_cancel.is_cancelled() {
                         break;
                     }
                     let start = Instant::now();
-                    let code = if let Some((program, comb)) = request.scheduler {
-                        HotspotCode::compile_scheduler(&program, comb, &options, &worker_cancel)
-                            .map(Arc::new)
-                            .map(EntryCode::Group)
-                    } else {
-                        match request.block {
-                            Some(block) => block
-                                .compile(&layout, &options, &worker_cancel)
-                                .map(EntryCode::Block),
-                            None => HotspotCode::compile(
-                                &request.units,
-                                &layout,
-                                &options,
-                                &worker_cancel,
-                            )
-                            .map(Arc::new)
-                            .map(EntryCode::Group),
+                    let code = match request.work {
+                        Work::Scheduler(state, comb) => {
+                            let prepared = match state {
+                                SchedulerState::Pending(program) => {
+                                    PreparedHotspotScheduler::new(program, &options, &worker_cancel)
+                                        .map(Box::new)
+                                }
+                                SchedulerState::Prepared(prepared) => Ok(prepared),
+                            };
+                            prepared
+                                .and_then(|prepared| {
+                                    HotspotCode::compile_scheduler(
+                                        *prepared,
+                                        comb,
+                                        &options,
+                                        &worker_cancel,
+                                    )
+                                })
+                                .map(Arc::new)
+                                .map(EntryCode::Group)
+                        }
+                        Work::Block(block) => block
+                            .compile(&layout, &options, &worker_cancel)
+                            .map(EntryCode::Block),
+                        Work::Group(units) => {
+                            HotspotCode::compile(&units, &layout, &options, &worker_cancel)
+                                .map(Arc::new)
+                                .map(EntryCode::Group)
                         }
                     }
                     .map_err(|error| error.to_string());
@@ -182,6 +211,7 @@ impl HotspotRuntime {
             stats: HotspotStats::default(),
             scheduler: None,
             scheduler_index: None,
+            options,
         })
     }
 
@@ -193,7 +223,7 @@ impl HotspotRuntime {
             .as_ref()
             .and_then(|s| s.unit);
         if self.scheduler_index.is_some() {
-            self.scheduler = Some(Arc::new(program.clone()));
+            self.scheduler = Some(SchedulerState::Pending(Arc::new(program.clone())));
         }
     }
 
@@ -203,6 +233,38 @@ impl HotspotRuntime {
                 .get(&EntryKey::Process(index))
                 .is_some_and(|entry| entry.code.is_some())
         })
+    }
+
+    /// Use the owner thread for planning and allocation while the single worker
+    /// compiles an admitted large Comb. Doing this earlier on that worker would
+    /// delay useful small regions during initialization. Small groups keep the
+    /// original lazy worker path, so short simulations do no extra planning.
+    fn prepare_large_scheduler(&mut self) {
+        let Some(state) = self.scheduler.take() else {
+            return;
+        };
+        let SchedulerState::Pending(program) = state else {
+            self.scheduler = Some(state);
+            return;
+        };
+        let start = Instant::now();
+        let prepared = PreparedHotspotScheduler::new(program, &self.options, &self.cancel);
+        let elapsed = start.elapsed();
+        self.stats.compile_time += elapsed;
+        match prepared {
+            Ok(prepared) => {
+                tracing::debug!(?elapsed, "hotspot scheduler prepared");
+                self.scheduler = Some(SchedulerState::Prepared(Box::new(prepared)));
+            }
+            Err(error) => {
+                tracing::debug!(%error, "hotspot scheduler preparation failed");
+                self.stats.failed_entries += 1;
+                self.entries
+                    .entry(EntryKey::Process(self.scheduler_index.unwrap()))
+                    .or_default()
+                    .unavailable = true;
+            }
+        }
     }
 
     fn request_scheduler(&mut self) {
@@ -219,15 +281,21 @@ impl HotspotRuntime {
         let Some(sender) = &self.requests else {
             return;
         };
-        let program = self.scheduler.take().unwrap();
         let request = Request {
             key: EntryKey::Process(self.scheduler_index.unwrap()),
-            units: Vec::new(),
-            block: None,
-            scheduler: Some((program, Arc::clone(comb))),
+            work: Work::Scheduler(self.scheduler.take().unwrap(), Arc::clone(comb)),
         };
-        if sender.try_send(request).is_ok() {
-            self.busy = true;
+        match sender.try_send(request) {
+            Ok(()) => self.busy = true,
+            Err(mpsc::TrySendError::Full(request)) => {
+                let Work::Scheduler(state, _) = request.work else {
+                    unreachable!("only scheduler jobs are submitted here");
+                };
+                self.scheduler = Some(state);
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                self.cancel();
+            }
         }
     }
 
@@ -274,7 +342,14 @@ impl HotspotRuntime {
                             self.stats.compiled_entries += 1;
                             entry.code = Some(code);
                         }
-                        Ok(_) => {
+                        Ok(code) => {
+                            tracing::debug!(key = ?completed.key,
+                                required_state_bytes = code.native().required_state_size,
+                                available_state_bytes = memory.len() * 8,
+                                code_bytes = code.native().code_size,
+                                published_bytes = self.stats.code_bytes,
+                                code_budget_bytes = MAX_CODE_BYTES,
+                                "hotspot publication exceeded its memory or code budget");
                             entry.unavailable = true;
                             self.stats.rejected_entries += 1;
                         }
@@ -360,6 +435,13 @@ impl HotspotRuntime {
             MAX_INSTRUCTIONS
         };
         if *instructions > limit || unsupported {
+            tracing::debug!(
+                ?key,
+                instructions = *instructions,
+                limit,
+                unsupported,
+                "hotspot group deferred to interpreter or block regions"
+            );
             *units = None;
             self.entries
                 .get_mut(&key)
@@ -385,6 +467,7 @@ impl HotspotRuntime {
                 .estimated_cost
                 .saturating_add(start.elapsed().saturating_mul(weight));
         }
+        let prepare_scheduler = key == EntryKey::Comb && entry.large_attempted;
         // A region may have queued work or published this group while its
         // interpreted invocation was running. Never queue a second job behind
         // that work: `busy` represents exactly one outstanding completion.
@@ -394,11 +477,14 @@ impl HotspotRuntime {
             if let Some(sender) = &self.requests {
                 match sender.try_send(Request {
                     key,
-                    units,
-                    block: None,
-                    scheduler: None,
+                    work: Work::Group(units),
                 }) {
-                    Ok(()) => self.busy = true,
+                    Ok(()) => {
+                        self.busy = true;
+                        if prepare_scheduler {
+                            self.prepare_large_scheduler();
+                        }
+                    }
                     Err(mpsc::TrySendError::Disconnected(_)) => {
                         self.cancel();
                     }
@@ -454,9 +540,7 @@ impl HotspotRuntime {
                 if let Some(sender) = &self.requests {
                     match sender.try_send(Request {
                         key,
-                        units: Vec::new(),
-                        block: Some(block),
-                        scheduler: None,
+                        work: Work::Block(block),
                     }) {
                         Ok(()) => self.busy = true,
                         Err(mpsc::TrySendError::Disconnected(_)) => {
@@ -515,48 +599,85 @@ module Top;
   always @(posedge gclk) seen = seen + 8'd1;
 endmodule
 "#;
-        let builder = || {
-            crate::Simulation::from_sv_sources(
-                vec![(SOURCE, std::path::Path::new("hotspot-scheduler.sv"))],
-                "Top",
-            )
-            .four_state(true)
-            .settle_partition(crate::SettlePartition::Always)
-        };
-        let mut mixed = builder().hotspot_jit(true).build_tiered().unwrap();
-        let mut reference = builder().build_interpreter().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(15);
-        let mut time = 0;
-        loop {
-            time += 43;
-            mixed.run_until(time).unwrap();
-            reference.run_until(time).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        for recording in [false, true] {
+            let mixed_vcd = directory.path().join("mixed.vcd");
+            let reference_vcd = directory.path().join("reference.vcd");
+            let builder = || {
+                crate::Simulation::from_sv_sources(
+                    vec![(SOURCE, std::path::Path::new("hotspot-scheduler.sv"))],
+                    "Top",
+                )
+                .four_state(true)
+                .settle_partition(crate::SettlePartition::Always)
+            };
+            let mixed_builder = if recording {
+                builder().vcd(&mixed_vcd)
+            } else {
+                builder()
+            };
+            let reference_builder = if recording {
+                builder().vcd(&reference_vcd)
+            } else {
+                builder()
+            };
+            let mut mixed = mixed_builder.hotspot_jit(true).build_tiered().unwrap();
+            let mut reference = reference_builder.build_interpreter().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(15);
+            let mut time = 0;
+            loop {
+                time += 43;
+                mixed.run_until(time).unwrap();
+                reference.run_until(time).unwrap();
+                for name in ["q", "g", "seen"] {
+                    assert_eq!(
+                        mixed.get_four_state(mixed.signal(name)),
+                        reference.get_four_state(reference.signal(name)),
+                        "{name} at {time}"
+                    );
+                }
+                let stats = mixed.hotspot_stats().unwrap();
+                assert_eq!(stats.failed_entries, 0, "{stats:?}");
+                if mixed.scheduler_stats().compiled_slots >= 256 {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "no scheduler publication: {stats:?}"
+                );
+                std::thread::yield_now();
+            }
+            // Restore a state captured after actual native scheduler execution into
+            // a fresh mixed executor. The checkpoint contains no JIT code or frames.
+            let checkpoint = mixed.save_state().unwrap();
+            let mut resumed = builder()
+                .hotspot_jit(true)
+                .defer_initialization(true)
+                .build_tiered()
+                .unwrap();
+            resumed.load_state(&checkpoint).unwrap();
+            assert_eq!(resumed.time(), mixed.time());
+            // Cancelling future work must not invalidate already linked code.
+            mixed.simulator.backend.cancel_background_compilation();
+            mixed.run_until(time + 10_000).unwrap();
+            reference.run_until(time + 10_000).unwrap();
+            resumed.run_until(time + 10_000).unwrap();
             for name in ["q", "g", "seen"] {
+                let expected = reference.get_four_state(reference.signal(name));
+                assert_eq!(mixed.get_four_state(mixed.signal(name)), expected);
+                assert_eq!(resumed.get_four_state(resumed.signal(name)), expected);
+            }
+            if recording {
+                mixed.flush_vcd().unwrap();
+                reference.flush_vcd().unwrap();
+                let mixed = std::fs::read_to_string(&mixed_vcd).unwrap();
+                let reference = std::fs::read_to_string(&reference_vcd).unwrap();
                 assert_eq!(
-                    mixed.get_four_state(mixed.signal(name)),
-                    reference.get_four_state(reference.signal(name)),
-                    "{name} at {time}"
+                    mixed.split_once("$enddefinitions").unwrap().1,
+                    reference.split_once("$enddefinitions").unwrap().1
                 );
             }
-            let stats = mixed.simulator.backend.hotspot_stats().unwrap();
-            assert_eq!(stats.failed_entries, 0, "{stats:?}");
-            if mixed.scheduler_stats().compiled_slots >= 256 {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "no scheduler publication: {stats:?}"
-            );
-            std::thread::yield_now();
         }
-        // Cancelling future work must not invalidate already linked code.
-        mixed.simulator.backend.cancel_background_compilation();
-        mixed.run_until(time + 10_000).unwrap();
-        reference.run_until(time + 10_000).unwrap();
-        assert_eq!(
-            mixed.get_four_state(mixed.signal("g")),
-            reference.get_four_state(reference.signal("g"))
-        );
     }
 
     #[test]
