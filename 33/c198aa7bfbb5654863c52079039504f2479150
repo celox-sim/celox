@@ -1,0 +1,1 @@
+Address review r4461662512: make packed-field compare planning and cached loads respect opaque state writes, with executable regressions.
