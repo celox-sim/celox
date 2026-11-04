@@ -450,7 +450,7 @@ impl Plan {
         });
         self.ordered_publish(g, ordered, tracked, finish_exit, checks, false);
         self.ordered_raw_levels(g, ordered, tracked, true);
-        g.check_waits(checks);
+        g.check_waits_at(checks, false);
         let staged: Vec<_> = self
             .kernels
             .iter()
@@ -539,7 +539,7 @@ impl Plan {
                 g.b.switch_to_block(done);
                 if snapshots {
                     self.ordered_raw_levels(g, ordered, tracked, true);
-                    g.check_waits(checks);
+                    g.check_waits_at(checks, false);
                 }
             });
         });

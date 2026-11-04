@@ -320,7 +320,7 @@ module Top;
     initial forever begin
         @(data or other); count = count + 1;
         #1;
-        @(data or other); count = count + 1;
+        @(negedge other or posedge data iff phase[0]); count = count + 1;
     end
     initial forever begin #2; other = !other; end
     initial #12 $finish;
