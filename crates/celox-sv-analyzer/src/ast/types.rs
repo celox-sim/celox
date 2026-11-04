@@ -270,6 +270,51 @@ pub(super) fn declaration_name(
     (identity, typename)
 }
 
+/// Bind typedef `alias` of a procedural block or subroutine body, as
+/// procedural lowering and the discovery of the block's declarations both
+/// do: its base type in the scope's constants `const_env`, its dimensions
+/// also with the members of an enumeration it declares, which are added to
+/// `members`, and its bounds frozen in that scope (IEEE 1800-2023 6.18,
+/// 6.19). Each such typedef is a type of its own, also where another block
+/// declares one of the same name, named by its declaration; it is written
+/// with the name of its design element.
+pub(super) fn bind_local_alias(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    alias: &celox_sv_syntax::TypeAlias,
+    const_env: &SharedEnv,
+    aliases: &SharedMap<Type>,
+    members: &mut EnumMemberConstants,
+) -> Converted<Option<Type>> {
+    let TypeAliasTarget::DataType(target) = alias.target else {
+        return Ok(None);
+    };
+    let mut dimension_env = (**const_env).clone();
+    parameters::enum_members_of(tree, session, target, &mut dimension_env, aliases, members)?;
+    let dimension_env: SharedEnv = dimension_env.into();
+    let Some(mut ty) = bind_alias(
+        tree,
+        session,
+        alias,
+        const_env,
+        aliases,
+        &dimension_env,
+        false,
+        || {
+            let (identity, typename) = declaration_name(tree, alias, None);
+            (
+                format!("{identity}@native:{}", alias.tokens.start),
+                typename,
+            )
+        },
+    )?
+    else {
+        return Ok(None);
+    };
+    freeze_bounds(&mut ty, &tree.functions, &dimension_env);
+    Ok(Some(ty))
+}
+
 fn bound_literal(value: i128) -> ConstExpr {
     if value >= 0 {
         ConstExpr::Literal(value.to_string())

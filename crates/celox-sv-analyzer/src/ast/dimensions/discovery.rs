@@ -13,6 +13,9 @@ struct Key {
     arena: usize,
     scope: crate::source_tree::ScopeHandle,
     path: Vec<BodyItemId>,
+    /// The first token of the procedural block whose local constants
+    /// [`local_constants`] binds, apart from the queries of its scope.
+    block: Option<usize>,
 }
 #[derive(Default)]
 pub(in crate::ast) struct State {
@@ -257,6 +260,36 @@ fn variables(
     }
     Ok(())
 }
+/// The value of local parameter `parameter`, bound with its declared type as
+/// procedural lowering binds it (IEEE 1800-2023 6.20.2).
+fn local_parameter_value(
+    parameter: &celox_sv_syntax::Parameter,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    context: &PackedDimensions,
+) -> Option<i128> {
+    let mut bound = Vec::new();
+    parameters::parameters_from_native(
+        &[parameter],
+        tree,
+        session,
+        &mut bound,
+        true,
+        &context.const_env,
+        &context.type_aliases,
+        &HashMap::default(),
+    )
+    .ok()?;
+    let [bound] = bound.as_slice() else {
+        return None;
+    };
+    let mut env = (*context.const_env).clone();
+    let mut types = parameter_types_from_const_env(&env);
+    let mut literals = HashMap::default();
+    parameters::bind_parameter(tree, session, &mut env, &mut types, &mut literals, bound)
+        .then(|| env.get(bound.name()).copied())
+        .flatten()
+}
 fn parameter(
     parameter: &celox_sv_syntax::Parameter,
     tree: &AnalysisContext<'_>,
@@ -283,19 +316,13 @@ fn parameter(
             dimensions,
             default,
         } => {
-            if local
-                && let Some(value) = default
-                    .and_then(|id| {
-                        constant_binding::bind(id, tree, session, context)
-                            .ok()
-                            .flatten()
-                    })
-                    .and_then(|value| {
-                        eval_ast_const_expr(&tree.functions, &value, &context.const_env)
-                    })
-            {
-                context.const_env.insert(n.clone(), value);
-            }
+            // A local parameter takes its value as procedural lowering binds
+            // it: converted to the parameter's type.
+            let value = if local && default.is_some() {
+                local_parameter_value(parameter, tree, session, context)
+            } else {
+                None
+            };
             // Elaborated bindings may shadow this authored parameter (notably
             // an implicit genvar localparam). Its scalar type markers then own
             // the type; restoring the outer declaration would lose that scope.
@@ -311,6 +338,11 @@ fn parameter(
                 if !dimensions.is_empty() || !ty.packed_ranges().is_empty() {
                     publish_shape(tree, session, key, context, n.clone(), &ty, local);
                 }
+            }
+            // After its shape, which hides an outer name as that of a local
+            // variable does: a local parameter is a constant (6.20.2).
+            if let Some(value) = value {
+                context.const_env.insert(n.clone(), value);
             }
             // Retain only this declaration's final binding. An imported
             // parameter or enumerator with the same name belongs to another
@@ -1115,19 +1147,18 @@ fn local_declaration(
         }
         LocalDeclaration::TypeAlias(id) => {
             let alias = tree.declarations().type_alias(*id);
+            // Bound as procedural lowering binds it, with the same identity
+            // and its bounds frozen in its own scope.
             if let TypeAliasTarget::DataType(id) = alias.target
-                && let Some(ty) = type_binding::bind(id, tree, session, context)?
+                && let Some(ty) = types::bind_local_alias(
+                    tree,
+                    session,
+                    alias,
+                    &context.const_env,
+                    &context.type_aliases,
+                    &mut EnumMemberConstants::default(),
+                )?
             {
-                let mut ty = type_with_dimensions(ty, &alias.dimensions, tree, session, context)?;
-                ty.name_declaration(|| {
-                    let (identity, typename) = types::declaration_name(tree, alias, None);
-                    // Lexically nested typedefs may reuse a name. The native
-                    // declaration, rather than that spelling, owns this type.
-                    (
-                        format!("{identity}@native:{}", alias.tokens.start),
-                        typename,
-                    )
-                });
                 if context.constant_types.contains_key(&name(&alias.name)) {
                     Arc::make_mut(&mut context.constant_types).remove(&name(&alias.name));
                 }
@@ -1139,19 +1170,75 @@ fn local_declaration(
     }
     Ok(())
 }
-fn statement_scope(
-    ids: &[StatementId],
+/// Bind the local parameters and typedefs of the procedural blocks around
+/// `target`, a type inside a subroutine or procedure, in `context`, each in
+/// its own block as a query there binds them, so that the specializations
+/// the type names are discovered with those of the declarations of the scope
+/// (IEEE 1800-2023 6.18, 6.20.2, 8.25).
+pub(in crate::ast) fn local_constants(
     target: TokenRange,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     context: &mut PackedDimensions,
-    key: &Key,
 ) -> Converted<()> {
-    enum Lexical {
-        Statements(Vec<StatementId>),
-        For(Vec<celox_sv_syntax::ForVariableDeclaration>),
-        Foreach(Vec<celox_sv_syntax::Name>),
-    }
+    let native = tree.declarations();
+    // The body around `target`: of the innermost subroutine, or of a
+    // procedure.
+    let roots = native
+        .subroutines
+        .iter()
+        .filter(|subroutine| contains(subroutine.body_tokens, target))
+        .min_by_key(|subroutine| subroutine.body_tokens.end - subroutine.body_tokens.start)
+        .map(|subroutine| (subroutine.body_tokens, subroutine.items.clone()))
+        .or_else(|| {
+            native
+                .procedures
+                .iter()
+                .map(|procedure| (native.statement(procedure.body).tokens, procedure.body))
+                .find(|(tokens, _)| contains(*tokens, target))
+                .map(|(tokens, body)| (tokens, vec![body]))
+        });
+    let Some((body, roots)) = roots else {
+        return Ok(());
+    };
+    let key = Key {
+        arena: native as *const _ as usize,
+        scope: tree.scope_handle(),
+        path: Vec::new(),
+        block: Some(body.start),
+    };
+    let result = lexical_scopes(&roots, target, tree).and_then(|scopes| {
+        for lexical in scopes {
+            let Lexical::Statements(items) = lexical else {
+                continue;
+            };
+            for id in items {
+                if let StatementKind::Declaration(
+                    item @ (LocalDeclaration::Parameters(_) | LocalDeclaration::TypeAlias(_)),
+                ) = &native.statement(id).kind
+                {
+                    local_declaration(item, tree, session, context, &key)?;
+                }
+            }
+        }
+        Ok(())
+    });
+    session.dimensions.partial.remove(&key);
+    result
+}
+/// A lexical scope of a procedural body.
+enum Lexical {
+    Statements(Vec<StatementId>),
+    For(Vec<celox_sv_syntax::ForVariableDeclaration>),
+    Foreach(Vec<celox_sv_syntax::Name>),
+}
+/// The lexical scopes among the statements `ids` that contain `target`,
+/// outer scopes first.
+fn lexical_scopes(
+    ids: &[StatementId],
+    target: TokenRange,
+    tree: &AnalysisContext<'_>,
+) -> Converted<Vec<Lexical>> {
     let mut scopes = vec![Lexical::Statements(ids.to_vec())];
     let mut pending = ids.iter().rev().copied().collect::<Vec<_>>();
     let mut seen = HashSet::default();
@@ -1189,6 +1276,17 @@ fn statement_scope(
         }
         pending.extend(statement.kind.children());
     }
+    Ok(scopes)
+}
+fn statement_scope(
+    ids: &[StatementId],
+    target: TokenRange,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    context: &mut PackedDimensions,
+    key: &Key,
+) -> Converted<()> {
+    let scopes = lexical_scopes(ids, target, tree)?;
     for lexical in scopes {
         match lexical {
             Lexical::Statements(items) => {
@@ -1357,6 +1455,7 @@ pub(in crate::ast) fn query_operand_dimensions_id(
         arena: native as *const _ as usize,
         scope: tree.scope_handle(),
         path: owners.path.clone(),
+        block: None,
     };
     if let Some(mut partial) = session.dimensions.partial.get(&key).cloned() {
         overlay(&mut partial, input);

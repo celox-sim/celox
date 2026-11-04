@@ -1,0 +1,31 @@
+{
+  "cases": [
+    "class::specializations_of_procedural_constants"
+  ],
+  "source": "src/sv/cases/class.vtest",
+  "standard": "IEEE 1800-2023 8.25: two parameter sets are the same when each type parameter's types are matching types, and matching specializations represent the same type; 6.22.1 b): a simple typedef that renames a type matches that type.",
+  "method": "The shared case runs unchanged in verify-sv-xezim; the reduced source below runs without the adapter.",
+  "reduced_source": "module Top;\n    class Resource; endclass\n    class Box #(type T = int) extends Resource; endclass\n    typedef bit [3:0] nibble_t;\n    initial begin\n        Box#(bit [3:0]) made = new;\n        Resource r = made;\n        Box#(nibble_t) a;\n        begin\n            typedef bit [3:0] t;\n            Box#(t) b;\n            $display(\"[%0d %0d %0d]\", $cast(a, r), $cast(b, r), $cast(made, r));\n        end\n    end\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "stdout": "[1 1 1]\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "status": "compile_error",
+      "stderr": "repro.sv:3: syntax error\nrepro.sv:3: error: Invalid module item.\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.4",
+      "stdout": "[0 0 1]\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "[1 1 1]\n"
+    }
+  ]
+}
