@@ -31,6 +31,7 @@
 //! and every design or kernel this module does not qualify, runs in the
 //! reference loop.
 
+mod nba;
 mod observers;
 mod ordered;
 mod slice;
@@ -99,7 +100,8 @@ const GATE_SOURCE_EDGED_BIT: usize = 32;
 
 const ACTIVE_COMMIT: &str = "the process drives or waits for a clock whose domain commits blocking results in the active region";
 
-const DELAY_STATUSES: [ProcessStatus; 6] = [
+const DELAY_STATUSES: [ProcessStatus; 7] = [
+    ProcessStatus::Nba,
     ProcessStatus::Delay,
     ProcessStatus::InactiveDelay,
     ProcessStatus::Done,
@@ -805,9 +807,12 @@ impl Plan {
                             && site.position.is_none()
                             && !program.layout().unpacked_arrays.contains_key(&site.target)
                             && !event_storage.contains_key(&target)
-                            && !probed.contains(&target)
-                            && !rtl_stores.contains(&target)
-                            && !kernel_stores.iter().any(|stores| stores.contains(&target))
+                            && (ordered_available
+                                || (!probed.contains(&target)
+                                    && !rtl_stores.contains(&target)
+                                    && !kernel_stores
+                                        .iter()
+                                        .any(|stores| stores.contains(&target))))
                     })
             })
             .map(|(index, _)| index)
@@ -869,7 +874,7 @@ impl Plan {
                 None
             } else if !slots.const_delays && !ordered_available {
                 Some("a delay is not a constant of at least one time unit")
-            } else if !process.nbas.is_empty() {
+            } else if !process.nbas.is_empty() && !nba_processes.contains(&index) {
                 Some("the process has nonblocking assignments")
             } else if !statuses_only(unit, slots.status, &DELAY_STATUSES) {
                 Some("the process suspends other than for a delay")
@@ -2113,7 +2118,19 @@ impl Plan {
         let clock_bits = self.clocks.len().next_multiple_of(64).max(64);
         let mut b = Builder::new();
         let comb = b.new_block();
+        let native_nbas: HashSet<_> = self
+            .nba_processes
+            .iter()
+            .copied()
+            .filter(|&index| self.kernels[index].is_some())
+            .collect();
+        let nbas = cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen")))
+            .then_some(self.service_function)
+            .flatten()
+            .filter(|_| !self.nba_processes.is_empty())
+            .map(|service| nba::Sites::new(program, &native_nbas, service));
         let mut g = Generator {
+            nbas: nbas.as_ref(),
             observers: self.observers.as_ref(),
             observer_service: self.service_function,
             outlined,
@@ -2678,6 +2695,26 @@ impl Plan {
                 });
                 g.b.switch_to_block(call);
                 let resume = g.b.new_block();
+                if let (Some(nbas), Some(nba)) = (g.nbas, nba) {
+                    let capture = g.b.new_block();
+                    let host = g.b.new_block();
+                    g.b.seal_block(SIRTerminator::Branch {
+                        cond: nba,
+                        true_block: (capture, Vec::new()),
+                        false_block: (host, Vec::new()),
+                    });
+                    g.b.switch_to_block(capture);
+                    let site = g.load(process.delay, 64);
+                    nbas.capture(&mut g, index, site);
+                    guards.as_mut().expect("native NBA budget guards").charge(
+                        &mut g,
+                        index as u64,
+                        crate::simulator::native_io::CHECKPOINT,
+                        time,
+                    );
+                    g.b.seal_block(SIRTerminator::Jump(resume, Vec::new()));
+                    g.b.switch_to_block(host);
+                }
                 if let (Some(guards), Some(yielded)) = (&mut guards, yielded) {
                     let checkpoint = g.b.new_block();
                     let host_call = g.b.new_block();
@@ -4111,6 +4148,7 @@ enum Phase {
 }
 
 struct Generator<'a> {
+    nbas: Option<&'a nba::Sites>,
     observers: Option<&'a observers::Observers>,
     observer_service: Option<u32>,
     outlined: Option<&'a mut Vec<Unit>>,
@@ -4191,6 +4229,10 @@ impl Generator<'_> {
     }
 
     fn publish_service(&mut self, function: Option<u32>, checks: &[WaitCheck<'_>]) {
+        if let Some(nbas) = self.nbas {
+            nbas.publish(self, checks);
+            return;
+        }
         let Some(function) = function else {
             return;
         };

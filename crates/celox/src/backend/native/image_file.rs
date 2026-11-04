@@ -10,9 +10,9 @@ use std::{
 use super::backend::NativeProgramImage;
 
 const TRAILER_MAGIC: &[u8; 8] = b"CELOXNPI";
-// Generated observers access snapshots through the private arena header and
-// word-aligned capture flags. Earlier runtimes use a different arena layout.
-const CONTAINER_VERSION: u16 = 64;
+// Generated NBA queues access stable record pages through the private arena
+// header. Earlier runtimes use a different arena layout and service ABI.
+const CONTAINER_VERSION: u16 = 65;
 const TRAILER_SIZE: usize = 32;
 // This optional prefix descriptor does not change the Postcard payload. Older
 // readers ignore framing flags and continue to locate the payload at EOF.
