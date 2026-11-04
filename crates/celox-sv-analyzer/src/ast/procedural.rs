@@ -1922,11 +1922,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             }));
         }
         let call = match native.expression(root).kind {
-            celox_sv_syntax::ExprKind::Call { expression, .. } => {
-                if expression_binding::object_method(
+            celox_sv_syntax::ExprKind::Call { .. } => {
+                if expression_binding::object_call_method(
                     self.tree,
                     self.session,
-                    expression,
+                    root,
                     native,
                     &self.dims,
                 )?
@@ -4271,6 +4271,7 @@ pub(super) fn lower_subroutine(
     if let Some(class) = class {
         builder.enter_class_scope(class);
         builder.dims.constructor = constructor;
+        builder.dims.method_name = Some(name.clone());
         // Method formals and locals may shadow properties, but not another
         // declaration in the method's own lexical scope (8.5, 6.21).
         builder.push_scope();

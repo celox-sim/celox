@@ -3639,6 +3639,10 @@ struct PackedDimensions {
     class_scope: Option<String>,
     /// The method being bound is the constructor of `class_scope`.
     constructor: bool,
+    /// The name of the method being bound, which a call `name(...)` in its
+    /// body calls rather than reads its result variable (IEEE 1800-2023
+    /// 13.4.1).
+    method_name: Option<String>,
     /// Where array locator methods declare their iterator locals; `None`
     /// outside a procedural body.
     locator_locals: Option<locators::LocalSink>,
@@ -3689,6 +3693,7 @@ impl PackedDimensions {
             subroutine_param_names: Arc::default(),
             class_scope: None,
             constructor: false,
+            method_name: None,
             locator_locals: None,
             locator_iterators: Arc::default(),
             effect_values: Arc::default(),

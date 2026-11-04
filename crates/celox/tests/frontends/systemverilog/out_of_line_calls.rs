@@ -733,3 +733,153 @@ endmodule
         Ok(vec![value(1), value(1)])
     );
 }
+
+#[test]
+fn recursive_methods() {
+    // Inside a method, a call of its own name calls the method; the name
+    // alone is its result variable (IEEE 1800-2023 13.4.1).
+    let source = r#"module Top(input int i, output int f, output int g, output int s);
+    class C;
+        int base;
+        extern virtual function int fact(int n);
+        function int fib(int n);
+            if (n < 2) return n + base;
+            return fib(n - 1) + fib(n - 2) - base;
+        endfunction
+        static function int sum(int n);
+            sum = 0;
+            for (int k = 1; k <= n; k++) sum = sum + k;
+        endfunction
+    endclass
+    function int C::fact(int n);
+        if (n <= 1) return 1;
+        return n * fact(n - 1);
+    endfunction
+    initial begin
+        C c;
+        c = new;
+        f = c.fact(i);
+        g = c.fib(i + 5);
+        s = C::sum(i);
+    end
+endmodule
+"#;
+    let inlined = simulate(source, false, false, "interpreter", 0, &["f"]);
+    assert!(
+        inlined
+            .as_ref()
+            .is_err_and(|error| error.contains("recursive call")),
+        "{inlined:?}"
+    );
+    // With `i` 0: 0! = 1, fib(5) = 5, and the empty sum.
+    for four_state in [false, true] {
+        for backend in backends() {
+            assert_eq!(
+                simulate(source, four_state, true, backend, 0, &["f", "g", "s"]),
+                Ok(vec![value(1), value(5), value(0)]),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+}
+
+#[test]
+fn recursive_methods_of_every_result_type() {
+    // A recursive call types its result by the method it calls, not by the
+    // result variable its name also is (IEEE 1800-2023 13.4.1), for every
+    // kind of result.
+    let source = r#"interface Bus;
+    int v;
+endinterface
+module Top(input int i, output int a, output int b, output int c, output int d,
+           output int e, output int f);
+    Bus bus();
+    typedef enum int { ZERO, ONE, TWO } level_t;
+    typedef struct { int x; int y; } pair_t;
+    typedef int queue_t[$];
+    class Node;
+        int depth;
+        virtual Bus port;
+        function string text(int n);
+            if (n == 0) return "x";
+            return {text(n - 1), "y"};
+        endfunction
+        function queue_t items(int n);
+            if (n == 0) return '{};
+            return {items(n - 1), n};
+        endfunction
+        function Node chain(int n);
+            if (n == 0) return this;
+            return chain(n - 1);
+        endfunction
+        function level_t level(int n);
+            if (n == 0) return ZERO;
+            return level_t'(level(n - 1) + 1);
+        endfunction
+        function pair_t pair(int n);
+            pair_t p;
+            if (n == 0) return '{0, 1};
+            p = pair(n - 1);
+            return '{p.x + 1, p.y * 2};
+        endfunction
+        function virtual Bus vif(int n);
+            if (n == 0) return port;
+            return vif(n - 1);
+        endfunction
+    endclass
+    initial begin
+        Node node;
+        Node last;
+        int q[$];
+        pair_t p;
+        string t;
+        virtual Bus port;
+        node = new;
+        node.port = bus;
+        node.depth = 7;
+        bus.v = 5;
+        t = node.text(i + 2);
+        a = t.len();
+        q = node.items(i + 3);
+        b = q.size() * 10 + q[2];
+        last = node.chain(i + 2);
+        c = last.depth;
+        d = node.level(i + 2);
+        p = node.pair(i + 3);
+        e = p.x * 100 + p.y;
+        port = node.vif(i + 2);
+        f = port.v;
+    end
+endmodule
+"#;
+    let inlined = simulate(source, false, false, "interpreter", 0, &["a"]);
+    assert!(
+        inlined
+            .as_ref()
+            .is_err_and(|error| error.contains("recursive call")),
+        "{inlined:?}"
+    );
+    for four_state in [false, true] {
+        for backend in backends() {
+            assert_eq!(
+                simulate(
+                    source,
+                    four_state,
+                    true,
+                    backend,
+                    0,
+                    &["a", "b", "c", "d", "e", "f"]
+                ),
+                Ok(vec![
+                    value(3),
+                    value(33),
+                    value(7),
+                    value(2),
+                    value(308),
+                    value(5)
+                ]),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+}
