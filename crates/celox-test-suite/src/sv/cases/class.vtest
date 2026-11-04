@@ -2617,6 +2617,53 @@ endmodule
   (top Top) (run_until 0) (assert_eq bad 0) (assert_eq done 1)
   (expect_output "0\n"))
 
+(case constrained_randomize_shifts
+  (source "shifts.sv" #"
+module Top(output int bad, output bit done);
+    class Field;
+        rand bit [63:0] value;
+        int unsigned m_size;
+        constraint valid { if (64 > m_size) { value < (64'h1 << m_size); } }
+    endclass
+    class Shifts;
+        rand bit signed [7:0] s;
+        rand bit [7:0] u, z, w, n;
+        rand bit [63:0] m;
+        rand bit [2:0] k;
+        constraint c {
+            s == (8'sh80 >>> 2);
+            u == (8'h80 >> 3);
+            z == (8'hff << 9);
+            (8'h1 << k) == 8'h10;
+            w == (8'h0f <<< 4);
+            // A signed count shifts arithmetically in its own context.
+            n == (8'h1 << (8'sh80 >>> 2));
+            m == (64'h1 << (8'sh80 >>> 6));
+        }
+    endclass
+    Field f;
+    Shifts t;
+    initial begin
+        f = new;
+        t = new;
+        for (int size = 0; size <= 64; size += 4) begin
+            f.m_size = size;
+            for (int i = 0; i < 4; i++) begin
+                if (f.randomize() == 0) bad++;
+                if (size < 64 && f.value >= (64'h1 << size)) bad++;
+            end
+        end
+        if (t.randomize() == 0 || t.s != -32 || t.u != 16 || t.z != 0 || t.k != 4 || t.w != 8'hf0
+            || t.n != 0 || t.m != 0)
+            bad++;
+        $display("%0d", bad);
+        done = bad == 0;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq bad 0) (assert_eq done 1)
+  (expect_output "0\n"))
+
 (case constrained_randomize_inline
   (source "inline_constraints.sv" #"
 module Top(output bit done);

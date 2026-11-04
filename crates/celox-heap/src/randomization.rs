@@ -167,6 +167,52 @@ fn cycle_index(field: &Field, value: u64) -> Option<u64> {
     }
 }
 
+/// `a` shifted by `b` (IEEE 1800-2023 11.4.10): of the width of `a`, by
+/// the unsigned amount `b` of any width, so that an amount of at least the
+/// width shifts every bit out; `>>>` of a `signed` result fills with the sign.
+fn shifted(op: &str, a: Term, b: Term, signed: bool) -> Term {
+    let (Sort::Bv(width), Sort::Bv(amount)) = (a.0.sort.clone(), b.0.sort.clone()) else {
+        unreachable!()
+    };
+    let wide = width.max(amount);
+    let arithmetic = op == ">>>" && signed;
+    let extend = |value: Term, from: u32, sign: bool| {
+        if from == wide {
+            value
+        } else {
+            let kind = if sign { "sign" } else { "zero" };
+            node(
+                Sort::Bv(wide),
+                format!("(_ {kind}_extend {})", wide - from),
+                vec![value],
+            )
+        }
+    };
+    let (a, b) = (extend(a, width, arithmetic), extend(b, amount, false));
+    let shift = |name: &str, a: Term| node(Sort::Bv(wide), name, vec![a, b.clone()]);
+    let not = |value: Term| node(Sort::Bv(wide), "bvnot", vec![value]);
+    let value = match op {
+        "<<" | "<<<" => shift("bvshl", a),
+        // A negative value shifts in ones: the complement of the
+        // complement shifted.
+        _ if arithmetic => ite(
+            node(Sort::Bool, "bvslt", vec![a.clone(), bv(wide, 0)]),
+            not(shift("bvlshr", not(a.clone()))),
+            shift("bvlshr", a),
+        ),
+        _ => shift("bvlshr", a),
+    };
+    if wide == width {
+        value
+    } else {
+        node(
+            Sort::Bv(width),
+            format!("(_ extract {} 0)", width - 1),
+            vec![value],
+        )
+    }
+}
+
 fn truth(value: Term) -> Term {
     let Sort::Bv(width) = value.0.sort else {
         unreachable!()
@@ -280,6 +326,8 @@ impl Expr {
                 };
                 if let Some(relation) = relation {
                     boolean(relation)
+                } else if matches!(op.as_str(), "<<" | "<<<" | ">>" | ">>>") {
+                    shifted(op, a, b, *signed)
                 } else {
                     let op = match op.as_str() {
                         "+" => "bvadd",

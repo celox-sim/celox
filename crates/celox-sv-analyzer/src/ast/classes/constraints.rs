@@ -54,6 +54,10 @@ fn sized(value: Typed, width: u32, signed: bool) -> Typed {
     }
 }
 
+fn shift(op: &str) -> bool {
+    matches!(op, "<<" | ">>" | "<<<" | ">>>")
+}
+
 fn comparison(op: &str) -> bool {
     matches!(op, "==" | "!=" | "<" | "<=" | ">" | ">=" | "&&" | "||")
 }
@@ -74,6 +78,21 @@ fn emit(value: Typed, context: Option<(u32, bool)>) -> ConstraintExpr {
                     value: Box::new(emit(*child, (!logical).then_some((width, signed)))),
                 },
                 if logical { 1 } else { width },
+            )
+        }
+        Kind::Binary(op, a, b) if shift(&op) => {
+            let a = emit(*a, Some((width, signed)));
+            // The count is self-determined; the heap reads its value as
+            // unsigned.
+            let b = emit(*b, None);
+            (
+                ConstraintExpr::Binary {
+                    op,
+                    left: Box::new(a),
+                    right: Box::new(b),
+                    signed,
+                },
+                width,
             )
         }
         Kind::Binary(op, a, b) => {
@@ -384,6 +403,22 @@ pub(in crate::ast) fn bind_inputs(
                     alternatives = next;
                 }
                 alternatives.pop().ok_or("empty constraint inside set")?
+            }
+            // A shift has the type of its left operand; the right operand
+            // is self-determined, of its own type, and its value is read as
+            // unsigned (IEEE 1800-2023 11.4.10, 11.6.1).
+            ExprKind::Binary {
+                left,
+                operator,
+                right,
+            } if matches!(operator.as_str(), "<<" | ">>" | "<<<" | ">>>") => {
+                let a = recurse(session, budget, *left)?;
+                let b = recurse(session, budget, *right)?;
+                Typed {
+                    width: a.width,
+                    signed: a.signed,
+                    kind: Kind::Binary(operator.clone(), Box::new(a), Box::new(b)),
+                }
             }
             ExprKind::Binary {
                 left,
