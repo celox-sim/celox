@@ -119,6 +119,9 @@ impl Observations {
     }
 
     pub(super) fn after(&self, g: &mut Generator<'_>, before: Snapshot) {
+        if let Some((_, blocks)) = &mut g.partitioned_glue {
+            blocks.insert(g.b.current_block());
+        }
         for (watch, snapshot) in self.watches.iter().zip(before.watches) {
             watch::watch_after(&mut g.b, watch, snapshot, None);
         }
