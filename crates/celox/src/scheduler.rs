@@ -780,6 +780,8 @@ impl Plan {
             .iter()
             .position(|function| function.name == crate::simulator::native_io::SYMBOL)
             .and_then(|index| u32::try_from(index).ok());
+        let ordered_available = cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen")))
+            && service_function.is_some();
         let nba_processes: HashSet<usize> = model
             .processes
             .iter()
@@ -1060,7 +1062,7 @@ impl Plan {
                     return Err("the process suspends other than for an edge or a delay");
                 }
                 let writes = &kernel_stores[index];
-                if !written(unit).is_empty() {
+                if !written(unit).is_empty() && !ordered_available {
                     return Err("the process drives an event signal");
                 }
                 reactive |= writes.iter().any(|store| waited.contains(store));
@@ -1160,7 +1162,7 @@ impl Plan {
             match wait {
                 Ok((wait, delays)) => {
                     kernels[index] = Some(Kernel {
-                        writes: Vec::new(),
+                        writes: written(unit),
                         wait: Some(wait),
                         delays,
                     })
@@ -1185,7 +1187,12 @@ impl Plan {
                     || (!control_slots.contains(address) && active_observers.contains(address))
             })
             .collect();
-        let possible_wait_feedback = opaque_dependencies || !feedback_stores.is_empty();
+        let event_writing_waits = kernels
+            .iter()
+            .flatten()
+            .any(|kernel| kernel.wait.is_some() && !kernel.writes.is_empty());
+        let possible_wait_feedback =
+            opaque_dependencies || event_writing_waits || !feedback_stores.is_empty();
         tracing::debug!(target: "celox::scheduler", possible_wait_feedback,
             stores = ?feedback_stores.iter().take(8).map(|address| program.get_path(address)).collect::<Vec<_>>(),
             "candidate wait feedback stores");
@@ -1663,9 +1670,7 @@ impl Plan {
         // mixed Active/NBA gate inputs, unknown-to-known edge sequences,
         // direct procedural clock writes, and Active-clock feedback need an
         // ordered queue rather than a domain mask.
-        let ordered_available = cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen")))
-            && plan.service_function.is_some();
-        let mut needs_ordered = false;
+        let mut needs_ordered = event_writing_waits;
         if !plan.active.is_empty() {
             let mut active_stores: HashMap<AbsoluteAddr, Vec<usize>> = HashMap::default();
             for (index, event) in plan.events.iter().enumerate() {
@@ -1934,6 +1939,23 @@ impl Plan {
                 }
             }
         }
+        let unhandled_rtl_events: Vec<_> = rtl_written
+            .difference(&derived)
+            .filter(|event| !stable_host_events.contains(event))
+            .copied()
+            .collect();
+        if ordered_available && !unhandled_rtl_events.is_empty() {
+            // Dependency proofs select the smaller schedule. Their failure
+            // selects generated ordered waves over every affected domain.
+            // Kernel-written events are already in `edged` and must appear
+            // only once in the level snapshot.
+            derived.extend(
+                unhandled_rtl_events
+                    .iter()
+                    .filter(|event| !edged.contains(event)),
+            );
+            needs_ordered = true;
+        }
         if needs_ordered {
             // The topology-based observer pruning above predates orphan
             // clocks. Ordered waves must preserve every real Active commit,
@@ -1951,11 +1973,6 @@ impl Plan {
                 plan.service_function.unwrap(),
             ));
         }
-        let unhandled_rtl_events: Vec<_> = rtl_written
-            .difference(&derived)
-            .filter(|event| !stable_host_events.contains(event))
-            .copied()
-            .collect();
         tracing::debug!(target: "celox::scheduler",
                 incremental_instructions = plan.incremental.as_ref().map(|cone| cone.units.iter().flat_map(instructions).count()),
                 incremental_source = ?plan.incremental.as_ref().map(|cone| program.get_path(&cone.source)),
@@ -1971,7 +1988,7 @@ impl Plan {
                 active_commits = ?active_commits.iter().map(|&event| program.get_path(&plan.events[event].signal)).collect::<Vec<_>>(),
                 kernels = ?plan.fallback.iter().enumerate().map(|(index, reason)| (index, schema.process_origins.get(index).map(ToString::to_string), reason, written(&sir.processes[index]).iter().map(|&event| program.get_path(&plan.events[event].signal)).collect::<Vec<_>>())).collect::<Vec<_>>(),
                 "compiled scheduler process plans");
-        if !unhandled_rtl_events.is_empty() {
+        if !ordered_available && !unhandled_rtl_events.is_empty() {
             tracing::debug!(target: "celox::scheduler",
                 signals = ?unhandled_rtl_events.iter().map(|&event| program.get_path(&plan.events[event].signal)).collect::<Vec<_>>(),
                 edged = ?edged.iter().map(|&event| program.get_path(&plan.events[event].signal)).collect::<Vec<_>>(),
@@ -1997,7 +2014,7 @@ impl Plan {
         plan.derived = derived.into_iter().collect();
         plan.gating = gating;
         let tracked = plan.tracked();
-        if !plan.active.is_empty()
+        if (!plan.active.is_empty() || plan.ordered.is_some())
             && (program.layout().widths[&slots.exit_arg] < event_bits * 2
                 || tracked.iter().any(|&event| {
                     plan.events[event].eval_only.is_none() || plan.events[event].apply.is_none()
@@ -2829,7 +2846,7 @@ impl Plan {
                 });
                 g.b.switch_to_block(next);
             }
-            if kernel.wait.is_none() {
+            if !kernel.writes.is_empty() {
                 // The edges of this run, against the levels before it.
                 let mut edges = g.load(slots.exit_arg, self.event_bits);
                 for (&event, &was) in kernel.writes.iter().zip(&before) {
@@ -2991,7 +3008,8 @@ impl Plan {
         let zero = g.constant(0, g.ready_bits);
         let more = g.binary(1, ready, BinaryOp::Ne, zero);
         let domains = g.b.new_block();
-        let resume_domains = (!self.active.is_empty()).then(|| g.b.new_block());
+        let resume_domains =
+            (!self.active.is_empty() || self.ordered.is_some()).then(|| g.b.new_block());
         let route_domains = resume_domains.map(|_| g.b.new_block()).unwrap_or(domains);
         let another = if wait_observers {
             g.b.new_block()
@@ -3023,7 +3041,7 @@ impl Plan {
 
         // The domains the edges trigger, then the NBA region.
         g.b.switch_to_block(domains);
-        if !self.active.is_empty() {
+        if !self.active.is_empty() || self.ordered.is_some() {
             self.batch_active(
                 &mut g,
                 &tracked,

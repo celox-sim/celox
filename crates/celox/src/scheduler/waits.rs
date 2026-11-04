@@ -274,6 +274,46 @@ endmodule"#,
         );
     }
 
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    #[test]
+    fn event_writing_waits_use_generated_waves() {
+        for body in [
+            "initial forever begin @(posedge root); generated = ~generated; end",
+            "initial forever begin @(posedge root); generated = 1; generated = 0; end",
+            "initial forever begin @(posedge root); generated = ~generated; end\n\
+             always @(negedge root) generated = ~generated;",
+        ] {
+            let source = format!(
+                r#"`timescale 1ns/1ns
+module Top;
+    bit root = 0;
+    logic generated = 0;
+    int count = 0;
+    always #1 root = ~root;
+    {body}
+    always_ff @(posedge generated) count <= count + 1;
+endmodule"#
+            );
+            for (four_state, hotspot) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
+                let simulation = Simulation::from_sv_sources(
+                    vec![(
+                        source.as_str(),
+                        std::path::Path::new("event-writing-waits.sv"),
+                    )],
+                    "Top",
+                )
+                .four_state(four_state)
+                .hotspot_jit(hotspot)
+                .scheduler_mode(SchedulerMode::DifferentialRuns)
+                .build_native()
+                .unwrap();
+                check(simulation, 24);
+            }
+        }
+    }
+
     #[test]
     fn full_wait_site_index_stays_compiled() {
         let mut source = String::from(
