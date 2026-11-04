@@ -37,6 +37,68 @@ pub(crate) struct Pool {
 }
 
 impl Pool {
+    /// Materialize portable queued state at entry to generated code. Only this
+    /// cold boundary uses Rust; publication and steady allocation stay native.
+    pub fn import(&mut self, header: &mut Header, fields: &[u64]) -> Result<u64, RuntimeErrorCode> {
+        let words = fields
+            .len()
+            .max(RECORD_HEADER_WORDS)
+            .checked_next_power_of_two()
+            .ok_or_else(Self::fault)?;
+        let class = words.trailing_zeros() as usize;
+        if header.free[class] == 0 {
+            self.reserve_class(header, class as u64)?;
+        }
+        let pointer = header.free[class];
+        let next = self.record(pointer, words).ok_or_else(Self::fault)?[0];
+        header.free[class] = next;
+        // SAFETY: record validated this exclusively borrowed pool's stable
+        // allocation. The class-sized block has room for every imported word.
+        unsafe {
+            let dst = pointer as *mut u64;
+            std::ptr::write_bytes(dst, 0, words);
+            std::ptr::copy_nonoverlapping(fields.as_ptr(), dst, fields.len());
+            dst.add(5).write(class as u64);
+        }
+        Ok(pointer)
+    }
+
+    pub fn append_imported(
+        &mut self,
+        header: &mut Header,
+        pointer: u64,
+    ) -> Result<(), RuntimeErrorCode> {
+        self.record(pointer, RECORD_HEADER_WORDS)
+            .ok_or_else(Self::fault)?;
+        if header.tail == 0 {
+            header.head = pointer;
+        } else {
+            self.record(header.tail, RECORD_HEADER_WORDS)
+                .ok_or_else(Self::fault)?;
+            // SAFETY: validated owned records, exclusively borrowed at entry.
+            unsafe {
+                (header.tail as *mut u64).write(pointer);
+            }
+        }
+        header.tail = pointer;
+        Ok(())
+    }
+
+    pub fn append_delayed(
+        &mut self,
+        header: &mut Header,
+        pointer: u64,
+    ) -> Result<(), RuntimeErrorCode> {
+        let len = usize::try_from(header.delayed_len).map_err(|_| Self::fault())?;
+        *self.delayed.get_mut(len).ok_or_else(Self::fault)? = pointer;
+        header.delayed_len += 1;
+        Ok(())
+    }
+    pub fn delayed_records(&self, header: &Header) -> Result<&[u64], RuntimeErrorCode> {
+        let len = usize::try_from(header.delayed_len).map_err(|_| Self::fault())?;
+        self.delayed.get(..len).ok_or_else(Self::fault)
+    }
+
     fn fault() -> RuntimeErrorCode {
         RuntimeErrorCode::Runtime {
             message: "native NBA queue allocation failed".into(),
@@ -171,6 +233,36 @@ mod tests {
         assert!(pool.record(first, usize::MAX).is_none());
         assert!(pool.reserve_class(&mut header, 2).is_err());
         assert!(pool.reserve_class(&mut header, u64::MAX).is_err());
+    }
+
+    #[test]
+    fn imported_records_copy_portable_values_and_keep_queue_order() {
+        let mut pool = Pool::default();
+        let mut header = Header::default();
+        let mut fields = vec![0; 12];
+        fields[2] = 257;
+        fields[3] = 63;
+        fields[4] = 73;
+        fields[7] = 1;
+        fields[8] = 0x1234;
+        fields[10] = u64::MAX;
+        let first = pool.import(&mut header, &fields).unwrap();
+        pool.append_imported(&mut header, first).unwrap();
+        fields[8] = 0x5678;
+        let second = pool.import(&mut header, &fields).unwrap();
+        pool.append_imported(&mut header, second).unwrap();
+        fields.fill(0);
+        assert_eq!(header.head, first);
+        assert_eq!(header.tail, second);
+        assert_eq!(pool.record(first, 12).unwrap()[0], second);
+        assert_eq!(pool.record(first, 12).unwrap()[8], 0x1234);
+        assert_eq!(pool.record(second, 12).unwrap()[8], 0x5678);
+        assert_eq!(pool.record(first, 12).unwrap()[10], u64::MAX);
+        assert_eq!(pool.record(first, 12).unwrap()[5], 4);
+        pool.reserve_delayed(&mut header, 2).unwrap();
+        pool.append_delayed(&mut header, second).unwrap();
+        pool.append_delayed(&mut header, first).unwrap();
+        assert_eq!(pool.delayed_records(&header).unwrap(), &[second, first]);
     }
 
     #[test]

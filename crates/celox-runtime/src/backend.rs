@@ -5,6 +5,64 @@ use num_bigint::BigUint;
 pub use crate::SimulatorErrorCode;
 use crate::{AbsoluteAddr, MemoryLayout, RuntimeEventBuffer, SignalRef};
 
+/// Executable storage retained by a detached native process invocation.
+pub trait NativeProcessCode: Send + Sync {
+    /// # Safety
+    /// `state` must be the live, exclusively executed image this code was
+    /// compiled for. All buffers referenced by its header must remain live.
+    /// Host callbacks may access the image while generated code is suspended,
+    /// but must not execute another kernel or replace its backing storage.
+    unsafe fn invoke(
+        &self,
+        index: usize,
+        state: *mut u8,
+        size: usize,
+    ) -> Result<(), SimulatorErrorCode>;
+}
+
+/// A native call prepared without retaining a Rust borrow of the backend or
+/// its memory. This permits synchronous host callbacks to borrow the backend.
+pub struct PreparedProcess {
+    code: Arc<dyn NativeProcessCode>,
+    _memory: Arc<dyn Any + Send + Sync>,
+    index: usize,
+    state: *mut u8,
+    size: usize,
+    measured: bool,
+}
+
+impl PreparedProcess {
+    pub fn new(
+        code: Arc<dyn NativeProcessCode>,
+        memory: Arc<dyn Any + Send + Sync>,
+        index: usize,
+        state: *mut u8,
+        size: usize,
+        measured: bool,
+    ) -> Self {
+        Self {
+            code,
+            _memory: memory,
+            index,
+            state,
+            size,
+            measured,
+        }
+    }
+
+    /// # Safety
+    /// The originating backend must remain alive and exclusively owned by the
+    /// caller, without any live borrow of its memory. No kernel, promotion, or
+    /// collection may run concurrently or from a callback. Signal IO is allowed
+    /// synchronously while native execution is suspended in the callback.
+    pub unsafe fn invoke(self) -> (Result<(), SimulatorErrorCode>, Option<std::time::Duration>) {
+        let start = self.measured.then(std::time::Instant::now);
+        // SAFETY: the caller supplies the image and header lifetime contract.
+        let result = unsafe { self.code.invoke(self.index, self.state, self.size) };
+        (result, start.map(|start| start.elapsed()))
+    }
+}
+
 /// The event IDs marked in a memory image's triggered bits, one bit per
 /// event, least significant bit first. Read a word at a time: few bits are
 /// set.
@@ -96,6 +154,15 @@ pub trait SimBackend {
             signals: Vec::new(),
         })
     }
+
+    /// Prepare a native process call that permits synchronous signal IO from
+    /// a host callback. `None` means this backend has no such native entry.
+    fn prepare_process(&mut self, _index: usize) -> Option<PreparedProcess> {
+        None
+    }
+
+    /// Account for a detached invocation after all host callbacks have ended.
+    fn complete_process(&mut self, _elapsed: Option<std::time::Duration>) {}
 
     // ── signal access ───────────────────────────────────────────
     fn resolve_signal(&self, addr: &AbsoluteAddr) -> SignalRef;

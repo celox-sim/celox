@@ -2,7 +2,7 @@
 use super::*;
 
 #[derive(Clone, Copy)]
-pub(super) struct Object {
+pub(in crate::scheduler) struct Object {
     pub signal: AbsoluteAddr,
     pub width: usize,
     pub element: Option<usize>,
@@ -175,7 +175,7 @@ fn value(
 
 /// Caller clips width to both the staged value and the destination object.
 /// Full native chunks are preferred; only short tails use smaller stores.
-pub(super) fn write(
+pub(in crate::scheduler) fn write(
     g: &mut Generator<'_>,
     source: Object,
     target: Object,

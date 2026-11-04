@@ -199,6 +199,25 @@ pub struct SharedNativeCode {
 unsafe impl Send for SharedNativeCode {}
 unsafe impl Sync for SharedNativeCode {}
 
+impl celox_runtime::backend::NativeProcessCode for SharedNativeCode {
+    unsafe fn invoke(
+        &self,
+        index: usize,
+        state: *mut u8,
+        size: usize,
+    ) -> Result<(), SimulatorErrorCode> {
+        if size < self.layout.total_size {
+            return Err(SimulatorErrorCode::InternalError);
+        }
+        let func = *self
+            .process_funcs
+            .get(index)
+            .ok_or(SimulatorErrorCode::InternalError)?;
+        // SAFETY: the invocation owner retains this code and its live image.
+        unsafe { NativeBackend::call_raw(state, func) }
+    }
+}
+
 impl SharedNativeCode {
     /// Attach a compiler-produced image to the precompiled host runtime.
     ///
@@ -1378,17 +1397,41 @@ impl HotspotCode {
         if memory.len().saturating_mul(8) < self.required_state_size {
             return Err(SimulatorErrorCode::InternalError);
         }
-        // The mapping owns the generated entry and the checked image covers
-        // all semantic storage and private scratch. The simulation owner holds
-        // exclusive access for the entire call.
-        let header = celox_state_layout::STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET / 8;
-        let previous = memory[header];
+        // SAFETY: the image is exclusively borrowed and its header is live.
+        unsafe { self.run_raw(memory.as_mut_ptr().cast()) }
+    }
+
+    unsafe fn run_raw(&self, state: *mut u8) -> Result<(), SimulatorErrorCode> {
+        // Detached invocations use raw state so no Rust slice remains live
+        // across their host callbacks. This mapping owns the immutable table.
+        let header = unsafe {
+            state
+                .add(celox_state_layout::STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET)
+                .cast::<u64>()
+        };
+        let previous = unsafe { header.read_unaligned() };
         if let Some(table) = &self.extern_functions {
-            memory[header] = table.as_ptr() as u64;
+            unsafe { header.write_unaligned(table.as_ptr() as u64) };
         }
-        let result = NativeBackend::call_func(memory, self.code.fn_ptr);
-        memory[header] = previous;
+        let result = unsafe { NativeBackend::call_raw(state, self.code.fn_ptr) };
+        unsafe { header.write_unaligned(previous) };
         result
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+impl celox_runtime::backend::NativeProcessCode for HotspotCode {
+    unsafe fn invoke(
+        &self,
+        _index: usize,
+        state: *mut u8,
+        size: usize,
+    ) -> Result<(), SimulatorErrorCode> {
+        if size < self.required_state_size {
+            return Err(SimulatorErrorCode::InternalError);
+        }
+        // SAFETY: the caller retains the image and header buffers throughout.
+        unsafe { self.run_raw(state) }
     }
 }
 
@@ -4209,7 +4252,12 @@ impl NativeBackend {
     }
 
     fn call_func(memory: &mut [u64], func: NativeSimFunc) -> Result<(), SimulatorErrorCode> {
-        let ptr = memory.as_mut_ptr() as *mut u8;
+        // SAFETY: this call exclusively owns the initialized image.
+        unsafe { Self::call_raw(memory.as_mut_ptr().cast(), func) }
+    }
+
+    unsafe fn call_raw(ptr: *mut u8, func: NativeSimFunc) -> Result<(), SimulatorErrorCode> {
+        // SAFETY: the caller supplies the native image and exclusive execution.
         let ret = unsafe { func(ptr) };
         match ret {
             0 => Ok(()),
@@ -4462,6 +4510,25 @@ impl super::super::SimBackend for NativeBackend {
             .get(index)
             .ok_or(SimulatorErrorCode::InternalError)?;
         self.call_func_timed(func)
+    }
+
+    fn prepare_process(&mut self, index: usize) -> Option<celox_runtime::backend::PreparedProcess> {
+        self.compiled.process_funcs.get(index)?;
+        Some(celox_runtime::backend::PreparedProcess::new(
+            self.compiled.clone(),
+            self.memory.owner(),
+            index,
+            self.memory.as_mut_ptr().cast(),
+            self.memory.len_words() * 8,
+            self.execution_timing.is_some(),
+        ))
+    }
+
+    fn complete_process(&mut self, elapsed: Option<std::time::Duration>) {
+        if let (Some(elapsed), Some(timing)) = (elapsed, &mut self.execution_timing) {
+            timing.elapsed = timing.elapsed.saturating_add(elapsed);
+            timing.calls = timing.calls.saturating_add(1);
+        }
     }
 
     fn resolve_signal(&self, addr: &AbsoluteAddr) -> SignalRef {

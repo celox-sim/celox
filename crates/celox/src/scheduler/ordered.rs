@@ -304,6 +304,11 @@ impl Plan {
 
         g.b.switch_to_block(wave);
         let phase = g.arena_header_load(std::mem::offset_of!(ArenaHeader, phase));
+        let post = g.equals(phase, 1);
+        g.if_bit(post, 0, |g| {
+            self.observe_slot(g, tracked, checks, finish_exit, false)
+        });
+        let phase = g.arena_header_load(std::mem::offset_of!(ArenaHeader, phase));
         let active_phase = g.equals(phase, 0);
         let levels = g.load_levels();
         let stable = self.stable_edges(g, tracked, levels);

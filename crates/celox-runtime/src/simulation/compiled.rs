@@ -69,6 +69,7 @@ impl<B: SimBackend> SimulationState<B> {
     {
         let scheduler = self.model.scheduler.as_ref()?;
         let pending = &self.process_state;
+        let native_nbas = executor.compiled_nba_queues();
         if self.finished
             || self.stopped
             || self.suspended.is_some()
@@ -90,8 +91,8 @@ impl<B: SimBackend> SimulationState<B> {
             || !pending.ready.is_empty()
             || !pending.deferred_ready.is_empty()
             || !pending.inactive.is_empty()
-            || !pending.nba_queue.is_empty()
-            || !pending.delayed_nba.is_empty()
+            || (!native_nbas && (!pending.nba_queue.is_empty() || !pending.delayed_nba.is_empty()))
+            || pending.delayed_nba.values().flatten().any(|(program, _)| *program)
             || !pending.nba_events.is_empty()
             // A derived clock changes with the slots of its sources, which
             // the scheduler does not tell apart.
@@ -103,7 +104,14 @@ impl<B: SimBackend> SimulationState<B> {
         {
             return None;
         }
-        let mut first = u64::MAX;
+        let mut first = if pending.nba_queue.is_empty() {
+            u64::MAX
+        } else {
+            self.scheduler.time
+        };
+        if let Some((&time, _)) = pending.delayed_nba.first_key_value() {
+            first = first.min(time);
+        }
         let mut other = u64::MAX;
         for &Reverse((time, process)) in self.process_wakeups.iter() {
             if scheduler.wake.get(process).is_some_and(Option::is_some)
@@ -206,6 +214,19 @@ impl<B: SimBackend> SimulationState<B> {
         if self.one_slot_runs() && limit > self.scheduler.time {
             self.sample_values(executor.backend_mut());
         }
+        if executor.compiled_nba_queues() {
+            let immediate = std::mem::take(&mut self.process_state.nba_queue);
+            let delayed = std::mem::take(&mut self.process_state.delayed_nba)
+                .into_iter()
+                .flat_map(|(time, updates)| {
+                    updates.into_iter().map(move |(program, update)| {
+                        debug_assert!(!program, "program queues use the Reactive regions");
+                        (time, update)
+                    })
+                })
+                .collect();
+            executor.put_compiled_nbas(immediate, delayed)?;
+        }
         executor.set_compiled_host_budgets(self.round_budget, self.return_budget);
         let scheduler = self
             .model
@@ -213,6 +234,7 @@ impl<B: SimBackend> SimulationState<B> {
             .as_ref()
             .ok_or(SimulatorErrorCode::InternalError)?;
         let backend = executor.backend_mut();
+        backend.set(scheduler.now, self.scheduler.time);
         backend.set(scheduler.limit, limit);
         backend.set(scheduler.exit, 0u8);
         backend.set(scheduler.finish, 0u8);
@@ -377,6 +399,13 @@ impl<B: SimBackend> SimulationState<B> {
         self.process_state
             .nba_queue
             .extend(executor.take_compiled_nbas());
+        for (time, update) in executor.take_compiled_delayed_nbas() {
+            self.process_state
+                .delayed_nba
+                .entry(time)
+                .or_default()
+                .push((false, update));
+        }
 
         let scheduler = self
             .model

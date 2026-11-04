@@ -7,6 +7,9 @@ use crate::RuntimeErrorCode;
 #[repr(C)]
 pub(crate) struct Header {
     pub nba: super::native_nba::Header,
+    pub slot_observer: u64,
+    pub host_values: *mut u64,
+    pub host_words: u64,
     pub observers: *mut u64,
     pub observer_initial: u64,
     pub observer_evaluating: u64,
@@ -34,6 +37,9 @@ impl Default for Header {
     fn default() -> Self {
         Self {
             nba: Default::default(),
+            slot_observer: 0,
+            host_values: std::ptr::null_mut(),
+            host_words: 0,
             observers: std::ptr::null_mut(),
             observer_initial: 1,
             observer_evaluating: 0,
@@ -78,6 +84,7 @@ impl Header {
 pub(crate) struct Arena {
     pub header: Header,
     pub observers: Vec<u64>,
+    pub host_values: Vec<u64>,
     pub nba: super::native_nba::Pool,
     records: Vec<u64>,
     images: Vec<u64>,
