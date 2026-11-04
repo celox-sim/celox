@@ -2024,6 +2024,14 @@ impl Plan {
                 .then_some((capacity / 8).max(1) as u64)
             },
         };
+        let mut guards = if cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen")))
+            && (self.cyclic || !self.service_processes.is_empty())
+        {
+            self.service_function
+                .map(|service| ordered::Guards::new(&mut g, service))
+        } else {
+            None
+        };
         let waits: Vec<(usize, &Wait)> = self
             .kernels
             .iter()
@@ -2163,13 +2171,17 @@ impl Plan {
         // The kernels due now are ready.
         g.b.switch_to_block(run);
         if !self.service_processes.is_empty() {
-            g.service_call(
-                self.service_function.expect("native host services"),
-                u64::MAX,
-                crate::simulator::native_io::PROCESS_PHASE,
-                time,
-                internal_exit,
-            );
+            if guards.is_some() {
+                ordered::Guards::process_phase(&mut g);
+            } else {
+                g.service_call(
+                    self.service_function.expect("native host services"),
+                    u64::MAX,
+                    crate::simulator::native_io::PROCESS_PHASE,
+                    time,
+                    internal_exit,
+                );
+            }
         }
         let mut ready = g.constant(0, g.ready_bits);
         for &(index, status) in &delays {
@@ -2459,13 +2471,22 @@ impl Plan {
             let current = g.constant(index as u64, SCHEDULER_TIME_WIDTH);
             g.store(slots.current, SCHEDULER_TIME_WIDTH, current);
             if self.cyclic {
-                g.service_call(
-                    self.service_function.expect("native work-list services"),
-                    index as u64,
-                    crate::simulator::native_io::SCHEDULER_RUN,
-                    time,
-                    internal_exit,
-                );
+                if let Some(guards) = &mut guards {
+                    guards.charge(
+                        &mut g,
+                        index as u64,
+                        crate::simulator::native_io::SCHEDULER_RUN,
+                        time,
+                    );
+                } else {
+                    g.service_call(
+                        self.service_function.expect("native work-list services"),
+                        index as u64,
+                        crate::simulator::native_io::SCHEDULER_RUN,
+                        time,
+                        internal_exit,
+                    );
+                }
             }
             let before: Vec<_> = kernel
                 .writes
@@ -2509,6 +2530,25 @@ impl Plan {
                     false_block: (returned, Vec::new()),
                 });
                 g.b.switch_to_block(call);
+                let resume = g.b.new_block();
+                if let (Some(guards), Some(yielded)) = (&mut guards, yielded) {
+                    let checkpoint = g.b.new_block();
+                    let host_call = g.b.new_block();
+                    g.b.seal_block(SIRTerminator::Branch {
+                        cond: yielded,
+                        true_block: (checkpoint, Vec::new()),
+                        false_block: (host_call, Vec::new()),
+                    });
+                    g.b.switch_to_block(checkpoint);
+                    guards.charge(
+                        &mut g,
+                        index as u64,
+                        crate::simulator::native_io::CHECKPOINT,
+                        time,
+                    );
+                    g.b.seal_block(SIRTerminator::Jump(resume, Vec::new()));
+                    g.b.switch_to_block(host_call);
+                }
                 let current = g.constant(index as u64, 64);
                 let request = g.load(process.delay, celox_design::PROCESS_DELAY_WIDTH);
                 let request = if let Some(yielded) = yielded {
@@ -2546,7 +2586,6 @@ impl Plan {
                     ],
                 });
                 let ok = g.equals(result, 0);
-                let resume = g.b.new_block();
                 g.b.seal_block(SIRTerminator::Branch {
                     cond: ok,
                     true_block: (resume, Vec::new()),
@@ -2777,13 +2816,22 @@ impl Plan {
         // kernels that may run in another.
         g.b.switch_to_block(pass_end);
         if self.cyclic {
-            g.service_call(
-                self.service_function.expect("native work-list services"),
-                u64::MAX,
-                crate::simulator::native_io::SCHEDULER_PASS,
-                time,
-                internal_exit,
-            );
+            if let Some(guards) = &mut guards {
+                guards.charge(
+                    &mut g,
+                    u64::MAX,
+                    crate::simulator::native_io::SCHEDULER_PASS,
+                    time,
+                );
+            } else {
+                g.service_call(
+                    self.service_function.expect("native work-list services"),
+                    u64::MAX,
+                    crate::simulator::native_io::SCHEDULER_PASS,
+                    time,
+                    internal_exit,
+                );
+            }
         }
         let none = g.constant(u64::MAX, SCHEDULER_TIME_WIDTH);
         g.store(slots.current, SCHEDULER_TIME_WIDTH, none);
@@ -3196,13 +3244,17 @@ impl Plan {
             });
             g.b.switch_to_block(resume);
             if !self.service_processes.is_empty() {
-                g.service_call(
-                    self.service_function.expect("native host services"),
-                    u64::MAX,
-                    crate::simulator::native_io::PROCESS_PHASE,
-                    time,
-                    internal_exit,
-                );
+                if guards.is_some() {
+                    ordered::Guards::process_phase(&mut g);
+                } else {
+                    g.service_call(
+                        self.service_function.expect("native host services"),
+                        u64::MAX,
+                        crate::simulator::native_io::PROCESS_PHASE,
+                        time,
+                        internal_exit,
+                    );
+                }
             }
             let mut levels = g.no_levels();
             for (bit, &event) in tracked.iter().enumerate() {
@@ -3306,6 +3358,9 @@ impl Plan {
         g.emit_settle(&program.sir.eval_comb, finish_exit, internal_exit);
         if let Some(lazy) = &self.lazy {
             g.emit_eager(&lazy.eager, finish_exit, internal_exit);
+        }
+        if let Some(guards) = guards {
+            guards.emit(&mut g, internal_exit);
         }
         g.finish()
     }
