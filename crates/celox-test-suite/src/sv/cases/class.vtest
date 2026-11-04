@@ -2571,6 +2571,52 @@ endmodule
   (top Top) (run_until 0) (assert_eq sum 40) (assert_eq done 1)
   (expect_output "40 0\n"))
 
+(case constrained_randomize_rand_arrays
+  (source "rand_arrays.sv" #"
+module Top(output int bad, output bit done);
+    typedef enum bit [1:0] { A = 1, B = 2 } e_t;
+    class Item;
+        rand bit [63:0] value[];
+        constraint max_values { value.size() > 0 && value.size() < 10; }
+    endclass
+    class Fifo;
+        rand bit [7:0] fifo[$];
+        int unsigned m_size = 4;
+        constraint valid_fifo_size { fifo.size() <= m_size; }
+    endclass
+    class Len;
+        rand int len;
+        rand int data[];
+        rand e_t kinds[];
+        rand bit [7:0] plain[];
+        constraint db { len inside {[0:15]}; data.size == len; kinds.size() == 3; }
+    endclass
+    Item item;
+    Fifo f;
+    Len l;
+    int nonzero;
+    initial begin
+        item = new;
+        f = new;
+        l = new;
+        l.plain = new[5];
+        for (int i = 0; i < 30; i++) begin
+            if (item.randomize() == 0 || item.value.size() < 1 || item.value.size() > 9) bad++;
+            foreach (item.value[j]) if (item.value[j] != 0) nonzero++;
+            if (f.randomize() == 0 || f.fifo.size() > 4) bad++;
+            if (l.randomize() == 0 || l.data.size() != l.len || l.kinds.size() != 3
+                || l.plain.size() != 5) bad++;
+            foreach (l.kinds[j]) if (!(l.kinds[j] inside {A, B})) bad++;
+        end
+        if (nonzero == 0) bad++;
+        $display("%0d", bad);
+        done = bad == 0;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq bad 0) (assert_eq done 1)
+  (expect_output "0\n"))
+
 (case constrained_randomize_inline
   (source "inline_constraints.sv" #"
 module Top(output bit done);

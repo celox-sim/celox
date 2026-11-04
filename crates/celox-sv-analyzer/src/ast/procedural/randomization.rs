@@ -360,6 +360,37 @@ fn lower_methods(
                         });
                     } else {
                         for property in &class.properties {
+                            // An array a call selects (18.11): its elements
+                            // are randomized at its size.
+                            if classes::constraints::random_array(property) {
+                                let program = celox_heap::randomization::Program {
+                                    arrays: vec![classes::constraints::array(property)?],
+                                    ..Default::default()
+                                };
+                                body.push(Stmt::If {
+                                    condition: Expr::Binary {
+                                        left: Box::new(Expr::Binary {
+                                            left: Box::new(Expr::Ident(argument.clone())),
+                                            op: BinaryOp::Ne,
+                                            right: Box::new(Expr::Literal("1".into())),
+                                        }),
+                                        op: BinaryOp::LogicAnd,
+                                        right: Box::new(classes::object_call(
+                                            ObjectOp::ModeGet(property.field.offset, false),
+                                            vec![Expr::Ident(this.clone())],
+                                        )),
+                                    },
+                                    then_body: vec![Stmt::Eval(classes::object_call(
+                                        ObjectOp::Randomize(program),
+                                        vec![
+                                            Expr::Ident(this.clone()),
+                                            Expr::Literal("1'b0".into()),
+                                        ],
+                                    ))],
+                                    else_body: Vec::new(),
+                                });
+                                continue;
+                            }
                             if property.constant
                                 || property.field.handle.is_some()
                                 || (property.r#type.is_enum

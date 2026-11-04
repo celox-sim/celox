@@ -1,6 +1,6 @@
 //! Scalar constraint binding. Unsupported forms fail before any RNG draws.
 use super::*;
-use celox_heap::randomization::{Expr as ConstraintExpr, Field, Program};
+use celox_heap::randomization::{Array, Expr as ConstraintExpr, Field, Program};
 use celox_sv_syntax::{ExprId, ExprKind};
 
 #[derive(Clone)]
@@ -115,6 +115,43 @@ pub(in crate::ast) fn constrainable(property: &Property) -> bool {
     property.field.handle.is_none() && property.field.width <= 64
 }
 
+/// The array whose size member `id` is, as `a.size`.
+fn array_size(id: ExprId, native: &celox_sv_syntax::Declarations) -> Option<String> {
+    let ExprKind::Member {
+        expression,
+        separator,
+        name,
+    } = &native.expression(id).kind
+    else {
+        return None;
+    };
+    let ExprKind::Name(array) = &native.expression(*expression).kind else {
+        return None;
+    };
+    (separator == "." && name.spelling == "size")
+        .then(|| instances::normalize_identifier(&array.spelling))
+}
+
+/// The size of array property `name` among those of the program.
+fn size(name: String, properties: &[Property]) -> Result<Typed, String> {
+    let (index, _) = properties
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, property)| property.name == name)
+        .filter(|(_, property)| property.sequence())
+        .ok_or_else(|| format!("constraint variable `{name}.size`"))?;
+    let array = properties[..index]
+        .iter()
+        .filter(|property| property.sequence())
+        .count();
+    Ok(Typed {
+        kind: Kind::Leaf(ConstraintExpr::Size(array)),
+        width: 32,
+        signed: true,
+    })
+}
+
 pub(in crate::ast) fn bind(
     id: ExprId,
     tree: &AnalysisContext<'_>,
@@ -224,6 +261,17 @@ pub(in crate::ast) fn bind_inputs(
                 } else {
                     return Err(format!("constraint variable `{name}`"));
                 }
+            }
+            // The size of a dynamic array or queue (IEEE 1800-2023 7.5.2,
+            // 7.10.2.1, 18.4), with or without the parentheses.
+            ExprKind::Call {
+                expression,
+                arguments,
+            } if arguments.is_empty() && array_size(*expression, native).is_some() => {
+                return size(array_size(*expression, native).unwrap(), properties);
+            }
+            ExprKind::Member { .. } if array_size(id, native).is_some() => {
+                return size(array_size(id, native).unwrap(), properties);
             }
             ExprKind::Member {
                 expression,
@@ -393,6 +441,7 @@ impl Class {
     pub(super) fn build_constraint_program(&self) -> Converted<Program> {
         let mut fields = Vec::new();
         let mut handles = Vec::new();
+        let mut arrays = Vec::new();
         for property in &self.properties {
             // An object handle shall not be randc (18.4).
             if property.randc && property.r#type.class().is_some() {
@@ -400,6 +449,10 @@ impl Class {
             }
             if property.rand_object() {
                 handles.push(property.field.offset);
+                continue;
+            }
+            if property.sequence() {
+                arrays.push(array(property)?);
                 continue;
             }
             if !constrainable(property) {
@@ -461,8 +514,82 @@ impl Class {
             fields,
             constraints,
             handles,
+            arrays,
         })
     }
+}
+
+/// Whether the solver can randomize dynamic array or queue property
+/// `property`: one of 2-state integral elements of at most 64 bits.
+pub(in crate::ast) fn random_array(property: &Property) -> bool {
+    property.sequence()
+        && property.r#type.container.as_ref().is_some_and(|container| {
+            container.layout.handle.is_none()
+                && container.record.is_none()
+                && container.layout.two_state
+                && (1..=64).contains(&container.layout.width)
+                && !(container.element.is_enum && container.element.enum_domain.is_none())
+        })
+}
+
+/// Dynamic array or queue property `property` of a constraint program: a
+/// random one is resized to the size its constraints give, if any, and its
+/// elements randomized (IEEE 1800-2023 18.4).
+pub(in crate::ast) fn array(property: &Property) -> Converted<Array> {
+    let container = property
+        .r#type
+        .container
+        .as_ref()
+        .expect("a dynamic array or queue");
+    let layout = container.layout;
+    let random = property.rand || property.randc;
+    if random {
+        if property.randc {
+            return Err(unsupported("a randc dynamic array or queue"));
+        }
+        if !random_array(property) {
+            return Err(unsupported(
+                "rand dynamic arrays and queues currently require 2-state integral elements of at most 64 bits",
+            ));
+        }
+    }
+    let (kind, capacity) = match layout.kind {
+        ContainerKind::Queue { capacity } => (1, capacity),
+        _ => (0, 0),
+    };
+    let handle = match layout.handle {
+        None => 0,
+        Some(HandleProperty::String) => 1,
+        Some(HandleProperty::Object) => 2,
+    };
+    let mask = u64::MAX >> (64 - layout.width.clamp(1, 64));
+    Ok(Array {
+        offset: property.field.offset,
+        layout: celox_heap::containers::parameter(
+            layout.width,
+            layout.two_state,
+            handle,
+            kind,
+            capacity,
+            false,
+            false,
+            false,
+        ),
+        width: layout.width,
+        random,
+        domain: container
+            .element
+            .enum_domain
+            .as_ref()
+            .map(|domain| {
+                domain
+                    .values()
+                    .into_iter()
+                    .map(|value| value.bits() as u64 & mask)
+                    .collect()
+            })
+            .unwrap_or_default(),
+    })
 }
 
 /// A generated call-specific method. Its immutable predicates never change the

@@ -10,7 +10,7 @@
 use std::rc::Rc;
 
 use super::*;
-use crate::system_functions::{HandleProperty, ObjectField, ObjectOp};
+use crate::system_functions::{ContainerKind, HandleProperty, ObjectField, ObjectOp};
 
 pub(super) mod constraints;
 pub(super) mod foreign;
@@ -42,6 +42,23 @@ impl Property {
     /// A rand object handle: the variables and constraints of the object it
     /// refers to are solved with those of the object that holds it (IEEE
     /// 1800-2023 18.4).
+    /// Whether the property is a dynamic array or queue (IEEE 1800-2023
+    /// 7.5, 7.10), whose size a constraint may name (18.4).
+    pub fn sequence(&self) -> bool {
+        self.r#type.unpacked_ranges.is_empty()
+            && self.r#type.container.as_ref().is_some_and(|container| {
+                matches!(
+                    container.layout.kind,
+                    ContainerKind::Dynamic | ContainerKind::Queue { .. }
+                )
+            })
+    }
+
+    /// Whether the property is a rand dynamic array or queue.
+    pub fn rand_array(&self) -> bool {
+        (self.rand || self.randc) && self.sequence()
+    }
+
     pub fn rand_object(&self) -> bool {
         self.rand
             && self.r#type.class().is_some()
@@ -225,9 +242,11 @@ impl Class {
     }
 
     /// Whether `randomize` solves the class's constraint program: it has
-    /// constraints or rand object handles.
+    /// constraints, rand object handles or rand arrays.
     pub fn solved(&self) -> bool {
-        self.has_constraints || self.has_rand_objects()
+        self.has_constraints
+            || self.has_rand_objects()
+            || self.properties.iter().any(Property::rand_array)
     }
 
     /// Validate the supported unconstrained subset before binding a call.
@@ -245,7 +264,9 @@ impl Class {
                 return Err(unsupported("randomization of a 4-state class property"));
             }
             if (property.rand || property.randc)
-                && ((property.field.handle.is_some() && !property.rand_object())
+                && ((property.field.handle.is_some()
+                    && !property.rand_object()
+                    && !property.rand_array())
                     || property.r#type.holds_chandle()
                     || (property.r#type.is_enum && property.r#type.enum_domain.is_none()))
             {
