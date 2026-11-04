@@ -4514,6 +4514,9 @@ pub(super) fn lower_subroutine(
     if class.is_some() {
         builder.pop_scope();
     }
+    // The locals of the array locator calls of the body are its own, as
+    // automatic as the rest of them (IEEE 1800-2023 7.12).
+    builder.flush_locator_locals();
     let static_types: HashMap<String, Type> = builder
         .state
         .statics
@@ -5601,6 +5604,7 @@ fn lower_class(
             classes::base_arguments(tree, builder.session, name).unwrap_or_default();
         let body = builder.constructor_prologue(&class, &this, &result, base_arguments)?;
         builder.pop_scope();
+        builder.flush_locator_locals();
         let mut subroutine = Subroutine {
             name: item.name(&classes::Class::subroutine_name(name, "new")),
             is_task: false,

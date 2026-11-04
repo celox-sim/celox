@@ -735,6 +735,57 @@ endmodule
 }
 
 #[test]
+fn heap_operations_go_out_of_line() {
+    // Queue concatenation, array locators, streaming of dynamically sized
+    // data, new events, the random and constraint modes and the constraint
+    // program a constructor registers are heap calls, which a function unit
+    // makes as an inlined body does. The iterator of a locator is a local of
+    // the function, in its frame.
+    let source = r#"module Top(input int i, output int a, output int b, output int c, output int d);
+    class K;
+        rand int x;
+        constraint lo { x < 10; }
+    endclass
+    function automatic int queues(int v);
+        int q[$] = '{1, 2, 3};
+        int found[$];
+        q = {q, v, v + 1};
+        found = q.find with (item > 2);
+        return found.size() * 100 + found[0];
+    endfunction
+    function automatic int streams(int v);
+        byte bytes[];
+        int r;
+        bytes = {>>8{v}};
+        r = {<<8{bytes}};
+        return r + bytes.size();
+    endfunction
+    function automatic int modes(K k, int v);
+        int was = k.lo.constraint_mode();
+        k.lo.constraint_mode(v[0]);
+        k.x.rand_mode(0);
+        return was * 100 + k.lo.constraint_mode() * 10 + k.x.rand_mode();
+    endfunction
+    function automatic int events(int v);
+        event ev;
+        event other;
+        other = ev;
+        return (ev != null) + 2 * (other == ev) + v;
+    endfunction
+    initial begin
+        K k;
+        k = new;
+        a = queues(i);
+        b = streams(i);
+        c = modes(k, i);
+        d = events(i);
+    end
+endmodule
+"#;
+    same_as_inlined(source, 5, 0, &["a", "b", "c", "d"]);
+}
+
+#[test]
 fn recursive_methods() {
     // Inside a method, a call of its own name calls the method; the name
     // alone is its result variable (IEEE 1800-2023 13.4.1).
