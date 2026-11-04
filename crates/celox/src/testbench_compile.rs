@@ -111,45 +111,33 @@ pub(crate) fn lower_expressions(
                 _ => {}
             }
         }
-        let constant = if width <= 64
-            && !value.string
-            && !logic
-            && writes.is_empty()
-            && !unit
-                .blocks
-                .values()
-                .flat_map(|block| &block.instructions)
-                .any(|inst| {
-                    matches!(
-                        inst,
-                        SIRInstruction::Load(..) | SIRInstruction::ExternCall { .. }
-                    )
-                }) {
-            celox_sir_opt::optimizer::optimize_merged_chain(
-                &mut unit,
-                std::sync::Arc::new(Default::default()),
-                |_, _, _| true,
-                false,
-                false,
-                &Default::default(),
-                || false,
-            )
-            .map_err(|error| error.to_string())?;
-            let constants = celox_sir::analysis::collect_unique_exact_u64_constants(&unit);
-            unit.blocks
-                .values()
-                .flat_map(|block| &block.instructions)
-                .find_map(|inst| match inst {
-                    SIRInstruction::Store(address, _, _, value, _, _)
-                        if address.absolute_addr() == result =>
-                    {
-                        constants.get(value).map(|value| value.value)
-                    }
-                    _ => None,
-                })
-        } else {
-            None
-        };
+        let constant =
+            if width <= 64 && !value.string && !logic && writes.is_empty() && foldable(&unit) {
+                celox_sir_opt::optimizer::optimize_merged_chain(
+                    &mut unit,
+                    std::sync::Arc::new(Default::default()),
+                    |_, _, _| true,
+                    false,
+                    false,
+                    &Default::default(),
+                    || false,
+                )
+                .map_err(|error| error.to_string())?;
+                let constants = celox_sir::analysis::collect_unique_exact_u64_constants(&unit);
+                unit.blocks
+                    .values()
+                    .flat_map(|block| &block.instructions)
+                    .find_map(|inst| match inst {
+                        SIRInstruction::Store(address, _, _, value, _, _)
+                            if address.absolute_addr() == result =>
+                        {
+                            constants.get(value).map(|value| value.value)
+                        }
+                        _ => None,
+                    })
+            } else {
+                None
+            };
         let entry = sir.processes.len();
         sir.processes.push(unit);
         runtime.runtime_schema.processes.push(control);
@@ -174,7 +162,66 @@ pub(crate) fn lower_expressions(
     })
 }
 
+/// Whether an expression kernel's result may be folded into a constant: it
+/// reads no state, makes no external call, and calls no function, which may
+/// write state or fail whatever its result.
+fn foldable<A>(unit: &celox_sir::ExecutionUnit<A>) -> bool {
+    !unit
+        .blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+        .any(|inst| {
+            inst.memory_read().is_some()
+                || inst.call_effects().is_some()
+                || matches!(inst, celox_sir::SIRInstruction::ExternCall { .. })
+        })
+}
+
 mod process;
 pub(crate) use process::lower as lower_processes;
 
 mod memory;
+
+#[cfg(test)]
+mod tests {
+    use celox_sir::{
+        BasicBlock, BlockId, ExecutionUnit, FunctionId, RegisterId, SIRInstruction, SIRTerminator,
+        SIRValue,
+    };
+
+    fn unit(instructions: Vec<SIRInstruction<u32>>) -> ExecutionUnit<u32> {
+        ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [(
+                BlockId(0),
+                BasicBlock {
+                    id: BlockId(0),
+                    params: Vec::new(),
+                    instructions,
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: Default::default(),
+        }
+    }
+
+    /// An expression kernel that calls a function is not folded into a
+    /// constant, whatever the call's effects: the call may still write
+    /// state or end the kernel with an error.
+    #[test]
+    fn a_kernel_with_a_call_is_not_folded() {
+        let imm = SIRInstruction::Imm(RegisterId(0), SIRValue::new(1u8));
+        assert!(super::foldable(&unit(vec![imm.clone()])));
+        let call = SIRInstruction::Call {
+            function: FunctionId(0),
+            frame: RegisterId(0),
+            args: Vec::new(),
+            outputs: Vec::new(),
+            dst: Some(RegisterId(1)),
+            effects: Default::default(),
+        };
+        assert!(!super::foldable(&unit(vec![imm, call])));
+    }
+}

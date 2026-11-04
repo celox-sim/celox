@@ -945,11 +945,10 @@ fn collect_comb_writes(program: &mut OptimizedSir) {
     for unit in &program.sir.eval_comb {
         for block in unit.blocks.values() {
             for instruction in &block.instructions {
-                if let SIRInstruction::Store(address, ..) | SIRInstruction::Commit(_, address, ..) =
-                    instruction
-                {
-                    comb_writes.insert(address.absolute_addr());
-                }
+                comb_writes.extend(
+                    known_objects(instruction.state_writes())
+                        .map(RegionedAbsoluteAddr::absolute_addr),
+                );
             }
         }
     }
@@ -987,35 +986,41 @@ fn rebuild_rtl_writes(program: &mut OptimizedSir) {
     {
         for block in unit.blocks.values() {
             for instruction in &block.instructions {
-                let (address, offset, width) = match instruction {
-                    SIRInstruction::Store(address, offset, width, ..)
-                    | SIRInstruction::Commit(_, address, offset, width, _) => {
-                        (address.absolute_addr(), offset, *width)
-                    }
-                    _ => continue,
+                // A dynamic access, or a call's, may write any bits.
+                let whole = |address: AbsoluteAddr| {
+                    program
+                        .runtime
+                        .design
+                        .state_objects
+                        .get(&address)
+                        .and_then(|object| object.width.checked_sub(1))
+                        .map(|msb| BitAccess::new(0, msb))
                 };
-                let access = offset
-                    .constant_bit_offset()
-                    .and_then(|lsb| {
-                        width
-                            .checked_sub(1)
-                            .and_then(|tail| lsb.checked_add(tail))
-                            .map(|msb| BitAccess::new(lsb, msb))
-                    })
-                    .or_else(|| {
-                        program
-                            .runtime
-                            .design
-                            .state_objects
-                            .get(&address)
-                            .and_then(|object| object.width.checked_sub(1))
-                            .map(|msb| BitAccess::new(0, msb))
-                    });
-                if let Some(access) = access {
-                    rtl_writes.insert(VarAtomBase {
-                        id: address,
-                        access,
-                    });
+                let mut insert = |address: AbsoluteAddr, access: Option<BitAccess>| {
+                    if let Some(access) = access {
+                        rtl_writes.insert(VarAtomBase {
+                            id: address,
+                            access,
+                        });
+                    }
+                };
+                match instruction.state_writes() {
+                    celox_sir::StateAccess::Access(write) => {
+                        let address = write.addr.absolute_addr();
+                        let exact = write.offset.constant_bit_offset().and_then(|lsb| {
+                            write
+                                .width
+                                .checked_sub(1)
+                                .and_then(|tail| lsb.checked_add(tail))
+                                .map(|msb| BitAccess::new(lsb, msb))
+                        });
+                        insert(address, exact.or_else(|| whole(address)));
+                    }
+                    access => {
+                        for object in known_objects(access) {
+                            insert(object.absolute_addr(), whole(object.absolute_addr()));
+                        }
+                    }
                 }
             }
         }
@@ -1512,11 +1517,16 @@ impl OptimizedSir {
         {
             for block in eu.blocks.values() {
                 for inst in &block.instructions {
-                    if let SIRInstruction::Store(addr, _, _, _, _, _) = inst
-                        && addr.region == SPARSE_WORKING_REGION
-                    {
-                        addrs.insert(addr.absolute_addr());
+                    // A Store, or a call that may store on an FF's behalf.
+                    // A Commit only publishes sparse next state.
+                    if matches!(inst, SIRInstruction::Commit(..)) {
+                        continue;
                     }
+                    addrs.extend(
+                        known_objects(inst.state_writes())
+                            .filter(|addr| addr.region == SPARSE_WORKING_REGION)
+                            .map(RegionedAbsoluteAddr::absolute_addr),
+                    );
                 }
             }
         }
@@ -1538,15 +1548,10 @@ impl OptimizedSir {
             blocks.sort_unstable_by_key(|(id, _)| (**id != unit.entry_block_id, **id));
             for (_, block) in blocks {
                 for instruction in &block.instructions {
-                    let (first, second) = match instruction {
-                        SIRInstruction::Load(_, address, ..)
-                        | SIRInstruction::Store(address, ..) => (address, None),
-                        SIRInstruction::Commit(source, destination, ..) => {
-                            (source, Some(destination))
-                        }
-                        _ => continue,
-                    };
-                    for address in std::iter::once(first).chain(second) {
+                    // A call ranks what it reads, then what it writes.
+                    let reads = known_objects(instruction.state_reads());
+                    let writes = known_objects(instruction.state_writes());
+                    for address in reads.chain(writes) {
                         let next = u32::try_from(rank.len()).unwrap_or(u32::MAX);
                         rank.entry(address.absolute_addr()).or_insert(next);
                     }
@@ -1594,21 +1599,44 @@ impl OptimizedSir {
             let bit = 1u64 << unit.lane.min(63);
             for block in unit.unit.blocks.values() {
                 for instruction in &block.instructions {
-                    let destination = match instruction {
-                        SIRInstruction::Store(address, ..)
-                        | SIRInstruction::Commit(_, address, ..) => address,
-                        _ => continue,
-                    };
-                    let homes = match destination.region {
-                        STABLE_REGION => &mut writers.stable,
-                        SPARSE_WORKING_REGION => &mut writers.sparse,
-                        _ => &mut writers.working,
-                    };
-                    *homes.entry(destination.absolute_addr()).or_default() |= bit;
+                    for destination in known_objects(instruction.state_writes()) {
+                        let homes = match destination.region {
+                            STABLE_REGION => &mut writers.stable,
+                            SPARSE_WORKING_REGION => &mut writers.sparse,
+                            _ => &mut writers.working,
+                        };
+                        *homes.entry(destination.absolute_addr()).or_default() |= bit;
+                    }
                 }
             }
         }
         writers
+    }
+}
+
+/// The objects `access` may touch. Layout and the inventories it is built
+/// from see units before any native kernel exists (the backends and the
+/// compiled scheduler generate them later), and only a native kernel may
+/// touch state no list names.
+fn known_objects(
+    access: celox_sir::StateAccess<'_, RegionedAbsoluteAddr>,
+) -> impl Iterator<Item = &RegionedAbsoluteAddr> {
+    access.objects().expect("layout sees no native kernels")
+}
+
+/// Whether `inst` may raise a fatal comb-capture assertion: one that does,
+/// or a call whose callee may, as one making comb-capture records may.
+#[cfg(feature = "host-runtime")]
+pub(crate) fn may_raise_fatal_capture(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
+    match inst {
+        SIRInstruction::CombCaptureEvent {
+            fatal_error_code, ..
+        } => fatal_error_code.is_some(),
+        SIRInstruction::Call { .. } => {
+            let host = inst.host_effects();
+            host.runtime_events && host.capture_flags
+        }
+        _ => false,
     }
 }
 
