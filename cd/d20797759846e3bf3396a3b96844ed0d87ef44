@@ -1,1 +1,3 @@
 Address #3113 observer review in the existing PR: invoke before_domains as a synchronous native service, preserving generated scheduling and native-only steady execution.
+
+Integrate the validated native SlotObserver service fix from the saved #3113 review revision.
