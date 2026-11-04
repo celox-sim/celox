@@ -3,3 +3,5 @@ Address review 5766239395 on PR #3091: normalize accepted restored gated baselin
 Sync after #3091 merged. stack sync tried to drop an already reachable merge-parent commit that Git omitted from its todo; a normal noninteractive rebase onto origin/master applies only the remaining 14 commits.
 
 Rebase dependent revisions onto the existing #3113/#3115 observer review fixes; retain the already-published #3093 head.
+
+Integrate native before_domains callbacks with unspecified event polarity: use settled-edge comparison and exercise callback-driven domain changes against the reference executor.
