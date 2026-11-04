@@ -1,0 +1,1 @@
+array elements bound by the subscript's loop variable (nested loops over one array); members of loop elements checked for local/protected visibility (8.18); tests
