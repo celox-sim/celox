@@ -8,10 +8,7 @@ impl ISelContext<'_> {
         inst: &SIRInstruction<RegionedAbsoluteAddr>,
     ) {
         // A native kernel or a function unit may write any state.
-        if matches!(inst, SIRInstruction::ExternCall { func, .. }
-            if celox_sir::extern_abi::native_kernel_index(*func).is_some())
-            || matches!(inst, SIRInstruction::Call { .. })
-        {
+        if inst.accesses_unknown_state() || matches!(inst, SIRInstruction::Call { .. }) {
             self.reg_addrs.clear();
         }
         if let Some(write) = inst.memory_write()
