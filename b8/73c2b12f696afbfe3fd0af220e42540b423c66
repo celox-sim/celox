@@ -1,0 +1,1 @@
+LRM 13.5 sentence in comment/body; output/inout actuals bound with the ordinary lvalue/place binding (selects, packed members, container elements), written through the place at the return via the system-actual place store; handle-typed properties written whole; tests
