@@ -52,6 +52,12 @@ impl<'a> PlannedLaneKernel<'a> {
         }
     }
 
+    /// The kernel's units, which task items index.
+    #[cfg(all(test, feature = "systemverilog"))]
+    pub(crate) fn units(&self) -> Vec<&'a ExecutionUnit<RegionedAbsoluteAddr>> {
+        self.units.iter().map(|unit| &unit.unit).collect()
+    }
+
     /// Units of one task, in execution order.
     pub(crate) fn task_units(&self, task: usize) -> Vec<&'a ExecutionUnit<RegionedAbsoluteAddr>> {
         self.tasks[task]

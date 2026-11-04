@@ -433,6 +433,36 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  # The SystemVerilog suite with every subroutine that can be lowered out
+  # of line (CELOX_SV_FORCE_OUT_OF_LINE), on every backend: no design takes
+  # that path yet, so full validation checks it gives each case the results
+  # inlining gives.
+  sv-out-of-line-calls:
+    name: SystemVerilog suite with out-of-line calls
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.full_validation != 'false' && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CELOX_SV_FORCE_OUT_OF_LINE: "1"
+      CELOX_TEST_FEATURES: systemverilog,cranelift,wasm-runtime
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.validation_ref || github.sha }}
+
+      # No Rust cache: each cache needs a warming twin in rust-cache.yml,
+      # which a job that runs only in full validation does not repay.
+      - uses: $/.github/actions/setup-rust
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.144
+
+      - name: Run the SystemVerilog suite with calls out of line
+        run: node scripts/run-vtest.mjs --test systemverilog --no-fail-fast
+
   # The driver is built once; the shards run the conformance cases with it.
   sv-tests:
     name: sv-tests driver
@@ -996,6 +1026,7 @@ jobs:
         sv-tests,
         sv-tests-shard,
         common-cells,
+        sv-out-of-line-calls,
         napi-linux,
         napi-wasm,
         rust,
@@ -1033,6 +1064,7 @@ jobs:
         sv-tests,
         sv-tests-shard,
         common-cells,
+        sv-out-of-line-calls,
         napi-linux,
         napi-wasm,
         rust,

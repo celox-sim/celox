@@ -679,6 +679,7 @@ pub fn parse_sv(
                     .sv_recursion_report
                     .as_deref()
                     .map(std::sync::Arc::from),
+                force_out_of_line_calls: diagnostics.sv_force_out_of_line,
                 ..diagnostic_policy.sv_options(sv_timescale, legacy_empty_reductions)
             },
             force_signals,

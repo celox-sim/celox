@@ -9,6 +9,7 @@
 //! Expressions are lowered through SLT, which keeps their width and
 //! four-state semantics identical to the combinational lowering.
 
+mod calls;
 mod containers;
 mod dpi_builtins;
 mod file_io;
@@ -129,6 +130,10 @@ pub(super) struct Ff<'p, 'a> {
     inferred_clock: Option<Clock>,
     /// The `$past` histories of the process.
     history: Vec<History>,
+    /// The function whose unit this lowers, if it lowers one.
+    frame: Option<calls::FrameContext>,
+    /// Whether every call is inlined, in code that must not call.
+    inline_calls: bool,
 }
 
 /// The clock of an edge-triggered process.
@@ -221,6 +226,8 @@ impl<'p, 'a> Ff<'p, 'a> {
             flush_site: None,
             inferred_clock: None,
             history: Vec::new(),
+            frame: None,
+            inline_calls: false,
         }
     }
 
@@ -4971,12 +4978,13 @@ impl<'p, 'a> Ff<'p, 'a> {
             .cloned()
             .ok_or_else(|| unsupported(format!("call of `{name}`")))?;
         self.m.record_call(&self.active_calls, name);
-        if self.active_calls.iter().any(|active| active == name) {
+        let out_of_line = self.out_of_line_callee(name, &subroutine, args)?;
+        if out_of_line.is_none() && self.active_calls.iter().any(|active| active == name) {
             self.m
                 .record_argument_calls(&self.active_calls, &subroutine, args);
             return Err(unsupported(format!("recursive call of `{name}`")));
         }
-        if self.active_calls.len() >= MAX_CALL_DEPTH {
+        if out_of_line.is_none() && self.active_calls.len() >= MAX_CALL_DEPTH {
             return Err(unsupported("subroutine call depth limit exceeded"));
         }
         if args.len() > subroutine.params.len() {
@@ -5010,8 +5018,10 @@ impl<'p, 'a> Ff<'p, 'a> {
         // Each inlined automatic task activation owns persistent storage, so
         // another process can enter the same task while this one is suspended.
         // Static formals/locals deliberately keep their module-wide addresses.
+        // An out-of-line call keeps its automatic storage in its frame.
         let mut activation = Vec::new();
-        if self.kernel.is_some() && (subroutine.is_task || self.forked) {
+        let copies_before = self.m.activation_copies.len();
+        if out_of_line.is_none() && self.kernel.is_some() && (subroutine.is_task || self.forked) {
             for name in &subroutine.automatic_locals {
                 // A reference formal, or a member of one, has no storage of
                 // its own.
@@ -5044,6 +5054,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                     self.element_widths.insert(working(copy), width);
                 }
                 self.m.name_to_id.insert(name.clone(), copy);
+                self.m
+                    .activation_copies
+                    .push((name.clone(), original, copy));
                 if self.forked {
                     let slot = self.frame_locals.len();
                     self.frame_locals.push(copy);
@@ -5060,6 +5073,9 @@ impl<'p, 'a> Ff<'p, 'a> {
         let mut references = Vec::new();
         let mut aliases = Vec::new();
         let mut property_outputs = Vec::new();
+        // The formals an out-of-line call copies back, each with the
+        // temporary that receives it from the callee's frame.
+        let mut copies = Vec::new();
         let positions: Vec<_> = if arg_order.is_empty() {
             (0..subroutine.params.len()).collect()
         } else {
@@ -5157,13 +5173,28 @@ impl<'p, 'a> Ff<'p, 'a> {
                 let reference = actual
                     .as_ref()
                     .ok_or_else(|| unsupported("missing output argument"))?;
+                // An out-of-line call copies a formal of its frame back from
+                // a temporary of the caller.
+                let declared = self.m.declared(id);
+                let formal = match out_of_line {
+                    Some(index)
+                        if self.m.out_of_line().is_some_and(|functions| {
+                            functions.functions[index].slot(declared).is_some()
+                        }) =>
+                    {
+                        let (temp, name) = self.call_result_temp(id);
+                        copies.push((id, temp));
+                        name
+                    }
+                    _ => param.name.clone(),
+                };
                 // A reference formal bound to a class property, forwarded:
                 // its object was evaluated when the reference was made.
                 if let Some(store) =
-                    forwarded_property(reference, sv::ir::Expr::Ident(param.name.clone()))
+                    forwarded_property(reference, sv::ir::Expr::Ident(formal.clone()))
                 {
                     property_outputs.push(store);
-                } else if let Some(stores) = forwarded_members(reference, &param.name) {
+                } else if let Some(stores) = forwarded_members(reference, &formal) {
                     property_outputs.extend(stores);
                 } else {
                     let lvalues = lvalue_from_expr(reference).ok_or_else(|| {
@@ -5177,7 +5208,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     // The members of an unpacked structure take the formal's
                     // bits, even a single string or handle member.
                     let concat = matches!(reference, sv::ir::Expr::Concat(_));
-                    outputs.push((param.name.clone(), id, lvalues, guards, concat));
+                    outputs.push((formal, id, lvalues, guards, concat));
                 }
             }
             if param.direction.is_read() {
@@ -5231,7 +5262,8 @@ impl<'p, 'a> Ff<'p, 'a> {
                 let value = self.lower_slt(&arena, node)?;
                 inputs.push((id, self.kept_input(id, value, keep)));
             } else if !subroutine.persistent_locals.contains(&param.name)
-                && (self.kernel.is_none()
+                && (out_of_line.is_some()
+                    || self.kernel.is_none()
                     || !subroutine.is_task
                     || subroutine.automatic_locals.contains(&param.name))
             {
@@ -5239,66 +5271,72 @@ impl<'p, 'a> Ff<'p, 'a> {
                 inputs.push((id, self.kept_input(id, value, keep)));
             }
         }
-        for (id, value) in inputs {
-            let value = match value {
-                Ok(value) => value,
-                Err(name) => self.eval(&sv::ir::Expr::Ident(name), None)?,
-            };
-            let width = self.m.var(id).width;
-            let offset = sv_memory_offset(self.m.var(id), 0, width);
-            self.store(id, offset, width, value);
-        }
-        // The body names each reference formal's actual itself, so its reads
-        // and writes are those of the actual, also across suspensions of a
-        // task and through any other name of it (IEEE 1800-2023 13.5.2).
-        for (formal, _, target) in &references {
-            self.m.name_to_id.insert(formal.clone(), *target);
-        }
-        if let Some(return_var) = &subroutine.return_var {
-            let id = self
-                .m
-                .id(return_var)
-                .ok_or_else(|| unsupported(format!("result of `{name}`")))?;
-            if !subroutine.persistent_locals.contains(return_var) {
-                self.init_default(id);
+        let called = match out_of_line {
+            Some(index) => Some(self.call_out_of_line(index, &subroutine, inputs, &copies)?),
+            None => {
+                for (id, value) in inputs {
+                    let value = match value {
+                        Ok(value) => value,
+                        Err(name) => self.eval(&sv::ir::Expr::Ident(name), None)?,
+                    };
+                    let width = self.m.var(id).width;
+                    let offset = sv_memory_offset(self.m.var(id), 0, width);
+                    self.store(id, offset, width, value);
+                }
+                // The body names each reference formal's actual itself, so its reads
+                // and writes are those of the actual, also across suspensions of a
+                // task and through any other name of it (IEEE 1800-2023 13.5.2).
+                for (formal, _, target) in &references {
+                    self.m.name_to_id.insert(formal.clone(), *target);
+                }
+                if let Some(return_var) = &subroutine.return_var {
+                    let id = self
+                        .m
+                        .id(return_var)
+                        .ok_or_else(|| unsupported(format!("result of `{name}`")))?;
+                    if !subroutine.persistent_locals.contains(return_var) {
+                        self.init_default(id);
+                    }
+                }
+                let return_block = self.b.new_block();
+                self.functions.push(FunctionBlocks {
+                    return_block,
+                    return_var: subroutine.return_var.clone(),
+                    loop_depth: self.loops.len(),
+                });
+                let mut body = subroutine.body;
+                let (constants, parameter_types) = (self.m.constants, self.m.parameter_types);
+                let constant = |position: &sv::ir::ConstExpr| {
+                    sv::typecheck::eval_const_expr_with_types(position, constants, parameter_types)
+                };
+                self.split_property_concats(&mut body, &aliases);
+                for alias in &aliases {
+                    body = alias.rewrite(body, &constant)?;
+                }
+                let built = self.b.built();
+                self.active_calls.push(name.to_string());
+                let falls = self.exec_block(&body);
+                self.active_calls.pop();
+                let after = self.b.built();
+                self.m.expanded_call(
+                    name,
+                    super::recursion::Expansion {
+                        instructions: after.instructions - built.instructions,
+                        blocks: after.blocks - built.blocks,
+                        nodes: 0,
+                    },
+                );
+                self.functions.pop();
+                for (formal, original, _) in references {
+                    self.m.name_to_id.insert(formal, original);
+                }
+                if falls? {
+                    self.jump(return_block);
+                }
+                self.b.switch_to_block(return_block);
+                None
             }
-        }
-        let return_block = self.b.new_block();
-        self.functions.push(FunctionBlocks {
-            return_block,
-            return_var: subroutine.return_var.clone(),
-            loop_depth: self.loops.len(),
-        });
-        let mut body = subroutine.body;
-        let (constants, parameter_types) = (self.m.constants, self.m.parameter_types);
-        let constant = |position: &sv::ir::ConstExpr| {
-            sv::typecheck::eval_const_expr_with_types(position, constants, parameter_types)
         };
-        self.split_property_concats(&mut body, &aliases);
-        for alias in &aliases {
-            body = alias.rewrite(body, &constant)?;
-        }
-        let built = self.b.built();
-        self.active_calls.push(name.to_string());
-        let falls = self.exec_block(&body);
-        self.active_calls.pop();
-        let after = self.b.built();
-        self.m.expanded_call(
-            name,
-            super::recursion::Expansion {
-                instructions: after.instructions - built.instructions,
-                blocks: after.blocks - built.blocks,
-                nodes: 0,
-            },
-        );
-        self.functions.pop();
-        for (formal, original, _) in references {
-            self.m.name_to_id.insert(formal, original);
-        }
-        if falls? {
-            self.jump(return_block);
-        }
-        self.b.switch_to_block(return_block);
         for (formal, id, lvalues, guards, concat) in outputs {
             self.check_tagged_guards(&guards)?;
             let signed = self.m.var(id).signed;
@@ -5315,16 +5353,20 @@ impl<'p, 'a> Ff<'p, 'a> {
         for store in property_outputs {
             self.exec_block(&[store])?;
         }
-        let result = subroutine.return_var.as_ref().map(|name| {
-            if activation.iter().any(|(local, _)| local == name) {
-                self.m.var(self.m.id(name).unwrap()).path[0].clone()
-            } else {
-                name.clone()
-            }
-        });
+        let result = match called {
+            Some(result) => result,
+            None => subroutine.return_var.as_ref().map(|name| {
+                if activation.iter().any(|(local, _)| local == name) {
+                    self.m.var(self.m.id(name).unwrap()).path[0].clone()
+                } else {
+                    name.clone()
+                }
+            }),
+        };
         for (name, original) in activation {
             self.m.name_to_id.insert(name, original);
         }
+        self.m.activation_copies.truncate(copies_before);
         Ok(result)
     }
 
@@ -8010,7 +8052,10 @@ impl Ff<'_, '_> {
         let saved_builder = std::mem::take(&mut self.b);
         let kernel = self.kernel.take();
         let direct = std::mem::replace(&mut self.direct, true);
+        // The probe may not call (see below).
+        let inline_calls = std::mem::replace(&mut self.inline_calls, true);
         let lowered = self.assign(&sv::ir::LValue::Ident(name.clone()), expr);
+        self.inline_calls = inline_calls;
         self.direct = direct;
         self.kernel = kernel;
         let expression_builder = std::mem::replace(&mut self.b, saved_builder);

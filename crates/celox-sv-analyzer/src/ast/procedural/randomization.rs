@@ -364,6 +364,7 @@ fn lower_methods(
         result.push(Subroutine {
             name: method_name(&class.name, method),
             is_task: false,
+            automatic: true,
             automatic_locals: builder.state.locals[first_local..]
                 .iter()
                 .map(|local| local.name.clone())

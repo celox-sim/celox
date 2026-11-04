@@ -4563,6 +4563,7 @@ pub(super) fn lower_subroutine(
             None => name,
         }),
         is_task: native.kind == celox_sv_syntax::SubroutineKind::Task,
+        automatic: builder.automatic,
         automatic_locals: builder.state.locals[first_local..]
             .iter()
             .enumerate()
@@ -5625,6 +5626,7 @@ fn lower_class(
         let mut subroutine = Subroutine {
             name: item.name(&classes::Class::subroutine_name(name, "new")),
             is_task: false,
+            automatic: true,
             automatic_locals: builder.state.locals[first_local..]
                 .iter()
                 .map(|local| local.name.clone())
@@ -5737,6 +5739,7 @@ fn lower_cast(
     let mut subroutine = Subroutine {
         name: item.name(&classes::Class::cast_name(name)),
         is_task: false,
+        automatic: true,
         automatic_locals: builder.state.locals[first_local..]
             .iter()
             .map(|local| local.name.clone())
