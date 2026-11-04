@@ -1086,6 +1086,11 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                         ("xezim", "containers::container_values_are_converted_on_every_path") => {
                             ("mismatch", "execute", "10, 48, 10, 49, 32, 49, 10]")
                         }
+                        ("icarus", "class::constrained_randomize_state_properties") => (
+                            "compile_error",
+                            "compile",
+                            "Constraint declarations not supported",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

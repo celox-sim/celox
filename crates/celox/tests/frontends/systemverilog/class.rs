@@ -814,6 +814,71 @@ fn method_defaults_use_the_receiver_the_call_evaluated() {
     assert_eq!(sim.get(r), BigUint::from(1u8));
 }
 
+/// A constraint may not name a property that a constraint program does not
+/// hold, and such a property may not be random; the class is otherwise
+/// randomized with it as state.
+#[test]
+fn constraints_on_handle_and_string_properties_are_rejected() {
+    let wide = "class C; rand bit [3:0] x; bit [127:0] w; constraint k { x < 5; } endclass";
+    for (body, call, want) in [
+        (
+            "class C; rand bit [3:0] x; string s; constraint k { x < s.len(); } endclass",
+            "c.randomize()",
+            "constraint",
+        ),
+        (
+            "class N; endclass class C; rand bit [3:0] x; N n; constraint k { x == n; } endclass",
+            "c.randomize()",
+            "a handle, string, container or property wider than 64 bits in a constraint",
+        ),
+        (
+            "class C; rand bit [3:0] x; bit [127:0] w; constraint k { x < w; } endclass",
+            "c.randomize()",
+            "a handle, string, container or property wider than 64 bits in a constraint",
+        ),
+        (
+            "class C; rand bit [3:0] x; rand int q[$]; constraint k { x < 5; } endclass",
+            "c.randomize()",
+            "constraints currently require scalar integral rand properties",
+        ),
+        (
+            "class C; rand bit [3:0] x; rand bit [127:0] w; constraint k { x < 5; } endclass",
+            "c.randomize()",
+            "constraints currently require scalar integral rand properties",
+        ),
+        // Selecting a wide property makes it random, which the solver
+        // cannot do, with constraints of the class or of the call.
+        (
+            wide,
+            "c.randomize(w)",
+            "randomize argument wider than 64 bits under constraints",
+        ),
+        (
+            "class C; rand bit [3:0] x; bit [127:0] w; endclass",
+            "c.randomize(w) with { x < 5; }",
+            "randomize argument wider than 64 bits under constraints",
+        ),
+        // A base handle dispatches to the randomizer of a constrained
+        // derived class (18.6.2).
+        (
+            "class C; rand bit [3:0] x; bit [127:0] w; endclass \
+             class D extends C; constraint k { x < 5; } endclass",
+            "c.randomize(w)",
+            "randomize argument wider than 64 bits under constraints",
+        ),
+    ] {
+        let source =
+            format!("module Top; {body} C c; initial begin c = new; void'({call}); end endmodule");
+        let Err(error) = Simulator::from_sv_sources(vec![(&source, Path::new("class.sv"))], "Top")
+            .build_cranelift()
+        else {
+            panic!("{body} {call} is unsupported");
+        };
+        let error = error.to_string();
+        assert!(error.contains(want), "{body} {call}: {error}");
+    }
+}
+
 #[test]
 fn randomizing_four_state_properties_is_rejected() {
     for (body, want) in [
@@ -1687,6 +1752,7 @@ sv_backends! {
 sv_backends! {
     fn constrained_randomize_conditionals(sim) { @case "class::constrained_randomize_conditionals"; }
     fn constrained_randomize_nested_guards(sim) { @case "class::constrained_randomize_nested_guards"; }
+    fn constrained_randomize_state_properties(sim) { @case "class::constrained_randomize_state_properties"; }
 }
 
 sv_backends! {

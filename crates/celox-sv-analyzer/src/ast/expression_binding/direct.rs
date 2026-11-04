@@ -874,7 +874,7 @@ fn bind_value_in(
                             .ends_with("::randomize")
                             .then(|| {
                                 objects::random_selection(
-                                    tree, session, dimensions, &name, args, native,
+                                    tree, session, dimensions, &name, args, native, false,
                                 )
                             })
                             .transpose()?;
