@@ -1,0 +1,1 @@
+Move the Delay(0) status correction into the Inactive implementation that introduced it, so lower stack PRs pass their own default-feature tests. CI job 126534547430 exposed the same failure as local simulation consumer validation.
