@@ -1,1 +1,1 @@
-Move the Delay(0) status correction into the Inactive implementation that introduced it, so lower stack PRs pass their own default-feature tests. CI job 126534547430 exposed the same failure as local simulation consumer validation.
+Move the status correction one member earlier, into #3107 where Inactive promotion was introduced, and leave this host-service change focused on host writes.
