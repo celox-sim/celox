@@ -1,0 +1,1 @@
+Reuse the mixed scheduler publication helper moved into PR3113 for native observer regression coverage; remove its duplicate definition after integrating that review fix.
