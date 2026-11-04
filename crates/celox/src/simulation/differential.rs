@@ -1214,10 +1214,10 @@ mod tests {
         agrees_with_the_reference(&source, 200);
     }
 
-    /// A kernel that waits and then loops without suspending yields now and
-    /// then, and keeps the reference loop.
+    /// A kernel that loops through queued NBAs stays native and remains bounded.
     #[test]
-    fn waiting_kernels_that_yield_fall_back() {
+    fn waiting_kernels_that_yield_remain_compiled() {
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
         let reasons = |source: &str| -> Vec<String> {
             build_in(source, SchedulerMode::Compiled)
                 .scheduler_stats()
@@ -1238,19 +1238,29 @@ mod tests {
                 initial begin q = 1'b0; @(posedge clk); forever q <= ~q; end
             endmodule
         "#;
-        assert_eq!(reasons(spinning), ["a nonblocking site queues its values"]);
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        assert!(reasons(spinning).is_empty());
+        let mut sim = build_in(spinning, SchedulerMode::Compiled);
+        sim.run_until(0).unwrap();
+        sim.state.set_slot_budgets(32, 16);
+        let _before = sim.scheduler_stats().reference_steps;
+        let error = sim.run_until(10).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not suspend within one time slot"),
+            "{error}"
+        );
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        assert_eq!(sim.scheduler_stats().reference_steps, _before);
     }
 
     /// A nonblocking site in a loop runs several times in one run of its
-    /// kernel. A loop the frontend keeps yields now and then, and the
-    /// copies of one it unrolls queue their values: either way the kernel
-    /// keeps the reference loop, and every mode leaves its state.
+    /// kernel. Both retained and unrolled loops preserve every queued value
+    /// while the generated scheduler owns their steady execution.
     #[test]
-    fn nonblocking_sites_in_loops_keep_the_reference_loop() {
-        for (bound, reason) in [
-            ("n", "a nonblocking site queues its values"),
-            ("2", "a nonblocking site queues its values"),
-        ] {
+    fn nonblocking_sites_in_loops_remain_compiled() {
+        for bound in ["n", "2"] {
             for tail in ["", "$finish;"] {
                 let source = format!(
                     "`timescale 1ns/1ns
@@ -1268,19 +1278,28 @@ mod tests {
                         end
                     endmodule"
                 );
-                let kernels = build_in(&source, SchedulerMode::Compiled)
+                let _kernels = build_in(&source, SchedulerMode::Compiled)
                     .scheduler_stats()
                     .kernels;
+                #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
                 assert!(
-                    kernels.contains(&crate::KernelSchedule::Reference(reason.into())),
-                    "{bound} {tail}: {kernels:?}"
+                    _kernels
+                        .iter()
+                        .all(|kernel| *kernel == crate::KernelSchedule::Compiled),
+                    "{bound} {tail}: {_kernels:?}"
                 );
                 let mut reference = build_in(&source, SchedulerMode::Reference);
                 reference.run_until(100).unwrap();
                 let expected = reference.save_state().unwrap();
                 for mode in MODES {
                     let mut sim = build_in(&source, mode);
+                    sim.run_until(0).unwrap();
+                    let _before = sim.scheduler_stats().reference_steps;
                     sim.run_until(100).unwrap();
+                    if mode != SchedulerMode::Reference {
+                        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+                        assert_eq!(sim.scheduler_stats().reference_steps, _before);
+                    }
                     assert_eq!(
                         sim.save_state().unwrap(),
                         expected,
@@ -1293,10 +1312,10 @@ mod tests {
 
     /// A nonblocking update into what a stateful combinational process, a
     /// latch, is sensitive to bumps its occurrence counter when the
-    /// reference publishes it: the kernel keeps the reference loop, and
-    /// every mode leaves the reference's state and records.
+    /// generated scheduler publishes it. Every mode leaves the reference's
+    /// state and records.
     #[test]
-    fn nonblocking_updates_into_probed_signals_keep_the_reference_loop() {
+    fn nonblocking_updates_into_probed_signals_remain_compiled() {
         let source = r#"
             `timescale 1ns/1ns
             module Top(output logic [7:0] n);
@@ -1309,14 +1328,15 @@ mod tests {
                 assign n = l;
             endmodule
         "#;
-        let kernels = build_in(source, SchedulerMode::Compiled)
+        let _kernels = build_in(source, SchedulerMode::Compiled)
             .scheduler_stats()
             .kernels;
-        // The frontend queues this site's values, and a staged one would
-        // keep the reference loop too (`Plan::new`).
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
         assert!(
-            matches!(kernels[1], crate::KernelSchedule::Reference(_)),
-            "{kernels:?}"
+            _kernels
+                .iter()
+                .all(|kernel| *kernel == crate::KernelSchedule::Compiled),
+            "{_kernels:?}"
         );
         let displays = |sim: &mut Simulation| {
             sim.drain_runtime_events()
@@ -1329,7 +1349,13 @@ mod tests {
         let expected = (reference.save_state().unwrap(), displays(&mut reference));
         for mode in MODES {
             let mut sim = build_in(source, mode);
+            sim.run_until(0).unwrap();
+            let _before = sim.scheduler_stats().reference_steps;
             sim.run_until(100).unwrap();
+            if mode != SchedulerMode::Reference {
+                #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+                assert_eq!(sim.scheduler_stats().reference_steps, _before);
+            }
             let state = sim.save_state().unwrap();
             assert_eq!((state, displays(&mut sim)), expected, "{mode:?}");
         }
@@ -1361,14 +1387,15 @@ mod tests {
     /// `actions`, and afterwards the state file is the reference's. At least
     /// one slot must run compiled.
     fn host_driven_agrees(source: &str, runs: &[(u64, &[Host])]) {
-        let kernels = build_in(source, SchedulerMode::Compiled)
+        let _kernels = build_in(source, SchedulerMode::Compiled)
             .scheduler_stats()
             .kernels;
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
         assert!(
-            kernels
+            _kernels
                 .iter()
                 .all(|kernel| *kernel == crate::KernelSchedule::Compiled),
-            "{kernels:?}"
+            "{_kernels:?}"
         );
         let mut reference = build_in(source, SchedulerMode::Reference);
         let mut expected = Vec::new();

@@ -2,10 +2,11 @@
 //! extern-function ABI. The active scope borrows host services separately from
 //! the backend; the callback never re-enters a Simulator or its scheduler.
 pub(crate) use super::native_arena::Header as ArenaHeader;
+pub(crate) use super::native_nba::Header as NbaHeader;
 use super::*;
 use celox_design::{HostRequestKind, HostRequestSite};
 
-pub(crate) const SYMBOL: &str = "__celox_native_services_v4";
+pub(crate) const SYMBOL: &str = "__celox_native_services_v5";
 
 pub(crate) const CHECKPOINT: u64 = u64::MAX;
 pub(crate) const SCHEDULER_RUN: u64 = u64::MAX - 1;
@@ -19,6 +20,8 @@ pub(crate) const ARENA_WAVE_LIMIT: u64 = u64::MAX - 7;
 pub(crate) const GUARD_FAULT: u64 = u64::MAX - 8;
 pub(crate) const COMB_BEFORE: u64 = u64::MAX - 9;
 pub(crate) const COMB_AFTER: u64 = u64::MAX - 10;
+pub(crate) const ARENA_RESERVE_NBA: u64 = u64::MAX - 11;
+pub(crate) const ARENA_RESERVE_DELAYED_NBA: u64 = u64::MAX - 12;
 
 pub(crate) fn signature() -> celox_design::ExternSignature {
     let integer = celox_design::ExternType::Integer {
@@ -46,6 +49,7 @@ pub(super) struct Metadata {
     pub runtime_sites: Vec<RuntimeEventSite>,
     pub process_names: Vec<String>,
     pub nbas: Vec<Vec<celox_design::NbaSite<SignalRef>>>,
+    pub native_nbas: Vec<celox_design::NbaSite<SignalRef>>,
     pub flagged: Vec<(usize, usize)>,
     pub deferred_groups: Vec<(u32, usize)>,
 }
@@ -164,6 +168,12 @@ impl Metadata {
             }
         }
         Some(Arc::new(Self {
+            native_nbas: program
+                .runtime_schema
+                .nba_sites
+                .iter()
+                .map(|site| site.map(|address| backend.resolve_signal(&address)))
+                .collect(),
             deferred_groups,
             nbas,
             flagged,
@@ -231,7 +241,8 @@ impl Scope<'_> {
             Ok(result) => result,
             Err(panic) => std::panic::resume_unwind(panic),
         };
-        (result, self.error.take())
+        let exported = self.export_nbas();
+        (result.and(exported), self.error.take())
     }
 
     fn store_value(
@@ -268,6 +279,62 @@ impl Scope<'_> {
             // described by the same layout. These writes bypass backend.set.
             unsafe { settle.mark_range(self.state.cast_mut(), signal.offset, plane * count) };
         }
+        Ok(())
+    }
+
+    /// Export unfinished native updates at a host boundary. The generated loop
+    /// drains its FIFO on ordinary slot completion, so that path does no work.
+    fn export_nbas(&mut self) -> Result<(), RuntimeErrorCode> {
+        while self.arena.header.nba.head != 0 {
+            let pointer = self.arena.header.nba.head;
+            let header = self
+                .arena
+                .nba
+                .record(pointer, 8)
+                .ok_or_else(|| Self::fault("invalid native NBA record"))?;
+            let next = header[0];
+            let site = usize::try_from(header[2])
+                .ok()
+                .and_then(|site| self.metadata.native_nbas.get(site))
+                .ok_or_else(|| Self::fault("invalid native NBA site"))?;
+            let lsb =
+                usize::try_from(header[3]).map_err(|_| Self::fault("invalid native NBA range"))?;
+            let width =
+                usize::try_from(header[4]).map_err(|_| Self::fault("invalid native NBA range"))?;
+            let class = header[5];
+            let words = site.width.div_ceil(64);
+            let masks = self.metadata.layout.four_state && site.value.is_4state;
+            let record = self
+                .arena
+                .nba
+                .record(pointer, 8 + words * if masks { 2 } else { 1 })
+                .ok_or_else(|| Self::fault("invalid native NBA value"))?;
+            let plane = |slice: &[u64]| {
+                BigUint::new(
+                    slice
+                        .iter()
+                        .flat_map(|&word| [word as u32, (word >> 32) as u32])
+                        .collect(),
+                )
+            };
+            let value = plane(&record[8..8 + words]);
+            let mask = if masks {
+                plane(&record[8 + words..8 + words * 2])
+            } else {
+                BigUint::default()
+            };
+            self.nbas.push_back(celox_runtime::NbaUpdate {
+                target: site.target,
+                lsb,
+                width,
+                value: (value, mask),
+            });
+            self.arena
+                .nba
+                .release(&mut self.arena.header.nba, pointer, class)?;
+            self.arena.header.nba.head = next;
+        }
+        self.arena.header.nba.tail = 0;
         Ok(())
     }
 
@@ -626,6 +693,16 @@ pub(crate) extern "C" fn call(
             scope
                 .arena
                 .reserve(encoded == ARENA_RESERVE_IMAGES, process)?;
+        } else if encoded == ARENA_RESERVE_NBA {
+            scope
+                .arena
+                .nba
+                .reserve_class(&mut scope.arena.header.nba, process)?;
+        } else if encoded == ARENA_RESERVE_DELAYED_NBA {
+            scope
+                .arena
+                .nba
+                .reserve_delayed(&mut scope.arena.header.nba, process)?;
         } else if encoded == ARENA_WAVE_LIMIT {
             return Err(Scope::fault(
                 "native ordered domain waves exceeded the round budget",
@@ -710,6 +787,7 @@ mod tests {
             process_names: vec![],
             flagged: vec![(0, 0), (0, 1)],
             deferred_groups: Vec::new(),
+            native_nbas: Vec::new(),
             nbas: vec![
                 staged
                     .iter()
