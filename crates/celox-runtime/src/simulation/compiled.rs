@@ -74,7 +74,7 @@ impl<B: SimBackend> SimulationState<B> {
             || self.stopped
             || self.suspended.is_some()
             || self.declarations_pending
-            || self.host_pending
+            || (self.host_pending && !executor.compiled_host_inputs())
             // Non-event data has no per-writer event mask. Keep its wave
             // boundary visible before a compiled waiter can resume.
             || (self.observed_data
@@ -107,11 +107,12 @@ impl<B: SimBackend> SimulationState<B> {
         {
             return None;
         }
-        let mut first = if pending.nba_queue.is_empty() && pending.ready.is_empty() {
-            u64::MAX
-        } else {
-            self.scheduler.time
-        };
+        let mut first =
+            if pending.nba_queue.is_empty() && pending.ready.is_empty() && !self.host_pending {
+                u64::MAX
+            } else {
+                self.scheduler.time
+            };
         if let Some((&time, _)) = pending.delayed_nba.first_key_value() {
             first = first.min(time);
         }
@@ -147,7 +148,25 @@ impl<B: SimBackend> SimulationState<B> {
         let reference = other;
         // Time zero starts processes in their own order; the reference loop
         // runs it.
-        if first == u64::MAX || first == 0 || first > end || first >= reference {
+        let cold_zero = first == 0
+            && (!executor.compiled_host_inputs()
+                || self
+                    .process_wakeups
+                    .iter()
+                    .any(|&Reverse((time, process))| {
+                        time == 0
+                            && executor
+                                .backend()
+                                .get_as::<u8>(self.model.processes[process].status)
+                                == 0
+                    })
+                || pending.ready.iter().any(|&process| {
+                    executor
+                        .backend()
+                        .get_as::<u8>(self.model.processes[process].status)
+                        == 0
+                }));
+        if first == u64::MAX || cold_zero || first > end || first >= reference {
             return None;
         }
         let one_slot = match executor.compiled_slots() {
@@ -217,6 +236,12 @@ impl<B: SimBackend> SimulationState<B> {
         if self.one_slot_runs() && limit > self.scheduler.time {
             self.sample_values(executor.backend_mut());
         }
+        let host_entry = self.host_pending;
+        if executor.compiled_host_inputs() {
+            let writes = executor.take_host_writes();
+            executor.put_compiled_host_inputs(host_entry, writes)?;
+            self.host_pending = false;
+        }
         if executor.compiled_nba_queues() {
             let immediate = std::mem::take(&mut self.process_state.nba_queue);
             let delayed = std::mem::take(&mut self.process_state.delayed_nba)
@@ -237,6 +262,16 @@ impl<B: SimBackend> SimulationState<B> {
             .as_ref()
             .ok_or(SimulatorErrorCode::InternalError)?;
         let backend = executor.backend_mut();
+        if host_entry {
+            let mut values = num_bigint::BigUint::default();
+            let mut unknowns = num_bigint::BigUint::default();
+            for (bit, &id) in scheduler.events.iter().enumerate() {
+                values.set_bit(bit as u64, self.last_clock_values.contains(id));
+                unknowns.set_bit(bit as u64, self.last_clock_unknown.contains(id));
+            }
+            backend.set_wide(scheduler.levels, values);
+            backend.set_wide(scheduler.unknown_levels, unknowns);
+        }
         backend.set(scheduler.now, self.scheduler.time);
         backend.set(scheduler.limit, limit);
         backend.set(scheduler.exit, 0u8);

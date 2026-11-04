@@ -201,6 +201,19 @@ impl<B: SimBackend> UnitExecutor for Simulator<B> {
         self.native_host_round_budget = rounds;
     }
 
+    fn compiled_host_inputs(&self) -> bool {
+        self.compiled_nba_queues()
+    }
+
+    fn put_compiled_host_inputs(
+        &mut self,
+        pending: bool,
+        writes: Vec<(SignalRef, celox_runtime::timing::Value)>,
+    ) -> Result<(), celox_runtime::SimulatorErrorCode> {
+        self.put_native_host_inputs(pending, writes);
+        Ok(())
+    }
+
     fn compiled_ready_queue(&self) -> bool {
         self.compiled_nba_queues()
     }
