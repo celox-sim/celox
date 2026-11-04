@@ -1,0 +1,1 @@
+commit only on success: array sizes validated with every other value before any change; one active-constraint set (constraint_mode, inline) decides solved sizes and emitted constraints; tests
