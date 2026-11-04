@@ -9,3 +9,5 @@ Integrate native before_domains callbacks with unspecified event polarity: use s
 Address review r4469875852: preserve scheduled rising-edge rules for unspecified domains, and use the existing native stable-edge wave when no scheduled edge fires. Add mixed known/unspecified clock coverage for both timed and untimed execution.
 
 Refresh validation counts after independently tested combinational finish and host Active ordering review fixes.
+
+Sync merged PRs through #3111: stack sync failed because Git already omits merged commits from the todo; use a normal noninteractive rebase onto updated origin/master.
