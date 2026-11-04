@@ -386,3 +386,136 @@ endmodule"#;
         }
     }
 }
+
+#[test]
+fn restored_ready_processes_enter_the_native_active_region() {
+    let source = r#"`timescale 1ns/1ns
+module Top;
+ bit trigger = 0;
+ int q = 0, seen = 0;
+ initial begin #1; forever begin @(trigger); q <= q + 1; end end
+ initial begin #1; forever begin @(trigger); seen = q; end end
+endmodule"#;
+    for four_state in [false, true] {
+        for hotspot in [false, true] {
+            let make = |mode| {
+                Simulation::from_sv_sources(
+                    vec![(source, std::path::Path::new("native-ready-restore.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .hotspot_jit(hotspot)
+                .scheduler_mode(mode)
+                .build_native()
+                .unwrap()
+            };
+            let mut reference = make(SchedulerMode::Reference);
+            reference.run_until(2).unwrap();
+            let mut saved = reference.save_state().unwrap();
+            let processes = &mut saved.schedule.as_mut().unwrap().processes;
+            assert_eq!(processes.waiters.len(), 2);
+            processes
+                .ready
+                .extend(processes.waiters.drain(..).map(|waiter| waiter.process));
+            reference.load_state(&saved).unwrap();
+            let mut native = make(SchedulerMode::Compiled);
+            native.load_state(&saved).unwrap();
+            let before = native.scheduler_stats().reference_steps;
+            reference.run_until(2).unwrap();
+            native.run_until(2).unwrap();
+            assert_eq!(
+                native.save_state().unwrap(),
+                reference.save_state().unwrap()
+            );
+            assert_eq!(native.scheduler_stats().reference_steps, before);
+            assert_eq!(native.get(native.signal("q")), 1u8.into());
+            assert_eq!(native.get(native.signal("seen")), 0u8.into());
+        }
+    }
+}
+
+#[test]
+fn restored_ready_delay_only_process_rearms_future_wakeups() {
+    fn check<B: crate::backend::SimBackend>(
+        mut reference: Simulation<B>,
+        mut compiled: Simulation<B>,
+        publish: impl FnOnce(&mut B),
+    ) {
+        reference.run_until(0).unwrap();
+        let mut saved = reference.save_state().unwrap();
+        let schedule = saved.schedule.as_mut().unwrap();
+        // Restore a timestamp whose due wakeup has already moved to Active,
+        // but whose process has not run yet.
+        assert_eq!(schedule.processes.wakeups.len(), 1);
+        let (process, time) = schedule.processes.wakeups.pop().unwrap();
+        assert_eq!(time, 2);
+        schedule.time = time;
+        schedule.processes.ready.push(process);
+        reference.load_state(&saved).unwrap();
+        compiled.load_state(&saved).unwrap();
+        publish(&mut compiled.simulator.backend);
+        let before = compiled.scheduler_stats();
+        assert!(
+            before
+                .kernels
+                .iter()
+                .all(|k| *k == KernelSchedule::Compiled)
+        );
+
+        for end in [2, 4, 6, 10] {
+            reference.run_until(end).unwrap();
+            compiled.run_until(end).unwrap();
+            assert_eq!(compiled.get(compiled.signal("q")), (end as u32 / 2).into());
+            let saved = compiled.save_state().unwrap();
+            let schedule = saved.schedule.as_ref().unwrap();
+            assert_eq!(schedule.processes.wakeups.len(), 1, "time={end}");
+            assert_eq!(schedule.processes.wakeups[0].1, end + 2);
+            assert!(schedule.processes.ready.is_empty());
+            assert_eq!(saved, reference.save_state().unwrap(), "time={end}");
+            let after = compiled.scheduler_stats();
+            assert_eq!(after.reference_steps, before.reference_steps, "{after:?}");
+            assert!(after.compiled_slots > before.compiled_slots);
+            if end == 4 {
+                // The next delay must survive another save/load as well as
+                // consecutive native runs.
+                compiled.load_state(&saved).unwrap();
+                reference.load_state(&saved).unwrap();
+            }
+        }
+    }
+
+    let source = r#"`timescale 1ns/1ns
+module Top;
+ int q = 0;
+ initial forever begin #2; q++; end
+endmodule"#;
+    for four_state in [false, true] {
+        let make = |mode| {
+            Simulation::from_sv_sources(
+                vec![(
+                    source,
+                    std::path::Path::new("native-ready-delay-restore.sv"),
+                )],
+                "Top",
+            )
+            .four_state(four_state)
+            .scheduler_mode(mode)
+        };
+        check(
+            make(SchedulerMode::Reference).build_native().unwrap(),
+            make(SchedulerMode::Compiled).build_native().unwrap(),
+            |_| {},
+        );
+        check(
+            make(SchedulerMode::Reference)
+                .hotspot_jit(true)
+                .build_tiered()
+                .unwrap(),
+            make(SchedulerMode::Compiled)
+                .hotspot_jit(true)
+                .build_tiered()
+                .unwrap(),
+            |backend| backend.publish_scheduler_for_test(),
+        );
+    }
+}
