@@ -1,1 +1,6 @@
-shift count self-determined (nested >>> stays arithmetic), unsigned only as a value; tests 8'h1 << (8'sh80 >>> 2) and 64'h1 << (8'sh80 >>> 6)
+Revision history for #3144:
+
+rev 2 (content) 2026-11-04 20:24 UTC — shift count self-determined (nested >>> stays arithmetic), unsigned only as a value; tests 8'h1 << (8'sh80 >>> 2) and 64'h1 << (8'sh80 >>> 6)
+rev 1 (initial) 2026-11-04 20:24 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3144,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"7ad0227e54b103757ac67ecb30fd7feb3c63ed93","timestamp_iso":"2026-11-04T20:24:43Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"7ad0227e54b103757ac67ecb30fd7feb3c63ed93","new_sha":"7283dd92b98fb79b1e599866e16573c4dcc5dc72","timestamp_iso":"2026-11-04T20:24:43Z","reason":"shift count self-determined (nested >>> stays arithmetic), unsigned only as a value; tests 8'h1 << (8'sh80 >>> 2) and 64'h1 << (8'sh80 >>> 6)","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/7ad0227e54b103757ac67ecb30fd7feb3c63ed93...7283dd92b98fb79b1e599866e16573c4dcc5dc72"}]} -->
