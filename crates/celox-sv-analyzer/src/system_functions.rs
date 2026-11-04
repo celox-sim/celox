@@ -1129,6 +1129,12 @@ pub enum ContainerOp {
     Concat,
     /// A new queue containing the inclusive range of its source queue.
     Slice,
+    /// The container in the first argument with each container at nesting
+    /// depth `depth` (1: its elements) assigned to the operation's layout: a
+    /// queue is kept to its capacity (IEEE 1800-2023 7.10.5).
+    Bound {
+        depth: u32,
+    },
     Size,
     Get,
     Set,

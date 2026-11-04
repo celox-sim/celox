@@ -172,6 +172,12 @@ fn dpi_return_ids_are_available_during_discovery_and_final_publication() {
                 session.types.data(expected),
                 &semantic_types::TyData::String
             );
+        } else if declaration == "chandle" {
+            // A chandle is its own type, of no packed bits (6.14).
+            assert_eq!(
+                session.types.data(expected),
+                &semantic_types::TyData::Chandle
+            );
         } else {
             let semantic_types::TyData::Packed(packed) = session.types.data(expected) else {
                 panic!("{declarations}")

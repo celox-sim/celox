@@ -7972,12 +7972,17 @@ fn container_formals_copy_only_what_container_assignment_represents() {
     for (formal, actual, detail) in [
         ("output int q[$]", "b", "another queue bound"),
         ("inout int q[$:3]", "a", "another queue bound"),
+        // An output formal is copied out without the conversion an
+        // assignment makes, so its inner queues have the actual's bounds.
+        ("output int q[$][$]", "nb", "another queue bound"),
+        ("inout int q[$][$:3]", "na", "another queue bound"),
         ("output int q[$]", "x", "compatible container"),
         ("inout int q[$]", "m", "incompatible dynamic container"),
         ("int q[$]", "m", "incompatible dynamic container"),
     ] {
         let source = format!(
             "module Top; typedef int q_t[$]; int a[$]; int b[$:3]; int x; int m[string]; \
+             int na[$][$]; int nb[$][$:3]; \
              function automatic q_t make(); return a; endfunction \
              function automatic void f({formal}); endfunction \
              initial f({actual}); endmodule"

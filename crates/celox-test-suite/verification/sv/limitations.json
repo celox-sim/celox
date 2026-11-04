@@ -1681,6 +1681,24 @@
     }
   },
   {
+    "id": "sv_verilator_nested_bounded_queues",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052",
+    "reason": "Assigning a container of unbounded queues to one of bounded queues generates C++ that assigns VlQueue<VlQueue<unsigned int>> to VlQueue<VlQueue<unsigned int, 2>>, which does not compile (no matching operator=). IEEE 1800-2023 7.6 makes the element types equivalent, and 7.10.5 keeps each assigned queue to its bound. Celox passes the unchanged case.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_nested_bounded_queues.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "containers::container_values_are_converted_on_every_path",
+        "containers::nested_bounded_queues_are_assigned_elementwise"
+      ]
+    }
+  },
+  {
     "id": "sv_icarus_dist_uniform_seed_width",
     "category": "simulator_runtime_limitation",
     "phase": "execute",
@@ -3839,6 +3857,7 @@
         "virtual_interfaces::rejects_integers_in_conditional_array_elements",
         "virtual_interfaces::rejects_modport_ports_to_full_interface",
         "virtual_interfaces::rejects_modport_to_full_interface",
+        "virtual_interfaces::rejects_package_results_of_other_interfaces",
         "virtual_interfaces::rejects_virtual_interfaces_as_integral_references",
         "virtual_interfaces::retargets_with_ordinary_events",
         "virtual_interfaces::type_parameter_values",

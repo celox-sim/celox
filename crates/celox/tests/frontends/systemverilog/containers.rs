@@ -8,6 +8,11 @@ sv_backends! {
     fn shuffle_nested_receivers(sim) { @case "containers::shuffle_nested_receivers"; }
 
     fn functions_returning_containers(sim) { @case "containers::functions_returning_containers"; }
+    fn returned_patterns_take_the_result_type(sim) { @case "containers::returned_patterns_take_the_result_type"; }
+    fn containers_received_from_any_expression(sim) { @case "containers::containers_received_from_any_expression"; }
+    fn nested_bounded_queues_are_assigned_elementwise(sim) { @case "containers::nested_bounded_queues_are_assigned_elementwise"; }
+    fn container_values_are_converted_on_every_path(sim) { @case "containers::container_values_are_converted_on_every_path"; }
+    fn conditionals_received_by_containers(sim) { @case "containers::conditionals_received_by_containers"; }
     fn associative_default_strings(sim) { @case "containers::associative_default_strings"; }
     fn associative_default_copy(sim) { @case "containers::associative_default_copy"; }
     fn associative_default_four_state(sim) { @case "containers::associative_default_four_state"; }

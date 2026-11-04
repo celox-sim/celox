@@ -118,7 +118,14 @@ impl Ff<'_, '_> {
         if op.reduction().is_none() && args.iter().any(|arg| self.m.calls(arg)) {
             let value_receiver = matches!(
                 op,
-                New | Literal | WithDefault | Convert | Concat | Slice | Equal | CaseEqual
+                New | Literal
+                    | WithDefault
+                    | Convert
+                    | Concat
+                    | Slice
+                    | Bound { .. }
+                    | Equal
+                    | CaseEqual
             );
             if !value_receiver {
                 // Preserve the receiver's location, not an old immutable copy
@@ -200,7 +207,14 @@ impl Ff<'_, '_> {
         // its current container after the arguments, so a nested pop is kept.
         let property = if !matches!(
             op,
-            New | Literal | WithDefault | Convert | Concat | Slice | Equal | CaseEqual
+            New | Literal
+                | WithDefault
+                | Convert
+                | Concat
+                | Slice
+                | Bound { .. }
+                | Equal
+                | CaseEqual
         ) && let sv::ir::Expr::Call {
             callee: sv::ir::Callee::Object(object),
             args,
@@ -220,8 +234,10 @@ impl Ff<'_, '_> {
         let element_result = matches!(op, Get | PopFront | PopBack);
         let four_state = (element_result || op == Equal) && !layout.two_state && self.m.four_state;
         let (temp, name) = self.m.temp("container", width, signed, four_state);
-        if matches!(op, New | Literal | WithDefault | Convert | Concat | Slice)
-            || element_result && layout.handle == Some(HandleProperty::Object)
+        if matches!(
+            op,
+            New | Literal | WithDefault | Convert | Concat | Slice | Bound { .. }
+        ) || element_result && layout.handle == Some(HandleProperty::Object)
         {
             self.m.variables.get_mut(&temp).unwrap().value_kind = celox_design::ValueKind::ObjRef;
         } else if element_result && layout.handle == Some(HandleProperty::String) {
@@ -260,6 +276,11 @@ impl Ff<'_, '_> {
                 let lo = self.queue_slice_bound(&args[1], true)?;
                 let hi = self.queue_slice_bound(&args[2], false)?;
                 self.heap_call(code(heap::SLICE), &[source, lo, hi])
+            }
+            Bound { depth } => {
+                let source = self.handle(&args[0])?;
+                let depth = self.constant64(u64::from(depth));
+                self.heap_call(code(heap::BOUND), &[source, depth])
             }
             Concat => {
                 let first = self.handle(&args[0])?;

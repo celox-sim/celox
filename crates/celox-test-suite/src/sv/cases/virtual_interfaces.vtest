@@ -402,6 +402,36 @@ endmodule
   (top Top) (run_until 0)
   (expect_output "12 22 1 1\n"))
 
+
+(case rejects_package_results_of_other_interfaces
+  ; A return statement's value is received by the result as an assignment
+  ; to it would be (IEEE 1800-2023 13.4.1), so a package function returning
+  ; a virtual interface of another interface is rejected (25.9).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic [7:0] data;
+endinterface
+interface other_if(input logic clk);
+    logic [7:0] data;
+endinterface
+package handles_pkg;
+    virtual other_if other;
+    function automatic virtual bus_if get();
+        return other;
+    endfunction
+endpackage
+module Top;
+    logic clk = 0;
+    other_if b(clk);
+    virtual bus_if v;
+    initial begin
+        handles_pkg::other = b;
+        v = handles_pkg::get();
+    end
+endmodule
+"#)
+  (top Top)
+  (expect reject))
 (case rejects_integers_as_class_call_arguments
   ; A method's virtual interface formal receives only a virtual interface of
   ; its interface; an integer is not one (IEEE 1800-2023 25.9).

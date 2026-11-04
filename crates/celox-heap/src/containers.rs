@@ -61,6 +61,11 @@ pub const SLICE: u64 = 103;
 pub const WITH_DEFAULT: u64 = 104;
 /// Shuffle sequence a with seed b, moving complete payload/mask pairs.
 pub const SHUFFLE: u64 = 105;
+/// `bound(a, b)`: container `a` with each container at nesting depth `b`
+/// (1: its elements) assigned to the layout of the parameter, a queue kept to
+/// its capacity (IEEE 1800-2023 7.10.5), as converting a container to one
+/// whose elements are bounded queues assigns each element.
+pub const BOUND: u64 = 106;
 
 /// The operation parameter encodes the element width (bits 0..6), whether
 /// it is two-state (7), its handle kind (8..9: none/string/object), container
@@ -408,6 +413,46 @@ impl Heap {
 
     /// Execute a container helper. Indices have already undergone language
     /// conversion; invalid four-state indices use an out-of-range sentinel.
+    /// The [`BOUND`] of container `handle` at nesting depth `depth`.
+    fn bound(&mut self, handle: Handle, depth: u64, layout: Layout) -> Handle {
+        let Some(container) = self.containers.get(&handle).cloned() else {
+            return handle;
+        };
+        let mut result = (*container).clone();
+        if depth == 0 {
+            result.layout = layout.0;
+            if let Contents::Sequence(v) = &mut result.contents {
+                v.truncate(layout.capacity());
+            }
+        } else {
+            let rebound = |heap: &mut Self, element: Element| Element {
+                value: heap.bound(element.value as Handle, depth - 1, layout) as u64,
+                mask: element.mask,
+            };
+            // An associative array's default is a value of its elements.
+            if let Some(default) = result.default {
+                result.default = Some(rebound(self, default));
+            }
+            match &mut result.contents {
+                Contents::Sequence(v) => {
+                    let elements = v.iter().copied().collect::<Vec<_>>();
+                    *v = elements.into_iter().map(|e| rebound(self, e)).collect();
+                }
+                Contents::Associative(v) => {
+                    let entries = v.iter().map(|(k, e)| (k.clone(), *e)).collect::<Vec<_>>();
+                    *v = entries
+                        .into_iter()
+                        .map(|(k, e)| (k, rebound(self, e)))
+                        .collect();
+                }
+            }
+        }
+        if result == *container {
+            return handle;
+        }
+        self.publish_container(result, true)
+    }
+
     pub(crate) fn container_call(
         &mut self,
         op: u64,
@@ -416,6 +461,9 @@ impl Heap {
         b: u64,
         c: u64,
     ) -> u64 {
+        if op == BOUND {
+            return self.bound(a as Handle, b, Layout(parameter)) as u64;
+        }
         let layout = Layout(parameter);
         let key = layout.key(self, b);
         let existing = self.containers.get(&(a as Handle));
@@ -731,6 +779,42 @@ mod tests {
     fn call(heap: &mut Heap, op: u64, p: u64, a: u64, b: u64, c: u64) -> u64 {
         heap.call(encode(op, p), a, b, c)
     }
+    #[test]
+    fn bound_keeps_nested_queues_to_the_capacity_of_the_layout() {
+        let mut heap = Heap::new();
+        let inner = parameter(8, true, 0, 1, 0, false, false, false);
+        let bounded = parameter(8, true, 0, 1, 2, false, false, false);
+        let outer = parameter(32, true, 2, 1, 0, false, false, false);
+        let queue = |heap: &mut Heap, values: &[u64]| {
+            let mut handle = call(heap, NEW, inner, values.len() as u64, 0, 0);
+            for (index, value) in values.iter().enumerate() {
+                handle = call(heap, SET, inner, handle, index as u64, *value);
+            }
+            handle
+        };
+        let long = queue(&mut heap, &[1, 2, 3]);
+        let short = queue(&mut heap, &[4]);
+        let mut source = call(&mut heap, NEW, outer, 2, 0, 0);
+        source = call(&mut heap, SET, outer, source, 0, long);
+        source = call(&mut heap, SET, outer, source, 1, short);
+        let result = call(&mut heap, BOUND, bounded, source, 1, 0);
+        let first = call(&mut heap, GET, outer, result, 0, 0);
+        assert_eq!(call(&mut heap, LEN, bounded, first, 0, 0), 2);
+        assert_eq!(call(&mut heap, GET, bounded, first, 1, 0), 2);
+        let second = call(&mut heap, GET, outer, result, 1, 0);
+        assert_eq!(call(&mut heap, LEN, bounded, second, 0, 0), 1);
+        // The source keeps its elements; a bound that changes nothing keeps
+        // the container.
+        assert_eq!(call(&mut heap, LEN, inner, long, 0, 0), 3);
+        assert_eq!(call(&mut heap, BOUND, bounded, result, 1, 0), result);
+        // An associative array's default is a value of its elements.
+        let map = parameter(32, true, 2, 2, 0, false, false, false);
+        let with_default = call(&mut heap, WITH_DEFAULT, map, 0, long, 0);
+        let rebound = call(&mut heap, BOUND, bounded, with_default, 1, 0);
+        let default = call(&mut heap, GET, map, rebound, 7, 0);
+        assert_eq!(call(&mut heap, LEN, bounded, default, 0, 0), 2);
+    }
+
     #[test]
     fn associative_defaults_survive_updates_and_clear_without_creating_entries() {
         let mut heap = Heap::new();
