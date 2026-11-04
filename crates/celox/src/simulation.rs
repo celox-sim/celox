@@ -201,6 +201,10 @@ impl<B: SimBackend> UnitExecutor for Simulator<B> {
         self.native_host_round_budget = rounds;
     }
 
+    fn compiled_ready_queue(&self) -> bool {
+        self.compiled_nba_queues()
+    }
+
     fn compiled_nba_queues(&self) -> bool {
         cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen")))
             && self.has_native_scheduler_services()
