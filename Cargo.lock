@@ -2148,9 +2148,9 @@ dependencies = [
 
 [[package]]
 name = "iced-x86"
-version = "1.21.0"
+version = "1.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c447cff8c7f384a7d4f741cfcff32f75f3ad02b406432e8d6c878d56b1edf6b"
+checksum = "c23ad4d19dca41180e835ef6fbd2c1ee655777eca086ad80dd517e0513322879"
 dependencies = [
  "lazy_static",
 ]
@@ -3029,8 +3029,8 @@ dependencies = [
  "serde",
  "serde_json",
  "syn 3.0.9",
- "syntree",
- "syntree_layout",
+ "syntree 0.18.0",
+ "syntree_layout 0.4.0",
  "tempfile",
  "thiserror",
  "ts-rs",
@@ -3045,9 +3045,9 @@ checksum = "54ec451836679aaa55158b454b441e21446a111ea34aa1917eba29245bafe4b8"
 
 [[package]]
 name = "parol_runtime"
-version = "5.0.2"
+version = "5.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b36bcb5c5908d5d063aa32c5c34dc75d23b0bd8839a1ff2ce0dfe8688bd9c76"
+checksum = "274a0e53aefcaa7f5e3152b007bdd269379903f514fd69c6387410265f07e129"
 dependencies = [
  "anyhow",
  "codespan-reporting",
@@ -3058,8 +3058,8 @@ dependencies = [
  "parol-macros",
  "petgraph 0.8.3",
  "scnr2",
- "syntree",
- "syntree_layout",
+ "syntree 0.19.0",
+ "syntree_layout 0.5.0",
  "thiserror",
 ]
 
@@ -3924,13 +3924,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "00c99c9cda412afe293a6b962af651b4594161ba88c1affe7ef66459ea040a06"
 
 [[package]]
+name = "syntree"
+version = "0.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41a357e911815897d5b73a55402c5252d51b0ae00d8a4f6100cf366fb76979bd"
+
+[[package]]
 name = "syntree_layout"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "24d027955f5f14d526450b6a11ef5aa962761e924dcd092298dd0d1466570565"
 dependencies = [
  "anyhow",
- "syntree",
+ "syntree 0.18.0",
+ "thiserror",
+ "xml_writer",
+]
+
+[[package]]
+name = "syntree_layout"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1cd199782ff53ff3f11ecbeff9d0d586800598354e3352d325261ade3c903bb"
+dependencies = [
+ "anyhow",
+ "syntree 0.19.0",
  "thiserror",
  "xml_writer",
 ]

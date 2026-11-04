@@ -36,6 +36,16 @@ pub struct SchedulerStats {
     pub mode: SchedulerMode,
     /// Time slots the compiled scheduler ran.
     pub compiled_slots: u64,
+    /// Entries into the compiled scheduler, including runs that finish or fail.
+    /// A run can execute many slots; this counts host/native boundaries.
+    pub compiled_runs: u64,
+    /// Calls to the reference stepping path, including initialization, resume,
+    /// and calls with no work before their limit. This is not a slot count.
+    pub reference_steps: u64,
+    /// Synchronous native scheduler service calls (NBA, I/O and bookkeeping).
+    /// They do not leave the compiled run and are separate from compiled_runs.
+    /// Filled by the hosting simulator; generic runtime executors leave it zero.
+    pub native_service_calls: u64,
     /// Steps checked against the shadow simulation in
     /// [`SchedulerMode::Differential`]. Steps of the reference loop are not
     /// counted otherwise, which would cost every step.

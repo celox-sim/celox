@@ -107,8 +107,8 @@ fn dispatch(
 /// `control[TB_PHASE]` after a published time step: the run resumes
 /// after its edges.
 const PUBLISHED: u64 = u64::MAX - 1;
-// TBs can have more continuation sites than the timed scheduler's 8-bit
-// continuation selector. Keep their dispatch in the TB's own 64-bit slot.
+// Keep the TB's continuation separate from the shared timed scheduler's
+// continuation: the TB may resume after running that scheduler.
 fn settle_then(g: &mut Generator<'_>, m: &Meta, target: BlockId) {
     let index = match g.continuations.iter().position(|&block| block == target) {
         Some(i) => i,
@@ -581,6 +581,8 @@ fn generate(
             .get(&slots.levels)
             .copied()
             .unwrap_or(SCHEDULER_TIME_WIDTH),
+        ready_bits: program.layout().widths[&slots.ready],
+        cont_bits: program.layout().widths[&slots.cont],
         // The unit drains its own events (`resume_after_events`).
         event_batch: None,
     };
@@ -1143,8 +1145,11 @@ fn generate(
         let active = g.binary(1, ticks, BinaryOp::LtU, limit);
         let running = equals_slot(&mut g, m.control[TB_STOPPED], 0);
         let active = g.binary(1, active, BinaryOp::And, running);
-        let mut armed = g.constant(0, 64);
-        let mut values = g.constant(0, 64);
+        // Clock positions are independent of process-ready bits. Clear and
+        // populate the complete slots, including clocks above bit 63.
+        let clock_bits = program.layout().widths[&slots.clock_armed];
+        let mut armed = g.constant(0, clock_bits);
+        let mut values = g.constant(0, clock_bits);
         for (c, &bit) in m.clocks.iter().zip(&positions) {
             let enabled = waited_on(&mut g, c);
             let next = g.load(c[0], 64);
@@ -1156,20 +1161,20 @@ fn generate(
             let fall = g.binary(1, next, BinaryOp::Eq, now);
             let fall = g.binary(1, fall, BinaryOp::And, falling);
             let due = g.binary(1, rise, BinaryOp::Or, fall);
-            let set = g.bit(due, bit);
-            armed = g.binary(64, armed, BinaryOp::Or, set);
-            let set = g.bit(rise, bit);
-            values = g.binary(64, values, BinaryOp::Or, set);
+            let set = g.bit_of(due, bit, clock_bits);
+            armed = g.binary(clock_bits, armed, BinaryOp::Or, set);
+            let set = g.bit_of(rise, bit, clock_bits);
+            values = g.binary(clock_bits, values, BinaryOp::Or, set);
             g.store_at(slots.clock_next, bit * 64, 64, now);
             let two = g.constant(2, 64);
             g.store_at(slots.clock_period, bit * 64, 64, two);
         }
         for &(_, _, moved, current, bit) in &resets {
-            let set = g.bit(moved, bit);
-            armed = g.binary(64, armed, BinaryOp::Or, set);
+            let set = g.bit_of(moved, bit, clock_bits);
+            armed = g.binary(clock_bits, armed, BinaryOp::Or, set);
             let rises = g.binary(1, moved, BinaryOp::And, current);
-            let set = g.bit(rises, bit);
-            values = g.binary(64, values, BinaryOp::Or, set);
+            let set = g.bit_of(rises, bit, clock_bits);
+            values = g.binary(clock_bits, values, BinaryOp::Or, set);
             g.store_at(slots.clock_next, bit * 64, 64, now);
             let two = g.constant(2, 64);
             g.store_at(slots.clock_period, bit * 64, 64, two);
@@ -1184,13 +1189,14 @@ fn generate(
         for &(source, saved, ..) in &resets {
             copy(&mut g, program, saved, source);
         }
-        g.store(slots.clock_armed, 64, armed);
-        g.store(slots.clock_value, 64, values);
+        g.store(slots.clock_armed, clock_bits, armed);
+        g.store(slots.clock_value, clock_bits, values);
         g.store(slots.limit, 64, now);
         put(&mut g, slots.count, 0);
         put(&mut g, slots.budget, u64::MAX);
         put(&mut g, slots.events, 0);
-        put(&mut g, slots.ready, 0);
+        let zero = g.constant(0, g.ready_bits);
+        g.store(slots.ready, g.ready_bits, zero);
         let zero = g.constant(0, 8);
         g.store(slots.exit, 8, zero);
         g.store(slots.finish, 8, zero);

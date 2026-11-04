@@ -63,6 +63,44 @@ pub fn emit_owned_prepared_eu(
     )
 }
 
+/// Allocated native code whose private arena has not yet been placed.
+///
+/// Selection, optimization and allocation depend on semantic layout, not on
+/// generated callees' scratch extents. Final emission must supply their actual
+/// complete extents; no guessed reservation or relocation of live code is used.
+pub struct AllocatedFunction {
+    function: MFunction,
+    allocation: crate::native::regalloc::RegallocResult,
+    destruction: SsaDestructionPlan,
+    semantic_size: usize,
+    tick_loop: bool,
+    check_runtime_events: bool,
+    timing: bool,
+    total_start: Option<std::time::Instant>,
+}
+
+/// Perform all allocation work before generated callees finish compiling.
+/// Use `AllocatedFunction::emit` once their complete scratch extents are known.
+pub fn allocate_owned_prepared_eu(
+    sir_eu: crate::ExecutionUnit<crate::RegionedAbsoluteAddr>,
+    layout: &crate::MemoryLayout,
+    four_state: bool,
+    label: &str,
+    options: &crate::X86BackendOptions,
+    trace: Option<&mut NativeFunctionTrace>,
+    is_cancelled: impl Fn() -> bool,
+) -> Result<AllocatedFunction, ChainedEmitError> {
+    allocate_prepared_eu_inner(
+        std::borrow::Cow::Owned(sir_eu),
+        layout,
+        four_state,
+        label,
+        options,
+        trace,
+        is_cancelled,
+    )
+}
+
 fn emit_prepared_eu_inner(
     sir_eu: std::borrow::Cow<'_, crate::ExecutionUnit<crate::RegionedAbsoluteAddr>>,
     layout: &crate::MemoryLayout,
@@ -72,6 +110,27 @@ fn emit_prepared_eu_inner(
     mut trace: Option<&mut NativeFunctionTrace>,
     is_cancelled: impl Fn() -> bool,
 ) -> Result<EmitResult, ChainedEmitError> {
+    let allocated = allocate_prepared_eu_inner(
+        sir_eu,
+        layout,
+        four_state,
+        label,
+        options,
+        trace.as_deref_mut(),
+        &is_cancelled,
+    )?;
+    allocated.emit(options.arena_base, trace, is_cancelled)
+}
+
+fn allocate_prepared_eu_inner(
+    sir_eu: std::borrow::Cow<'_, crate::ExecutionUnit<crate::RegionedAbsoluteAddr>>,
+    layout: &crate::MemoryLayout,
+    four_state: bool,
+    label: &str,
+    options: &crate::X86BackendOptions,
+    mut trace: Option<&mut NativeFunctionTrace>,
+    is_cancelled: impl Fn() -> bool,
+) -> Result<AllocatedFunction, ChainedEmitError> {
     use crate::native::{isel, regalloc};
     // Shared borrow so the checkpoint closure and downstream callees observe
     // the same predicate without moving it.
@@ -325,7 +384,7 @@ fn emit_prepared_eu_inner(
     }
     verify_mir(&mfunc, "after post-allocation MIR peepholes")?;
     checkpoint()?;
-    if let Some(trace) = trace.as_deref_mut() {
+    if let Some(trace) = trace {
         trace.mir_after_regalloc = mfunc.to_string();
         trace.register_assignment.clear();
         for (vreg, preg) in ra.assignment.sorted_entries() {
@@ -370,63 +429,87 @@ fn emit_prepared_eu_inner(
         );
     }
     checkpoint()?;
-    let emit_start = timing.then(crate::timing::now);
     let semantic_size = layout
         .merged_total_size
         .checked_add(layout.triggered_bits_total_size)
         .expect("native simulation-state size overflow");
-    let state_size = options
-        .arena_base
-        .map_or(semantic_size, |base| base.max(semantic_size));
-    let native_callee_end = [options.arena_base.unwrap_or(0)];
-    let callee_ends = if options.arena_base.is_some() {
-        &native_callee_end[..]
-    } else {
-        &[]
-    };
     mfunc.settle_flags = layout.settle.as_ref().and_then(|settle| {
         let flags = settle.flags();
         Some(i32::try_from(flags.start).ok()?..i32::try_from(flags.end).ok()?)
     });
-    let result = if label == "eval_comb_apply_ff" && options.native_tick_loop {
-        emit_with_plan_tick_loop(
-            &mfunc,
-            &ra.assignment,
-            ra.spill_frame_size,
-            state_size,
-            callee_ends,
-            &ssa_destruction,
-            check_runtime_events,
-        )?
-    } else {
-        emit_with_plan(
-            &mfunc,
-            &ra.assignment,
-            ra.spill_frame_size,
-            state_size,
-            callee_ends,
-            &ssa_destruction,
-        )?
-    };
-    if let Some(trace) = trace {
-        trace.disassembly = disassemble_with_block_offsets(
-            &result.code[..result.text_size],
-            0,
-            &result.block_offsets,
-        );
+    Ok(AllocatedFunction {
+        function: mfunc,
+        allocation: ra,
+        destruction: ssa_destruction,
+        semantic_size,
+        tick_loop: label == "eval_comb_apply_ff" && options.native_tick_loop,
+        check_runtime_events,
+        timing,
+        total_start,
+    })
+}
+
+impl AllocatedFunction {
+    /// Emit using an arena above every generated callee's complete
+    /// `required_state_size`, including its nested callees. Generated calls
+    /// without a nonzero extent are rejected by the emitter.
+    pub fn emit(
+        self,
+        arena_base: Option<usize>,
+        trace: Option<&mut NativeFunctionTrace>,
+        is_cancelled: impl Fn() -> bool,
+    ) -> Result<EmitResult, ChainedEmitError> {
+        if is_cancelled() {
+            return Err(ChainedEmitError::Cancelled);
+        }
+        let emit_start = self.timing.then(crate::timing::now);
+        let state_size = arena_base.map_or(self.semantic_size, |base| base.max(self.semantic_size));
+        let native_callee_end = [arena_base.unwrap_or(0)];
+        let callee_ends = if arena_base.is_some() {
+            &native_callee_end[..]
+        } else {
+            &[]
+        };
+        let result = if self.tick_loop {
+            emit_with_plan_tick_loop(
+                &self.function,
+                &self.allocation.assignment,
+                self.allocation.spill_frame_size,
+                state_size,
+                callee_ends,
+                &self.destruction,
+                self.check_runtime_events,
+            )?
+        } else {
+            emit_with_plan(
+                &self.function,
+                &self.allocation.assignment,
+                self.allocation.spill_frame_size,
+                state_size,
+                callee_ends,
+                &self.destruction,
+            )?
+        };
+        if let Some(trace) = trace {
+            trace.disassembly = disassemble_with_block_offsets(
+                &result.code[..result.text_size],
+                0,
+                &result.block_offsets,
+            );
+        }
+        if let Some(start) = emit_start {
+            tracing::debug!(
+                "[native-timing] emit_chained emit bytes={} elapsed={:?}",
+                result.code.len(),
+                start.elapsed()
+            );
+        }
+        if let Some(start) = self.total_start {
+            tracing::debug!(
+                "[native-timing] emit_chained total elapsed={:?}",
+                start.elapsed()
+            );
+        }
+        Ok(result)
     }
-    if let Some(start) = emit_start {
-        tracing::debug!(
-            "[native-timing] emit_chained emit bytes={} elapsed={:?}",
-            result.code.len(),
-            start.elapsed()
-        );
-    }
-    if let Some(start) = total_start {
-        tracing::debug!(
-            "[native-timing] emit_chained total elapsed={:?}",
-            start.elapsed()
-        );
-    }
-    Ok(result)
 }

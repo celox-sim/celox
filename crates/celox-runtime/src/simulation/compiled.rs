@@ -21,16 +21,18 @@ fn compiled_clocks<B: SimBackend>(
     scheduler: &SchedulerRefs,
     queue: &BinaryHeap<SimEvent<B>>,
     clocks: &[Option<ClockDef>],
-) -> u64 {
-    let mut seen = 0u64;
-    let mut twice = 0u64;
+) -> num_bigint::BigUint {
+    let mut seen = num_bigint::BigUint::default();
+    let mut twice = num_bigint::BigUint::default();
     for event in queue {
         if let Some(bit) = clock_slot(scheduler, event, clocks) {
-            twice |= seen & 1 << bit;
-            seen |= 1 << bit;
+            if seen.bit(bit as u64) {
+                twice.set_bit(bit as u64, true);
+            }
+            seen.set_bit(bit as u64, true);
         }
     }
-    seen & !twice
+    seen ^ twice
 }
 
 /// The clock slot of `scheduler` that may run the queued `event`.
@@ -84,6 +86,7 @@ impl<B: SimBackend> SimulationState<B> {
                             .any(|term| term.driven)
                 }))
             || !pending.observed.is_empty()
+            || self.reactive_pending()
             || !pending.ready.is_empty()
             || !pending.deferred_ready.is_empty()
             || !pending.inactive.is_empty()
@@ -121,7 +124,7 @@ impl<B: SimBackend> SimulationState<B> {
             let compiled = compiled_clocks(scheduler, queue, clocks);
             for event in queue {
                 if clock_slot(scheduler, event, clocks).is_some_and(|bit| {
-                    compiled >> bit & 1 != 0
+                    compiled.bit(bit as u64)
                         && !scheduler.clock_events[bit].intersects(&self.observed_events)
                 }) {
                     first = first.min(event.time);
@@ -224,6 +227,14 @@ impl<B: SimBackend> SimulationState<B> {
             backend.set(waiting, 0u8);
         }
         backend.set(scheduler.ready, 0u64);
+        for (index, counted) in self.model.counted.iter().enumerate() {
+            for &(_, kind) in &counted.domains {
+                backend.set(
+                    scheduler.counter_baseline(index, kind),
+                    self.process_state.domain_counters[index][crate::timing::kind_index(kind)],
+                );
+            }
+        }
         // The scheduler's waiting kernels wait in its slots during the run,
         // with the level each wait last saw.
         for (process, slots) in scheduler.waits.iter().enumerate() {
@@ -247,13 +258,17 @@ impl<B: SimBackend> SimulationState<B> {
             // of the edge the wait site waits for.
             let level = match self.process_state.waiters.get(process) {
                 Some(waiter) => match waiter.baselines.first() {
-                    Some(Baseline::Raw(raw)) => {
+                    Some(Baseline::Raw(raw) | Baseline::RawCounter { raw, .. }) => {
                         let bit = |index: usize| raw.get(index).is_some_and(|byte| byte & 1 != 0);
                         u8::from(bit(0)) | (u8::from(bit(1)) * LEVEL_UNKNOWN)
                     }
-                    Some(Baseline::Value((value, mask))) => {
-                        u8::from(value.bit(0)) | (u8::from(mask.bit(0)) * LEVEL_UNKNOWN)
-                    }
+                    Some(
+                        Baseline::Value((value, mask))
+                        | Baseline::Counter {
+                            value: (value, mask),
+                            ..
+                        },
+                    ) => u8::from(value.bit(0)) | (u8::from(mask.bit(0)) * LEVEL_UNKNOWN),
                     _ => return Err(SimulatorErrorCode::InternalError.into()),
                 },
                 None => {
@@ -271,7 +286,20 @@ impl<B: SimBackend> SimulationState<B> {
                 .ok_or(SimulatorErrorCode::InternalError)?;
             let level = level | (*term as u8) << celox_design::BASELINE_TERM_SHIFT;
             backend.set(waiting, 1u8);
-            backend.set(baseline, level);
+            match self
+                .process_state
+                .waiters
+                .get(process)
+                .and_then(|waiter| waiter.baselines.first())
+            {
+                Some(Baseline::RawCounter { seen, .. } | Baseline::Counter { seen, .. }) => {
+                    backend.set(
+                        baseline,
+                        u64::from(level) | (u64::from(*seen) << celox_design::SCHEDULER_FLAG_WIDTH),
+                    );
+                }
+                _ => backend.set(baseline, level),
+            }
             self.process_state.waiters.remove(process);
         }
         // The scheduler's kernels wait in its wake slots during the run.
@@ -292,10 +320,10 @@ impl<B: SimBackend> SimulationState<B> {
             let queue = &mut self.scheduler.event_queue;
             let compiled = compiled_clocks(scheduler, queue, &self.scheduler.clocks);
             clocks.resize(scheduler.clocks.len(), None);
-            let mut values = 0u64;
+            let mut values = num_bigint::BigUint::default();
             for event in queue.iter() {
                 let Some(bit) = clock_slot(scheduler, event, &self.scheduler.clocks)
-                    .filter(|&bit| compiled >> bit & 1 != 0)
+                    .filter(|&bit| compiled.bit(bit as u64))
                 else {
                     continue;
                 };
@@ -310,17 +338,18 @@ impl<B: SimBackend> SimulationState<B> {
                     SchedulerRefs::clock_element(scheduler.clock_period, bit),
                     period,
                 );
-                values |= u64::from(event.next_val != 0) << bit;
+                values.set_bit(bit as u64, event.next_val != 0);
                 clocks[bit] = Some(event.event_ref);
             }
             queue.retain(|event| {
                 clock_slot(scheduler, event, &self.scheduler.clocks)
-                    .is_none_or(|bit| compiled >> bit & 1 == 0)
+                    .is_none_or(|bit| !compiled.bit(bit as u64))
             });
-            backend.set(scheduler.clock_armed, compiled);
-            backend.set(scheduler.clock_value, values);
+            backend.set_wide(scheduler.clock_armed, compiled);
+            backend.set_wide(scheduler.clock_value, values);
         }
         let unit = scheduler.unit;
+        self.stats.compiled_runs = self.stats.compiled_runs.saturating_add(1);
         let result = executor.run_process(unit);
         self.process_state
             .nba_queue
@@ -336,7 +365,13 @@ impl<B: SimBackend> SimulationState<B> {
         let now: u64 = backend.get_as(scheduler.now);
         let exit = SchedulerExit::from_code(backend.get_as(scheduler.exit));
         let current: u64 = backend.get_as(scheduler.current);
-        let ready: u64 = backend.get_as(scheduler.ready);
+        let ready = backend.get(scheduler.ready);
+        for (index, counted) in self.model.counted.iter().enumerate() {
+            for &(_, kind) in &counted.domains {
+                self.process_state.domain_counters[index][crate::timing::kind_index(kind)] =
+                    backend.get_as(scheduler.counter_baseline(index, kind));
+            }
+        }
         let complete = result.is_ok() && exit == Some(SchedulerExit::Limit);
         // A clock that overflows ends the run after its slot completed.
         let slot_complete = complete || exit == Some(SchedulerExit::ClockOverflow);
@@ -347,18 +382,18 @@ impl<B: SimBackend> SimulationState<B> {
         // Armed clocks wait for their next edge in the event queue again; a
         // clock whose edge applied in a slot the run left unfinished is gone,
         // as the reference loop leaves it until the slot re-arms it.
-        let armed: u64 = backend.get_as(scheduler.clock_armed);
-        let values: u64 = backend.get_as(scheduler.clock_value);
+        let armed = backend.get(scheduler.clock_armed);
+        let values = backend.get(scheduler.clock_value);
         let clocked = clocks.iter().any(Option::is_some);
         for (bit, event_ref) in clocks.into_iter().enumerate() {
-            let Some(event_ref) = event_ref.filter(|_| armed >> bit & 1 != 0) else {
+            let Some(event_ref) = event_ref.filter(|_| armed.bit(bit as u64)) else {
                 continue;
             };
             self.scheduler.push(SimEvent {
                 time: backend.get_as(SchedulerRefs::clock_element(scheduler.clock_next, bit)),
                 event_ref,
                 signal: scheduler.clocks[bit].1,
-                next_val: u8::from(values >> bit & 1 != 0),
+                next_val: u8::from(values.bit(bit as u64)),
                 periodic: true,
             });
         }
@@ -371,7 +406,7 @@ impl<B: SimBackend> SimulationState<B> {
                 .get(process)
                 .copied()
                 .flatten()
-                .is_some_and(|ordinal| ready >> ordinal & 1 != 0)
+                .is_some_and(|ordinal| ready.bit(ordinal as u64))
         };
         let pending =
             |process: usize| !complete && (process as u64 == current || is_ready(process));
@@ -435,7 +470,18 @@ impl<B: SimBackend> SimulationState<B> {
                 restored?;
                 continue;
             }
-            let level = backend.get_as::<u8>(baseline);
+            // The frontend reserves room for a raw snapshot before the plan
+            // selects the compact scalar form. Read only the compact prefix;
+            // some backends require get_as's storage view to fit its type.
+            let packed = backend.get_as::<u64>(crate::SignalRef {
+                width: baseline.width.min(u64::BITS as usize),
+                ..baseline
+            });
+            let level = packed as u8;
+            let counter = terms
+                .first()
+                .and_then(|term| term.counter)
+                .map(|_| (packed >> celox_design::SCHEDULER_FLAG_WIDTH) as u32);
             // A four-state signal's image holds its mask plane after its value.
             let planes = [level & 1, u8::from(level & LEVEL_UNKNOWN != 0)];
             let level = if self.four_state && terms.iter().any(|term| term.signal.is_4state) {
@@ -450,6 +496,21 @@ impl<B: SimBackend> SimulationState<B> {
                 |waiter| {
                     waiter.site = site;
                     waiter.baselines.truncate(1);
+                    if let Some(seen) = counter {
+                        match waiter.baselines.first_mut() {
+                            Some(Baseline::RawCounter { seen: last, raw }) => {
+                                *last = seen;
+                                copy_planes(raw, level, 1);
+                            }
+                            _ => {
+                                let mut raw = Vec::with_capacity(level.len());
+                                copy_planes(&mut raw, level, 1);
+                                waiter.baselines.clear();
+                                waiter.baselines.push(Baseline::RawCounter { seen, raw });
+                            }
+                        }
+                        return;
+                    }
                     match waiter.baselines.first_mut() {
                         Some(Baseline::Raw(raw)) => copy_planes(raw, level, 1),
                         _ => {
@@ -463,9 +524,26 @@ impl<B: SimBackend> SimulationState<B> {
             );
         }
         if !complete {
-            for process in 0..ordinals.len() {
-                if is_ready(process) && process as u64 != current {
-                    self.process_state.ready.insert(process);
+            for (process, ordinal) in ordinals.iter().enumerate() {
+                if ordinal.is_none() || process as u64 == current {
+                    continue;
+                }
+                // Region suspensions are stored as statuses while native
+                // code owns the slot. Preserve their queues on early exit.
+                match status(process) {
+                    Some(celox_design::ProcessStatus::AssertionObserved) => {
+                        self.process_state.observed.insert(process);
+                    }
+                    Some(celox_design::ProcessStatus::AssertionReactive) => {
+                        self.process_state.reactive.insert(process);
+                    }
+                    Some(celox_design::ProcessStatus::DeferActive) if !is_ready(process) => {
+                        self.process_state.deferred_ready.insert(process);
+                    }
+                    _ if is_ready(process) => {
+                        self.process_state.ready.insert(process);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -577,13 +655,20 @@ fn pack_wait_snapshot(
         let len = bytes * if term.mask_offset.is_some() { 2 } else { 1 };
         let encoded;
         let raw = match baseline {
-            Baseline::Raw(raw) => raw.as_slice(),
-            Baseline::Value(value) => {
+            Baseline::Raw(raw) | Baseline::RawCounter { raw, .. } => raw.as_slice(),
+            Baseline::Value(value) | Baseline::Counter { value, .. } => {
                 encoded = crate::timing::encode_planes(value, term.width, len);
                 &encoded
             }
             _ => return Err(SimulatorErrorCode::InternalError),
         };
+        if let Some(offset) = term.counter_offset {
+            let (Baseline::RawCounter { seen, .. } | Baseline::Counter { seen, .. }) = baseline
+            else {
+                return Err(SimulatorErrorCode::InternalError);
+            };
+            packed[offset / 8..offset / 8 + 4].copy_from_slice(&seen.to_le_bytes());
+        }
         if raw.len() < len {
             return Err(SimulatorErrorCode::InternalError);
         }
@@ -616,14 +701,32 @@ fn unpack_wait_snapshot(
     for (index, term) in layout.terms.iter().enumerate() {
         let bytes = term.width.div_ceil(8);
         let len = bytes * if term.mask_offset.is_some() { 2 } else { 1 };
+        let seen = term.counter_offset.map(|offset| {
+            u32::from_le_bytes(packed[offset / 8..offset / 8 + 4].try_into().unwrap())
+        });
+        let empty = || match seen {
+            Some(seen) => Baseline::RawCounter {
+                seen,
+                raw: Vec::with_capacity(len),
+            },
+            None => Baseline::Raw(Vec::with_capacity(len)),
+        };
         if index == baselines.len() {
-            baselines.push(Baseline::Raw(Vec::with_capacity(len)));
+            baselines.push(empty());
         }
-        if !matches!(baselines[index], Baseline::Raw(_)) {
-            baselines[index] = Baseline::Raw(Vec::with_capacity(len));
+        if !matches!(
+            (&baselines[index], seen),
+            (Baseline::Raw(_), None) | (Baseline::RawCounter { .. }, Some(_))
+        ) {
+            baselines[index] = empty();
         }
-        let Baseline::Raw(raw) = &mut baselines[index] else {
-            unreachable!()
+        let raw = match &mut baselines[index] {
+            Baseline::Raw(raw) => raw,
+            Baseline::RawCounter { seen: last, raw } => {
+                *last = seen.unwrap();
+                raw
+            }
+            _ => unreachable!(),
         };
         raw.resize(len, 0);
         let at = term.value_offset / 8;
@@ -640,6 +743,40 @@ fn unpack_wait_snapshot(
 mod raw_wait_snapshot_tests {
     use super::*;
     use num_bigint::BigUint;
+
+    #[test]
+    fn counted_wait_snapshot_preserves_counter_wrap_and_raw_planes() {
+        let layout = celox_design::schedule::CompiledWaitLayout::with_counters(&[
+            (65, true, true),
+            (9, false, false),
+            (1, true, true),
+        ])
+        .unwrap();
+        let baselines = vec![
+            Baseline::Counter {
+                seen: u32::MAX,
+                value: (BigUint::from(3u8) << 63, BigUint::from(1u8) << 64),
+            },
+            Baseline::Raw(vec![0x12, 1]),
+            Baseline::RawCounter {
+                seen: 0,
+                raw: vec![1, 1],
+            },
+        ];
+        let packed = pack_wait_snapshot(&layout, &baselines).unwrap();
+        let mut bytes = packed.to_bytes_le();
+        bytes.resize(layout.bits.div_ceil(8), 0);
+        let mut restored = Vec::new();
+        for _ in 0..2 {
+            unpack_wait_snapshot(&layout, &bytes, &mut restored).unwrap();
+            assert_eq!(pack_wait_snapshot(&layout, &restored).unwrap(), packed);
+            assert!(matches!(
+                restored[0],
+                Baseline::RawCounter { seen: u32::MAX, .. }
+            ));
+            assert!(matches!(restored[2], Baseline::RawCounter { seen: 0, .. }));
+        }
+    }
 
     #[test]
     fn raw_wait_snapshot_handover_preserves_partial_bytes_and_mask_planes() {

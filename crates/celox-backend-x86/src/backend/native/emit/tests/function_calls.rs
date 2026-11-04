@@ -1268,3 +1268,356 @@ fn spilled_vectors_of_a_function_unit_are_aligned_without_avx() {
         );
     }
 }
+
+#[test]
+fn allocated_caller_uses_late_callee_extent_without_changing_code() {
+    let layout = MemoryLayout::build(&VectorObjects, false, MemoryLayoutMode::Packed);
+    let mut unit = vector_pressure().unit;
+    unit.blocks
+        .get_mut(&crate::BlockId(0))
+        .unwrap()
+        .instructions
+        .insert(
+            2 * VECTORS as usize,
+            SIRInstruction::ExternCall {
+                dst: None,
+                func: celox_sir::extern_abi::NATIVE_KERNEL_CALL_TAG,
+                args: vec![],
+            },
+        );
+    let mut strategies = vec![StateBaseStrategy::R15];
+    if X86Features::detect().state_base() == StateBaseStrategy::Gs {
+        strategies.push(StateBaseStrategy::Gs);
+    }
+    for strategy in strategies {
+        let features = X86Features::for_test_with_state_base(false, strategy);
+        let options = X86BackendOptions {
+            target_features: Some(features),
+            ..Default::default()
+        };
+        let mut early_trace = NativeFunctionTrace::default();
+        let allocated = allocate_owned_prepared_eu(
+            unit.clone(),
+            &layout,
+            false,
+            "caller",
+            &options,
+            Some(&mut early_trace),
+            || false,
+        )
+        .unwrap();
+        assert!(
+            early_trace.spill_frame_size > 0,
+            "values must spill across the call"
+        );
+
+        // The child is compiled only after caller allocation. It destroys its
+        // entire private region, including where an unreserved caller would
+        // have placed live spills. Its emitted extent, not a guess, is linked.
+        let semantic_end =
+            (layout.merged_total_size + layout.triggered_bits_total_size).next_multiple_of(8);
+        let child_end = semantic_end + 4096;
+        let mut vregs = VRegAllocator::new();
+        let trash = vregs.alloc();
+        let mut child = MFunction::new(vregs, vec![SpillDesc::transient()]);
+        child.target_features = features;
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm {
+            dst: trash,
+            value: 0xdead_beef_dead_beef,
+        });
+        for offset in (semantic_end..child_end).step_by(8) {
+            block.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: offset as i32,
+                src: trash,
+                size: OpSize::S64,
+            });
+        }
+        block.push(MInst::Return);
+        child.push_block(block);
+        let ra = regalloc::run_regalloc(&mut child).unwrap();
+        let child_code =
+            emit_with_callees(&child, &ra.assignment, ra.spill_frame_size, child_end, &[]).unwrap();
+        let linked = options
+            .clone()
+            .with_native_callees([child_code.required_state_size as usize]);
+        let expected =
+            emit_prepared_eu(&unit, &layout, false, "caller", &linked, None, || false).unwrap();
+        let actual = allocated
+            .emit(linked.arena_base, Some(&mut early_trace), || false)
+            .unwrap();
+        assert_eq!(actual.code, expected.code);
+        assert_eq!(actual.required_state_size, expected.required_state_size);
+        assert!(!early_trace.disassembly.is_empty());
+        let child_jit = JitCode::new(&child_code.code).unwrap();
+        let caller_jit = JitCode::new(&actual.code).unwrap();
+        let table = [child_jit.fn_ptr as usize];
+        let mut memory = vec![0u8; actual.required_state_size as usize];
+        memory[celox_state_layout::STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET..][..8]
+            .copy_from_slice(&(table.as_ptr() as u64).to_le_bytes());
+        for id in 0..2 * VECTORS {
+            let addr = layout.offsets[&object(id)];
+            let value = (u128::from(id + 1) << 80) | u128::from(id + 101);
+            memory[addr..][..16].copy_from_slice(&value.to_le_bytes());
+        }
+        assert_eq!(unsafe { caller_jit.call(&mut memory) }, 0);
+        for id in 0..VECTORS {
+            let a = (u128::from(id + 1) << 80) | u128::from(id + 101);
+            let b = (u128::from(id + VECTORS + 1) << 80) | u128::from(id + VECTORS + 101);
+            let addr = layout.offsets[&object(2 * VECTORS + id)];
+            assert_eq!(&memory[addr..][..16], &(a ^ b).to_le_bytes());
+        }
+        let missing = allocate_owned_prepared_eu(
+            unit.clone(),
+            &layout,
+            false,
+            "caller",
+            &options,
+            None,
+            || false,
+        )
+        .unwrap()
+        .emit(None, None, || false);
+        assert!(
+            missing.is_err(),
+            "unresolved native callee must be rejected"
+        );
+        let cancelled = allocate_owned_prepared_eu(
+            unit.clone(),
+            &layout,
+            false,
+            "caller",
+            &options,
+            None,
+            || false,
+        )
+        .unwrap()
+        .emit(linked.arena_base, None, || true);
+        assert!(matches!(cancelled, Err(ChainedEmitError::Cancelled)));
+    }
+}
+
+#[test]
+fn native_scheduler_memory_stays_in_generated_code() {
+    use celox_sir::native_memory::NativeMemoryOp as Op;
+    for four_state in [false, true] {
+        let layout = layout(four_state);
+        let offset = layout.offsets[&object(WIDE)];
+        let mut arena = [0u64; 8];
+        let operation = |op: Op, dst: Option<usize>, args: &[usize]| SIRInstruction::ExternCall {
+            dst: dst.map(reg),
+            func: op.function(),
+            args: args.iter().copied().map(reg).collect(),
+        };
+        let unit = ExecutionUnit {
+            entry_block_id: crate::BlockId(0),
+            blocks: [block(
+                0,
+                vec![
+                    imm(0, arena.as_mut_ptr() as u64),
+                    imm(1, 24),
+                    imm(2, offset as u64),
+                    load(10, state(WIDE), 100),
+                    imm(3, 0xfedc_ba98_7654_3210),
+                    operation(Op::WriteIndirect, None, &[0, 1, 3]),
+                    operation(Op::ReadIndirect, Some(4), &[0, 1]),
+                    operation(Op::WriteState, None, &[2, 4]),
+                    operation(Op::ReadState, Some(5), &[2]),
+                    imm(6, 32),
+                    operation(Op::WriteIndirect, None, &[0, 6, 5]),
+                    SIRInstruction::Slice(reg(11), reg(10), 8, 8),
+                    store(state(OUT), 8, 11),
+                ],
+                SIRTerminator::Return,
+            )]
+            .into_iter()
+            .collect(),
+            register_map: (0..=6)
+                .map(|id| (reg(id), bit(64)))
+                .chain([
+                    (reg(10), RegisterType::Logic { width: 100 }),
+                    (reg(11), RegisterType::Logic { width: 8 }),
+                ])
+                .collect(),
+        };
+        unit.verify();
+        let lowered = crate::isel::lower_execution_unit(&unit, &layout, four_state);
+        assert!(lowered.blocks.iter().all(|block| {
+            block
+                .insts
+                .iter()
+                .all(|inst| !matches!(inst, MInst::CallExtern { .. }))
+        }));
+        let program = compile(&[], &unit, &layout, &[]);
+        let (status, memory) = program.run_with(|memory| {
+            memory[offset..offset + 8].copy_from_slice(&0x0123_4567_89ab_cdefu64.to_le_bytes());
+        });
+        assert_eq!(status, 0);
+        assert_eq!(arena[3], 0xfedc_ba98_7654_3210);
+        assert_eq!(arena[4], arena[3]);
+        assert_eq!(
+            memory[layout.offsets[&object(OUT)]],
+            0xcd,
+            "a slice of the earlier value must not reload through a raw state write"
+        );
+    }
+}
+
+#[test]
+fn native_raw_state_write_invalidates_dynamic_load_caches() {
+    use celox_sir::native_memory::NativeMemoryOp;
+    for four_state in [false, true] {
+        let layout = layout(four_state);
+        let mut instructions = vec![
+            imm(0, 0),
+            imm(1, layout.offsets[&object(KEEP)] as u64),
+            imm(2, 21),
+        ];
+        for base in [10, 20] {
+            if base == 20 {
+                instructions.push(SIRInstruction::ExternCall {
+                    dst: None,
+                    func: NativeMemoryOp::WriteState.function(),
+                    args: vec![reg(1), reg(2)],
+                });
+            }
+            for id in base..base + 4 {
+                instructions.push(SIRInstruction::Load(
+                    reg(id),
+                    state(KEEP),
+                    SIROffset::Dynamic(reg(0)),
+                    32,
+                ));
+            }
+            instructions.push(binary(base + 4, base, BinaryOp::Add, base + 1));
+            instructions.push(binary(base + 5, base + 2, BinaryOp::Add, base + 3));
+            instructions.push(binary(base + 6, base + 4, BinaryOp::Add, base + 5));
+        }
+        instructions.push(store(state(SP), 32, 16));
+        instructions.push(store(state(OUT), 32, 26));
+        let unit = ExecutionUnit {
+            entry_block_id: crate::BlockId(0),
+            blocks: [block(0, instructions, SIRTerminator::Return)]
+                .into_iter()
+                .collect(),
+            register_map: (0..3)
+                .map(|id| (reg(id), bit(64)))
+                .chain((10..17).chain(20..27).map(|id| (reg(id), bit(32))))
+                .collect(),
+        };
+        unit.verify();
+        let program = compile(&[], &unit, &layout, &[]);
+        let (status, memory) = program.run_with(|memory| {
+            let offset = layout.offsets[&object(KEEP)];
+            memory[offset..offset + 4].copy_from_slice(&10u32.to_le_bytes());
+        });
+        assert_eq!(status, 0);
+        for (id, expected) in [(SP, 40u32), (OUT, 84u32)] {
+            let offset = layout.offsets[&object(id)];
+            assert_eq!(
+                u32::from_le_bytes(memory[offset..offset + 4].try_into().unwrap()),
+                expected
+            );
+        }
+    }
+}
+
+#[test]
+fn native_raw_state_write_preserves_packed_field_comparisons() {
+    use celox_sir::native_memory::NativeMemoryOp;
+    // The two placements exercise independent hazards: sinking earlier loads
+    // past a raw write, and reusing a packed-word cache after that write.
+    for (field_width, defer_first_pack) in [(12, false), (12, true), (16, false), (16, true)] {
+        let layout = layout(false);
+        let offset = layout.offsets[&object(PAIR)];
+        let mut instructions = vec![imm(0, 1), imm(1, offset as u64), imm(2, 0)];
+        let mut register_map = [
+            (reg(0), bit(field_width)),
+            (reg(1), bit(64)),
+            (reg(2), bit(64)),
+            (reg(3), bit(field_width)),
+        ]
+        .into_iter()
+        .collect::<crate::HashMap<_, _>>();
+        for (loads, comparisons) in [(10, 20), (30, 40)] {
+            // Keep the second needle after the write as well. Otherwise its
+            // old definition would conservatively reject the second plan,
+            // hiding a failure to invalidate the packed-word cache itself.
+            let needle = if loads == 10 { 0 } else { 3 };
+            if loads == 30 {
+                instructions.push(imm(needle, 1));
+            }
+            for lane in 0..8 {
+                instructions.push(SIRInstruction::Load(
+                    reg(loads + lane),
+                    state(PAIR),
+                    SIROffset::Static(lane * field_width),
+                    field_width,
+                ));
+                instructions.push(binary(
+                    comparisons + lane,
+                    loads + lane,
+                    BinaryOp::Eq,
+                    needle,
+                ));
+                register_map.insert(reg(loads + lane), bit(field_width));
+                register_map.insert(reg(comparisons + lane), bit(1));
+            }
+            if loads == 10 {
+                if !defer_first_pack {
+                    instructions.push(SIRInstruction::Concat(
+                        reg(50),
+                        (20..28).rev().map(reg).collect(),
+                    ));
+                }
+                instructions.push(SIRInstruction::ExternCall {
+                    dst: None,
+                    func: NativeMemoryOp::WriteState.function(),
+                    args: vec![reg(1), reg(2)],
+                });
+                if defer_first_pack {
+                    instructions.push(SIRInstruction::Concat(
+                        reg(50),
+                        (20..28).rev().map(reg).collect(),
+                    ));
+                }
+            } else {
+                instructions.push(SIRInstruction::Concat(
+                    reg(51),
+                    (40..48).rev().map(reg).collect(),
+                ));
+            }
+        }
+        instructions.extend([store(state(SP), 8, 50), store(state(OUT), 8, 51)]);
+        register_map.extend([(reg(50), bit(8)), (reg(51), bit(8))]);
+        let unit = ExecutionUnit {
+            entry_block_id: crate::BlockId(0),
+            blocks: [block(0, instructions, SIRTerminator::Return)]
+                .into_iter()
+                .collect(),
+            register_map,
+        };
+        unit.verify();
+        // Disable BMI2 for 16-bit lanes to exercise the separate SIMD
+        // packed-lane planner, which also sinks its loads to the Concat.
+        let features =
+            X86Features::detect().with_bmi2(field_width == 12 && X86Features::detect().bmi2());
+        let program = compile_for(&[], &unit, &layout, &[], Some(features));
+        let (status, memory) = program.run_with(|memory| {
+            let fields = (0..8).fold(0u128, |value, lane| value | (1 << (lane * field_width)));
+            memory[offset..offset + 16].copy_from_slice(&fields.to_le_bytes());
+        });
+        assert_eq!(status, 0);
+        assert_eq!(
+            memory[layout.offsets[&object(SP)]],
+            0xff,
+            "earlier loads, deferred={defer_first_pack}"
+        );
+        assert_eq!(
+            memory[layout.offsets[&object(OUT)]],
+            u8::MAX << 64usize.div_ceil(field_width),
+            "fresh loads, deferred={defer_first_pack}"
+        );
+    }
+}

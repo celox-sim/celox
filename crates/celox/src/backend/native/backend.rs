@@ -1156,6 +1156,87 @@ pub(super) struct CompiledNativeFunction {
     pub(super) required_native_features: u8,
 }
 
+/// Allocated scheduler MIR without a guessed native callee scratch extent.
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+pub(crate) struct PreparedHotspotScheduler {
+    program: Arc<LaidOutProgram>,
+    allocated: emit::AllocatedFunction,
+    // Only the shared Comb entry is unresolved. All other outlined kernels
+    // can compile independently while that entry is still on the worker.
+    callees: Vec<Option<Arc<HotspotCode>>>,
+}
+
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+impl PreparedHotspotScheduler {
+    /// Optimize, allocate and compile independent callees while Comb compiles.
+    /// Only linking and emission wait for its actual scratch extent.
+    pub(crate) fn new(
+        program: Arc<LaidOutProgram>,
+        options: &SimulatorOptions,
+        cancel: &CompileCancel,
+    ) -> Result<Self, SimulatorError> {
+        let (unit, outlined) =
+            crate::scheduler::hotspot_scheduler(&program).map_err(codegen_message)?;
+        HotspotCode::validate_units(std::slice::from_ref(&unit))?;
+        let mut native = options.x86_options.clone();
+        native.baseline = false;
+        native.native_tick_loop = false;
+        let unit = prepare_merged_sir(
+            &[&unit],
+            program.layout(),
+            options.four_state,
+            "hotspot",
+            NativeMergeKind::Partial,
+            None,
+            &options.optimize_options.diagnostics,
+            Some(cancel),
+            native.baseline,
+            native.function.is_some(),
+        )?;
+        let allocated = emit::allocate_owned_prepared_eu(
+            unit,
+            program.layout(),
+            options.four_state,
+            "hotspot",
+            &native,
+            None,
+            || cancel.is_cancelled(),
+        )
+        .map_err(hotspot_pipeline_error)?;
+        let mut callees = Vec::with_capacity(outlined.len());
+        for body in outlined {
+            if cancel.is_cancelled() {
+                return Err(crate::backend::compile_cancel::cancelled_error());
+            }
+            let code = if program.sir.eval_comb.len() == 1 && body == program.sir.eval_comb[0] {
+                None
+            } else {
+                Some(Arc::new(HotspotCode::compile(
+                    &[body],
+                    program.layout(),
+                    options,
+                    cancel,
+                )?))
+            };
+            callees.push(code);
+        }
+        Ok(Self {
+            program,
+            allocated,
+            callees,
+        })
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+fn hotspot_pipeline_error(source: emit::ChainedEmitError) -> SimulatorError {
+    if matches!(source, emit::ChainedEmitError::Cancelled) {
+        codegen_err(CodegenError::Cancelled)
+    } else {
+        codegen_err(CodegenError::NativePipeline { source })
+    }
+}
+
 /// An independently owned complete entry using the program's existing state ABI.
 #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
 pub(crate) struct HotspotCode {
@@ -1176,22 +1257,7 @@ impl HotspotCode {
         options: &SimulatorOptions,
         cancel: &CompileCancel,
     ) -> Result<Self, SimulatorError> {
-        // Calls need a linked function table and disjoint nested scratch. Keep
-        // them interpreted until incremental linking implements that contract.
-        if units
-            .iter()
-            .flat_map(|unit| unit.blocks.values())
-            .any(|block| {
-                block
-                    .instructions
-                    .iter()
-                    .any(|inst| matches!(inst, SIRInstruction::Call { .. }))
-            })
-        {
-            return Err(codegen_message(
-                "hotspot entry requires an unlinked function",
-            ));
-        }
+        Self::validate_units(units)?;
         let mut native = options.x86_options.clone();
         native.baseline = false;
         native.native_tick_loop = false;
@@ -1208,12 +1274,39 @@ impl HotspotCode {
             &options.optimize_options.diagnostics,
             Some(cancel),
         )?;
+        Self::from_compiled(compiled, native.diagnostics.perf_map)
+    }
+
+    fn validate_units(units: &[ExecutionUnit<RegionedAbsoluteAddr>]) -> Result<(), SimulatorError> {
+        // Calls need a linked function table and disjoint nested scratch. Keep
+        // them interpreted until incremental linking implements that contract.
+        if units
+            .iter()
+            .flat_map(|unit| unit.blocks.values())
+            .any(|block| {
+                block
+                    .instructions
+                    .iter()
+                    .any(|inst| matches!(inst, SIRInstruction::Call { .. }))
+            })
+        {
+            return Err(codegen_message(
+                "hotspot entry requires an unlinked function",
+            ));
+        }
+        Ok(())
+    }
+
+    fn from_compiled(
+        compiled: CompiledNativeFunction,
+        perf_map: bool,
+    ) -> Result<Self, SimulatorError> {
         let code_size = compiled.code.len();
         let code = jit_mem::JitCode::new_named_with_symbols_profiled(
             &compiled.code,
             "celox_hotspot",
             &compiled.symbols,
-            native.diagnostics.perf_map,
+            perf_map,
         )
         .map_err(|error| codegen_message(format!("hotspot executable allocation: {error}")))?;
         Ok(Self {
@@ -1226,25 +1319,27 @@ impl HotspotCode {
     }
 
     pub(crate) fn compile_scheduler(
-        program: &LaidOutProgram,
+        prepared: PreparedHotspotScheduler,
         comb: Arc<HotspotCode>,
         options: &SimulatorOptions,
         cancel: &CompileCancel,
     ) -> Result<Self, SimulatorError> {
-        let (unit, outlined) =
-            crate::scheduler::hotspot_scheduler(program).map_err(codegen_message)?;
-        let mut callees = Vec::new();
+        let PreparedHotspotScheduler {
+            program,
+            allocated,
+            callees: prepared_callees,
+        } = prepared;
+        let mut callees = Vec::with_capacity(prepared_callees.len());
         let mut additional_bytes = 0usize;
-        for body in outlined {
+        for prepared in prepared_callees {
             if cancel.is_cancelled() {
                 return Err(crate::backend::compile_cancel::cancelled_error());
             }
-            let code = if program.sir.eval_comb.len() == 1 && body == program.sir.eval_comb[0] {
-                Arc::clone(&comb)
-            } else {
-                let code = Self::compile(&[body], program.layout(), options, cancel)?;
+            let code = if let Some(code) = prepared {
                 additional_bytes = additional_bytes.saturating_add(code.code_size);
-                Arc::new(code)
+                code
+            } else {
+                Arc::clone(&comb)
             };
             callees.push(code);
         }
@@ -1252,7 +1347,22 @@ impl HotspotCode {
         caller_options.x86_options = caller_options
             .x86_options
             .with_native_callees(callees.iter().map(|code| code.required_state_size));
-        let mut caller = Self::compile(&[unit], program.layout(), &caller_options, cancel)?;
+        let emitted = allocated
+            .emit(caller_options.x86_options.arena_base, None, || {
+                cancel.is_cancelled()
+            })
+            .map_err(hotspot_pipeline_error)?;
+        let symbols = perf_symbols_for_emit_result("hotspot", &emitted);
+        let mut caller = Self::from_compiled(
+            CompiledNativeFunction {
+                code: emitted.code,
+                symbols,
+                trace: None,
+                required_state_size: emitted.required_state_size as usize,
+                required_native_features: emitted.required_image_features,
+            },
+            caller_options.x86_options.diagnostics.perf_map,
+        )?;
         let mut table = options
             .dpi
             .resolve(&program.runtime().runtime_schema.extern_functions)?;

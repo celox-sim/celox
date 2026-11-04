@@ -3507,6 +3507,120 @@ mod tests {
         assert_eq!(counters.1, 0, "host edge batches: {counters:?}");
     }
 
+    // Clock masks have their own width: one TB process can drive clock
+    // positions beyond either one machine word or its process-ready mask.
+    #[test]
+    fn wide_tb_clock_handoff_preserves_every_edge() {
+        for reset in [false, true] {
+            let count = if reset { 33 } else { 65 };
+            let mut source = String::from(if reset {
+                "module Counter(clk: input clock, rst: input reset_async_high, q: output bit<8>) {\n\
+                 always_ff (clk, rst) { if_reset { q = 0; } else { q += 1; } } }\n"
+            } else {
+                "module Counter(clk: input clock, q: output bit<8>) {\n\
+                 always_ff (clk) { q += 1; } }\n"
+            });
+            source.push_str("#[test(Top)] module Top {\n");
+            for index in 0..count {
+                source.push_str(&format!(
+                    "inst c{index}: $tb::clock_gen #(period: 2); var q{index}: bit<8>;\n"
+                ));
+                let reset_port = if reset {
+                    source.push_str(&format!("inst r{index}: $tb::reset_gen(clk: c{index});\n"));
+                    format!(", rst: r{index}")
+                } else {
+                    String::new()
+                };
+                source.push_str(&format!(
+                    "inst d{index}: Counter(clk: c{index}, q: q{index}{reset_port});\n"
+                ));
+            }
+            source.push_str("initial {\n");
+            if reset {
+                // Normalize initial X levels together; subsequent assertions
+                // must exercise the native reset-mask handoff.
+                for index in 0..count {
+                    source.push_str(&format!("r{index} = 0;\n"));
+                }
+            }
+            for index in 0..count {
+                if reset {
+                    source.push_str(&format!("c{index}.next(1); r{index}.assert(1);\n"));
+                }
+                source.push_str(&format!("c{index}.next(1);\n"));
+            }
+            // A subsequent handoff must clear all other bits too.
+            source.push_str("c0.next(2);\n");
+            for index in 0..count {
+                let expected = if index == 0 { 3 } else { 1 };
+                source.push_str(&format!("$assert(q{index} == 8'd{expected});\n"));
+            }
+            source.push_str("$finish(); } }");
+            fn check<B: SimBackend>(
+                mut sim: Simulator<B>,
+                generated: bool,
+                reset: bool,
+                four_state: bool,
+            ) {
+                let scheduler = sim.program.runtime_schema.scheduler.as_ref().unwrap();
+                assert!(
+                    scheduler.clocks.len() > 64,
+                    "reset={reset}: {} slots",
+                    scheduler.clocks.len()
+                );
+                assert_eq!(sim.backend.resolve_signal(&scheduler.slots.ready).width, 64);
+                let meta = sim.program.testbench.as_ref().unwrap().scheduler().unwrap();
+                let clock_signals: Vec<_> = meta
+                    .events
+                    .iter()
+                    .map(|event| sim.backend.resolve_signal(event))
+                    .collect();
+                assert!(
+                    scheduler.clocks.iter().enumerate().any(|(bit, clock)| {
+                        bit >= 64
+                            && clock_signals.contains(&sim.backend.resolve_signal(clock)) != reset
+                    }),
+                    "the fixture must exercise an upper {} bit",
+                    if reset { "reset" } else { "clock" }
+                );
+                let tb = compile_initial_testbench(&sim).unwrap();
+                compiled::take_counters(&mut sim);
+                assert_eq!(
+                    run_compiled_testbench_to_finish(&mut sim, &tb),
+                    TestResult::Pass
+                );
+                if generated {
+                    let counters = compiled::take_counters(&mut sim);
+                    assert!(counters.0 > 0, "compiled TB did not run: {counters:?}");
+                    assert_eq!(
+                        counters.1,
+                        usize::from(reset && four_state),
+                        "only initial unknown reset levels may use host edges: {counters:?}"
+                    );
+                }
+            }
+            for four_state in [false, true] {
+                let build = || {
+                    Simulator::builder(&source, "Top")
+                        .reset_type(crate::ResetType::AsyncHigh)
+                        .four_state(four_state)
+                };
+                check(build().build_native().unwrap(), true, reset, four_state);
+                check(
+                    build().build_interpreter().unwrap(),
+                    false,
+                    reset,
+                    four_state,
+                );
+                #[cfg(feature = "cranelift")]
+                check(build().build_cranelift().unwrap(), true, reset, four_state);
+                // This large inlined TB exceeds wasmparser's 50,000-local
+                // function limit. Smaller clock/reset handoffs are covered
+                // by the four_state_tb_edges_* tests on Wasm too.
+            }
+        }
+    }
+
     #[test]
     fn concurrent_tb_publishes_each_clock_phase_to_vcd() {
         let source = r#"

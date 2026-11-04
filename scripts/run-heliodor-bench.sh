@@ -560,14 +560,26 @@ validate_gate_celox_config() {
 validate_gate_tiered_stats() {
     local log="$1"
     local expected_test="$2"
-    local line marker_count=0 valid_count=0
+    local line marker_count=0 valid_count=0 mixed_count=0 hotspot_count=0 hotspot_valid=0
     local pattern="^CELOX_TIERED_STATS test=${expected_test} tier=compiled promotion=promoted interpreted_evaluations=([0-9]+) compiled_evaluations=([0-9]+) promoted_after_interpreted_evaluations=([0-9]+) promotion_elapsed_ns=([0-9]+) safe_point_polls=([0-9]+) split_apply_deferrals=([0-9]+) threshold_deferrals=([0-9]+)$"
+    local mixed_pattern="^CELOX_TIERED_STATS test=${expected_test} tier=interpreter promotion=disabled interpreted_evaluations=([0-9]+) compiled_evaluations=0 promoted_after_interpreted_evaluations=NA promotion_elapsed_ns=NA safe_point_polls=([0-9]+) split_apply_deferrals=([0-9]+) threshold_deferrals=([0-9]+)$"
+    local hotspot_pattern="^CELOX_HOTSPOT_STATS test=${expected_test} interpreted_calls=([0-9]+) compiled_calls=([0-9]+) compiled_block_calls=([0-9]+) compiled_entries=([0-9]+) rejected_entries=([0-9]+) failed_entries=([0-9]+) code_bytes=([0-9]+) compile_ns=([0-9]+) frame_bytes_transferred=([0-9]+)$"
 
     if [[ ! -f "$log" ]]; then
         echo "error: tiered Celox gate log does not exist: $log" >&2
         return 1
     fi
     while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" == CELOX_HOTSPOT_STATS* ]]; then
+            hotspot_count=$((hotspot_count + 1))
+            if [[ "$line" =~ $hotspot_pattern ]] &&
+                ((10#${BASH_REMATCH[2]} > 0 || 10#${BASH_REMATCH[3]} > 0)) &&
+                ((10#${BASH_REMATCH[4]} > 0 && 10#${BASH_REMATCH[6]} == 0)) &&
+                ((10#${BASH_REMATCH[7]} > 0 && 10#${BASH_REMATCH[8]} > 0)); then
+                hotspot_valid=$((hotspot_valid + 1))
+            fi
+            continue
+        fi
         if [[ "$line" != CELOX_TIERED_STATS* ]]; then
             continue
         fi
@@ -576,11 +588,15 @@ validate_gate_tiered_stats() {
             ((10#${BASH_REMATCH[2]} > 0)) &&
             ((10#${BASH_REMATCH[4]} > 0)); then
             valid_count=$((valid_count + 1))
+        elif [[ "$line" =~ $mixed_pattern ]]; then
+            mixed_count=$((mixed_count + 1))
         fi
     done <"$log"
-    if ((marker_count != 1 || valid_count != 1)); then
-        echo "error: tiered Celox gate must report exactly one promoted tier with generated-code evaluations" >&2
-        echo "records=$marker_count valid=$valid_count" >&2
+    if ((marker_count != 1 ||
+        (hotspot_count == 0 && valid_count != 1) ||
+        (hotspot_count != 0 && (hotspot_count != 1 || hotspot_valid != 1 || mixed_count != 1)))); then
+        echo "error: tiered Celox gate requires one whole-image promotion or hotspot record with generated-code execution" >&2
+        echo "records=$marker_count promoted=$valid_count mixed=$mixed_count hotspot=$hotspot_count valid_hotspot=$hotspot_valid" >&2
         return 1
     fi
 }

@@ -45,6 +45,7 @@ mod host {
     mod format;
     mod fread;
     mod monitor;
+    mod native_arena;
     pub(crate) mod native_io;
     mod scan;
     mod strobe;
@@ -142,6 +143,8 @@ mod host {
         pub(crate) process_heap_roots: Vec<celox_heap::Root>,
         pub(super) file_io: celox_runtime::file_io::FileIo,
         native_file_io: Option<Arc<native_io::Metadata>>,
+        native_arena: native_arena::Arena,
+        pub(crate) native_service_calls: u64,
         pub(crate) native_host_return_budget: u64,
         pub(crate) native_host_round_budget: u64,
         pub(crate) postponed_output: bool,
@@ -1391,9 +1394,13 @@ mod host {
                 process_heap_roots: Vec::new(),
                 file_io: Default::default(),
                 native_file_io,
+                native_arena: Default::default(),
                 postponed_output,
+                native_service_calls: 0,
                 native_host_return_budget: u64::MAX,
-                native_host_round_budget: u64::MAX,
+                // Standalone native testbenches also need a finite bound on
+                // Active feedback; timed runs replace this with their budget.
+                native_host_round_budget: 1 << 20,
                 native_nba_queue: Default::default(),
                 pending_host_events: Arc::new(std::sync::Mutex::new(PendingRuntimeEvents {
                     deferred: DeferredQueues {
@@ -2623,6 +2630,7 @@ mod host {
                 if let Some(metadata) = &self.native_file_io {
                     let (state, state_size) = self.backend.memory_as_ptr();
                     let mut scope = native_io::Scope {
+                        arena: &mut self.native_arena,
                         metadata,
                         state,
                         state_size,
@@ -2630,16 +2638,15 @@ mod host {
                         pending: &self.pending_host_events,
                         read_seq: &self.runtime_event_read_seq,
                         error: None,
+                        calls: 0,
                         return_budget: self.native_host_return_budget,
-                        returns: 0,
                         round_budget: self.native_host_round_budget,
-                        scheduler_time: None,
-                        passes: 0,
-                        run_returns: 0,
                         nbas: &mut self.native_nba_queue,
                         pending_scan: 0,
                     };
                     let (result, error) = scope.run(&mut self.backend, index);
+                    self.native_service_calls =
+                        self.native_service_calls.saturating_add(scope.calls);
                     error.map_or(result, Err)
                 } else {
                     self.backend.run_process(index)
@@ -3882,6 +3889,12 @@ mod host {
     }
 
     impl Simulator<crate::backend::TieredBackend> {
+        /// Counts for incremental JIT execution, or `None` for whole-image tiering.
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        pub fn hotspot_stats(&self) -> Option<crate::backend::HotspotStats> {
+            self.backend.hotspot_stats()
+        }
+
         /// Whether this tiered simulation has adopted its compiled tier.
         ///
         /// False while background compilation is still running or after it
