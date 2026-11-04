@@ -1,3 +1,5 @@
 Address review4466885218 in the public-step member: drain same-time SDK zero-delay continuations before returning, with post-NBA ordering regressions. Keep the change in its existing PR while lower members merge.
 
 Present the final public-step behavior and regression evidence without retaining the review chronology in the PR description.
+
+Fix review 4471943302: retain host-only timestamp classification across native safe-point reentry; regress capped public step with zero-delay continuations.
