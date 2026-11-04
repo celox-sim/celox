@@ -10,9 +10,9 @@ use std::{
 use super::backend::NativeProgramImage;
 
 const TRAILER_MAGIC: &[u8; 8] = b"CELOXNPI";
-// Compiled waits and domain levels now retain occurrence counters; private
-// scheduler masks and continuations also use the expanded storage contract.
-const CONTAINER_VERSION: u16 = 60;
+// Native ordered schedulers access the reusable arena through a new private
+// host-context layout. Earlier runtimes cannot execute these images.
+const CONTAINER_VERSION: u16 = 61;
 const TRAILER_SIZE: usize = 32;
 // This optional prefix descriptor does not change the Postcard payload. Older
 // readers ignore framing flags and continue to locate the payload at EOF.
