@@ -1,0 +1,3 @@
+Preserve semantic regression coverage on ARM; require native scheduler residency only on the x86 implementation supported by this change.
+
+Address review r4469915947: finish from a combinational observer must be checked after the complete combinational execution phase so later units retain their writes and captures.
