@@ -129,7 +129,7 @@ fn retained_parameter_types_are_frozen_per_override_and_can_cross_tables() {
             &tree,
             &mut session,
             &HashMap::default(),
-            &HashMap::default(),
+            &ConstEnv::default(),
             &HashMap::from_iter([("N".into(), ConstExpr::Literal(width.to_string()))]),
         )
         .unwrap();
@@ -218,7 +218,7 @@ fn preliminary_queries_preserve_final_scalar_parameter_bindings() {
         &tree,
         &mut session,
         &HashMap::default(),
-        &HashMap::default(),
+        &ConstEnv::default(),
         &HashMap::default(),
     )
     .unwrap();
@@ -245,7 +245,7 @@ fn generated_parameters_keep_each_iterations_type_and_shadow_the_outer_one() {
     let items = generate::items(
         &tree,
         &mut session,
-        &HashMap::default(),
+        &ConstEnv::default(),
         &HashMap::default(),
     )
     .unwrap();
@@ -283,7 +283,7 @@ fn nested_generate_signals_hide_enclosing_parameter_types() {
         let items = generate::items(
             &tree,
             &mut session,
-            &HashMap::default(),
+            &ConstEnv::default(),
             &HashMap::default(),
         )
         .unwrap();

@@ -48,7 +48,7 @@ fn persistent_state_is_unobservable(subroutine: &Subroutine) -> bool {
 /// checks; functions with persistent storage or observable effects stay calls.
 pub struct RuntimeConstantFunctions<'a> {
     functions: ConstantFunctions,
-    constants: &'a HashMap<String, i128>,
+    constants: &'a dyn typecheck::ConstantEnvironment,
     cache: HashMap<String, Option<typecheck::IntegralLiteral>>,
     two_state: bool,
 }
@@ -56,7 +56,7 @@ pub struct RuntimeConstantFunctions<'a> {
 impl<'a> RuntimeConstantFunctions<'a> {
     pub fn new(
         module: &crate::ir::Module,
-        constants: &'a HashMap<String, i128>,
+        constants: &'a impl typecheck::Constants,
         four_state: bool,
     ) -> Self {
         let subroutines = module
@@ -259,7 +259,7 @@ mod tests {
             assign q = mixed();
         endmodule"#,
         );
-        let constants = HashMap::default();
+        let constants = ConstEnv::default();
         for four_state in [false, true] {
             let mut evaluator = RuntimeConstantFunctions::new(&module, &constants, four_state);
             assert_eq!(evaluator.value("mixed").unwrap().value, BigUint::default());
@@ -278,7 +278,7 @@ mod tests {
         );
         // The bits the loop leaves alone keep their value between calls.
         assert!(!module.subroutines()[0].persistent_locals.is_empty());
-        let constants = HashMap::default();
+        let constants = ConstEnv::default();
         let value = RuntimeConstantFunctions::new(&module, &constants, false)
             .value("partial")
             .unwrap();
@@ -308,7 +308,7 @@ mod tests {
             assign r = indexed();
         endmodule"#,
         );
-        let constants = HashMap::default();
+        let constants = ConstEnv::default();
         for four_state in [false, true] {
             let mut evaluator = RuntimeConstantFunctions::new(&module, &constants, four_state);
             assert!(evaluator.value("toggle").is_none());
@@ -327,7 +327,7 @@ mod tests {
             assign q = unknown_match();
         endmodule"#,
         );
-        let constants = HashMap::default();
+        let constants = ConstEnv::default();
         let mut evaluator = RuntimeConstantFunctions::new(&module, &constants, true);
         let value = evaluator.value("unknown_match").unwrap();
         assert_eq!(value.mask, BigUint::from(1u8));
@@ -380,7 +380,7 @@ mod tests {
             assign q=0;
         endmodule"#,
         );
-        let constants = HashMap::default();
+        let constants = ConstEnv::default();
         for four_state in [false, true] {
             let mut evaluator = RuntimeConstantFunctions::new(&module, &constants, four_state);
             for name in ["arithmetic", "signed_case", "skip_label", "fill_case"] {
@@ -410,7 +410,7 @@ mod tests {
             assign q=0;
         endmodule"#,
         );
-        let constants = HashMap::default();
+        let constants = ConstEnv::default();
         let mut evaluator = RuntimeConstantFunctions::new(&module, &constants, true);
         for (name, expected, mask) in [
             ("definite_match", 1u8, 0u8),
@@ -436,7 +436,7 @@ mod tests {
             assign q = pattern();
         endmodule"#,
         );
-        let constants = HashMap::default();
+        let constants = ConstEnv::default();
         let mut evaluator = RuntimeConstantFunctions::new(&module, &constants, true);
         let result = evaluator.value("pattern").unwrap();
         assert_eq!(result.width, 16);
@@ -458,7 +458,7 @@ mod tests {
         endmodule"#,
         );
         assert!(module.subroutines()[0].persistent_locals.is_empty());
-        let constants = HashMap::default();
+        let constants = ConstEnv::default();
         let mut evaluator = RuntimeConstantFunctions::new(&module, &constants, true);
         FUNCTION_CALLS.with(|calls| calls.set(0));
         let value = evaluator.value("pattern").unwrap();
@@ -486,7 +486,7 @@ mod tests {
             assign q = 0;
         endmodule"#,
         );
-        let constants = HashMap::default();
+        let constants = ConstEnv::default();
         let mut evaluator = RuntimeConstantFunctions::new(&module, &constants, true);
         for name in [
             "stateful",
@@ -512,7 +512,7 @@ mod tests {
             assign q=0;
         endmodule"#,
         );
-        let constants = HashMap::default();
+        let constants = ConstEnv::default();
         let mut two_state = RuntimeConstantFunctions::new(&module, &constants, false);
         for name in ["explicit_unknown", "outside_select", "non_integral_local"] {
             assert!(
@@ -540,7 +540,7 @@ mod tests {
             assign q = slices();
         endmodule"#,
         );
-        let constants = HashMap::default();
+        let constants = ConstEnv::default();
         let mut evaluator = RuntimeConstantFunctions::new(&module, &constants, true);
         assert!(evaluator.functions.functions.contains_key("slices"));
         assert!(evaluator.value("slices").is_none());
@@ -555,7 +555,7 @@ mod tests {
             assign q = 0;
         endmodule"#,
         );
-        let constants = HashMap::default();
+        let constants = ConstEnv::default();
         for four_state in [false, true] {
             let mut evaluator = RuntimeConstantFunctions::new(&module, &constants, four_state);
             assert_eq!(
@@ -581,7 +581,7 @@ mod tests {
             assign q = mixed_sign();
         endmodule"#,
         );
-        let constants = HashMap::default();
+        let constants = ConstEnv::default();
         let mut actual = Vec::new();
         let mut expected = Vec::new();
         for four_state in [false, true] {
@@ -635,7 +635,7 @@ mod tests {
             assign q = 0;
         endmodule"#,
         );
-        let constants = HashMap::default();
+        let constants = ConstEnv::default();
         for four_state in [false, true] {
             let mut evaluator = RuntimeConstantFunctions::new(&module, &constants, four_state);
             for (name, expected) in [
@@ -680,7 +680,7 @@ mod tests {
             assign q = 0;
         endmodule"#,
         );
-        let constants = HashMap::default();
+        let constants = ConstEnv::default();
         let mut evaluator = RuntimeConstantFunctions::new(&module, &constants, true);
         FUNCTION_CALLS.with(|count| count.set(0));
         let result = evaluator.value("merged").unwrap();

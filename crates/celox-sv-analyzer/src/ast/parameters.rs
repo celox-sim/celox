@@ -13,11 +13,7 @@ pub(crate) fn unbounded_parameter_marker(name: &str) -> String {
 
 /// All constant/type projections of one binding. Include the old and new
 /// packed bounds so scope exit can remove newly introduced dimension keys.
-pub(super) fn binding_keys(
-    name: &str,
-    env: &HashMap<String, i128>,
-    packed_count: usize,
-) -> Vec<String> {
+pub(super) fn binding_keys(name: &str, env: &ConstEnv, packed_count: usize) -> Vec<String> {
     let count = env
         .get(&parameter_dimensions_marker(name))
         .and_then(|count| usize::try_from(*count).ok())
@@ -55,7 +51,7 @@ pub(super) fn binding_keys(
     keys
 }
 
-pub(super) fn is_unbounded(value: &ConstExpr, env: &HashMap<String, i128>) -> bool {
+pub(super) fn is_unbounded(value: &ConstExpr, env: &ConstEnv) -> bool {
     match value {
         ConstExpr::Literal(value) => value == "$",
         ConstExpr::Ident(name) => env.get(&unbounded_parameter_marker(name)) == Some(&1),
@@ -63,7 +59,7 @@ pub(super) fn is_unbounded(value: &ConstExpr, env: &HashMap<String, i128>) -> bo
     }
 }
 
-pub(super) fn contains_unbounded_operand(value: &ConstExpr, env: &HashMap<String, i128>) -> bool {
+pub(super) fn contains_unbounded_operand(value: &ConstExpr, env: &ConstEnv) -> bool {
     match value {
         ConstExpr::Literal(_) | ConstExpr::Ident(_) => is_unbounded(value, env),
         ConstExpr::SelectRange { expr, msb, lsb, .. } => {
@@ -146,7 +142,7 @@ pub(super) fn parameters_from_native(
     session: &mut Session,
     parameters: &mut Vec<Parameter>,
     is_local: bool,
-    base_const_env: &HashMap<String, i128>,
+    base_const_env: &ConstEnv,
     type_aliases: &HashMap<String, Type>,
     parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Result<(), AnalyzerError> {
@@ -177,13 +173,13 @@ pub(super) fn parameters_from_native(
 /// Keep that prefix separate: its values and type markers override inherited
 /// bindings, but inherited values must not resolve a forward prefix reference.
 pub(super) struct ParameterEnvironment<'a> {
-    base: &'a HashMap<String, i128>,
-    values: HashMap<String, i128>,
+    base: &'a ConstEnv,
+    values: ConstEnv,
     // Evaluation sees inherited constants except declarations of this scope.
     // Keep it incremental, while `values` remains the local prefix projection.
-    bindings: HashMap<String, i128>,
+    bindings: ConstEnv,
     types: HashMap<String, ExprType>,
-    constants: HashMap<String, i128>,
+    constants: ConstEnv,
     // Only a nonnumeric prefix binding with an inherited numeric value makes
     // the range-lowering and width-evaluation projections differ. Track that
     // conservatively as the prefix grows, without rescanning its literals.
@@ -198,7 +194,7 @@ impl<'a> ParameterEnvironment<'a> {
         tree: &AnalysisContext<'_>,
         session: &mut Session,
         parameters: &[Parameter],
-        base: &'a HashMap<String, i128>,
+        base: &'a ConstEnv,
         shadowed: &[String],
     ) -> Self {
         let shadowed: HashSet<&str> = shadowed
@@ -212,7 +208,7 @@ impl<'a> ParameterEnvironment<'a> {
                 bindings.remove(&key);
             }
         }
-        let mut values = HashMap::default();
+        let mut values = ConstEnv::default();
         let mut types = parameter_types_from_const_env(&bindings);
         let mut literals = scope::imported(tree)
             .parameter_values
@@ -349,7 +345,7 @@ pub(super) fn parameters_from_native_with_environment(
     session: &mut Session,
     parameters: &mut Vec<Parameter>,
     is_local: bool,
-    base_const_env: &HashMap<String, i128>,
+    base_const_env: &ConstEnv,
     type_aliases: &HashMap<String, Type>,
     parameter_overrides: &HashMap<String, ConstExpr>,
     environment: &mut ParameterEnvironment<'_>,
@@ -634,7 +630,7 @@ fn parameter_declared_width(
     authored: &[&celox_sv_syntax::Parameter],
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
-    base_const_env: &HashMap<String, i128>,
+    base_const_env: &ConstEnv,
     environment: &ParameterEnvironment<'_>,
     type_aliases: &HashMap<String, Type>,
     parameter_overrides: &HashMap<String, ConstExpr>,
@@ -710,8 +706,8 @@ fn parameter_width_from_environments(
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
     type_aliases: &HashMap<String, Type>,
-    range_env: &HashMap<String, i128>,
-    env: &HashMap<String, i128>,
+    range_env: &ConstEnv,
+    env: &ConstEnv,
     native: &declaration_types::Prefix<'_>,
 ) -> Converted<Option<usize>> {
     let prefix = native;
@@ -777,8 +773,8 @@ pub(super) fn const_env_from_parameters(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     parameters: &[Parameter],
-) -> HashMap<String, i128> {
-    let mut env = HashMap::default();
+) -> ConstEnv {
+    let mut env = ConstEnv::default();
     extend_const_env_with_parameters(tree, session, &mut env, parameters);
     env
 }
@@ -786,7 +782,7 @@ pub(super) fn const_env_from_parameters(
 pub(super) fn extend_const_env_with_parameters(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &mut HashMap<String, i128>,
+    env: &mut ConstEnv,
     parameters: &[Parameter],
 ) {
     let mut parameter_types = parameter_types_from_const_env(env);
@@ -806,7 +802,7 @@ pub(super) fn extend_const_env_with_parameters(
 pub(super) fn bind_parameter(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &mut HashMap<String, i128>,
+    env: &mut ConstEnv,
     types: &mut HashMap<String, ExprType>,
     literals: &mut HashMap<String, Expr>,
     parameter: &Parameter,
@@ -884,7 +880,7 @@ pub(super) fn bind_parameter(
 /// Record packed bounds for parameter selects and array queries.
 fn insert_parameter_dimension_markers(
     functions: &const_functions::ConstantFunctions,
-    env: &mut HashMap<String, i128>,
+    env: &mut ConstEnv,
     parameter: &Parameter,
 ) {
     let name = parameter.name();
@@ -927,7 +923,7 @@ fn insert_parameter_dimension_markers(
 pub(super) fn parameter_element_literal(
     name: &str,
     indices: &[i128],
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
 ) -> Option<String> {
     let count = usize::try_from(*env.get(&parameter_dimensions_marker(name))?).ok()?;
     if indices.is_empty() || indices.len() > count {
@@ -1050,7 +1046,7 @@ fn enum_literal_fits_base_type(literal: &typecheck::IntegralLiteral, base: ExprT
 pub(super) fn enum_member_constants_from_scope(
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
-    base_const_env: &HashMap<String, i128>,
+    base_const_env: &ConstEnv,
     type_aliases: &HashMap<String, Type>,
     parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Result<EnumMemberConstants, AnalyzerError> {
@@ -1069,7 +1065,7 @@ pub(super) fn enum_member_constants_from_items(
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
     declarations: &[celox_sv_syntax::BodyItemId],
-    base_const_env: &HashMap<String, i128>,
+    base_const_env: &ConstEnv,
     type_aliases: &HashMap<String, Type>,
     parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Result<EnumMemberConstants, AnalyzerError> {
@@ -1207,7 +1203,7 @@ pub(super) fn enum_members_of(
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
     id: celox_sv_syntax::TypeId,
-    eval_env: &mut HashMap<String, i128>,
+    eval_env: &mut ConstEnv,
     resolved_type_aliases: &HashMap<String, Type>,
     constants: &mut EnumMemberConstants,
 ) -> Result<(), AnalyzerError> {
@@ -1378,7 +1374,7 @@ pub(super) fn parameter_value_env(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     parameters: &[Parameter],
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
 ) -> HashMap<String, Expr> {
     parameter_value_env_filtered(tree, session, parameters, const_env, None)
 }
@@ -1389,7 +1385,7 @@ pub(super) fn parameter_value_env_for_references(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     parameters: &[Parameter],
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     references: &HashSet<String>,
 ) -> HashMap<String, Expr> {
     let mut needed: HashSet<String> = parameters
@@ -1464,7 +1460,7 @@ fn parameter_value_env_filtered(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     parameters: &[Parameter],
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     needed: Option<&HashSet<String>>,
 ) -> HashMap<String, Expr> {
     let mut values = HashMap::default();
@@ -1584,7 +1580,7 @@ fn parameter_value_env_filtered(
 fn replace_oob_const_selects_with_unknown(
     tree: &AnalysisContext<'_>,
     expr: ConstExpr,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
 ) -> ConstExpr {
     let functions = &tree.functions;
     match expr {
@@ -1791,7 +1787,7 @@ pub(super) fn format_typed_parameter_literal(value: i128, width: usize, signed: 
 
 pub(super) fn substitute_typed_parameter_literals(
     expr: ConstExpr,
-    constants: &HashMap<String, i128>,
+    constants: &ConstEnv,
     parameter_types: &HashMap<String, ExprType>,
 ) -> ConstExpr {
     substitute_typed_parameter_literals_with_lookup(expr, constants, &|name| {
@@ -1801,7 +1797,7 @@ pub(super) fn substitute_typed_parameter_literals(
 
 pub(super) fn substitute_typed_parameter_literals_with_lookup(
     expr: ConstExpr,
-    constants: &HashMap<String, i128>,
+    constants: &ConstEnv,
     parameter_types: &impl Fn(&str) -> Option<ExprType>,
 ) -> ConstExpr {
     match expr {
@@ -1940,10 +1936,7 @@ pub(super) fn infer_const_expr_type(
 /// [`infer_const_expr_type`] with the types of the parameters the
 /// expression reads looked up in `const_env`, rather than collected from
 /// all of it.
-pub(super) fn infer_const_expr_type_in(
-    expr: &ConstExpr,
-    const_env: &HashMap<String, i128>,
-) -> Option<ExprType> {
+pub(super) fn infer_const_expr_type_in(expr: &ConstExpr, const_env: &ConstEnv) -> Option<ExprType> {
     infer_const_expr_type_inner(
         expr,
         &|name| dimensions::parameter_type_from_const_env(const_env, name),
@@ -1973,7 +1966,7 @@ fn infer_const_expr_type_inner(
             width: typecheck::select_range_width(
                 &(**msb).clone().into(),
                 &(**lsb).clone().into(),
-                &HashMap::default(),
+                &ConstEnv::default(),
             )?,
             signed: *signed,
         }),
@@ -2109,7 +2102,7 @@ mod tests;
 pub(super) fn real_literal(
     expr: &ConstExpr,
     kind: TypeKind,
-    constants: &HashMap<String, i128>,
+    constants: &ConstEnv,
     literals: &HashMap<String, Expr>,
 ) -> Option<Expr> {
     let expanded = substitute_expr_idents(const_expr_to_expr(expr.clone()), literals);
@@ -2139,7 +2132,7 @@ pub(super) fn enum_constant_type(
     session: &mut Session,
     id: celox_sv_syntax::TypeId,
     declaration: &Type,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
 ) -> Converted<Option<semantic_types::ConstantType>> {
     let celox_sv_syntax::DataTypeKind::Enum { base, items } =

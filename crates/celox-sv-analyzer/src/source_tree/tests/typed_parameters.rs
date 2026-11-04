@@ -1,5 +1,6 @@
 //! Actual typed parameter-initializer ownership (not the lightweight binder).
 use super::*;
+use crate::ast::ConstEnv;
 use crate::ast::{ConstExpr, Source};
 use celox_sv_syntax::{Declarations, DimensionKind, ExprKind};
 fn subtract(tree: &mut SourceTree) {
@@ -17,7 +18,7 @@ fn native_typed_multidimensional_initializer_and_overrides_drive_widths() {
     subtract(&mut tree);
     for (override_, expected) in [(None, 1), (Some(2), 0)] {
         let overrides = override_
-            .map(|value| HashMap::from_iter([("I".into(), value)]))
+            .map(|value| ConstEnv::from_iter([("I".into(), value)]))
             .unwrap_or_default();
         let source =
             Source::from_syntax_with_module_parameter_overrides(&tree, "M", &overrides).unwrap();

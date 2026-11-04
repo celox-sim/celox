@@ -155,8 +155,8 @@ fn functions() -> ConstantFunctions {
     }
 }
 
-fn environment(count: usize) -> HashMap<String, i128> {
-    let mut env = HashMap::from_iter([
+fn environment(count: usize) -> ConstEnv {
+    let mut env = ConstEnv::from_iter([
         ("GLOBAL".into(), -1),
         ("W".into(), 8),
         ("self_name".into(), 7),
@@ -189,7 +189,7 @@ fn copied_call(
     functions: &ConstantFunctions,
     function: &ConstantFunction,
     args: &[i128],
-    constants: &HashMap<String, i128>,
+    constants: &ConstEnv,
 ) -> Option<i128> {
     // Calls it makes see the caller's scope, not its frame.
     let context = Environment {
@@ -260,7 +260,7 @@ fn borrowed_calls_match_copied_frames_and_preserve_caller_values() {
 }
 
 struct CountedEnvironment<'a> {
-    values: &'a HashMap<String, i128>,
+    values: &'a ConstEnv,
     lookups: Cell<usize>,
 }
 

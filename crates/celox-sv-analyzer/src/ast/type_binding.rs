@@ -76,7 +76,7 @@ pub(super) fn port_type(
     port: &celox_sv_syntax::Port,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
 ) -> Converted<Option<Type>> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
@@ -94,7 +94,7 @@ pub(super) fn declared_port_range_matches(
     ty: &Type,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
 ) -> Converted<bool> {
     let Some(id) = port.declared_type else {
@@ -125,7 +125,7 @@ pub(super) fn implicit_subroutine_type(
     id: TypeId,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: impl ToShared<i128>,
+    env: impl ToShared<i128, ConstEnv>,
     aliases: impl ToShared<Type>,
 ) -> Converted<Type> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
@@ -139,7 +139,7 @@ pub(super) fn local_signals(
     declaration: &celox_sv_syntax::VariableDeclaration,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
     selected_name: Option<&str>,
 ) -> Converted<Vec<Signal>> {
@@ -179,7 +179,7 @@ pub(super) fn net_signals(
     declaration: &celox_sv_syntax::NetDeclaration,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
     selected_name: Option<&str>,
 ) -> Converted<Vec<Signal>> {
@@ -224,7 +224,7 @@ pub(super) fn argument_type(
     root: celox_sv_syntax::ExprId,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
 ) -> Converted<Option<Type>> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
@@ -291,7 +291,7 @@ pub(super) fn procedural_type(
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: impl ToShared<i128>,
+    env: impl ToShared<i128, ConstEnv>,
     aliases: impl ToShared<Type>,
 ) -> Converted<Option<Type>> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
@@ -303,7 +303,7 @@ pub(super) fn enum_constant_base(
     id: TypeId,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
 ) -> Converted<Option<Type>> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
@@ -315,7 +315,7 @@ pub(super) fn alias_base_type(
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: impl ToShared<i128>,
+    env: impl ToShared<i128, ConstEnv>,
     aliases: impl ToShared<Type>,
     defer_class_defaults: bool,
 ) -> Converted<Option<Type>> {
@@ -378,7 +378,7 @@ pub(super) fn alias_signals(
     declaration: &celox_sv_syntax::VariableDeclaration,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
     selected_name: Option<&str>,
 ) -> Converted<Vec<Signal>> {

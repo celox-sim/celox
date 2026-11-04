@@ -29,7 +29,7 @@ impl Message {
     fn of(
         functions: &const_functions::ConstantFunctions,
         ty: &Type,
-        env: &HashMap<String, i128>,
+        env: &ConstEnv,
     ) -> Converted<Self> {
         if !ty.unpacked_ranges.is_empty()
             || ty.container.is_some()

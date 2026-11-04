@@ -19,7 +19,7 @@ pub(super) struct ScopeSymbols {
     pub declarations_only: bool,
     /// Constant values of parameters and enum members, with their type
     /// markers.
-    pub const_env: HashMap<String, i128>,
+    pub const_env: ConstEnv,
     /// Literal values of parameters and enum members.
     pub parameter_values: HashMap<String, Expr>,
     pub parameters: Vec<Parameter>,
@@ -609,15 +609,55 @@ fn stmt_initializes(stmt: &Stmt, name: &str) -> bool {
     }
 }
 
-fn extend_missing<V: Clone>(map: &mut HashMap<String, V>, other: &HashMap<String, V>) {
-    for (name, value) in other {
-        map.entry(name.clone()).or_insert_with(|| value.clone());
+fn extend_missing<V: Clone + 'static, M: Table<V>>(map: &mut M, other: &M) {
+    for (name, value) in other.entries() {
+        if !map.has(name) {
+            map.put(name.clone(), value.clone());
+        }
     }
 }
 
-fn alias_entry<V: Clone>(map: &mut HashMap<String, V>, name: &str, target: &str) {
-    if let Some(value) = map.get(target).cloned() {
-        map.insert(name.to_string(), value);
+fn alias_entry<V: Clone + 'static, M: Table<V>>(map: &mut M, name: &str, target: &str) {
+    if let Some(value) = map.find(target).cloned() {
+        map.put(name.to_string(), value);
+    }
+}
+
+/// The tables a scope merges: plain tables and environments of constants.
+trait Table<V: 'static> {
+    fn entries(&self) -> impl Iterator<Item = (&String, &V)>;
+    fn has(&self, name: &str) -> bool;
+    fn find(&self, name: &str) -> Option<&V>;
+    fn put(&mut self, name: String, value: V);
+}
+
+impl<V: 'static> Table<V> for HashMap<String, V> {
+    fn entries(&self) -> impl Iterator<Item = (&String, &V)> {
+        self.iter()
+    }
+    fn has(&self, name: &str) -> bool {
+        self.contains_key(name)
+    }
+    fn find(&self, name: &str) -> Option<&V> {
+        self.get(name)
+    }
+    fn put(&mut self, name: String, value: V) {
+        self.insert(name, value);
+    }
+}
+
+impl Table<i128> for ConstEnv {
+    fn entries(&self) -> impl Iterator<Item = (&String, &i128)> {
+        self.iter()
+    }
+    fn has(&self, name: &str) -> bool {
+        self.contains_key(name)
+    }
+    fn find(&self, name: &str) -> Option<&i128> {
+        self.get(name)
+    }
+    fn put(&mut self, name: String, value: i128) {
+        self.insert(name, value);
     }
 }
 

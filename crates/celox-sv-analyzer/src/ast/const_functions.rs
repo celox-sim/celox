@@ -377,7 +377,7 @@ fn scope_flags(tree: &AnalysisContext<'_>) -> (bool, bool) {
 pub(super) fn module_constant_functions(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     type_aliases: &HashMap<String, Type>,
     parameter_literals: &HashMap<String, Expr>,
 ) -> ConstantFunctions {
@@ -394,7 +394,7 @@ pub(super) fn module_constant_functions(
 pub(super) fn symbolic_module_constant_functions(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     type_aliases: &HashMap<String, Type>,
     parameter_literals: &HashMap<String, Expr>,
     symbolic_parameters: &HashSet<String>,
@@ -443,7 +443,7 @@ pub(super) fn symbolic_module_constant_functions(
 fn collect_module_constant_functions(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     type_aliases: &HashMap<String, Type>,
     parameter_literals: &HashMap<String, Expr>,
     symbolic_parameters: &HashSet<String>,
@@ -828,7 +828,7 @@ pub(super) fn validate_argument_bindings(
 pub(super) fn eval_expression_literal(
     functions: &ConstantFunctions,
     expr: &Expr,
-    constants: &HashMap<String, i128>,
+    constants: &ConstEnv,
 ) -> Option<typecheck::IntegralLiteral> {
     let Expr::Call {
         callee: Callee::Subroutine(_),
@@ -895,7 +895,7 @@ pub(super) fn eval_call_literal(
     functions: &ConstantFunctions,
     name: &str,
     args: &[crate::ir::ConstExpr],
-    constants: &HashMap<String, i128>,
+    constants: &ConstEnv,
 ) -> Option<typecheck::IntegralLiteral> {
     let env = Environment {
         constants,
@@ -1243,7 +1243,7 @@ impl<'a> Frame<'a> {
                 let width = typecheck::select_range_width(
                     &msb.clone().into(),
                     &lsb.clone().into(),
-                    &HashMap::default(),
+                    &ConstEnv::default(),
                 )
                 .or_else(|| {
                     let msb = self.eval_lowered(&msb.clone().into())?;

@@ -34,7 +34,7 @@ pub(super) struct Item {
     /// The symbols the scope that elaborated the item imports.
     imported: Arc<scope::ScopeSymbols>,
     pub id: celox_sv_syntax::BodyItemId,
-    pub env: SharedMap<i128>,
+    pub env: SharedEnv,
     pub literals: SharedMap<Expr>,
     parameter_dimensions: Arc<VariablePackedDimensions>,
     qualified_types: SharedMap<Type>,
@@ -530,7 +530,7 @@ struct Scope {
     imported: Arc<scope::ScopeSymbols>,
     path: String,
     in_loop: bool,
-    env: SharedMap<i128>,
+    env: SharedEnv,
     literals: SharedMap<Expr>,
     parameters: Vec<Parameter>,
     parameter_dimensions: Arc<VariablePackedDimensions>,
@@ -586,7 +586,7 @@ pub(super) type Memo = memo::State;
 pub(super) fn items(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
 ) -> Result<Vec<Item>, AnalyzerError> {
     items_with_literal_use(tree, session, env, aliases, LiteralUse::All)
@@ -597,7 +597,7 @@ pub(super) fn items(
 pub(super) fn subroutine_items(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
 ) -> Result<Vec<Item>, AnalyzerError> {
     items_with_literal_use(
@@ -623,7 +623,7 @@ enum LiteralUse {
 fn items_with_literal_use(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
     literal_use: LiteralUse,
 ) -> Result<Vec<Item>, AnalyzerError> {
@@ -635,7 +635,7 @@ fn items_with_literal_use(
 fn elaborate(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
     literal_use: LiteralUse,
 ) -> Result<Vec<Item>, AnalyzerError> {
@@ -891,7 +891,7 @@ impl<'a> Elaborator<'a, '_> {
                 // Preserve four-state truth first (IEEE 1800-2023 12.4).
                 // The numeric interpreter additionally handles user functions
                 // kept symbolic for declaration-contract specialization.
-                typecheck::eval_const_integral_literal_with_types(&expr, &scope.env, &types)
+                typecheck::eval_const_integral_literal_with_types(&expr, &*scope.env, &types)
                     .map(|literal| typecheck::integral_literal_truth(&literal) == Some(true))
                     .or_else(|| {
                         typecheck::eval_const_expr_with_types_in_env(
@@ -1521,7 +1521,7 @@ fn bind_import(scope: &mut Scope, name: &str, target: &str, session: &mut Sessio
 fn module_constant_functions(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
     literals: &HashMap<String, Expr>,
 ) -> Converted<HashMap<String, Function>> {
@@ -1807,7 +1807,7 @@ mod tests {
             .unwrap();
             let tree = AnalysisContext::unspecialized(&tree);
             parameters::PARAMETER_BINDINGS.with(|bindings| bindings.set(0));
-            let active = items(&tree, session, &HashMap::default(), &HashMap::default()).unwrap();
+            let active = items(&tree, session, &ConstEnv::default(), &HashMap::default()).unwrap();
             let bindings = parameters::PARAMETER_BINDINGS.with(|bindings| bindings.get());
             assert!(
                 bindings <= 3 * count,
@@ -1833,7 +1833,7 @@ mod tests {
         let session = &mut Session::default();
         let syntax = crate::source_tree::SourceTree::empty();
         let tree = AnalysisContext::unspecialized(&syntax);
-        let mut base = HashMap::from_iter([("pkg::IMPORTED".into(), -1)]);
+        let mut base = ConstEnv::from_iter([("pkg::IMPORTED".into(), -1)]);
         insert_parameter_type_markers(
             &mut base,
             "pkg::IMPORTED",
@@ -1901,7 +1901,7 @@ mod tests {
         )
         .unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
-        let active = items(&tree, session, &HashMap::default(), &HashMap::default()).unwrap();
+        let active = items(&tree, session, &ConstEnv::default(), &HashMap::default()).unwrap();
         assert_eq!(active.len(), 2);
         assert!(std::ptr::eq(&*active[0].names, &*active[1].names));
         assert!(Arc::ptr_eq(&active[0].shadowed, &active[1].shadowed));
@@ -1938,7 +1938,7 @@ mod tests {
             let active = items(
                 &tree,
                 &mut Session::default(),
-                &HashMap::from_iter([("B".into(), 99)]),
+                &ConstEnv::from_iter([("B".into(), 99)]),
                 &HashMap::default(),
             )
             .unwrap();
@@ -2177,7 +2177,7 @@ mod tests {
         )
         .unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
-        let active = items(&tree, session, &HashMap::default(), &HashMap::default()).unwrap();
+        let active = items(&tree, session, &ConstEnv::default(), &HashMap::default()).unwrap();
         let outer = FunctionReturnMetadata {
             semantic_type: None,
             arguments: None,
@@ -2266,11 +2266,11 @@ mod tests {
             &tree,
             session,
             &HashMap::default(),
-            &HashMap::default(),
+            &ConstEnv::default(),
             &HashMap::default(),
         )
         .unwrap();
-        let mut env = HashMap::default();
+        let mut env = ConstEnv::default();
         extend_const_env_with_parameters(&tree, session, &mut env, &parameters);
         assert_eq!(env[&parameter_dimensions_marker("i")], 2);
         let active = items(&tree, &mut Session::default(), &env, &HashMap::default()).unwrap();
@@ -2315,7 +2315,7 @@ mod tests {
                 eval_ast_const_expr(
                     &const_functions::ConstantFunctions::default(),
                     lsb,
-                    &HashMap::default()
+                    &ConstEnv::default()
                 ),
                 Some(index as i128),
                 "{assignment:?}"
@@ -2614,7 +2614,7 @@ mod tests {
                         .unwrap();
                 let tree = AnalysisContext::unspecialized(&tree);
                 let active =
-                    items(&tree, session, &HashMap::default(), &HashMap::default()).unwrap();
+                    items(&tree, session, &ConstEnv::default(), &HashMap::default()).unwrap();
                 assert!(active.iter().all(|item| item.literals.is_empty()));
                 let ir =
                     crate::analyze::analyze_source(Source::from_syntax(&tree).unwrap()).unwrap();
@@ -2639,7 +2639,7 @@ mod tests {
         let tree =
             crate::source_tree::parse_scope_fixture(code, Path::new("needed_literals.sv")).unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
-        let env = HashMap::default();
+        let env = ConstEnv::default();
         let aliases = HashMap::default();
         let parameters =
             parameters_from_scope(&tree, session, &aliases, &env, &HashMap::default()).unwrap();
@@ -2745,7 +2745,7 @@ mod tests {
             crate::source_tree::parse_scope_fixture(code, Path::new("subroutine_literals.sv"))
                 .unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
-        let env = HashMap::default();
+        let env = ConstEnv::default();
         let aliases = HashMap::default();
         let full = items(&tree, session, &env, &aliases).unwrap();
         let projected = subroutine_items(&tree, session, &env, &aliases).unwrap();
@@ -2801,7 +2801,7 @@ mod tests {
                         .unwrap();
                 let tree = AnalysisContext::unspecialized(&tree);
                 let active =
-                    subroutine_items(&tree, session, &HashMap::default(), &HashMap::default())
+                    subroutine_items(&tree, session, &ConstEnv::default(), &HashMap::default())
                         .unwrap();
                 assert!(active.iter().all(|item| item.literals.is_empty()));
                 let ir =
@@ -2853,11 +2853,11 @@ mod tests {
             )
             .unwrap();
             let tree = AnalysisContext::unspecialized(&tree);
-            let full = items(&tree, session, &HashMap::default(), &HashMap::default())
+            let full = items(&tree, session, &ConstEnv::default(), &HashMap::default())
                 .err()
                 .expect(body);
             let projected =
-                subroutine_items(&tree, session, &HashMap::default(), &HashMap::default())
+                subroutine_items(&tree, session, &ConstEnv::default(), &HashMap::default())
                     .err()
                     .expect(body);
             assert_eq!(projected.to_string(), full.to_string(), "{body}");
