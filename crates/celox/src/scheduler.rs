@@ -38,6 +38,7 @@ mod ordered;
 mod regions;
 mod slice;
 mod slot_observers;
+mod steps;
 mod testbench;
 mod waits;
 
