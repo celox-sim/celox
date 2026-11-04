@@ -210,6 +210,50 @@ mod tests {
         }
     }
 
+    #[cfg(all(
+        feature = "sv-dpi",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    #[test]
+    fn opaque_dependencies_use_generated_scans() {
+        extern "C" fn increment(value: i32) -> i32 {
+            value.wrapping_add(1)
+        }
+        for body in [
+            "int raw = 0; always #3 raw = increment(data); wire [31:0] observed = raw + 1;",
+            "int observed = 0; initial forever begin @(data); observed = increment(data); end",
+            "int observed = 0; always @(posedge clk) observed = increment(data);",
+        ] {
+            let source = format!(
+                r#"`timescale 1ns/1ns
+module Top;
+    import "DPI-C" function int increment(input int value);
+    bit clk = 0;
+    int data = 0, count = 0;
+    always #1 clk = ~clk;
+    always #2 data = data + 1;
+    {body}
+    initial forever begin @(observed); count = count + 1; end
+endmodule"#
+            );
+            for (four_state, hotspot) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
+                let build = Simulation::from_sv_sources(
+                    vec![(source.as_str(), std::path::Path::new("opaque-waits.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .hotspot_jit(hotspot)
+                .scheduler_mode(SchedulerMode::DifferentialRuns);
+                // SAFETY: the imported signature is int increment(int).
+                let build = unsafe { build.dpi_function("increment", increment as *const ()) };
+                check(build.build_native().unwrap(), 24);
+            }
+        }
+    }
+
     #[test]
     fn different_event_lists_stay_compiled() {
         check_backends(
