@@ -1,1 +1,7 @@
-Codex: wide selections checked against constrained dispatch targets
+Revision history for #3123:
+
+rev 3 (content) 2026-11-04 14:07 UTC — Codex: wide selections checked against constrained dispatch targets
+rev 2 (content) 2026-11-04 13:59 UTC — Codex: reject a selected property the solver cannot hold (randomize(wide)); rand wide test
+rev 1 (initial) 2026-11-04 13:59 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3123,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"aa88689d87265caa0da3b7a85e324aee93e93a90","timestamp_iso":"2026-11-04T13:59:25Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"aa88689d87265caa0da3b7a85e324aee93e93a90","new_sha":"a43e2584adf18d506f9369799dc76a924fe5f4db","timestamp_iso":"2026-11-04T13:59:25Z","reason":"Codex: reject a selected property the solver cannot hold (randomize(wide)); rand wide test","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/aa88689d87265caa0da3b7a85e324aee93e93a90...a43e2584adf18d506f9369799dc76a924fe5f4db"},{"number":3,"change_type":"content","old_sha":"a43e2584adf18d506f9369799dc76a924fe5f4db","new_sha":"c7d12695b8acd5e0cacddbc85b6c5b69b618fc5a","timestamp_iso":"2026-11-04T14:07:50Z","reason":"Codex: wide selections checked against constrained dispatch targets","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/a43e2584adf18d506f9369799dc76a924fe5f4db...c7d12695b8acd5e0cacddbc85b6c5b69b618fc5a"}]} -->
