@@ -609,6 +609,8 @@ impl Plan {
                 .collect()
         };
         let rtl_stores: HashSet<AbsoluteAddr> = rtl_units().flat_map(stores).collect();
+        let opaque = |unit: &Unit| instructions(unit).any(makes_extern_calls);
+        let opaque_comb = sir.eval_comb.iter().any(opaque);
         let kernel_stores: Vec<HashSet<AbsoluteAddr>> = sir
             .processes
             .iter()
@@ -665,6 +667,12 @@ impl Plan {
             .map(|slicer| slicer.input_signals(wait_reads.iter().copied()))
             .unwrap_or_default();
         active_observers.extend(observed_inputs.into_iter().map(storage));
+        // An external call's state dependencies cannot be recovered from SIR
+        // loads. Preserve every blocking publication before NBA when the
+        // combinational observer cone contains such a call.
+        if opaque_comb {
+            active_observers.extend(rtl_stores.iter().copied());
+        }
         // A stateful combinational consumer can retain an intermediate
         // blocking result even when no waiter or clock reads it. Include all
         // combinational inputs so indirect cones are covered too. Missing
@@ -696,14 +704,14 @@ impl Plan {
             .filter(|(_, event)| {
                 unknown_gate
                     || event.eval_only.as_ref().is_none_or(|units| {
-                        units
-                            .iter()
-                            .flat_map(instructions)
-                            .flat_map(written_storage)
-                            .any(|target| {
-                                target.region == STABLE_REGION
-                                    && active_observers.contains(&storage(target.absolute_addr()))
-                            })
+                        units.iter().flat_map(instructions).any(|inst| {
+                            makes_extern_calls(inst)
+                                || written_storage(inst).any(|target| {
+                                    target.region == STABLE_REGION
+                                        && active_observers
+                                            .contains(&storage(target.absolute_addr()))
+                                })
+                        })
                     })
             })
             .map(|(index, _)| index)
@@ -903,7 +911,7 @@ impl Plan {
                         (index < fallback.len() && fallback[index].is_none()).then_some(unit)
                     }),
             )
-            .any(|unit| instructions(unit).any(makes_extern_calls));
+            .any(opaque);
         for index in 0..schema.processes.len() {
             let process = &model.processes[index];
             if process.waits.is_empty() || fallback[index].is_some() {
@@ -1012,7 +1020,10 @@ impl Plan {
                         }
                     }
                 };
-                let mut reactive = false;
+                // Unknown effects can wake a waiter more than once per slot.
+                // Use the generated work list and its budget, not the compact
+                // single-writer proof, for those activations.
+                let mut reactive = opaque_dependencies;
                 for &(signal, _) in &terms {
                     let width = program.layout().widths.get(&signal);
                     let signal = storage(signal);
@@ -1056,7 +1067,7 @@ impl Plan {
                 if reactive && !process.nbas.is_empty() && !nba_processes.contains(&index) {
                     return Err("a reactive wait stages nonblocking assignments");
                 }
-                if reactive && opaque_dependencies {
+                if reactive && opaque_dependencies && service_function.is_none() {
                     return Err("a reactive wait has opaque dependencies");
                 }
                 if (raw.is_some() || !alternatives.is_empty())
@@ -1174,7 +1185,7 @@ impl Plan {
                     || (!control_slots.contains(address) && active_observers.contains(address))
             })
             .collect();
-        let possible_wait_feedback = !feedback_stores.is_empty();
+        let possible_wait_feedback = opaque_dependencies || !feedback_stores.is_empty();
         tracing::debug!(target: "celox::scheduler", possible_wait_feedback,
             stores = ?feedback_stores.iter().take(8).map(|address| program.get_path(address)).collect::<Vec<_>>(),
             "candidate wait feedback stores");
@@ -1321,14 +1332,18 @@ impl Plan {
             homes_overlap_only_whole(program.layout()),
             "stable homes overlap at different offsets"
         );
-        let settle_reads: Option<HashSet<AbsoluteAddr>> = (!effects).then(|| {
-            sir.eval_comb
-                .iter()
-                .flat_map(instructions)
-                .flat_map(read_storage)
-                .map(|source| storage(source.absolute_addr()))
-                .collect()
-        });
+        // A pending settle cannot pass an opaque reader, nor can an opaque
+        // writer use a sliced settle selected only from explicit stores.
+        // Keep the complete generated settle in that general path.
+        let settle_reads: Option<HashSet<AbsoluteAddr>> =
+            (!effects && !opaque_dependencies).then(|| {
+                sir.eval_comb
+                    .iter()
+                    .flat_map(instructions)
+                    .flat_map(read_storage)
+                    .map(|source| storage(source.absolute_addr()))
+                    .collect()
+            });
         // A settle may wait for its readers only when it is a function of
         // its inputs that cannot fail: when it would end the run, it must do
         // so in its own slot; when it reads what an earlier settle left (a
