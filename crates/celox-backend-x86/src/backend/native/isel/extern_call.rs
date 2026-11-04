@@ -17,6 +17,10 @@ pub(super) fn lower_extern_call(
     func: u32,
     args: &[RegisterId],
 ) {
+    if let Some(op) = celox_sir::native_memory::NativeMemoryOp::decode(func) {
+        lower_native_memory(ctx, block, op, dst, args);
+        return;
+    }
     for (index, &arg) in args.iter().enumerate() {
         let src = extern_argument(ctx, block, arg);
         block.push(MInst::ExternArg {
@@ -216,4 +220,54 @@ pub(super) fn lower_float(
     let result = ctx.alloc_vreg(SpillDesc::transient());
     block.push(MInst::ExternResult { dst: result });
     define_extern_result(ctx, block, dst, result);
+}
+
+/// The producer bounds these accesses before entering this instruction. Keep
+/// state and indirect bases distinct for MIR's memory-dependency analysis.
+fn lower_native_memory(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    op: celox_sir::native_memory::NativeMemoryOp,
+    dst: Option<RegisterId>,
+    args: &[RegisterId],
+) {
+    use celox_sir::native_memory::NativeMemoryOp::*;
+    let words: Vec<_> = args.iter().map(|&arg| ctx.reg_map.get(arg)).collect();
+    let result = dst.map(|_| ctx.alloc_vreg(SpillDesc::transient()));
+    match op {
+        ReadIndirect => block.push(MInst::LoadPtrIndexed {
+            dst: result.unwrap(),
+            ptr: words[0],
+            offset: 0,
+            index: words[1],
+            size: OpSize::S64,
+        }),
+        WriteIndirect => block.push(MInst::StorePtrIndexed {
+            ptr: words[0],
+            offset: 0,
+            index: words[1],
+            src: words[2],
+            size: OpSize::S64,
+        }),
+        ReadState => block.push(MInst::LoadIndexed {
+            dst: result.unwrap(),
+            base: BaseReg::SimState,
+            offset: 0,
+            index: words[0],
+            scale: 1,
+            size: OpSize::S64,
+            alias_range: None,
+        }),
+        WriteState => block.push(MInst::StoreIndexed {
+            base: BaseReg::SimState,
+            offset: 0,
+            index: words[0],
+            src: words[1],
+            size: OpSize::S64,
+            alias_range: None,
+        }),
+    }
+    if let Some(dst) = dst {
+        define_extern_result(ctx, block, dst, result.unwrap());
+    }
 }
