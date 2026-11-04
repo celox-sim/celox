@@ -107,6 +107,20 @@ impl std::ops::Deref for RuntimeDesign {
 }
 
 impl RuntimeDesign {
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    pub(crate) fn set_event_kind_for_test(
+        &mut self,
+        address: AbsoluteAddr,
+        kind: celox_design::DomainKind,
+    ) {
+        self.semantic.state_objects.get_mut(&address).unwrap().kind = kind;
+    }
+
     /// Add compiler-owned storage after source hierarchy projection. The slot
     /// remains an ordinary state object for layout, roots, images and snapshots.
     pub(crate) fn allocate_testbench_slot(
