@@ -108,6 +108,13 @@ fn emit(value: Typed, context: Option<(u32, bool)>) -> ConstraintExpr {
     }
 }
 
+/// Whether a constraint program holds property `property` as a field: an
+/// integral property of at most 64 bits. Other properties, such as handles
+/// and strings, are state a constraint does not name.
+pub(in crate::ast) fn constrainable(property: &Property) -> bool {
+    property.field.handle.is_none() && property.field.width <= 64
+}
+
 pub(in crate::ast) fn bind(
     id: ExprId,
     tree: &AnalysisContext<'_>,
@@ -170,8 +177,19 @@ pub(in crate::ast) fn bind_inputs(
                     if property.r#type.holds_chandle() {
                         return Err("a chandle in a constraint".into());
                     }
+                    if !constrainable(property) {
+                        return Err(
+                            "a handle, string, container or property wider than 64 bits in a constraint"
+                                .into(),
+                        );
+                    }
+                    // The field of the property among those of the program.
+                    let field = properties[..index]
+                        .iter()
+                        .filter(|property| constrainable(property))
+                        .count();
                     Typed {
-                        kind: Kind::Leaf(ConstraintExpr::Field(index)),
+                        kind: Kind::Leaf(ConstraintExpr::Field(field)),
                         width: property.field.width,
                         signed: property.field.signed,
                     }
@@ -364,10 +382,15 @@ impl Class {
     pub fn constraint_program(&self) -> Converted<Program> {
         let mut fields = Vec::new();
         for property in &self.properties {
-            if property.field.handle.is_some() || property.field.width > 64 {
-                return Err(unsupported(
-                    "constraints currently require scalar integral properties",
-                ));
+            if !constrainable(property) {
+                // A property no constraint names is state the solver does
+                // not need; a random one would have to be solved.
+                if property.rand || property.randc {
+                    return Err(unsupported(
+                        "constraints currently require scalar integral rand properties",
+                    ));
+                }
+                continue;
             }
             // A randc property draws from the cycle of its whole domain
             // (IEEE 1800-2023 18.4.2), kept for at most 256 values.
