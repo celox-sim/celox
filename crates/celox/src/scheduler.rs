@@ -858,7 +858,10 @@ impl Plan {
                 Some("a program process runs in the reactive region set")
             } else if !process.host_requests.is_empty() && !service_processes.contains(&index) {
                 Some("the process makes host requests")
-            } else if service_processes.contains(&index) && !written(unit).is_empty() {
+            } else if service_processes.contains(&index)
+                && !written(unit).is_empty()
+                && !ordered_available
+            {
                 Some("a synchronous host-service process drives an event signal")
             } else if yielding.contains(&index) && !service_processes.contains(&index) {
                 Some("a loop checkpoint requires native services")
@@ -1198,10 +1201,12 @@ impl Plan {
                     || (!control_slots.contains(address) && active_observers.contains(address))
             })
             .collect();
-        let event_writing_waits = kernels
-            .iter()
-            .flatten()
-            .any(|kernel| kernel.wait.is_some() && !kernel.writes.is_empty());
+        let event_writing_waits = kernels.iter().enumerate().any(|(index, kernel)| {
+            kernel.as_ref().is_some_and(|kernel| {
+                !kernel.writes.is_empty()
+                    && (kernel.wait.is_some() || service_processes.contains(&index))
+            })
+        });
         let possible_wait_feedback =
             opaque_dependencies || event_writing_waits || !feedback_stores.is_empty();
         tracing::debug!(target: "celox::scheduler", possible_wait_feedback,
@@ -2618,11 +2623,6 @@ impl Plan {
                     );
                 }
             }
-            let before: Vec<_> = kernel
-                .writes
-                .iter()
-                .map(|&event| g.level(&self.events[event]))
-                .collect();
             let first_host = self
                 .service_processes
                 .contains(&index)
@@ -2636,7 +2636,24 @@ impl Plan {
                 .unwrap_or_default();
             g.b.seal_block(SIRTerminator::Jump(enter, enter_args));
             g.b.switch_to_block(enter);
+            let before: Vec<_> = kernel
+                .writes
+                .iter()
+                .map(|&event| g.level(&self.events[event]))
+                .collect();
             g.inline_writer(&program.sir.processes[index], finish_exit);
+            if !kernel.writes.is_empty() {
+                // Capture every continuation, including returns to a host service.
+                // A later continuation cannot erase an already observed pulse.
+                let mut edges = g.load(slots.exit_arg, self.event_bits);
+                for (&event, &was) in kernel.writes.iter().zip(&before) {
+                    let is = g.level(&self.events[event]);
+                    let edge = g.edge(&self.events[event], was, is);
+                    let bit = g.event_bit(edge, event);
+                    edges = g.binary(self.event_bits, edges, BinaryOp::Or, bit);
+                }
+                g.store(slots.exit_arg, self.event_bits, edges);
+            }
             let status = g.load(process.status, celox_design::PROCESS_STATUS_WIDTH);
             let code = |status: ProcessStatus| u64::from(status.code());
             if self.service_processes.contains(&index) {
@@ -2872,17 +2889,6 @@ impl Plan {
                     false_block: (pick, Vec::new()),
                 });
                 g.b.switch_to_block(next);
-            }
-            if !kernel.writes.is_empty() {
-                // The edges of this run, against the levels before it.
-                let mut edges = g.load(slots.exit_arg, self.event_bits);
-                for (&event, &was) in kernel.writes.iter().zip(&before) {
-                    let is = g.level(&self.events[event]);
-                    let edge = g.edge(&self.events[event], was, is);
-                    let bit = g.event_bit(edge, event);
-                    edges = g.binary(self.event_bits, edges, BinaryOp::Or, bit);
-                }
-                g.store(slots.exit_arg, self.event_bits, edges);
             }
             // Before the next run, the waits see this one's writes.
             let ready = g.load(slots.ready, g.ready_bits);
