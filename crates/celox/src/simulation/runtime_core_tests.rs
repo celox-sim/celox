@@ -2745,3 +2745,37 @@ endprogram"#;
     target.load_state(&file).unwrap();
     assert_eq!(target.save_state().unwrap().schedule, file.schedule);
 }
+
+/// An Active occurrence consumed before NBA must not be replayed when a
+/// different domain observes one of the deferred publications (LRM 4.5).
+#[cfg(feature = "systemverilog")]
+#[test]
+fn consumed_active_occurrences_are_not_replayed_after_nba() {
+    let source = r#"`timescale 1ns/1ns
+module Top;
+    bit clk=0, q=0;
+    logic enable=1'bx;
+    bit [7:0] edges=0, rises=0;
+    wire gated=clk & enable;
+    always #1 clk=!clk;
+    always @(posedge clk) enable=1;
+    always @(posedge gated) begin edges=edges+1; q<=edges[0]; end
+    always @(posedge q) rises<=rises+1;
+    initial begin #10; if (edges == 0) $fatal; end
+endmodule"#;
+    let builder = || {
+        Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("consumed-edge.sv"))],
+            "Top",
+        )
+        .four_state(true)
+        .scheduler_mode(crate::SchedulerMode::Reference)
+    };
+    on_every_backend!(builder(), |sim| {
+        sim.run_until(2).unwrap();
+        assert_eq!(sim.get(sim.signal("edges")), 2u8.into());
+        assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+        assert_eq!(sim.get(sim.signal("rises")), 1u8.into());
+        assert_eq!(sim.scheduler_stats().compiled_runs, 0);
+    });
+}
