@@ -2326,40 +2326,17 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         // checked as those of a typedef of the module (6.19); a typedef of
         // another enumeration declares none.
         let mut members = EnumMemberConstants::default();
-        let mut dimension_env = (*self.dims.const_env).clone();
-        parameters::enum_members_of(
-            self.tree,
-            self.session,
-            target,
-            &mut dimension_env,
-            &self.type_aliases,
-            &mut members,
-        )?;
-        // The typedef is bound as one of the module: its base type in the
-        // scope's constants, its dimensions also with its members.
-        let local = *self.state.counter;
-        *self.state.counter += 1;
         let aliases: SharedMap<Type> = self.type_aliases.clone().into();
-        let dimension_env: SharedEnv = dimension_env.into();
-        let mut ty = types::bind_alias(
+        let ty = types::bind_local_alias(
             self.tree,
             self.session,
             alias,
             &self.dims.const_env,
             &aliases,
-            &dimension_env,
-            false,
-            // Each local typedef is a type of its own, also where another
-            // scope declares one of the same name; it is written with the
-            // name of its design element.
-            || {
-                let (identity, typename) = types::declaration_name(self.tree, alias, None);
-                (format!("{identity}@{local}"), typename)
-            },
+            &mut members,
         )?
         .ok_or_else(|| unsupported("local type declaration of this type"))?;
         drop(aliases);
-        types::freeze_bounds(&mut ty, &self.tree.functions, &dimension_env);
         let name = instances::normalize_identifier(&alias.name.spelling);
         // The type hides a variable or constant of an enclosing scope with
         // its name.

@@ -1217,6 +1217,99 @@ endmodule
   (top Top) (run_until 2) (assert_eq done 1)
   (expect_output "1 1 11\n2 2 21\n"))
 
+(case specializations_of_procedural_constants
+  (source "class.sv" #"
+package p;
+    typedef enum bit [1:0] {A, B, C} e_t;
+    class Resource;
+    endclass
+    class Box #(type T = int, int N = 1) extends Resource;
+        T value;
+        static function int width(); return $bits(T) * N; endfunction
+    endclass
+    class User;
+        static function int sum(Resource resource);
+            typedef bit [$bits(e_t):0] t;
+            // 7 converted to the parameter's type is 3.
+            localparam logic [1:0] W = 7;
+            typedef bit [W:0] w_t;
+            localparam int S = 2;
+            typedef bit [S-1:0] s_t;
+            int total;
+            total = Box#(t)::width() + Box#(w_t)::width();
+            begin
+                typedef bit [$bits(e_t)+1:0] t;
+                localparam int K = $bits(e_t);
+                // s_t keeps the bounds of its own block.
+                localparam int S = 4;
+                Box#(t, K) box;
+                if ($cast(box, resource))
+                    total += Box#(t, K)::width() + box.value;
+                total += Box#(s_t)::width();
+            end
+            return total;
+        endfunction
+    endclass
+endpackage
+module Top(output int sum, output bit done);
+    import p::*;
+    initial begin
+        localparam int M = $bits(e_t) + 1;
+        typedef logic [$bits(e_t)*4-1:0] b_t;
+        Box#(bit [3:0], 2) box = new;
+        box.value = 9;
+        sum = User::sum(box) + Box#(b_t, M)::width();
+        $display("%0d", sum);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 50) (assert_eq done 1)
+  (expect_output "50\n"))
+
+(case specializations_of_procedural_aggregate_types
+  (source "class.sv" #"
+package p;
+    typedef enum bit [1:0] {A, B, C} e_t;
+    class Box #(type T = int);
+        static int made;
+        static function int width(); made++; return $bits(T); endfunction
+    endclass
+    class User;
+        static function int sum();
+            typedef bit [$bits(e_t):0] t;
+            int total;
+            begin
+                typedef enum bit [2:0] {X, Y, Z} local_e;
+                typedef struct packed { bit [4:0] a; t b; } local_s;
+                typedef union packed { bit [5:0] a; bit [5:0] b; } local_u;
+                local_e e;
+                e = Z;
+                total = Box#(t)::width() * 1000 + Box#(local_e)::width() * 100
+                    + Box#(local_s)::width() * 10 + Box#(local_u)::width() / 6 + e;
+                void'(Box#(local_e)::width());
+            end
+            begin
+                // A typedef of another block is another type (6.22.1).
+                typedef enum bit [2:0] {X, Y, Z} local_e;
+                total += Box#(local_e)::width() * 10000 + Box#(local_e)::made * 100000;
+            end
+            return total;
+        endfunction
+    endclass
+endpackage
+module Top(output int sum, output bit done);
+    import p::*;
+    initial begin
+        sum = User::sum();
+        $display("%0d", sum);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 133383) (assert_eq done 1)
+  (expect_output "133383\n"))
+
 (case specializations_keep_their_parameter_scopes
   (source "class.sv" #"
 module Top(output bit done);

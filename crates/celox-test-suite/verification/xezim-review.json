@@ -1026,6 +1026,14 @@
     "sv_property_member_part_select_patterns": {
       "title": "An assignment pattern assigned to a part-select of a packed multidimensional member of a class property, info.n.data[2:1] = '{4'hc, 4'hd} with logic [3:0][3:0] data, writes 4'h2 into the member's low bits instead of the two selected elements",
       "standard": "IEEE 1800-2023 7.4.6, 10.9"
+    },
+    "sv_class_typedef_type_arguments": {
+      "title": "A specialization named with a typedef of a type, `Box #(nibble_t)` with `typedef bit [3:0] nibble_t`, is not the specialization named with the type itself, `Box #(bit [3:0])`: $cast between their handles fails",
+      "standard": "IEEE 1800-2023 8.25, 6.22.1"
+    },
+    "sv_procedural_enum_typedef_specializations": {
+      "title": "In a class method, a variable of an enumeration typedef declared in a begin-end block reads 0 after `e = Z`, and the static property of `Box #(local_e)` named in a later block with its own enumeration typedef `local_e` counts the calls of other specializations",
+      "standard": "IEEE 1800-2023 6.19, 6.22.1, 8.25"
     }
   },
   "cases": [
@@ -5562,6 +5570,22 @@
       "status": "mismatch",
       "classification": "lrm_ambiguous",
       "note": "In `$sscanf(next_text(), \"%d %d\", settings[i].offset, settings[i].level)`, where `next_text()` sets `i = 1`, xezim writes `settings[0]`: it takes the outputs' objects before it evaluates the text. Celox and Verilator evaluate the inputs first and write `settings[1]`, as for outputs that are variables. 21.3.4.3 does not say when the outputs of `$sscanf` are evaluated relative to its inputs."
+    },
+    {
+      "suite": "sv",
+      "name": "class::specializations_of_procedural_constants",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class_typedef_type_arguments",
+      "note": "User::sum casts a handle to a Box #(bit [3:0], 2) to Box #(t, K), where t is the block typedef bit [$bits(e_t)+1:0] = bit [3:0] and K = 2; the types match (6.22.1), so the specializations are the same type (8.25) and the cast succeeds. With Box #(w_t)::width() = 4 (W = 7 converted to logic [1:0] is 3) and Box #(s_t)::width() = 2 (s_t keeps the bounds of its block although an inner block hides S), sum is 3 + 4 + 8 + 9 + 2 + 24 = 50. xezim 0.11.4 gives 29: the cast fails, and Box #(w_t)::width() and Box #(s_t)::width() are 1. The adapter-free source prints [0 0 1] for $cast to Box #(nibble_t), to Box #(t) with a block typedef and to Box #(bit [3:0]): a typedef of a module or a block both break the match. See verification/repros/sv_class_typedef_type_arguments_xezim.json; Verilator 5.052 passes the shared case."
+    },
+    {
+      "suite": "sv",
+      "name": "class::specializations_of_procedural_aggregate_types",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_procedural_enum_typedef_specializations",
+      "note": "User::sum names Box with the enumeration, structure and union typedefs of a begin-end block and with a bit vector typedef of the method, and a later block declares its own enumeration local_e: a typedef of an enumeration matches only itself (6.22.1 d), so it is another specialization (8.25), whose made is 1. With e = Z (2), sum is 3000 + 300 + 80 + 1 + 2 + 30000 + 100000 = 133383. xezim 0.11.4 gives 933381: e reads 0, and Box #(local_e)::made of the second block is 9. Printing the parts shows widths 3, 3, 8 and 6 as expected, e = 0, and made = 8 where the case calls that specialization once. Verilator 5.052 gives 333383: it takes the two local_e typedefs as one type (made 3)."
     }
   ]
 }

@@ -55,6 +55,8 @@ sv_backends! {
     fn class_named_method_arguments(sim) { @case "class::named_method_arguments"; }
     fn class_typedefs_of_interface_classes(sim) { @case "class::typedefs_of_interface_classes"; }
     fn class_specializations_in_generate_blocks(sim) { @case "class::specializations_in_generate_blocks"; }
+    fn class_specializations_of_procedural_constants(sim) { @case "class::specializations_of_procedural_constants"; }
+    fn class_specializations_of_procedural_aggregate_types(sim) { @case "class::specializations_of_procedural_aggregate_types"; }
     fn class_specializations_keep_their_parameter_scopes(sim) { @case "class::specializations_keep_their_parameter_scopes"; }
     fn class_untyped_class_parameters_take_the_type_of_their_value(sim) { @case "class::untyped_class_parameters_take_the_type_of_their_value"; }
     fn class_class_declarations_bind_in_their_scopes(sim) { @case "class::class_declarations_bind_in_their_scopes"; }

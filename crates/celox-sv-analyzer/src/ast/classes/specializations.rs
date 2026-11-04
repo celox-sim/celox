@@ -1860,21 +1860,77 @@ pub(in crate::ast) fn collect(
         }
         scopes
     };
+    // The procedural blocks, and the bodies of subroutines, that declare
+    // local parameters or typedefs: a type inside one is named in the scope
+    // of their declarations (6.18, 6.20.2), which the discovery of the
+    // block's declarations binds.
+    let local_constant = |id: &celox_sv_syntax::StatementId| {
+        matches!(
+            &native.statement(*id).kind,
+            celox_sv_syntax::StatementKind::Declaration(
+                celox_sv_syntax::LocalDeclaration::Parameters(_)
+                    | celox_sv_syntax::LocalDeclaration::TypeAlias(_)
+            )
+        )
+    };
+    let blocks = native
+        .statements
+        .iter()
+        .filter_map(|statement| match &statement.kind {
+            celox_sv_syntax::StatementKind::Block { items, .. }
+            | celox_sv_syntax::StatementKind::Parallel { items, .. } => {
+                Some((statement.tokens, items))
+            }
+            _ => None,
+        })
+        .chain(
+            native
+                .subroutines
+                .iter()
+                .map(|subroutine| (subroutine.body_tokens, &subroutine.items)),
+        )
+        .filter(|(tokens, items)| in_scope(*tokens) && items.iter().any(local_constant))
+        .map(|(tokens, _)| tokens)
+        .collect::<Vec<_>>();
+    // The innermost of those blocks around `tokens`.
+    let block_of = |tokens: celox_sv_syntax::TokenRange| {
+        blocks
+            .iter()
+            .filter(|block| within(**block, tokens))
+            .min_by_key(|block| block.end - block.start)
+            .copied()
+    };
+    // `context` with the local constants around reference `tokens`; none
+    // when they cannot be bound, as the reference then names no
+    // specialization that can be made before the procedure.
+    let local =
+        |session: &mut Session, tokens: celox_sv_syntax::TokenRange, context: &PackedDimensions| {
+            let mut context = context.clone();
+            crate::ast::dimensions::local_constants(tokens, tree, session, &mut context).ok()?;
+            Some(context)
+        };
     let mut done = HashSet::<(usize, String)>::default();
     // A class scope's references with the same spelling name the same
     // specialization: each is made once, in the scope's context built once.
     let mut spelled = HashSet::<(String, String, String)>::default();
-    let mut contexts = HashMap::<String, PackedDimensions>::default();
+    let mut contexts = HashMap::<String, Option<PackedDimensions>>::default();
     loop {
         let before = session.class_specializations.len();
         for (index, (scope, name, arguments, tokens)) in references.iter().enumerate() {
+            let block = block_of(*tokens);
             let scopes = match scope {
                 None => {
                     if done.insert((index, String::new())) {
                         for context in module_scopes(*tokens) {
+                            let context = match block {
+                                Some(_) => local(session, *tokens, &context),
+                                None => Some(context),
+                            };
                             // A specialization that cannot be made reports
                             // why where it is used.
-                            let _ = specialize(tree, session, name, arguments, &context);
+                            if let Some(context) = context {
+                                let _ = specialize(tree, session, name, arguments, &context);
+                            }
                         }
                     }
                     continue;
@@ -1883,10 +1939,15 @@ pub(in crate::ast) fn collect(
             };
             for scope in scopes {
                 let shared = !crate::ast::dimensions::unshared_discovery();
+                // A spelling names the same specialization within one block.
+                let lexical = match block {
+                    Some(block) => format!("{scope}@{}", block.start),
+                    None => scope.clone(),
+                };
                 if !done.insert((index, scope.clone()))
                     || (shared
                         && !spelled.insert((
-                            scope.clone(),
+                            lexical.clone(),
                             name.clone(),
                             argument_spelling(native, arguments),
                         )))
@@ -1894,20 +1955,26 @@ pub(in crate::ast) fn collect(
                     continue;
                 }
                 if !shared {
-                    contexts.remove(&scope);
+                    contexts.remove(&lexical);
                 }
                 #[cfg(test)]
                 crate::ast::dimensions::CLASS_REFERENCE_SPECIALIZATIONS
                     .with(|count| count.set(count.get() + 1));
-                let context = contexts.entry(scope.clone()).or_insert_with(|| {
-                    let mut context = context.clone();
+                if !contexts.contains_key(&lexical) {
+                    let mut scoped = context.clone();
                     let (env, aliases) =
-                        shared_scope(session, &scope, &context.const_env, &context.type_aliases);
-                    context.const_env = env;
-                    context.type_aliases = aliases;
-                    context
-                });
-                let _ = specialize(tree, session, name, arguments, context);
+                        shared_scope(session, &scope, &scoped.const_env, &scoped.type_aliases);
+                    scoped.const_env = env;
+                    scoped.type_aliases = aliases;
+                    let scoped = match block {
+                        Some(_) => local(session, *tokens, &scoped),
+                        None => Some(scoped),
+                    };
+                    contexts.insert(lexical.clone(), scoped);
+                }
+                if let Some(context) = &contexts[&lexical] {
+                    let _ = specialize(tree, session, name, arguments, context);
+                }
             }
         }
         let after = session.class_specializations.len();
