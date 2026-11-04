@@ -757,6 +757,11 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
         self.retain_activation_roots(executor);
+        // Backend safe points can interrupt a timestamp between generated
+        // rounds. Observers must see it only after its continuations finish.
+        if self.next_work_time() == Some(now) {
+            return Ok(now);
+        }
         executor.try_finish_timed_step(now)?;
         // What the host writes after the slot is an update of its time.
         if executor.take_slot_writes() {
