@@ -34,6 +34,7 @@
 mod ordered;
 mod slice;
 mod testbench;
+mod waits;
 
 use slice::CombSlicer;
 
@@ -134,10 +135,6 @@ const MIXED_STATUSES: [ProcessStatus; 12] = [
     ProcessStatus::HostRequest,
     ProcessStatus::Yield,
 ];
-
-/// The most distinct edges one kernel waits for: those the edge index of a
-/// baseline byte holds.
-const MAX_TERMS: usize = 1 << (SCHEDULER_FLAG_WIDTH - BASELINE_TERM_SHIFT as usize);
 
 /// The normal C ABI supplies native file writes without suspending into the
 /// host scheduler. Register the symbol only for native-target compilation.
@@ -341,18 +338,22 @@ struct Kernel {
     delays: bool,
 }
 
-/// The edges a kernel waits for: one at each wait site.
+/// Event controls of a kernel, including their dependency union and snapshots.
 struct Wait {
-    /// The distinct edges, in the order of the first site that waits for
-    /// each (see `celox_runtime::SchedulerRefs::wait_terms`).
+    /// Expressions used by dependency analysis. A raw leaf keeps them in
+    /// snapshot order; the compact path keeps distinct edges in site order.
     terms: Vec<(AbsoluteAddr, CounterKind)>,
-    /// The edge of each wait site, as an index into [`Self::terms`].
+    /// Each site's index into `terms` (compact) or `alternatives` (general).
     site_terms: Vec<usize>,
     /// Occurrences that can be hidden by later writes in the same activation.
     counters: Vec<Option<AbsoluteAddr>>,
-    /// Identical wide or multi-expression sites use raw planes; distinct
-    /// scalar sites retain the compact baseline byte.
+    /// A common event list, or a leaf of the general site dispatch.
     raw: Option<celox_design::schedule::CompiledWaitLayout>,
+    /// General event controls, selected by the process's full-width site id.
+    /// The outer terms/counters are their union for dependency analysis.
+    alternatives: Vec<Wait>,
+    /// Conditions judged at the event occurrence, never on a gate-only change.
+    gates: Vec<Option<celox_design::WaitGate<AbsoluteAddr>>>,
     /// RTL or another waiting kernel can change a watched expression.
     reactive: bool,
     /// Its nonblocking sites, by local index.
@@ -621,7 +622,12 @@ impl Plan {
             .copied()
             .map(storage)
             .collect();
-        let waited: HashSet<AbsoluteAddr> = model.waited.iter().map(|s| storage(*s)).collect();
+        let wait_reads: Vec<_> = schema
+            .wait_sites
+            .iter()
+            .flat_map(celox_design::WaitSite::reads)
+            .collect();
+        let waited: HashSet<AbsoluteAddr> = wait_reads.iter().map(|s| storage(*s)).collect();
         // Storage whose changes bump an occurrence counter: the reference
         // counts the nonblocking updates it publishes into it, which the
         // scheduler's publication does not.
@@ -653,10 +659,10 @@ impl Plan {
         // and only if one of these consumers actually needs a slice.
         let comb_slicer =
             std::cell::LazyCell::new(|| CombSlicer::new(&sir.eval_comb, shared.clone()));
-        let wait_slicer = (!model.waited.is_empty()).then(|| &*comb_slicer);
+        let wait_slicer = (!wait_reads.is_empty()).then(|| &*comb_slicer);
         let observed_inputs = wait_slicer
             .as_ref()
-            .map(|slicer| slicer.input_signals(model.waited.iter().copied()))
+            .map(|slicer| slicer.input_signals(wait_reads.iter().copied()))
             .unwrap_or_default();
         active_observers.extend(observed_inputs.into_iter().map(storage));
         // A stateful combinational consumer can retain an intermediate
@@ -830,8 +836,6 @@ impl Plan {
                 Some("the process has dynamic activation frames")
             } else if slots.program.is_some() {
                 Some("a program process runs in the reactive region set")
-            } else if slots.requires_timed_simulation && !service_processes.contains(&index) {
-                Some("an edge procedure")
             } else if !process.host_requests.is_empty() && !service_processes.contains(&index) {
                 Some("the process makes host requests")
             } else if service_processes.contains(&index) && !written(unit).is_empty() {
@@ -909,77 +913,105 @@ impl Plan {
             let slots = &schema.processes[index];
             let unit = &sir.processes[index];
             let wait = (|| -> Result<(Wait, bool), &'static str> {
-                if process.waits.iter().any(|terms| terms.is_empty()) {
-                    return Err("the process waits for a level");
-                }
-                let scalar = process.wait_terms().filter(|(terms, _)| {
-                    terms
-                        .iter()
-                        .all(|(signal, _)| program.layout().widths.get(signal) == Some(&1))
+                let scalar = process.compact_wait_terms(|signal| {
+                    program.layout().widths.get(&signal).copied().unwrap_or(0)
                 });
-                let (terms, site_terms, raw) = match scalar {
-                    Some((terms, sites)) => (terms, sites, None),
-                    None => {
-                        let listed = process
-                            .common_wait_terms()
-                            .ok_or("the process waits for different expression lists")?;
-                        let dimensions = listed
-                            .iter()
-                            .map(|term| {
-                                let width = *program.layout().widths.get(&term.signal)?;
-                                if program.layout().unpacked_arrays.contains_key(&term.signal) {
-                                    return None;
-                                }
-                                Some((
-                                    width,
-                                    program.layout().four_state
-                                        && program
-                                            .layout()
-                                            .is_4states
-                                            .get(&term.signal)
-                                            .copied()
-                                            .unwrap_or(true),
-                                    model
-                                        .counted
-                                        .iter()
-                                        .any(|counted| counted.slots.signal == term.signal),
-                                ))
-                            })
-                            .collect::<Option<Vec<_>>>()
-                            .ok_or("the process waits for an unsupported signal representation")?;
-                        let raw =
-                            celox_design::schedule::CompiledWaitLayout::with_counters(&dimensions)
-                                .ok_or("the wait snapshot layout overflows")?;
-                        if raw.scalar_byte || program.layout().widths[&baseline] < raw.bits {
-                            tracing::debug!(target: "celox::scheduler", process = index,
+                let raw_site = |listed: &[celox_design::schedule::TermModel<AbsoluteAddr>]| {
+                    let dimensions = listed
+                        .iter()
+                        .map(|term| {
+                            let width = *program.layout().widths.get(&term.signal)?;
+                            Some((
+                                width,
+                                program.layout().four_state
+                                    && program
+                                        .layout()
+                                        .is_4states
+                                        .get(&term.signal)
+                                        .copied()
+                                        .unwrap_or(true),
+                                model
+                                    .counted
+                                    .iter()
+                                    .any(|counted| counted.slots.signal == term.signal),
+                                term.gate.is_some_and(|gate| gate.counters.is_some()),
+                            ))
+                        })
+                        .collect::<Option<Vec<_>>>()
+                        .ok_or("the process waits for an unsupported signal representation")?;
+                    let raw =
+                        celox_design::schedule::CompiledWaitLayout::with_gate_counters(&dimensions)
+                            .ok_or("the wait snapshot layout overflows")?;
+                    if program.layout().widths[&baseline] < raw.bits {
+                        tracing::debug!(target: "celox::scheduler", process = index,
                                 available_bits = program.layout().widths[&baseline],
                                 required_bits = raw.bits, scalar = raw.scalar_byte,
                                 "compiled wait snapshot cannot hold the expression list");
-                            return Err("the compiled wait snapshot has insufficient storage");
+                        return Err("the compiled wait snapshot has insufficient storage");
+                    }
+                    Ok(Wait {
+                        terms: listed.iter().map(|term| (term.signal, term.kind)).collect(),
+                        site_terms: Vec::new(),
+                        counters: listed
+                            .iter()
+                            .map(|term| {
+                                term.gate
+                                    .and_then(|gate| gate.counters)
+                                    .map(|counters| counters.all)
+                                    .or_else(|| {
+                                        model
+                                            .counted
+                                            .iter()
+                                            .find(|counted| counted.slots.signal == term.signal)
+                                            .map(|counted| counted.slots.counter(term.kind))
+                                    })
+                            })
+                            .collect(),
+                        raw: Some(raw),
+                        alternatives: Vec::new(),
+                        gates: listed.iter().map(|term| term.gate).collect(),
+                        reactive: false,
+                        sites: Vec::new(),
+                    })
+                };
+                let (terms, site_terms, raw, alternatives, gates) = match scalar {
+                    Some((terms, sites)) => (terms, sites, None, Vec::new(), Vec::new()),
+                    None => {
+                        if let Some(listed) = process.common_wait_terms() {
+                            let wait = raw_site(listed)?;
+                            (
+                                wait.terms,
+                                vec![0; process.waits.len()],
+                                wait.raw,
+                                Vec::new(),
+                                wait.gates,
+                            )
+                        } else {
+                            let mut unique = Vec::new();
+                            let mut alternatives = Vec::new();
+                            let mut site_terms = Vec::new();
+                            for site in &process.waits {
+                                let index = match unique.iter().position(|known| *known == site) {
+                                    Some(index) => index,
+                                    None => {
+                                        let index = unique.len();
+                                        unique.push(site);
+                                        alternatives.push(raw_site(site)?);
+                                        index
+                                    }
+                                };
+                                site_terms.push(index);
+                            }
+                            let mut terms = Vec::new();
+                            for term in alternatives.iter().flat_map(|wait| &wait.terms) {
+                                if !terms.contains(term) {
+                                    terms.push(*term);
+                                }
+                            }
+                            (terms, site_terms, None, alternatives, Vec::new())
                         }
-                        (
-                            listed.iter().map(|term| (term.signal, term.kind)).collect(),
-                            vec![0; process.waits.len()],
-                            Some(raw),
-                        )
                     }
                 };
-                // The compiled wait tests the edge alone (IEEE 1800-2023
-                // 9.4.2.3: an `iff` condition is judged at the occurrence).
-                if process
-                    .waits
-                    .iter()
-                    .flatten()
-                    .any(|term| term.gate.is_some())
-                {
-                    return Err("the process waits with an iff condition");
-                }
-                if raw.is_none()
-                    && (terms.len() > MAX_TERMS
-                        || (terms.len() > 1 && site_terms.len() > 1 << SITE_BITS))
-                {
-                    return Err("the process waits for too many distinct edges");
-                }
                 let mut reactive = false;
                 for &(signal, _) in &terms {
                     let width = program.layout().widths.get(&signal);
@@ -987,7 +1019,7 @@ impl Plan {
                     let delayed = delay_writers.get(&signal) == Some(&1)
                         && !rtl_stores.contains(&signal)
                         && !other_stores.contains(&signal);
-                    if raw.is_none() && width != Some(&1) {
+                    if raw.is_none() && alternatives.is_empty() && width != Some(&1) {
                         return Err("the process waits for a non-scalar compact edge");
                     }
                     reactive |= !(delayed || undriven(signal));
@@ -1027,7 +1059,10 @@ impl Plan {
                 if reactive && opaque_dependencies {
                     return Err("a reactive wait has opaque dependencies");
                 }
-                if raw.is_some() && !process.nbas.is_empty() && !nba_processes.contains(&index) {
+                if (raw.is_some() || !alternatives.is_empty())
+                    && !process.nbas.is_empty()
+                    && !nba_processes.contains(&index)
+                {
                     return Err("a raw-expression wait stages nonblocking assignments");
                 }
                 let sites = if nba_processes.contains(&index) {
@@ -1083,17 +1118,28 @@ impl Plan {
                     Wait {
                         counters: terms
                             .iter()
-                            .map(|&(signal, kind)| {
-                                model
-                                    .counted
-                                    .iter()
-                                    .find(|counted| counted.slots.signal == signal)
-                                    .map(|counted| counted.slots.counter(kind))
+                            .enumerate()
+                            .map(|(index, &(signal, kind))| {
+                                gates
+                                    .get(index)
+                                    .copied()
+                                    .flatten()
+                                    .and_then(|gate| gate.counters)
+                                    .map(|counters| counters.all)
+                                    .or_else(|| {
+                                        model
+                                            .counted
+                                            .iter()
+                                            .find(|counted| counted.slots.signal == signal)
+                                            .map(|counted| counted.slots.counter(kind))
+                                    })
                             })
                             .collect(),
                         terms,
                         site_terms,
                         raw,
+                        alternatives,
+                        gates,
                         reactive,
                         sites,
                     },
@@ -1301,6 +1347,13 @@ impl Plan {
             .filter_map(|kernel| kernel.wait.as_ref())
             .flat_map(|wait| &wait.terms)
             .map(|&(signal, _)| storage(signal))
+            .chain(schema.wait_sites.iter().flat_map(|site| {
+                site.gates
+                    .iter()
+                    .flatten()
+                    .flat_map(celox_design::WaitGate::reads)
+                    .map(storage)
+            }))
             .chain(model.counted.iter().flat_map(|counted| {
                 CounterKind::ALL.map(|kind| storage(counted.slots.counter(kind)))
             }))
@@ -2366,6 +2419,9 @@ impl Plan {
                     g.b.emit(SIRInstruction::Mux(is, due, known, was));
                     is
                 };
+                // Counters sample iff gates at this write, before the next
+                // scheduled clock changes a gate (IEEE 1800-2023 9.4.2.3).
+                g.count_host_clock(schema, event.signal, was, is, due);
                 let changed = g.binary(1, was, BinaryOp::Ne, is);
                 if let Some(aliases) = &event.aliases {
                     for unit in aliases {
@@ -2401,7 +2457,7 @@ impl Plan {
                     false_block: (pick, Vec::new()),
                 });
                 g.b.switch_to_block(check);
-                g.check_waits(&checks);
+                g.check_waits_at(&checks, false);
             }
         }
         g.b.seal_block(SIRTerminator::Jump(pick, Vec::new()));
@@ -2816,11 +2872,11 @@ impl Plan {
                     false_block: (checked, Vec::new()),
                 });
                 g.b.switch_to_block(scan);
-                g.check_waits(&checks);
+                g.check_waits_at(&checks, false);
                 g.b.seal_block(SIRTerminator::Jump(checked, Vec::new()));
                 g.b.switch_to_block(checked);
             } else {
-                g.check_waits(&checks);
+                g.check_waits_at(&checks, false);
             }
             g.dispatch_continuations(&wait_continuations, internal_exit);
         }
@@ -4107,7 +4163,7 @@ impl Generator<'_> {
         });
         self.b.switch_to_block(changed);
         self.mark_dirty();
-        self.check_waits(checks);
+        self.check_waits_at(checks, false);
         self.b.seal_block(SIRTerminator::Jump(again, Vec::new()));
         self.b.switch_to_block(done);
     }
@@ -4570,6 +4626,22 @@ impl Generator<'_> {
         target: celox_sir::BlockId,
         internal_exit: celox_sir::BlockId,
     ) {
+        if !wait.alternatives.is_empty() {
+            let site = self.load(delay, SCHEDULER_TIME_WIDTH);
+            let blocks: Vec<_> = wait
+                .alternatives
+                .iter()
+                .map(|_| self.b.new_block())
+                .collect();
+            let sites: Vec<_> = wait.site_terms.iter().map(|&index| blocks[index]).collect();
+            self.dispatch_sites(site, &sites, internal_exit);
+            for (alternative, block) in wait.alternatives.iter().zip(blocks) {
+                self.b.switch_to_block(block);
+                self.capture_raw_wait(index, alternative);
+                self.b.seal_block(SIRTerminator::Jump(target, Vec::new()));
+            }
+            return;
+        }
         if wait.raw.is_some() {
             self.capture_raw_wait(index, wait);
             self.b.seal_block(SIRTerminator::Jump(target, Vec::new()));
@@ -4628,7 +4700,7 @@ impl Generator<'_> {
         time_slots: &[AbsoluteAddr],
     ) {
         if instructions(unit).any(makes_extern_calls) {
-            self.check_waits(waits);
+            self.check_waits_at(waits, false);
             return;
         }
         let storage = |address| self.shared.get(&address).copied().unwrap_or(address);
@@ -4656,13 +4728,17 @@ impl Generator<'_> {
             })
             .collect();
         tracing::debug!(target: "celox::scheduler", total=waits.len(), affected=affected.len(), "filtered post-kernel wait checks");
-        self.check_waits(&affected);
+        self.check_waits_at(&affected, false);
     }
 
     /// Test the waits of `waits` against their signals now
     /// (`check_waits`): a wait whose edge occurred since its baseline wakes
     /// its kernel; every changed signal becomes the baseline.
     fn check_waits(&mut self, waits: &[WaitCheck]) {
+        self.check_waits_at(waits, true);
+    }
+
+    fn check_waits_at(&mut self, waits: &[WaitCheck], settled: bool) {
         if waits.is_empty() {
             return;
         }
@@ -4677,8 +4753,10 @@ impl Generator<'_> {
                 let edge = self.binary(1, edge, BinaryOp::Or, pending);
                 waiting = self.binary(1, waiting, BinaryOp::And, edge);
             }
-            let wake = if wait.raw.is_some() {
-                self.check_raw_wait(check.index, wait, waiting)
+            let wake = if !wait.alternatives.is_empty() {
+                self.check_wait_site(check.index, check.delay, wait, waiting, settled)
+            } else if wait.raw.is_some() {
+                self.check_raw_wait(check.index, wait, waiting, settled)
             } else {
                 let baseline = self.load(self.slots.baseline[check.index], SCHEDULER_FLAG_WIDTH);
                 let level_width = if self.four_state.is_none() { 1 } else { 2 };
@@ -5360,6 +5438,7 @@ impl Generator<'_> {
 #[derive(Clone, Copy)]
 struct WaitCheck<'a> {
     index: usize,
+    delay: AbsoluteAddr,
     /// Its bit in the ready mask.
     ordinal: usize,
     wait: &'a Wait,
@@ -5381,6 +5460,7 @@ fn waits_of<'a>(
             let kernel = kernel.as_ref()?;
             Some(WaitCheck {
                 index,
+                delay: schema.processes[index].delay,
                 ordinal: ordinals[index],
                 wait: kernel.wait.as_ref()?,
                 status: kernel.delays.then_some(schema.processes[index].status),
@@ -6445,6 +6525,9 @@ impl Generator<'_> {
         signal: AbsoluteAddr,
         term: &celox_design::schedule::CompiledWaitTerm,
     ) -> RegisterId {
+        if term.plane_bits == 1 && term.mask_offset.is_some() {
+            return self.signal_level(signal);
+        }
         if term.mask_offset.is_none() {
             return self.load(signal, term.width);
         }
@@ -6494,14 +6577,20 @@ impl Generator<'_> {
     }
 
     fn capture_raw_wait(&mut self, process: usize, wait: &Wait) {
-        for ((&(signal, _kind), term), counter) in wait
+        for (ordinal, ((&(signal, _kind), term), counter)) in wait
             .terms
             .iter()
             .zip(&wait.raw.as_ref().unwrap().terms)
             .zip(&wait.counters)
+            .enumerate()
         {
             if let (Some(offset), Some(counter)) = (term.counter_offset, counter) {
                 let seen = self.load(*counter, 32);
+                self.store_at(self.slots.baseline[process], offset, 32, seen);
+            }
+            if let Some(offset) = term.gated_counter_offset {
+                let counter = wait.gates[ordinal].unwrap().counters.unwrap().gated;
+                let seen = self.load(counter, 32);
                 self.store_at(self.slots.baseline[process], offset, 32, seen);
             }
             let planes = self.raw_wait_planes(signal, term);
@@ -6579,9 +6668,16 @@ impl Generator<'_> {
 
     /// Test every expression in an OR event list against its own snapshot,
     /// before publishing one ready bit and clearing the process's wait flag.
-    fn check_raw_wait(&mut self, process: usize, wait: &Wait, waiting: RegisterId) -> RegisterId {
+    fn check_raw_wait(
+        &mut self,
+        process: usize,
+        wait: &Wait,
+        waiting: RegisterId,
+        settled: bool,
+    ) -> RegisterId {
         if wait.terms.len() >= 4
             && wait.counters.iter().all(Option::is_none)
+            && wait.gates.iter().all(Option::is_none)
             && wait
                 .terms
                 .iter()
@@ -6590,12 +6686,17 @@ impl Generator<'_> {
             return self.check_change_wait(process, wait, waiting);
         }
         let mut occurred = self.constant(0, 1);
-        for ((&(signal, kind), term), counter) in wait
+        for (ordinal, ((&(signal, kind), term), counter)) in wait
             .terms
             .iter()
             .zip(&wait.raw.as_ref().unwrap().terms)
             .zip(&wait.counters)
+            .enumerate()
         {
+            let gate = wait.gates.get(ordinal).copied().flatten();
+            if !settled && gate.is_some_and(|gate| !gate.at_write && gate.counters.is_none()) {
+                continue;
+            }
             let width = if term.mask_offset.is_some() {
                 term.plane_bits * 2
             } else {
@@ -6623,13 +6724,34 @@ impl Generator<'_> {
                     )
                 }
             };
+            let gate_holds = gate.map(|gate| {
+                let level = self.signal_level(gate.signal);
+                self.equals(level, 1)
+            });
             let edge = if let (Some(offset), Some(counter)) = (term.counter_offset, counter) {
                 let seen = self.load_at(self.slots.baseline[process], offset, 32);
                 let current = self.load(*counter, 32);
                 let counted = self.binary(1, seen, BinaryOp::Ne, current);
-                self.binary(1, edge, BinaryOp::Or, counted)
+                let next = self.b.alloc_bit(32, false);
+                self.b
+                    .emit(SIRInstruction::Mux(next, waiting, current, seen));
+                self.store_at(self.slots.baseline[process], offset, 32, next);
+                if let Some(gated_offset) = term.gated_counter_offset {
+                    let gated = gate.unwrap().counters.unwrap().gated;
+                    let seen = self.load_at(self.slots.baseline[process], gated_offset, 32);
+                    let current = self.load(gated, 32);
+                    let accepted = self.binary(1, seen, BinaryOp::Ne, current);
+                    let one = self.constant(1, 1);
+                    let uncounted = self.binary(1, counted, BinaryOp::Xor, one);
+                    let raw = self.binary(1, edge, BinaryOp::And, uncounted);
+                    let raw = self.binary(1, raw, BinaryOp::And, gate_holds.unwrap());
+                    self.binary(1, accepted, BinaryOp::Or, raw)
+                } else {
+                    let edge = self.binary(1, edge, BinaryOp::Or, counted);
+                    gate_holds.map_or(edge, |gate| self.binary(1, edge, BinaryOp::And, gate))
+                }
             } else {
-                edge
+                gate_holds.map_or(edge, |gate| self.binary(1, edge, BinaryOp::And, gate))
             };
             occurred = self.binary(1, occurred, BinaryOp::Or, edge);
             let next = self.b.alloc_bit(width, false);

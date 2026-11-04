@@ -1977,7 +1977,8 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             let terms = site
                 .terms
                 .iter()
-                .map(|(signal, _)| {
+                .enumerate()
+                .map(|(index, (signal, _))| {
                     let metadata = &modules[&instance_modules[&signal.instance_id]].variables
                         [&signal.var_id]
                         .metadata;
@@ -1989,10 +1990,12 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                         metadata.width,
                         four_state && metadata.is_4state,
                         counted.contains_key(signal),
+                        site.gate(index).is_some_and(|gate| gate.counters.is_some()),
                     )
                 })
                 .collect::<Vec<_>>();
-            if let Some(layout) = celox_design::schedule::CompiledWaitLayout::with_counters(&terms)
+            if let Some(layout) =
+                celox_design::schedule::CompiledWaitLayout::with_gate_counters(&terms)
             {
                 widths[site.process] = widths[site.process].max(layout.bits);
             }
