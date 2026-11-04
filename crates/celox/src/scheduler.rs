@@ -31,6 +31,7 @@
 //! and every design or kernel this module does not qualify, runs in the
 //! reference loop.
 
+mod domains;
 pub(crate) mod host_inputs;
 mod nba;
 mod observers;
@@ -324,6 +325,8 @@ struct Event {
     width: usize,
     /// The level of the signal after an active edge.
     active: u8,
+    /// Unknown-kind domains observe any settled level change.
+    any_settled: bool,
     /// A clock edge rather than an asynchronous reset.
     clock: bool,
     eval_apply: Vec<Unit>,
@@ -550,17 +553,28 @@ impl Plan {
             }
         }
         let mut events = Vec::with_capacity(addresses.len());
-        let mut event_storage = HashMap::default();
+        let mut event_storage: HashMap<AbsoluteAddr, Vec<usize>> = HashMap::default();
         for &signal in &addresses {
             let (active, clock) = match model.kinds.get(&signal) {
                 Some(DomainKind::ClockPosedge) => (1, true),
                 Some(DomainKind::ClockNegedge) => (0, true),
                 Some(DomainKind::ResetAsyncHigh) => (1, false),
                 Some(DomainKind::ResetAsyncLow) => (0, false),
+                Some(DomainKind::Other) | None if native_observers => (1, true),
                 _ => return Err("an event is not a clock or reset edge".into()),
             };
             let units =
                 |map: &HashMap<AbsoluteAddr, Vec<Unit>>| -> Result<Option<Vec<Unit>>, String> {
+                    if native_observers {
+                        // Match NativeBackend::compile_ff_group exactly: aliases
+                        // bind the first kernel of their canonical domain. The
+                        // frontend may clone that kernel under several aliases;
+                        // concatenating those copies would execute it repeatedly.
+                        return Ok(map
+                            .iter()
+                            .find(|(key, _)| topology.canonical(**key) == signal)
+                            .map(|(_, units)| units.clone()));
+                    }
                     // An alias's domain must be the event's own; one with
                     // nothing to run is no domain at all.
                     let aliased = map.iter().any(|(key, units)| {
@@ -594,6 +608,7 @@ impl Plan {
                     .get(&signal)
                     .ok_or("an event signal has no storage")?,
                 active,
+                any_settled: matches!(model.kinds.get(&signal), Some(DomainKind::Other) | None),
                 clock,
                 eval_apply,
                 active_commit: model.active_commits.contains(&signal),
@@ -603,19 +618,20 @@ impl Plan {
                 eval_only,
                 apply,
             };
-            if event_storage
-                .insert(storage(signal), events.len())
-                .is_some()
-            {
+            let same_signal = event_storage.entry(storage(signal)).or_default();
+            if !native_observers && !same_signal.is_empty() {
                 return Err("two events share a signal".into());
             }
+            same_signal.push(events.len());
             events.push(event);
         }
         // Event signals change only where the scheduler sees them change.
         let written = |unit: &Unit| -> Vec<usize> {
             let mut written: Vec<usize> = instructions(unit)
                 .flat_map(written_storage)
-                .filter_map(|target| event_storage.get(&storage(target.absolute_addr())).copied())
+                .filter_map(|target| event_storage.get(&storage(target.absolute_addr())))
+                .flatten()
+                .copied()
                 .collect();
             written.sort_unstable();
             written.dedup();
@@ -1998,7 +2014,9 @@ impl Plan {
             .nba_processes
             .iter()
             .flat_map(|&process| &model.processes[process].nbas)
-            .filter_map(|site| event_storage.get(&storage(site.target)).copied())
+            .filter_map(|site| event_storage.get(&storage(site.target)))
+            .flatten()
+            .copied()
             .collect();
         if !nba_written.is_empty() {
             derived.extend(nba_written.iter().filter(|event| !edged.contains(event)));
@@ -2576,6 +2594,26 @@ impl Plan {
             let mut fired = g.constant(0, clock_bits);
             let mut edges = g.constant(0, self.event_bits);
             let mut levels = g.load_levels();
+            // Distinct polarity domains can share physical clock storage.
+            // Capture every baseline before the batch writes any alias.
+            let shared_clocks = self
+                .clocks
+                .iter()
+                .map(|&index| {
+                    let signal = self.events[index].signal;
+                    g.shared.get(&signal).copied().unwrap_or(signal)
+                })
+                .collect::<HashSet<_>>()
+                .len()
+                != self.clocks.len();
+            let before: Vec<_> = if shared_clocks {
+                self.clocks
+                    .iter()
+                    .map(|&index| g.level(&self.events[index]))
+                    .collect()
+            } else {
+                Vec::new()
+            };
             for (bit, &index) in self.clocks.iter().enumerate() {
                 let event = &self.events[index];
                 let next_edge = g.clock_next(bit);
@@ -2588,14 +2626,15 @@ impl Plan {
                     .iter()
                     .position(|&tracked| tracked == index)
                     .expect("clocks are tracked");
+                let baseline = if shared_clocks { before[bit] } else { actual };
                 let was = if let (Some(host), Some(prior)) = (host_entry, host_levels) {
                     let old = g.saved_level(prior, position);
                     let was =
                         g.b.alloc_bit(if g.four_state.is_some() { 2 } else { 1 }, false);
-                    g.b.emit(SIRInstruction::Mux(was, host, old, actual));
+                    g.b.emit(SIRInstruction::Mux(was, host, old, baseline));
                     was
                 } else {
-                    actual
+                    baseline
                 };
                 levels = g.with_level(levels, was, position);
                 let is = if g.four_state.is_none() {
@@ -2636,11 +2675,24 @@ impl Plan {
                     let dirty = g.binary(SCHEDULER_FLAG_WIDTH, dirty, BinaryOp::Or, changed);
                     g.store(slots.dirty, SCHEDULER_FLAG_WIDTH, dirty);
                 }
-                let edge = g.edge(event, was, is);
-                let edge = g.event_bit(edge, index);
-                edges = g.binary(self.event_bits, edges, BinaryOp::Or, edge);
+                if !shared_clocks {
+                    let edge = g.edge(event, was, is);
+                    let edge = g.event_bit(edge, index);
+                    edges = g.binary(self.event_bits, edges, BinaryOp::Or, edge);
+                }
                 let bit = g.bit_of(due, bit, clock_bits);
                 fired = g.binary(clock_bits, fired, BinaryOp::Or, bit);
+            }
+            // Judge all domains against the completed scheduled batch;
+            // otherwise a preceding alias write consumes a later domain's edge.
+            if shared_clocks {
+                for &index in &self.clocks {
+                    let was = g.saved_level(levels, position(&tracked, index));
+                    let is = g.level(&self.events[index]);
+                    let edge = g.edge(&self.events[index], was, is);
+                    let edge = g.event_bit(edge, index);
+                    edges = g.binary(self.event_bits, edges, BinaryOp::Or, edge);
+                }
             }
             g.store_levels(levels);
             g.store(slots.exit_arg, self.event_bits, edges);
@@ -3124,7 +3176,7 @@ impl Plan {
                 for &index in &edged {
                     let was = g.saved_level(levels, position(&tracked, index));
                     let is = g.level(&self.events[index]);
-                    let edge = g.edge(&self.events[index], was, is);
+                    let edge = g.settled_edge(&self.events[index], was, is);
                     let bit = g.event_bit(edge, index);
                     edges = g.binary(self.event_bits, edges, BinaryOp::Or, bit);
                 }
@@ -3283,7 +3335,13 @@ impl Plan {
                 pick,
                 resume_domains.expect("active resume block"),
             );
-        } else if !self.derived.is_empty() || !self.counted.is_empty() {
+        } else if !self.derived.is_empty()
+            || !self.counted.is_empty()
+            || self.events.iter().any(|event| event.any_settled)
+        {
+            // Unspecified domains use rising edges for scheduled writes, but
+            // any change for later settled waves. Keep that ordering when
+            // another clock's commit changes the domain's inputs.
             self.batch(&mut g, &tracked, slot_end, finish_exit, &checks);
         } else {
             let staged: Vec<&Staged> = waits.iter().flat_map(|(_, wait)| &wait.sites).collect();
@@ -4210,7 +4268,7 @@ impl Plan {
                 let bit = position(tracked, clock);
                 let was = g.saved_level(levels, bit);
                 let is = g.level(&self.events[clock]);
-                let edge = g.edge(&self.events[clock], was, is);
+                let edge = g.settled_edge(&self.events[clock], was, is);
                 let edge = g.binary(1, edge, BinaryOp::And, changed);
                 let edge = g.event_bit(edge, clock);
                 active = g.binary(self.event_bits, active, BinaryOp::Or, edge);
@@ -4243,7 +4301,7 @@ impl Plan {
         for (position, &index) in tracked.iter().enumerate() {
             let was = g.saved_level(levels, position);
             let is = g.level(&self.events[index]);
-            let edge = g.edge(&self.events[index], was, is);
+            let edge = g.settled_edge(&self.events[index], was, is);
             let bit = g.event_bit(edge, index);
             edges = g.binary(self.event_bits, edges, BinaryOp::Or, bit);
         }
@@ -4266,6 +4324,7 @@ impl Plan {
             let mut values = Vec::with_capacity(width);
             let mut unknowns = Vec::with_capacity(width);
             let mut falling = 0u64;
+            let mut any_change = 0u64;
             for (bit, &index) in events.iter().enumerate() {
                 let event = &self.events[index];
                 let level = g.level(event);
@@ -4276,6 +4335,9 @@ impl Plan {
                 }
                 if event.active == 0 {
                     falling |= 1u64 << bit;
+                }
+                if event.any_settled {
+                    any_change |= 1u64 << bit;
                 }
             }
             let pack = |g: &mut Generator<'_>, mut bits: Vec<RegisterId>| {
@@ -4298,9 +4360,14 @@ impl Plan {
             let is = g.binary(width, is, BinaryOp::Xor, falling);
             let all = g.ones(width);
             let not_was = g.binary(width, was, BinaryOp::Xor, all);
+            let mut changed = (any_change != 0).then(|| g.binary(width, was, BinaryOp::Xor, is));
             let edges = if let Some(old_unknown) = levels.unknown {
                 let old_unknown = slice(g, old_unknown);
                 let new_unknown = pack(g, unknowns);
+                if let Some(values) = changed {
+                    let masks = g.binary(width, old_unknown, BinaryOp::Xor, new_unknown);
+                    changed = Some(g.binary(width, values, BinaryOp::Or, masks));
+                }
                 // Table 9-2: leave known zero or reach known one, excluding
                 // all unknown-to-unknown transitions (including X <-> Z).
                 let leaves = g.binary(width, not_was, BinaryOp::Or, old_unknown);
@@ -4311,6 +4378,15 @@ impl Plan {
                 g.binary(width, edges, BinaryOp::And, some_known)
             } else {
                 g.binary(width, not_was, BinaryOp::And, is)
+            };
+            let edges = if let Some(changed) = changed {
+                let any = g.constant(any_change, width);
+                let ordinary = g.binary(width, any, BinaryOp::Xor, all);
+                let edges = g.binary(width, edges, BinaryOp::And, ordinary);
+                let changed = g.binary(width, changed, BinaryOp::And, any);
+                g.binary(width, edges, BinaryOp::Or, changed)
+            } else {
+                edges
             };
             for (bit, &index) in events.iter().enumerate() {
                 let lane = g.b.alloc_bit(1, false);
@@ -4687,6 +4763,14 @@ impl Generator<'_> {
     /// edge.
     fn edge(&mut self, event: &Event, was: RegisterId, is: RegisterId) -> RegisterId {
         self.level_edge(event.active != 0, was, is)
+    }
+
+    fn settled_edge(&mut self, event: &Event, was: RegisterId, is: RegisterId) -> RegisterId {
+        if event.any_settled {
+            self.binary(1, was, BinaryOp::Ne, is)
+        } else {
+            self.edge(event, was, is)
+        }
     }
 
     /// Whether a change of an edge level from `was` to `is` is a rising
