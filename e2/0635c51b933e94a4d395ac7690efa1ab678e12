@@ -5,3 +5,5 @@ Sync after #3091 merged. stack sync tried to drop an already reachable merge-par
 Rebase dependent revisions onto the existing #3113/#3115 observer review fixes; retain the already-published #3093 head.
 
 Integrate native before_domains callbacks with unspecified event polarity: use settled-edge comparison and exercise callback-driven domain changes against the reference executor.
+
+Address review r4469875852: preserve scheduled rising-edge rules for unspecified domains, and use the existing native stable-edge wave when no scheduled edge fires. Add mixed known/unspecified clock coverage for both timed and untimed execution.
