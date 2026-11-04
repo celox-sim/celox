@@ -8021,9 +8021,7 @@ impl Ff<'_, '_> {
         signed: bool,
         float: Option<celox_sir::FloatPrecision>,
     ) -> Result<SourceVarId, sv::AnalyzerError> {
-        let mut names = HashSet::default();
-        expr_idents(expr, &mut names);
-        subroutine_reads(self.m, expr, &mut names);
+        let names = level_reads(self.m, expr);
         if names.iter().any(|name| {
             self.m
                 .id(name)
@@ -8215,9 +8213,7 @@ impl Ff<'_, '_> {
     /// if the condition holds, and otherwise checks it again whenever a
     /// variable it reads changes.
     fn wait_level(&mut self, condition: &sv::ir::Expr) -> Result<(), sv::AnalyzerError> {
-        let mut names = HashSet::default();
-        expr_idents(condition, &mut names);
-        subroutine_reads(self.m, condition, &mut names);
+        let names = level_reads(self.m, condition);
         // Static task formals can change when another caller copies arguments
         // in, but hidden local storage has no observable change counters yet.
         // Do not compile a wait that would silently miss that wakeup, including
@@ -8423,6 +8419,20 @@ fn always_suspends(stmts: &[sv::ir::Stmt]) -> bool {
                 | sv::ir::Stmt::WaitImplicit { .. }
         )
     })
+}
+
+/// The names a process waiting on the value of `expr` watches: those `expr`
+/// reads, and those the subroutines it calls read, directly or through
+/// further calls, the defaults of their formals included. A level wait
+/// (IEEE 1800-2023 9.4.3) and an activation-local event expression are
+/// woken by the changes of these, and the out-of-line eligibility of
+/// subroutines counts their stores as observed through this same walk
+/// (see `ProcModule::observe_storage`).
+pub(super) fn level_reads(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> HashSet<String> {
+    let mut names = HashSet::default();
+    expr_idents(expr, &mut names);
+    subroutine_reads(pm, expr, &mut names);
+    names
 }
 
 /// The module variables the subroutines `expr` calls read, directly or

@@ -379,8 +379,9 @@ endmodule
 
 #[test]
 fn ineligible_subroutines_stay_inlined() {
-    // A `ref` formal and a host request keep a subroutine inlined, and with
-    // it every subroutine that calls it; `plain` still goes out of line.
+    // A `ref` formal keeps a subroutine inlined, and a host request keeps
+    // it inlined with every subroutine that calls it; `plain` still goes
+    // out of line.
     let source = r#"module Top(output int a, output int b, output int c);
     function automatic void bump(ref int v);
         v = v + 1;
@@ -646,5 +647,89 @@ endmodule
             &["done_at", "r", "d"]
         ),
         Ok(vec![value(1), value(1), value(2)])
+    );
+}
+
+#[test]
+fn callers_of_subroutines_with_ref_formals_go_out_of_line() {
+    // `bump` passes through `ref`, so it stays inlined; `bumped_twice`,
+    // which only calls it, goes out of line with `bump` inlined into its
+    // unit, bound to the frame slot of its local.
+    let source = r#"module Top(input int i, output int a, output int b);
+    function automatic void bump(ref int v);
+        v = v + 1;
+    endfunction
+    function automatic int bumped_twice(int v);
+        int t = v;
+        bump(t);
+        bump(t);
+        return t * 2;
+    endfunction
+    initial begin
+        a = bumped_twice(i);
+        b = bumped_twice(a);
+    end
+endmodule
+"#;
+    same_as_inlined(source, 1, 0, &["a", "b"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 0, &["a", "b"]),
+        Ok(vec![value(4), value(12)])
+    );
+}
+
+#[test]
+fn calls_kept_only_for_sensitivity_count_as_observing() {
+    // The branch that never runs still makes `always_comb` sensitive to
+    // what `counter` reads (IEEE 1800-2023 9.2.2.2.1), the static `total`
+    // among it, so `counter`, which stores `total`, stays inlined.
+    let source = r#"module Top(input int i, output int y, output int r);
+    function int counter(int v);
+        static int total = 0;
+        total = total + v;
+        return total;
+    endfunction
+    function automatic int pick(int v);
+        if (0) return counter(v);
+        return v + 1;
+    endfunction
+    always_comb y = pick(i);
+    initial r = counter(i + 2);
+endmodule
+"#;
+    same_as_inlined(source, 1, 0, &["y", "r"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 0, &["y", "r"]),
+        Ok(vec![value(1), value(2)])
+    );
+}
+
+#[test]
+fn defaults_a_level_wait_watches_count_as_observing() {
+    // A level wait watches what the defaults of the formals of the
+    // functions it calls read, supplied or not, the static `total` of
+    // `counter` among it, so `counter`, which stores `total`, stays inlined.
+    // `ready`, whose call supplies `v`, still goes out of line.
+    let source = r#"`timescale 1ns/1ns
+module Top(input int i, output int done_at, output int r);
+    function int counter(int v);
+        static int total = 0;
+        total = total + v;
+        return total;
+    endfunction
+    function automatic bit ready(int a, int v = counter(0));
+        return a + v > 1;
+    endfunction
+    initial begin
+        wait (ready(i, 2));
+        done_at = $time + 1;
+    end
+    initial #1 r = counter(i + 1);
+endmodule
+"#;
+    same_as_inlined(source, 1, 2, &["done_at", "r"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 2, &["done_at", "r"]),
+        Ok(vec![value(1), value(1)])
     );
 }

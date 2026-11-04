@@ -667,6 +667,8 @@ impl<'a> ProcModule<'a> {
 
     /// Syntactic implicit sensitivity, including branches that constant folding
     /// will remove. `always @*` sees arguments; `always_comb` also sees function bodies.
+    /// The out-of-line eligibility of subroutines counts their stores into
+    /// these as observed through this same walk (see [`Self::observe_storage`]).
     pub fn implicit_reads(
         &self,
         body: &[sv::ir::Stmt],

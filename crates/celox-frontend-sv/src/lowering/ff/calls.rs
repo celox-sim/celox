@@ -315,7 +315,9 @@ impl Ff<'_, '_> {
             slots.push(self.slot_of(id));
         }
         // Static storage of subroutines is the only module state a function
-        // may write: it is shared by every call, inlined or not.
+        // may write: it is shared by every call, inlined or not. Assembly
+        // instruments the stores into what is observed, which only the
+        // stores of the units the runtime runs can be.
         let persistent = self.m.static_storage();
         let frame: HashMap<SourceVarId, (usize, SourceVarId)> = slots
             .iter()
@@ -367,8 +369,9 @@ impl Ff<'_, '_> {
                     if !persistent.contains(&addr.var_id) {
                         return Err(other("writes module state"));
                     }
-                    // Whether something observes these stores shows once
-                    // the module is lowered (see `specialize_module`).
+                    if self.m.is_observed(addr.var_id) {
+                        return Err(other("stores into observed storage"));
+                    }
                     writes.insert(addr.var_id);
                 } else {
                     reads.insert(addr.var_id);
