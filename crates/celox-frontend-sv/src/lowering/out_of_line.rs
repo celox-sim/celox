@@ -6,11 +6,14 @@
 //! every subroutine that can be lowered so is, and every other one stays
 //! inlined. A subroutine qualifies when it cannot suspend its caller and
 //! makes no host request, both transitively (see [`Reason`]), has no `ref`
-//! formal, and its unit touches no state but its frame, the variables it
-//! reads, and the static storage of subroutines. Nor may it make a store
-//! that assembly instruments per store (a nonblocking one, or one into an
-//! event, clock or forced object), since assembly sees only the stores of
-//! the units the runtime runs: it rejects a function that does. Calls inside a function
+//! formal (the callees inlined into its unit may), and its unit touches no
+//! state but its frame, the variables it reads, and the static storage of
+//! subroutines. Nor may it make a store that assembly instruments per store
+//! (a nonblocking one, or one into what a wait, an event control or
+//! combinational logic observes), since assembly sees only the stores of
+//! the units the runtime runs: the frontend keeps out the stores into what
+//! the module's source may observe ([`ProcModule::observe_storage`]), and assembly
+//! rejects a function that makes one all the same. Calls inside a function
 //! unit cannot suspend either, so every frame lives only while the unit run
 //! that entered it.
 //!
@@ -146,29 +149,14 @@ pub(crate) struct OutOfLine {
     /// The number of frame slots of the module so far, which numbers their
     /// addresses.
     pub(super) slots: u32,
+    /// The variables whose stores a function unit must not make (see
+    /// [`ProcModule::observe_storage`]).
+    pub(super) observed: HashSet<SourceVarId>,
+    /// The module's names that hierarchical names of other modules reach.
+    pub(super) foreign: HashSet<String>,
 }
 
 impl OutOfLine {
-    /// Keep subroutines `names` inlined: their units store into storage
-    /// whose stores assembly instruments (see `specialize_module`).
-    pub(super) fn keep_inlined(&mut self, names: &[String]) {
-        for name in names {
-            self.rejected.insert(
-                name.clone(),
-                Reason::Other("stores into observed storage".to_string()),
-            );
-        }
-    }
-
-    /// The subroutines whose units store into `instrumented`, by name.
-    pub(super) fn storing_into(&self, instrumented: &HashSet<SourceVarId>) -> Vec<String> {
-        self.functions
-            .iter()
-            .filter(|function| function.writes.iter().any(|id| instrumented.contains(id)))
-            .map(|function| function.name.clone())
-            .collect()
-    }
-
     /// Note how a call of `name` was lowered: going out of line once is
     /// what counts, else the first reason.
     pub(super) fn record(&mut self, name: &str, outcome: Outcome) {
@@ -328,6 +316,28 @@ pub(super) fn automatic_names(subroutine: &sv::ir::Subroutine) -> impl Iterator<
         .chain(own.flat_map(|subroutine| &subroutine.return_var))
         .chain(&subroutine.automatic_locals)
         .filter(|name| !subroutine.persistent_locals.contains(name))
+}
+
+/// The static storage of `subroutine` (see [`automatic_names`]): what it
+/// declares, formals and result included, that is not automatic.
+fn static_names(subroutine: &sv::ir::Subroutine) -> Vec<&String> {
+    let automatic: HashSet<&String> = automatic_names(subroutine).collect();
+    let mut own: Vec<&String> = subroutine
+        .params
+        .iter()
+        .map(|param| &param.name)
+        .chain(&subroutine.return_var)
+        .chain(&subroutine.persistent_locals)
+        .collect();
+    for stmt in &subroutine.body {
+        stmt.walk(&mut |stmt| {
+            if let sv::ir::Stmt::Local { name, .. } = stmt {
+                own.push(name);
+            }
+        });
+    }
+    own.retain(|name| !automatic.contains(name));
+    own
 }
 
 /// The functions of `module` a unit of it calls, directly or through other
@@ -532,26 +542,130 @@ impl ProcModule<'_> {
     /// formals and results included, that is not automatic. It is shared by
     /// every call, inlined or not, recursive ones included.
     pub(super) fn static_storage(&self) -> HashSet<SourceVarId> {
-        let mut names = Vec::new();
-        for subroutine in self.subroutines.values() {
-            let automatic: HashSet<&String> = automatic_names(subroutine).collect();
-            let mut own: Vec<&String> = subroutine
-                .params
+        self.subroutines
+            .values()
+            .flat_map(static_names)
+            .filter_map(|name| self.id(name))
+            .collect()
+    }
+
+    /// Whether assembly may instrument the stores into `id` (see
+    /// [`Self::observe_storage`]), which a function unit must not make.
+    pub(super) fn is_observed(&self, id: SourceVarId) -> bool {
+        self.calls
+            .as_deref()
+            .and_then(|graph| graph.out_of_line.as_ref())
+            .is_some_and(|functions| functions.observed.contains(&id))
+    }
+
+    /// Record, before `module`'s processes are lowered, the variables whose
+    /// stores assembly may instrument (`SimModule::instrumented_storage`),
+    /// as far as a function unit can store them.
+    ///
+    /// A function unit stores no module state but the static storage of
+    /// subroutines. Assembly instruments the stores into what a wait or an
+    /// event control watches, what combinational logic is sensitive to, and
+    /// the targets of nonblocking assignments. Each construct is walked by
+    /// the walk its lowering derives that instrumentation from, so the two
+    /// cannot disagree: a level wait by [`super::ff::level_reads`],
+    /// combinational logic, `@*` and the expressions of event controls
+    /// (whose values are continuous assignments of the module) by
+    /// [`Self::implicit_reads`], an event control on an activation-local
+    /// expression by `level_reads` too. Added are the targets of
+    /// nonblocking assignments and `foreign`, the names that hierarchical
+    /// names of other modules reach. The set may be more than assembly
+    /// instruments, which only keeps a subroutine inlined that could have
+    /// gone out of line; assembly rejects a function unit that stores into
+    /// instrumented storage all the same.
+    pub(super) fn observe_storage(&mut self, module: &sv::ir::Module, foreign: &HashSet<String>) {
+        if self.out_of_line().is_none() {
+            return;
+        }
+        let assign = |lhs: &sv::ir::LValue, rhs: &sv::ir::Expr| sv::ir::Stmt::Assign {
+            lhs: lhs.clone(),
+            rhs: rhs.clone(),
+            nonblocking: false,
+        };
+        let mut observers: Vec<sv::ir::Stmt> = Vec::new();
+        for assignment in module.assignments() {
+            observers.push(assign(assignment.lhs_value(), assignment.rhs()));
+        }
+        for process in module.comb_processes() {
+            for assignment in process.assignments() {
+                observers.push(assign(assignment.lhs_value(), assignment.rhs()));
+            }
+            observers.extend(process.body().iter().cloned());
+            observers.extend(process.sensitivity_body().iter().cloned());
+        }
+        for instance in module.instances() {
+            for connection in instance.port_connections() {
+                if let Some(actual) = connection.actual_expr() {
+                    observers.push(sv::ir::Stmt::Eval(actual.clone()));
+                }
+            }
+        }
+        let mut levels: Vec<&sv::ir::Expr> = Vec::new();
+        let mut targets: Vec<&str> = Vec::new();
+        let bodies =
+            module
+                .initial_processes()
                 .iter()
-                .map(|param| &param.name)
-                .chain(&subroutine.return_var)
-                .chain(&subroutine.persistent_locals)
-                .collect();
-            for stmt in &subroutine.body {
-                stmt.walk(&mut |stmt| {
-                    if let sv::ir::Stmt::Local { name, .. } = stmt {
-                        own.push(name);
+                .map(|process| process.body())
+                .chain(module.ff_processes().iter().map(|process| process.body()))
+                .chain(module.comb_processes().iter().map(|process| process.body()))
+                .chain(module.subroutines().iter().flat_map(|subroutine| {
+                    [&subroutine.body[..], &subroutine.sensitivity_body[..]]
+                }));
+        for body in bodies {
+            for stmt in body {
+                stmt.walk(&mut |stmt| match stmt {
+                    sv::ir::Stmt::Wait(condition) => levels.push(condition),
+                    sv::ir::Stmt::WaitEvent(items) => {
+                        for item in items {
+                            for expr in std::iter::once(&item.expr).chain(&item.iff) {
+                                observers.push(sv::ir::Stmt::Eval(expr.clone()));
+                                levels.push(expr);
+                            }
+                        }
                     }
+                    // `walk` does not visit the statements whose reads an
+                    // `@*` covers.
+                    sv::ir::Stmt::WaitImplicit { reads, .. } => {
+                        observers.extend(reads.iter().cloned());
+                    }
+                    sv::ir::Stmt::Assign {
+                        lhs,
+                        nonblocking: true,
+                        ..
+                    } => targets.push(lhs.name()),
+                    sv::ir::Stmt::AssignConcat {
+                        parts,
+                        nonblocking: true,
+                        ..
+                    } => targets.extend(parts.iter().map(sv::ir::LValue::name)),
+                    _ => {}
                 });
             }
-            names.extend(own.into_iter().filter(|name| !automatic.contains(name)));
         }
-        names.into_iter().filter_map(|name| self.id(name)).collect()
+        let mut observed: HashSet<SourceVarId> = self
+            .implicit_reads(&observers, true)
+            .into_iter()
+            .map(|atom| atom.id)
+            .collect();
+        let levels: Vec<String> = levels
+            .into_iter()
+            .flat_map(|expr| super::ff::level_reads(self, expr))
+            .collect();
+        observed.extend(
+            targets
+                .into_iter()
+                .chain(levels.iter().map(String::as_str))
+                .chain(foreign.iter().map(String::as_str))
+                .filter_map(|name| self.id(name)),
+        );
+        if let Some(functions) = self.out_of_line() {
+            functions.observed = observed;
+        }
     }
 
     /// Why subroutine `name` cannot go out of line wherever it is called,
@@ -580,6 +694,22 @@ impl ProcModule<'_> {
         if self.subroutine_makes_host_request(name) {
             note(Reason::HostRequest);
         }
+        // The formals are the function's interface: a callee whose formals
+        // a unit cannot pass stays inlined, and its body is then part of
+        // the caller's unit, which binds them as any inlined call does.
+        if let Some(subroutine) = self.subroutine(name) {
+            for param in &subroutine.params {
+                if param.direction.is_reference() {
+                    note(Reason::RefFormal);
+                }
+                if !param.leaves.is_empty() {
+                    note(Reason::Other("unpacked structure formal".to_string()));
+                }
+            }
+        }
+        // What the body does, and the bodies of the subroutines it calls,
+        // which are inlined into the unit unless they go out of line
+        // themselves, and can only if they qualify themselves.
         let mut pending = vec![name.to_string()];
         let mut visited = HashSet::default();
         while let Some(name) = pending.pop() {
@@ -590,14 +720,6 @@ impl ProcModule<'_> {
                 note(Reason::Other(format!("no subroutine `{name}`")));
                 continue;
             };
-            for param in &subroutine.params {
-                if param.direction.is_reference() {
-                    note(Reason::RefFormal);
-                }
-                if !param.leaves.is_empty() {
-                    note(Reason::Other("unpacked structure formal".to_string()));
-                }
-            }
             let mut calls = Vec::new();
             for stmt in &subroutine.body {
                 stmt.walk(&mut |stmt| {

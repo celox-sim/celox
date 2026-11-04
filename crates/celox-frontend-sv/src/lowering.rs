@@ -4050,64 +4050,37 @@ fn specialize_module(
         })
         .collect::<Vec<_>>();
     // The out-of-line functions are kept with the call graph, which every
-    // lowering of the module's processes already receives.
-    //
-    // A function unit must not store into storage whose stores assembly
-    // instruments (`SimModule::instrumented_storage`), and which storage
-    // that is shows only once every process is lowered: a wait in a later
-    // process may read the static storage of an earlier function. A
-    // subroutine whose unit stores there is kept inlined, as its inlined
-    // stores are instrumented, and the module lowered again; each round
-    // keeps at least one more inlined.
-    let warnings_before = warnings.len();
-    let mut kept_inlined: Vec<String> = Vec::new();
-    let (mut lowered, calls) = loop {
-        let mut calls = (hierarchical.recursion_report.is_some() || hierarchical.force_out_of_line)
-            .then(|| recursion::CallGraph::new(hierarchical.force_out_of_line));
-        if let Some(functions) = calls.as_mut().and_then(|graph| graph.out_of_line.as_mut()) {
-            functions.keep_inlined(&kept_inlined);
+    // lowering of the module's processes already receives. A function unit
+    // must not store into storage whose stores assembly instruments
+    // (`SimModule::instrumented_storage`), which the module's source shows
+    // before it is lowered; waits and domains of other modules may watch
+    // what hierarchical names reach.
+    let mut calls = (hierarchical.recursion_report.is_some() || hierarchical.force_out_of_line)
+        .then(|| recursion::CallGraph::new(hierarchical.force_out_of_line));
+    if let Some(functions) = calls.as_mut().and_then(|graph| graph.out_of_line.as_mut()) {
+        functions.foreign = hierarchical.shared.foreign_references.clone();
+    }
+    let lowered = lower_module(
+        specialized,
+        four_state,
+        module.implicit_nets_allowed,
+        ff_parts,
+        warnings,
+        &local_forces,
+        level_lists,
+        hierarchical.foreign_writes,
+        &module.interface_member_paths,
+        hierarchical.shared,
+        calls.as_mut(),
+    );
+    let mut lowered = match (lowered, &calls, hierarchical.recursion_report) {
+        (Ok(lowered), _, _) => lowered,
+        // Report the graph recorded up to the error.
+        (Err(error), Some(graph), Some(path)) => {
+            recursion::append(specialized, graph, path);
+            return Err(error);
         }
-        let lowered = lower_module(
-            specialized,
-            four_state,
-            module.implicit_nets_allowed,
-            ff_parts,
-            warnings,
-            &local_forces,
-            level_lists,
-            hierarchical.foreign_writes,
-            &module.interface_member_paths,
-            hierarchical.shared,
-            calls.as_mut(),
-        );
-        let lowered = match (lowered, &calls, hierarchical.recursion_report) {
-            (Ok(lowered), _, _) => lowered,
-            // Report the graph recorded up to the error.
-            (Err(error), Some(graph), Some(path)) => {
-                recursion::append(specialized, graph, path);
-                return Err(error);
-            }
-            (Err(error), _, _) => return Err(error),
-        };
-        if let Some(functions) = calls.as_ref().and_then(|graph| graph.out_of_line.as_ref()) {
-            // Waits and domains of other modules may watch what
-            // hierarchical names reach.
-            let mut instrumented = lowered.sim_module.instrumented_storage();
-            instrumented.extend(
-                hierarchical
-                    .shared
-                    .foreign_references
-                    .iter()
-                    .filter_map(|name| lowered.signal_names.get(name).copied()),
-            );
-            let storing = functions.storing_into(&instrumented);
-            if !storing.is_empty() {
-                kept_inlined.extend(storing);
-                warnings.truncate(warnings_before);
-                continue;
-            }
-        }
-        break (lowered, calls);
+        (Err(error), _, _) => return Err(error),
     };
     lowered.calls = calls;
     propagate_force_signals(&mut lowered.instances, &key.force_signals);
@@ -4779,6 +4752,11 @@ fn lower_module_with_overrides(
             warnings,
         );
         pm.calls = calls.as_deref_mut();
+        let foreign = pm
+            .out_of_line()
+            .map(|functions| std::mem::take(&mut functions.foreign))
+            .unwrap_or_default();
+        pm.observe_storage(module, &foreign);
         let blocks = lower_ff_processes(
             module,
             &mut pm,
