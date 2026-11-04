@@ -1,0 +1,15 @@
+Address review 5766239395 on PR #3091: normalize accepted restored gated baselines and count iff occurrences at each scheduled host-clock write; validate lower commit and rebase dependents.
+
+Sync after #3091 merged. stack sync tried to drop an already reachable merge-parent commit that Git omitted from its todo; a normal noninteractive rebase onto origin/master applies only the remaining 14 commits.
+
+Rebase dependent revisions onto the existing #3113/#3115 observer review fixes; retain the already-published #3093 head.
+
+Integrate native before_domains callbacks with unspecified event polarity: use settled-edge comparison and exercise callback-driven domain changes against the reference executor.
+
+Address review r4469875852: preserve scheduled rising-edge rules for unspecified domains, and use the existing native stable-edge wave when no scheduled edge fires. Add mixed known/unspecified clock coverage for both timed and untimed execution.
+
+Refresh validation counts after independently tested combinational finish and host Active ordering review fixes.
+
+Sync merged PRs through #3111: stack sync failed because Git already omits merged commits from the todo; use a normal noninteractive rebase onto updated origin/master.
+
+Preserve the published, green #3113/#3114 heads while fixing #3115 CI. Retain their published parent for this update; current-master integration has been validated locally.
