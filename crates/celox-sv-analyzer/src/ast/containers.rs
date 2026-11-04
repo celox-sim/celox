@@ -910,6 +910,11 @@ pub(super) fn value(
             if separator != "." {
                 return Err(unsupported("container scoped call"));
             }
+            // `rand_mode` of a random array property is no array method
+            // (IEEE 1800-2023 18.8).
+            if name.spelling == "rand_mode" {
+                return Ok(None);
+            }
             let (op, count) = match name.spelling.as_str() {
                 "reverse" | "sort" | "rsort" | "shuffle"
                     if !matches!(target.layout.kind, ContainerKind::Associative { .. }) =>
