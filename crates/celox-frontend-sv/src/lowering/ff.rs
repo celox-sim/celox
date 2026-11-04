@@ -2943,7 +2943,10 @@ impl<'p, 'a> Ff<'p, 'a> {
             return Ok(None);
         };
         let (store, args, width, four_state) = match (&**op, args.as_slice()) {
-            (ObjectOp::Load(field), [Some(handle)]) if field.handle.is_none() => {
+            // A property holding a handle is written whole.
+            (ObjectOp::Load(field), [Some(handle)])
+                if field.handle.is_none() || select.is_none() =>
+            {
                 let object = self.capture_handle(handle)?;
                 (
                     ObjectOp::Store(*field),
@@ -3014,7 +3017,17 @@ impl<'p, 'a> Ff<'p, 'a> {
         // The local is written after the request, from its result.
         let (id, local) = self.m.temp("actual_value", width, false, four_state);
         let float = self.m.expr_float_precision(&load);
-        self.m.variables.get_mut(&id).expect("a temporary").float = float;
+        let variable = self.m.variables.get_mut(&id).expect("a temporary");
+        variable.float = float;
+        // The local of a property holding a handle keeps its object.
+        if let ObjectOp::Store(field) = &store
+            && let Some(handle) = field.handle
+        {
+            variable.value_kind = match handle {
+                sv::ir::HandleProperty::Object => celox_design::ValueKind::ObjRef,
+                sv::ir::HandleProperty::String => celox_design::ValueKind::StrRef,
+            };
+        }
         let part = match select {
             Some((msb, lsb)) => {
                 let part = LValue::Select {
@@ -3104,7 +3117,21 @@ impl<'p, 'a> Ff<'p, 'a> {
             parts => self.assign_concat(parts, value)?,
         }
         if let Some(place) = &actual.place {
-            self.eval(&place.store, None)?;
+            self.store_place(&place.store)?;
+        }
+        Ok(())
+    }
+
+    /// The store `store` of a place, a class property or a container
+    /// element, published as a store of a variable is (see
+    /// [`Self::observe_assignment`]): every write of a place, by an
+    /// assignment, an output copy-out or a scan, goes through here. A store
+    /// to an element of a container variable is a write of the variable; a
+    /// property of an object is no variable a wait can watch.
+    fn store_place(&mut self, store: &sv::ir::Expr) -> Result<(), sv::AnalyzerError> {
+        self.eval(store, None)?;
+        if let Some(target) = place_store_target(store) {
+            self.observe_assignment(&[sv::ir::LValue::Ident(target)])?;
         }
         Ok(())
     }
@@ -4271,7 +4298,11 @@ impl<'p, 'a> Ff<'p, 'a> {
                 Ok(true)
             }
             sv::ir::Stmt::Eval(expr) => {
-                self.eval(expr, None)?;
+                if place_store_target(expr).is_some() {
+                    self.store_place(expr)?;
+                } else {
+                    self.eval(expr, None)?;
+                }
                 Ok(true)
             }
             sv::ir::Stmt::SystemTask {
@@ -5073,6 +5104,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         let mut references = Vec::new();
         let mut aliases = Vec::new();
         let mut property_outputs = Vec::new();
+        let mut place_outputs = Vec::new();
         // The formals an out-of-line call copies back, each with the
         // temporary that receives it from the callee's frame.
         let mut copies = Vec::new();
@@ -5188,9 +5220,16 @@ impl<'p, 'a> Ff<'p, 'a> {
                     }
                     _ => param.name.clone(),
                 };
-                // A reference formal bound to a class property, forwarded:
-                // its object was evaluated when the reference was made.
-                if let Some(store) =
+                // A place actual, a class property, a select or member of
+                // one or a container element, is assigned when the call
+                // returns: "Execution of the return from the subroutine shall
+                // pass values from the output and inout type arguments to
+                // the corresponding variables in the subroutine call" (IEEE
+                // 1800-2023 13.5). The place is found then, as the
+                // assignment `actual = formal` there would find it.
+                if place_actual(reference) {
+                    place_outputs.push((formal.clone(), reference.clone()));
+                } else if let Some(store) =
                     forwarded_property(reference, sv::ir::Expr::Ident(formal.clone()))
                 {
                     property_outputs.push(store);
@@ -5349,6 +5388,10 @@ impl<'p, 'a> Ff<'p, 'a> {
                 self.assign_concat(&lvalues, &sv::ir::Expr::Ident(formal))?;
             }
             self.observe_assignment(&lvalues)?;
+        }
+        for (formal, actual) in place_outputs {
+            let (captured, _, _) = self.capture_system_actual(&actual)?;
+            self.write_system_actual(&captured, &sv::ir::Expr::Ident(formal))?;
         }
         for store in property_outputs {
             self.exec_block(&[store])?;
@@ -9197,6 +9240,75 @@ enum Reference {
 /// The store that copies `value` back into the class property that `actual`
 /// reads through the object of a reference formal (see
 /// [`references::Alias`]), when it is such a read.
+/// The container variable that place store `store` writes, a container
+/// element set on a variable, if it is one.
+fn place_store_target(store: &sv::ir::Expr) -> Option<String> {
+    match store {
+        sv::ir::Expr::Call {
+            callee: sv::ir::Callee::Object(op),
+            args,
+            ..
+        } if matches!(
+            **op,
+            sv::ir::ObjectOp::Container {
+                op: sv::ir::ContainerOp::Set,
+                ..
+            }
+        ) =>
+        {
+            match args.first() {
+                Some(Some(sv::ir::Expr::Ident(name))) => Some(name.clone()),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Whether output actual `actual` is a place that the analyzer bound: a
+/// class property, a select of one, or a container element, under the
+/// checks of the tags its selection crosses (see `capture_place_actual`).
+/// A property of the object of a reference formal is forwarded instead.
+fn place_actual(actual: &sv::ir::Expr) -> bool {
+    use sv::ir::{Callee, ContainerOp, Expr, ObjectOp};
+    let mut place = actual;
+    while let Expr::Call {
+        callee: Callee::Checked { .. },
+        args,
+        ..
+    } = place
+        && let [Some(_), Some(value)] = args.as_slice()
+    {
+        place = value;
+    }
+    if let Expr::Select { expr, .. } = place {
+        place = expr;
+    }
+    match place {
+        Expr::Call {
+            callee: Callee::Object(op),
+            args,
+            ..
+        } => match (&**op, args.as_slice()) {
+            (ObjectOp::Load(_), [Some(Expr::Ident(handle))])
+                if handle.starts_with(references::OBJECT_TEMP) =>
+            {
+                false
+            }
+            (ObjectOp::Load(_), [Some(_)]) => true,
+            (
+                ObjectOp::Container {
+                    op: ContainerOp::Get,
+                    ..
+                },
+                [Some(_), Some(_)],
+            ) => true,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 fn forwarded_property(actual: &sv::ir::Expr, value: sv::ir::Expr) -> Option<sv::ir::Stmt> {
     let sv::ir::Expr::Call {
         callee: sv::ir::Callee::Object(op),
