@@ -1,0 +1,1 @@
+Address #3113 observer review in the existing PR: invoke before_domains as a synchronous native service, preserving generated scheduling and native-only steady execution.
