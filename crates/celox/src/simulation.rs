@@ -201,6 +201,25 @@ impl<B: SimBackend> UnitExecutor for Simulator<B> {
         self.native_host_round_budget = rounds;
     }
 
+    fn compiled_nba_queues(&self) -> bool {
+        cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen")))
+            && self.has_native_scheduler_services()
+    }
+
+    fn put_compiled_nbas(
+        &mut self,
+        ready: Vec<celox_runtime::NbaUpdate>,
+        delayed: Vec<(u64, celox_runtime::NbaUpdate)>,
+    ) -> Result<(), celox_runtime::SimulatorErrorCode> {
+        self.native_nba_queue.extend(ready);
+        self.native_delayed_nbas.extend(delayed);
+        Ok(())
+    }
+
+    fn take_compiled_delayed_nbas(&mut self) -> Vec<(u64, celox_runtime::NbaUpdate)> {
+        self.native_delayed_nbas.drain(..).collect()
+    }
+
     fn take_compiled_nbas(&mut self) -> Vec<celox_runtime::NbaUpdate> {
         self.native_nba_queue.drain(..).collect()
     }
