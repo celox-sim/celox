@@ -51,10 +51,37 @@ pub enum Expr {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Program {
     pub fields: Vec<Field>,
     pub constraints: Vec<Expr>,
+    /// The byte offsets of the object's rand class handles: the variables
+    /// and constraints of the objects they refer to are solved with the
+    /// object's (IEEE 1800-2023 18.4).
+    #[serde(default)]
+    pub handles: Vec<u32>,
+}
+
+/// The objects a randomize call in progress runs the hooks of (IEEE
+/// 1800-2023 18.6.2), in order, each once.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct Visits {
+    /// The object whose randomize call runs the hooks.
+    root: Handle,
+    pub(crate) objects: Vec<Handle>,
+    seen: fxhash::FxHashSet<Handle>,
+    /// Whether the visits discover the members, as pre_randomize visits do.
+    discover: bool,
+}
+
+/// The program a class registers for the objects of it that rand handles
+/// reach, see [`Heap::register_program`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum Registered {
+    Program(std::sync::Arc<Program>),
+    /// The class has random variables or constraints the solver cannot
+    /// take, for this reason.
+    Unsupported(String),
 }
 
 /// Whether `term` is one of `values`, as a balanced tree so that a large
@@ -228,6 +255,124 @@ impl Expr {
 }
 
 impl Heap {
+    /// Register `program` for the objects of class `class`, once: the class
+    /// of an object rand handles reach is known only at run time, and an
+    /// object was constructed, which registers the program of its class.
+    pub fn register_program(&mut self, class: u32, program: Registered) {
+        self.programs.entry(class).or_insert(program);
+    }
+
+    /// Begin the pre_randomize visits of a randomize call of `object`, whose
+    /// own hook ran (IEEE 1800-2023 18.6.2): the objects its enabled rand
+    /// object handles refer to, by the handles its class registered. Each
+    /// visited object adds those of its own once its hook ran
+    /// ([`Heap::expand_visits`]), so a member a hook allocates is visited,
+    /// each object once. Kept until [`Heap::end_visits`], so a randomize
+    /// call inside a hook has its own.
+    pub fn begin_visits(&mut self, object: Handle) -> usize {
+        let mut visits = Visits {
+            root: object,
+            objects: Vec::new(),
+            seen: fxhash::FxHashSet::from_iter([object]),
+            discover: true,
+        };
+        let handles = self.registered_handles(object);
+        self.reach(object, &handles, &mut visits.seen, &mut visits.objects);
+        let count = visits.objects.len();
+        self.visits.push(visits);
+        count
+    }
+
+    /// Add the objects the enabled rand object handles of visited object
+    /// `object` refer to, once its pre_randomize ran: the number of objects
+    /// the visits in progress have now.
+    pub fn expand_visits(&mut self, object: Handle) -> usize {
+        let Some(mut visits) = self.visits.pop() else {
+            return 0;
+        };
+        let handles = self.registered_handles(object);
+        self.reach(object, &handles, &mut visits.seen, &mut visits.objects);
+        let count = visits.objects.len();
+        self.visits.push(visits);
+        count
+    }
+
+    /// End the visits in progress. The members whose pre_randomize ran are
+    /// those the solve of the call takes.
+    pub fn end_visits(&mut self) {
+        if let Some(visits) = self.visits.pop()
+            && visits.discover
+        {
+            self.prepared = Some((visits.root, visits.objects));
+        }
+    }
+
+    /// The objects whose post_randomize runs (18.6.2): the rand object
+    /// members the last successful solve took, without reading a handle
+    /// again, since a hook may have changed them. Begun right after the
+    /// solve, as [`Heap::begin_visits`] begins visits.
+    pub fn begin_solved_visits(&mut self) -> usize {
+        let objects = std::mem::take(&mut self.solved);
+        let count = objects.len();
+        self.visits.push(Visits {
+            root: crate::objects::NULL,
+            objects,
+            seen: Default::default(),
+            discover: false,
+        });
+        count
+    }
+
+    /// The rand object handles of the class of `object`, by its registered
+    /// program.
+    fn registered_handles(&self, object: Handle) -> Vec<u32> {
+        match self.programs.get(&self.class_of(object)) {
+            Some(Registered::Program(program)) => program.handles.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Add to `found` the non-null objects the enabled (18.8) rand object
+    /// handles at `handles` of `object` refer to that are not in `seen`.
+    fn reach(
+        &mut self,
+        object: Handle,
+        handles: &[u32],
+        seen: &mut fxhash::FxHashSet<Handle>,
+        found: &mut Vec<Handle>,
+    ) {
+        for &offset in handles {
+            if !self.random_mode(object, offset, true) {
+                continue;
+            }
+            let child = self.load(object, offset as usize, crate::HANDLE_BYTES) as Handle;
+            if child != crate::objects::NULL && seen.insert(child) {
+                found.push(child);
+            }
+        }
+    }
+
+    /// The objects the enabled rand object handles at `handles` of `object`
+    /// reach, each once and without `object`, breadth first, by the handles
+    /// their classes registered.
+    fn reached(&mut self, object: Handle, handles: &[u32]) -> Vec<Handle> {
+        let mut seen = fxhash::FxHashSet::from_iter([object]);
+        let mut found = Vec::new();
+        self.reach(object, handles, &mut seen, &mut found);
+        let mut next = 0;
+        while let Some(&current) = found.get(next) {
+            next += 1;
+            let handles = self.registered_handles(current);
+            self.reach(current, &handles, &mut seen, &mut found);
+        }
+        found
+    }
+
+    /// Whether class `class` registered its program.
+    pub fn program_registered(&self, class: u32) -> bool {
+        self.programs.contains_key(&class)
+    }
+
     /// Evaluate against the state after pre_randomize; commit only a complete
     /// assignment. A solver failure is a runtime fault, never an UNSAT result.
     pub fn randomize_object(
@@ -263,53 +408,89 @@ impl Heap {
             return false;
         }
         let result = (|| -> Result<bool, String> {
+            // The object and those its enabled rand handles refer to, each
+            // once, with the program of its class (18.4, 18.8). The handles
+            // themselves are never changed.
+            let mut members: Vec<(Handle, std::sync::Arc<Program>)> =
+                vec![(handle, std::sync::Arc::new(program.clone()))];
+            // The members are those whose pre_randomize ran, also of classes
+            // with nothing to solve; post_randomize runs on them (18.6.2).
+            // A check takes the same: randomize(null) makes the rand handles
+            // of the object state too (18.11, 18.11.1). A call that ran no
+            // hooks finds them here.
+            let participants = match self.prepared.take() {
+                Some((root, objects)) if root == handle => objects,
+                _ => self.reached(handle, &program.handles),
+            };
+            for &child in &participants {
+                // A class that registered nothing has nothing to solve.
+                match self.programs.get(&self.class_of(child)) {
+                    None => {}
+                    Some(Registered::Program(nested)) => members.push((child, nested.clone())),
+                    Some(Registered::Unsupported(reason)) => {
+                        return Err(format!("rand object member: {reason}"));
+                    }
+                }
+            }
             let mut projection = Env::new();
             let mut terms = Vec::new();
             let mut active = Vec::new();
             let mut cyclic = Vec::new();
             let mut formula = boolv(true);
-            for (index, field) in program.fields.iter().enumerate() {
-                if !(1..=64).contains(&field.width) {
-                    return Err("invalid constraint field width".into());
-                }
-                let name = index.to_string();
-                let term = var(name.clone(), Sort::Bv(field.width));
-                let enabled = !check_only && self.random_mode(handle, field.offset, field.random);
-                if enabled {
-                    projection.insert(name, term.clone());
-                    active.push((index, field));
-                    if !field.domain.is_empty() {
-                        formula = and(
-                            formula,
-                            member(&term, field.width, field.domain.iter().copied()),
-                        );
+            let mut bases = Vec::new();
+            for (object, current) in &members {
+                let (object, current) = (*object, current.as_ref());
+                bases.push(terms.len());
+                for field in &current.fields {
+                    if !(1..=64).contains(&field.width) {
+                        return Err("invalid constraint field width".into());
                     }
-                    if field.cyclic {
-                        if field.domain.is_empty() && field.width > 8 || field.domain.len() > 256 {
-                            return Err("randc property with more than 256 values".into());
+                    let name = terms.len().to_string();
+                    let term = var(name.clone(), Sort::Bv(field.width));
+                    let enabled =
+                        !check_only && self.random_mode(object, field.offset, field.random);
+                    if enabled {
+                        projection.insert(name, term.clone());
+                        active.push((terms.len(), object, field));
+                        if !field.domain.is_empty() {
+                            formula = and(
+                                formula,
+                                member(&term, field.width, field.domain.iter().copied()),
+                            );
                         }
-                        cyclic.push((field, term.clone()));
+                        if field.cyclic {
+                            if field.domain.is_empty() && field.width > 8
+                                || field.domain.len() > 256
+                            {
+                                return Err("randc property with more than 256 values".into());
+                            }
+                            cyclic.push((object, field, term.clone()));
+                        }
+                    } else {
+                        let value = self.load(
+                            object,
+                            field.offset as usize,
+                            field.width.div_ceil(8) as usize,
+                        );
+                        formula = and(formula, eq(term.clone(), bv(field.width, value)));
                     }
-                } else {
-                    let value = self.load(
-                        handle,
-                        field.offset as usize,
-                        field.width.div_ceil(8) as usize,
-                    );
-                    formula = and(formula, eq(term.clone(), bv(field.width, value)));
+                    terms.push(term);
                 }
-                terms.push(term);
             }
-            for constraint in &program.constraints {
-                let constraint = if let Expr::Enabled { index, value } = constraint {
-                    if !self.constraint_mode(handle, *index) {
-                        continue;
-                    }
-                    value.as_ref()
-                } else {
-                    constraint
-                };
-                formula = and(formula, truth(constraint.term(&terms, inputs)?));
+            for ((object, current), &base) in members.iter().zip(&bases) {
+                let object = *object;
+                let fields = &terms[base..base + current.fields.len()];
+                for constraint in &current.constraints {
+                    let constraint = if let Expr::Enabled { index, value } = constraint {
+                        if !self.constraint_mode(object, *index) {
+                            continue;
+                        }
+                        value.as_ref()
+                    } else {
+                        constraint
+                    };
+                    formula = and(formula, truth(constraint.term(fields, inputs)?));
+                }
             }
             let seed = if projection.is_empty() {
                 0
@@ -324,30 +505,34 @@ impl Heap {
             // their own, then, while the remaining values of the others
             // still exclude every solution, one more cycle at a time.
             // A restart takes effect only when the call succeeds.
-            let restriction = |heap: &mut Self, field: &Field, term: &Term, restart: bool| {
-                let remaining = if restart {
-                    (0..cycle_size(field)).collect()
-                } else {
-                    heap.cycle_remaining(handle, field.offset, cycle_size(field), false)
+            let restriction =
+                |heap: &mut Self, object: Handle, field: &Field, term: &Term, restart: bool| {
+                    let remaining = if restart {
+                        (0..cycle_size(field)).collect()
+                    } else {
+                        heap.cycle_remaining(object, field.offset, cycle_size(field), false)
+                    };
+                    member(
+                        term,
+                        field.width,
+                        remaining.into_iter().map(|entry| cycle_value(field, entry)),
+                    )
                 };
-                member(
-                    term,
-                    field.width,
-                    remaining.into_iter().map(|entry| cycle_value(field, entry)),
-                )
-            };
             let mut restarted = vec![false; cyclic.len()];
             let solve_with = |heap: &mut Self, restarted: &[bool]| {
                 let mut attempt = formula.clone();
-                for ((field, term), restart) in cyclic.iter().zip(restarted) {
-                    attempt = and(attempt, restriction(heap, field, term, *restart));
+                for ((object, field, term), restart) in cyclic.iter().zip(restarted) {
+                    attempt = and(attempt, restriction(heap, *object, field, term, *restart));
                 }
                 solve_seeded(&attempt, &projection, limits.clone(), seed)
             };
             let mut outcome = solve_with(self, &restarted);
             if matches!(outcome.verdict, Verdict::Unsat) && !cyclic.is_empty() {
-                for (position, (field, term)) in cyclic.iter().enumerate() {
-                    let alone = and(formula.clone(), restriction(self, field, term, false));
+                for (position, (object, field, term)) in cyclic.iter().enumerate() {
+                    let alone = and(
+                        formula.clone(),
+                        restriction(self, *object, field, term, false),
+                    );
                     restarted[position] = matches!(
                         solve_seeded(&alone, &projection, limits.clone(), seed).verdict,
                         Verdict::Unsat
@@ -378,31 +563,34 @@ impl Heap {
                     let model = &outcome.context_values;
                     let updates = active
                         .into_iter()
-                        .map(|(index, field)| match model.get(&index.to_string()) {
-                            Some(Scalar::Bv { value, .. }) => Ok((field, *value)),
-                            _ => Err("missing constraint field value".to_owned()),
-                        })
+                        .map(
+                            |(index, object, field)| match model.get(&index.to_string()) {
+                                Some(Scalar::Bv { value, .. }) => Ok((object, field, *value)),
+                                _ => Err("missing constraint field value".to_owned()),
+                            },
+                        )
                         .collect::<Result<Vec<_>, _>>()?;
-                    for ((field, _), restart) in cyclic.iter().zip(&restarted) {
+                    for ((object, field, _), restart) in cyclic.iter().zip(&restarted) {
                         if *restart {
-                            self.cycle_remaining(handle, field.offset, cycle_size(field), true);
+                            self.cycle_remaining(*object, field.offset, cycle_size(field), true);
                         }
                     }
-                    for (field, value) in &updates {
+                    for (object, field, value) in &updates {
                         if field.cyclic
                             && let Some(entry) = cycle_index(field, *value)
                         {
-                            self.take_cycle_entry(handle, field.offset, cycle_size(field), entry);
+                            self.take_cycle_entry(*object, field.offset, cycle_size(field), entry);
                         }
                     }
-                    for (field, value) in updates {
+                    for (object, field, value) in updates {
                         self.store(
-                            handle,
+                            object,
                             field.offset as usize,
                             field.width.div_ceil(8) as usize,
                             value,
                         );
                     }
+                    self.solved = participants;
                     Ok(true)
                 }
             }
@@ -437,7 +625,108 @@ mod tests {
                 right: Box::new(Expr::Literal(4, 3)),
                 signed: false,
             }],
+            ..Default::default()
         }
+    }
+
+    /// The objects rand handles refer to are solved with the object, with
+    /// the programs their classes registered, each once (IEEE 1800-2023
+    /// 18.4); a disabled or null handle and a class without a program add
+    /// nothing, and an unsupported one faults.
+    #[test]
+    fn rand_handles_solve_the_objects_they_refer_to() {
+        let mut heap = Heap::new();
+        // Parent: a 4-bit field at 0 and rand handles at 4 and 8.
+        let parent = heap.new_object(1, 12);
+        let child = heap.new_object(2, 1);
+        heap.store(parent, 4, crate::HANDLE_BYTES, child.into());
+        heap.store(parent, 8, crate::HANDLE_BYTES, parent.into());
+        let parent_program = Program {
+            handles: vec![4, 8],
+            ..program()
+        };
+        let mut child_program = program();
+        child_program.constraints = vec![Expr::Binary {
+            op: "==".into(),
+            left: Box::new(Expr::Field(0)),
+            right: Box::new(Expr::Literal(4, 9)),
+            signed: false,
+        }];
+        heap.register_program(2, Registered::Program(child_program.clone().into()));
+        // A later registration keeps the first.
+        heap.register_program(2, Registered::Unsupported("later".into()));
+        assert!(heap.program_registered(2));
+        assert!(heap.randomize_object(parent, &parent_program, false));
+        assert!(heap.load(parent, 0, 1) < 3);
+        assert_eq!(heap.load(child, 0, 1), 9);
+        assert_eq!(heap.load(parent, 4, crate::HANDLE_BYTES), u64::from(child));
+        // A check takes the objects of the enabled handles too; generated
+        // randomize(null) disables them for the call (18.11).
+        heap.store(child, 0, 1, 4);
+        assert!(!heap.randomize_object(parent, &parent_program, true));
+        // A disabled handle leaves its object out (18.8).
+        heap.set_random_mode(parent, 4, false);
+        assert!(heap.randomize_object(parent, &parent_program, false));
+        assert_eq!(heap.load(child, 0, 1), 4);
+        heap.set_random_mode(parent, 4, true);
+        // A null handle refers to nothing.
+        heap.store(parent, 4, crate::HANDLE_BYTES, 0);
+        assert!(heap.randomize_object(parent, &parent_program, false));
+        assert_eq!(heap.take_fault(), None);
+        // A class whose program the solver cannot take faults.
+        let other = heap.new_object(3, 1);
+        heap.register_program(3, Registered::Unsupported("rand dynamic array".into()));
+        heap.store(parent, 4, crate::HANDLE_BYTES, other.into());
+        assert!(!heap.randomize_object(parent, &parent_program, false));
+        assert!(matches!(
+            heap.take_fault(),
+            Some(Fault::ConstraintRandomization(reason)) if reason.contains("rand dynamic array")
+        ));
+        // A class that registered nothing has nothing to solve.
+        let plain = heap.new_object(4, 1);
+        heap.store(parent, 4, crate::HANDLE_BYTES, plain.into());
+        assert!(heap.randomize_object(parent, &parent_program, false));
+        // Registration and visits through the heap operations.
+        let json =
+            heap.intern(&serde_json::to_vec(&Registered::Program(child_program.into())).unwrap());
+        assert_eq!(heap.call(crate::ops::OBJECT_PROGRAM_REGISTERED, 5, 0, 0), 0);
+        heap.call(crate::ops::OBJECT_REGISTER_PROGRAM, 5, json.into(), 0);
+        assert_eq!(heap.call(crate::ops::OBJECT_PROGRAM_REGISTERED, 5, 0, 0), 1);
+        // The objects the hooks visit: through the registered handles, each
+        // once, without the object itself.
+        heap.register_program(1, Registered::Program(parent_program.clone().into()));
+        heap.store(parent, 4, crate::HANDLE_BYTES, child.into());
+        assert_eq!(
+            heap.call(crate::ops::OBJECT_VISIT_BEGIN, parent.into(), 0, 0),
+            1
+        );
+        assert_eq!(
+            heap.call(crate::ops::OBJECT_VISIT, 0, 0, 0),
+            u64::from(child)
+        );
+        heap.set_random_mode(parent, 4, false);
+        assert_eq!(
+            heap.call(crate::ops::OBJECT_VISIT_BEGIN, parent.into(), 0, 0),
+            0
+        );
+        heap.call(crate::ops::OBJECT_VISIT_END, 0, 0, 0);
+        assert_eq!(
+            heap.call(crate::ops::OBJECT_VISIT, 0, 0, 0),
+            u64::from(child)
+        );
+        heap.call(crate::ops::OBJECT_VISIT_END, 0, 0, 0);
+        // post_randomize visits the members the solve took, also after a
+        // hook cleared the handle.
+        heap.set_random_mode(parent, 4, true);
+        assert!(heap.randomize_object(parent, &parent_program, false));
+        heap.store(parent, 4, crate::HANDLE_BYTES, crate::objects::NULL.into());
+        assert_eq!(heap.call(crate::ops::OBJECT_VISIT_SOLVED, 0, 0, 0), 1);
+        assert_eq!(
+            heap.call(crate::ops::OBJECT_VISIT, 0, 0, 0),
+            u64::from(child)
+        );
+        heap.call(crate::ops::OBJECT_VISIT_END, 0, 0, 0);
+        assert_eq!(heap.take_fault(), None);
     }
 
     #[test]
@@ -541,6 +830,7 @@ mod tests {
         let program = Program {
             fields: vec![field(0), field(1)],
             constraints: vec![below(0, 2), below(1, 3)],
+            ..Default::default()
         };
         for _ in 0..4 {
             let mut seen = Vec::new();
@@ -702,6 +992,7 @@ mod tests {
                     Expr::Field(2),
                 ),
             ],
+            ..Default::default()
         };
         let mut heap = Heap::new();
         let object = heap.new_object(1, 24);

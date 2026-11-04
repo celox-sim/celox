@@ -879,6 +879,225 @@ fn constraints_on_handle_and_string_properties_are_rejected() {
     }
 }
 
+/// The objects rand object handles reach form a graph that may be cyclic:
+/// each object is solved, and its hooks run, once per call (IEEE 1800-2023
+/// 18.4, 18.6.2). Verilator 5.052 rejects a rand member of the containing
+/// class's type and does not finish compiling a cycle through two classes.
+#[test]
+fn rand_object_cycles_are_solved_once() {
+    let source = r#"module Top(output int sum, output bit done);
+    class Leaf;
+        rand bit [3:0] v;
+        int pre, post;
+        constraint c { v inside {[3:5]}; }
+        function void pre_randomize(); pre++; endfunction
+        function void post_randomize(); post++; endfunction
+    endclass
+    class SubLeaf extends Leaf;
+        constraint d { v != 4; }
+    endclass
+    class Stuck extends Leaf;
+        constraint e { v == 9; }
+    endclass
+    class Node;
+        rand bit [3:0] w;
+        rand Leaf leaf;
+        rand Leaf none;
+        Leaf plain;
+        rand Node self_ref;
+        constraint k { w < 3; }
+    endclass
+    class Holder;
+        rand Leaf leaf;
+    endclass
+    Node n;
+    SubLeaf s;
+    Holder h;
+    int bad;
+    initial begin
+        n = new;
+        s = new;
+        n.leaf = s;
+        n.plain = new;
+        n.self_ref = n;
+        for (int i = 0; i < 20; i++) begin
+            if (!n.randomize()) $fatal(1, "randomize");
+            if (n.w >= 3 || !(s.v inside {3, 5})) bad++;
+        end
+        // A non-rand handle is not randomized; the hooks ran once per call.
+        sum = s.pre + s.post + n.plain.v + n.plain.pre;
+        // A class without constraints of its own solves its rand objects.
+        h = new;
+        h.leaf = new;
+        if (!h.randomize() || !(h.leaf.v inside {[3:5]}) || h.leaf.pre != 1) bad++;
+        // An unsatisfiable member fails the call, changes nothing and runs
+        // no post_randomize.
+        begin
+            Stuck stuck = new;
+            n.leaf = stuck;
+            n.w = 2;
+            if (n.randomize() || n.w != 2 || stuck.v != 0 || stuck.pre != 1 || stuck.post != 0) bad++;
+        end
+        $display("%0d %0d", sum, bad);
+        done = bad == 0;
+    end
+endmodule
+"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("cycle.sv"))], "Top")
+        .build()
+        .unwrap();
+    let (sum, done) = (sim.signal("sum"), sim.signal("done"));
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sum), BigUint::from(40u8));
+    assert_eq!(sim.get(done), BigUint::from(1u8));
+}
+
+/// post_randomize runs on the rand object members the solve took, also when
+/// the containing object's post_randomize clears or replaces the handle
+/// first, and pre_randomize on those the object's own pre_randomize
+/// allocates (IEEE 1800-2023 18.6.2). A randomize call inside a hook does
+/// not change them, and the hooks it dispatches are those of the classes
+/// its rand handles can refer to, not the hook calling it. randomize(null)
+/// makes the rand handles state too (18.11, 18.11.1): it checks the
+/// object's own constraints and runs the hooks of no member.
+#[test]
+fn post_randomize_runs_on_the_solved_members() {
+    let source = r#"module Top(output int bad, output bit done);
+    class Leaf;
+        rand bit [3:0] v;
+        int pre, post;
+        constraint c { v inside {[3:5]}; }
+        function void pre_randomize(); pre++; endfunction
+        function void post_randomize(); post++; endfunction
+    endclass
+    class Other;
+        rand Leaf leaf;
+    endclass
+    class Parent;
+        rand Leaf leaf;
+        int mode;
+        Leaf spare;
+        Other other;
+        function void pre_randomize();
+            if (mode == 3) leaf = new;
+        endfunction
+        function void post_randomize();
+            if (mode == 1) leaf = null;
+            if (mode == 2) leaf = spare;
+            if (mode == 4) void'(other.randomize());
+        endfunction
+    endclass
+    Parent p;
+    Leaf first, second;
+    initial begin
+        p = new;
+        p.spare = new;
+        // Cleared by the parent's post_randomize.
+        first = new;
+        p.leaf = first;
+        p.mode = 1;
+        if (!p.randomize() || p.leaf != null || first.pre != 1 || first.post != 1
+            || !(first.v inside {[3:5]})) bad++;
+        // Replaced: the solved leaf's hook runs, the replacement's does not.
+        second = new;
+        p.leaf = second;
+        p.mode = 2;
+        if (!p.randomize() || p.leaf != p.spare || second.post != 1 || p.spare.pre != 0
+            || p.spare.post != 0) bad++;
+        // Allocated by the parent's pre_randomize: solved, both hooks run.
+        p.mode = 3;
+        p.leaf = null;
+        if (!p.randomize() || p.leaf == null || p.leaf.pre != 1 || p.leaf.post != 1
+            || !(p.leaf.v inside {[3:5]})) bad++;
+        // A randomize call in the parent's post_randomize keeps the
+        // parent's members.
+        p.mode = 4;
+        p.other = new;
+        p.other.leaf = new;
+        first = new;
+        p.leaf = first;
+        if (!p.randomize() || first.post != 1 || p.other.leaf.post != 1
+            || !(p.other.leaf.v inside {[3:5]})) bad++;
+        // randomize(null): the member's constraint and hooks are not part
+        // of the check.
+        p.mode = 0;
+        first = new;
+        first.v = 9;
+        p.leaf = first;
+        if (p.randomize(null) != 1 || first.v != 9 || first.pre != 0 || first.post != 0) bad++;
+        $display("%0d", bad);
+        done = 1;
+    end
+endmodule
+"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("hooks.sv"))], "Top")
+        .build()
+        .unwrap();
+    let (bad, done) = (sim.signal("bad"), sim.signal("done"));
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(done), BigUint::from(1u8));
+    assert_eq!(sim.get(bad), BigUint::from(0u8));
+}
+
+/// Each object's rand object handles are read once its pre_randomize ran,
+/// at every depth, so a member a nested hook allocates gets its
+/// pre_randomize, is solved and gets its post_randomize; each object of a
+/// cycle is visited once (IEEE 1800-2023 18.6.2).
+#[test]
+fn pre_randomize_discovers_members_at_every_depth() {
+    let source = r#"module Top(output int bad, output bit done);
+    class Leaf;
+        rand bit [3:0] v;
+        int pre, post;
+        constraint c { v inside {[3:5]}; }
+        function void pre_randomize(); pre++; endfunction
+        function void post_randomize(); post++; endfunction
+    endclass
+    class Node;
+        rand Leaf leaf;
+        int pre, post;
+        function void pre_randomize(); pre++; if (leaf == null) leaf = new; endfunction
+        function void post_randomize(); post++; endfunction
+    endclass
+    class Parent;
+        rand Node node;
+    endclass
+    class Pair;
+        rand bit [3:0] w;
+        rand Pair other;
+        int pre, post;
+        constraint k { w == 6; }
+        function void pre_randomize(); pre++; endfunction
+        function void post_randomize(); post++; endfunction
+    endclass
+    Parent p;
+    Pair a, b;
+    initial begin
+        p = new;
+        p.node = new;
+        if (!p.randomize() || p.node.leaf == null || p.node.pre != 1 || p.node.post != 1
+            || p.node.leaf.pre != 1 || p.node.leaf.post != 1
+            || !(p.node.leaf.v inside {[3:5]})) bad++;
+        a = new;
+        b = new;
+        a.other = b;
+        b.other = a;
+        if (!a.randomize() || a.w != 6 || b.w != 6 || a.pre != 1 || a.post != 1
+            || b.pre != 1 || b.post != 1) bad++;
+        $display("%0d", bad);
+        done = 1;
+    end
+endmodule
+"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("depth.sv"))], "Top")
+        .build()
+        .unwrap();
+    let (bad, done) = (sim.signal("bad"), sim.signal("done"));
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(done), BigUint::from(1u8));
+    assert_eq!(sim.get(bad), BigUint::from(0u8));
+}
+
 #[test]
 fn randomizing_four_state_properties_is_rejected() {
     for (body, want) in [
@@ -1753,6 +1972,7 @@ sv_backends! {
     fn constrained_randomize_conditionals(sim) { @case "class::constrained_randomize_conditionals"; }
     fn constrained_randomize_nested_guards(sim) { @case "class::constrained_randomize_nested_guards"; }
     fn constrained_randomize_state_properties(sim) { @case "class::constrained_randomize_state_properties"; }
+    fn constrained_randomize_rand_objects(sim) { @case "class::constrained_randomize_rand_objects"; }
 }
 
 sv_backends! {

@@ -379,9 +379,29 @@ pub(in crate::ast) fn bind_inputs(
 }
 
 impl Class {
+    /// The constraint program of the class, built once when the class is
+    /// laid out (see [`Class::program`]).
     pub fn constraint_program(&self) -> Converted<Program> {
+        self.program.clone()
+    }
+
+    /// Whether the class has a constraint program, without copying it.
+    pub fn check_constraint_program(&self) -> Converted<()> {
+        self.program.as_ref().map(|_| ()).map_err(Clone::clone)
+    }
+
+    pub(super) fn build_constraint_program(&self) -> Converted<Program> {
         let mut fields = Vec::new();
+        let mut handles = Vec::new();
         for property in &self.properties {
+            // An object handle shall not be randc (18.4).
+            if property.randc && property.r#type.class().is_some() {
+                return Err(unsupported("a randc object handle"));
+            }
+            if property.rand_object() {
+                handles.push(property.field.offset);
+                continue;
+            }
             if !constrainable(property) {
                 // A property no constraint names is state the solver does
                 // not need; a random one would have to be solved.
@@ -440,6 +460,7 @@ impl Class {
         Ok(Program {
             fields,
             constraints,
+            handles,
         })
     }
 }

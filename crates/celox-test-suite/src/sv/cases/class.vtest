@@ -2510,6 +2510,67 @@ endmodule
   (top Top) (run_until 0) (assert_eq sum 16) (assert_eq done 1)
   (expect_output "base 16\n"))
 
+(case constrained_randomize_rand_objects
+  (source "class.sv" #"
+module Top(output int sum, output bit done);
+    class Leaf;
+        rand bit [3:0] v;
+        int pre, post;
+        constraint c { v inside {[3:5]}; }
+        function void pre_randomize(); pre++; endfunction
+        function void post_randomize(); post++; endfunction
+    endclass
+    class SubLeaf extends Leaf;
+        constraint d { v != 4; }
+    endclass
+    class Stuck extends Leaf;
+        constraint e { v == 9; }
+    endclass
+    class Node;
+        rand bit [3:0] w;
+        rand Leaf leaf;
+        rand Leaf none;
+        Leaf plain;
+        constraint k { w < 3; }
+    endclass
+    class Holder;
+        rand Leaf leaf;
+    endclass
+    Node n;
+    SubLeaf s;
+    Holder h;
+    int bad;
+    initial begin
+        n = new;
+        s = new;
+        n.leaf = s;
+        n.plain = new;
+        for (int i = 0; i < 20; i++) begin
+            if (!n.randomize()) $fatal(1, "randomize");
+            if (n.w >= 3 || !(s.v inside {3, 5})) bad++;
+        end
+        // A non-rand handle is not randomized; the hooks ran once per call.
+        sum = s.pre + s.post + n.plain.v + n.plain.pre;
+        // A class without constraints of its own solves its rand objects.
+        h = new;
+        h.leaf = new;
+        if (!h.randomize() || !(h.leaf.v inside {[3:5]}) || h.leaf.pre != 1) bad++;
+        // An unsatisfiable member fails the call, changes nothing and runs
+        // no post_randomize.
+        begin
+            Stuck stuck = new;
+            n.leaf = stuck;
+            n.w = 2;
+            if (n.randomize() || n.w != 2 || stuck.v != 0 || stuck.pre != 1 || stuck.post != 0) bad++;
+        end
+        $display("%0d %0d", sum, bad);
+        done = bad == 0;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 40) (assert_eq done 1)
+  (expect_output "40 0\n"))
+
 (case constrained_randomize_inline
   (source "inline_constraints.sv" #"
 module Top(output bit done);
