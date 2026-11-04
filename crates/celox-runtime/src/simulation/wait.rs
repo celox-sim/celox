@@ -420,19 +420,7 @@ impl<B: SimBackend> SimulationState<B> {
     ) -> bool {
         let now = state.planes(term.signal).expect("a plain signal");
         let all = state.counter(counters.all);
-        if !matches!(baseline, Baseline::Gated { .. }) {
-            // A baseline loaded from a state file.
-            let (gated, value) = match baseline {
-                Baseline::Counter { seen, value } => (*seen, value.clone()),
-                Baseline::Value(value) => (backend.get_as(counters.gated), value.clone()),
-                _ => (backend.get_as(counters.gated), read(backend, term.signal)),
-            };
-            *baseline = Baseline::Gated {
-                gated,
-                all,
-                raw: encode_planes(&value, term.signal.width, now.len()),
-            };
-        }
+        baseline.normalize_gate(backend, term.signal, counters);
         let Baseline::Gated {
             gated,
             all: counted,
@@ -687,6 +675,33 @@ pub enum Baseline {
     /// began, the counter of all occurrences and the signal's state as in
     /// [`Baseline::Raw`] at the last check.
     Gated { gated: u32, all: u32, raw: Vec<u8> },
+}
+
+impl Baseline {
+    /// Restore the legacy value/counter encoding before a gated wait is checked
+    /// or handed to generated code. A legacy counter records accepted (gated)
+    /// occurrences; it is not the counter of all signal changes.
+    pub(super) fn normalize_gate<B: SimBackend>(
+        &mut self,
+        backend: &B,
+        signal: SignalRef,
+        counters: GateCounterRefs,
+    ) {
+        if matches!(self, Self::Gated { .. }) {
+            return;
+        }
+        let (gated, value) = match self {
+            Self::Counter { seen, value } => (*seen, value.clone()),
+            Self::Value(value) => (backend.get_as(counters.gated), value.clone()),
+            _ => (backend.get_as(counters.gated), read(backend, signal)),
+        };
+        let len = planes(backend, signal).expect("a gated plain signal").len();
+        *self = Self::Gated {
+            gated,
+            all: backend.get_as(counters.all),
+            raw: encode_planes(&value, signal.width, len),
+        };
+    }
 }
 
 /// A process suspended at a wait.

@@ -242,12 +242,35 @@ impl<B: SimBackend> SimulationState<B> {
                 continue;
             };
             let (waiting, baseline) = (*waiting, *baseline);
-            if let Some(layout) = &scheduler.raw_waits[process] {
+            if let Some(layouts) = &scheduler.raw_waits[process] {
                 let Some(waiter) = self.process_state.waiters.get(process) else {
                     backend.set(waiting, 0u8);
                     continue;
                 };
-                let packed = pack_wait_snapshot(layout, &waiter.baselines)?;
+                let layout = layouts
+                    .get(waiter.site)
+                    .ok_or_else(|| Self::site_error(process, waiter.site))?;
+                let mut baselines = std::borrow::Cow::Borrowed(waiter.baselines.as_slice());
+                if let Some(gates) = self
+                    .model
+                    .wait_gates
+                    .get(process)
+                    .and_then(|sites| sites.get(waiter.site))
+                {
+                    let terms = &self.model.processes[process].wait_sites[waiter.site];
+                    for (index, gate) in gates.iter().enumerate() {
+                        if let Some(counters) = gate.and_then(|gate| gate.counters)
+                            && !matches!(baselines[index], Baseline::Gated { .. })
+                        {
+                            baselines.to_mut()[index].normalize_gate(
+                                backend,
+                                terms[index].signal,
+                                counters,
+                            );
+                        }
+                    }
+                }
+                let packed = pack_wait_snapshot(layout, &baselines)?;
                 backend.set(waiting, 1u8);
                 backend.set_wide(baseline, packed);
                 self.process_state.waiters.remove(process);
@@ -455,7 +478,10 @@ impl<B: SimBackend> SimulationState<B> {
                 .wait_sites
                 .get(site)
                 .ok_or_else(|| Self::site_error(process, site))?;
-            if let Some(layout) = &scheduler.raw_waits[process] {
+            if let Some(layouts) = &scheduler.raw_waits[process] {
+                let layout = layouts
+                    .get(site)
+                    .ok_or_else(|| Self::site_error(process, site))?;
                 let mut packed = backend.get(baseline).to_bytes_le();
                 packed.resize(layout.bits.div_ceil(8), 0);
                 let mut restored = Ok(());
@@ -646,7 +672,7 @@ fn pack_wait_snapshot(
     layout: &celox_design::schedule::CompiledWaitLayout,
     baselines: &[Baseline],
 ) -> Result<num_bigint::BigUint, SimulatorErrorCode> {
-    if layout.scalar_byte || baselines.len() != layout.terms.len() {
+    if baselines.len() != layout.terms.len() {
         return Err(SimulatorErrorCode::InternalError);
     }
     let mut packed = vec![0u8; layout.bits.div_ceil(8)];
@@ -655,22 +681,39 @@ fn pack_wait_snapshot(
         let len = bytes * if term.mask_offset.is_some() { 2 } else { 1 };
         let encoded;
         let raw = match baseline {
-            Baseline::Raw(raw) | Baseline::RawCounter { raw, .. } => raw.as_slice(),
+            Baseline::Raw(raw) | Baseline::RawCounter { raw, .. } | Baseline::Gated { raw, .. } => {
+                raw.as_slice()
+            }
             Baseline::Value(value) | Baseline::Counter { value, .. } => {
                 encoded = crate::timing::encode_planes(value, term.width, len);
                 &encoded
             }
-            _ => return Err(SimulatorErrorCode::InternalError),
         };
         if let Some(offset) = term.counter_offset {
-            let (Baseline::RawCounter { seen, .. } | Baseline::Counter { seen, .. }) = baseline
-            else {
-                return Err(SimulatorErrorCode::InternalError);
+            let seen = match baseline {
+                Baseline::RawCounter { seen, .. } | Baseline::Counter { seen, .. } => *seen,
+                Baseline::Gated { all, .. } => *all,
+                _ => return Err(SimulatorErrorCode::InternalError),
             };
             packed[offset / 8..offset / 8 + 4].copy_from_slice(&seen.to_le_bytes());
         }
+        if let Some(offset) = term.gated_counter_offset {
+            let Baseline::Gated { gated, .. } = baseline else {
+                return Err(SimulatorErrorCode::InternalError);
+            };
+            packed[offset / 8..offset / 8 + 4].copy_from_slice(&gated.to_le_bytes());
+        }
         if raw.len() < len {
             return Err(SimulatorErrorCode::InternalError);
+        }
+        if layout.scalar_byte {
+            packed[0] = (raw[0] & 1)
+                | if term.mask_offset.is_some() {
+                    (raw[1] & 1) << 1
+                } else {
+                    0
+                };
+            continue;
         }
         let at = term.value_offset / 8;
         packed[at..at + bytes].copy_from_slice(&raw[..bytes]);
@@ -694,7 +737,7 @@ fn unpack_wait_snapshot(
     packed: &[u8],
     baselines: &mut Vec<Baseline>,
 ) -> Result<(), SimulatorErrorCode> {
-    if layout.scalar_byte || packed.len() < layout.bits.div_ceil(8) {
+    if packed.len() < layout.bits.div_ceil(8) {
         return Err(SimulatorErrorCode::InternalError);
     }
     baselines.truncate(layout.terms.len());
@@ -704,19 +747,29 @@ fn unpack_wait_snapshot(
         let seen = term.counter_offset.map(|offset| {
             u32::from_le_bytes(packed[offset / 8..offset / 8 + 4].try_into().unwrap())
         });
-        let empty = || match seen {
-            Some(seen) => Baseline::RawCounter {
+        let gated = term.gated_counter_offset.map(|offset| {
+            u32::from_le_bytes(packed[offset / 8..offset / 8 + 4].try_into().unwrap())
+        });
+        let empty = || match (seen, gated) {
+            (Some(all), Some(gated)) => Baseline::Gated {
+                all,
+                gated,
+                raw: Vec::with_capacity(len),
+            },
+            (Some(seen), None) => Baseline::RawCounter {
                 seen,
                 raw: Vec::with_capacity(len),
             },
-            None => Baseline::Raw(Vec::with_capacity(len)),
+            _ => Baseline::Raw(Vec::with_capacity(len)),
         };
         if index == baselines.len() {
             baselines.push(empty());
         }
         if !matches!(
-            (&baselines[index], seen),
-            (Baseline::Raw(_), None) | (Baseline::RawCounter { .. }, Some(_))
+            (&baselines[index], seen, gated),
+            (Baseline::Raw(_), None, None)
+                | (Baseline::RawCounter { .. }, Some(_), None)
+                | (Baseline::Gated { .. }, Some(_), Some(_))
         ) {
             baselines[index] = empty();
         }
@@ -726,14 +779,40 @@ fn unpack_wait_snapshot(
                 *last = seen.unwrap();
                 raw
             }
+            Baseline::Gated {
+                all,
+                gated: last,
+                raw,
+            } => {
+                *all = seen.unwrap();
+                *last = gated.unwrap();
+                raw
+            }
             _ => unreachable!(),
         };
         raw.resize(len, 0);
+        if layout.scalar_byte {
+            raw[0] = packed[0] & 1;
+            if term.mask_offset.is_some() {
+                raw[1] = (packed[0] >> 1) & 1;
+            }
+            continue;
+        }
         let at = term.value_offset / 8;
         raw[..bytes].copy_from_slice(&packed[at..at + bytes]);
         if let Some(mask) = term.mask_offset {
             let at = mask / 8;
             raw[bytes..].copy_from_slice(&packed[at..at + bytes]);
+        }
+        // A narrower site reuses the preceding site's snapshot storage.
+        // Generated loads/stores touch logical bits only; the last byte can
+        // still contain high bits belonging to that preceding expression.
+        if term.width % 8 != 0 {
+            let keep = ((1u16 << (term.width % 8)) - 1) as u8;
+            raw[bytes - 1] &= keep;
+            if term.mask_offset.is_some() {
+                raw[len - 1] &= keep;
+            }
         }
     }
     Ok(())
