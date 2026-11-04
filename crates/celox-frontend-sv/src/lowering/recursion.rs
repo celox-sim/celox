@@ -90,9 +90,22 @@ pub(crate) struct CallGraph {
     record: Record,
     /// The open attempts, innermost last.
     attempts: Vec<Record>,
+    /// The subroutines lowered out of line, when that is forced (see
+    /// [`super::out_of_line`]). They live with the graph because every
+    /// lowering of the module's processes receives it.
+    pub(super) out_of_line: Option<super::out_of_line::OutOfLine>,
 }
 
 impl CallGraph {
+    /// A graph with nothing recorded, which also keeps the out-of-line
+    /// functions when `out_of_line` is set.
+    pub(super) fn new(out_of_line: bool) -> Self {
+        Self {
+            out_of_line: out_of_line.then(super::out_of_line::OutOfLine::default),
+            ..Self::default()
+        }
+    }
+
     fn top(&mut self) -> &mut Record {
         match self.attempts.last_mut() {
             Some(record) => record,
@@ -408,6 +421,9 @@ pub(super) fn report(module: &sv::ir::Module, graph: &CallGraph) -> Vec<String> 
              expansion_instructions {instructions} blocks {blocks} nodes {nodes} \
              reaching_units {units} : {joined}"
         ));
+    }
+    if let Some(functions) = &graph.out_of_line {
+        lines.extend(functions.report());
     }
     lines
 }

@@ -9,6 +9,10 @@ pub struct RuntimeDiagnostics {
     /// A file to which the SystemVerilog frontend appends the recursive call
     /// cycles of each module it lowers (`CELOX_SV_RECURSION_REPORT`).
     pub sv_recursion_report: Option<std::path::PathBuf>,
+    /// Lower every SystemVerilog subroutine that can be into a SIR function
+    /// unit and call it instead of inlining it (`CELOX_SV_FORCE_OUT_OF_LINE`),
+    /// a test switch that changes the generated code, not the behavior.
+    pub sv_force_out_of_line: bool,
 }
 
 #[cfg(feature = "host-runtime")]
@@ -93,6 +97,7 @@ mod host {
                 sv_recursion_report: variables
                     .get(OsStr::new("CELOX_SV_RECURSION_REPORT"))
                     .map(std::path::PathBuf::from),
+                sv_force_out_of_line: enabled("CELOX_SV_FORCE_OUT_OF_LINE"),
             };
             let sir = crate::optimizer::SirDiagnostics {
                 pass_timing,
@@ -182,7 +187,9 @@ mod host {
                 ("CELOX_TICK_TIMING", "100"),
                 ("CELOX_REGALLOC_VERIFY", "1"),
                 ("CELOX_SV_RECURSION_REPORT", "/tmp/recursion.txt"),
+                ("CELOX_SV_FORCE_OUT_OF_LINE", "1"),
             ]);
+            assert!(options.runtime.sv_force_out_of_line);
             assert!(options.sir.pass_timing);
             assert_eq!(
                 options.runtime.sv_recursion_report.as_deref(),

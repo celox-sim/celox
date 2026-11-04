@@ -139,6 +139,8 @@ mod literals;
 mod mixed;
 #[path = "frontends/systemverilog/operators.rs"]
 mod operators;
+#[path = "frontends/systemverilog/out_of_line_calls.rs"]
+mod out_of_line_calls;
 #[path = "frontends/systemverilog/packed_structs.rs"]
 mod packed_structs;
 #[path = "frontends/systemverilog/procedural.rs"]
