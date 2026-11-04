@@ -1031,6 +1031,17 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                         ("icarus", "scan::sscanf_inputs_before_property_outputs") => {
                             ("runtime_error", "execute", "unresolved functor reference")
                         }
+                        ("icarus", "class::specializations_of_procedural_constants") => {
+                            ("compile_error", "compile", "syntax error")
+                        }
+                        ("icarus", "class::specializations_of_procedural_aggregate_types") => {
+                            ("compile_error", "compile", "syntax error")
+                        }
+                        ("verilator", "class::specializations_of_procedural_aggregate_types") => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq sum: expected 0x20907, got 0x51647",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }
