@@ -2627,6 +2627,22 @@ mod host {
             })
         }
 
+        pub(crate) fn put_native_host_inputs(
+            &mut self,
+            pending: bool,
+            writes: Vec<(SignalRef, (num_bigint::BigUint, num_bigint::BigUint))>,
+        ) {
+            if let Some(metadata) = &self.native_file_io {
+                native_io::pack_host_inputs(
+                    &self.backend,
+                    metadata,
+                    &mut self.native_arena,
+                    writes,
+                );
+            }
+            self.native_arena.header.host_entry = u64::from(pending);
+        }
+
         pub(crate) fn has_native_scheduler_services(&self) -> bool {
             self.native_file_io.is_some()
         }

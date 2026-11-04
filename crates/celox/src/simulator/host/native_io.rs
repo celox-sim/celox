@@ -7,7 +7,7 @@ pub(crate) use super::native_nba::Header as NbaHeader;
 use super::*;
 use celox_design::{HostRequestKind, HostRequestSite};
 
-pub(crate) const SYMBOL: &str = "__celox_native_services_v9";
+pub(crate) const SYMBOL: &str = "__celox_native_services_v10";
 
 pub(crate) const BEFORE_DOMAINS: u64 = u64::MAX - 14;
 
@@ -53,8 +53,8 @@ pub(super) struct Metadata {
     pub runtime_sites: Vec<RuntimeEventSite>,
     pub process_names: Vec<String>,
     pub nbas: Vec<Vec<celox_design::NbaSite<SignalRef>>>,
-    pub host_inputs: crate::HashMap<SignalRef, Vec<usize>>,
     pub native_nbas: Vec<celox_design::NbaSite<SignalRef>>,
+    pub host_inputs: crate::HashMap<SignalRef, Vec<usize>>,
     pub flagged: Vec<(usize, usize)>,
     pub deferred_groups: Vec<(u32, usize)>,
 }
@@ -1048,8 +1048,8 @@ mod tests {
             process_names: vec![],
             flagged: vec![(0, 0), (0, 1)],
             deferred_groups: Vec::new(),
-            host_inputs: Default::default(),
             native_nbas: Vec::new(),
+            host_inputs: crate::HashMap::default(),
             nbas: vec![
                 staged
                     .iter()

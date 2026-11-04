@@ -55,6 +55,8 @@ pub(super) struct ShadowCheck<'a, B: SimBackend> {
     one_slot: bool,
     /// The time the step in progress started from.
     start: u64,
+    /// Host settling can be a complete generated run at the current time.
+    host_entry: bool,
     /// Steps checked.
     pub(super) checked: u64,
 }
@@ -65,6 +67,7 @@ impl<'a, B: SimBackend> ShadowCheck<'a, B> {
             shadow,
             one_slot: mode != crate::SchedulerMode::DifferentialRuns,
             start: 0,
+            host_entry: false,
             checked: 0,
         }
     }
@@ -99,6 +102,7 @@ impl<B: SimBackend> StepObserver<Simulator<B>> for ShadowCheck<'_, B> {
 
     fn before_step(&mut self, state: &SimulationState<B>, primary: &mut Simulator<B>) {
         self.start = state.time();
+        self.host_entry = state.host_pending();
         let shadow = &mut *self.shadow;
         shadow.simulator.mirror(primary);
         if state.is_suspended() {
@@ -122,6 +126,15 @@ impl<B: SimBackend> StepObserver<Simulator<B>> for ShadowCheck<'_, B> {
         result: &Result<Option<u64>, RuntimeErrorCode>,
     ) -> Result<(), RuntimeErrorCode> {
         let shadow = &mut *self.shadow;
+        // A generated host-input run may end after settling the current
+        // timestamp. The reference's step normally continues to the next
+        // event, so stop it at the same legal boundary for this comparison.
+        // Compare the complete state and pending queues there as usual.
+        let limit = if self.host_entry && matches!(result, Ok(Some(time)) if *time == self.start) {
+            limit.min(self.start)
+        } else {
+            limit
+        };
         let mut reference = shadow.state.step_until(&mut shadow.simulator, limit);
         // A compiled run of several slots: the shadow runs them one by one,
         // up to the last slot of the run, or to the slot a failed run ended
@@ -1412,7 +1425,8 @@ mod tests {
         ) {
             for (run, &(end, actions)) in runs.iter().enumerate() {
                 drive(&mut sim, actions);
-                sim.run_until(end).unwrap();
+                sim.run_until(end)
+                    .unwrap_or_else(|error| panic!("{label} run {run}: {error:?}"));
                 assert_eq!(
                     sim.save_state().unwrap(),
                     expected[run],

@@ -274,4 +274,83 @@ endmodule"#;
         assert!(error.contains("does not settle"), "{error}");
         assert_eq!(sim.scheduler_stats().reference_steps, before);
     }
+    fn host_clock<B: SimBackend + 'static>(
+        mut sim: Simulation<B>,
+        mode: SchedulerMode,
+        finish: bool,
+        prepare: impl FnOnce(&mut B),
+    ) {
+        let clk = sim.signal("clk");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        sim.modify(|io| io.set(clk, 0u8)).unwrap();
+        sim.observe_slots(
+            Box::new(Drive {
+                clk,
+                data: sim.signal("d"),
+                q: sim.signal("q"),
+                last: false,
+                finish,
+                seen: seen.clone(),
+            }),
+            &[clk],
+        );
+        sim.run_until(1).unwrap();
+        prepare(&mut sim.simulator.backend);
+        let before = sim.scheduler_stats();
+        sim.modify(|io| io.set(clk, 1u8)).unwrap();
+        sim.run_until(5).unwrap();
+        assert_eq!(*seen.lock().unwrap(), vec![(1, 0)]);
+        assert_eq!(
+            sim.get(sim.signal("q")),
+            if finish { 0u8 } else { 52u8 }.into()
+        );
+        assert_eq!(
+            sim.get(sim.signal("wakes")),
+            if finish { 0u8 } else { 1u8 }.into()
+        );
+        if finish {
+            assert!(sim.simulator.host_watch.has_log());
+        }
+        if mode == SchedulerMode::Compiled {
+            let after = sim.scheduler_stats();
+            assert_eq!(after.reference_steps, before.reference_steps, "{after:?}");
+            assert!(after.compiled_slots > before.compiled_slots);
+        }
+    }
+
+    #[test]
+    fn host_observed_clock_writes_precede_native_domains() {
+        let source = r#"`timescale 1ns/1ns
+module Top(input bit clk);
+    int d = 0, q = 0, wakes = 0;
+    wire [31:0] input_value = d * 3 + 1;
+    always_ff @(posedge clk) q <= input_value;
+    initial forever begin @(d); wakes++; end
+endmodule"#;
+        for four_state in [false, true] {
+            for finish in [false, true] {
+                for mode in [SchedulerMode::Reference, SchedulerMode::Compiled] {
+                    let make = || {
+                        Simulation::from_sv_sources(
+                            vec![(source, std::path::Path::new("native-host-observer.sv"))],
+                            "Top",
+                        )
+                        .four_state(four_state)
+                        .scheduler_mode(mode)
+                    };
+                    host_clock(make().build_native().unwrap(), mode, finish, |_| {});
+                    host_clock(
+                        make().hotspot_jit(true).build_tiered().unwrap(),
+                        mode,
+                        finish,
+                        |backend| {
+                            if mode == SchedulerMode::Compiled {
+                                backend.publish_scheduler_for_test();
+                            }
+                        },
+                    );
+                }
+            }
+        }
+    }
 }
