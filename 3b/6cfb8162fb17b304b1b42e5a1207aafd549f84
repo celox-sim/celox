@@ -1,1 +1,3 @@
 Address review 5766239395 on PR #3091: normalize accepted restored gated baselines and count iff occurrences at each scheduled host-clock write; validate lower commit and rebase dependents.
+
+Sync after #3091 merged. stack sync tried to drop an already reachable merge-parent commit that Git omitted from its todo; a normal noninteractive rebase onto origin/master applies only the remaining 14 commits.
