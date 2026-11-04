@@ -254,3 +254,135 @@ endmodule"#
         }
     }
 }
+
+#[test]
+fn delayed_nbas_keep_native_time_order_across_state_restore() {
+    let source = r#"`timescale 1ns/1ns
+module Top;
+    bit clk = 0;
+    logic [72:0] q = 0;
+    logic [12:0] words [3];
+    int ticks = 0;
+    int changes = 0;
+    initial begin words[0]=0; words[1]=0; words[2]=0; end
+    always #1 clk = !clk;
+    initial forever begin
+        @(posedge clk); ticks++;
+        repeat (70) begin
+            q <= #3 ticks;
+            q <= #1 'x;
+            q <= #7 'z;
+        end
+        words[ticks % 3] <= #2 ticks;
+        q[ticks % 60 +: 13] <= #5 ticks;
+    end
+    initial forever begin @(q); changes++; end
+endmodule"#;
+    for four_state in [false, true] {
+        for hotspot in [false, true] {
+            let make = |mode| {
+                Simulation::from_sv_sources(
+                    vec![(source, std::path::Path::new("native-delayed-nba.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .hotspot_jit(hotspot)
+                .scheduler_mode(mode)
+                .build_native()
+                .unwrap()
+            };
+            let mut native = make(SchedulerMode::Compiled);
+            let mut reference = make(SchedulerMode::Reference);
+            native.run_until(0).unwrap();
+            reference.run_until(0).unwrap();
+            let before = native.scheduler_stats().reference_steps;
+            for end in [1, 2, 4, 7, 12, 19] {
+                native.run_until(end).unwrap();
+                reference.run_until(end).unwrap();
+                assert_eq!(
+                    native.save_state().unwrap(),
+                    reference.save_state().unwrap(),
+                    "at {end}, four_state={four_state}, hotspot={hotspot}"
+                );
+                let saved = native.save_state().unwrap();
+                native.load_state(&saved).unwrap();
+            }
+            assert_eq!(native.scheduler_stats().reference_steps, before);
+            assert!(native.scheduler_stats().compiled_slots > 0);
+        }
+    }
+}
+
+#[test]
+fn delayed_nba_can_be_the_only_remaining_native_work() {
+    for setup in ["#1;", ""] {
+        let source = format!(
+            r#"`timescale 1ns/1ns
+module Top;
+    logic [72:0] q = 0;
+    initial begin {setup} q <= #4 'x; q <= #2 'z; q <= #4 7; end
+endmodule"#
+        );
+        for four_state in [false, true] {
+            let make = |mode| {
+                Simulation::from_sv_sources(
+                    vec![(
+                        source.as_str(),
+                        std::path::Path::new("native-delayed-only.sv"),
+                    )],
+                    "Top",
+                )
+                .four_state(four_state)
+                .scheduler_mode(mode)
+                .build_native()
+                .unwrap()
+            };
+            let mut native = make(SchedulerMode::Compiled);
+            let mut reference = make(SchedulerMode::Reference);
+            native.run_until(0).unwrap();
+            reference.run_until(0).unwrap();
+            let before = native.scheduler_stats().reference_steps;
+            for end in 1..=7 {
+                native.run_until(end).unwrap();
+                reference.run_until(end).unwrap();
+                assert_eq!(
+                    native.save_state().unwrap(),
+                    reference.save_state().unwrap(),
+                    "setup={setup} at {end}"
+                );
+            }
+            assert_eq!(native.scheduler_stats().reference_steps, before);
+            assert_eq!(native.get(native.signal("q")), 7u8.into());
+        }
+    }
+}
+
+#[test]
+fn native_delayed_nba_reports_timestamp_overflow() {
+    let source = r#"`timescale 1ns/1ns
+module Top;
+    bit q;
+    initial begin #9223372036854775808; q <= #9223372036854775808 1; end
+endmodule"#;
+    for mode in [SchedulerMode::Reference, SchedulerMode::Compiled] {
+        let mut sim = Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("native-nba-time-overflow.sv"))],
+            "Top",
+        )
+        .scheduler_mode(mode)
+        .build_native()
+        .unwrap();
+        sim.run_until(0).unwrap();
+        let before = sim.scheduler_stats().reference_steps;
+        let error = sim.run_until(u64::MAX).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("nonblocking assignment delay overflows simulation time"),
+            "{error}"
+        );
+        if mode == SchedulerMode::Compiled {
+            assert_eq!(sim.scheduler_stats().reference_steps, before);
+        }
+    }
+}

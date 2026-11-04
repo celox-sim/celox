@@ -50,6 +50,28 @@ pub trait UnitExecutor {
     /// enforce them without entering the reference scheduler.
     fn set_compiled_host_budgets(&mut self, _rounds: u64, _returns: u64) {}
 
+    /// The native scheduler can import portable NBA queues at invocation
+    /// boundaries and schedule their publication without the reference loop.
+    fn compiled_nba_queues(&self) -> bool {
+        false
+    }
+
+    fn put_compiled_nbas(
+        &mut self,
+        ready: Vec<super::NbaUpdate>,
+        delayed: Vec<(u64, super::NbaUpdate)>,
+    ) -> Result<(), SimulatorErrorCode> {
+        if ready.is_empty() && delayed.is_empty() {
+            Ok(())
+        } else {
+            Err(SimulatorErrorCode::InternalError)
+        }
+    }
+
+    fn take_compiled_delayed_nbas(&mut self) -> Vec<(u64, super::NbaUpdate)> {
+        Vec::new()
+    }
+
     /// Unpublished NBA values left by a native run, including an early error.
     fn take_compiled_nbas(&mut self) -> Vec<super::NbaUpdate> {
         Vec::new()

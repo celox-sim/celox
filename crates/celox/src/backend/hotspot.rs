@@ -227,6 +227,24 @@ impl HotspotRuntime {
         }
     }
 
+    #[cfg(all(test, feature = "systemverilog"))]
+    pub(crate) fn scheduler_is_prepared_for_test(&self) -> bool {
+        self.scheduler_index.is_some()
+    }
+
+    #[cfg(all(test, feature = "systemverilog"))]
+    pub(crate) fn request_comb_for_test(&mut self, units: &[ExecutionUnit<RegionedAbsoluteAddr>]) {
+        if !self.busy
+            && self
+                .entries
+                .get(&EntryKey::Comb)
+                .is_none_or(|entry| entry.code.is_none())
+        {
+            self.begin(EntryKey::Comb);
+            self.finish(EntryKey::Comb, None, Some(units.to_vec()));
+        }
+    }
+
     pub(crate) fn has_compiled_scheduler(&self) -> bool {
         self.scheduler_index.is_some_and(|index| {
             self.entries
@@ -320,6 +338,15 @@ impl HotspotRuntime {
         key: EntryKey,
         memory: &mut [u64],
     ) -> Option<Result<(), SimulatorErrorCode>> {
+        self.prepare(key, memory.len() * 8)
+            .map(|code| code.run(memory))
+    }
+
+    pub(crate) fn prepare(
+        &mut self,
+        key: EntryKey,
+        state_size: usize,
+    ) -> Option<&Arc<HotspotCode>> {
         self.polls = self.polls.wrapping_add(1);
         if self.busy && self.polls.is_multiple_of(64) {
             match self.completed.try_recv() {
@@ -329,7 +356,7 @@ impl HotspotRuntime {
                     let entry = self.entries.entry(completed.key).or_default();
                     match completed.code {
                         Ok(code)
-                            if code.native().required_state_size <= memory.len() * 8
+                            if code.native().required_state_size <= state_size
                                 && self
                                     .stats
                                     .code_bytes
@@ -345,7 +372,7 @@ impl HotspotRuntime {
                         Ok(code) => {
                             tracing::debug!(key = ?completed.key,
                                 required_state_bytes = code.native().required_state_size,
-                                available_state_bytes = memory.len() * 8,
+                                available_state_bytes = state_size,
                                 code_bytes = code.native().code_size,
                                 published_bytes = self.stats.code_bytes,
                                 code_budget_bytes = MAX_CODE_BYTES,
@@ -373,7 +400,7 @@ impl HotspotRuntime {
             self.entries.get(&key).and_then(|entry| entry.code.as_ref())
         {
             self.stats.compiled_calls = self.stats.compiled_calls.saturating_add(1);
-            Some(code.run(memory))
+            Some(code)
         } else {
             None
         }
