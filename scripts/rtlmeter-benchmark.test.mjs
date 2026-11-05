@@ -21,7 +21,7 @@ function report(name = "e902") {
     xezimRelease: locked.original.ref, xezimRevision: locked.locked.rev,
     versions: { celox: 'celox 0.12.0', verilator: 'Verilator 5.052', xezim: `xezim version ${locked.original.ref.replace(/^v/, '')}\ngit unknown` },
     binarySha256: { celox: 'a'.repeat(64), verilator: 'b'.repeat(64), xezim: 'c'.repeat(64) },
-    configuration: { celox: 'native O2; threads=1; cold source-to-finish',
+    configuration: { celox: 'tiered hotspot JIT O2; threads=1; cold source-to-finish',
       verilator: '--binary --timing --assert; -O3; C++ -O3; -j1; fresh Mdir',
       xezim: 'release default VM; persistent caches disabled; full four-state' },
     inputSha256, sourceSha256: createHash('sha256').update(JSON.stringify(inputSha256)).digest('hex'),
