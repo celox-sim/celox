@@ -1050,6 +1050,10 @@
     "sv_inherited_constraint_members": {
       "title": "In a module that another module instantiates, a constraint of a derived class that names a property of its base, `class SubLeaf extends Leaf; constraint d { v != 4; }`, fails to build with \"Undeclared identifier 'v' in class constraint\"; with that module as the top it builds",
       "standard": "IEEE 1800-2023 8.13, 18.5"
+    },
+    "sv_associative_function_results": {
+      "title": "Assigning a function's associative array result leaves the target's entries: with a function returning '{\"a\": v, default: 0}, m = make(5) keeps the earlier entries of m and its default instead of the returned array",
+      "standard": "IEEE 1800-2023 13.4.1, 7.9.9, 10.9.1"
     }
   },
   "cases": [
@@ -5658,6 +5662,38 @@
       "classification": "xezim_bug",
       "bug": "sv_inherited_constraint_members",
       "note": "SubLeaf extends Leaf and constrains Leaf's rand v (constraint d { v != 4; }), which a derived class may (8.13, 18.5). The suite's testbench instantiates Top, and xezim 0.11.4 then rejects the constraint with \"Undeclared identifier 'v' in class constraint\". The reduced source does the same with tb as the top and builds with -s Top. Run with Top as the top, the shared source also shows a second difference: when a nested object's constraints fail, xezim calls its pre_randomize once per internal retry (500 times) where randomize calls it once (18.6.1). See verification/repros/sv_inherited_constraint_members_xezim.json; Verilator 5.052 fails at run time on the null rand handle, which needs no randomization (18.4)."
+    },
+    {
+      "suite": "sv",
+      "name": "containers::associative_patterns_with_keys",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_associative_function_results",
+      "note": "An associative array pattern gives each key its value and the other keys the default (10.9.1), and a function's associative array result replaces the target's entries (13.4.1, 7.9.9), so m = make(5) gives one entry and the default 0; the case prints 1 5 0 second. The pinned xezim keeps the earlier entries and default of m; in the shared case it also reads the first pattern's values as x and keeps an X key. The adapter-free source prints [2 1 9] where [1 5 0] is required; see verification/repros/sv_associative_function_results_xezim.json. Celox prints the expected output; Verilator 5.052 does not run four-state cases."
+    },
+    {
+      "suite": "sv",
+      "name": "containers::ambiguous_conditions_of_containers",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_container_expression_values",
+      "note": "A conditional whose condition is ambiguous evaluates both container operands and gives equal ones, the element-wise combination of arrays of as many elements, or an empty container (11.4.11); the case prints 2 2 first. The pinned xezim gives the conditional of queues one element, ambiguous condition or not, as for known conditions (see verification/repros/sv_container_expression_values_xezim.json). Celox prints the expected output; Verilator 5.052 does not run four-state cases."
+    },
+    {
+      "suite": "sv",
+      "name": "containers::conversions_before_ambiguous_merges",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_container_expression_values",
+      "note": "Each operand of an ambiguous conditional is converted to the receiving container before the operands are merged (10.8, 11.4.11, 7.10.5), so the merge into int c[$:1] of three- and two-element queues prints 2 3. The pinned xezim builds the keyed patterns correctly (first line 2 10 2 90 20) but gives every ambiguous conditional of queues no elements (0 0), whether it is assigned or passed to a container formal, and passes no elements to the formal for a known condition either (0 for 1'b0 ? a : b, expected 9); see verification/repros/sv_container_expression_values_xezim.json. Celox prints the expected output; Verilator 5.052 does not run four-state cases."
+    },
+    {
+      "suite": "sv",
+      "name": "containers::untargeted_and_nested_container_merges",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_container_expression_values",
+      "note": "An ambiguous conditional of queues compared without a target merges first (11.4.11), so (c ? a : a) == a is 1 and (c ? a : b) == a with a = '{1, 2}, b = '{1, 3} is 0; inner queues compare by their elements (7.6, 11.4.5). The pinned xezim prints x for all three comparisons of conditionals, still finds two queues of queues equal after an inner element changed (1 1 instead of 0 0), and gives 0 instead of x for equal outer queues whose inner queue holds 4'b1x00. Celox prints the expected output; Verilator 5.052 does not run four-state cases."
     }
   ]
 }
