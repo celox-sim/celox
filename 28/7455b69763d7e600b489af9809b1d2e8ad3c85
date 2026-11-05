@@ -1,0 +1,1 @@
+Allow the assertion's clocking event before a named property with disable iff (16.12.1); only an outer disable iff or an implication makes the instance an operand.
