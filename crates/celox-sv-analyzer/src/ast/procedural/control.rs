@@ -660,8 +660,8 @@ impl BodyBuilder<'_, '_, '_> {
                         celox_design::AssertionOutcome::Fail,
                     );
                     if concurrent.is_some() {
-                        assertions::concurrent_action(&then_body)?;
-                        assertions::concurrent_action(&else_body)?;
+                        // `timed_tasks::classify` checks the actions once
+                        // every subroutine is known.
                         // Evaluate every predicate in Observed; neither action can run
                         // until all the monitors have made that decision.
                         then_body.insert(0, Stmt::AssertionRegion { reactive: true });

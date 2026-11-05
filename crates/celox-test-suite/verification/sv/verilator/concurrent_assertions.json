@@ -95,6 +95,17 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "concurrent_assertions::subroutine_calls_in_actions at 276:2: assert_eq sampled: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "concurrent_assertions::subroutine_calls_in_actions",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

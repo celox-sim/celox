@@ -266,6 +266,17 @@
     },
     {
       "category": "Sequential",
+      "detail": "Icarus build exit status: 7; see <case>/build.log\n<case>/source_0.sv:22: syntax error\n<case>/source_0.sv:22: error: Malformed statement\n<case>/source_0.sv:24: syntax error\n<case>/source_0.sv:24: error: Malformed statement\n<case>/source_0.sv:19: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<case>/source_0.sv:29: syntax error\n<case>/source_0.sv:29: error: Syntax error in continuous assignment\n",
+      "expectation": "Simulation",
+      "name": "concurrent_assertions::subroutine_calls_in_actions",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "Icarus 13.0 rejects concurrent assertion items and property syntax. IEEE 1800-2023 16.5 and 16.14.1 permit these explicitly clocked Boolean assert/assume/cover properties and their actions. Assertions stay enabled; no -gno-assertions workaround is used.",
       "expectation": "Simulation",
       "known_issue": {
