@@ -934,3 +934,146 @@ endmodule
         }
     }
 }
+
+#[test]
+fn process_random_state_in_function_units() {
+    // A unit draws on the RNG of the process that calls it, which the call
+    // passes in its frame and takes back: object seeding, `shuffle`,
+    // `$urandom`, `std::randomize` and `$random` give each process the
+    // sequence they give it inlined, through a unit calling a unit and two
+    // processes calling the same units in turn. `$time` is the simulation
+    // time.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c, output int d, output int e,
+           output longint t);
+    class Obj;
+        rand int x;
+        constraint bounded { x inside {[0:99]}; }
+    endclass
+    function automatic int one();
+        return $urandom % 1000;
+    endfunction
+    function automatic int draw(int n);
+        int sum = 0;
+        for (int k = 0; k < n; k++) sum = sum * 3 + one();
+        return sum;
+    endfunction
+    function automatic int ranged();
+        return $urandom_range(10, 20) + draw(1);
+    endfunction
+    function automatic int made();
+        Obj o = new;
+        void'(o.randomize());
+        return o.x;
+    endfunction
+    function automatic int shuffled();
+        int q[$] = '{1, 2, 3, 4, 5};
+        q.shuffle();
+        return q[0] * 10000 + q[1] * 1000 + q[2] * 100 + q[3] * 10 + q[4];
+    endfunction
+    function automatic int scoped();
+        int v;
+        void'(std::randomize(v));
+        return v;
+    endfunction
+    function automatic int legacy();
+        return $random;
+    endfunction
+    function automatic longint now();
+        return $time;
+    endfunction
+    initial begin
+        a = draw(3);
+        #1 b = ranged() ^ made();
+        #2 a = a ^ draw(2);
+    end
+    initial begin
+        c = draw(2);
+        #1 d = shuffled() ^ scoped();
+        #2 c = c ^ ranged() ^ $urandom;
+    end
+    initial begin
+        e = legacy();
+        #3 e = e ^ legacy() ^ $random;
+        t = now();
+    end
+endmodule
+"#;
+    same_as_inlined(source, 9, 4, &["a", "b", "c", "d", "e", "t"]);
+}
+
+#[test]
+fn recursive_functions_draw_on_the_process_rng() {
+    // A recursive function passes the RNG down its activations and back:
+    // two processes calling it in turn get the sequences a loop gives them
+    // inlined.
+    let design = |draw: &str| {
+        format!(
+            r#"`timescale 1ns/1ns
+module Top(output int a, output int b);
+{draw}
+    initial begin
+        a = draw(3);
+        #2 a = a ^ draw(2);
+    end
+    initial begin
+        #1 b = draw(4);
+        #2 b = b ^ draw(1) ^ $urandom;
+    end
+endmodule
+"#
+        )
+    };
+    let recursive = design(
+        "    function automatic int draw(int n);
+        if (n == 0) return 0;
+        return $urandom % 1000 + draw(n - 1) * 3;
+    endfunction",
+    );
+    // The same draws, in the order the recursion makes them.
+    let looped = design(
+        "    function automatic int draw(int n);
+        int parts[8];
+        int sum = 0;
+        for (int k = 0; k < n; k++) parts[k] = $urandom % 1000;
+        for (int k = n - 1; k >= 0; k--) sum = parts[k] + sum * 3;
+        return sum;
+    endfunction",
+    );
+    assert_eq!(function_units(&recursive, true), 1, "function units");
+    for four_state in [false, true] {
+        let expected = simulate(&looped, four_state, false, "interpreter", 4, &["a", "b"])
+            .expect("the looped design runs");
+        for backend in backends() {
+            assert_eq!(
+                simulate(&recursive, four_state, true, backend, 4, &["a", "b"]),
+                Ok(expected.clone()),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+}
+
+#[test]
+fn always_ff_processes_pass_their_rng() {
+    // An always_ff process keeps its RNG state among its writes, which the
+    // call passes and takes back as it does any other process's.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int q, output int r);
+    logic clk = 0;
+    function automatic int one(int bias);
+        return $urandom % 1000 + bias;
+    endfunction
+    always_ff @(posedge clk) begin
+        q <= one(q) ^ $urandom;
+        r <= one(r + 1);
+    end
+    initial begin
+        #1 clk = 1;
+        #1 clk = 0;
+        #1 clk = 1;
+    end
+endmodule
+"#;
+    same_as_inlined(source, 1, 4, &["q", "r"]);
+}

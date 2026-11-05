@@ -2155,6 +2155,15 @@ impl<'p, 'a> Ff<'p, 'a> {
 
     // ---------------------------------------------------------------- stores
 
+    /// The seed of this process's `$urandom` stream before it is seeded: a
+    /// function unit has the calling process's in its frame.
+    fn process_seed(&self) -> sv::ir::Expr {
+        match self.frame.as_ref().and_then(|frame| frame.random.as_ref()) {
+            Some((_, seed)) => sv::ir::Expr::Ident(seed.clone()),
+            None => sv::ir::Expr::Literal(format!("32'd{}", self.random_seed)),
+        }
+    }
+
     /// The state of this process's `$urandom` stream.
     fn urandom_state(&mut self) -> (SourceVarId, String) {
         if self.random.is_none() {
@@ -2294,7 +2303,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     op: BinaryOp::Eq,
                     right: Box::new(Expr::Literal("33'd0".into())),
                 }),
-                then_expr: Box::new(Expr::Literal(format!("32'd{}", self.random_seed))),
+                then_expr: Box::new(self.process_seed()),
                 else_expr: Box::new(Expr::Ident(name.clone())),
             },
         };
