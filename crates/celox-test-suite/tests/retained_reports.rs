@@ -1115,6 +1115,11 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                         ("icarus", "class::virtual_interface_property_waits") => {
                             ("compile_error", "compile", "Invalid class item")
                         }
+                        ("icarus", "class::constrained_randomize_foreach") => (
+                            "compile_error",
+                            "compile",
+                            "Constraint declarations not supported",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

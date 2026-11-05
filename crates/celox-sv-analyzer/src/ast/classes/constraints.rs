@@ -134,6 +134,183 @@ pub(in crate::ast) fn constrainable(property: &Property) -> bool {
     property.field.handle.is_none() && property.field.width <= 64
 }
 
+/// A constraint loop over the elements of a state array.
+#[derive(Clone)]
+struct Loop {
+    variable: String,
+    array: String,
+    element: std::sync::Arc<ContainerType>,
+}
+
+/// The element `a[i]`, or the member `a[i].m` of the object it refers to,
+/// that `id` names, with `i` the variable of the loop over `a`.
+fn element(
+    id: ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    properties: &[Property],
+    env: &ConstEnv,
+    loops: &[Loop],
+) -> Result<Option<Typed>, String> {
+    if loops.is_empty() {
+        return Ok(None);
+    }
+    let native = tree.declarations();
+    let (select, member) = match &native.expression(id).kind {
+        ExprKind::Member {
+            expression,
+            separator,
+            name,
+        } if separator == "." => (
+            *expression,
+            Some(instances::normalize_identifier(&name.spelling)),
+        ),
+        _ => (id, None),
+    };
+    let ExprKind::Select {
+        expression,
+        dimension,
+    } = &native.expression(select).kind
+    else {
+        return Ok(None);
+    };
+    let ExprKind::Name(array) = &native.expression(*expression).kind else {
+        return Ok(None);
+    };
+    let array = instances::normalize_identifier(&array.spelling);
+    if !loops.iter().any(|candidate| candidate.array == array) {
+        return Ok(None);
+    }
+    // The loop whose variable the subscript is, which loops over the array.
+    let celox_sv_syntax::DimensionKind::Index(index) = dimension.kind else {
+        return Err("constraint array element other than its loop's".into());
+    };
+    let level = match &native.expression(index).kind {
+        ExprKind::Name(name) => {
+            let variable = instances::normalize_identifier(&name.spelling);
+            loops
+                .iter()
+                .rposition(|candidate| candidate.variable == variable)
+                .filter(|&level| loops[level].array == array)
+        }
+        _ => None,
+    }
+    .ok_or("constraint array element other than its loop's")?;
+    let looped = &loops[level];
+    let element = &looped.element;
+    let (member, width, signed) = match member {
+        None => {
+            if !solver_element(element, tree, session, env) {
+                return Err("a constraint array element other than 2-state integral".into());
+            }
+            (None, element.layout.width, element.layout.signed)
+        }
+        Some(member) => {
+            let class = element
+                .element
+                .class()
+                .ok_or("a member of a constraint array element other than an object")?
+                .to_owned();
+            let owner = session.constraint_owners.last().cloned();
+            let found = if owner.as_ref().is_some_and(|(owner, _)| *owner == class) {
+                properties
+                    .iter()
+                    .rev()
+                    .find(|property| property.name == member)
+                    .cloned()
+            } else if session
+                .constraint_owners
+                .iter()
+                .any(|(owner, _)| *owner == class)
+            {
+                return Err(format!(
+                    "a constraint on objects of class `{class}` while its constraints are bound"
+                ));
+            } else {
+                super::class(tree, session, &class, env, &HashMap::default())
+                    .map_err(|_| format!("class `{class}`"))?
+                    .property(&member)
+                    .cloned()
+            };
+            let property = found.ok_or_else(|| format!("constraint variable `{member}`"))?;
+            visible(&property, tree, session, env)?;
+            solver_holds(&property, tree, session, env)?;
+            (
+                Some(property.field.offset),
+                property.field.width,
+                property.field.signed,
+            )
+        }
+    };
+    Ok(Some(Typed {
+        kind: Kind::Leaf(ConstraintExpr::Element {
+            level: level as u32,
+            member,
+            width,
+        }),
+        width,
+        signed,
+    }))
+}
+
+/// Whether the constraint being bound may access property `property`: a
+/// local member in its class only, a protected one also in those deriving
+/// from it (IEEE 1800-2023 8.18), from the constraint's lexical class.
+fn visible(
+    property: &Property,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &ConstEnv,
+) -> Result<(), String> {
+    if !property.local && !property.protected {
+        return Ok(());
+    }
+    let scope = session.constraint_scopes.last().cloned();
+    let visible = match &scope {
+        Some((scope, _)) if *scope == property.owner => true,
+        Some((_, Some(base))) if !property.local => {
+            super::class(tree, session, base, env, &HashMap::default()).is_ok_and(|base| {
+                base.derives_from(tree, session, &property.owner, env, &HashMap::default())
+            })
+        }
+        _ => false,
+    };
+    if visible {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} member `{}` of class `{}`",
+            if property.local { "local" } else { "protected" },
+            property.name,
+            property.owner
+        ))
+    }
+}
+
+/// The arrays of the program, by index, that constraint `expr` loops over.
+pub(in crate::ast) fn looped_arrays(expr: &ConstraintExpr, found: &mut Vec<usize>) {
+    match expr {
+        ConstraintExpr::Foreach { array, body } => {
+            found.push(*array);
+            looped_arrays(body, found);
+        }
+        ConstraintExpr::Enabled { value, .. }
+        | ConstraintExpr::Resize { value, .. }
+        | ConstraintExpr::Unary { value, .. } => looped_arrays(value, found),
+        ConstraintExpr::Binary { left, right, .. } => {
+            looped_arrays(left, found);
+            looped_arrays(right, found);
+        }
+        ConstraintExpr::Literal(..)
+        | ConstraintExpr::Field(_)
+        | ConstraintExpr::Input { .. }
+        | ConstraintExpr::Size(_)
+        | ConstraintExpr::Index { .. }
+        | ConstraintExpr::Solved(_)
+        | ConstraintExpr::Element { .. } => {}
+    }
+}
+
 /// The array whose size member `id` is, as `a.size`.
 fn array_size(id: ExprId, native: &celox_sv_syntax::Declarations) -> Option<String> {
     let ExprKind::Member {
@@ -171,6 +348,67 @@ fn size(name: String, properties: &[Property]) -> Result<Typed, String> {
     })
 }
 
+/// Whether a constraint may name property `property` as a value of the
+/// solver, by its semantic type: a 2-state integral one of at most 64 bits
+/// (IEEE 1800-2023 18.3). Properties of the class and members of objects a
+/// loop reaches take the same check; every other kind of type is named
+/// here, so that a new one has to say whether the solver holds it.
+pub(in crate::ast) fn solver_holds(
+    property: &Property,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &ConstEnv,
+) -> Result<(), String> {
+    solver_type(&property.r#type, tree, session, env)
+}
+
+/// Whether the solver holds a value of type `ty`, by its semantic type: a
+/// 2-state integral one of at most 64 bits. Every other kind of type is
+/// named here, so that a new one has to say whether the solver holds it.
+fn solver_type(
+    ty: &Type,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &ConstEnv,
+) -> Result<(), String> {
+    use super::super::semantic_types::{TyData, of_type};
+    let id = of_type(&mut session.types, &tree.functions, ty, env)
+        .ok_or("a value of a type a constraint does not take")?;
+    match session.types.data(id) {
+        TyData::Packed(packed) if packed.four_state => {
+            Err("4-state class property in a constraint".into())
+        }
+        TyData::Packed(packed) if packed.bits() <= 64 => Ok(()),
+        TyData::Real | TyData::Shortreal => Err("a real in a constraint".into()),
+        // A chandle has no integral value to constrain (6.14).
+        TyData::Chandle => Err("a chandle in a constraint".into()),
+        TyData::Packed(_)
+        | TyData::String
+        | TyData::Null
+        | TyData::Class(_)
+        | TyData::VirtualInterface { .. }
+        | TyData::UnpackedStruct(_)
+        | TyData::Array { .. } => {
+            Err("a handle, string, container or property wider than 64 bits in a constraint".into())
+        }
+    }
+}
+
+/// Whether the solver holds the elements of container `container` as
+/// values: those of a type [`solver_type`] takes, an enumeration with its
+/// values.
+fn solver_element(
+    container: &ContainerType,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &ConstEnv,
+) -> bool {
+    container.layout.handle.is_none()
+        && container.record.is_none()
+        && !(container.element.is_enum && container.element.enum_domain.is_none())
+        && solver_type(&container.element, tree, session, env).is_ok()
+}
+
 pub(in crate::ast) fn bind(
     id: ExprId,
     tree: &AnalysisContext<'_>,
@@ -189,6 +427,7 @@ pub(in crate::ast) fn bind_inputs(
     env: &ConstEnv,
     inputs: &HashMap<String, (usize, u32, bool)>,
 ) -> Result<ConstraintExpr, String> {
+    #[allow(clippy::too_many_arguments)]
     fn expression(
         id: ExprId,
         tree: &AnalysisContext<'_>,
@@ -196,6 +435,7 @@ pub(in crate::ast) fn bind_inputs(
         properties: &[Property],
         env: &ConstEnv,
         inputs: &HashMap<String, (usize, u32, bool)>,
+        loops: &[Loop],
         depth: usize,
         budget: &mut usize,
     ) -> Result<Typed, String> {
@@ -211,13 +451,95 @@ pub(in crate::ast) fn bind_inputs(
                 properties,
                 env,
                 inputs,
+                loops,
                 depth + 1,
                 budget,
             )
         };
         let native = tree.declarations();
+        if let Some(element) = element(id, tree, session, properties, env, loops)? {
+            return Ok(element);
+        }
         Ok(match &native.expression(id).kind {
             ExprKind::Group(id) => return recurse(session, budget, *id),
+            // A loop over the elements of a state array (IEEE 1800-2023
+            // 18.5.8.1), solved with the elements it has.
+            ExprKind::ConstraintForeach {
+                array,
+                variables,
+                body,
+            } => {
+                let ExprKind::Name(name) = &native.expression(*array).kind else {
+                    return Err("constraint foreach over an array other than a property".into());
+                };
+                let name = instances::normalize_identifier(&name.spelling);
+                let [Some(variable)] = variables.as_slice() else {
+                    return Err("constraint foreach over more than one dimension".into());
+                };
+                let (index, property) = properties
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find(|(_, property)| property.name == name)
+                    .filter(|(_, property)| property.sequence())
+                    .ok_or_else(|| format!("constraint foreach over `{name}`"))?;
+                if property.rand || property.randc {
+                    return Err("constraint foreach over a rand array".into());
+                }
+                visible(property, tree, session, env)?;
+                let array = properties[..index]
+                    .iter()
+                    .filter(|property| property.sequence())
+                    .count();
+                let mut inner = loops.to_vec();
+                inner.push(Loop {
+                    variable: instances::normalize_identifier(&variable.spelling),
+                    array: name,
+                    element: property
+                        .r#type
+                        .container
+                        .as_ref()
+                        .expect("a dynamic array or queue")
+                        .clone(),
+                });
+                let body = expression(
+                    *body,
+                    tree,
+                    session,
+                    properties,
+                    env,
+                    inputs,
+                    &inner,
+                    depth + 1,
+                    budget,
+                )?;
+                Typed {
+                    kind: Kind::Leaf(ConstraintExpr::Foreach {
+                        array,
+                        body: Box::new(emit(body, None)),
+                    }),
+                    width: 1,
+                    signed: false,
+                }
+            }
+            ExprKind::Name(name)
+                if loops.iter().any(|candidate| {
+                    candidate.variable == instances::normalize_identifier(&name.spelling)
+                }) =>
+            {
+                let name = instances::normalize_identifier(&name.spelling);
+                let level = loops
+                    .iter()
+                    .rposition(|candidate| candidate.variable == name)
+                    .expect("a loop variable");
+                Typed {
+                    kind: Kind::Leaf(ConstraintExpr::Index {
+                        level: level as u32,
+                    }),
+                    width: 32,
+                    signed: true,
+                }
+            }
             ExprKind::Name(name) => {
                 let name = instances::normalize_identifier(&name.spelling);
                 if let Some((index, property)) = properties
@@ -226,19 +548,7 @@ pub(in crate::ast) fn bind_inputs(
                     .rev()
                     .find(|(_, p)| p.name == name)
                 {
-                    if property.field.four_state {
-                        return Err("4-state class property in a constraint".into());
-                    }
-                    // A chandle has no integral value to constrain (6.14).
-                    if property.r#type.holds_chandle() {
-                        return Err("a chandle in a constraint".into());
-                    }
-                    if !constrainable(property) {
-                        return Err(
-                            "a handle, string, container or property wider than 64 bits in a constraint"
-                                .into(),
-                        );
-                    }
+                    solver_holds(property, tree, session, env)?;
                     // The field of the property among those of the program.
                     let field = properties[..index]
                         .iter()
@@ -454,11 +764,45 @@ pub(in crate::ast) fn bind_inputs(
                     kind: Kind::Binary(operator.clone(), Box::new(a), Box::new(b)),
                 }
             }
-            _ => return Err("unsupported scalar constraint expression".into()),
+            // Every node kind is listed, so that a new one has to say how a
+            // constraint takes it.
+            ExprKind::Member { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::MinTypMax { .. }
+            | ExprKind::Type(_)
+            | ExprKind::Conditional { .. }
+            | ExprKind::Assignment { .. }
+            | ExprKind::Tagged { .. }
+            | ExprKind::Copy(_)
+            | ExprKind::ArrayMethodWith { .. }
+            | ExprKind::RandomizeWith { .. }
+            | ExprKind::Parameterized { .. }
+            | ExprKind::Select { .. }
+            | ExprKind::Cast { .. }
+            | ExprKind::Concatenation(_)
+            | ExprKind::Replication { .. }
+            | ExprKind::Pattern { .. }
+            | ExprKind::Set(_)
+            | ExprKind::Streaming { .. }
+            | ExprKind::StreamSelect { .. } => {
+                return Err("unsupported scalar constraint expression".into());
+            }
         })
     }
-    expression(id, tree, session, properties, env, inputs, 0, &mut 16_384)
-        .map(|value| emit(value, None))
+    expression(
+        id,
+        tree,
+        session,
+        properties,
+        env,
+        inputs,
+        &[],
+        0,
+        &mut 16_384,
+    )
+    .map(|value| emit(value, None))
 }
 
 impl Class {
@@ -473,7 +817,12 @@ impl Class {
         self.program.as_ref().map(|_| ()).map_err(Clone::clone)
     }
 
-    pub(super) fn build_constraint_program(&self) -> Converted<Program> {
+    pub(super) fn build_constraint_program(
+        &self,
+        tree: &AnalysisContext<'_>,
+        session: &mut Session,
+        env: &ConstEnv,
+    ) -> Converted<Program> {
         let mut fields = Vec::new();
         let mut handles = Vec::new();
         let mut arrays = Vec::new();
@@ -487,7 +836,7 @@ impl Class {
                 continue;
             }
             if property.sequence() {
-                arrays.push(array(property)?);
+                arrays.push(array(property, tree, session, env)?);
                 continue;
             }
             if !constrainable(property) {
@@ -556,21 +905,29 @@ impl Class {
 
 /// Whether the solver can randomize dynamic array or queue property
 /// `property`: one of 2-state integral elements of at most 64 bits.
-pub(in crate::ast) fn random_array(property: &Property) -> bool {
+pub(in crate::ast) fn random_array(
+    property: &Property,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &ConstEnv,
+) -> bool {
     property.sequence()
-        && property.r#type.container.as_ref().is_some_and(|container| {
-            container.layout.handle.is_none()
-                && container.record.is_none()
-                && container.layout.two_state
-                && (1..=64).contains(&container.layout.width)
-                && !(container.element.is_enum && container.element.enum_domain.is_none())
-        })
+        && property
+            .r#type
+            .container
+            .as_ref()
+            .is_some_and(|container| solver_element(container, tree, session, env))
 }
 
 /// Dynamic array or queue property `property` of a constraint program: a
 /// random one is resized to the size its constraints give, if any, and its
 /// elements randomized (IEEE 1800-2023 18.4).
-pub(in crate::ast) fn array(property: &Property) -> Converted<Array> {
+pub(in crate::ast) fn array(
+    property: &Property,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &ConstEnv,
+) -> Converted<Array> {
     let container = property
         .r#type
         .container
@@ -582,7 +939,7 @@ pub(in crate::ast) fn array(property: &Property) -> Converted<Array> {
         if property.randc {
             return Err(unsupported("a randc dynamic array or queue"));
         }
-        if !random_array(property) {
+        if !random_array(property, tree, session, env) {
             return Err(unsupported(
                 "rand dynamic arrays and queues currently require 2-state integral elements of at most 64 bits",
             ));
