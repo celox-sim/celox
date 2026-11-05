@@ -1,0 +1,1 @@
+Action callee checks reuse the process-kernel analyses (may suspend, uses the scheduler) over every body, subroutines included; event triggers and process control in actions or their callees are rejected.
