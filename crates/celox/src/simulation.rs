@@ -1587,6 +1587,10 @@ impl<B: SimBackend, F: FnMut() -> bool> celox_runtime::StepObserver<Simulator<B>
         self.left == 0 || (self.interrupt)()
     }
 
+    fn reads_scheduling_state(&self) -> bool {
+        false
+    }
+
     fn before_step(&mut self, state: &SimulationState<B>, _: &mut Simulator<B>) {
         self.compiled = state.scheduler_stats().compiled_slots;
     }

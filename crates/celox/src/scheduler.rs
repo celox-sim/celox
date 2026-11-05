@@ -2376,11 +2376,17 @@ impl Plan {
             Some(_) => g.b.new_block(),
             None => limit_exit,
         };
+        // A run that stops here leaves the next slot it judged, `u64::MAX`
+        // with nothing to do, which `time` still holds then.
+        let judged = g.b.new_block();
         g.b.seal_block(SIRTerminator::Branch {
             cond: stop,
-            true_block: (stopped, Vec::new()),
+            true_block: (judged, Vec::new()),
             false_block: (run, Vec::new()),
         });
+        g.b.switch_to_block(judged);
+        g.store(slots.next, SCHEDULER_TIME_WIDTH, time);
+        g.b.seal_block(SIRTerminator::Jump(stopped, Vec::new()));
         if self.lazy.is_some() {
             g.b.switch_to_block(stopped);
             let deferred = g.load(slots.defer_limit_settle, SCHEDULER_FLAG_WIDTH);
@@ -3771,11 +3777,17 @@ impl Plan {
             let full = g.binary(1, events, BinaryOp::GeU, batch);
             returns = g.binary(1, returns, BinaryOp::Or, full);
         }
+        // A run that returns there has not judged its next slot.
+        let unjudged = g.b.new_block();
         g.b.seal_block(SIRTerminator::Branch {
             cond: returns,
-            true_block: (stopped, Vec::new()),
+            true_block: (unjudged, Vec::new()),
             false_block: (header, Vec::new()),
         });
+        g.b.switch_to_block(unjudged);
+        let unknown = g.constant(celox_design::SCHEDULER_NEXT_UNJUDGED, SCHEDULER_TIME_WIDTH);
+        g.store(slots.next, SCHEDULER_TIME_WIDTH, unknown);
+        g.b.seal_block(SIRTerminator::Jump(stopped, Vec::new()));
         g.emit_settle(&program.sir.eval_comb, finish_exit, internal_exit);
         if let Some(lazy) = &self.lazy {
             g.emit_eager(&lazy.eager, finish_exit, internal_exit);

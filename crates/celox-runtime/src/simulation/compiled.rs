@@ -6,7 +6,9 @@ use std::collections::BinaryHeap;
 
 use celox_design::{SchedulerExit, edges::LEVEL_UNKNOWN};
 
-use super::{Baseline, CompiledSlots, SchedulerMode, SimulationExecutor, SimulationState};
+use super::{
+    Baseline, CompiledSlots, NativeResidency, SchedulerMode, SimulationExecutor, SimulationState,
+};
 use crate::{
     SimulatorErrorCode,
     backend::{EventHandle, SimBackend},
@@ -83,34 +85,32 @@ impl<B: SimBackend> SimulationState<B> {
             || self.suspended.is_some()
             || self.declarations_pending
             || (self.host_pending && !executor.compiled_host_inputs())
-            // Non-event data has no per-writer event mask. Keep its wave
-            // boundary visible before a compiled waiter can resume.
-            || (self.observed_data
-                && scheduler.waits.iter().enumerate().any(|(index, wait)| {
-                    wait.is_some()
-                        && self.model.processes[index]
-                            .wait_sites
-                            .iter()
-                            .flatten()
-                            .any(|term| term.driven)
-                }))
-            || (region_pending && (!native_regions || regions.iter().flat_map(|queue| queue.iter()).any(|&process| {
-                self.model.processes[process].program.is_some()
-                    || scheduler.ordinals.get(process).is_none_or(Option::is_none)
-                    || self.writes_observed(scheduler, process)
-            })))
+            || self.observation_needs_reference()
+            || (region_pending
+                && (!native_regions
+                    || regions
+                        .iter()
+                        .flat_map(|queue| queue.iter())
+                        .any(|&process| {
+                            self.model.processes[process].program.is_some()
+                                || scheduler.ordinals.get(process).is_none_or(Option::is_none)
+                                || self.writes_observed(scheduler, process)
+                        })))
             || !pending.re_inactive.is_empty()
             || !pending.re_nba_queue.is_empty()
-            || (!pending.ready.is_empty() && (!executor.compiled_ready_queue() || pending.ready.iter().any(|&process| {
-                scheduler.ordinals.get(process).is_none_or(Option::is_none)
-                    || self.writes_observed(scheduler, process)
-            })))
+            || (!pending.ready.is_empty()
+                && (!executor.compiled_ready_queue()
+                    || pending.ready.iter().any(|&process| {
+                        scheduler.ordinals.get(process).is_none_or(Option::is_none)
+                            || self.writes_observed(scheduler, process)
+                    })))
             || (!native_nbas && (!pending.nba_queue.is_empty() || !pending.delayed_nba.is_empty()))
-            || pending.delayed_nba.values().flatten().any(|(program, _)| *program)
+            || pending
+                .delayed_nba
+                .values()
+                .flatten()
+                .any(|(program, _)| *program)
             || !pending.nba_events.is_empty()
-            // A derived clock changes with the slots of its sources, which
-            // the scheduler does not tell apart.
-            || self.observed_events.intersects(&scheduler.derived_events)
             || pending.waiters.iter().any(|(process, _)| {
                 scheduler.waits.get(process).is_none_or(Option::is_none)
                     || self.writes_observed(scheduler, process)
@@ -130,6 +130,9 @@ impl<B: SimBackend> SimulationState<B> {
         if let Some((&time, _)) = pending.delayed_nba.first_key_value() {
             first = first.min(time);
         }
+        if let Some(native) = &self.native {
+            first = first.min(native.next);
+        }
         let mut other = u64::MAX;
         for &Reverse((time, process)) in self.process_wakeups.iter() {
             if scheduler.wake.get(process).is_some_and(Option::is_some)
@@ -143,7 +146,9 @@ impl<B: SimBackend> SimulationState<B> {
         // The host clocks the scheduler runs are its work; every other
         // scheduled event is the reference loop's.
         let queue = &self.scheduler.event_queue;
-        if scheduler.clocks.is_empty() {
+        // The clocks a resident run loop keeps in the slots are not queued:
+        // an edge queued meanwhile is the reference loop's.
+        if scheduler.clocks.is_empty() || self.native.is_some() {
             other = other.min(self.scheduler.next_event_time().unwrap_or(u64::MAX));
         } else {
             let clocks = &self.scheduler.clocks;
@@ -195,6 +200,28 @@ impl<B: SimBackend> SimulationState<B> {
         })
     }
 
+    /// Whether what the host observes keeps every slot in the reference
+    /// loop, which only a change of the observed signals changes.
+    pub(super) fn observation_needs_reference(&self) -> bool {
+        let Some(scheduler) = &self.model.scheduler else {
+            return false;
+        };
+        // Non-event data has no per-writer event mask. Keep its wave
+        // boundary visible before a compiled waiter can resume.
+        (self.observed_data
+            && scheduler.waits.iter().enumerate().any(|(index, wait)| {
+                wait.is_some()
+                    && self.model.processes[index]
+                        .wait_sites
+                        .iter()
+                        .flatten()
+                        .any(|term| term.driven)
+            }))
+            // A derived clock changes with the slots of its sources, which
+            // the scheduler does not tell apart.
+            || self.observed_events.intersects(&scheduler.derived_events)
+    }
+
     /// Whether `process` may change an event the host observes, so that
     /// its slots run in the reference loop.
     fn writes_observed(&self, scheduler: &SchedulerRefs, process: usize) -> bool {
@@ -206,18 +233,26 @@ impl<B: SimBackend> SimulationState<B> {
 
     /// Run the compiled scheduler for the slots up to `limit`, at most
     /// `budget` of them. Returns, like [`Self::step_until`], the time of the
-    /// last slot run.
+    /// last slot run. With `resident`, a run that reaches its limit leaves
+    /// the scheduler's kernels and clocks in its slots for the next run, as
+    /// [`Self::unload_native`] describes.
     pub(super) fn run_compiled<E>(
         &mut self,
         executor: &mut E,
         limit: u64,
         budget: u64,
+        resident: bool,
     ) -> Result<Option<u64>, SimulatorErrorCode>
     where
         E: SimulationExecutor<Backend = B>,
     {
         self.stopped = false;
-        match self.run_compiled_slots(executor, limit, budget) {
+        let result = self.run_compiled_slots(executor, limit, budget, resident);
+        if result.is_err() && self.native.is_some() {
+            // The terminal and error paths below read the runtime's queues.
+            self.unload_native(executor.backend())?;
+        }
+        match result {
             Ok(time) => Ok(Some(time)),
             Err(Halt::Finish) => {
                 self.finalize_terminal(executor)?;
@@ -241,6 +276,7 @@ impl<B: SimBackend> SimulationState<B> {
         executor: &mut E,
         limit: u64,
         budget: u64,
+        resident: bool,
     ) -> Result<u64, Halt>
     where
         E: SimulationExecutor<Backend = B>,
@@ -309,6 +345,176 @@ impl<B: SimBackend> SimulationState<B> {
         let budget = budget.min(backend.compiled_scheduler_budget());
         backend.set(scheduler.budget, budget);
         backend.set(scheduler.runtime_events, 0u64);
+        // Between the runs of a run loop that keeps them resident, the
+        // scheduler's slots still hold its kernels and host clocks.
+        let clocks = match self.native.take() {
+            Some(native) => {
+                self.enter_resident(backend, native_regions)?;
+                native.clocks
+            }
+            None => self.load_native(backend, native_regions)?,
+        };
+        let scheduler = self
+            .model
+            .scheduler
+            .as_ref()
+            .ok_or(SimulatorErrorCode::InternalError)?;
+        let unit = scheduler.unit;
+        self.stats.compiled_runs = self.stats.compiled_runs.saturating_add(1);
+        let result = executor.run_process(unit);
+        self.process_state
+            .nba_queue
+            .extend(executor.take_compiled_nbas());
+        for (time, update) in executor.take_compiled_delayed_nbas() {
+            self.process_state
+                .delayed_nba
+                .entry(time)
+                .or_default()
+                .push((false, update));
+        }
+
+        let scheduler = self
+            .model
+            .scheduler
+            .as_ref()
+            .ok_or(SimulatorErrorCode::InternalError)?;
+        let backend = executor.backend();
+        let count: u64 = backend.get_as(scheduler.count);
+        let now: u64 = backend.get_as(scheduler.now);
+        let exit = SchedulerExit::from_code(backend.get_as(scheduler.exit));
+        let current: u64 = backend.get_as(scheduler.current);
+        let complete = result.is_ok() && exit == Some(SchedulerExit::Limit);
+        // A clock that overflows ends the run after its slot completed.
+        let slot_complete = complete || exit == Some(SchedulerExit::ClockOverflow);
+        let overflowed = scheduler
+            .clocks
+            .get(backend.get_as::<u64>(scheduler.exit_index()) as usize)
+            .map(|&(event, _)| event);
+        let clocked = clocks.iter().any(Option::is_some);
+        // A run that reached its limit may leave its kernels and clocks in
+        // the slots for the next run of the loop: the next slot of its own
+        // work is all the runtime needs of them meanwhile.
+        let next = if complete && resident {
+            backend.get_as::<u64>(scheduler.next)
+        } else {
+            celox_design::SCHEDULER_NEXT_UNJUDGED
+        };
+        if next != celox_design::SCHEDULER_NEXT_UNJUDGED {
+            self.native = Some(NativeResidency { next, clocks });
+        } else {
+            self.store_native(backend, clocks, complete, current)?;
+        }
+        let scheduler = self
+            .model
+            .scheduler
+            .as_ref()
+            .ok_or(SimulatorErrorCode::InternalError)?;
+        self.stats.compiled_slots += count;
+        if count > 0 {
+            self.scheduler.time = now;
+        }
+        if slot_complete {
+            // The slots ended with their levels as the baseline of the next.
+            self.resample_clock_values(executor.backend());
+        } else if count > 0 {
+            // The baseline is the levels slot `now` started from; events the
+            // kernels do not write kept theirs.
+            // The frontend sizes the slots from an estimate, so they can be
+            // wider than the events need.
+            let plane = |slot: crate::SignalRef| -> Box<dyn Fn(usize) -> bool> {
+                if slot.width <= 64 {
+                    let bits: u64 = executor.backend().get_as(slot);
+                    Box::new(move |bit| bits >> bit & 1 != 0)
+                } else {
+                    let bits = executor.backend().get(slot);
+                    Box::new(move |bit| bits.bit(bit as u64))
+                }
+            };
+            let level = plane(scheduler.levels);
+            let unknown = self.four_state.then(|| plane(scheduler.unknown_levels));
+            // A run without clocks records no level of their events, which
+            // only the clocks change.
+            let scheduler = self
+                .model
+                .scheduler
+                .as_ref()
+                .ok_or(SimulatorErrorCode::InternalError)?;
+            let recorded: Vec<(usize, u8)> = scheduler
+                .events
+                .iter()
+                .enumerate()
+                .filter(|&(_, &id)| {
+                    clocked || scheduler.clocks.iter().all(|&(clock, _)| clock != id)
+                })
+                .map(|(bit, &id)| {
+                    let unknown = unknown.as_ref().is_some_and(|unknown| unknown(bit));
+                    (
+                        id,
+                        u8::from(level(bit)) | (u8::from(unknown) * LEVEL_UNKNOWN),
+                    )
+                })
+                .collect();
+            for (id, level) in recorded {
+                self.record_level(id, level);
+            }
+        }
+        // Domains mark trigger bits as they run; between slots none is set.
+        executor.backend_mut().clear_triggered_bits();
+        result?;
+        match exit {
+            Some(SchedulerExit::Limit) => {}
+            Some(SchedulerExit::Finish) => return Err(Halt::Finish),
+            Some(SchedulerExit::DelayOverflow) => {
+                return Err(Halt::Error(SimulatorErrorCode::Runtime {
+                    message: format!("process {current} delay overflows simulation time"),
+                    signals: Vec::new(),
+                }));
+            }
+            Some(SchedulerExit::ClockOverflow) => {
+                let event = overflowed.ok_or(SimulatorErrorCode::InternalError)?;
+                return Err(Halt::Error(SimulatorErrorCode::Runtime {
+                    message: format!("event {event} overflows simulation time"),
+                    signals: Vec::new(),
+                }));
+            }
+            Some(SchedulerExit::Internal) | None => {
+                return Err(SimulatorErrorCode::InternalError.into());
+            }
+        }
+        self.retain_activation_roots(executor);
+        // Backend safe points can interrupt a timestamp between generated
+        // rounds. Observers must see it only after its continuations finish.
+        if self.next_work_time() == Some(now) {
+            return Ok(now);
+        }
+        executor.try_finish_timed_step(now)?;
+        // What the host writes after the slot is an update of its time.
+        if executor.take_slot_writes() {
+            self.host_pending = true;
+        }
+        // A run of one slot ends it unless work is left at its time.
+        if (self.one_slot_runs() || executor.compiled_slots() == CompiledSlots::One)
+            && !self.host_pending
+            && self.next_work_time() != Some(now)
+        {
+            self.end_time_slot(executor, now)?;
+        }
+        Ok(now)
+    }
+
+    /// Move the state of the compiled scheduler's kernels and host clocks
+    /// into its slots for a run. Returns the event of each clock slot it
+    /// armed.
+    fn load_native(
+        &mut self,
+        backend: &mut B,
+        native_regions: bool,
+    ) -> Result<Vec<Option<B::Event>>, Halt> {
+        let scheduler = self
+            .model
+            .scheduler
+            .as_ref()
+            .ok_or(SimulatorErrorCode::InternalError)?;
         for &(_, waiting) in scheduler.wake.iter().flatten() {
             backend.set(waiting, 0u8);
         }
@@ -475,30 +681,71 @@ impl<B: SimBackend> SimulationState<B> {
             backend.set_wide(scheduler.clock_armed, compiled);
             backend.set_wide(scheduler.clock_value, values);
         }
-        let unit = scheduler.unit;
-        self.stats.compiled_runs = self.stats.compiled_runs.saturating_add(1);
-        let result = executor.run_process(unit);
-        self.process_state
-            .nba_queue
-            .extend(executor.take_compiled_nbas());
-        for (time, update) in executor.take_compiled_delayed_nbas() {
-            self.process_state
-                .delayed_nba
-                .entry(time)
-                .or_default()
-                .push((false, update));
-        }
+        Ok(clocks)
+    }
 
+    /// Enter a run with the kernels and clocks still resident in the slots
+    /// ([`Self::load_native`] for what the runtime holds meanwhile: ready
+    /// kernels and restored Inactive work).
+    fn enter_resident(&mut self, backend: &mut B, native_regions: bool) -> Result<(), Halt> {
         let scheduler = self
             .model
             .scheduler
             .as_ref()
             .ok_or(SimulatorErrorCode::InternalError)?;
-        let backend = executor.backend();
-        let count: u64 = backend.get_as(scheduler.count);
-        let now: u64 = backend.get_as(scheduler.now);
-        let exit = SchedulerExit::from_code(backend.get_as(scheduler.exit));
-        let current: u64 = backend.get_as(scheduler.current);
+        // A resident run loop files nothing of the scheduler's kernels in
+        // the runtime's queues: only the reference loop does, which unloads
+        // them first.
+        debug_assert!(self.process_wakeups.iter().all(|&Reverse((_, process))| {
+            scheduler.wake.get(process).is_none_or(Option::is_none)
+        }));
+        debug_assert!(
+            self.process_state
+                .waiters
+                .iter()
+                .all(|(process, _)| { scheduler.waits.get(process).is_none_or(Option::is_none) })
+        );
+        // The run that left the kernels resident completed its slots, which
+        // left none of them ready.
+        if !self.process_state.ready.is_empty() {
+            let mut ready = num_bigint::BigUint::default();
+            for process in std::mem::take(&mut self.process_state.ready) {
+                let ordinal = scheduler
+                    .ordinals
+                    .get(process)
+                    .copied()
+                    .flatten()
+                    .ok_or(SimulatorErrorCode::InternalError)?;
+                ready.set_bit(ordinal as u64, true);
+            }
+            backend.set_wide(scheduler.ready, ready);
+        }
+        if native_regions {
+            for process in std::mem::take(&mut self.process_state.inactive) {
+                let (wake, waiting) =
+                    scheduler.wake[process].ok_or(SimulatorErrorCode::InternalError)?;
+                backend.set(wake, self.scheduler.time);
+                backend.set(waiting, 1u8);
+            }
+        }
+        Ok(())
+    }
+
+    /// Move the state of the scheduler's kernels and of the clocks of
+    /// `clocks` out of its slots into the runtime's queues after a run that
+    /// returned at `current` unless `complete`.
+    fn store_native(
+        &mut self,
+        backend: &B,
+        clocks: Vec<Option<B::Event>>,
+        complete: bool,
+        current: u64,
+    ) -> Result<(), Halt> {
+        let scheduler = self
+            .model
+            .scheduler
+            .as_ref()
+            .ok_or(SimulatorErrorCode::InternalError)?;
         let ready = backend.get(scheduler.ready);
         for (index, counted) in self.model.counted.iter().enumerate() {
             for &(_, kind) in &counted.domains {
@@ -506,19 +753,11 @@ impl<B: SimBackend> SimulationState<B> {
                     backend.get_as(scheduler.counter_baseline(index, kind));
             }
         }
-        let complete = result.is_ok() && exit == Some(SchedulerExit::Limit);
-        // A clock that overflows ends the run after its slot completed.
-        let slot_complete = complete || exit == Some(SchedulerExit::ClockOverflow);
-        let overflowed = scheduler
-            .clocks
-            .get(backend.get_as::<u64>(scheduler.exit_index()) as usize)
-            .map(|&(event, _)| event);
         // Armed clocks wait for their next edge in the event queue again; a
         // clock whose edge applied in a slot the run left unfinished is gone,
         // as the reference loop leaves it until the slot re-arms it.
         let armed = backend.get(scheduler.clock_armed);
         let values = backend.get(scheduler.clock_value);
-        let clocked = clocks.iter().any(Option::is_some);
         for (bit, event_ref) in clocks.into_iter().enumerate() {
             let Some(event_ref) = event_ref.filter(|_| armed.bit(bit as u64)) else {
                 continue;
@@ -684,97 +923,38 @@ impl<B: SimBackend> SimulationState<B> {
                 }
             }
         }
-        self.stats.compiled_slots += count;
-        if count > 0 {
-            self.scheduler.time = now;
+        Ok(())
+    }
+
+    /// Move what a resident run loop left in the compiled scheduler's slots
+    /// back into the runtime's queues, which are then the whole scheduling
+    /// state again. Does nothing when nothing is resident.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn unload_native(&mut self, backend: &B) -> Result<(), SimulatorErrorCode> {
+        match self.native.take() {
+            Some(native) => self
+                .store_native(backend, native.clocks, true, u64::MAX)
+                .map_err(|halt| match halt {
+                    Halt::Error(error) => error,
+                    _ => SimulatorErrorCode::InternalError,
+                }),
+            None => Ok(()),
         }
-        if slot_complete {
-            // The slots ended with their levels as the baseline of the next.
-            self.resample_clock_values(executor.backend());
-        } else if count > 0 {
-            // The baseline is the levels slot `now` started from; events the
-            // kernels do not write kept theirs.
-            // The frontend sizes the slots from an estimate, so they can be
-            // wider than the events need.
-            let plane = |slot: crate::SignalRef| -> Box<dyn Fn(usize) -> bool> {
-                if slot.width <= 64 {
-                    let bits: u64 = executor.backend().get_as(slot);
-                    Box::new(move |bit| bits >> bit & 1 != 0)
-                } else {
-                    let bits = executor.backend().get(slot);
-                    Box::new(move |bit| bits.bit(bit as u64))
-                }
-            };
-            let level = plane(scheduler.levels);
-            let unknown = self.four_state.then(|| plane(scheduler.unknown_levels));
-            // A run without clocks records no level of their events, which
-            // only the clocks change.
-            let scheduler = self
-                .model
-                .scheduler
-                .as_ref()
-                .ok_or(SimulatorErrorCode::InternalError)?;
-            let recorded: Vec<(usize, u8)> = scheduler
-                .events
+    }
+
+    /// Whether the runs of a run loop may keep the compiled scheduler's
+    /// kernels and host clocks resident in its slots: no kernel or clock
+    /// it runs changes an event the host observes, which the reference loop
+    /// would have to take over.
+    pub(super) fn may_stay_resident(&self) -> bool {
+        self.model.scheduler.as_ref().is_some_and(|scheduler| {
+            !scheduler
+                .kernel_events
                 .iter()
-                .enumerate()
-                .filter(|&(_, &id)| {
-                    clocked || scheduler.clocks.iter().all(|&(clock, _)| clock != id)
-                })
-                .map(|(bit, &id)| {
-                    let unknown = unknown.as_ref().is_some_and(|unknown| unknown(bit));
-                    (
-                        id,
-                        u8::from(level(bit)) | (u8::from(unknown) * LEVEL_UNKNOWN),
-                    )
-                })
-                .collect();
-            for (id, level) in recorded {
-                self.record_level(id, level);
-            }
-        }
-        // Domains mark trigger bits as they run; between slots none is set.
-        executor.backend_mut().clear_triggered_bits();
-        result?;
-        match exit {
-            Some(SchedulerExit::Limit) => {}
-            Some(SchedulerExit::Finish) => return Err(Halt::Finish),
-            Some(SchedulerExit::DelayOverflow) => {
-                return Err(Halt::Error(SimulatorErrorCode::Runtime {
-                    message: format!("process {current} delay overflows simulation time"),
-                    signals: Vec::new(),
-                }));
-            }
-            Some(SchedulerExit::ClockOverflow) => {
-                let event = overflowed.ok_or(SimulatorErrorCode::InternalError)?;
-                return Err(Halt::Error(SimulatorErrorCode::Runtime {
-                    message: format!("event {event} overflows simulation time"),
-                    signals: Vec::new(),
-                }));
-            }
-            Some(SchedulerExit::Internal) | None => {
-                return Err(SimulatorErrorCode::InternalError.into());
-            }
-        }
-        self.retain_activation_roots(executor);
-        // Backend safe points can interrupt a timestamp between generated
-        // rounds. Observers must see it only after its continuations finish.
-        if self.next_work_time() == Some(now) {
-            return Ok(now);
-        }
-        executor.try_finish_timed_step(now)?;
-        // What the host writes after the slot is an update of its time.
-        if executor.take_slot_writes() {
-            self.host_pending = true;
-        }
-        // A run of one slot ends it unless work is left at its time.
-        if (self.one_slot_runs() || executor.compiled_slots() == CompiledSlots::One)
-            && !self.host_pending
-            && self.next_work_time() != Some(now)
-        {
-            self.end_time_slot(executor, now)?;
-        }
-        Ok(now)
+                .chain(&scheduler.clock_events)
+                .any(|events| events.intersects(&self.observed_events))
+        })
     }
 
     /// Whether every run of the compiled scheduler takes one slot: the
