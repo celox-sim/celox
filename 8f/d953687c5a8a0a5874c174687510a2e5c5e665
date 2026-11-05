@@ -1,1 +1,6 @@
-Codex review: an enumerated destination with an unresolved domain is not numeric; $cast counts as an update, so deferred system-task arguments reject it.
+Revision history for #3232:
+
+rev 2 (content) 2026-11-05 22:55 UTC — Codex review: an enumerated destination with an unresolved domain is not numeric; $cast counts as an update, so deferred system-task arguments reject it.
+rev 1 (initial) 2026-11-05 22:55 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3232,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"0156748f1c73c5267f640609eb826cbed2a950c1","timestamp_iso":"2026-11-05T22:55:14Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"0156748f1c73c5267f640609eb826cbed2a950c1","new_sha":"8fd953687c5a8a0a5874c174687510a2e5c5e665","timestamp_iso":"2026-11-05T22:55:14Z","reason":"Codex review: an enumerated destination with an unresolved domain is not numeric; $cast counts as an update, so deferred system-task arguments reject it.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/0156748f1c73c5267f640609eb826cbed2a950c1...8fd953687c5a8a0a5874c174687510a2e5c5e665"}]} -->
