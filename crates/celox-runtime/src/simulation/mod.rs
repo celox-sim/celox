@@ -149,6 +149,16 @@ impl<E: SimulationExecutor> StepObserver<E> for () {
     }
 }
 
+/// The frames of the calls an activation is suspended inside: the stack
+/// below [`celox_design::ProcessSlots::call_top`] when it suspended, and its
+/// kernel's resume point then, which names the call the first frame belongs
+/// to (see [`celox_design::FunctionFrame`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SavedCalls {
+    pub resume: u64,
+    pub stack: Vec<u8>,
+}
+
 /// Backend-independent state and execution rules for timed simulation.
 pub struct SimulationState<B: SimBackend> {
     scheduler: Scheduler<B>,
@@ -195,10 +205,6 @@ pub struct SimulationState<B: SimBackend> {
     process_names: Vec<String>,
     /// The loop that runs time slots, and the slots each loop ran.
     stats: SchedulerStats,
-    /// The call stack below [`celox_design::ProcessSlots::call_top`] of
-    /// each activation suspended inside a call, by activation, kept while
-    /// other code runs on the one stack.
-    call_stacks: fxhash::FxHashMap<usize, Vec<u8>>,
     /// The bits of the compiled scheduler's events whose changes the host
     /// observes inside a slot: the kernels and host clocks that write them
     /// run in the reference loop.
@@ -293,7 +299,6 @@ impl<B: SimBackend> SimulationState<B> {
             slot_resumed: std::collections::VecDeque::new(),
             process_names: Vec::new(),
             stats: SchedulerStats::default(),
-            call_stacks: Default::default(),
             observed_events: Default::default(),
             observed_data: false,
             native: None,

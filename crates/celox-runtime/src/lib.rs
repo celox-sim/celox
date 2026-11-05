@@ -37,14 +37,14 @@ pub use reflection::{
 pub use schedule::{ResolvedSchedule, host_watch};
 pub use simulation::{
     Activation, CompiledSlots, EventInfo, HostBoundary, KernelSchedule,
-    PersistedSimulationSnapshot, ProcessControl, ScheduleKey, ScheduleParts, SchedulerMode,
-    SchedulerStats, SimulationExecutor, SimulationSnapshot, SimulationState, StepObserver,
-    SuspendedProcess, UnitExecutor,
+    PersistedSimulationSnapshot, ProcessControl, SavedCalls, ScheduleKey, ScheduleParts,
+    SchedulerMode, SchedulerStats, SimulationExecutor, SimulationSnapshot, SimulationState,
+    StepObserver, SuspendedProcess, UnitExecutor,
 };
 pub use state_file::{
-    ActivationRecord, BaselineRecord, FrameValueKind, FrameValueRecord, NbaRecord, ProcessRecord,
-    ProcessRef, ScheduleRecord, ScheduledEvent, StateDifference, StateFile, StateFileError,
-    StateObject, StateRole, WaiterRecord, format_state_value,
+    ActivationRecord, BaselineRecord, CallStackRecord, FrameValueKind, FrameValueRecord, NbaRecord,
+    ProcessRecord, ProcessRef, ScheduleRecord, ScheduledEvent, StateDifference, StateFile,
+    StateFileError, StateObject, StateRole, WaiterRecord, format_state_value,
 };
 pub use testbench::bind_testbench_program;
 pub use timing::{

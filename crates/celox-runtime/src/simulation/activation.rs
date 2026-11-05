@@ -72,9 +72,9 @@ impl<B: SimBackend> SimulationState<B> {
     /// other code may have overwritten since: a resumed chain finds each
     /// frame where it left it.
     pub(super) fn restore_call_stack(&mut self, backend: &mut B, process: usize) {
-        if let Some(stack) = self.call_stacks.remove(&process) {
-            backend.restore_call_stack(&stack);
-            self.stats.call_stack_restored_bytes += stack.len() as u64;
+        if let Some(saved) = self.process_state.call_stacks.remove(&process) {
+            backend.restore_call_stack(&saved.stack);
+            self.stats.call_stack_restored_bytes += saved.stack.len() as u64;
         }
     }
 
@@ -93,7 +93,10 @@ impl<B: SimBackend> SimulationState<B> {
         backend.set(slot, 0u32);
         self.stats.call_stack_saves += 1;
         self.stats.call_stack_saved_bytes += u64::from(top);
-        self.call_stacks.insert(process, stack);
+        let resume = backend.get_as(self.model.processes[process].resume);
+        self.process_state
+            .call_stacks
+            .insert(process, super::SavedCalls { resume, stack });
     }
 
     pub(super) fn restore_activation(&mut self, backend: &mut B, process: usize) -> usize {
@@ -374,7 +377,7 @@ impl<B: SimBackend> SimulationState<B> {
         {
             self.cancel_semaphore_wait(process);
             self.cancel_mailbox_wait(process);
-            self.call_stacks.remove(&process);
+            self.process_state.call_stacks.remove(&process);
         }
         let mut next = Some(process);
         while let Some(id) = next {
@@ -452,6 +455,22 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
         executor.retain_process_values(&values);
+        if !self.process_state.call_stacks.is_empty() {
+            let stacks: Vec<_> = self
+                .process_state
+                .call_stacks
+                .iter()
+                .map(|(&process, saved)| {
+                    let kernel = self
+                        .process_state
+                        .activations
+                        .get(process)
+                        .map_or(process, |activation| activation.kernel);
+                    (kernel, saved)
+                })
+                .collect();
+            executor.retain_call_stacks(&stacks);
+        }
     }
 
     pub(super) fn rebuild_activation_models(&mut self) {

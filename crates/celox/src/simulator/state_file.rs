@@ -733,6 +733,7 @@ impl<B: SimBackend> Simulator<B> {
             ..ProcessRecord::default()
         };
         self.capture_activation_values(state, &mut record, strings)?;
+        record.call_stacks = self.capture_call_stacks(state, process, strings)?;
         Ok(record)
     }
 
@@ -1059,6 +1060,23 @@ impl<B: SimBackend> Simulator<B> {
             }
         }
         self.validate_activation_schedule(record, &processes, &activations, &mut unknown);
+        // The string IDs of the frames stay until the load binds them.
+        let mut call_stacks = std::collections::BTreeMap::new();
+        for saved in &record.call_stacks {
+            let Some(index) = process(&saved.process) else {
+                unknown.push(saved.process.to_string());
+                continue;
+            };
+            let calls = celox_runtime::SavedCalls {
+                resume: saved.resume,
+                stack: saved.stack.clone(),
+            };
+            if self.saved_frame_handles(kernel(index), &calls).is_none() {
+                unknown.push(format!("call stack of {}", saved.process));
+                continue;
+            }
+            call_stacks.insert(index, calls);
+        }
         if !unknown.is_empty() {
             return Err(unknown);
         }
@@ -1066,6 +1084,7 @@ impl<B: SimBackend> Simulator<B> {
             wakeups,
             ProcessState {
                 activations,
+                call_stacks,
                 cells,
                 waiters,
                 ready,

@@ -435,6 +435,11 @@ pub fn planes_occur(kind: CounterKind, old: &[u8], new: &[u8], width: usize) -> 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProcessState {
     pub activations: Vec<crate::simulation::Activation>,
+    /// The call stack below [`celox_design::ProcessSlots::call_top`] of
+    /// each activation suspended inside a call, by activation, kept while
+    /// other code runs on the one stack.
+    #[serde(default)]
+    pub call_stacks: std::collections::BTreeMap<usize, crate::simulation::SavedCalls>,
     pub cells: Vec<Value>,
     /// Processes suspended at a wait.
     pub waiters: Waiters,

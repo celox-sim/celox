@@ -1367,3 +1367,328 @@ endmodule
 "#;
     same_as_inlined(source, 2, 6, &["r"]);
 }
+
+#[test]
+fn delays_suspend_through_task_units() {
+    // Each task of the chain waits before and after its call, so the
+    // process sits inside the calls across time slots while the other
+    // process runs the same tasks. `#0` resumes in the inactive region,
+    // before the nonblocking assignment of the time is published.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c);
+    int seen = 0;
+    task automatic inner(input int n, output int r);
+        int x = n * 3;
+        #(n) x += $urandom % 7;
+        $display("inner %0d at %0t", n, $time);
+        #0 r = x + seen;
+    endtask
+    task automatic middle(input int n, output int r);
+        int got;
+        #1 inner(n + 1, got);
+        $display("middle %0d got %0d at %0t", n, got, $time);
+        r = got + 1;
+    endtask
+    task automatic outer(input int n, output int r);
+        int sum = 0;
+        for (int k = 0; k < n; k++) begin
+            int part;
+            middle(k, part);
+            sum += part;
+        end
+        #2 r = sum;
+    endtask
+    int two = 2;
+    initial begin
+        outer(two + 1, a);
+        seen <= 100;
+        #0 c = seen;
+    end
+    initial begin
+        #1 outer(two, b);
+    end
+endmodule
+"#;
+    same_as_inlined(source, 3, 40, &["a", "b", "c"]);
+}
+
+#[test]
+fn saved_frames_keep_their_heap_handles_across_collections() {
+    // Only the frames of the suspended tasks hold the objects and strings
+    // they made. While they wait, the other process allocates enough for
+    // the heap to collect between the time slots: the collector finds the
+    // handles in the saved frames, walking the chain from the kernel's call.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int n);
+    class Box;
+        int v;
+        function new(int x);
+            v = x;
+        endfunction
+    endclass
+    task automatic hold(input int k, output int r);
+        Box box = new(k);
+        string s = "held";
+        s = {s, "-", s};
+        #5;
+        r = box.v * 100 + s.len();
+    endtask
+    task automatic deep(input int k, output int r);
+        Box mine = new(k + 1);
+        string tag = "d";
+        int got;
+        tag = {tag, tag, tag};
+        #1 hold(k, got);
+        r = got + mine.v * 10000 + tag.len() * 1000000;
+    endtask
+    int seven = 7;
+    int count = 2000;
+    initial deep(seven, a);
+    initial begin
+        Box t;
+        string u;
+        #2;
+        for (int i = 0; i < count; i++) begin
+            t = new(i);
+            u = {u, "x"};
+            if (u.len() > 8) u = "";
+            n += t.v % 2;
+        end
+    end
+endmodule
+"#;
+    same_as_inlined(source, 3, 10, &["a", "n"]);
+}
+
+#[test]
+fn state_files_keep_the_frames_of_suspended_calls() {
+    // A state file saved while both processes wait inside their calls holds
+    // the saved frames, strings by contents; a load on any backend resumes
+    // them where they stopped. A frame holding a class object cannot be
+    // saved, as a state object holding one cannot.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b);
+    task automatic step(input int n, output int r);
+        string s = "s";
+        int x = n;
+        repeat (n) s = {s, "+"};
+        #(n) x += s.len();
+        s = {s, "!"};
+        #1 r = x * 10 + s.len();
+    endtask
+    task automatic chain(input int n, output int r);
+        int first;
+        int second;
+        step(n, first);
+        step(n + 1, second);
+        r = first * 1000 + second;
+    endtask
+    int two = 2;
+    initial chain(two, a);
+    initial #1 chain(two + 1, b);
+endmodule
+"#;
+    let build = |forced: bool| {
+        let builder = Simulation::from_sv_sources(vec![(source, Path::new("calls.sv"))], "Top");
+        if forced {
+            builder.force_out_of_line_calls()
+        } else {
+            builder
+        }
+    };
+    fn outputs<B: SimBackend>(sim: &mut Simulation<B>) -> (BigUint, BigUint) {
+        sim.run_until(20).expect("the design runs");
+        (sim.get(sim.signal("a")), sim.get(sim.signal("b")))
+    }
+    let expected = outputs(&mut build(false).build_interpreter().expect("builds"));
+    let mut origin = build(true).build_interpreter().expect("builds");
+    origin.run_until(3).expect("the design runs");
+    assert!(origin.scheduler_stats().call_stack_saves > 0);
+    let mut bytes = Vec::new();
+    origin
+        .save_state()
+        .expect("the frames save")
+        .write_to(&mut bytes)
+        .expect("the file writes");
+    let file = celox::StateFile::read_from(bytes.as_slice()).expect("the file reads");
+    assert_eq!(outputs(&mut origin), expected, "the saved run continues");
+    macro_rules! resumes {
+        ($build:ident) => {{
+            let mut target = build(true).$build().expect("builds");
+            target.load_state(&file).expect("the frames load");
+            assert_eq!(outputs(&mut target), expected, stringify!($build));
+        }};
+    }
+    resumes!(build_interpreter);
+    resumes!(build_cranelift);
+    resumes!(build_wasm);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    resumes!(build_native);
+
+    let objects = r#"`timescale 1ns/1ns
+module Top(output int a);
+    class Box;
+        int v;
+    endclass
+    task automatic hold(output int r);
+        Box box = new;
+        #5 r = box.v;
+    endtask
+    initial hold(a);
+endmodule
+"#;
+    let mut sim = Simulation::from_sv_sources(vec![(objects, Path::new("calls.sv"))], "Top")
+        .force_out_of_line_calls()
+        .build_interpreter()
+        .expect("builds");
+    sim.run_until(1).expect("the design runs");
+    assert!(sim.save_state().is_err(), "a class object in a frame");
+}
+
+#[test]
+fn recursive_tasks_wait_at_every_level() {
+    // Each activation waits before and after its recursive call, while a
+    // second process runs the same task: both chains stay suspended inside
+    // their calls across many time slots.
+    let recursive = r#"`timescale 1ns/1ns
+module Top(output int a, output int b);
+    task automatic down(input int n, output int r);
+        int below;
+        int mine = n * 3;
+        if (n == 0) begin
+            #1 r = 1;
+            return;
+        end
+        #(n) down(n - 1, below);
+        #1 r = below * 2 + mine;
+    endtask
+    int k = 3;
+    initial down(k, a);
+    initial #2 down(k - 1, b);
+endmodule
+"#;
+    let looped = recursive.replace(
+        "        int below;
+        int mine = n * 3;
+        if (n == 0) begin
+            #1 r = 1;
+            return;
+        end
+        #(n) down(n - 1, below);
+        #1 r = below * 2 + mine;",
+        "        int below;
+        for (int m = n; m > 0; m--) #(m);
+        #1 below = 1;
+        for (int m = 1; m <= n; m++) #1 below = below * 2 + m * 3;
+        r = below;",
+    );
+    assert_ne!(looped, recursive);
+    assert_eq!(function_units(recursive, true), 1, "function units");
+    for four_state in [false, true] {
+        let expected = simulate_run(&looped, four_state, false, "interpreter", 30, &["a", "b"])
+            .expect("the looped design runs");
+        for backend in backends() {
+            assert_eq!(
+                simulate_run(recursive, four_state, true, backend, 30, &["a", "b"]),
+                Ok(expected.clone()),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+}
+
+#[test]
+fn timed_tasks_in_fork_children() {
+    // A task waits a real amount in a scope whose precision is finer than
+    // its unit; fork children and their parent call it and a task that
+    // calls it at once.
+    let source = r#"`timescale 1ns/10ps
+module Top(output int a, output int b, output int c, output int d);
+    task automatic settle(input real d, output int r);
+        #(d) r = int'($realtime * 100);
+    endtask
+    task automatic twice(input int n, output int r);
+        int got;
+        settle(n * 0.75, got);
+        #1 r = got + n;
+    endtask
+    int one = 1;
+    initial begin
+        fork
+            begin
+                twice(one, a);
+            end
+            begin
+                settle(one * 1.5, b);
+            end
+        join_none
+        twice(one + 2, c);
+        wait fork;
+        settle(0.25, d);
+    end
+endmodule
+"#;
+    same_as_inlined(source, 2, 20, &["a", "b", "c", "d"]);
+}
+
+#[test]
+fn stops_inside_task_units() {
+    // `$stop` inside a task suspends the process with its frames; the run
+    // continues from there, and `$finish` inside a task ends it.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b);
+    task automatic halt(input int n, output int r);
+        int x = n * 2;
+        #1 $stop;
+        r = x + 1;
+        if (n > 2) begin
+            #1 $finish;
+            r = 0;
+        end
+    endtask
+    int two = 2;
+    initial begin
+        halt(two, a);
+        halt(two + 1, b);
+    end
+endmodule
+"#;
+    fn stops<B: SimBackend>(mut sim: Simulation<B>) -> Vec<(bool, u64, BigUint, BigUint)> {
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            sim.run_until(10).expect("the design runs");
+            seen.push((
+                sim.is_stopped(),
+                sim.time(),
+                sim.get(sim.signal("a")),
+                sim.get(sim.signal("b")),
+            ));
+        }
+        seen
+    }
+    assert_eq!(function_units(source, true), 1, "function units");
+    for four_state in [false, true] {
+        let build = |forced: bool| {
+            let builder = Simulation::from_sv_sources(vec![(source, Path::new("calls.sv"))], "Top")
+                .four_state(four_state);
+            if forced {
+                builder.force_out_of_line_calls()
+            } else {
+                builder
+            }
+        };
+        let expected = stops(build(false).build_interpreter().expect("builds"));
+        assert!(expected[0].0, "the run stops: {expected:?}");
+        assert_eq!(
+            stops(build(true).build_interpreter().expect("builds")),
+            expected
+        );
+        assert_eq!(
+            stops(build(true).build_cranelift().expect("builds")),
+            expected
+        );
+        assert_eq!(stops(build(true).build_wasm().expect("builds")), expected);
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        assert_eq!(stops(build(true).build_native().expect("builds")), expected);
+    }
+}

@@ -1759,6 +1759,7 @@ fn lower_processes(
         }));
         processes.push(SymbolicProcess {
             frame: None,
+            call_resumes: Vec::new(),
             kernel,
             slots,
             origin: celox_design::ProcessOrigin {
@@ -1967,6 +1968,7 @@ pub fn lower_frontend_artifact(
         reset_clock_map,
         processes,
         functions: Vec::new(),
+        function_frames: Vec::new(),
         package_bindings: HashMap::default(),
         hierarchical_bindings: HashMap::default(),
         counter_slots,
