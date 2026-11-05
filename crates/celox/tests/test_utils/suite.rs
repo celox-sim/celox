@@ -159,7 +159,10 @@ pub fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
         |builder, (name, value)| builder.param(name, *value),
     );
     Ok(match backend {
-        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        #[cfg(any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        ))]
         "hotspot" => Box::new(CeloxBackend(
             builder
                 .hotspot_jit(true)

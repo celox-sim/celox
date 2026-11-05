@@ -163,8 +163,10 @@ describe("Simulator checkpoints", () => {
 	});
 
 	test("tiered simulators restore across promotion", async () => {
+		// Whole-image promotion; hotspot JIT never adopts a compiled image.
 		const sim = Simulator.fromSource<CounterPorts>(COUNTER_SOURCE, "Counter", {
 			tier: true,
+			hotspotJit: false,
 		});
 		startCounter(sim);
 		sim.tick(4);

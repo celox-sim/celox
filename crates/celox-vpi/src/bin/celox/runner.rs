@@ -35,7 +35,8 @@ pub(super) struct ExecutionArgs {
     /// cross-codegen builds.
     #[arg(long, value_enum)]
     backend: Option<Backend>,
-    /// JIT strategy. Auto uses hotspot on supported single-thread x86-64 runs.
+    /// JIT strategy. Auto uses hotspot on supported single-thread native
+    /// x86-64 and AArch64 runs.
     #[arg(
         long,
         value_enum,
@@ -121,8 +122,11 @@ impl ExecutionArgs {
     fn hotspot_unavailable(&self, force_signals: bool) -> Option<&'static str> {
         if self.backend() != Backend::Tiered {
             Some("hotspot JIT requires --backend tiered")
-        } else if !cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen"))) {
-            Some("hotspot JIT requires a native x86-64 build")
+        } else if !cfg!(any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )) {
+            Some("hotspot JIT requires a native x86-64 or AArch64 build")
         } else if self.threads != 1 {
             Some("hotspot JIT requires --threads 1")
         } else if force_signals {
@@ -1111,7 +1115,10 @@ pub(super) fn run(
                 && timing
                     .and_then(TieredExecutionTiming::promotion_elapsed)
                     .is_some();
-            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+            #[cfg(any(
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+            ))]
             if let Some(hotspot) = sim.hotspot_stats() {
                 generated_code_exercised =
                     hotspot.compiled_calls > 0 || hotspot.compiled_block_calls > 0;
@@ -1466,7 +1473,10 @@ fn load_sources(
     Ok((sources, metadata))
 }
 
-#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+))]
 pub(super) fn print_hotspot_stats(test: &str, stats: &celox::HotspotStats) {
     report!(
         true,
