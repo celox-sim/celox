@@ -1468,7 +1468,7 @@ pub struct SchedulerSlots<A> {
     /// After a [`SchedulerExit::Limit`] exit, the time of the next slot of
     /// the scheduler's own work, `u64::MAX` for none, or
     /// [`SCHEDULER_NEXT_UNJUDGED`] when the run returned at its budget or
-    /// event batch without judging it.
+    /// event batch without judging it, or when that slot is at `u64::MAX`.
     pub next: A,
     /// Why the run returned, a [`SchedulerExit`] code.
     pub exit: A,
