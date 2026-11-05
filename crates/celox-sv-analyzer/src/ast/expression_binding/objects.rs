@@ -698,6 +698,55 @@ pub(in crate::ast) fn method(
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<(String, Vec<Option<String>>, Receiver)>> {
+    method_named(tree, session, id, native, dimensions, false)
+}
+
+/// The method that native expression `id` calls: the callee of a call
+/// `c(...)`, or, as [`method`] resolves it, a method named without its
+/// parentheses (13.5.5). Every resolution of a call goes through it, since
+/// only a call knows that the name of the enclosing method `m` in `m(...)`
+/// calls the method, where `m` alone is its result variable (IEEE 1800-2023
+/// 13.4.1).
+pub(in crate::ast) fn call_method(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<(String, Vec<Option<String>>, Receiver)>> {
+    match &native.expression(ungroup(id, native)).kind {
+        ExprKind::Call { expression, .. } => {
+            method_named(tree, session, *expression, native, dimensions, true)
+        }
+        _ => method(tree, session, id, native, dimensions),
+    }
+}
+
+/// The callee of call native expression `id`, or `id` itself when it is
+/// not a call.
+pub(in crate::ast) fn callee(id: ExprId, native: &Declarations) -> ExprId {
+    match &native.expression(ungroup(id, native)).kind {
+        ExprKind::Call { expression, .. } => *expression,
+        _ => id,
+    }
+}
+
+/// Whether unqualified `name` inside a method names a method of its class
+/// rather than a declaration that hides it: a call of the enclosing method
+/// by its name calls it, though the name alone is its result variable
+/// (IEEE 1800-2023 13.4.1).
+fn names_method(dimensions: &PackedDimensions, name: &str, called: bool) -> bool {
+    (called && dimensions.method_name.as_deref() == Some(name)) || dimensions.get(name).is_none()
+}
+
+fn method_named(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+    called: bool,
+) -> Converted<Option<(String, Vec<Option<String>>, Receiver)>> {
     let mut through_super = false;
     let (class_name, method_name, receiver) = match &native.expression(ungroup(id, native)).kind {
         ExprKind::Member {
@@ -725,7 +774,7 @@ pub(in crate::ast) fn method(
         }
         ExprKind::Name(name) => {
             let normalized = instances::normalize_identifier(&name.spelling);
-            if dimensions.get(&normalized).is_some() {
+            if !names_method(dimensions, &normalized, called) {
                 return Ok(None);
             }
             match scope_class(dimensions) {
@@ -852,7 +901,7 @@ pub(in crate::ast) fn method_call<'a>(
         ExprKind::Member { .. } => (id, &[][..]),
         _ => return Ok(None),
     };
-    Ok(method(tree, session, callee, native, dimensions)?.map(|_| (callee, arguments)))
+    Ok(call_method(tree, session, id, native, dimensions)?.map(|_| (callee, arguments)))
 }
 
 /// Check that the handle native expression `id` evaluates to may be
@@ -1135,9 +1184,12 @@ pub(super) fn random_selection(
     name: &str,
     arguments: &[celox_sv_syntax::Argument],
     native: &Declarations,
+    inline: bool,
 ) -> Converted<Expr> {
     let owner = name.strip_suffix("::randomize").expect("randomize method");
     let class = class(tree, session, dimensions, owner)?;
+    // A selected property the constraint program cannot hold.
+    let mut unsolvable = false;
     let mut bits = vec!['0'; class.properties.len() + 1];
     if !arguments.is_empty() {
         bits[0] = '1';
@@ -1170,7 +1222,10 @@ pub(super) fn random_selection(
                 if property.field.four_state {
                     return Err(unsupported("randomization of a 4-state class property"));
                 }
-                if property.field.handle.is_some()
+                // A selected array is random for the call, as a rand one
+                // (18.11).
+                let array = classes::constraints::random_array(property);
+                if (property.field.handle.is_some() && !array)
                     || property.r#type.holds_chandle()
                     || (property.r#type.is_enum && property.r#type.enum_domain.is_none())
                     || (property.randc && property.cyclic_domain_size().is_none())
@@ -1179,6 +1234,7 @@ pub(super) fn random_selection(
                         "randomize arguments require integral properties with a supported enum domain",
                     ));
                 }
+                unsolvable |= !classes::constraints::constrainable(property) && !array;
                 bits[index + 1] = '1';
             }
             _ => {
@@ -1187,6 +1243,34 @@ pub(super) fn random_selection(
                 ));
             }
         }
+    }
+    // The program of the solver holds only the properties a constraint may
+    // name, and would leave another one unchanged. The solver randomizes
+    // the call's properties when the call has constraints, or the class of
+    // the object it dispatches to (18.6.2): this class or one derived from
+    // it.
+    if unsolvable
+        && (inline
+            || class.solved()
+            || classes::visible_classes(tree, session)
+                .into_iter()
+                .filter(|name| *name != class.name)
+                .any(|name| {
+                    self::class(tree, session, dimensions, &name).is_ok_and(|derived| {
+                        derived.solved()
+                            && derived.derives_from(
+                                tree,
+                                session,
+                                &class.name,
+                                &dimensions.const_env,
+                                &dimensions.type_aliases,
+                            )
+                    })
+                }))
+    {
+        return Err(unsupported(
+            "randomize argument wider than 64 bits under constraints",
+        ));
     }
     Ok(Expr::Literal(format!(
         "{}'b{}",
@@ -1445,20 +1529,17 @@ pub(super) fn randomize_with(
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
-    let (callee, arguments) = match &native.expression(ungroup(expression, native)).kind {
-        ExprKind::Call {
-            expression,
-            arguments,
-        } => (*expression, arguments.as_slice()),
-        _ => (expression, &[][..]),
+    let arguments = match &native.expression(ungroup(expression, native)).kind {
+        ExprKind::Call { arguments, .. } => arguments.as_slice(),
+        _ => &[][..],
     };
-    let (method_name, _, receiver) = method(tree, session, callee, native, dimensions)?
+    let (method_name, _, receiver) = call_method(tree, session, expression, native, dimensions)?
         .filter(|(name, _, _)| name.ends_with("::randomize"))
         .ok_or_else(|| unsupported("inline constraints require class randomize"))?;
     let owner = method_name.strip_suffix("::randomize").unwrap();
     let class = class(tree, session, dimensions, owner)?;
     // Inline constraints need the solver even on otherwise unconstrained classes.
-    class.constraint_program()?;
+    class.check_constraint_program()?;
     let constraint_ids = constraints.ok_or_else(|| unsupported("inline constraint form"))?;
     let mut inputs = HashMap::default();
     let mut input_types = Vec::new();
@@ -1557,7 +1638,15 @@ pub(super) fn randomize_with(
             .map_err(|reason| unsupported(format!("inline constraints: {reason}")))
         })
         .collect::<Converted<Vec<_>>>()?;
-    let selection = random_selection(tree, session, dimensions, &method_name, arguments, native)?;
+    let selection = random_selection(
+        tree,
+        session,
+        dimensions,
+        &method_name,
+        arguments,
+        native,
+        true,
+    )?;
     let handle = match receiver {
         Receiver::Handle(id) => bind_value(id, native, tree, session, dimensions, None)?,
         Receiver::This => this(),
@@ -1592,8 +1681,9 @@ pub(super) fn randomize_with(
     })
 }
 
-/// The declared result type of the method that native callee expression
-/// `id` names (`h.m`, `C::m`, or unqualified inside a method), when known.
+/// The declared result type of the method that native expression `id`
+/// calls, as [`call_method`] resolves the call (`h.m`, `C::m`, or
+/// unqualified inside a method), when known.
 pub(in crate::ast) fn method_result(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
@@ -1601,7 +1691,11 @@ pub(in crate::ast) fn method_result(
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<Type>> {
-    let (class_name, name) = match &native.expression(ungroup(id, native)).kind {
+    let called = matches!(
+        native.expression(ungroup(id, native)).kind,
+        ExprKind::Call { .. }
+    );
+    let (class_name, name) = match &native.expression(ungroup(callee(id, native), native)).kind {
         ExprKind::Member {
             expression,
             separator,
@@ -1618,9 +1712,11 @@ pub(in crate::ast) fn method_result(
             _ => return Ok(None),
         },
         ExprKind::Name(name)
-            if dimensions
-                .get(&instances::normalize_identifier(&name.spelling))
-                .is_none() =>
+            if names_method(
+                dimensions,
+                &instances::normalize_identifier(&name.spelling),
+                called,
+            ) =>
         {
             (scope_class(dimensions), name)
         }

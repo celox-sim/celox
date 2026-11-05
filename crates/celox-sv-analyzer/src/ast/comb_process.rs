@@ -5,7 +5,7 @@ use super::*;
 pub(super) fn comb_processes_from_scope(
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     packed_dimensions: &PackedDimensions,
     parameter_literals: &HashMap<String, Expr>,
     state: &mut procedural::BodyState<'_>,
@@ -65,7 +65,7 @@ fn comb_processes_from_item(
     condition: Option<ConstExpr>,
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
-    const_env: &SharedMap<i128>,
+    const_env: &SharedEnv,
     packed_dimensions: &PackedDimensions,
     parameter_literals: &SharedMap<Expr>,
     processes: &mut Vec<CombProcess>,
@@ -273,7 +273,7 @@ fn logic_gate_processes(
 
 fn always_dimensions(
     dimensions: &PackedDimensions,
-    const_env: &SharedMap<i128>,
+    const_env: &SharedEnv,
     literals: &SharedMap<Expr>,
 ) -> PackedDimensions {
     let mut local = dimensions.clone();
@@ -524,7 +524,7 @@ fn comb_process_from_procedure(
             syntax_tree,
             builder.session,
             stmt,
-            &HashMap::default(),
+            &ConstEnv::default(),
             parameter_literals,
         );
     }
@@ -549,10 +549,7 @@ mod snapshot_tests {
 
     #[test]
     fn always_context_shares_large_inputs_and_detaches_body_local_mutations() {
-        let env: SharedMap<i128> = (0..4096)
-            .map(|i| (format!("P{i}"), i))
-            .collect::<HashMap<_, _>>()
-            .into();
+        let env: SharedEnv = (0..4096).map(|i| (format!("P{i}"), i)).collect();
         let literals: SharedMap<Expr> = (0..4096)
             .map(|i| (format!("P{i}"), Expr::Literal(i.to_string())))
             .collect::<HashMap<_, _>>()

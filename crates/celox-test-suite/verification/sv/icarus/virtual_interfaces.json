@@ -591,6 +591,29 @@
         "reason": "Icarus 13.0 does not parse virtual interface declarations (\"syntax error\", \"Invalid module item\" or \"Invalid class item\" at `virtual bus_if v;`), which IEEE 1800-2023 25.9 defines. Verilator 5.052 and xezim 0.11.3 run the simulation cases.",
         "upstream": []
       },
+      "name": "virtual_interfaces::rejects_package_results_of_other_interfaces",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus 13.0 does not parse virtual interface declarations (\"syntax error\", \"Invalid module item\" or \"Invalid class item\" at `virtual bus_if v;`), which IEEE 1800-2023 25.9 defines. Verilator 5.052 and xezim 0.11.3 run the simulation cases.",
+      "expectation": "CompilationError",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_virtual_interfaces_icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_virtual_interfaces",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not parse virtual interface declarations (\"syntax error\", \"Invalid module item\" or \"Invalid class item\" at `virtual bus_if v;`), which IEEE 1800-2023 25.9 defines. Verilator 5.052 and xezim 0.11.3 run the simulation cases.",
+        "upstream": []
+      },
       "name": "virtual_interfaces::rejects_virtual_interfaces_as_integral_references",
       "phase": "skip",
       "status": "ignored",

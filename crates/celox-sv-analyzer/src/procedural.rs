@@ -216,6 +216,11 @@ pub enum LoopKind<E> {
     DoWhile,
     Repeat(E),
     Forever,
+    /// A `forever` loop that holds an event control through virtual
+    /// interfaces, run once (its body ends in a break): the reads of an
+    /// enclosing `@*` leave its reads out, which are its timing (IEEE
+    /// 1800-2023 9.4.2.2). It runs as `Forever`.
+    EventBlock,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -359,6 +364,7 @@ impl<E, L> StmtBase<E, L> {
                     LoopKind::DoWhile => LoopKind::DoWhile,
                     LoopKind::Repeat(count) => LoopKind::Repeat(fe(count)),
                     LoopKind::Forever => LoopKind::Forever,
+                    LoopKind::EventBlock => LoopKind::EventBlock,
                 },
                 init: body(init, fe, fl),
                 condition: condition.map(&mut *fe),
@@ -694,6 +700,11 @@ pub struct LocalVariableBase<T> {
 pub struct SubroutineBase<E, L, T> {
     pub name: String,
     pub is_task: bool,
+    /// Whether the subroutine is automatic (IEEE 1800-2023 13.4.2): its
+    /// formals, result and locals not declared `static` belong to each
+    /// call. A static subroutine's belong to the subroutine, shared by
+    /// every call, recursive ones included.
+    pub automatic: bool,
     /// Automatic storage that needs a private activation when a task suspends.
     pub automatic_locals: Vec<String>,
     /// Observable static storage shared by every call of this function.
@@ -735,6 +746,7 @@ impl<E, L, T> SubroutineBase<E, L, T> {
         SubroutineBase {
             name: self.name,
             is_task: self.is_task,
+            automatic: self.automatic,
             automatic_locals: self.automatic_locals,
             persistent_locals: self.persistent_locals,
             return_type: self.return_type.map(&mut *ft),

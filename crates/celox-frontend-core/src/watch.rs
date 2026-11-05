@@ -125,13 +125,7 @@ pub fn emit_watched<A: Clone>(
     write: SIRInstruction<A>,
     value_type: Option<&celox_sir::RegisterType>,
 ) {
-    let old = load_range(
-        b,
-        &watch.signal,
-        watch.offset.clone(),
-        watch.width,
-        watch.four_state,
-    );
+    let snapshot = watch_before(b, watch);
     // A store of the whole signal stores the new value itself; any other
     // write is read back.
     let stored = match &write {
@@ -152,10 +146,47 @@ pub fn emit_watched<A: Clone>(
         }
         _ => None,
     };
-    // Everything derived from the old value is computed before the write,
-    // so no backend can re-read the written state for it.
-    let old_lsb = lsb(b, old, watch.width, watch.four_state);
     b.emit(write);
+    watch_after(b, watch, snapshot, stored);
+}
+
+/// Values captured before one logical write, which may span several stores.
+#[derive(Clone, Copy)]
+pub struct WatchSnapshot {
+    value: RegisterId,
+    lsb: RegisterId,
+}
+
+/// Capture an observed range before a logical update. Derive its low bit now
+/// so a backend cannot fold that read across the intervening stores.
+pub fn watch_before<A: Clone>(b: &mut SIRBuilder<A>, watch: &WatchCode<A>) -> WatchSnapshot {
+    let old = load_range(
+        b,
+        &watch.signal,
+        watch.offset.clone(),
+        watch.width,
+        watch.four_state,
+    );
+    let low = lsb(b, old, watch.width, watch.four_state);
+    WatchSnapshot {
+        value: old,
+        lsb: low,
+    }
+}
+
+/// Count a single logical update after all its stores. `stored` can name a
+/// complete new value with exactly the watched range's state representation;
+/// otherwise the watched range is read back from state.
+pub fn watch_after<A: Clone>(
+    b: &mut SIRBuilder<A>,
+    watch: &WatchCode<A>,
+    snapshot: WatchSnapshot,
+    stored: Option<RegisterId>,
+) {
+    let WatchSnapshot {
+        value: old,
+        lsb: old_lsb,
+    } = snapshot;
     if watch.counters.is_empty() && watch.gated.is_empty() {
         return;
     }

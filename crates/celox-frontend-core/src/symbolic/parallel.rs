@@ -9,7 +9,7 @@
 //! keeps working on data already in its core's cache.
 
 use celox_design::{InstanceId, RegionedAbsoluteAddrBase};
-use celox_sir::{ExecutionUnit, LaneUnit, ParallelFfKernel, SIRInstruction};
+use celox_sir::{ExecutionUnit, LaneUnit, ParallelFfKernel, SIRInstruction, StateAccess};
 
 use crate::symbolic::artifact::FfPart;
 use crate::{HashMap, HashSet, SourceAddr, SourceVarId};
@@ -193,22 +193,41 @@ pub(crate) fn instance_ff_costs(
 
 /// Logical byte ranges written by a unit, per object and independent of the
 /// storage region (a staged write and its publication cover the same bytes).
-/// Dynamic writes cover the whole object.
+/// Dynamic writes, and a call's, cover the whole object.
 fn written_ranges(unit: &ExecutionUnit<RegionedAbsoluteAddr>) -> Vec<(AbsoluteAddr, usize, usize)> {
     let mut ranges = unit
         .blocks
         .values()
         .flat_map(|block| &block.instructions)
-        .filter_map(|instruction| match instruction {
-            SIRInstruction::Store(address, offset, width, ..)
-            | SIRInstruction::Commit(_, address, offset, width, _) => {
-                let (begin, end) = match offset.constant_bit_offset() {
-                    Some(bit) if !offset.is_dynamic() => (bit / 8, (bit + width).div_ceil(8)),
-                    _ => (0, usize::MAX),
-                };
-                Some((address.absolute_addr(), begin, end.max(begin + 1)))
-            }
-            _ => None,
+        .flat_map(|instruction| {
+            let (exact, whole) = match instruction.state_writes() {
+                StateAccess::Access(write) => {
+                    let (begin, end) = match write.offset.constant_bit_offset() {
+                        Some(bit) if !write.offset.is_dynamic() => {
+                            (bit / 8, (bit + write.width).div_ceil(8))
+                        }
+                        _ => (0, usize::MAX),
+                    };
+                    (
+                        Some((write.addr.absolute_addr(), begin, end.max(begin + 1))),
+                        None,
+                    )
+                }
+                access => (
+                    None,
+                    Some(
+                        access
+                            .objects()
+                            .expect("the frontend makes no native kernels"),
+                    ),
+                ),
+            };
+            exact.into_iter().chain(
+                whole
+                    .into_iter()
+                    .flatten()
+                    .map(|address| (address.absolute_addr(), 0, usize::MAX)),
+            )
         })
         .collect::<Vec<_>>();
     ranges.sort_unstable();
@@ -254,18 +273,8 @@ fn accessed_objects(
         .values()
         .flat_map(|block| &block.instructions)
         .flat_map(|instruction| {
-            let objects = match instruction {
-                SIRInstruction::Load(_, address, ..) | SIRInstruction::Store(address, ..) => {
-                    [Some(address), None]
-                }
-                SIRInstruction::Commit(source, destination, ..) => {
-                    [Some(source), Some(destination)]
-                }
-                _ => [None, None],
-            };
-            objects
-                .into_iter()
-                .flatten()
+            super::read_objects(instruction)
+                .chain(super::written_objects(instruction))
                 .map(RegionedAbsoluteAddr::absolute_addr)
         })
 }
@@ -550,5 +559,71 @@ mod tests {
             cost(commit(SPARSE_WORKING_REGION, 3, 1 << 20)),
             32 * SPARSE_SUMMARY_WORD_COST
         );
+    }
+
+    /// A unit of `instructions` in one block.
+    fn unit(
+        instructions: Vec<SIRInstruction<RegionedAbsoluteAddr>>,
+    ) -> ExecutionUnit<RegionedAbsoluteAddr> {
+        ExecutionUnit {
+            entry_block_id: celox_sir::BlockId(0),
+            blocks: [(
+                celox_sir::BlockId(0),
+                celox_sir::BasicBlock {
+                    id: celox_sir::BlockId(0),
+                    params: Vec::new(),
+                    instructions,
+                    terminator: celox_sir::SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: HashMap::default(),
+        }
+    }
+
+    /// A call writes, and reads, the whole objects of its effects: the
+    /// placement groups and lane votes count them as a store's would.
+    #[test]
+    fn calls_write_and_access_whole_objects() {
+        let call = SIRInstruction::Call {
+            function: celox_sir::FunctionId(0),
+            frame: celox_sir::RegisterId(0),
+            args: Vec::new(),
+            outputs: Vec::new(),
+            dst: None,
+            effects: std::sync::Arc::new(celox_sir::CallEffects {
+                reads: vec![address(STABLE_REGION, 0)],
+                writes: vec![address(1, 1)],
+                ..Default::default()
+            }),
+        };
+        let store = SIRInstruction::Store(
+            address(1, 2),
+            SIROffset::Static(8),
+            8,
+            celox_sir::RegisterId(0),
+            Vec::new(),
+            Vec::new(),
+        );
+        let calling = unit(vec![call, store]);
+        assert_eq!(
+            written_ranges(&calling),
+            [(object(1), 0, usize::MAX), (object(2), 1, 2)]
+        );
+        let mut accessed = accessed_objects(&calling).collect::<Vec<_>>();
+        accessed.sort_unstable();
+        assert_eq!(accessed, [object(0), object(1), object(2)]);
+        // A call that leaves state alone writes nothing.
+        let quiet = SIRInstruction::Call {
+            function: celox_sir::FunctionId(0),
+            frame: celox_sir::RegisterId(0),
+            args: Vec::new(),
+            outputs: Vec::new(),
+            dst: None,
+            effects: Default::default(),
+        };
+        assert!(written_ranges(&unit(vec![quiet.clone()])).is_empty());
+        assert_eq!(accessed_objects(&unit(vec![quiet])).count(), 0);
     }
 }

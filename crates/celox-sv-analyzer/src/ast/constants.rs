@@ -6,7 +6,7 @@ pub(super) fn bind_generate_parameter(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     parameter: Parameter,
-    const_env: &mut HashMap<String, i128>,
+    const_env: &mut ConstEnv,
     parameter_literals: &mut HashMap<String, Expr>,
 ) {
     let mut parameter_types = parameter_types_from_const_env(const_env);
@@ -24,7 +24,7 @@ pub(super) fn bind_generate_parameter_with_types(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     parameter: Parameter,
-    const_env: &mut HashMap<String, i128>,
+    const_env: &mut ConstEnv,
     parameter_literals: &mut HashMap<String, Expr>,
     parameter_types: &mut HashMap<String, ExprType>,
 ) {
@@ -74,7 +74,7 @@ pub(super) fn bind_generate_parameter_with_types(
 pub(super) fn eval_ast_const_expr(
     functions: &const_functions::ConstantFunctions,
     expr: &ConstExpr,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
 ) -> Option<i128> {
     // Look up only the identifiers in this expression, rather than scanning
     // every visible signal/parameter marker for each declaration bound.
@@ -96,7 +96,7 @@ pub(super) fn substitute_process_constants(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     process: CombProcess,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
 ) -> CombProcess {
     substitute_process_constants_with_parameter_literals(
         tree,
@@ -111,7 +111,7 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     process: CombProcess,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     parameter_literals: &HashMap<String, Expr>,
 ) -> CombProcess {
     let mut sensitivity_body = process.sensitivity_body;
@@ -172,7 +172,7 @@ pub(super) fn substitute_assignment_constants_with_parameter_literals(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     assignment: Assignment,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     parameter_literals: &HashMap<String, Expr>,
 ) -> Assignment {
     Assignment::new(
@@ -189,7 +189,7 @@ pub(super) fn substitute_assignment_constants_with_parameter_literals(
 
 pub(super) fn substitute_lvalue_constants(
     lvalue: LValue,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     parameter_literals: &HashMap<String, Expr>,
 ) -> LValue {
     match lvalue {
@@ -221,7 +221,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     expr: Expr,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     parameter_literals: &HashMap<String, Expr>,
 ) -> Expr {
     match expr {
@@ -450,23 +450,17 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
     }
 }
 
-pub(super) fn substitute_const_expr_constants(
-    expr: ConstExpr,
-    const_env: &HashMap<String, i128>,
-) -> ConstExpr {
+pub(super) fn substitute_const_expr_constants(expr: ConstExpr, const_env: &ConstEnv) -> ConstExpr {
     substitute_const_expr_constants_impl(expr, const_env, false, false, None)
 }
 
-pub(super) fn substitute_dimension_constants(
-    expr: ConstExpr,
-    const_env: &HashMap<String, i128>,
-) -> ConstExpr {
+pub(super) fn substitute_dimension_constants(expr: ConstExpr, const_env: &ConstEnv) -> ConstExpr {
     substitute_const_expr_constants_impl(expr, const_env, true, false, None)
 }
 
 pub(super) fn substitute_const_expr_constants_preserving_enum_types(
     expr: ConstExpr,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
 ) -> ConstExpr {
     substitute_const_expr_constants_impl(expr, const_env, false, true, None)
 }
@@ -475,7 +469,7 @@ pub(super) fn substitute_const_expr_constants_preserving_enum_types(
 /// parameter whose complete value does not fit the numeric environment.
 fn substitute_const_expr_constants_with_literals(
     expr: ConstExpr,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     parameter_literals: &HashMap<String, Expr>,
 ) -> ConstExpr {
     substitute_const_expr_constants_impl(expr, const_env, false, false, Some(parameter_literals))
@@ -483,7 +477,7 @@ fn substitute_const_expr_constants_with_literals(
 
 fn substitute_const_expr_constants_impl(
     expr: ConstExpr,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     include_local_parameters: bool,
     preserve_enum_types: bool,
     parameter_literals: Option<&HashMap<String, Expr>>,
@@ -1068,7 +1062,7 @@ pub(super) fn user_call_value(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     expression: Expr,
-    constants: &HashMap<String, i128>,
+    constants: &ConstEnv,
 ) -> Option<ConstExpr> {
     let functions = &tree.functions;
     if let Expr::Call {
@@ -1142,7 +1136,7 @@ pub(super) fn countbits_constant_call(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     expression: Expr,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
 ) -> Option<ConstExpr> {
     let Expr::Call { args, .. } = expression else {
         return None;
@@ -1167,7 +1161,7 @@ fn countbits_constant_operand(
     session: &mut Session,
     operand: Expr,
     controls: &[ConstExpr],
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
 ) -> Option<ConstExpr> {
     let functions = &tree.functions;
     let call = |session: &mut Session, operand| {

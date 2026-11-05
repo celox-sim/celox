@@ -10,7 +10,7 @@ pub(super) fn proves(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     subroutine: &Subroutine,
-    constants: &HashMap<String, i128>,
+    constants: &ConstEnv,
     locals: &[LocalVariable],
 ) -> bool {
     let Some(name) = subroutine.return_var.as_deref() else {
@@ -40,7 +40,7 @@ pub(super) fn proves_local(
     session: &mut Session,
     name: &str,
     body: &[Stmt],
-    constants: &HashMap<String, i128>,
+    constants: &ConstEnv,
     locals: &[LocalVariable],
 ) -> bool {
     let Some(local) = locals.iter().find(|local| local.name == name) else {
@@ -59,7 +59,7 @@ pub(super) fn proves_variable(
     name: &str,
     width: usize,
     body: &[Stmt],
-    constants: &HashMap<String, i128>,
+    constants: &ConstEnv,
     locals: &[LocalVariable],
 ) -> bool {
     if !(1..=MAX_BITS).contains(&width) {
@@ -106,7 +106,7 @@ struct Proof<'a> {
     width: usize,
     written: BigUint,
     full: BigUint,
-    env: HashMap<String, i128>,
+    env: ConstEnv,
     types: HashMap<String, (usize, bool)>,
     remaining: usize,
 }

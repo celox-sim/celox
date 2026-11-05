@@ -758,7 +758,7 @@ mod tests {
         let tree = AnalysisContext::unspecialized(&tree);
         for analyzed in [
             Source::from_syntax(&tree).unwrap(),
-            Source::from_syntax_module_with_parameter_overrides(&tree, "Top", &HashMap::default())
+            Source::from_syntax_module_with_parameter_overrides(&tree, "Top", &ConstEnv::default())
                 .unwrap(),
         ] {
             let module = &analyzed.modules[0];

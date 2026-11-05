@@ -1,5 +1,6 @@
 //! Observable native numeric-call operand ownership and compatibility.
 use super::*;
+use crate::ast::ConstEnv;
 use crate::ast::{BinaryOp, Expr, Source, SystemFunction};
 use celox_sv_syntax::{Declarations, ExprKind};
 fn subtract(tree: &mut SourceTree) {
@@ -99,7 +100,7 @@ fn native_nested_numeric_constants_retain_symbolic_override_dependencies() {
     subtract(&mut tree);
     for (override_, expected) in [(None, 3), (Some(64), 6)] {
         let overrides = override_
-            .map(|value| HashMap::from_iter([("W".into(), value)]))
+            .map(|value| ConstEnv::from_iter([("W".into(), value)]))
             .unwrap_or_default();
         let source =
             Source::from_syntax_with_module_parameter_overrides(&tree, "M", &overrides).unwrap();

@@ -209,6 +209,9 @@ pub(crate) fn collect_strided_array_layouts(
                 .flat_map(|parallel| parallel.units().map(|unit| &unit.unit)),
         )
         .chain(&program.sir.processes)
+        // A callee accesses the objects of its effects at the offsets its own
+        // body gives. Its frame slots are no state object, so no candidate.
+        .chain(program.sir.functions.iter().map(|function| &function.unit))
     {
         // Zero resets may be coalesced or split at native word boundaries.
         // Strided access expansion handles each logical range, and the native
@@ -280,7 +283,17 @@ fn collect_ff_referenced_addresses(program: &OptimizedSir) -> crate::HashSet<Abs
                         addrs.insert(src.absolute_addr());
                         addrs.insert(dst.absolute_addr());
                     }
-                    _ => {}
+                    // What a call reads or writes, its callee's body
+                    // included, is referenced as the call's own accesses
+                    // would be.
+                    // Layout sees no native kernels, the one instruction
+                    // whose objects no list names.
+                    _ => addrs.extend(
+                        inst.opaque_accessed_objects()
+                            .into_iter()
+                            .flatten()
+                            .map(|addr| addr.absolute_addr()),
+                    ),
                 }
             }
         }

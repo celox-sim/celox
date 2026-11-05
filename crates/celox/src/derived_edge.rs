@@ -129,15 +129,7 @@ impl EdgePlan {
             unit.blocks
                 .values()
                 .flat_map(|block| &block.instructions)
-                .any(|inst| {
-                    matches!(
-                        inst,
-                        SIRInstruction::CombCaptureEvent {
-                            fatal_error_code: Some(_),
-                            ..
-                        }
-                    )
-                })
+                .any(crate::ir::may_raise_fatal_capture)
         });
         if comb_fatal {
             return Err("combinational logic has fatal assertions");

@@ -133,7 +133,7 @@ impl Ordered {
 }
 
 impl Generator<'_> {
-    fn native_load(&mut self, op: Memory, args: Vec<RegisterId>) -> RegisterId {
+    pub(super) fn native_load(&mut self, op: Memory, args: Vec<RegisterId>) -> RegisterId {
         let dst = self.b.alloc_bit(64, false);
         self.b.emit(SIRInstruction::ExternCall {
             dst: Some(dst),
@@ -143,7 +143,7 @@ impl Generator<'_> {
         dst
     }
 
-    fn native_store(&mut self, op: Memory, args: Vec<RegisterId>) {
+    pub(super) fn native_store(&mut self, op: Memory, args: Vec<RegisterId>) {
         self.b.emit(SIRInstruction::ExternCall {
             dst: None,
             func: op.function(),
@@ -161,31 +161,31 @@ impl Generator<'_> {
         self.native_load(Memory::ReadIndirect, vec![context, offset])
     }
 
-    fn arena_header_load(&mut self, offset: usize) -> RegisterId {
+    pub(super) fn arena_header_load(&mut self, offset: usize) -> RegisterId {
         let pointer = self.arena_header();
         let offset = self.constant(offset as u64, 64);
         self.native_load(Memory::ReadIndirect, vec![pointer, offset])
     }
 
-    fn arena_header_store(&mut self, offset: usize, value: RegisterId) {
+    pub(super) fn arena_header_store(&mut self, offset: usize, value: RegisterId) {
         let pointer = self.arena_header();
         let offset = self.constant(offset as u64, 64);
         self.native_store(Memory::WriteIndirect, vec![pointer, offset, value]);
     }
 
-    fn arena_load(&mut self, pointer: RegisterId, word: RegisterId) -> RegisterId {
+    pub(super) fn arena_load(&mut self, pointer: RegisterId, word: RegisterId) -> RegisterId {
         let eight = self.constant(8, 64);
         let offset = self.binary(64, word, BinaryOp::Mul, eight);
         self.native_load(Memory::ReadIndirect, vec![pointer, offset])
     }
 
-    fn arena_store(&mut self, pointer: RegisterId, word: RegisterId, value: RegisterId) {
+    pub(super) fn arena_store(&mut self, pointer: RegisterId, word: RegisterId, value: RegisterId) {
         let eight = self.constant(8, 64);
         let offset = self.binary(64, word, BinaryOp::Mul, eight);
         self.native_store(Memory::WriteIndirect, vec![pointer, offset, value]);
     }
 
-    fn arena_require(&mut self, condition: RegisterId) {
+    pub(super) fn arena_require(&mut self, condition: RegisterId) {
         let next = self.b.new_block();
         let failed = self.exit_block(SchedulerExit::Internal);
         self.b.seal_block(SIRTerminator::Branch {
@@ -196,7 +196,7 @@ impl Generator<'_> {
         self.b.switch_to_block(next);
     }
 
-    fn arena_service(&mut self, function: u32, request: u64, argument: RegisterId) {
+    pub(super) fn arena_service(&mut self, function: u32, request: u64, argument: RegisterId) {
         let context = self.load_at(
             self.slots.defer_limit_settle,
             celox_design::SCHEDULER_HOST_CONTEXT_BIT,
@@ -215,7 +215,7 @@ impl Generator<'_> {
         self.arena_require(ok);
     }
 
-    fn words(&mut self, count: usize, body: impl FnOnce(&mut Self, RegisterId)) {
+    pub(super) fn words(&mut self, count: usize, body: impl FnOnce(&mut Self, RegisterId)) {
         let count = self.constant(count as u64, 64);
         self.word_range(count, body);
     }
@@ -303,6 +303,11 @@ impl Plan {
         });
 
         g.b.switch_to_block(wave);
+        let phase = g.arena_header_load(std::mem::offset_of!(ArenaHeader, phase));
+        let post = g.equals(phase, 1);
+        g.if_bit(post, 0, |g| {
+            self.observe_slot(g, tracked, checks, finish_exit, false)
+        });
         let phase = g.arena_header_load(std::mem::offset_of!(ArenaHeader, phase));
         let active_phase = g.equals(phase, 0);
         let levels = g.load_levels();
@@ -392,7 +397,13 @@ impl Plan {
         let commits = g.binary(1, commits, BinaryOp::Ne, zero);
         let phase = g.arena_header_load(std::mem::offset_of!(ArenaHeader, phase));
         let pre = g.equals(phase, 0);
-        let pre = g.binary(1, pre, BinaryOp::And, commits);
+        let pre = if self.inactive.is_empty() {
+            g.binary(1, pre, BinaryOp::And, commits)
+        } else {
+            // An Inactive continuation may cause another evaluation before
+            // any pending nonblocking result may become visible (LRM 4.5).
+            pre
+        };
         let post = g.equals(pre, 0);
         g.if_bit(post, 0, |g| {
             let phase = g.constant(1, 64);
@@ -430,6 +441,46 @@ impl Plan {
         let phase = g.arena_header_load(std::mem::offset_of!(ArenaHeader, phase));
         let pre = g.equals(phase, 0);
         g.if_bit(pre, 0, |g| self.ordered_save_levels(g, tracked));
+        if !self.inactive.is_empty() {
+            let ordinals = ordinals(&self.kernels);
+            let time = g.load(g.slots.now, SCHEDULER_TIME_WIDTH);
+            let mut ready = g.constant(0, g.ready_bits);
+            for &(index, status) in &self.inactive {
+                let waiting = g.waiting_for_time(index, Some(status));
+                // SDK Delay(0) resumes after NBA, whereas InactiveDelay(0)
+                // resumes before it. Computed delays can return either status.
+                let inactive = g.equals_at(status, ProcessStatus::InactiveDelay);
+                let waiting = g.binary(1, waiting, BinaryOp::And, inactive);
+                let wake = g.load(g.slots.wake[index], SCHEDULER_TIME_WIDTH);
+                let now = g.binary(1, wake, BinaryOp::Eq, time);
+                let due = g.binary(1, waiting, BinaryOp::And, now);
+                let bit = g.bit(due, ordinals[index]);
+                ready = g.binary(g.ready_bits, ready, BinaryOp::Or, bit);
+            }
+            let zero = g.constant(0, g.ready_bits);
+            let any = g.binary(1, ready, BinaryOp::Ne, zero);
+            let promote = g.binary(1, pre, BinaryOp::And, any);
+            let inactive = g.b.new_block();
+            let publish = g.b.new_block();
+            g.b.seal_block(SIRTerminator::Branch {
+                cond: promote,
+                true_block: (inactive, Vec::new()),
+                false_block: (publish, Vec::new()),
+            });
+            g.b.switch_to_block(inactive);
+            g.store(g.slots.ready, g.ready_bits, ready);
+            let one = g.constant(1, SCHEDULER_FLAG_WIDTH);
+            g.store_at(
+                g.slots.defer_limit_settle,
+                celox_design::SCHEDULER_ACTIVE_RESUME_BIT,
+                SCHEDULER_FLAG_WIDTH,
+                one,
+            );
+            // Keep the ordered pending records and their working images. The
+            // normal Active work loop returns to `wave` after the #0 kernels.
+            g.b.seal_block(SIRTerminator::Jump(pick, Vec::new()));
+            g.b.switch_to_block(publish);
+        }
         let zero = g.constant(0, SCHEDULER_FLAG_WIDTH);
         g.store_at(
             g.slots.defer_limit_settle,
@@ -450,7 +501,7 @@ impl Plan {
         });
         self.ordered_publish(g, ordered, tracked, finish_exit, checks, false);
         self.ordered_raw_levels(g, ordered, tracked, true);
-        g.check_waits(checks);
+        g.check_waits_at(checks, false);
         let staged: Vec<_> = self
             .kernels
             .iter()
@@ -539,7 +590,7 @@ impl Plan {
                 g.b.switch_to_block(done);
                 if snapshots {
                     self.ordered_raw_levels(g, ordered, tracked, true);
-                    g.check_waits(checks);
+                    g.check_waits_at(checks, false);
                 }
             });
         });
@@ -669,7 +720,7 @@ endmodule
                     .hotspot_jit(hotspot)
                     .scheduler_mode(SchedulerMode::DifferentialRuns)
             };
-            let mut sim = build().build_native().unwrap();
+            let mut sim = build().build_scheduler_test().unwrap();
             sim.run_until(2).unwrap();
             assert_eq!(sim.get(sim.signal("a")), 200u16.into());
             assert_eq!(sim.get(sim.signal("q")), 200u16.into());
@@ -692,7 +743,7 @@ endmodule
             assert_eq!(after.reference_steps, before.reference_steps, "{after:?}");
             let mut bounded = build()
                 .scheduler_mode(SchedulerMode::Compiled)
-                .build_native()
+                .build_scheduler_test()
                 .unwrap();
             bounded.state.set_slot_budgets(32, 1024);
             let error = bounded.run_until(2).unwrap_err().to_string();
@@ -729,7 +780,7 @@ endmodule
                     .opt_level(level)
                     .hotspot_jit(hotspot)
                     .scheduler_mode(SchedulerMode::DifferentialRuns)
-                    .build_native()
+                    .build_scheduler_test()
                     .unwrap();
                     sim.run_until(2).unwrap();
                     assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
@@ -862,5 +913,165 @@ endmodule
         let after = sim.scheduler_stats();
         assert_eq!(after.reference_steps, before.reference_steps);
         assert_eq!(after.native_service_calls, before.native_service_calls);
+    }
+    #[test]
+    fn inactive_and_computed_delays_keep_pending_domains_compiled() {
+        for body in [
+            "always #2 begin clk = 1; #0; seen = q; clk = 0; #0; turns++; end",
+            "always #2 begin clk = 1; #0; seen = q; clk = 0; #0; clk = 1; #0; clk = 0; turns++; end",
+            "always begin #(turns % 3); turns++; clk = !clk; #0; seen = q; end",
+        ] {
+            let source = format!(
+                r#"`timescale 1ns/1ns
+module Top;
+    bit clk = 0;
+    int q = 0;
+    int seen = 0;
+    int turns = 0;
+    always_ff @(posedge clk) q <= q + 1;
+    {body}
+endmodule"#
+            );
+            for (four_state, hotspot) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
+                let mut sim = Simulation::from_sv_sources(
+                    vec![(
+                        source.as_str(),
+                        std::path::Path::new("compiled-inactive.sv"),
+                    )],
+                    "Top",
+                )
+                .four_state(four_state)
+                .hotspot_jit(hotspot)
+                .scheduler_mode(SchedulerMode::DifferentialRuns)
+                .build_scheduler_test()
+                .unwrap();
+                sim.run_until(1).unwrap();
+                let before = sim.scheduler_stats();
+                assert!(
+                    before
+                        .kernels
+                        .iter()
+                        .all(|k| *k == crate::KernelSchedule::Compiled),
+                    "{before:?}"
+                );
+                let reference_steps = before.reference_steps;
+                for end in [2, 3, 7, 12, 20] {
+                    sim.run_until(end).unwrap();
+                }
+                let after = sim.scheduler_stats();
+                assert_eq!(after.reference_steps, reference_steps, "{after:?}");
+                assert!(
+                    after.compiled_slots > 0 && after.checked_steps > 0,
+                    "{after:?}"
+                );
+                if body.starts_with("always #2") {
+                    assert_eq!(sim.get(sim.signal("q")), 10u8.into());
+                    assert_eq!(sim.get(sim.signal("seen")), 9u8.into());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn service_continuations_preserve_event_writes_in_native_code() {
+        for body in [
+            "always #2 begin clk = 1; $fwrite(1, \"up\"); clk = 0; $fwrite(1, \"down\"); turns++; end",
+            "always #2 begin clk = !clk; $fwrite(1, \"level %b\", clk); turns++; end",
+            "always #2 turns++; always @(turns) begin clk = 1; $fwrite(1, \"up\"); clk = 0; $fwrite(1, \"down\"); end",
+        ] {
+            let source = format!(
+                r#"`timescale 1ns/1ns
+module Top;
+    bit clk = 0;
+    int q = 0;
+    int turns = 0;
+    always_ff @(posedge clk) q <= q + 1;
+    {body}
+endmodule"#
+            );
+            for (four_state, hotspot) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
+                let build = |mode| {
+                    Simulation::from_sv_sources(
+                        vec![(
+                            source.as_str(),
+                            std::path::Path::new("compiled-service-events.sv"),
+                        )],
+                        "Top",
+                    )
+                    .four_state(four_state)
+                    .hotspot_jit(hotspot)
+                    .scheduler_mode(mode)
+                    .build_scheduler_test()
+                    .unwrap()
+                };
+                let mut sim = build(SchedulerMode::Compiled);
+                let mut reference = build(SchedulerMode::Reference);
+                sim.run_until(1).unwrap();
+                reference.run_until(1).unwrap();
+                let before = sim.scheduler_stats();
+                assert!(
+                    before
+                        .kernels
+                        .iter()
+                        .all(|k| *k == crate::KernelSchedule::Compiled),
+                    "{before:?}"
+                );
+                let reference_steps = before.reference_steps;
+                for end in [2, 3, 7, 12, 20] {
+                    sim.run_until(end).unwrap();
+                    reference.run_until(end).unwrap();
+                    assert_eq!(sim.time(), reference.time());
+                    for name in ["clk", "q", "turns"] {
+                        assert_eq!(
+                            sim.get(sim.signal(name)),
+                            reference.get(reference.signal(name)),
+                            "{name}: {body}"
+                        );
+                    }
+                    assert_eq!(sim.drain_runtime_events(), reference.drain_runtime_events());
+                }
+                let after = sim.scheduler_stats();
+                assert_eq!(after.reference_steps, reference_steps, "{after:?}");
+                assert!(after.compiled_slots > 0, "{after:?}");
+                assert_eq!(sim.get(sim.signal("turns")), 10u8.into());
+            }
+        }
+    }
+
+    #[test]
+    fn inactive_nonconvergence_is_bounded_in_generated_code() {
+        let source = r#"`timescale 1ns/1ns
+module Top;
+    int turns = 0;
+    initial begin #1; forever begin #0; turns++; end end
+endmodule"#;
+        for four_state in [false, true] {
+            let mut sim = Simulation::from_sv_sources(
+                vec![(source, std::path::Path::new("compiled-inactive-loop.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+            .scheduler_mode(SchedulerMode::Compiled)
+            .build_native()
+            .unwrap();
+            sim.state.set_slot_budgets(8, 32);
+            sim.run_until(0).unwrap();
+            let before = sim.scheduler_stats();
+            let error = sim.run_until(2).unwrap_err();
+            assert!(error.to_string().contains("budget"), "{error}");
+            let after = sim.scheduler_stats();
+            assert_eq!(after.reference_steps, before.reference_steps, "{after:?}");
+            assert!(
+                after
+                    .kernels
+                    .iter()
+                    .all(|k| *k == crate::KernelSchedule::Compiled),
+                "{after:?}"
+            );
+        }
     }
 }

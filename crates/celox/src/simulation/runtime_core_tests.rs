@@ -490,6 +490,51 @@ fn zero_delays_order_against_flip_flops_and_nonblocking_assignments() {
     }
 }
 
+#[test]
+fn public_step_drains_zero_delay_continuations_and_nbas() {
+    for four_state in [false, true] {
+        let mut d = Design::new("StepZeroDelays", four_state);
+        let x = d.output("x", 8, 0);
+        let body = vec![
+            d.delay(1),
+            d.set(x, 1),
+            d.delay(0),
+            d.set(x, 2),
+            d.delay(0),
+            d.set(x, 3),
+            d.delay(1),
+            d.set(x, 4),
+        ];
+        d.module.process(body).unwrap();
+        let artifact = d.finish();
+        on_every_backend!(
+            builder(&artifact, four_state).scheduler_mode(crate::SchedulerMode::Compiled),
+            |sim| {
+                sim.run_until(0).unwrap();
+                assert_eq!(sim.step().unwrap(), Some(1));
+                assert_eq!(value(&mut sim, "x"), 3);
+                assert_eq!(sim.step().unwrap(), Some(2));
+                assert_eq!(value(&mut sim, "x"), 4);
+                assert_eq!(sim.step().unwrap(), None);
+            }
+        );
+
+        let artifact = zero_delays(four_state);
+        on_every_backend!(
+            builder(&artifact, four_state).scheduler_mode(crate::SchedulerMode::Compiled),
+            |sim| {
+                sim.run_until(0).unwrap();
+                assert_eq!(sim.step().unwrap(), Some(1));
+                assert_eq!(value(&mut sim, "q"), 3);
+                assert_eq!(value(&mut sim, "inactive_seen"), 0);
+                assert_eq!(value(&mut sim, "post_nba_seen"), 1);
+                assert_eq!(value(&mut sim, "x"), 1);
+                assert_eq!(sim.step().unwrap(), None);
+            }
+        );
+    }
+}
+
 /// Two nonblocking assignments to one watched destination in one slot
 /// publish in order, each as its own update; so do three executions of a
 /// single-site assignment.
@@ -2778,4 +2823,231 @@ endmodule"#;
         assert_eq!(sim.get(sim.signal("rises")), 1u8.into());
         assert_eq!(sim.scheduler_stats().compiled_runs, 0);
     });
+}
+
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[test]
+fn public_step_reenters_native_code_until_the_timestamp_is_quiescent() {
+    use celox_runtime::{CompiledSlots, Halt, HostBoundary, UnitExecutor};
+
+    struct Capped<'a, B: SimBackend> {
+        sim: &'a mut Simulator<B>,
+        budget: crate::SignalRef,
+        value: crate::SignalRef,
+        calls: usize,
+        boundaries: Vec<(u64, u8)>,
+    }
+    impl<B: SimBackend> UnitExecutor for Capped<'_, B> {
+        type Backend = B;
+        fn backend(&self) -> &B {
+            &self.sim.backend
+        }
+        fn backend_mut(&mut self) -> &mut B {
+            &mut self.sim.backend
+        }
+        fn compiled_host_inputs(&self) -> bool {
+            UnitExecutor::compiled_host_inputs(self.sim)
+        }
+        fn put_compiled_host_inputs(
+            &mut self,
+            pending: bool,
+            writes: Vec<(crate::SignalRef, celox_runtime::timing::Value)>,
+        ) -> Result<(), celox_runtime::SimulatorErrorCode> {
+            UnitExecutor::put_compiled_host_inputs(self.sim, pending, writes)
+        }
+        fn eval_comb(&mut self) -> Result<(), Halt> {
+            UnitExecutor::eval_comb(self.sim)
+        }
+        fn eval_apply_ff_at(&mut self, event: B::Event) -> Result<(), Halt> {
+            UnitExecutor::eval_apply_ff_at(self.sim, event)
+        }
+        fn eval_only_ff_at(&mut self, event: B::Event) -> Result<(), Halt> {
+            UnitExecutor::eval_only_ff_at(self.sim, event)
+        }
+        fn apply_ff_at(&mut self, event: B::Event) -> Result<(), Halt> {
+            UnitExecutor::apply_ff_at(self.sim, event)
+        }
+        fn run_process(&mut self, index: usize) -> Result<(), Halt> {
+            // Force the generated loop to return after each internal round,
+            // as a backend safe point can do while waiting for optimized code.
+            self.sim.backend.set(self.budget, 1u64);
+            self.calls += 1;
+            assert!(self.calls <= 16, "same-time native reentry lost its bound");
+            UnitExecutor::run_process(self.sim, index)
+        }
+    }
+    impl<B: SimBackend> HostBoundary for Capped<'_, B> {
+        fn take_host_writes(&mut self) -> Vec<(crate::SignalRef, celox_runtime::timing::Value)> {
+            HostBoundary::take_host_writes(self.sim)
+        }
+        fn compiled_slots(&self) -> CompiledSlots {
+            CompiledSlots::One
+        }
+        fn finish_timed_step(&mut self, time: u64) {
+            self.boundaries
+                .push((time, self.sim.backend.get_as(self.value)));
+        }
+    }
+
+    for four_state in [false, true] {
+        let mut d = Design::new("CappedStep", four_state);
+        let x = d.output("x", 8, 0);
+        let body = vec![
+            d.delay(1),
+            d.set(x, 1),
+            d.delay(0),
+            d.set(x, 2),
+            d.delay(0),
+            d.set(x, 3),
+            d.delay(1),
+            d.set(x, 4),
+        ];
+        d.module.process(body).unwrap();
+        let mut sim = builder(&d.finish(), four_state)
+            .scheduler_mode(crate::SchedulerMode::Compiled)
+            .build_native()
+            .unwrap();
+        sim.run_until(0).unwrap();
+        let before = sim.scheduler_stats().reference_steps;
+        let value = sim.signal("x");
+        let slots = &sim
+            .simulator
+            .program
+            .runtime_schema
+            .scheduler
+            .as_ref()
+            .unwrap()
+            .slots;
+        let budget = sim.simulator.backend.resolve_signal(&slots.budget);
+        let mut executor = Capped {
+            sim: &mut sim.simulator,
+            budget,
+            value,
+            calls: 0,
+            boundaries: Vec::new(),
+        };
+        assert_eq!(sim.state.step(&mut executor).unwrap(), Some(1));
+        assert_eq!(executor.sim.backend.get_as::<u8>(value), 3);
+        assert_eq!(executor.boundaries, [(1, 3)]);
+        assert!(executor.calls >= 3);
+        assert_eq!(sim.state.step(&mut executor).unwrap(), Some(2));
+        assert_eq!(executor.boundaries, [(1, 3), (2, 4)]);
+        assert_eq!(sim.scheduler_stats().reference_steps, before);
+
+        for first_limit in [u64::MAX, 1, 2] {
+            let mut d = Design::new("CappedHostStep", four_state);
+            let pulse = d.input("pulse", 1);
+            d.init(pulse, 1, 0);
+            let x = d.output("x", 8, 0);
+            let body = vec![
+                wait(pulse, EventEdge::Change),
+                d.set(x, 1),
+                d.delay(0),
+                d.set(x, 2),
+                d.delay(0),
+                d.set(x, 3),
+                d.delay(2),
+                d.set(x, 4),
+                d.delay(2),
+                d.set(x, 5),
+            ];
+            d.module.process(body).unwrap();
+            let artifact = d.finish();
+            let make = |mode| {
+                builder(&artifact, four_state)
+                    .scheduler_mode(mode)
+                    .build_native()
+                    .unwrap()
+            };
+            let mut reference = make(crate::SchedulerMode::Reference);
+            let mut sim = make(crate::SchedulerMode::Compiled);
+            for sim in [&mut reference, &mut sim] {
+                sim.run_until(1).unwrap();
+                let pulse = sim.signal("pulse");
+                sim.modify(|io| io.set(pulse, 1u8)).unwrap();
+            }
+            let before = sim.scheduler_stats().reference_steps;
+            let value = sim.signal("x");
+            let slots = &sim
+                .simulator
+                .program
+                .runtime_schema
+                .scheduler
+                .as_ref()
+                .unwrap()
+                .slots;
+            let budget = sim.simulator.backend.resolve_signal(&slots.budget);
+            for (step, limit) in [first_limit, u64::MAX, u64::MAX, u64::MAX]
+                .into_iter()
+                .enumerate()
+            {
+                let expected = reference
+                    .state
+                    .step_until(&mut reference.simulator, limit)
+                    .unwrap();
+                if step == 0 {
+                    assert_eq!(expected, Some(if first_limit < 3 { 1 } else { 3 }));
+                }
+                {
+                    let mut executor = Capped {
+                        sim: &mut sim.simulator,
+                        budget,
+                        value,
+                        calls: 0,
+                        boundaries: Vec::new(),
+                    };
+                    assert_eq!(
+                        sim.state.step_until(&mut executor, limit).unwrap(),
+                        expected
+                    );
+                    if step == 0 {
+                        assert!(executor.calls >= 3, "must cross native safe points");
+                        let mut boundaries = vec![(1, 3)];
+                        if first_limit >= 3 {
+                            boundaries.push((3, 4));
+                        }
+                        assert_eq!(executor.boundaries, boundaries);
+                    }
+                }
+                assert_eq!(sim.save_state().unwrap(), reference.save_state().unwrap());
+                assert_eq!(sim.scheduler_stats().reference_steps, before);
+            }
+        }
+
+        let mut d = Design::new("UnsettledCappedStep", four_state);
+        d.output("x", 8, 0);
+        let body = vec![
+            d.delay(1),
+            Statement::Forever {
+                body: vec![d.delay(0)],
+            },
+        ];
+        d.module.process(body).unwrap();
+        let mut sim = builder(&d.finish(), four_state)
+            .scheduler_mode(crate::SchedulerMode::Compiled)
+            .build_native()
+            .unwrap();
+        sim.run_until(0).unwrap();
+        sim.state.set_slot_budgets(3, 100);
+        let value = sim.signal("x");
+        let slots = &sim
+            .simulator
+            .program
+            .runtime_schema
+            .scheduler
+            .as_ref()
+            .unwrap()
+            .slots;
+        let budget = sim.simulator.backend.resolve_signal(&slots.budget);
+        let mut executor = Capped {
+            sim: &mut sim.simulator,
+            budget,
+            value,
+            calls: 0,
+            boundaries: Vec::new(),
+        };
+        let error = sim.state.step(&mut executor).unwrap_err();
+        assert!(error.to_string().contains("does not settle"), "{error}");
+        assert!(executor.calls <= 5);
+    }
 }

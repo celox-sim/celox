@@ -145,6 +145,13 @@ impl SourceTree {
     pub(crate) fn declarations(&self) -> &celox_sv_syntax::Declarations {
         &self.declarations
     }
+    /// A handle that keeps the address of [`Self::declarations`] from being
+    /// reused while it is held, so that the address identifies this arena.
+    pub(crate) fn declarations_incarnation(
+        &self,
+    ) -> std::sync::Weak<celox_sv_syntax::Declarations> {
+        std::sync::Arc::downgrade(&self.declarations.0)
+    }
     /// The token-order index of this file's arenas.
     pub(crate) fn spans(&self) -> &Spans {
         self.declarations

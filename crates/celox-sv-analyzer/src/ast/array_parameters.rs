@@ -42,7 +42,7 @@ fn declared_type(
     native: &celox_sv_syntax::Parameter,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     type_aliases: &HashMap<String, Type>,
 ) -> Converted<Option<Type>> {
     let celox_sv_syntax::ParameterKind::Value { data_type, .. } = native.kind else {
@@ -64,7 +64,7 @@ pub(super) fn uses_signal_representation(
     parameter: &celox_sv_syntax::Parameter,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     aliases: &HashMap<String, Type>,
 ) -> Converted<bool> {
     if !is_array_parameter(parameter, tree.declarations()) {
@@ -86,7 +86,7 @@ pub(super) fn uses_signal_representation(
 pub(super) fn array_parameters_from_scope(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     type_aliases: &HashMap<String, Type>,
 ) -> Converted<Vec<ArrayParameter>> {
     let mut parameters = Vec::new();
@@ -138,7 +138,7 @@ fn array_parameters_from_declaration(
     authored: &[&celox_sv_syntax::Parameter],
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     type_aliases: &HashMap<String, Type>,
     publish: &mut impl FnMut(&ArrayParameter),
 ) -> Result<Vec<ArrayParameter>, AnalyzerError> {

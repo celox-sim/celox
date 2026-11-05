@@ -103,6 +103,23 @@ pub struct Heap {
     live_after_collection: usize,
     /// The state of UVM's C library functions, see [`uvm_dpi`].
     uvm: uvm_dpi::UvmDpi,
+    /// The constraint programs of classes by class id, see
+    /// [`Heap::register_program`].
+    #[serde(default)]
+    programs: HashMap<u32, randomization::Registered>,
+    /// The objects each randomize call in progress runs the hooks of, see
+    /// [`Heap::begin_visits`].
+    #[serde(default)]
+    visits: Vec<randomization::Visits>,
+    /// The rand object members whose pre_randomize ran, by the object whose
+    /// randomize call ran them, for the solve that follows, see
+    /// [`Heap::end_visits`].
+    #[serde(default)]
+    prepared: Option<(Handle, Vec<Handle>)>,
+    /// The rand object members the last successful randomize solve took,
+    /// whose post_randomize runs, see [`Heap::begin_solved_visits`].
+    #[serde(default)]
+    solved: Vec<Handle>,
 }
 
 impl Default for Heap {
@@ -137,6 +154,10 @@ impl Heap {
             created: 0,
             live_after_collection: 1,
             uvm: uvm_dpi::UvmDpi::default(),
+            programs: HashMap::default(),
+            visits: Vec::new(),
+            prepared: None,
+            solved: Vec::new(),
         }
     }
 
@@ -193,6 +214,7 @@ impl Heap {
             && self.events == other.events
             && self.containers == other.containers
             && self.uvm == other.uvm
+            && self.programs == other.programs
     }
 
     /// The number of live strings, including `""`.

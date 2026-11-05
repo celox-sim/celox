@@ -103,6 +103,63 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-UNSUPPORTED: <case>/source_0.sv:11:23: Unsupported: static cast to 'int$[$]' from 'int$[]'\n                                            : ... note: In instance 'celox_suite_tb.dut'\n   11 |         return queue_t'(a);\n      |                       ^\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.052\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "Simulation",
+      "name": "containers::containers_received_from_any_expression",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Assigning a container of unbounded queues to one of bounded queues generates C++ that assigns VlQueue<VlQueue<unsigned int>> to VlQueue<VlQueue<unsigned int, 2>>, which does not compile (no matching operator=). IEEE 1800-2023 7.6 makes the element types equivalent, and 7.10.5 keeps each assigned queue to its bound. Celox passes the unchanged case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_nested_bounded_queues.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_nested_bounded_queues",
+        "observed_version": "Verilator 5.052",
+        "phase": "compile",
+        "reason": "Assigning a container of unbounded queues to one of bounded queues generates C++ that assigns VlQueue<VlQueue<unsigned int>> to VlQueue<VlQueue<unsigned int, 2>>, which does not compile (no matching operator=). IEEE 1800-2023 7.6 makes the element types equivalent, and 7.10.5 keeps each assigned queue to its bound. Celox passes the unchanged case.",
+        "upstream": []
+      },
+      "name": "containers::nested_bounded_queues_are_assigned_elementwise",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Assigning a container of unbounded queues to one of bounded queues generates C++ that assigns VlQueue<VlQueue<unsigned int>> to VlQueue<VlQueue<unsigned int, 2>>, which does not compile (no matching operator=). IEEE 1800-2023 7.6 makes the element types equivalent, and 7.10.5 keeps each assigned queue to its bound. Celox passes the unchanged case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_nested_bounded_queues.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_nested_bounded_queues",
+        "observed_version": "Verilator 5.052",
+        "phase": "compile",
+        "reason": "Assigning a container of unbounded queues to one of bounded queues generates C++ that assigns VlQueue<VlQueue<unsigned int>> to VlQueue<VlQueue<unsigned int, 2>>, which does not compile (no matching operator=). IEEE 1800-2023 7.6 makes the element types equivalent, and 7.10.5 keeps each assigned queue to its bound. Celox passes the unchanged case.",
+        "upstream": []
+      },
+      "name": "containers::container_values_are_converted_on_every_path",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

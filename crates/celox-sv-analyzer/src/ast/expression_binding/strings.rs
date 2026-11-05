@@ -234,7 +234,7 @@ pub(in crate::ast) fn native_string(
                 || method(tree, session, *expression, native, dimensions)
                     .is_some_and(|(op, _)| op.returns_string())
                 || enum_name(tree, session, *expression, native, dimensions)
-                || returns_string(tree, session, *expression, native, dimensions)
+                || returns_string(tree, session, id, native, dimensions)
         }
         // `e.name` without parentheses (6.19.5.6, 6.19.5.7).
         ExprKind::Member { .. } if enum_name(tree, session, id, native, dimensions) => true,
@@ -325,8 +325,8 @@ pub(in crate::ast) fn fixed_array_element(
     .is_some_and(|ty| ty.string && ty.unpacked.len() == indices)
 }
 
-/// Whether native callee expression `id` is a function or method that
-/// returns a `string`.
+/// Whether `id`, a call or a method named without parentheses, calls a
+/// function or method that returns a `string`.
 fn returns_string(
     tree: &AnalysisContext<'_>,
     session: &mut Session,

@@ -26,7 +26,7 @@ pub(in crate::ast) struct DeclarationScope {
 }
 
 impl DeclarationScope {
-    pub fn apply(&self, env: &mut HashMap<String, i128>, types: &mut HashMap<String, Type>) {
+    pub fn apply(&self, env: &mut ConstEnv, types: &mut HashMap<String, Type>) {
         for (name, value) in &self.env {
             match value {
                 Some(value) => {

@@ -1,0 +1,28 @@
+{
+  "case": "containers::nested_bounded_queues_are_assigned_elementwise",
+  "source": "src/sv/cases/containers.vtest",
+  "standard": "IEEE 1800-2023 7.6: a container may be assigned one whose elements are of an equivalent type; 7.10.5: a bounded queue keeps the elements up to its bound when it is assigned more.",
+  "method": "The shared case runs unchanged in verify-sv-verilator, verify-sv-icarus and verify-sv-xezim; the reduced source below runs without the adapters (verilator --binary, iverilog -g2012 -s Top, xezim -s Top, and the Celox sv_tests driver in simulation mode).",
+  "reduced_source": "module Top;\n  initial begin\n    int a[$][$];\n    int c[$][$:1];\n    a = '{'{1, 2, 3}, '{4}};\n    c = a;\n    $display(\"[%0d %0d %0d %0d]\", c.size(), c[0].size(), c[1].size(), c[0][1]);\n  end\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "stderr": "Vnb___024root__0__Slow.cpp:49:15: error: no match for \u2018operator=\u2019 (operand types are \u2018VlQueue<VlQueue<unsigned int, 2> >\u2019 and \u2018VlQueue<VlQueue<unsigned int> >\u2019)\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "stderr": "nb.sv:3: Sorry: Queue of type `queue of netvector_t:bool signed[31:0]` is not yet supported.\nnb.sv:4: Sorry: Queue of type `queue of netvector_t:bool signed[31:0]` is not yet supported.\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "[2 1 1 1]\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "[2 2 1 2]\n"
+    }
+  ]
+}

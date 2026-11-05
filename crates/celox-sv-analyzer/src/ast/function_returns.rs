@@ -120,7 +120,7 @@ impl FunctionReturnMetadata {
                     table,
                     &const_functions::ConstantFunctions::default(),
                     &ty,
-                    &HashMap::default(),
+                    &ConstEnv::default(),
                 )
             });
         Some(Self {

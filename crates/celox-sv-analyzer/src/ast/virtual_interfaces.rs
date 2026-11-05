@@ -117,7 +117,7 @@ impl VirtualInterfaces {
                 .filter_map(|parameter| {
                     Some((parameter.name().to_owned(), parameter.resolved_value()?))
                 })
-                .collect::<HashMap<_, _>>();
+                .collect::<ConstEnv>();
             // The signature is a module with a port of the interface, whose
             // members are its ports `<port>$<member>`.
             let members = module
@@ -165,7 +165,7 @@ impl VirtualInterfaces {
 
 /// `r#type` of a member of a non-parameterized interface, whose bounds are
 /// constants, possibly the interface's `constants`.
-fn resolved_type(r#type: &crate::ir::Type, constants: &HashMap<String, i128>) -> Option<Type> {
+fn resolved_type(r#type: &crate::ir::Type, constants: &ConstEnv) -> Option<Type> {
     let kind = match r#type.kind() {
         crate::ir::TypeKind::Bit => TypeKind::Bit,
         crate::ir::TypeKind::Logic => TypeKind::Logic,
@@ -651,7 +651,7 @@ pub(super) fn read(
                 .unwrap_or(false),
         ),
         None => {
-            let shape = casts::expr_type_from_type(functions, &found.r#type, &HashMap::default());
+            let shape = casts::expr_type_from_type(functions, &found.r#type, &ConstEnv::default());
             (shape.map(|shape| shape.width), found.r#type.is_signed())
         }
     };
@@ -671,6 +671,72 @@ pub(super) fn read(
 /// An error unless evaluating virtual interface `handle` has no effects: a
 /// member access compares it with each instance, evaluating it again.
 fn check_pure(handle: &Expr) -> Converted<()> {
+    if pure(handle) {
+        Ok(())
+    } else {
+        Err(unsupported(
+            "virtual interface handle expression with a call that may have effects",
+        ))
+    }
+}
+
+/// The variable handle expression `expr` is read from, through selects,
+/// container element reads and checks; `None` for a handle that no
+/// variable holds, as a class property of an object or a call's result.
+pub(super) fn base_variable(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Ident(name) => Some(name),
+        Expr::Select { expr, .. } => base_variable(expr),
+        Expr::Call {
+            callee: Callee::Checked { .. },
+            args,
+            ..
+        } => match args.as_slice() {
+            [Some(_), Some(value)] => base_variable(value),
+            _ => None,
+        },
+        Expr::Call {
+            callee: Callee::Object(op),
+            args,
+            ..
+        } if matches!(
+            **op,
+            system_functions::ObjectOp::Container {
+                op: system_functions::ContainerOp::Get,
+                ..
+            }
+        ) =>
+        {
+            args.first()
+                .and_then(Option::as_ref)
+                .and_then(base_variable)
+        }
+        _ => None,
+    }
+}
+
+/// Whether expression `expr` reads storage only: it has no call but the
+/// read of a container element, whose container and index it reads too.
+/// A subroutine call, or a property of an object, is no storage of the
+/// design.
+pub(super) fn reads_storage_only(expr: &Expr) -> bool {
+    let mut storage = true;
+    visit_calls(expr, &mut |callee| {
+        storage &= matches!(callee, Callee::Checked { .. })
+            || matches!(callee, Callee::Object(op) if matches!(
+                **op,
+                system_functions::ObjectOp::Container {
+                    op: system_functions::ContainerOp::Get,
+                    ..
+                }
+            ));
+    });
+    storage
+}
+
+/// Whether evaluating virtual interface `handle` has no effects, so that
+/// evaluating it again gives the same handle.
+pub(super) fn pure(handle: &Expr) -> bool {
     let mut effect = false;
     visit_calls(handle, &mut |callee| {
         effect |= match callee {
@@ -686,12 +752,7 @@ fn check_pure(handle: &Expr) -> Converted<()> {
             _ => true,
         };
     });
-    if effect {
-        return Err(unsupported(
-            "virtual interface handle expression with a call that may have effects",
-        ));
-    }
-    Ok(())
+    !effect
 }
 
 /// `visit(callee)` for each call in `expr`, including its select indices.
@@ -943,17 +1004,13 @@ fn native_value_type(
             {
                 return Ok(Some(element.as_ref().clone()));
             }
-            let name = match expression_binding::object_method(
-                tree,
-                session,
-                *expression,
-                native,
-                dimensions,
-            ) {
-                Ok(Some((name, _, _))) => name,
-                _ => expression_binding::callable_name(tree, *expression, native)
-                    .ok_or_else(|| "the call".to_owned())?,
-            };
+            let name =
+                match expression_binding::object_call_method(tree, session, id, native, dimensions)
+                {
+                    Ok(Some((name, _, _))) => name,
+                    _ => expression_binding::callable_name(tree, *expression, native)
+                        .ok_or_else(|| "the call".to_owned())?,
+                };
             return match dimensions.function_return_types.get(&name) {
                 Some(result) => match &result.virtual_interface {
                     Some(ty) => Ok(Some(ty.as_ref().clone())),
@@ -1016,6 +1073,12 @@ pub(super) fn check_assignment(
     dimensions: &PackedDimensions,
     target: &VirtualInterface,
 ) -> Converted<()> {
+    // The packages are analyzed once to find the interfaces before their
+    // declarations exist; the analysis that has them checks the values, as
+    // it checks the types (see `bind_type`).
+    if declarations(session).is_none() {
+        return Ok(());
+    }
     // Each branch of a conditional may be the value.
     if let celox_sv_syntax::ExprKind::Conditional {
         then_expression,
@@ -1208,7 +1271,7 @@ pub(super) fn watched(
 ) -> Converted<Expr> {
     let functions = &tree.functions;
     let (found, signals) = self::member(session, ty, member)?;
-    let width = casts::expr_type_from_type(functions, &found.r#type, &HashMap::default())
+    let width = casts::expr_type_from_type(functions, &found.r#type, &ConstEnv::default())
         .map(|shape| shape.width)
         .ok_or_else(|| unsupported(format!("width of virtual interface member `{member}`")))?;
     let mut value = Expr::Literal(format!("{width}'d0"));
@@ -1254,7 +1317,7 @@ pub(super) fn is_null(handle: &Expr) -> Expr {
 pub(super) fn event_block(mut stmts: Vec<Stmt>) -> Stmt {
     stmts.push(Stmt::Break);
     Stmt::Loop {
-        kind: crate::procedural::LoopKind::Forever,
+        kind: crate::procedural::LoopKind::EventBlock,
         init: Vec::new(),
         condition: None,
         step: Vec::new(),
@@ -1264,17 +1327,13 @@ pub(super) fn event_block(mut stmts: Vec<Stmt>) -> Stmt {
 
 /// Whether `stmt` is an [`event_block`].
 fn is_event_block(stmt: &Stmt) -> bool {
-    matches!(stmt, Stmt::Loop {
-        kind: crate::procedural::LoopKind::Forever,
-        body,
-        ..
-    } if matches!(body.first(), Some(Stmt::Eval(Expr::Call {
-        callee: Callee::Checked {
-            check: system_functions::AccessCheck::VirtualInterface,
+    matches!(
+        stmt,
+        Stmt::Loop {
+            kind: crate::procedural::LoopKind::EventBlock,
             ..
-        },
-        ..
-    }))))
+        }
+    )
 }
 
 /// `stmt` without the [`event_block`]s it contains, whose reads are those

@@ -318,7 +318,7 @@ pub(super) fn check_subroutine_statics(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     subroutine: &Subroutine,
-    constants: &HashMap<String, i128>,
+    constants: &ConstEnv,
     locals: &[LocalVariable],
     statics: &HashSet<String>,
     directions: &Directions,
@@ -406,7 +406,7 @@ pub(super) fn check_subroutine_statics(
 pub(super) fn check_static_result(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    constants: &HashMap<String, i128>,
+    constants: &ConstEnv,
     locals: &[LocalVariable],
     subroutine: &Subroutine,
     directions: &Directions,
@@ -1192,7 +1192,7 @@ fn expr_is_constant(tree: &AnalysisContext<'_>, session: &mut Session, expr: &Ex
                 .all(|expr| expr_is_constant(tree, session, expr))
                 && expr_to_const(session, expr.clone())
                     .and_then(|call| {
-                        eval_ast_const_expr(&tree.functions, &call, &HashMap::default())
+                        eval_ast_const_expr(&tree.functions, &call, &ConstEnv::default())
                     })
                     .is_some()
         }

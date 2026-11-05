@@ -57,6 +57,10 @@ sv_backends! {
         @case "virtual_interfaces::class_call_arguments_and_package_results";
     }
 
+    fn rejects_package_results_of_other_interfaces(sim) {
+        @case "virtual_interfaces::rejects_package_results_of_other_interfaces";
+    }
+
     fn rejects_integers_as_class_call_arguments(sim) {
         @case "virtual_interfaces::rejects_integers_as_class_call_arguments";
     }
@@ -134,15 +138,14 @@ sv_backends! {
     }
 }
 
-/// A wait through a handle that a class property, an automatic variable or
-/// an argument holds must follow changes of the handle (IEEE 1800-2023
-/// 9.4.2), which is not implemented; it is rejected rather than sampled.
+/// A `wait` through a handle that a class property, an automatic variable
+/// or an argument holds would have to follow changes of the handle while
+/// its condition is evaluated (IEEE 1800-2023 9.4.3), which is not
+/// implemented; it is rejected rather than sampled.
 #[test]
-fn waits_through_non_static_handles_are_unsupported() {
+fn level_waits_through_non_static_handles_are_unsupported() {
     let waits = [
-        "class C; virtual bus_if vif; task run(virtual bus_if b); vif = b; @(posedge vif.clk); endtask endclass",
         "class C; virtual bus_if vif; task run(virtual bus_if b); vif = b; wait (vif.clk); endtask endclass",
-        "class C; task run(virtual bus_if b); @(posedge b.clk); endtask endclass",
         "class C; task run(virtual bus_if b); virtual bus_if v; v = b; wait (v.clk); endtask endclass",
     ];
     for wait in waits {
@@ -167,27 +170,26 @@ fn waits_through_non_static_handles_are_unsupported() {
     }
 }
 
-/// An argument of an automatic module task is not a variable of the design
-/// either, so a wait through it is unsupported too.
+/// An event control through a handle that an argument of an automatic
+/// module task holds reads the handle when the wait begins (9.4.2) and
+/// waits on the member of the instance it denotes then.
 #[test]
-fn waits_through_task_arguments_are_unsupported() {
-    let source = "interface bus_if(input logic clk); endinterface
-        module top;
+fn event_waits_through_task_arguments() {
+    let source = "`timescale 1ns/1ns
+        interface bus_if(input logic clk); endinterface
+        module top(output int seen);
             logic clk = 0;
             bus_if bus(clk);
-            task automatic run(virtual bus_if b); @(posedge b.clk); endtask
-            initial run(bus);
+            always #5 clk = ~clk;
+            task automatic run(virtual bus_if b); repeat (2) @(posedge b.clk); endtask
+            initial begin run(bus); seen = $time; end
         endmodule";
-    let Err(error) = celox::Simulation::from_sv_sources(vec![(source, Path::new("vif.sv"))], "top")
-        .build_interpreter()
-    else {
-        panic!("a wait through a task argument is unsupported");
-    };
-    let error = error.to_string();
-    assert!(
-        error.contains("wait on a member through a virtual interface held by"),
-        "{error}"
-    );
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("vif.sv"))], "top")
+        .build()
+        .unwrap();
+    let seen = sim.signal("seen");
+    sim.run_until(30).unwrap();
+    assert_eq!(sim.get(seen), num_bigint::BigUint::from(15u8));
 }
 
 /// A member access compares the handle with each instance, so a handle
@@ -448,4 +450,206 @@ fn retargeting_a_waited_handle_to_null_is_an_error() {
             assert!(error.contains("null virtual interface accessed"), "{error}");
         }
     }
+}
+
+/// The reads of an event control through a virtual interface that a class
+/// property holds are its timing, not reads of an enclosing `always @*`
+/// (IEEE 1800-2023 9.4.2.2): a change of the interface member does not run
+/// the `always @*` again.
+#[test]
+fn implicit_events_leave_out_waits_through_class_properties() {
+    let source = "`timescale 1ns/1ns
+        interface clk_if; logic clk = 0; endinterface
+        class Env; virtual clk_if m_if; endclass
+        module top(output int runs);
+            clk_if i0();
+            Env e = new;
+            bit go;
+            event ev;
+            always #5 i0.clk = ~i0.clk;
+            always @* begin
+                -> ev;
+                if (go) @(posedge e.m_if.clk);
+            end
+            // The first run at 0 races the counting process; count after it.
+            always @(ev) if ($time > 0) runs++;
+            initial begin e.m_if = i0; #2 go = 1; end
+        endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("vif.sv"))], "top")
+        .build()
+        .unwrap();
+    let runs = sim.signal("runs");
+    sim.run_until(60).unwrap();
+    assert_eq!(sim.get(runs), num_bigint::BigUint::from(1u8));
+}
+
+/// Each item of an event control evaluates its handle when the wait begins,
+/// once: an index with a call that selects another interface each time
+/// gives each item its own (IEEE 1800-2023 9.4.2).
+#[test]
+fn event_items_evaluate_their_handles_separately() {
+    let source = "`timescale 1ns/1ns
+        interface clk_if; logic clk = 0; logic other = 0; endinterface
+        module top(output int woke);
+            clk_if i0();
+            clk_if i1();
+            virtual clk_if handles[2];
+            int calls;
+            function automatic int pick();
+                calls++;
+                return calls - 1;
+            endfunction
+            task automatic watch();
+                @(posedge handles[pick()].clk or posedge handles[pick()].other);
+            endtask
+            initial begin #5 i0.clk = 1; end
+            initial begin #3 i1.other = 1; end
+            initial begin handles[0] = i0; handles[1] = i1; watch(); woke = $time; end
+        endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("vif.sv"))], "top")
+        .build()
+        .unwrap();
+    let woke = sim.signal("woke");
+    sim.run_until(10).unwrap();
+    assert_eq!(sim.get(woke), num_bigint::BigUint::from(3u8));
+}
+
+/// A handle that design storage holds, a variable or an element of an array
+/// of the design, is an operand of the wait's event expression: a change of
+/// the index or of the variable during the wait retargets it (IEEE
+/// 1800-2023 9.4.2).
+#[test]
+fn waits_follow_design_storage_handles() {
+    let source = "`timescale 1ns/1ns
+        interface clk_if; logic clk = 0; endinterface
+        module top(output int by_index, output int by_variable);
+            clk_if i0();
+            clk_if i1();
+            virtual clk_if handles[2];
+            virtual clk_if current;
+            int idx;
+            initial begin #5 i0.clk = 1; end
+            initial begin #3 i1.clk = 1; end
+            initial begin
+                handles[0] = i0;
+                handles[1] = i1;
+                current = i0;
+                fork
+                    begin @(posedge handles[idx].clk); by_index = $time; end
+                    begin @(posedge current.clk); by_variable = $time; end
+                    begin #2 idx = 1; current = i1; end
+                join
+            end
+        endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("vif.sv"))], "top")
+        .build()
+        .unwrap();
+    let (by_index, by_variable) = (sim.signal("by_index"), sim.signal("by_variable"));
+    sim.run_until(10).unwrap();
+    assert_eq!(sim.get(by_index), num_bigint::BigUint::from(3u8));
+    assert_eq!(sim.get(by_variable), num_bigint::BigUint::from(3u8));
+}
+
+/// A wait through a virtual interface that a ref formal names would follow
+/// the actual's storage, which is not implemented: it is rejected rather
+/// than sampled or left without events.
+#[test]
+fn waits_through_reference_formals_are_unsupported() {
+    let source = "interface bus_if(input logic clk); endinterface
+        module top;
+            logic clk = 0;
+            bus_if bus(clk);
+            virtual bus_if current;
+            task automatic watch(ref virtual bus_if h); @(posedge h.clk); endtask
+            initial begin current = bus; watch(current); end
+        endmodule";
+    let Err(error) = celox::Simulation::from_sv_sources(vec![(source, Path::new("vif.sv"))], "top")
+        .build_interpreter()
+    else {
+        panic!("a wait through a ref formal is unsupported");
+    };
+    assert!(error.to_string().contains("a ref formal names"), "{error}");
+}
+
+/// A handle that a container variable of the design or a static local holds
+/// is storage of the design too: a change of the index, or of the static by
+/// an overlapping activation, during the wait retargets it (IEEE 1800-2023
+/// 6.21, 9.4.2).
+#[test]
+fn waits_follow_containers_and_statics() {
+    let source = "`timescale 1ns/1ns
+        interface clk_if; logic clk = 0; endinterface
+        module top(output int by_queue, output int first, output int second);
+            clk_if i0();
+            clk_if i1();
+            virtual clk_if queue_handles[$];
+            int idx;
+            task watch(virtual clk_if v);
+                static virtual clk_if s;
+                s = v;
+                @(posedge s.clk);
+            endtask
+            initial begin #5 i0.clk = 1; end
+            initial begin #3 i1.clk = 1; end
+            initial begin
+                queue_handles.push_back(i0);
+                queue_handles.push_back(i1);
+                fork
+                    begin @(posedge queue_handles[idx].clk); by_queue = $time; end
+                    begin #2 idx = 1; end
+                    begin watch(i0); first = $time; end
+                    begin #2 watch(i1); second = $time; end
+                join
+            end
+        endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("vif.sv"))], "top")
+        .build()
+        .unwrap();
+    let signals = [
+        sim.signal("by_queue"),
+        sim.signal("first"),
+        sim.signal("second"),
+    ];
+    sim.run_until(10).unwrap();
+    for signal in signals {
+        assert_eq!(sim.get(signal), num_bigint::BigUint::from(3u8));
+    }
+}
+
+/// Each activation of a wait that reads its handle when it begins has its
+/// own copy: overlapping activations of the same statement, forked in a
+/// loop, wait on the interfaces they read (IEEE 1800-2023 9.4.2).
+#[test]
+fn handle_copies_belong_to_their_activation() {
+    let source = "`timescale 1ns/1ns
+        interface clk_if; logic clk = 0; endinterface
+        class Env; virtual clk_if m_if; endclass
+        module top(output int woke0, output int woke1);
+            clk_if i0();
+            clk_if i1();
+            Env objs[2];
+            initial begin #5 i0.clk = 1; end
+            initial begin #3 i1.clk = 1; end
+            initial begin
+                objs[0] = new;
+                objs[1] = new;
+                objs[0].m_if = i0;
+                objs[1].m_if = i1;
+                for (int j = 0; j < 2; j++)
+                    fork
+                        automatic int k = j;
+                        begin
+                            @(posedge objs[k].m_if.clk);
+                            if (k == 0) woke0 = $time; else woke1 = $time;
+                        end
+                    join_none
+            end
+        endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("vif.sv"))], "top")
+        .build()
+        .unwrap();
+    let (woke0, woke1) = (sim.signal("woke0"), sim.signal("woke1"));
+    sim.run_until(10).unwrap();
+    assert_eq!(sim.get(woke0), num_bigint::BigUint::from(5u8));
+    assert_eq!(sim.get(woke1), num_bigint::BigUint::from(3u8));
 }

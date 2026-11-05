@@ -3,6 +3,7 @@ use super::{
     conversion::of_type,
     relations::{Assignable, Mismatch},
 };
+use crate::ast::ConstEnv;
 use crate::ast::Session;
 use crate::ast::{AnalysisContext, types};
 use std::path::Path;
@@ -14,7 +15,7 @@ fn typedefs(items: &str) -> (TyTable, HashMap<String, TyId>) {
     let tree =
         crate::source_tree::parse_scope_fixture(&source, Path::new("semantic_types.sv")).unwrap();
     let tree = AnalysisContext::unspecialized(&tree);
-    let env = HashMap::default();
+    let env = ConstEnv::default();
     let aliases = types::type_aliases_from_scope_with_env(&tree, session, &env).unwrap();
     let mut table = TyTable::default();
     let ids = aliases
@@ -150,7 +151,7 @@ fn aggregates_of_each_generate_scope_are_types_of_their_own() {
         crate::source_tree::parse_scope_fixture(source, Path::new("semantic_types.sv")).unwrap();
     let tree = AnalysisContext::unspecialized(&tree);
     let items = tree.body_membership().unwrap();
-    let env = HashMap::default();
+    let env = ConstEnv::default();
     let mut table = TyTable::default();
     let mut scope = |path| {
         let aliases = types::type_aliases_of_generate_scope(

@@ -132,8 +132,9 @@ pub(crate) struct SchedulerRefs {
     /// waits for edges, by process index, with the index of the edge of
     /// each of its wait sites (`ProcessModel::wait_terms`).
     pub(crate) waits: Vec<Option<(SignalRef, SignalRef, Vec<usize>)>>,
-    /// Raw-plane encoding for identical wide or OR event-expression lists.
-    pub(crate) raw_waits: Vec<Option<celox_design::schedule::CompiledWaitLayout>>,
+    /// Raw-plane snapshots by process and wait site. The active site's full
+    /// index selects the encoding, independently of the compact fast path.
+    pub(crate) raw_waits: Vec<Option<Vec<celox_design::schedule::CompiledWaitLayout>>>,
     /// The number of such kernels.
     pub(crate) wait_kernels: usize,
     /// The bit of each kernel the scheduler runs in its ready mask: its
@@ -527,12 +528,10 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                             if scheduler.fallback[index].is_some() || process.waits.is_empty() {
                                 return None;
                             }
-                            let site_terms =
-                                process.wait_terms().map(|(_, sites)| sites).or_else(|| {
-                                    process
-                                        .common_wait_terms()
-                                        .map(|_| vec![0; process.waits.len()])
-                                })?;
+                            let site_terms = process
+                                .compact_wait_terms(|signal| resolve(&signal).width)
+                                .map(|(_, sites)| sites)
+                                .unwrap_or_else(|| vec![0; process.waits.len()]);
                             Some((
                                 resolve(&slots.waiting[index]),
                                 resolve(&slots.baseline[index]),
@@ -546,30 +545,36 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                                 return None;
                             }
                             let process = &model.processes[index];
-                            if process.wait_terms().is_some_and(|(terms, _)| {
-                                terms.iter().all(|(signal, _)| resolve(signal).width == 1)
-                            }) {
+                            if process
+                                .compact_wait_terms(|signal| resolve(&signal).width)
+                                .is_some()
+                            {
                                 return None;
                             }
-                            let terms = process.common_wait_terms()?;
-                            let dimensions = terms
+                            process
+                                .waits
                                 .iter()
-                                .map(|term| {
-                                    let signal = resolve(&term.signal);
-                                    (
-                                        signal.width,
-                                        backend.layout().four_state && signal.is_4state,
-                                        model
-                                            .counted
-                                            .iter()
-                                            .any(|counted| counted.slots.signal == term.signal),
+                                .map(|terms| {
+                                    let dimensions = terms
+                                        .iter()
+                                        .map(|term| {
+                                            let signal = resolve(&term.signal);
+                                            (
+                                                signal.width,
+                                                backend.layout().four_state && signal.is_4state,
+                                                model.counted.iter().any(|counted| {
+                                                    counted.slots.signal == term.signal
+                                                }),
+                                                term.gate
+                                                    .is_some_and(|gate| gate.counters.is_some()),
+                                            )
+                                        })
+                                        .collect::<Vec<_>>();
+                                    celox_design::schedule::CompiledWaitLayout::with_gate_counters(
+                                        &dimensions,
                                     )
                                 })
-                                .collect::<Vec<_>>();
-                            let layout = celox_design::schedule::CompiledWaitLayout::with_counters(
-                                &dimensions,
-                            )?;
-                            (!layout.scalar_byte).then_some(layout)
+                                .collect()
                         })
                         .collect(),
                     ordinals: {

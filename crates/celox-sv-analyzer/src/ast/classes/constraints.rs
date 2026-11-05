@@ -1,6 +1,6 @@
 //! Scalar constraint binding. Unsupported forms fail before any RNG draws.
 use super::*;
-use celox_heap::randomization::{Expr as ConstraintExpr, Field, Program};
+use celox_heap::randomization::{Array, Expr as ConstraintExpr, Field, Program};
 use celox_sv_syntax::{ExprId, ExprKind};
 
 #[derive(Clone)]
@@ -54,6 +54,10 @@ fn sized(value: Typed, width: u32, signed: bool) -> Typed {
     }
 }
 
+fn shift(op: &str) -> bool {
+    matches!(op, "<<" | ">>" | "<<<" | ">>>")
+}
+
 fn comparison(op: &str) -> bool {
     matches!(op, "==" | "!=" | "<" | "<=" | ">" | ">=" | "&&" | "||")
 }
@@ -74,6 +78,21 @@ fn emit(value: Typed, context: Option<(u32, bool)>) -> ConstraintExpr {
                     value: Box::new(emit(*child, (!logical).then_some((width, signed)))),
                 },
                 if logical { 1 } else { width },
+            )
+        }
+        Kind::Binary(op, a, b) if shift(&op) => {
+            let a = emit(*a, Some((width, signed)));
+            // The count is self-determined; the heap reads its value as
+            // unsigned.
+            let b = emit(*b, None);
+            (
+                ConstraintExpr::Binary {
+                    op,
+                    left: Box::new(a),
+                    right: Box::new(b),
+                    signed,
+                },
+                width,
             )
         }
         Kind::Binary(op, a, b) => {
@@ -108,12 +127,56 @@ fn emit(value: Typed, context: Option<(u32, bool)>) -> ConstraintExpr {
     }
 }
 
+/// Whether a constraint program holds property `property` as a field: an
+/// integral property of at most 64 bits. Other properties, such as handles
+/// and strings, are state a constraint does not name.
+pub(in crate::ast) fn constrainable(property: &Property) -> bool {
+    property.field.handle.is_none() && property.field.width <= 64
+}
+
+/// The array whose size member `id` is, as `a.size`.
+fn array_size(id: ExprId, native: &celox_sv_syntax::Declarations) -> Option<String> {
+    let ExprKind::Member {
+        expression,
+        separator,
+        name,
+    } = &native.expression(id).kind
+    else {
+        return None;
+    };
+    let ExprKind::Name(array) = &native.expression(*expression).kind else {
+        return None;
+    };
+    (separator == "." && name.spelling == "size")
+        .then(|| instances::normalize_identifier(&array.spelling))
+}
+
+/// The size of array property `name` among those of the program.
+fn size(name: String, properties: &[Property]) -> Result<Typed, String> {
+    let (index, _) = properties
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, property)| property.name == name)
+        .filter(|(_, property)| property.sequence())
+        .ok_or_else(|| format!("constraint variable `{name}.size`"))?;
+    let array = properties[..index]
+        .iter()
+        .filter(|property| property.sequence())
+        .count();
+    Ok(Typed {
+        kind: Kind::Leaf(ConstraintExpr::Size(array)),
+        width: 32,
+        signed: true,
+    })
+}
+
 pub(in crate::ast) fn bind(
     id: ExprId,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     properties: &[Property],
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
 ) -> Result<ConstraintExpr, String> {
     bind_inputs(id, tree, session, properties, env, &HashMap::default())
 }
@@ -123,7 +186,7 @@ pub(in crate::ast) fn bind_inputs(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     properties: &[Property],
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     inputs: &HashMap<String, (usize, u32, bool)>,
 ) -> Result<ConstraintExpr, String> {
     fn expression(
@@ -131,7 +194,7 @@ pub(in crate::ast) fn bind_inputs(
         tree: &AnalysisContext<'_>,
         session: &mut Session,
         properties: &[Property],
-        env: &HashMap<String, i128>,
+        env: &ConstEnv,
         inputs: &HashMap<String, (usize, u32, bool)>,
         depth: usize,
         budget: &mut usize,
@@ -170,8 +233,19 @@ pub(in crate::ast) fn bind_inputs(
                     if property.r#type.holds_chandle() {
                         return Err("a chandle in a constraint".into());
                     }
+                    if !constrainable(property) {
+                        return Err(
+                            "a handle, string, container or property wider than 64 bits in a constraint"
+                                .into(),
+                        );
+                    }
+                    // The field of the property among those of the program.
+                    let field = properties[..index]
+                        .iter()
+                        .filter(|property| constrainable(property))
+                        .count();
                     Typed {
-                        kind: Kind::Leaf(ConstraintExpr::Field(index)),
+                        kind: Kind::Leaf(ConstraintExpr::Field(field)),
                         width: property.field.width,
                         signed: property.field.signed,
                     }
@@ -206,6 +280,17 @@ pub(in crate::ast) fn bind_inputs(
                 } else {
                     return Err(format!("constraint variable `{name}`"));
                 }
+            }
+            // The size of a dynamic array or queue (IEEE 1800-2023 7.5.2,
+            // 7.10.2.1, 18.4), with or without the parentheses.
+            ExprKind::Call {
+                expression,
+                arguments,
+            } if arguments.is_empty() && array_size(*expression, native).is_some() => {
+                return size(array_size(*expression, native).unwrap(), properties);
+            }
+            ExprKind::Member { .. } if array_size(id, native).is_some() => {
+                return size(array_size(id, native).unwrap(), properties);
             }
             ExprKind::Member {
                 expression,
@@ -319,6 +404,22 @@ pub(in crate::ast) fn bind_inputs(
                 }
                 alternatives.pop().ok_or("empty constraint inside set")?
             }
+            // A shift has the type of its left operand; the right operand
+            // is self-determined, of its own type, and its value is read as
+            // unsigned (IEEE 1800-2023 11.4.10, 11.6.1).
+            ExprKind::Binary {
+                left,
+                operator,
+                right,
+            } if matches!(operator.as_str(), "<<" | ">>" | "<<<" | ">>>") => {
+                let a = recurse(session, budget, *left)?;
+                let b = recurse(session, budget, *right)?;
+                Typed {
+                    width: a.width,
+                    signed: a.signed,
+                    kind: Kind::Binary(operator.clone(), Box::new(a), Box::new(b)),
+                }
+            }
             ExprKind::Binary {
                 left,
                 operator,
@@ -361,13 +462,43 @@ pub(in crate::ast) fn bind_inputs(
 }
 
 impl Class {
+    /// The constraint program of the class, built once when the class is
+    /// laid out (see [`Class::program`]).
     pub fn constraint_program(&self) -> Converted<Program> {
+        self.program.clone()
+    }
+
+    /// Whether the class has a constraint program, without copying it.
+    pub fn check_constraint_program(&self) -> Converted<()> {
+        self.program.as_ref().map(|_| ()).map_err(Clone::clone)
+    }
+
+    pub(super) fn build_constraint_program(&self) -> Converted<Program> {
         let mut fields = Vec::new();
+        let mut handles = Vec::new();
+        let mut arrays = Vec::new();
         for property in &self.properties {
-            if property.field.handle.is_some() || property.field.width > 64 {
-                return Err(unsupported(
-                    "constraints currently require scalar integral properties",
-                ));
+            // An object handle shall not be randc (18.4).
+            if property.randc && property.r#type.class().is_some() {
+                return Err(unsupported("a randc object handle"));
+            }
+            if property.rand_object() {
+                handles.push(property.field.offset);
+                continue;
+            }
+            if property.sequence() {
+                arrays.push(array(property)?);
+                continue;
+            }
+            if !constrainable(property) {
+                // A property no constraint names is state the solver does
+                // not need; a random one would have to be solved.
+                if property.rand || property.randc {
+                    return Err(unsupported(
+                        "constraints currently require scalar integral rand properties",
+                    ));
+                }
+                continue;
             }
             // A randc property draws from the cycle of its whole domain
             // (IEEE 1800-2023 18.4.2), kept for at most 256 values.
@@ -417,8 +548,83 @@ impl Class {
         Ok(Program {
             fields,
             constraints,
+            handles,
+            arrays,
         })
     }
+}
+
+/// Whether the solver can randomize dynamic array or queue property
+/// `property`: one of 2-state integral elements of at most 64 bits.
+pub(in crate::ast) fn random_array(property: &Property) -> bool {
+    property.sequence()
+        && property.r#type.container.as_ref().is_some_and(|container| {
+            container.layout.handle.is_none()
+                && container.record.is_none()
+                && container.layout.two_state
+                && (1..=64).contains(&container.layout.width)
+                && !(container.element.is_enum && container.element.enum_domain.is_none())
+        })
+}
+
+/// Dynamic array or queue property `property` of a constraint program: a
+/// random one is resized to the size its constraints give, if any, and its
+/// elements randomized (IEEE 1800-2023 18.4).
+pub(in crate::ast) fn array(property: &Property) -> Converted<Array> {
+    let container = property
+        .r#type
+        .container
+        .as_ref()
+        .expect("a dynamic array or queue");
+    let layout = container.layout;
+    let random = property.rand || property.randc;
+    if random {
+        if property.randc {
+            return Err(unsupported("a randc dynamic array or queue"));
+        }
+        if !random_array(property) {
+            return Err(unsupported(
+                "rand dynamic arrays and queues currently require 2-state integral elements of at most 64 bits",
+            ));
+        }
+    }
+    let (kind, capacity) = match layout.kind {
+        ContainerKind::Queue { capacity } => (1, capacity),
+        _ => (0, 0),
+    };
+    let handle = match layout.handle {
+        None => 0,
+        Some(HandleProperty::String) => 1,
+        Some(HandleProperty::Object) => 2,
+    };
+    let mask = u64::MAX >> (64 - layout.width.clamp(1, 64));
+    Ok(Array {
+        offset: property.field.offset,
+        layout: celox_heap::containers::parameter(
+            layout.width,
+            layout.two_state,
+            handle,
+            kind,
+            capacity,
+            false,
+            false,
+            false,
+        ),
+        width: layout.width,
+        random,
+        domain: container
+            .element
+            .enum_domain
+            .as_ref()
+            .map(|domain| {
+                domain
+                    .values()
+                    .into_iter()
+                    .map(|value| value.bits() as u64 & mask)
+                    .collect()
+            })
+            .unwrap_or_default(),
+    })
 }
 
 /// A generated call-specific method. Its immutable predicates never change the

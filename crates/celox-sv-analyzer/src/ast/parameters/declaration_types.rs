@@ -82,7 +82,7 @@ impl Prefix<'_> {
     pub fn scalar_width(&self, functions: &const_functions::ConstantFunctions) -> Option<usize> {
         self.primitive
             .as_ref()
-            .and_then(|ty| expr_type_from_type(functions, ty, &HashMap::default()))
+            .and_then(|ty| expr_type_from_type(functions, ty, &ConstEnv::default()))
             .map(|ty| ty.width)
     }
     pub fn signed_element_depth(&self) -> Option<usize> {
@@ -98,7 +98,7 @@ impl Prefix<'_> {
         &self,
         tree: &AnalysisContext<'_>,
         session: &mut Session,
-        env: &HashMap<String, i128>,
+        env: &ConstEnv,
         aliases: &HashMap<String, Type>,
     ) -> Converted<Vec<PackedRange>> {
         let mut ranges = constant_binding::packed_ranges(
@@ -125,7 +125,7 @@ impl Prefix<'_> {
         types: &HashMap<String, ExprType>,
         functions: &const_functions::ConstantFunctions,
         table: &mut semantic_types::TyTable,
-        env: &HashMap<String, i128>,
+        env: &ConstEnv,
     ) -> Option<semantic_types::ConstantType> {
         if parameter
             .value()
