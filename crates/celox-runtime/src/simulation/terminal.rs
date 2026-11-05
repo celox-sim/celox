@@ -139,12 +139,9 @@ impl<B: SimBackend> SimulationState<B> {
                     let encoded: u64 = executor.backend().get_as(process.delay);
                     let (kind, site) = HostRequestKind::decode(encoded)
                         .ok_or(SimulatorErrorCode::InternalError)?;
-                    let request = process
-                        .host_requests
-                        .iter()
-                        .filter(|request| request.kind == kind)
-                        .nth(site as usize)
-                        .ok_or(SimulatorErrorCode::InternalError)?;
+                    let request =
+                        celox_design::host_request_site(&process.host_requests, kind, site)
+                            .ok_or(SimulatorErrorCode::InternalError)?;
                     if kind == HostRequestKind::Process {
                         let request = request.clone();
                         if !self.process_request(executor, self.scheduler.time, index, &request)? {

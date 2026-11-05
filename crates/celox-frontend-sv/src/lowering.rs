@@ -6459,6 +6459,7 @@ fn lower_initial_processes(
                 resume: declare("resume", PROCESS_RESUME_WIDTH),
                 status: declare("status", PROCESS_STATUS_WIDTH),
                 delay: declare("delay", PROCESS_DELAY_WIDTH),
+                call_top: None,
             }
         })
         .collect();
@@ -6553,7 +6554,7 @@ fn lower_initial_processes(
             nba_sites.extend(kernel.nba_sites);
             nba_switches.extend(kernel.nba_switches);
             host_request_sites.extend(kernel.host_request_sites.into_iter().map(|mut site| {
-                site.process = index;
+                site.process = celox_design::SiteProcess::own(index);
                 site
             }));
             Ok(SymbolicProcess {
@@ -6564,6 +6565,20 @@ fn lower_initial_processes(
             })
         })
         .collect::<Result<Vec<_>, sv::AnalyzerError>>();
+    // A kernel that can suspend inside a call lists the requests of the
+    // module's function units after its own.
+    if let Ok(processes) = &processes {
+        for (index, process) in processes.iter().enumerate() {
+            if process.slots.call_top.is_some() {
+                host_request_sites.extend(pm.function_host_request_sites.iter().map(|site| {
+                    celox_design::HostRequestSite {
+                        process: celox_design::SiteProcess::function(index),
+                        ..site.clone()
+                    }
+                }));
+            }
+        }
+    }
     *runtime_event_sites = std::mem::take(&mut pm.runtime_event_sites);
     *runtime_errors = std::mem::take(&mut pm.runtime_errors);
     *extern_functions = std::mem::take(&mut pm.extern_functions);

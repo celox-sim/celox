@@ -47,6 +47,7 @@ pub(crate) fn lower_expressions(
         resume: runtime.design.allocate_testbench_slot(16, false),
         status: runtime.design.allocate_testbench_slot(8, false),
         delay: runtime.design.allocate_testbench_slot(64, false),
+        call_top: None,
     };
     for slot in [control.resume, control.status, control.delay] {
         runtime.runtime_schema.testbench_read_roots.insert(slot);

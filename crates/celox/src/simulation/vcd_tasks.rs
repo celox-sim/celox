@@ -84,7 +84,7 @@ impl<B: SimBackend> Simulator<B> {
                     .program
                     .runtime_schema
                     .processes
-                    .get(site.process)
+                    .get(site.process.index())
                     .and_then(|slots| {
                         self.program
                             .design

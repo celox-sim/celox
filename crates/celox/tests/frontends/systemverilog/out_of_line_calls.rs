@@ -394,16 +394,17 @@ endmodule
 
 #[test]
 fn ineligible_subroutines_stay_inlined() {
-    // A `ref` formal keeps a subroutine inlined, and a host request keeps
-    // it inlined with every subroutine that calls it; `plain` still goes
-    // out of line.
+    // A `ref` formal keeps a subroutine inlined, and a host request that a
+    // unit cannot make (a process method, which acts on the calling
+    // process) keeps it inlined with every subroutine that calls it;
+    // `plain` still goes out of line.
     let source = r#"module Top(output int a, output int b, output int c);
     function automatic void bump(ref int v);
         v = v + 1;
     endfunction
     function automatic int shout(int v);
-        string text = $sformatf("shout %0d", v);
-        return v + text.len();
+        process p = process::self();
+        return v + (p == null ? 0 : 1);
     endfunction
     function automatic int via_shout(int v);
         return shout(v) * 2;
@@ -1189,4 +1190,180 @@ endmodule
             );
         }
     }
+}
+
+#[test]
+fn host_requests_suspend_through_function_units() {
+    // Each unit of the chain makes host requests before and after its call,
+    // drawing on the process RNG around them; two processes call it in
+    // turn. Each request suspends the process inside the calls, which
+    // continue where they stopped.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c, output int d);
+    function automatic string inner(int n);
+        string text = $sformatf("inner %0d %0d", n, $urandom % 100);
+        int parsed;
+        void'($sscanf(text, "inner %d", parsed));
+        return $sformatf("%s/%0d", text, parsed + 1);
+    endfunction
+    function automatic int middle(int n);
+        string first = $sformatf("m%0d", n);
+        string got = inner(n + 1);
+        int x = $urandom_range(9);
+        $display("%s %s %0d", first, got, x);
+        return got.len() + x;
+    endfunction
+    function automatic int outer(int n);
+        int sum = 0;
+        for (int k = 0; k < n; k++) begin
+            sum += middle(k);
+            if ($test$plusargs("never")) sum = 0;
+        end
+        $display("outer %0d", $sformatf("%0d", sum).len());
+        return sum;
+    endfunction
+    int one = 1;
+    initial begin
+        a = outer(one + 2);
+        #2 c = outer(one);
+        fork
+            d = outer(one + 1);
+        join
+    end
+    initial begin
+        #1 b = outer(one + 1);
+    end
+endmodule
+"#;
+    same_as_inlined(source, 3, 4, &["a", "b", "c", "d"]);
+}
+
+#[test]
+fn recursive_functions_make_host_requests() {
+    // A format result made before a recursive call is kept across it: the
+    // call reaches the same request site again.
+    let recursive = r#"`timescale 1ns/1ns
+module Top(output int a, output int b);
+    function automatic string path(int n);
+        string head;
+        if (n == 0) return $sformatf("[%0d]", $urandom % 10);
+        head = $sformatf("<%0d", n);
+        return {head, path(n - 1), $sformatf("%0d>", n)};
+    endfunction
+    int k = 3;
+    initial begin
+        $display("%s", path(k));
+        a = path(k - 1).len();
+    end
+    initial begin
+        #1 $display("%s", path(k + 1));
+        b = $urandom % 1000;
+    end
+endmodule
+"#;
+    let looped = recursive.replace(
+        "        string head;
+        if (n == 0) return $sformatf(\"[%0d]\", $urandom % 10);
+        head = $sformatf(\"<%0d\", n);
+        return {head, path(n - 1), $sformatf(\"%0d>\", n)};",
+        "        string head = \"\";
+        string tail = \"\";
+        for (int m = n; m > 0; m--) begin
+            head = {head, $sformatf(\"<%0d\", m)};
+            tail = {$sformatf(\"%0d>\", m), tail};
+        end
+        return {head, $sformatf(\"[%0d]\", $urandom % 10), tail};",
+    );
+    assert_ne!(looped, recursive);
+    assert_eq!(function_units(recursive, true), 1, "function units");
+    for four_state in [false, true] {
+        let expected = simulate_run(&looped, four_state, false, "interpreter", 2, &["a", "b"])
+            .expect("the looped design runs");
+        for backend in backends() {
+            assert_eq!(
+                simulate_run(recursive, four_state, true, backend, 2, &["a", "b"]),
+                Ok(expected.clone()),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+    // Every request inside the calls kept the live frames, and gave them back.
+    let mut sim = Simulation::from_sv_sources(vec![(recursive, Path::new("calls.sv"))], "Top")
+        .force_out_of_line_calls()
+        .build_interpreter()
+        .expect("the design builds");
+    sim.run_until(2).expect("the design runs");
+    let stats = sim.scheduler_stats();
+    assert!(stats.call_stack_saves > 0);
+    assert!(stats.call_stack_saved_bytes > 0);
+    assert_eq!(
+        stats.call_stack_saved_bytes,
+        stats.call_stack_restored_bytes
+    );
+}
+
+#[test]
+fn errors_after_a_host_request_in_a_function_unit() {
+    // The callee raises an error once it continues after its request.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int r);
+    function automatic int check(int x);
+        string text = $sformatf("x=%0d", x);
+        if (x == 3) $fatal(1, "%s", text);
+        return text.len();
+    endfunction
+    function automatic int twice(int x);
+        return check(x) + check(x + 1);
+    endfunction
+    int k = 1;
+    initial begin
+        r = twice(k);
+        #1 r = twice(k + 1);
+    end
+endmodule
+"#;
+    same_as_inlined(source, 2, 0, &["r"]);
+    for four_state in [false, true] {
+        let inlined = simulate_run(source, four_state, false, "interpreter", 2, &["r"]);
+        assert!(inlined.is_err(), "{inlined:?}");
+        for backend in backends() {
+            assert_eq!(
+                simulate_run(source, four_state, true, backend, 2, &["r"]),
+                inlined,
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+}
+
+#[test]
+fn file_output_in_function_units_with_native_services() {
+    // The native backend serves file output of compiled kernels itself:
+    // the edge process's `$fwrite` goes there, while the initial process's
+    // calls into units that write files suspend through the reference loop.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int r);
+    bit clk = 0;
+    int count = 0;
+    function automatic int report(int n);
+        $fdisplay(1, "report %0d", n);
+        if (n > 0) $fwrite(1, "[%0d]", nested(n - 1));
+        return n * 2;
+    endfunction
+    function automatic int nested(int n);
+        $fwrite(1, "nested %0d;", n);
+        return n + 1;
+    endfunction
+    always #1 clk = ~clk;
+    always @(posedge clk) begin
+        count <= count + 1;
+        $fwrite(1, "edge %0d;", count);
+    end
+    initial begin
+        r = report(count + 2);
+        #3 r = report(count);
+    end
+endmodule
+"#;
+    same_as_inlined(source, 2, 6, &["r"]);
 }

@@ -27,7 +27,7 @@ impl Ff<'_, '_> {
                 arg_order: Vec::new(),
             });
         }
-        if self.kernel.is_none() {
+        if !self.can_request() {
             return Err(unsupported("`$sformatf` outside a scheduled process"));
         }
         let mut values = values
@@ -73,7 +73,7 @@ impl Ff<'_, '_> {
             None => (1, ticks_per_unit.to_string()),
         };
         self.host_request_sites.push(HostRequestSite {
-            process: 0,
+            process: celox_design::SiteProcess::own(0),
             kind: HostRequestKind::Format,
             operation,
             args: inputs,
@@ -87,8 +87,7 @@ impl Ff<'_, '_> {
             }],
             strings: vec![text],
         });
-        self.with_kernel(|kernel| kernel.host_request(HostRequestKind::Format, site))
-            .map_err(kernel_error)?;
+        self.request_host(HostRequestKind::Format, site)?;
         Ok(sv::ir::Expr::Ident(name))
     }
 

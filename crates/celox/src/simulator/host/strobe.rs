@@ -134,7 +134,7 @@ impl<B: SimBackend> Simulator<B> {
         timestamp: u64,
     ) -> Result<(), Halt> {
         let site = self.program.runtime_schema.host_request_sites[call.site].clone();
-        let process = site.process;
+        let process = site.process.index();
         let slots = self.program.runtime_schema.processes[process]
             .map(|address| self.backend.resolve_signal(&address));
         let saved: Vec<_> = slots
@@ -176,15 +176,17 @@ impl<B: SimBackend> Simulator<B> {
                             .unwrap_or(0);
                         let (kind, index) =
                             HostRequestKind::decode(word).ok_or(RuntimeErrorCode::InternalError)?;
-                        let request = self
-                            .program
-                            .runtime_schema
-                            .host_request_sites
-                            .iter()
-                            .filter(|request| request.process == process && request.kind == kind)
-                            .nth(index as usize)
-                            .cloned()
-                            .ok_or(RuntimeErrorCode::InternalError)?;
+                        let request = celox_design::host_request_site(
+                            self.program
+                                .runtime_schema
+                                .host_request_sites
+                                .iter()
+                                .filter(|request| request.process.index() == process),
+                            kind,
+                            index,
+                        )
+                        .cloned()
+                        .ok_or(RuntimeErrorCode::InternalError)?;
                         if kind != HostRequestKind::FileIo || !matches!(request.operation, 2 | 3) {
                             return Err(RuntimeErrorCode::InternalError.into());
                         }
@@ -234,7 +236,7 @@ mod tests {
         let decoded: crate::simulator::checkpoint::PersistedCheckpoint =
             postcard::from_bytes(&wire).unwrap();
         let checkpoint = decoded.bind(core).unwrap();
-        let slots = core.program.runtime_schema.processes[site.process]
+        let slots = core.program.runtime_schema.processes[site.process.index()]
             .map(|address| core.backend.resolve_signal(&address));
         let values: Vec<_> = slots
             .iter()

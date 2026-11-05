@@ -4799,7 +4799,7 @@ endmodule"#;
             site.process = count - 1 - site.process;
         }
         for site in &mut schema.host_request_sites {
-            site.process = count - 1 - site.process;
+            site.process = site.process.with_index(count - 1 - site.process.index());
         }
         program.sir.processes.reverse();
         let image =
