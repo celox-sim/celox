@@ -106,7 +106,14 @@ pub(super) fn replay(program: &LaidOutProgram, g: &mut Generator<'_>, checks: &[
         let in_bounds = g.binary(1, next, BinaryOp::LeU, len);
         g.arena_require(in_bounds);
         let width = g.constant(object.width as u64, 64);
-        nba::writes::write(g, object, object, Some(record), zero, width);
+        let write = |g: &mut Generator<'_>, record| {
+            if object.element.is_none() {
+                nba::writes::write_whole(g, object, record);
+            } else {
+                nba::writes::write(g, object, object, Some(record), zero, width);
+            }
+        };
+        write(g, record);
         for &check_index in affected.get(&signal).map_or(&[][..], Vec::as_slice) {
             let check = &checks[check_index];
             let wait = check.wait;
@@ -142,7 +149,7 @@ pub(super) fn replay(program: &LaidOutProgram, g: &mut Generator<'_>, checks: &[
         }
         let offset = g.constant(((8 + words) * 8) as u64, 64);
         let restore = g.binary(64, record, BinaryOp::Add, offset);
-        nba::writes::write(g, object, object, Some(restore), zero, width);
+        write(g, restore);
         g.b.seal_block(SIRTerminator::Jump(again, vec![next]));
     }
     g.b.switch_to_block(done);

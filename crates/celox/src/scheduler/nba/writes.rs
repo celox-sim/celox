@@ -173,6 +173,56 @@ fn value(
     }
 }
 
+/// Store a captured value of all of `object`, which is not an array, at
+/// constant positions, and return whether it changed. The general range
+/// store would select chunk sizes at run time for every such object.
+pub(in crate::scheduler) fn write_whole(
+    g: &mut Generator<'_>,
+    object: Object,
+    record: RegisterId,
+) -> RegisterId {
+    debug_assert!(object.element.is_none());
+    let words = object.width.div_ceil(64);
+    let mut changed = g.constant(0, 1);
+    for offset in (0..object.width).step_by(64) {
+        let width = (object.width - offset).min(64);
+        let word = g.constant((VALUE + offset / 64) as u64, 64);
+        let bits = g.arena_load(record, word);
+        let value = if g.keeps_unknowns(object.signal) {
+            let word = g.constant((VALUE + words + offset / 64) as u64, 64);
+            let mask = g.arena_load(record, word);
+            let packed = g.b.alloc_bit(128, false);
+            g.b.emit(SIRInstruction::Concat(packed, vec![mask, bits]));
+            let value = g.b.alloc_logic(64);
+            g.b.emit(SIRInstruction::Unary(
+                value,
+                celox_design::UnaryOp::FromPlanes,
+                packed,
+            ));
+            value
+        } else {
+            bits
+        };
+        let value = if width == 64 {
+            value
+        } else {
+            let narrow = if g.keeps_unknowns(object.signal) {
+                g.b.alloc_logic(width)
+            } else {
+                g.b.alloc_bit(width, false)
+            };
+            g.b.emit(SIRInstruction::Slice(narrow, value, 0, width));
+            narrow
+        };
+        let before = g.load_state(object.signal, offset, width);
+        g.store_state(object.signal, offset, width, value);
+        let after = g.load_state(object.signal, offset, width);
+        let differs = g.binary(1, before, BinaryOp::NeCase, after);
+        changed = g.binary(1, changed, BinaryOp::Or, differs);
+    }
+    changed
+}
+
 /// Caller clips width to both the staged value and the destination object.
 /// Full native chunks are preferred; only short tails use smaller stores.
 pub(in crate::scheduler) fn write(
