@@ -19,9 +19,14 @@
 //!
 //! The frame of a function holds its own frame base and call depth first
 //! (the caller passes both: a unit run by the runtime starts with an empty
-//! stack at offset zero and depth zero), then its automatic formals, its
-//! result and its locals, then the temporaries the lowering of its body
-//! created, which a recursive activation must not share. Static storage
+//! stack at offset zero and depth zero), then the state of the calling
+//! process that its body and the bodies it reaches use ([`ProcessState`]),
+//! then its automatic formals, its result and its locals, then the
+//! temporaries the lowering of its body created, which a recursive
+//! activation must not share. The process state is the RNG state and seed
+//! of `$urandom` and the seed of `$random`: the caller passes its own and
+//! takes the states back after the call, which, as a call cannot suspend,
+//! is drawing on them in place. A unit thereby serves every process. Static storage
 //! that the analyzer found observable (`persistent_locals`, IEEE 1800-2023
 //! 13.4.2) stays a module variable shared by every activation.
 //!
@@ -77,6 +82,20 @@ impl std::fmt::Display for Reason {
     }
 }
 
+/// The state of the calling process that a subroutine's body and the bodies
+/// it reaches use, which a unit of it receives through its frame: the
+/// caller passes its own and takes the RNG states back after the call.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct ProcessState {
+    /// The process RNG of `$urandom`, `std::randomize`, object seeding and
+    /// `shuffle` (IEEE 1800-2023 18.13, 18.14).
+    pub random: bool,
+    /// The seed of `$random` without a seed argument.
+    pub dist_seed: bool,
+    /// The simulation time, which `$time` and its kin read.
+    pub time: bool,
+}
+
 /// What became of the calls of one subroutine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Outcome {
@@ -103,9 +122,9 @@ pub(super) struct Slot {
 #[derive(Debug, Clone)]
 pub(super) struct Function {
     pub name: String,
-    /// The frame's slots: the frame base, the call depth, then the formals,
-    /// result and locals, all known before the body is lowered, then the
-    /// temporaries of the body.
+    /// The frame's slots: the frame base, the call depth, the calling
+    /// process's state, then the formals, result and locals, all known
+    /// before the body is lowered, then the temporaries of the body.
     pub slots: Vec<Slot>,
     /// `None` while the body is being lowered.
     pub unit: Option<ExecutionUnit<Addr>>,
@@ -122,6 +141,11 @@ pub(super) struct Function {
     /// that was still being lowered when the call was built (a recursive
     /// call), set once every size is known.
     pub size_patches: Vec<(RegisterId, usize)>,
+    /// The slots of the calling process's state (see [`ProcessState`]):
+    /// those of the RNG state and the process seed, and that of the seed
+    /// of `$random`.
+    pub random: Option<(usize, usize)>,
+    pub dist_seed: Option<usize>,
 }
 
 impl Function {
@@ -142,6 +166,8 @@ pub(crate) struct OutOfLine {
     /// Why each subroutine asked about cannot go out of line wherever it is
     /// called, if it cannot.
     intrinsic: HashMap<String, Option<Reason>>,
+    /// The process state each subroutine asked about uses.
+    process_state: HashMap<String, ProcessState>,
     /// The outcome of the calls of each called subroutine, for the report.
     outcomes: BTreeMap<String, Outcome>,
     /// How many function bodies are being lowered, nested.
@@ -677,14 +703,25 @@ impl ProcModule<'_> {
         {
             return known.clone();
         }
-        let reason = self.find_out_of_line_reason(name);
+        let (reason, state) = self.find_out_of_line_reason(name);
         if let Some(functions) = self.out_of_line() {
             functions.intrinsic.insert(name.to_string(), reason.clone());
+            functions.process_state.insert(name.to_string(), state);
         }
         reason
     }
 
-    fn find_out_of_line_reason(&mut self, name: &str) -> Option<Reason> {
+    /// The process state that subroutine `name` and the bodies it reaches
+    /// use (see [`ProcessState`]).
+    pub(super) fn process_state(&mut self, name: &str) -> ProcessState {
+        self.out_of_line_reason(name);
+        self.out_of_line()
+            .and_then(|functions| functions.process_state.get(name).copied())
+            .unwrap_or_default()
+    }
+
+    fn find_out_of_line_reason(&mut self, name: &str) -> (Option<Reason>, ProcessState) {
+        let mut state = ProcessState::default();
         let mut found: Option<Reason> = None;
         let mut note = |reason: Reason| {
             if found.as_ref().is_none_or(|known| reason < *known) {
@@ -749,53 +786,43 @@ impl ProcModule<'_> {
             while let Some((callee, args)) = calls.pop() {
                 match callee {
                     sv::ir::Callee::System(function) => {
-                        if function.is_host_request() {
-                            note(Reason::HostRequest);
-                        } else if function.reads_simulation_state() {
-                            // `$time`, `$urandom` and the like read the
-                            // process or the simulation, not the frame.
-                            note(Reason::Other("reads simulation state".to_string()));
+                        use sv::ir::SystemFunction;
+                        match function {
+                            _ if function.is_host_request() => note(Reason::HostRequest),
+                            SystemFunction::Urandom
+                            | SystemFunction::UrandomRange
+                            | SystemFunction::ScopeRandomize
+                            | SystemFunction::ScopeRandomizeEnum => state.random = true,
+                            SystemFunction::Random if args.is_empty() => state.dist_seed = true,
+                            // They advance the seed in their argument.
+                            SystemFunction::Random | SystemFunction::DistUniform => {}
+                            SystemFunction::Time
+                            | SystemFunction::Stime
+                            | SystemFunction::Realtime => state.time = true,
+                            // The sampled values are those of the calling
+                            // process's site (IEEE 1800-2023 16.9.3).
+                            _ if function.reads_simulation_state() => {
+                                note(Reason::Other("reads simulation state".to_string()));
+                            }
+                            _ => {}
                         }
                     }
                     sv::ir::Callee::String(sv::ir::StringOp::Format { .. }) => {
                         note(Reason::HostRequest);
                     }
                     sv::ir::Callee::Object(op) => match &*op {
-                        // Heap and container calls, which need nothing
-                        // but the heap.
-                        sv::ir::ObjectOp::Load(_)
-                        | sv::ir::ObjectOp::Store(_)
-                        | sv::ir::ObjectOp::ClassOf
-                        | sv::ir::ObjectOp::Check(_)
-                        | sv::ir::ObjectOp::Box(_)
-                        | sv::ir::ObjectOp::Unbox(_)
-                        | sv::ir::ObjectOp::NewEvent
-                        | sv::ir::ObjectOp::Concat(_)
-                        | sv::ir::ObjectOp::Locator(_)
-                        | sv::ir::ObjectOp::Pattern(_)
-                        | sv::ir::ObjectOp::Stream(_)
-                        | sv::ir::ObjectOp::ConstraintModeGet(_)
-                        | sv::ir::ObjectOp::ConstraintModeSet(_)
-                        | sv::ir::ObjectOp::ModeGet(..)
-                        | sv::ir::ObjectOp::ModeSet(_)
-                        | sv::ir::ObjectOp::RegisterProgram(..)
-                        | sv::ir::ObjectOp::ProgramRegistered(_) => {}
-                        sv::ir::ObjectOp::Container {
+                        // Construction seeds the object from the process
+                        // RNG (IEEE 1800-2023 18.14.3), and `shuffle` draws
+                        // on it.
+                        sv::ir::ObjectOp::New { .. }
+                        | sv::ir::ObjectOp::Container {
                             op: sv::ir::ContainerOp::Shuffle,
                             ..
-                        } => note(Reason::Other("process random state".to_string())),
-                        sv::ir::ObjectOp::Container { .. } => {}
-                        // Construction draws on the process RNG (IEEE
-                        // 1800-2023 18.14), and so do randomization and the
-                        // object RNG.
-                        op => {
-                            let debug = format!("{op:?}");
-                            let variant = debug
-                                .split(|c: char| !c.is_alphanumeric())
-                                .next()
-                                .unwrap_or_default();
-                            note(Reason::Other(format!("object operation {variant}")));
-                        }
+                        } => state.random = true,
+                        // The rest are heap calls, which need nothing but
+                        // the heap: randomization and the object RNG draw
+                        // on the object's own RNG, which is in it.
+                        _ => {}
                     },
                     sv::ir::Callee::String(_)
                     | sv::ir::Callee::Checked { .. }
@@ -814,7 +841,7 @@ impl ProcModule<'_> {
                 }
             }
         }
-        found
+        (found, state)
     }
 
     /// Whether a call of `subroutine` with `args` has only constant
