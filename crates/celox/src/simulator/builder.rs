@@ -5132,6 +5132,54 @@ endmodule"#;
         not(feature = "arm64-codegen")
     ))]
     #[test]
+    fn native_scheduler_delayed_nba_code_grows_linearly() {
+        // Every process both stages a delayed NBA and waits on the clock:
+        // publishing a site must not copy every wait check, nor replaying a
+        // host input every whole-object store, once per site or call.
+        for four_state in [false, true] {
+            let size = |processes| {
+                let mut source = String::from(
+                    "`timescale 1ns/1ns\nmodule Top; bit clk = 0; always #1 clk = ~clk;\n",
+                );
+                for index in 0..processes {
+                    source += &format!("logic [71:0] r{index} = 0;\n");
+                    let previous = index.max(1) - 1;
+                    source += &format!("always @(posedge clk) r{index} <= #1 r{previous} + 1;\n");
+                }
+                source += "endmodule\n";
+                let mut builder = crate::Simulation::from_sv_sources(
+                    vec![(source.as_str(), std::path::Path::new("delayed-nbas.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .emit_triggers();
+                builder.native_file_calls = true;
+                let (program, _, _, _, _) = builder
+                    .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, true)
+                    .unwrap();
+                let scheduler = program.runtime.runtime_schema.scheduler.as_ref().unwrap();
+                assert!(scheduler.fallback.iter().all(Option::is_none));
+                program.sir.processes[scheduler.unit.unwrap()]
+                    .blocks
+                    .values()
+                    .map(|block| block.instructions.len())
+                    .sum::<usize>()
+            };
+            let small = size(32);
+            let large = size(64);
+            assert!(
+                large < small * 3,
+                "quadratic delayed NBA code: {small} -> {large}, four_state={four_state}"
+            );
+        }
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    #[test]
     fn native_scheduler_host_wait_scans_grow_linearly() {
         for four_state in [false, true] {
             let size = |processes| {

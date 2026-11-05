@@ -340,6 +340,16 @@ impl Sites {
         record: Option<RegisterId>,
         checks: &[WaitCheck<'_>],
     ) {
+        let changed = self.apply(g, index, record);
+        g.if_bit(changed, 0, |g| {
+            g.mark_dirty();
+            g.check_waits_at(checks, false);
+        });
+    }
+
+    /// Write one site's update and pulse its scheduler edges, returning
+    /// whether the target changed. The caller checks the waits.
+    fn apply(&self, g: &mut Generator<'_>, index: usize, record: Option<RegisterId>) -> RegisterId {
         let site = &self.sites[index];
         let observation = &self.observations[index];
         let objects = self.objects[index];
@@ -404,10 +414,7 @@ impl Sites {
             }
             g.store_at(g.slots.exit_arg, g.event_bits, g.event_bits, pulses);
         }
-        g.if_bit(changed, 0, |g| {
-            g.mark_dirty();
-            g.check_waits_at(checks, false);
-        });
+        changed
     }
 
     /// Include the heap root when selecting the next generated time slot.
@@ -504,6 +511,11 @@ impl Sites {
         g.b.switch_to_block(queued);
         let record = self.queue.pop(g);
         let site = self.queue.read(g, record, SITE);
+        // Every site's update joins one wait check: the queue can hold a
+        // record of any site, and checking the waits in each site's block
+        // would copy them once per site of the design.
+        let changed = g.b.alloc_bit(1, false);
+        let applied = g.b.new_block_with(vec![changed]);
         let blocks: Vec<_> = self.sites.iter().map(|_| g.b.new_block()).collect();
         let mut targets = vec![bad; self.site_count];
         for (&id, &block) in self.global.iter().zip(&blocks) {
@@ -513,11 +525,17 @@ impl Sites {
         for (index, block) in blocks.into_iter().enumerate() {
             let site = &self.sites[index];
             g.b.switch_to_block(block);
-            self.update(g, index, Some(record), checks);
+            let differs = self.apply(g, index, Some(record));
             let class = Self::class(site, g);
             self.queue.release(g, record, class);
-            g.b.seal_block(SIRTerminator::Jump(again, Vec::new()));
+            g.b.seal_block(SIRTerminator::Jump(applied, vec![differs]));
         }
+        g.b.switch_to_block(applied);
+        g.if_bit(changed, 0, |g| {
+            g.mark_dirty();
+            g.check_waits_at(checks, false);
+        });
+        g.b.seal_block(SIRTerminator::Jump(again, Vec::new()));
         g.b.switch_to_block(flagged);
         for (index, site) in self.sites.iter().enumerate() {
             if self.processes[site.process].is_empty() {
