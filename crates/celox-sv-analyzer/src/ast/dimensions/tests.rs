@@ -29,7 +29,7 @@ fn query_number(
     root: celox_sv_syntax::ExprId,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
     context: Option<&PackedDimensions>,
 ) -> Option<usize> {
@@ -85,7 +85,7 @@ fn literal_arithmetic_queries_keep_widths_and_skip_scope_discovery() {
                 root,
                 &tree,
                 session,
-                &HashMap::default(),
+                &ConstEnv::default(),
                 &HashMap::default(),
                 Some(&input),
             )
@@ -109,7 +109,7 @@ fn queries_still_discover_names_in_unselected_conditional_arms() {
             native_calls(&tree)[0],
             &tree,
             session,
-            &HashMap::default(),
+            &ConstEnv::default(),
             &HashMap::default(),
             Some(&PackedDimensions::default()),
         ),
@@ -282,7 +282,7 @@ fn preliminary_function_scope_discovers_shadowing_formals() {
         call,
         &tree,
         session,
-        &HashMap::default(),
+        &ConstEnv::default(),
         &HashMap::default(),
         Some(&dimensions),
     )
@@ -398,7 +398,7 @@ fn nonansi_validation_leaves_generate_queries_to_elaboration() {
     crate::ast::validation::reject_silently_ignored_constructs(
         &tree,
         session,
-        &HashMap::default(),
+        &ConstEnv::default(),
         &HashMap::default(),
         &ScopedMap::default(),
         &HashMap::default(),
@@ -425,7 +425,7 @@ fn unpacked_dimensions_discovers_local_dpi_return_types() {
                 call,
                 &tree,
                 session,
-                &HashMap::default(),
+                &ConstEnv::default(),
                 &HashMap::default(),
                 None
             ),
@@ -453,7 +453,7 @@ fn unpacked_dimensions_preserves_runtime_indexed_range_types() {
             call,
             &tree,
             session,
-            &HashMap::default(),
+            &ConstEnv::default(),
             &HashMap::default(),
             None
         ),
@@ -482,7 +482,7 @@ fn preliminary_unpacked_queries_resolve_preceding_declaration_ranges() {
                 calls[0],
                 &tree,
                 session,
-                &HashMap::default(),
+                &ConstEnv::default(),
                 &aliases,
                 None
             ),
@@ -494,7 +494,7 @@ fn preliminary_unpacked_queries_resolve_preceding_declaration_ranges() {
                 calls[1],
                 &tree,
                 session,
-                &HashMap::default(),
+                &ConstEnv::default(),
                 &aliases,
                 None
             ),
@@ -523,7 +523,7 @@ fn preliminary_unpacked_queries_discover_array_parameters_before_dependent_range
                 calls[0],
                 &tree,
                 session,
-                &HashMap::default(),
+                &ConstEnv::default(),
                 &HashMap::default(),
                 None,
             ),
@@ -535,7 +535,7 @@ fn preliminary_unpacked_queries_discover_array_parameters_before_dependent_range
                 calls[1],
                 &tree,
                 session,
-                &HashMap::default(),
+                &ConstEnv::default(),
                 &HashMap::default(),
                 None,
             ),
@@ -577,7 +577,7 @@ fn preliminary_unpacked_queries_prefer_values_over_imported_typedefs() {
     let tree = AnalysisContext::unspecialized(&tree);
     let call = native_calls(&tree)[0];
     assert_eq!(
-        query_number(call, &tree, session, &HashMap::default(), &aliases, None),
+        query_number(call, &tree, session, &ConstEnv::default(), &aliases, None),
         Some(0)
     );
 }
@@ -679,7 +679,7 @@ fn preliminary_literal_queries_do_not_discover_scope_declarations() {
                 *call,
                 &tree,
                 session,
-                &HashMap::default(),
+                &ConstEnv::default(),
                 &HashMap::default(),
                 Some(&context),
             )
@@ -693,7 +693,7 @@ fn preliminary_literal_queries_do_not_discover_scope_declarations() {
                 *call,
                 &tree,
                 session,
-                &HashMap::default(),
+                &ConstEnv::default(),
                 &HashMap::default(),
                 Some(&input),
             )
@@ -728,7 +728,7 @@ fn discovery_prefix_does_not_copy_a_growing_symbol_overlay() {
             calls[0],
             &tree,
             session,
-            &HashMap::default(),
+            &ConstEnv::default(),
             &HashMap::default(),
             None,
         ),

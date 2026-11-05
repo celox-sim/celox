@@ -1965,6 +1965,7 @@ pub fn lower_frontend_artifact(
         arena,
         reset_clock_map,
         processes,
+        functions: Vec::new(),
         package_bindings: HashMap::default(),
         hierarchical_bindings: HashMap::default(),
         counter_slots,

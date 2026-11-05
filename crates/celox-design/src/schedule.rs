@@ -73,6 +73,23 @@ pub struct ProcessModel<A> {
 }
 
 impl<A: Copy + Eq> ProcessModel<A> {
+    /// The compact wait encoding is an optimization, not a limit on event
+    /// controls. All other shapes use a snapshot selected by the full site id.
+    pub fn compact_wait_terms(
+        &self,
+        mut width: impl FnMut(A) -> usize,
+    ) -> Option<(Vec<(A, CounterKind)>, Vec<usize>)> {
+        if self.waits.iter().flatten().any(|term| term.gate.is_some()) {
+            return None;
+        }
+        let (terms, sites) = self.wait_terms()?;
+        let max_terms = 1 << (crate::SCHEDULER_FLAG_WIDTH - crate::BASELINE_TERM_SHIFT as usize);
+        (terms.len() <= max_terms
+            && (terms.len() == 1 || sites.len() <= 256)
+            && terms.iter().all(|&(signal, _)| width(signal) == 1))
+        .then_some((terms, sites))
+    }
+
     /// The common event-expression list when every site waits for the same
     /// expressions. Different scalar sites use `wait_terms` instead.
     pub fn common_wait_terms(&self) -> Option<&[TermModel<A>]> {
@@ -231,6 +248,9 @@ pub struct CompiledWaitTerm {
     pub plane_bits: usize,
     /// Saved occurrence counter, independent of the last visible value.
     pub counter_offset: Option<usize>,
+    /// Accepted occurrences for an `iff` term. `counter_offset` keeps all
+    /// occurrences so a rejected write cannot be accepted by a later gate.
+    pub gated_counter_offset: Option<usize>,
 }
 
 impl CompiledWaitLayout {
@@ -247,10 +267,21 @@ impl CompiledWaitLayout {
     }
 
     pub fn with_counters(terms: &[(usize, bool, bool)]) -> Option<Self> {
-        if terms.is_empty() || terms.iter().any(|&(width, _, _)| width == 0) {
+        Self::with_gate_counters(
+            &terms
+                .iter()
+                .map(|&(w, m, c)| (w, m, c, false))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// Dimensions are (logical width, unknown plane, occurrence counter,
+    /// gated occurrence counter). An empty list represents an inert wait.
+    pub fn with_gate_counters(terms: &[(usize, bool, bool, bool)]) -> Option<Self> {
+        if terms.iter().any(|&(width, _, _, _)| width == 0) {
             return None;
         }
-        if let &[(1, mask, false)] = terms {
+        if let &[(1, mask, false, false)] = terms {
             return Some(Self {
                 terms: vec![CompiledWaitTerm {
                     width: 1,
@@ -258,6 +289,7 @@ impl CompiledWaitLayout {
                     mask_offset: mask.then_some(1),
                     plane_bits: 1,
                     counter_offset: None,
+                    gated_counter_offset: None,
                 }],
                 bits: 8,
                 scalar_byte: true,
@@ -266,7 +298,7 @@ impl CompiledWaitLayout {
         let mut offset = 0usize;
         let terms = terms
             .iter()
-            .map(|&(width, mask, counted)| {
+            .map(|&(width, mask, counted, gated)| {
                 let plane_bits = width.div_ceil(64).checked_mul(64)?;
                 let value_offset = offset;
                 offset = offset.checked_add(plane_bits)?;
@@ -277,7 +309,14 @@ impl CompiledWaitLayout {
                 } else {
                     None
                 };
-                let counter_offset = if counted {
+                let counter_offset = if counted || gated {
+                    let at = offset;
+                    offset = offset.checked_add(32)?;
+                    Some(at)
+                } else {
+                    None
+                };
+                let gated_counter_offset = if gated {
                     let at = offset;
                     offset = offset.checked_add(32)?;
                     Some(at)
@@ -290,6 +329,7 @@ impl CompiledWaitLayout {
                     mask_offset,
                     plane_bits,
                     counter_offset,
+                    gated_counter_offset,
                 })
             })
             .collect::<Option<Vec<_>>>()?;

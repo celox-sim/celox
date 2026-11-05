@@ -15,8 +15,8 @@ fn symbolic_shape() -> VariableDimensions {
     procedural::dimensions_from_type(&ty)
 }
 
-fn env(width: i128) -> HashMap<String, i128> {
-    HashMap::from_iter([("N".into(), width)])
+fn env(width: i128) -> ConstEnv {
+    ConstEnv::from_iter([("N".into(), width)])
 }
 
 fn assert_width(table: &TyTable, id: TyId, width: u128) {
@@ -56,7 +56,7 @@ fn unresolved_shapes_are_not_frozen_by_provisional_queries() {
     let functions = const_functions::ConstantFunctions::default();
     assert!(
         shape
-            .bind_type(&mut table, &functions, &HashMap::default())
+            .bind_type(&mut table, &functions, &ConstEnv::default())
             .is_none()
     );
     let five = shape.type_id(&mut table, &functions, &env(5)).unwrap();
@@ -92,11 +92,11 @@ fn class_identity_changes_cannot_reuse_a_previous_binding() {
     let mut table = TyTable::default();
     let functions = const_functions::ConstantFunctions::default();
     let first = shape
-        .bind_type(&mut table, &functions, &HashMap::default())
+        .bind_type(&mut table, &functions, &ConstEnv::default())
         .unwrap();
     shape.class = Some("D".into());
     let second = shape
-        .type_id(&mut table, &functions, &HashMap::default())
+        .type_id(&mut table, &functions, &ConstEnv::default())
         .unwrap();
     assert_ne!(first, second);
     assert!(
@@ -112,7 +112,7 @@ fn renaming_references_preserves_the_evaluated_declaration_type() {
     let id = shape.bind_type(&mut table, &functions, &env(5)).unwrap();
     let names = HashMap::from_iter([("N".into(), "P".into())]);
     let renamed = scope::Renamer { names: &names }.dimensions(shape);
-    let caller = HashMap::from_iter([("P".into(), 99)]);
+    let caller = ConstEnv::from_iter([("P".into(), 99)]);
     assert_eq!(renamed.type_id(&mut table, &functions, &caller), Some(id));
     assert_width(&table, id, 5);
 }
@@ -209,12 +209,12 @@ fn generated_formals_keep_their_declaration_scope_bounds() {
     let (_, shapes, _) = procedural::subroutine_argument_names(
         &tree,
         &mut session,
-        &HashMap::default(),
+        &ConstEnv::default(),
         &SharedMap::default(),
     )
     .unwrap();
     let formal = &shapes["g.f"][0];
-    let caller = HashMap::from_iter([("W".into(), 99)]);
+    let caller = ConstEnv::from_iter([("W".into(), 99)]);
     let id = formal
         .type_id(&mut session.types, &tree.functions, &caller)
         .unwrap();

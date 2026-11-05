@@ -10,7 +10,7 @@
 use std::rc::Rc;
 
 use super::*;
-use crate::system_functions::{HandleProperty, ObjectField, ObjectOp};
+use crate::system_functions::{ContainerKind, HandleProperty, ObjectField, ObjectOp};
 
 pub(super) mod constraints;
 pub(super) mod foreign;
@@ -39,6 +39,33 @@ pub(super) struct Property {
 }
 
 impl Property {
+    /// A rand object handle: the variables and constraints of the object it
+    /// refers to are solved with those of the object that holds it (IEEE
+    /// 1800-2023 18.4).
+    /// Whether the property is a dynamic array or queue (IEEE 1800-2023
+    /// 7.5, 7.10), whose size a constraint may name (18.4).
+    pub fn sequence(&self) -> bool {
+        self.r#type.unpacked_ranges.is_empty()
+            && self.r#type.container.as_ref().is_some_and(|container| {
+                matches!(
+                    container.layout.kind,
+                    ContainerKind::Dynamic | ContainerKind::Queue { .. }
+                )
+            })
+    }
+
+    /// Whether the property is a rand dynamic array or queue.
+    pub fn rand_array(&self) -> bool {
+        (self.rand || self.randc) && self.sequence()
+    }
+
+    pub fn rand_object(&self) -> bool {
+        self.rand
+            && self.r#type.class().is_some()
+            && self.r#type.container.is_none()
+            && self.r#type.unpacked_ranges.is_empty()
+    }
+
     pub fn cyclic_domain_size(&self) -> Option<u16> {
         if self.field.handle.is_some() {
             return None;
@@ -153,6 +180,9 @@ pub(super) struct Class {
     pub size: u32,
     pub has_constraints: bool,
     pub constraints: Vec<(String, Result<Vec<celox_heap::randomization::Expr>, String>)>,
+    /// The constraint program of the class, or why it has none, built once
+    /// for each class when it is laid out.
+    pub program: Converted<celox_heap::randomization::Program>,
 }
 
 /// An internal unsigned packed argument of a generated method.
@@ -171,10 +201,58 @@ impl Class {
         unsigned_type(self.properties.len() + 1)
     }
 
+    /// Register the class's constraint program once, from its constructor,
+    /// for the objects of it that rand object handles reach: which classes
+    /// those are is known only at run time (IEEE 1800-2023 18.4). A class
+    /// with nothing random registers nothing; one the solver cannot take
+    /// registers why, which faults only when such an object is reached.
+    pub fn program_registration(&self) -> Option<Stmt> {
+        use celox_heap::randomization::Registered;
+        if !self.has_constraints && !self.properties.iter().any(|p| p.rand || p.randc) {
+            return None;
+        }
+        let program = match self
+            .check_randomize()
+            .and_then(|()| self.constraint_program())
+        {
+            Ok(program) => Registered::Program(program.into()),
+            Err(error) => Registered::Unsupported(error.to_string()),
+        };
+        Some(Stmt::If {
+            condition: Expr::Binary {
+                left: Box::new(object_call(
+                    ObjectOp::ProgramRegistered(self.id),
+                    Vec::new(),
+                )),
+                op: BinaryOp::Eq,
+                right: Box::new(Expr::Literal("1'b0".into())),
+            },
+            then_body: vec![Stmt::Eval(object_call(
+                ObjectOp::RegisterProgram(self.id, program),
+                Vec::new(),
+            ))],
+            else_body: Vec::new(),
+        })
+    }
+
+    /// Whether a rand object handle of the class makes `randomize` solve the
+    /// objects it refers to (IEEE 1800-2023 18.4).
+    pub fn has_rand_objects(&self) -> bool {
+        self.properties.iter().any(Property::rand_object)
+    }
+
+    /// Whether `randomize` solves the class's constraint program: it has
+    /// constraints, rand object handles or rand arrays.
+    pub fn solved(&self) -> bool {
+        self.has_constraints
+            || self.has_rand_objects()
+            || self.properties.iter().any(Property::rand_array)
+    }
+
     /// Validate the supported unconstrained subset before binding a call.
     pub fn check_randomize(&self) -> Converted<()> {
-        if self.has_constraints {
-            self.constraint_program()?;
+        if self.solved() {
+            self.check_constraint_program()?;
         }
         for property in &self.properties {
             if property.randc && property.cyclic_domain_size().is_none() {
@@ -186,7 +264,9 @@ impl Class {
                 return Err(unsupported("randomization of a 4-state class property"));
             }
             if (property.rand || property.randc)
-                && (property.field.handle.is_some()
+                && ((property.field.handle.is_some()
+                    && !property.rand_object()
+                    && !property.rand_array())
                     || property.r#type.holds_chandle()
                     || (property.r#type.is_enum && property.r#type.enum_domain.is_none()))
             {
@@ -312,7 +392,7 @@ impl Class {
         tree: &AnalysisContext<'_>,
         session: &mut Session,
         ancestor: &str,
-        env: &HashMap<String, i128>,
+        env: &ConstEnv,
         aliases: &HashMap<String, Type>,
     ) -> bool {
         let mut pending = vec![self.name.clone()];
@@ -336,7 +416,7 @@ impl Class {
         &self,
         tree: &AnalysisContext<'_>,
         session: &mut Session,
-        env: &HashMap<String, i128>,
+        env: &ConstEnv,
         aliases: &HashMap<String, Type>,
     ) -> HashSet<String> {
         let mut pending = vec![self.name.clone()];
@@ -459,7 +539,7 @@ pub(super) fn scope_declarations<'a>(
 pub(super) fn scope_classes(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
 ) -> Vec<Class> {
     let names = scope_declarations(tree)
         .flat_map(|declaration| specializations_of(tree, session, declaration))
@@ -679,7 +759,7 @@ pub(super) fn item_statics(
     item: celox_sv_syntax::BodyItemId,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
 ) -> Vec<StaticProperty> {
     item_classes(item, tree, session)
@@ -782,7 +862,7 @@ pub(super) fn class(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     name: &str,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
 ) -> Converted<Rc<Class>> {
     if let Some(class) = session.classes.get(name) {
@@ -802,7 +882,7 @@ pub(super) fn class(
 pub(super) fn shared_class(
     tree: &AnalysisContext<'_>,
     name: &str,
-    env: &SharedMap<i128>,
+    env: &SharedEnv,
     aliases: &SharedMap<Type>,
     session: &mut Session,
 ) -> Converted<Rc<Class>> {
@@ -1128,9 +1208,10 @@ pub(super) fn shared_class(
             constraints.push((block_name, expressions));
         }
     }
-    let class = Rc::new(Class {
+    let mut class = Class {
         name: name.to_owned(),
         id: class_id(name),
+        program: Ok(Default::default()),
         constraints,
         has_constraints: declaration.has_constraints
             || base.as_ref().is_some_and(|base| base.has_constraints),
@@ -1145,7 +1226,9 @@ pub(super) fn shared_class(
         methods,
         declarations: Vec::new(),
         size: size.max(1),
-    });
+    };
+    class.program = class.build_constraint_program();
+    let class = Rc::new(class);
     session.classes.insert(name.to_owned(), class.clone());
     Ok(class)
 }
@@ -1156,7 +1239,7 @@ fn interface_name(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     interface: celox_sv_syntax::TypeId,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
 ) -> Converted<String> {
     let native = tree.declarations();
@@ -1185,7 +1268,7 @@ fn interface_class(
     name: &str,
     declaration: &celox_sv_syntax::ClassDeclaration,
     interfaces: Vec<String>,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     context: &PackedDimensions,
 ) -> Converted<Rc<Class>> {
     let aliases = &*context.type_aliases;
@@ -1255,6 +1338,7 @@ fn interface_class(
         is_interface: true,
         has_constraints: false,
         constraints: Vec::new(),
+        program: Ok(Default::default()),
         properties: Vec::new(),
         base_properties: 0,
         aggregates: Vec::new(),
@@ -1383,7 +1467,7 @@ fn out_of_block_definition(
 pub(super) fn field(
     functions: &const_functions::ConstantFunctions,
     ty: &Type,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     offset: u32,
 ) -> Converted<ObjectField> {
     if ty.unpacked_struct().is_some() {
@@ -1435,7 +1519,7 @@ fn object_classes(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     ancestor: &str,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
 ) -> Converted<Vec<Rc<Class>>> {
     let concrete = ConcreteClasses::of(tree, session, env, aliases);
@@ -1470,7 +1554,7 @@ impl ConcreteClasses {
     fn of(
         tree: &AnalysisContext<'_>,
         session: &mut Session,
-        env: &HashMap<String, i128>,
+        env: &ConstEnv,
         aliases: &HashMap<String, Type>,
     ) -> Rc<Self> {
         let generation =
@@ -1505,6 +1589,56 @@ impl ConcreteClasses {
     }
 }
 
+/// The classes of the objects the rand object handles of an object of
+/// `class` may reach: those deriving from the class of each such handle,
+/// and so on through their own (IEEE 1800-2023 18.4).
+pub(super) fn rand_member_classes(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    class: &Class,
+    env: &ConstEnv,
+    aliases: &HashMap<String, Type>,
+) -> Converted<Vec<Rc<Class>>> {
+    let handle_classes = |class: &Class| {
+        class
+            .properties
+            .iter()
+            .filter(|property| property.rand_object())
+            .filter_map(|property| property.r#type.class().map(str::to_owned))
+            .collect::<Vec<_>>()
+    };
+    let mut pending = handle_classes(class);
+    let mut seen = HashSet::default();
+    let mut ids = HashSet::default();
+    let mut classes = Vec::new();
+    while let Some(name) = pending.pop() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        for member in object_classes(tree, session, &name, env, aliases)? {
+            if ids.insert(member.id) {
+                pending.extend(handle_classes(&member));
+                classes.push(member);
+            }
+        }
+    }
+    Ok(classes)
+}
+
+/// The implementations of randomize hook `method` (`pre_randomize` or
+/// `post_randomize`) that the objects of each of `classes` run, by class id
+/// (IEEE 1800-2023 18.6.2).
+pub(super) fn hook_targets(classes: &[Rc<Class>], method: &str) -> Vec<(u32, String)> {
+    classes
+        .iter()
+        .filter_map(|class| {
+            class
+                .method(method)
+                .map(|hook| (class.id, Class::subroutine_name(&hook.owner, &hook.name)))
+        })
+        .collect()
+}
+
 /// The overrides that dispatcher `Class::dispatcher_name(owner, method)`
 /// calls: each implementation of the method with the classes, deriving from
 /// or implementing `owner` and not abstract, whose objects run it.
@@ -1513,7 +1647,7 @@ pub(super) fn dispatch_targets(
     session: &mut Session,
     owner: &str,
     method: &str,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
 ) -> Converted<Vec<(String, Vec<u32>)>> {
     let mut targets: Vec<(String, Vec<u32>)> = Vec::new();
@@ -1536,7 +1670,7 @@ pub(super) fn cast_targets(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     name: &str,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
 ) -> Converted<Vec<u32>> {
     Ok(object_classes(tree, session, name, env, aliases)?

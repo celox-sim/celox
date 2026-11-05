@@ -55,6 +55,8 @@ pub(super) struct ShadowCheck<'a, B: SimBackend> {
     one_slot: bool,
     /// The time the step in progress started from.
     start: u64,
+    /// Host settling can be a complete generated run at the current time.
+    host_entry: bool,
     /// Steps checked.
     pub(super) checked: u64,
 }
@@ -65,6 +67,7 @@ impl<'a, B: SimBackend> ShadowCheck<'a, B> {
             shadow,
             one_slot: mode != crate::SchedulerMode::DifferentialRuns,
             start: 0,
+            host_entry: false,
             checked: 0,
         }
     }
@@ -99,6 +102,7 @@ impl<B: SimBackend> StepObserver<Simulator<B>> for ShadowCheck<'_, B> {
 
     fn before_step(&mut self, state: &SimulationState<B>, primary: &mut Simulator<B>) {
         self.start = state.time();
+        self.host_entry = state.host_pending();
         let shadow = &mut *self.shadow;
         shadow.simulator.mirror(primary);
         if state.is_suspended() {
@@ -122,6 +126,15 @@ impl<B: SimBackend> StepObserver<Simulator<B>> for ShadowCheck<'_, B> {
         result: &Result<Option<u64>, RuntimeErrorCode>,
     ) -> Result<(), RuntimeErrorCode> {
         let shadow = &mut *self.shadow;
+        // A generated host-input run may end after settling the current
+        // timestamp. The reference's step normally continues to the next
+        // event, so stop it at the same legal boundary for this comparison.
+        // Compare the complete state and pending queues there as usual.
+        let limit = if self.host_entry && matches!(result, Ok(Some(time)) if *time == self.start) {
+            limit.min(self.start)
+        } else {
+            limit
+        };
         let mut reference = shadow.state.step_until(&mut shadow.simulator, limit);
         // A compiled run of several slots: the shadow runs them one by one,
         // up to the last slot of the run, or to the slot a failed run ended
@@ -275,14 +288,49 @@ fn first_difference<B: SimBackend>(
         let memory = unsafe { std::slice::from_raw_parts(ptr, len) };
         memory[range.clone()].to_vec()
     };
+    let primary_layout = primary.layout();
     let (primary, shadow) = (bytes(primary), bytes(shadow));
-    primary
+    // Native and interpreted stores may preserve different unused bits in a
+    // physical slot. Compare every declared stable value/mask bit, including
+    // anonymous process state, but not alignment or per-element padding.
+    let layout = primary_layout;
+    layout
+        .offsets
         .iter()
-        .zip(&shadow)
-        .enumerate()
-        .map(|(index, pair)| (range.start + index, pair))
-        .find(|(offset, (a, b))| a != b && !excluded.iter().any(|r| r.contains(offset)))
+        .flat_map(|(address, &base)| {
+            let width = layout.widths[address];
+            let (elements, stride, bits) = layout.unpacked_arrays.get(address).map_or(
+                (1, layout.plane_size(address), width),
+                |array| {
+                    (
+                        array.element_count,
+                        array.element_stride,
+                        array.element_width,
+                    )
+                },
+            );
+            let planes = if layout.four_state && layout.is_4states[address] {
+                2
+            } else {
+                1
+            };
+            (0..planes).flat_map(move |plane| {
+                (0..elements).flat_map(move |element| {
+                    (0..bits.div_ceil(8)).map(move |byte| {
+                        let offset =
+                            base + plane * layout.plane_size(address) + element * stride + byte;
+                        let mask = ((1u16 << (bits - byte * 8).min(8)) - 1) as u8;
+                        (offset, mask)
+                    })
+                })
+            })
+        })
+        .filter(|&(offset, mask)| {
+            (primary[offset - range.start] ^ shadow[offset - range.start]) & mask != 0
+                && !excluded.iter().any(|r| r.contains(&offset))
+        })
         .map(|(offset, _)| offset)
+        .min()
 }
 
 #[cfg(all(test, feature = "systemverilog"))]
@@ -309,6 +357,57 @@ mod tests {
             .scheduler_mode(mode)
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn differential_ignores_storage_padding_but_checks_each_value_and_mask_plane() {
+        use crate::SimBackend;
+        let source =
+            "module Top(output logic [12:0] scalar, output logic [12:0] words[3]); endmodule";
+        for four_state in [false, true] {
+            let make = || {
+                Simulation::from_sv_sources(
+                    vec![(source, Path::new("differential-padding.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .scheduler_mode(SchedulerMode::Reference)
+                .build_interpreter()
+                .unwrap()
+            };
+            let mut primary = make();
+            let reference = make();
+            for name in ["scalar", "words"] {
+                let signal = primary.signal(name);
+                let (elements, stride, plane_size) =
+                    signal.array_layout.map_or((1, 2, 2), |array| {
+                        (array.element_count, array.element_stride, array.plane_size)
+                    });
+                for plane in 0..if four_state { 2 } else { 1 } {
+                    for element in 0..elements {
+                        let offset = signal.offset + plane * plane_size + element * stride + 1;
+                        let backend = &mut primary.simulator.backend;
+                        let (pointer, len) = backend.memory_as_ptr();
+                        assert!(offset < len);
+                        // SAFETY: the allocation includes this element's upper byte.
+                        let old = unsafe { *pointer.add(offset) };
+                        backend.write_memory(offset, &[old ^ 0xe0]);
+                        assert_eq!(
+                            super::first_difference(backend, &reference.simulator.backend, &[]),
+                            None,
+                            "padding of {name}[{element}], plane {plane}"
+                        );
+                        backend.write_memory(offset, &[old ^ 0xe1]);
+                        assert_eq!(
+                            super::first_difference(backend, &reference.simulator.backend, &[]),
+                            Some(offset),
+                            "declared bit of {name}[{element}], plane {plane}"
+                        );
+                        backend.write_memory(offset, &[old]);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -1214,10 +1313,10 @@ mod tests {
         agrees_with_the_reference(&source, 200);
     }
 
-    /// A kernel that waits and then loops without suspending yields now and
-    /// then, and keeps the reference loop.
+    /// A kernel that loops through queued NBAs stays native and remains bounded.
     #[test]
-    fn waiting_kernels_that_yield_fall_back() {
+    fn waiting_kernels_that_yield_remain_compiled() {
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
         let reasons = |source: &str| -> Vec<String> {
             build_in(source, SchedulerMode::Compiled)
                 .scheduler_stats()
@@ -1238,19 +1337,29 @@ mod tests {
                 initial begin q = 1'b0; @(posedge clk); forever q <= ~q; end
             endmodule
         "#;
-        assert_eq!(reasons(spinning), ["a nonblocking site queues its values"]);
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        assert!(reasons(spinning).is_empty());
+        let mut sim = build_in(spinning, SchedulerMode::Compiled);
+        sim.run_until(0).unwrap();
+        sim.state.set_slot_budgets(32, 16);
+        let _before = sim.scheduler_stats().reference_steps;
+        let error = sim.run_until(10).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not suspend within one time slot"),
+            "{error}"
+        );
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        assert_eq!(sim.scheduler_stats().reference_steps, _before);
     }
 
     /// A nonblocking site in a loop runs several times in one run of its
-    /// kernel. A loop the frontend keeps yields now and then, and the
-    /// copies of one it unrolls queue their values: either way the kernel
-    /// keeps the reference loop, and every mode leaves its state.
+    /// kernel. Both retained and unrolled loops preserve every queued value
+    /// while the generated scheduler owns their steady execution.
     #[test]
-    fn nonblocking_sites_in_loops_keep_the_reference_loop() {
-        for (bound, reason) in [
-            ("n", "a nonblocking site queues its values"),
-            ("2", "a nonblocking site queues its values"),
-        ] {
+    fn nonblocking_sites_in_loops_remain_compiled() {
+        for bound in ["n", "2"] {
             for tail in ["", "$finish;"] {
                 let source = format!(
                     "`timescale 1ns/1ns
@@ -1268,19 +1377,28 @@ mod tests {
                         end
                     endmodule"
                 );
-                let kernels = build_in(&source, SchedulerMode::Compiled)
+                let _kernels = build_in(&source, SchedulerMode::Compiled)
                     .scheduler_stats()
                     .kernels;
+                #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
                 assert!(
-                    kernels.contains(&crate::KernelSchedule::Reference(reason.into())),
-                    "{bound} {tail}: {kernels:?}"
+                    _kernels
+                        .iter()
+                        .all(|kernel| *kernel == crate::KernelSchedule::Compiled),
+                    "{bound} {tail}: {_kernels:?}"
                 );
                 let mut reference = build_in(&source, SchedulerMode::Reference);
                 reference.run_until(100).unwrap();
                 let expected = reference.save_state().unwrap();
                 for mode in MODES {
                     let mut sim = build_in(&source, mode);
+                    sim.run_until(0).unwrap();
+                    let _before = sim.scheduler_stats().reference_steps;
                     sim.run_until(100).unwrap();
+                    if mode != SchedulerMode::Reference {
+                        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+                        assert_eq!(sim.scheduler_stats().reference_steps, _before);
+                    }
                     assert_eq!(
                         sim.save_state().unwrap(),
                         expected,
@@ -1293,10 +1411,10 @@ mod tests {
 
     /// A nonblocking update into what a stateful combinational process, a
     /// latch, is sensitive to bumps its occurrence counter when the
-    /// reference publishes it: the kernel keeps the reference loop, and
-    /// every mode leaves the reference's state and records.
+    /// generated scheduler publishes it. Every mode leaves the reference's
+    /// state and records.
     #[test]
-    fn nonblocking_updates_into_probed_signals_keep_the_reference_loop() {
+    fn nonblocking_updates_into_probed_signals_remain_compiled() {
         let source = r#"
             `timescale 1ns/1ns
             module Top(output logic [7:0] n);
@@ -1309,14 +1427,15 @@ mod tests {
                 assign n = l;
             endmodule
         "#;
-        let kernels = build_in(source, SchedulerMode::Compiled)
+        let _kernels = build_in(source, SchedulerMode::Compiled)
             .scheduler_stats()
             .kernels;
-        // The frontend queues this site's values, and a staged one would
-        // keep the reference loop too (`Plan::new`).
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
         assert!(
-            matches!(kernels[1], crate::KernelSchedule::Reference(_)),
-            "{kernels:?}"
+            _kernels
+                .iter()
+                .all(|kernel| *kernel == crate::KernelSchedule::Compiled),
+            "{_kernels:?}"
         );
         let displays = |sim: &mut Simulation| {
             sim.drain_runtime_events()
@@ -1329,7 +1448,13 @@ mod tests {
         let expected = (reference.save_state().unwrap(), displays(&mut reference));
         for mode in MODES {
             let mut sim = build_in(source, mode);
+            sim.run_until(0).unwrap();
+            let _before = sim.scheduler_stats().reference_steps;
             sim.run_until(100).unwrap();
+            if mode != SchedulerMode::Reference {
+                #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+                assert_eq!(sim.scheduler_stats().reference_steps, _before);
+            }
             let state = sim.save_state().unwrap();
             assert_eq!((state, displays(&mut sim)), expected, "{mode:?}");
         }
@@ -1361,14 +1486,15 @@ mod tests {
     /// `actions`, and afterwards the state file is the reference's. At least
     /// one slot must run compiled.
     fn host_driven_agrees(source: &str, runs: &[(u64, &[Host])]) {
-        let kernels = build_in(source, SchedulerMode::Compiled)
+        let _kernels = build_in(source, SchedulerMode::Compiled)
             .scheduler_stats()
             .kernels;
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
         assert!(
-            kernels
+            _kernels
                 .iter()
                 .all(|kernel| *kernel == crate::KernelSchedule::Compiled),
-            "{kernels:?}"
+            "{_kernels:?}"
         );
         let mut reference = build_in(source, SchedulerMode::Reference);
         let mut expected = Vec::new();
@@ -1385,7 +1511,8 @@ mod tests {
         ) {
             for (run, &(end, actions)) in runs.iter().enumerate() {
                 drive(&mut sim, actions);
-                sim.run_until(end).unwrap();
+                sim.run_until(end)
+                    .unwrap_or_else(|error| panic!("{label} run {run}: {error:?}"));
                 assert_eq!(
                     sim.save_state().unwrap(),
                     expected[run],

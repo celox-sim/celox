@@ -538,7 +538,7 @@ impl<'a, 'b> Elaborator<'a, 'b> {
         let integral = |expr: &ConstExpr| {
             typecheck::eval_const_integral_literal_with_types(
                 &expr.clone().into(),
-                &scope.env,
+                &*scope.env,
                 &types,
             )
             .ok_or_else(|| unsupported("nonconstant case-generate expression"))
@@ -610,7 +610,7 @@ fn next_assignment(
     value: i128,
     operator: &str,
     rhs: ConstExpr,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
 ) -> Option<i128> {
     if operator == "=" {
         return eval_ast_const_expr(functions, &rhs, env);
@@ -646,7 +646,7 @@ mod tests {
         let session = &mut Session::default();
         let tree=crate::source_tree::parse_scope_fixture("module M;function automatic int rootf();return 1;endfunction generate function automatic int regionf();return 2;endfunction endgenerate endmodule",Path::new("native-root-seeding.sv")).unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
-        let env = HashMap::default();
+        let env = ConstEnv::default();
         let aliases = HashMap::default();
         let seeded =
             items_with_literal_use(&tree, session, &env, &aliases, LiteralUse::RootSubroutines)

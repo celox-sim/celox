@@ -1,5 +1,6 @@
 //! Alias body identity through production typedef and enum consumers.
 use super::*;
+use crate::ast::ConstEnv;
 use crate::ast::Source;
 use celox_sv_syntax::{BodyItemKind, ExprKind, TypeAliasTarget};
 
@@ -15,7 +16,7 @@ fn parsed(code: &str) -> SourceTree {
     tree
 }
 fn number(value: &crate::ast::ConstExpr) -> i128 {
-    crate::typecheck::eval_const_expr(&value.clone().into(), &HashMap::default()).unwrap()
+    crate::typecheck::eval_const_expr(&value.clone().into(), &ConstEnv::default()).unwrap()
 }
 
 #[test]

@@ -798,7 +798,7 @@ pub(in crate::ast) fn validate_enum_initializers(
         let literal = expr.as_ref().and_then(|expr| {
             typecheck::eval_const_integral_literal_with_lookup(
                 &expr.clone().into(),
-                &env,
+                &*env,
                 &|name| {
                     dimensions::parameter_type_from_const_env(&env, name)
                         .map(|ty| (ty.width, ty.signed))

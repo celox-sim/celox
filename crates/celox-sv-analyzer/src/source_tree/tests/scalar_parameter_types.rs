@@ -1,5 +1,6 @@
 //! Native scalar declaration metadata/widths through actual parameter binding.
 use super::*;
+use crate::ast::ConstEnv;
 use crate::ast::Source;
 use celox_sv_syntax::{DataTypeKind, ExprKind};
 fn parsed(code: &str) -> SourceTree {
@@ -38,7 +39,7 @@ fn native_scalar_bound_environment_respects_module_parameter_overrides() {
         let source = Source::from_syntax_with_module_parameter_overrides(
             &tree,
             "M",
-            &HashMap::from_iter([("W".into(), width)]),
+            &ConstEnv::from_iter([("W".into(), width)]),
         )
         .unwrap();
         let ir = crate::analyze::analyze_source(source).unwrap();

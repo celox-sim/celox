@@ -1,0 +1,28 @@
+{
+  "case": "containers::conditionals_received_by_containers",
+  "source": "src/sv/cases/containers.vtest",
+  "standard": "IEEE 1800-2023 11.4.11: if the condition is true, the conditional returns the value of the first expression; 13.4.1: a function returns the value of its return statement; 7.10: a slice of a queue is a queue of the selected elements.",
+  "method": "The shared case runs unchanged in verify-sv-verilator, verify-sv-icarus and verify-sv-xezim; the reduced source below runs without the adapters (verilator --binary, iverilog -g2012 -s Top, xezim -s Top, and the Celox sv_tests driver in simulation mode).",
+  "reduced_source": "module Top;\n  typedef int queue_t[$];\n  typedef int array_t[];\n  function automatic queue_t tail(queue_t q);\n    return q[1:$];\n  endfunction\n  initial begin\n    queue_t a, b, q; array_t d; bit c = 1;\n    a = '{1, 2}; b = '{3}; d = '{5, 6};\n    q = c ? a : b;\n    $display(\"[%0d %0d]\", q.size(), q[0]);\n    q = tail('{1, 2, 3});\n    $display(\"[%0d %0d]\", q.size(), q[0]);\n    q = d;\n    $display(\"[%0d %0d]\", q.size(), q[0]);\n  end\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "stdout": "[2 1]\n[2 2]\n[2 5]\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "stderr": "xe.sv:5: syntax error\nxe.sv:5: error: Malformed statement\nxe.sv:8: warning: Static variable initialization requires explicit lifetime in this context.\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "[1 0]\n[1 0]\n[2 5]\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "[2 1]\n[2 2]\n[2 5]\n"
+    }
+  ]
+}

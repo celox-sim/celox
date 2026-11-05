@@ -29,6 +29,8 @@ pub(super) struct Checkpoint {
     extern_functions: usize,
     extern_calls: usize,
     warnings: usize,
+    /// The out-of-line functions, which a discarded lowering may have added.
+    functions: usize,
 }
 
 impl Checkpoint {
@@ -81,6 +83,10 @@ pub(super) struct ProcModule<'a> {
     /// Whether a call of each subroutine asked about can make a host
     /// request, by name.
     requesting_subroutines: HashMap<String, bool>,
+    /// The automatic storage that inlined subroutine activations copied,
+    /// innermost last: each name, the variable it named before the copy,
+    /// and the copy it names while the activation is lowered.
+    pub(super) activation_copies: Vec<(String, SourceVarId, SourceVarId)>,
 }
 
 /// One word a memory file writes: its bits in the destination, value, and
@@ -302,6 +308,7 @@ impl<'a> ProcModule<'a> {
             warnings,
             calls: None,
             requesting_subroutines: Default::default(),
+            activation_copies: Vec::new(),
         }
     }
 
@@ -333,7 +340,7 @@ impl<'a> ProcModule<'a> {
 
     /// Whether the body of subroutine `name` can make a host request,
     /// including through the calls it makes and their omitted defaults.
-    fn subroutine_makes_host_request(&mut self, name: &str) -> bool {
+    pub(super) fn subroutine_makes_host_request(&mut self, name: &str) -> bool {
         if let Some(&known) = self.requesting_subroutines.get(name) {
             return known;
         }
@@ -660,6 +667,8 @@ impl<'a> ProcModule<'a> {
 
     /// Syntactic implicit sensitivity, including branches that constant folding
     /// will remove. `always @*` sees arguments; `always_comb` also sees function bodies.
+    /// The out-of-line eligibility of subroutines counts their stores into
+    /// these as observed through this same walk (see [`Self::observe_storage`]).
     pub fn implicit_reads(
         &self,
         body: &[sv::ir::Stmt],
@@ -725,8 +734,8 @@ impl<'a> ProcModule<'a> {
                         // Dynamic selects and wildcard controls include the base.
                         exprs.push((**base).clone());
                     }
-                    exprs.extend(expr_from_const_expr(msb));
-                    exprs.extend(expr_from_const_expr(lsb));
+                    exprs.extend(expr_from_const_expr_with_calls(msb, true));
+                    exprs.extend(expr_from_const_expr_with_calls(lsb, true));
                 }
                 Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => {
                     exprs.push((**expr).clone())
@@ -783,9 +792,11 @@ impl<'a> ProcModule<'a> {
                         exprs.push(expr);
                     },
                     &mut |lhs| {
+                        // A position may call a function, whose arguments
+                        // are read too.
                         if let sv::ir::LValue::Select { msb, lsb, .. } = lhs {
-                            positions.extend(expr_from_const_expr(&msb));
-                            positions.extend(expr_from_const_expr(&lsb));
+                            positions.extend(expr_from_const_expr_with_calls(&msb, true));
+                            positions.extend(expr_from_const_expr_with_calls(&lsb, true));
                         }
                     },
                 );
@@ -992,6 +1003,11 @@ impl<'a> ProcModule<'a> {
             extern_functions: self.extern_functions.len(),
             extern_calls: self.extern_calls,
             warnings: self.warnings.len(),
+            functions: self
+                .calls
+                .as_deref()
+                .and_then(|calls| calls.out_of_line.as_ref())
+                .map_or(0, super::out_of_line::OutOfLine::len),
         }
     }
 
@@ -1020,6 +1036,9 @@ impl<'a> ProcModule<'a> {
         self.extern_functions.truncate(checkpoint.extern_functions);
         self.extern_calls = checkpoint.extern_calls;
         self.warnings.truncate(checkpoint.warnings);
+        if let Some(functions) = self.out_of_line() {
+            functions.truncate(checkpoint.functions);
+        }
     }
 
     /// Register a runtime event site and return its local number.

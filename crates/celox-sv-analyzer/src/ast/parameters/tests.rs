@@ -79,7 +79,7 @@ fn short_circuit_proof_does_not_inherit_a_required_parameter_literal() {
         &tree,
         session,
         &HashMap::default(),
-        &HashMap::default(),
+        &ConstEnv::default(),
         &HashMap::default(),
     )
     .unwrap_err();
@@ -93,7 +93,7 @@ fn short_circuit_proof_does_not_inherit_a_required_parameter_literal() {
 fn typed_constant_lookup_matches_full_tables_and_visits_only_referenced_names() {
     use std::cell::Cell;
 
-    let mut env = HashMap::from_iter([("A".into(), -1), ("B".into(), 3)]);
+    let mut env = ConstEnv::from_iter([("A".into(), -1), ("B".into(), 3)]);
     insert_parameter_type_markers(
         &mut env,
         "A",
@@ -201,7 +201,7 @@ fn incremental_collection_binds_each_prefix_entry_once() {
         &tree,
         session,
         &HashMap::default(),
-        &HashMap::default(),
+        &ConstEnv::default(),
         &HashMap::default(),
     )
     .unwrap();
@@ -215,7 +215,7 @@ fn incremental_collection_binds_each_prefix_entry_once() {
     let enums = enum_member_constants_from_scope(
         &tree,
         session,
-        &HashMap::default(),
+        &ConstEnv::default(),
         &HashMap::default(),
         &HashMap::default(),
     )
@@ -247,7 +247,7 @@ fn incremental_prefix_matches_rebuilding_with_inherited_values_and_overrides() {
     .unwrap();
     let tree = AnalysisContext::unspecialized(&tree);
     let mut base =
-        HashMap::from_iter([("N".into(), 99), ("MASK".into(), 255), ("LATER".into(), 9)]);
+        ConstEnv::from_iter([("N".into(), 99), ("MASK".into(), 255), ("LATER".into(), 9)]);
     insert_parameter_type_markers(
         &mut base,
         "MASK",
@@ -352,7 +352,7 @@ fn collects_the_declarations_of_a_package() {
         &tree,
         session,
         &HashMap::default(),
-        &HashMap::default(),
+        &ConstEnv::default(),
         &HashMap::default(),
     )
     .unwrap();
@@ -392,7 +392,7 @@ fn numeric_ranged_headers_do_not_copy_the_environment() {
             &tree,
             session,
             &HashMap::default(),
-            &HashMap::default(),
+            &ConstEnv::default(),
             &HashMap::default(),
         )
         .unwrap();
@@ -418,7 +418,7 @@ fn borrowed_range_context_matches_copied_context_with_aliases_and_stale_values()
         Path::new("borrowed_ranges.sv"),
     ).unwrap();
     let tree = AnalysisContext::unspecialized(&tree);
-    let base = HashMap::from_iter([("N".into(), 99), ("LATER".into(), 17)]);
+    let base = ConstEnv::from_iter([("N".into(), 99), ("LATER".into(), 17)]);
     let copied_base = base.clone();
     let aliases = type_aliases_from_scope_with_env(&tree, session, &base).unwrap();
     for n in [3, 8, 2, 3] {
@@ -485,7 +485,7 @@ fn four_state_prefix_keeps_the_separate_range_projection() {
     )
     .unwrap();
     let tree = AnalysisContext::unspecialized(&tree);
-    let base = HashMap::from_iter([("P".into(), 99)]);
+    let base = ConstEnv::from_iter([("P".into(), 99)]);
     DECLARATION_ENV_COPIES.with(|copies| copies.set(0));
     let parameters = parameters_from_scope(
         &tree,
@@ -562,7 +562,7 @@ fn literal_prefix_range_contexts_match_copied_projection_and_track_inherited_sha
     let tree = AnalysisContext::unspecialized(&tree);
     for inherited_p in [None, Some(2)] {
         let base = inherited_p
-            .map(|value| HashMap::from_iter([("P".into(), value)]))
+            .map(|value| ConstEnv::from_iter([("P".into(), value)]))
             .unwrap_or_default();
         let copied_base = base.clone();
         let mut borrowed = Vec::new();
@@ -618,7 +618,7 @@ fn literal_prefix_range_contexts_match_copied_projection_and_track_inherited_sha
 
 fn copied_resolved_literal(
     parameter: &Parameter,
-    constants: &HashMap<String, i128>,
+    constants: &ConstEnv,
     types: &HashMap<String, ExprType>,
     literals: &HashMap<String, Expr>,
 ) -> Option<Expr> {
@@ -655,7 +655,7 @@ fn borrowed_literal_environment_matches_self_masked_copy_with_types_and_unknowns
     let syntax = crate::source_tree::SourceTree::empty();
     let tree = AnalysisContext::unspecialized(&syntax);
     let mut constants =
-        HashMap::from_iter([("A".into(), -2), (unbounded_parameter_marker("U"), 1)]);
+        ConstEnv::from_iter([("A".into(), -2), (unbounded_parameter_marker("U"), 1)]);
     insert_parameter_type_markers(
         &mut constants,
         "A",
@@ -766,7 +766,7 @@ fn reverse_generate_literal_chains_borrow_width_and_initializer_environments() {
 
 fn separately_resolved_value_and_literal(
     parameter: &Parameter,
-    constants: &HashMap<String, i128>,
+    constants: &ConstEnv,
     types: &HashMap<String, ExprType>,
     literals: &HashMap<String, Expr>,
 ) -> (Option<i128>, Option<Expr>) {
@@ -799,7 +799,7 @@ fn retained_parameter_literals_match_separate_resolution_across_types_and_depend
     let syntax = crate::source_tree::SourceTree::empty();
     let tree = AnalysisContext::unspecialized(&syntax);
     let mut constants =
-        HashMap::from_iter([("A".into(), -2), (unbounded_parameter_marker("U"), 1)]);
+        ConstEnv::from_iter([("A".into(), -2), (unbounded_parameter_marker("U"), 1)]);
     insert_parameter_type_markers(
         &mut constants,
         "A",
@@ -948,7 +948,7 @@ fn generate_bindings_keep_numeric_literals_and_unresolved_fallback_order() {
     for (initializer, two_state, expected_value) in
         [("X", false, 91), ("X", true, -125), ("missing", false, 91)]
     {
-        let mut env = HashMap::from_iter([("P".into(), 91)]);
+        let mut env = ConstEnv::from_iter([("P".into(), 91)]);
         let mut types = HashMap::default();
         let mut literals = HashMap::from_iter([("X".into(), Expr::Literal("8'b10xz0011".into()))]);
         let parameter = Parameter::new(
@@ -1003,7 +1003,7 @@ fn compare_retained_and_repeated_parameter_resolution() {
         let session = &mut Session::default();
         let syntax = crate::source_tree::SourceTree::empty();
         let tree = AnalysisContext::unspecialized(&syntax);
-        let mut env = HashMap::default();
+        let mut env = ConstEnv::default();
         let mut types = HashMap::default();
         let mut literals = HashMap::default();
         for parameter in parameters {
@@ -1165,8 +1165,8 @@ fn referenced_value_projection_matches_full_environment() {
         p("typed_known", id("later"), None, false),
     ];
     for env in [
-        HashMap::default(),
-        HashMap::from_iter([("B".into(), -3), ("typed_known".into(), -1)]),
+        ConstEnv::default(),
+        ConstEnv::from_iter([("B".into(), -3), ("typed_known".into(), -1)]),
     ] {
         let full = parameter_value_env(&tree, session, &parameters, &env);
         for parameter in &parameters {
@@ -1223,7 +1223,7 @@ fn numeric_projection_does_not_expand_initializer_dependencies() {
             true,
         ),
     ];
-    let env = HashMap::from_iter([("B".into(), 3)]);
+    let env = ConstEnv::from_iter([("B".into(), 3)]);
     PARAMETER_VALUE_MATERIALIZATIONS.with(|count| count.set(0));
     let projected = parameter_value_env_for_references(
         &tree,
@@ -1274,7 +1274,7 @@ fn compare_full_and_referenced_parameter_values() {
                         )
                     })
                     .collect();
-                let env = HashMap::default();
+                let env = ConstEnv::default();
                 let references = HashSet::from_iter(["P0".into()]);
                 let expected =
                     parameter_value_env(&tree, session, &parameters[..1], &env)["P0"].clone();
@@ -1322,7 +1322,7 @@ fn unbounded_binding_keeps_declared_rank_without_a_numeric_value() {
     let session = &mut Session::default();
     let syntax = crate::source_tree::SourceTree::empty();
     let tree = AnalysisContext::unspecialized(&syntax);
-    let mut env = HashMap::default();
+    let mut env = ConstEnv::default();
     let mut types = HashMap::default();
     let mut literals = HashMap::default();
     for value in ["7", "$"] {
@@ -1366,7 +1366,7 @@ fn unbounded_generate_binding_clears_inherited_numeric_values() {
         true,
         true,
     );
-    let mut env = HashMap::from_iter([
+    let mut env = ConstEnv::from_iter([
         ("P".into(), 7),
         (parameter_marker("P"), 7),
         (local_parameter_marker("P"), 7),
@@ -1420,8 +1420,8 @@ fn unbounded_projection_keeps_requested_aliases_and_omits_unused_dollars() {
         ),
     ];
     for env in [
-        HashMap::default(),
-        HashMap::from_iter([(unbounded_parameter_marker("U"), 1), ("U".into(), 99)]),
+        ConstEnv::default(),
+        ConstEnv::from_iter([(unbounded_parameter_marker("U"), 1), ("U".into(), 99)]),
     ] {
         let full = parameter_value_env(&tree, session, &parameters, &env);
         for name in ["U", "ALIAS", "NUMBER"] {
@@ -1480,7 +1480,7 @@ fn unbased_parameter_overrides_fill_declared_width_before_dependent_parameters()
             &tree,
             session,
             &HashMap::default(),
-            &HashMap::default(),
+            &ConstEnv::default(),
             &overrides,
         )
         .unwrap();
@@ -1509,7 +1509,7 @@ fn inherited_alias_prefixes_bind_once_without_copying_declaration_environments()
         let tree = crate::source_tree::parse_scope_fixture(&code, Path::new("inherited_prefix.sv"))
             .unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
-        let mut base = HashMap::from_iter([("EXTERNAL".into(), 16)]);
+        let mut base = ConstEnv::from_iter([("EXTERNAL".into(), 16)]);
         insert_parameter_type_markers(
             &mut base,
             "EXTERNAL",
@@ -1546,7 +1546,7 @@ fn inherited_alias_prefixes_bind_once_without_copying_declaration_environments()
 #[test]
 fn inherited_evaluation_masks_pending_local_names_and_their_type_markers() {
     let session = &mut Session::default();
-    let mut base = HashMap::from_iter([("EXTERNAL".into(), 8), ("LOCAL".into(), 99)]);
+    let mut base = ConstEnv::from_iter([("EXTERNAL".into(), 8), ("LOCAL".into(), 99)]);
     insert_parameter_type_markers(
         &mut base,
         "LOCAL",

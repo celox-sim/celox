@@ -31,9 +31,17 @@
 //! and every design or kernel this module does not qualify, runs in the
 //! reference loop.
 
+mod domains;
+pub(crate) mod host_inputs;
+mod nba;
+mod observers;
 mod ordered;
+mod regions;
 mod slice;
+mod slot_observers;
+mod steps;
 mod testbench;
+mod waits;
 
 use slice::CombSlicer;
 
@@ -42,7 +50,7 @@ use celox_design::{
     SCHEDULER_FLAG_WIDTH, SCHEDULER_TIME_WIDTH, STABLE_REGION, SchedulerExit, SchedulerSlots,
     TIME_SLOT_WIDTH, edges::LEVEL_UNKNOWN, schedule::ScheduleModel,
 };
-use celox_sir::{BinaryOp, SIRBuilder, SIRSwitchCase, SIRValue};
+use celox_sir::{BinaryOp, SIRBuilder, SIRSwitchCase, SIRValue, StateAccess};
 use num_bigint::BigUint;
 use std::collections::BTreeSet;
 
@@ -97,7 +105,8 @@ const GATE_SOURCE_EDGED_BIT: usize = 32;
 
 const ACTIVE_COMMIT: &str = "the process drives or waits for a clock whose domain commits blocking results in the active region";
 
-const DELAY_STATUSES: [ProcessStatus; 6] = [
+const DELAY_STATUSES: [ProcessStatus; 7] = [
+    ProcessStatus::Nba,
     ProcessStatus::Delay,
     ProcessStatus::InactiveDelay,
     ProcessStatus::Done,
@@ -135,16 +144,14 @@ const MIXED_STATUSES: [ProcessStatus; 12] = [
     ProcessStatus::Yield,
 ];
 
-/// The most distinct edges one kernel waits for: those the edge index of a
-/// baseline byte holds.
-const MAX_TERMS: usize = 1 << (SCHEDULER_FLAG_WIDTH - BASELINE_TERM_SHIFT as usize);
-
 /// The normal C ABI supplies native file writes without suspending into the
 /// host scheduler. Register the symbol only for native-target compilation.
 pub(crate) fn enable_native_services(program: &mut LaidOutProgram) {
     let schema = &mut program.runtime.runtime_schema;
     let name = crate::simulator::native_io::SYMBOL;
-    let needs_service = !schema.processes.is_empty()
+    let needs_service = schema.scheduler.is_some()
+        || !schema.processes.is_empty()
+        || !schema.comb_observers.is_empty()
         || schema
             .host_request_sites
             .iter()
@@ -168,12 +175,47 @@ pub(crate) fn enable_native_services(program: &mut LaidOutProgram) {
     });
 }
 
+/// Flag the `$finish` records of every function that makes records, and
+/// count all its records, as [`Generator::instrument`] does for the units
+/// the scheduler inlines: the scheduler inlines a callee's calls, not its
+/// body, so the callee does it itself. Only a compiled run reads the slots
+/// this writes, and it clears them when it starts.
+fn instrument_recording_functions(
+    program: &mut LaidOutProgram,
+    slots: &SchedulerSlots<AbsoluteAddr>,
+) {
+    let finish_sites: HashSet<u32> = program
+        .runtime
+        .runtime_schema
+        .runtime_event_sites
+        .iter()
+        .enumerate()
+        .filter(|(_, site)| matches!(site.kind, RuntimeEventKind::Finish))
+        .map(|(index, _)| index as u32)
+        .collect();
+    let mut changed = false;
+    for function in &mut program.sir.functions {
+        if instructions(&function.unit)
+            .any(|inst| matches!(inst, SIRInstruction::RuntimeEvent { .. }))
+        {
+            function.unit =
+                Generator::instrument_records(&function.unit, &finish_sites, slots, true, false);
+            changed = true;
+        }
+    }
+    // The calls of a function now write the slots too.
+    if changed {
+        program.sir.summarize_calls();
+    }
+}
+
 /// Generate the compiled scheduler of `program`, if it qualifies, and record
 /// for every process kernel whether the scheduler runs it.
 pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool) {
     let Some(schema) = program.runtime.runtime_schema.scheduler.clone() else {
         return;
     };
+    instrument_recording_functions(program, &schema.slots);
     let kernels = program.runtime.runtime_schema.processes.len();
     let mut lazy = false;
     let (fallback, unit, events, clocks, kernel_events) =
@@ -189,8 +231,12 @@ pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool) {
                 lazy = plan.lazy.is_some();
                 let fallback = plan.fallback.clone();
                 // Without kernels, slots of host clocks alone.
-                let unit = (plan.kernels.iter().any(Option::is_some) || !plan.clocks.is_empty())
-                    .then(|| plan.generate(program, &schema.slots));
+                let unit = (plan.kernels.iter().any(Option::is_some)
+                    || !plan.clocks.is_empty()
+                    || (cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen")))
+                        && plan.service_function.is_some()
+                        && program.runtime.runtime_schema.scheduler.is_some()))
+                .then(|| plan.generate(program, &schema.slots));
                 let tracked = plan.tracked();
                 let kernel_events = plan
                     .kernels
@@ -279,6 +325,8 @@ struct Event {
     width: usize,
     /// The level of the signal after an active edge.
     active: u8,
+    /// Unknown-kind domains observe any settled level change.
+    any_settled: bool,
     /// A clock edge rather than an asynchronous reset.
     clock: bool,
     eval_apply: Vec<Unit>,
@@ -306,18 +354,22 @@ struct Kernel {
     delays: bool,
 }
 
-/// The edges a kernel waits for: one at each wait site.
+/// Event controls of a kernel, including their dependency union and snapshots.
 struct Wait {
-    /// The distinct edges, in the order of the first site that waits for
-    /// each (see `celox_runtime::SchedulerRefs::wait_terms`).
+    /// Expressions used by dependency analysis. A raw leaf keeps them in
+    /// snapshot order; the compact path keeps distinct edges in site order.
     terms: Vec<(AbsoluteAddr, CounterKind)>,
-    /// The edge of each wait site, as an index into [`Self::terms`].
+    /// Each site's index into `terms` (compact) or `alternatives` (general).
     site_terms: Vec<usize>,
     /// Occurrences that can be hidden by later writes in the same activation.
     counters: Vec<Option<AbsoluteAddr>>,
-    /// Identical wide or multi-expression sites use raw planes; distinct
-    /// scalar sites retain the compact baseline byte.
+    /// A common event list, or a leaf of the general site dispatch.
     raw: Option<celox_design::schedule::CompiledWaitLayout>,
+    /// General event controls, selected by the process's full-width site id.
+    /// The outer terms/counters are their union for dependency analysis.
+    alternatives: Vec<Wait>,
+    /// Conditions judged at the event occurrence, never on a gate-only change.
+    gates: Vec<Option<celox_design::WaitGate<AbsoluteAddr>>>,
     /// RTL or another waiting kernel can change a watched expression.
     reactive: bool,
     /// Its nonblocking sites, by local index.
@@ -346,6 +398,11 @@ struct CountedEvent {
 }
 
 struct Plan {
+    /// Direct host event writes, including asynchronous resets with no clock.
+    host_edges: Vec<usize>,
+    /// Zero or computed delays require an Inactive pass before NBA publication.
+    inactive: Vec<(usize, AbsoluteAddr)>,
+    observers: Option<observers::Observers>,
     counted: Vec<CountedEvent>,
     /// In event-id order, which the reference loop visits several triggered
     /// domains in.
@@ -440,26 +497,42 @@ impl Plan {
         let schema = &program.runtime.runtime_schema;
         let model = ScheduleModel::derive(&program.design, schema);
         let topology = &model.events;
-        if !schema.comb_observers.is_empty() {
+        let native_observers = cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen")))
+            && schema
+                .extern_functions
+                .iter()
+                .any(|function| function.name == crate::simulator::native_io::SYMBOL);
+        if !native_observers && !schema.comb_observers.is_empty() {
             return Err("the design observes combinational processes".into());
         }
         if slots.wake.len() != schema.processes.len() {
             return Err("the scheduler slots do not match the kernels".into());
         }
         let sir = &program.sir;
-        let comb_fatal = sir.eval_comb.iter().any(|unit| {
-            instructions(unit).any(|inst| {
-                matches!(
-                    inst,
-                    SIRInstruction::CombCaptureEvent {
-                        fatal_error_code: Some(_),
-                        ..
-                    }
-                )
-            })
-        });
-        if comb_fatal {
+        let comb_fatal = sir
+            .eval_comb
+            .iter()
+            .any(|unit| instructions(unit).any(crate::ir::may_raise_fatal_capture));
+        if comb_fatal && !native_observers {
             return Err("combinational logic has fatal assertions".into());
+        }
+        let rtl_units = || {
+            sir.eval_comb
+                .iter()
+                .chain(sir.eval_apply_ffs.values().flatten())
+                .chain(sir.eval_only_ffs.values().flatten())
+                .chain(sir.apply_ffs.values().flatten())
+        };
+        let planned = || {
+            rtl_units()
+                .chain(sir.eval_comb_apply_ffs.values().flatten())
+                .chain(sir.processes.iter().take(schema.processes.len()))
+                .flat_map(instructions)
+        };
+        // A native kernel may read and write any state, which none of the
+        // storage sets below can name (see `read_storage`).
+        if planned().any(SIRInstruction::accesses_unknown_state) {
+            return Err("a unit may access any state".into());
         }
 
         let shared = program.shared_storage();
@@ -480,17 +553,28 @@ impl Plan {
             }
         }
         let mut events = Vec::with_capacity(addresses.len());
-        let mut event_storage = HashMap::default();
+        let mut event_storage: HashMap<AbsoluteAddr, Vec<usize>> = HashMap::default();
         for &signal in &addresses {
             let (active, clock) = match model.kinds.get(&signal) {
                 Some(DomainKind::ClockPosedge) => (1, true),
                 Some(DomainKind::ClockNegedge) => (0, true),
                 Some(DomainKind::ResetAsyncHigh) => (1, false),
                 Some(DomainKind::ResetAsyncLow) => (0, false),
+                Some(DomainKind::Other) | None if native_observers => (1, true),
                 _ => return Err("an event is not a clock or reset edge".into()),
             };
             let units =
                 |map: &HashMap<AbsoluteAddr, Vec<Unit>>| -> Result<Option<Vec<Unit>>, String> {
+                    if native_observers {
+                        // Match NativeBackend::compile_ff_group exactly: aliases
+                        // bind the first kernel of their canonical domain. The
+                        // frontend may clone that kernel under several aliases;
+                        // concatenating those copies would execute it repeatedly.
+                        return Ok(map
+                            .iter()
+                            .find(|(key, _)| topology.canonical(**key) == signal)
+                            .map(|(_, units)| units.clone()));
+                    }
                     // An alias's domain must be the event's own; one with
                     // nothing to run is no domain at all.
                     let aliased = map.iter().any(|(key, units)| {
@@ -524,6 +608,7 @@ impl Plan {
                     .get(&signal)
                     .ok_or("an event signal has no storage")?,
                 active,
+                any_settled: matches!(model.kinds.get(&signal), Some(DomainKind::Other) | None),
                 clock,
                 eval_apply,
                 active_commit: model.active_commits.contains(&signal),
@@ -533,34 +618,24 @@ impl Plan {
                 eval_only,
                 apply,
             };
-            if event_storage
-                .insert(storage(signal), events.len())
-                .is_some()
-            {
+            let same_signal = event_storage.entry(storage(signal)).or_default();
+            if !native_observers && !same_signal.is_empty() {
                 return Err("two events share a signal".into());
             }
+            same_signal.push(events.len());
             events.push(event);
         }
         // Event signals change only where the scheduler sees them change.
         let written = |unit: &Unit| -> Vec<usize> {
             let mut written: Vec<usize> = instructions(unit)
-                .filter_map(|inst| match inst {
-                    SIRInstruction::Store(target, ..) | SIRInstruction::Commit(_, target, ..) => {
-                        event_storage.get(&storage(target.absolute_addr())).copied()
-                    }
-                    _ => None,
-                })
+                .flat_map(written_storage)
+                .filter_map(|target| event_storage.get(&storage(target.absolute_addr())))
+                .flatten()
+                .copied()
                 .collect();
             written.sort_unstable();
             written.dedup();
             written
-        };
-        let rtl_units = || {
-            sir.eval_comb
-                .iter()
-                .chain(sir.eval_apply_ffs.values().flatten())
-                .chain(sir.eval_only_ffs.values().flatten())
-                .chain(sir.apply_ffs.values().flatten())
         };
         // The events RTL logic drives: clocks derived from the events the
         // scheduler's slots change, and only those (checked below).
@@ -568,15 +643,13 @@ impl Plan {
         // The storage each unit writes.
         let stores = |unit: &Unit| -> HashSet<AbsoluteAddr> {
             instructions(unit)
-                .filter_map(|inst| match inst {
-                    SIRInstruction::Store(target, ..) | SIRInstruction::Commit(_, target, ..) => {
-                        Some(storage(target.absolute_addr()))
-                    }
-                    _ => None,
-                })
+                .flat_map(written_storage)
+                .map(|target| storage(target.absolute_addr()))
                 .collect()
         };
         let rtl_stores: HashSet<AbsoluteAddr> = rtl_units().flat_map(stores).collect();
+        let opaque = |unit: &Unit| instructions(unit).any(makes_extern_calls);
+        let opaque_comb = sir.eval_comb.iter().any(opaque);
         let kernel_stores: Vec<HashSet<AbsoluteAddr>> = sir
             .processes
             .iter()
@@ -590,7 +663,12 @@ impl Plan {
             .copied()
             .map(storage)
             .collect();
-        let waited: HashSet<AbsoluteAddr> = model.waited.iter().map(|s| storage(*s)).collect();
+        let wait_reads: Vec<_> = schema
+            .wait_sites
+            .iter()
+            .flat_map(celox_design::WaitSite::reads)
+            .collect();
+        let waited: HashSet<AbsoluteAddr> = wait_reads.iter().map(|s| storage(*s)).collect();
         // Storage whose changes bump an occurrence counter: the reference
         // counts the nonblocking updates it publishes into it, which the
         // scheduler's publication does not.
@@ -622,12 +700,18 @@ impl Plan {
         // and only if one of these consumers actually needs a slice.
         let comb_slicer =
             std::cell::LazyCell::new(|| CombSlicer::new(&sir.eval_comb, shared.clone()));
-        let wait_slicer = (!model.waited.is_empty()).then(|| &*comb_slicer);
+        let wait_slicer = (!wait_reads.is_empty()).then(|| &*comb_slicer);
         let observed_inputs = wait_slicer
             .as_ref()
-            .map(|slicer| slicer.input_signals(model.waited.iter().copied()))
+            .map(|slicer| slicer.input_signals(wait_reads.iter().copied()))
             .unwrap_or_default();
         active_observers.extend(observed_inputs.into_iter().map(storage));
+        // An external call's state dependencies cannot be recovered from SIR
+        // loads. Preserve every blocking publication before NBA when the
+        // combinational observer cone contains such a call.
+        if opaque_comb {
+            active_observers.extend(rtl_stores.iter().copied());
+        }
         // A stateful combinational consumer can retain an intermediate
         // blocking result even when no waiter or clock reads it. Include all
         // combinational inputs so indirect cones are covered too. Missing
@@ -659,13 +743,13 @@ impl Plan {
             .filter(|(_, event)| {
                 unknown_gate
                     || event.eval_only.as_ref().is_none_or(|units| {
-                        units.iter().flat_map(instructions).any(|inst| match inst {
-                            SIRInstruction::Store(target, ..)
-                            | SIRInstruction::Commit(_, target, ..) => {
-                                target.region == STABLE_REGION
-                                    && active_observers.contains(&storage(target.absolute_addr()))
-                            }
-                            _ => false,
+                        units.iter().flat_map(instructions).any(|inst| {
+                            makes_extern_calls(inst)
+                                || written_storage(inst).any(|target| {
+                                    target.region == STABLE_REGION
+                                        && active_observers
+                                            .contains(&storage(target.absolute_addr()))
+                                })
                         })
                     })
             })
@@ -735,6 +819,8 @@ impl Plan {
             .iter()
             .position(|function| function.name == crate::simulator::native_io::SYMBOL)
             .and_then(|index| u32::try_from(index).ok());
+        let ordered_available = cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen")))
+            && service_function.is_some();
         let nba_processes: HashSet<usize> = model
             .processes
             .iter()
@@ -744,13 +830,19 @@ impl Plan {
                     && !process.nbas.is_empty()
                     && process.nbas.iter().all(|site| {
                         let target = storage(site.target);
-                        site.delay == 0
-                            && site.position.is_none()
-                            && !program.layout().unpacked_arrays.contains_key(&site.target)
-                            && !event_storage.contains_key(&target)
-                            && !probed.contains(&target)
-                            && !rtl_stores.contains(&target)
-                            && !kernel_stores.iter().any(|stores| stores.contains(&target))
+                        ordered_available
+                            || (site.delay == 0
+                                && (!event_storage.contains_key(&target)
+                                    && site.position.is_none()
+                                    && !program
+                                        .layout()
+                                        .unpacked_arrays
+                                        .contains_key(&site.target)
+                                    && !probed.contains(&target)
+                                    && !rtl_stores.contains(&target)
+                                    && !kernel_stores
+                                        .iter()
+                                        .any(|stores| stores.contains(&target))))
                     })
             })
             .map(|(index, _)| index)
@@ -799,19 +891,20 @@ impl Plan {
                 Some("the process has dynamic activation frames")
             } else if slots.program.is_some() {
                 Some("a program process runs in the reactive region set")
-            } else if slots.requires_timed_simulation && !service_processes.contains(&index) {
-                Some("an edge procedure")
             } else if !process.host_requests.is_empty() && !service_processes.contains(&index) {
                 Some("the process makes host requests")
-            } else if service_processes.contains(&index) && !written(unit).is_empty() {
+            } else if service_processes.contains(&index)
+                && !written(unit).is_empty()
+                && !ordered_available
+            {
                 Some("a synchronous host-service process drives an event signal")
             } else if yielding.contains(&index) && !service_processes.contains(&index) {
                 Some("a loop checkpoint requires native services")
             } else if !process.waits.is_empty() {
                 None
-            } else if !slots.const_delays {
+            } else if !slots.const_delays && !ordered_available {
                 Some("a delay is not a constant of at least one time unit")
-            } else if !process.nbas.is_empty() {
+            } else if !process.nbas.is_empty() && !nba_processes.contains(&index) {
                 Some("the process has nonblocking assignments")
             } else if !statuses_only(unit, slots.status, &DELAY_STATUSES) {
                 Some("the process suspends other than for a delay")
@@ -868,9 +961,7 @@ impl Plan {
                         (index < fallback.len() && fallback[index].is_none()).then_some(unit)
                     }),
             )
-            .any(|unit| {
-                instructions(unit).any(|inst| matches!(inst, SIRInstruction::ExternCall { .. }))
-            });
+            .any(opaque);
         for index in 0..schema.processes.len() {
             let process = &model.processes[index];
             if process.waits.is_empty() || fallback[index].is_some() {
@@ -880,85 +971,116 @@ impl Plan {
             let slots = &schema.processes[index];
             let unit = &sir.processes[index];
             let wait = (|| -> Result<(Wait, bool), &'static str> {
-                if process.waits.iter().any(|terms| terms.is_empty()) {
-                    return Err("the process waits for a level");
-                }
-                let scalar = process.wait_terms().filter(|(terms, _)| {
-                    terms
-                        .iter()
-                        .all(|(signal, _)| program.layout().widths.get(signal) == Some(&1))
+                let scalar = process.compact_wait_terms(|signal| {
+                    program.layout().widths.get(&signal).copied().unwrap_or(0)
                 });
-                let (terms, site_terms, raw) = match scalar {
-                    Some((terms, sites)) => (terms, sites, None),
-                    None => {
-                        let listed = process
-                            .common_wait_terms()
-                            .ok_or("the process waits for different expression lists")?;
-                        let dimensions = listed
-                            .iter()
-                            .map(|term| {
-                                let width = *program.layout().widths.get(&term.signal)?;
-                                if program.layout().unpacked_arrays.contains_key(&term.signal) {
-                                    return None;
-                                }
-                                Some((
-                                    width,
-                                    program.layout().four_state
-                                        && program
-                                            .layout()
-                                            .is_4states
-                                            .get(&term.signal)
-                                            .copied()
-                                            .unwrap_or(true),
-                                    model
-                                        .counted
-                                        .iter()
-                                        .any(|counted| counted.slots.signal == term.signal),
-                                ))
-                            })
-                            .collect::<Option<Vec<_>>>()
-                            .ok_or("the process waits for an unsupported signal representation")?;
-                        let raw =
-                            celox_design::schedule::CompiledWaitLayout::with_counters(&dimensions)
-                                .ok_or("the wait snapshot layout overflows")?;
-                        if raw.scalar_byte || program.layout().widths[&baseline] < raw.bits {
-                            tracing::debug!(target: "celox::scheduler", process = index,
+                let raw_site = |listed: &[celox_design::schedule::TermModel<AbsoluteAddr>]| {
+                    let dimensions = listed
+                        .iter()
+                        .map(|term| {
+                            let width = *program.layout().widths.get(&term.signal)?;
+                            Some((
+                                width,
+                                program.layout().four_state
+                                    && program
+                                        .layout()
+                                        .is_4states
+                                        .get(&term.signal)
+                                        .copied()
+                                        .unwrap_or(true),
+                                model
+                                    .counted
+                                    .iter()
+                                    .any(|counted| counted.slots.signal == term.signal),
+                                term.gate.is_some_and(|gate| gate.counters.is_some()),
+                            ))
+                        })
+                        .collect::<Option<Vec<_>>>()
+                        .ok_or("the process waits for an unsupported signal representation")?;
+                    let raw =
+                        celox_design::schedule::CompiledWaitLayout::with_gate_counters(&dimensions)
+                            .ok_or("the wait snapshot layout overflows")?;
+                    if program.layout().widths[&baseline] < raw.bits {
+                        tracing::debug!(target: "celox::scheduler", process = index,
                                 available_bits = program.layout().widths[&baseline],
                                 required_bits = raw.bits, scalar = raw.scalar_byte,
                                 "compiled wait snapshot cannot hold the expression list");
-                            return Err("the compiled wait snapshot has insufficient storage");
+                        return Err("the compiled wait snapshot has insufficient storage");
+                    }
+                    Ok(Wait {
+                        terms: listed.iter().map(|term| (term.signal, term.kind)).collect(),
+                        site_terms: Vec::new(),
+                        counters: listed
+                            .iter()
+                            .map(|term| {
+                                term.gate
+                                    .and_then(|gate| gate.counters)
+                                    .map(|counters| counters.all)
+                                    .or_else(|| {
+                                        model
+                                            .counted
+                                            .iter()
+                                            .find(|counted| counted.slots.signal == term.signal)
+                                            .map(|counted| counted.slots.counter(term.kind))
+                                    })
+                            })
+                            .collect(),
+                        raw: Some(raw),
+                        alternatives: Vec::new(),
+                        gates: listed.iter().map(|term| term.gate).collect(),
+                        reactive: false,
+                        sites: Vec::new(),
+                    })
+                };
+                let (terms, site_terms, raw, alternatives, gates) = match scalar {
+                    Some((terms, sites)) => (terms, sites, None, Vec::new(), Vec::new()),
+                    None => {
+                        if let Some(listed) = process.common_wait_terms() {
+                            let wait = raw_site(listed)?;
+                            (
+                                wait.terms,
+                                vec![0; process.waits.len()],
+                                wait.raw,
+                                Vec::new(),
+                                wait.gates,
+                            )
+                        } else {
+                            let mut unique = Vec::new();
+                            let mut alternatives = Vec::new();
+                            let mut site_terms = Vec::new();
+                            for site in &process.waits {
+                                let index = match unique.iter().position(|known| *known == site) {
+                                    Some(index) => index,
+                                    None => {
+                                        let index = unique.len();
+                                        unique.push(site);
+                                        alternatives.push(raw_site(site)?);
+                                        index
+                                    }
+                                };
+                                site_terms.push(index);
+                            }
+                            let mut terms = Vec::new();
+                            for term in alternatives.iter().flat_map(|wait| &wait.terms) {
+                                if !terms.contains(term) {
+                                    terms.push(*term);
+                                }
+                            }
+                            (terms, site_terms, None, alternatives, Vec::new())
                         }
-                        (
-                            listed.iter().map(|term| (term.signal, term.kind)).collect(),
-                            vec![0; process.waits.len()],
-                            Some(raw),
-                        )
                     }
                 };
-                // The compiled wait tests the edge alone (IEEE 1800-2023
-                // 9.4.2.3: an `iff` condition is judged at the occurrence).
-                if process
-                    .waits
-                    .iter()
-                    .flatten()
-                    .any(|term| term.gate.is_some())
-                {
-                    return Err("the process waits with an iff condition");
-                }
-                if raw.is_none()
-                    && (terms.len() > MAX_TERMS
-                        || (terms.len() > 1 && site_terms.len() > 1 << SITE_BITS))
-                {
-                    return Err("the process waits for too many distinct edges");
-                }
-                let mut reactive = false;
+                // Unknown effects can wake a waiter more than once per slot.
+                // Use the generated work list and its budget, not the compact
+                // single-writer proof, for those activations.
+                let mut reactive = opaque_dependencies;
                 for &(signal, _) in &terms {
                     let width = program.layout().widths.get(&signal);
                     let signal = storage(signal);
                     let delayed = delay_writers.get(&signal) == Some(&1)
                         && !rtl_stores.contains(&signal)
                         && !other_stores.contains(&signal);
-                    if raw.is_none() && width != Some(&1) {
+                    if raw.is_none() && alternatives.is_empty() && width != Some(&1) {
                         return Err("the process waits for a non-scalar compact edge");
                     }
                     reactive |= !(delayed || undriven(signal));
@@ -977,7 +1099,8 @@ impl Plan {
                 }
                 let delays = !statuses_only(unit, slots.status, &WAIT_STATUSES);
                 if delays
-                    && (!slots.const_delays || !statuses_only(unit, slots.status, &MIXED_STATUSES))
+                    && ((!slots.const_delays && !ordered_available)
+                        || !statuses_only(unit, slots.status, &MIXED_STATUSES))
                 {
                     tracing::debug!(target: "celox::scheduler", process = index,
                         status_definitions = ?instructions(unit).filter_map(|inst| match inst {
@@ -988,17 +1111,20 @@ impl Plan {
                     return Err("the process suspends other than for an edge or a delay");
                 }
                 let writes = &kernel_stores[index];
-                if !written(unit).is_empty() {
+                if !written(unit).is_empty() && !ordered_available {
                     return Err("the process drives an event signal");
                 }
                 reactive |= writes.iter().any(|store| waited.contains(store));
                 if reactive && !process.nbas.is_empty() && !nba_processes.contains(&index) {
                     return Err("a reactive wait stages nonblocking assignments");
                 }
-                if reactive && opaque_dependencies {
+                if reactive && opaque_dependencies && service_function.is_none() {
                     return Err("a reactive wait has opaque dependencies");
                 }
-                if raw.is_some() && !process.nbas.is_empty() && !nba_processes.contains(&index) {
+                if (raw.is_some() || !alternatives.is_empty())
+                    && !process.nbas.is_empty()
+                    && !nba_processes.contains(&index)
+                {
                     return Err("a raw-expression wait stages nonblocking assignments");
                 }
                 let sites = if nba_processes.contains(&index) {
@@ -1054,17 +1180,28 @@ impl Plan {
                     Wait {
                         counters: terms
                             .iter()
-                            .map(|&(signal, kind)| {
-                                model
-                                    .counted
-                                    .iter()
-                                    .find(|counted| counted.slots.signal == signal)
-                                    .map(|counted| counted.slots.counter(kind))
+                            .enumerate()
+                            .map(|(index, &(signal, kind))| {
+                                gates
+                                    .get(index)
+                                    .copied()
+                                    .flatten()
+                                    .and_then(|gate| gate.counters)
+                                    .map(|counters| counters.all)
+                                    .or_else(|| {
+                                        model
+                                            .counted
+                                            .iter()
+                                            .find(|counted| counted.slots.signal == signal)
+                                            .map(|counted| counted.slots.counter(kind))
+                                    })
                             })
                             .collect(),
                         terms,
                         site_terms,
                         raw,
+                        alternatives,
+                        gates,
                         reactive,
                         sites,
                     },
@@ -1074,7 +1211,7 @@ impl Plan {
             match wait {
                 Ok((wait, delays)) => {
                     kernels[index] = Some(Kernel {
-                        writes: Vec::new(),
+                        writes: written(unit),
                         wait: Some(wait),
                         delays,
                     })
@@ -1099,7 +1236,14 @@ impl Plan {
                     || (!control_slots.contains(address) && active_observers.contains(address))
             })
             .collect();
-        let possible_wait_feedback = !feedback_stores.is_empty();
+        let event_writing_waits = kernels.iter().enumerate().any(|(index, kernel)| {
+            kernel.as_ref().is_some_and(|kernel| {
+                !kernel.writes.is_empty()
+                    && (kernel.wait.is_some() || service_processes.contains(&index))
+            })
+        });
+        let possible_wait_feedback =
+            opaque_dependencies || event_writing_waits || !feedback_stores.is_empty();
         tracing::debug!(target: "celox::scheduler", possible_wait_feedback,
             stores = ?feedback_stores.iter().take(8).map(|address| program.get_path(address)).collect::<Vec<_>>(),
             "candidate wait feedback stores");
@@ -1191,8 +1335,18 @@ impl Plan {
         } else {
             tracing::debug!(target: "celox::scheduler", possible_wait_feedback, nba_processes = nba_processes.len(), "individual wait dependency slices are unnecessary");
         }
-        let cyclic =
-            service_function.is_some() && (possible_wait_feedback || !nba_processes.is_empty());
+        let inactive: Vec<_> = kernels
+            .iter()
+            .enumerate()
+            .filter_map(|(index, kernel)| {
+                (ordered_available
+                    && kernel.as_ref().is_some_and(|kernel| kernel.delays)
+                    && !schema.processes[index].const_delays)
+                    .then_some((index, schema.processes[index].status))
+            })
+            .collect();
+        let cyclic = service_function.is_some()
+            && (possible_wait_feedback || !nba_processes.is_empty() || !inactive.is_empty());
         for index in remaining {
             if !cyclic
                 && kernels[index]
@@ -1227,17 +1381,16 @@ impl Plan {
         };
         let effects = sir.eval_comb.iter().any(|unit| {
             instructions(unit).any(|inst| match inst {
-                SIRInstruction::RuntimeEvent { .. }
-                | SIRInstruction::CombCaptureEvent { .. }
-                | SIRInstruction::CombCaptureEnableIfChanged { .. }
-                | SIRInstruction::ExternCall { .. } => true,
                 SIRInstruction::Store(_, _, _, _, triggers, sites) => {
                     triggers.iter().any(|trigger| !internal_trigger(trigger)) || !sites.is_empty()
                 }
                 SIRInstruction::Commit(_, _, _, _, triggers) => {
                     triggers.iter().any(|trigger| !internal_trigger(trigger))
                 }
-                _ => false,
+                // Records, captures and external calls, a callee's too. A
+                // call's effects do not say which triggers it raises, so any
+                // is taken for one the scheduler does not compare itself.
+                _ => inst.host_effects() != celox_sir::HostEffects::default(),
             })
         });
         // Dirty tracking compares stable homes by their representative
@@ -1247,18 +1400,18 @@ impl Plan {
             homes_overlap_only_whole(program.layout()),
             "stable homes overlap at different offsets"
         );
-        let settle_reads: Option<HashSet<AbsoluteAddr>> = (!effects).then(|| {
-            sir.eval_comb
-                .iter()
-                .flat_map(instructions)
-                .filter_map(|inst| match inst {
-                    SIRInstruction::Load(_, source, ..) | SIRInstruction::Commit(source, ..) => {
-                        Some(storage(source.absolute_addr()))
-                    }
-                    _ => None,
-                })
-                .collect()
-        });
+        // A pending settle cannot pass an opaque reader, nor can an opaque
+        // writer use a sliced settle selected only from explicit stores.
+        // Keep the complete generated settle in that general path.
+        let settle_reads: Option<HashSet<AbsoluteAddr>> =
+            (!effects && !opaque_dependencies).then(|| {
+                sir.eval_comb
+                    .iter()
+                    .flat_map(instructions)
+                    .flat_map(read_storage)
+                    .map(|source| storage(source.absolute_addr()))
+                    .collect()
+            });
         // A settle may wait for its readers only when it is a function of
         // its inputs that cannot fail: when it would end the run, it must do
         // so in its own slot; when it reads what an earlier settle left (a
@@ -1277,6 +1430,13 @@ impl Plan {
             .filter_map(|kernel| kernel.wait.as_ref())
             .flat_map(|wait| &wait.terms)
             .map(|&(signal, _)| storage(signal))
+            .chain(schema.wait_sites.iter().flat_map(|site| {
+                site.gates
+                    .iter()
+                    .flatten()
+                    .flat_map(celox_design::WaitGate::reads)
+                    .map(storage)
+            }))
             .chain(model.counted.iter().flat_map(|counted| {
                 CounterKind::ALL.map(|kind| storage(counted.slots.counter(kind)))
             }))
@@ -1421,11 +1581,8 @@ impl Plan {
                 .eval_comb
                 .iter()
                 .flat_map(instructions)
-                .all(|instruction| {
-                    instruction
-                        .memory_read()
-                        .is_none_or(|read| read.addr.region == STABLE_REGION)
-                })
+                .flat_map(read_storage)
+                .all(|read| read.region == STABLE_REGION)
             && sir.eval_comb.iter().all(|unit| {
                 celox_sir::cfg::SirCfg::analyze(unit).is_ok_and(|cfg| cfg.loops.is_empty())
             }) {
@@ -1440,9 +1597,9 @@ impl Plan {
                         return None;
                     }
                     let sources: HashSet<_> = instructions(&sir.processes[index])
-                        .filter_map(|instruction| instruction.memory_write())
-                        .filter(|write| write.addr.region == STABLE_REGION)
-                        .map(|write| storage(write.addr.absolute_addr()))
+                        .flat_map(written_storage)
+                        .filter(|write| write.region == STABLE_REGION)
+                        .map(|write| storage(write.absolute_addr()))
                         .filter(|address| settle_reads.as_ref().unwrap().contains(address))
                         .collect();
                     // Read-before-write activations retain their existing
@@ -1502,7 +1659,19 @@ impl Plan {
                 });
             }
         }
+        let host_edges = if ordered_available {
+            (0..events.len())
+                .filter(|event| !rtl_written.contains(event))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let mut plan = Self {
+            host_edges,
+            inactive,
+            observers: native_observers
+                .then(|| observers::Observers::new(program))
+                .filter(|observers| !observers.groups.is_empty()),
             counted: counted_events,
             events,
             kernels,
@@ -1574,9 +1743,7 @@ impl Plan {
         // mixed Active/NBA gate inputs, unknown-to-known edge sequences,
         // direct procedural clock writes, and Active-clock feedback need an
         // ordered queue rather than a domain mask.
-        let ordered_available = cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen")))
-            && plan.service_function.is_some();
-        let mut needs_ordered = false;
+        let mut needs_ordered = event_writing_waits || !plan.inactive.is_empty();
         if !plan.active.is_empty() {
             let mut active_stores: HashMap<AbsoluteAddr, Vec<usize>> = HashMap::default();
             for (index, event) in plan.events.iter().enumerate() {
@@ -1584,11 +1751,8 @@ impl Plan {
                     continue;
                 }
                 for unit in event.eval_only.iter().flatten() {
-                    for inst in instructions(unit) {
-                        if let SIRInstruction::Store(target, ..)
-                        | SIRInstruction::Commit(_, target, ..) = inst
-                            && target.region == STABLE_REGION
-                        {
+                    for target in instructions(unit).flat_map(written_storage) {
+                        if target.region == STABLE_REGION {
                             active_stores
                                 .entry(storage(target.absolute_addr()))
                                 .or_default()
@@ -1679,14 +1843,17 @@ impl Plan {
                         kernel.as_ref().is_some_and(|kernel| {
                             source_event.is_some_and(|source| kernel.writes.contains(source))
                         }) && instructions(&sir.processes[index])
-                            .filter(|inst| match inst {
-                                SIRInstruction::Store(target, ..)
-                                | SIRInstruction::Commit(_, target, ..) => {
-                                    storage(target.absolute_addr()) == source
+                            .map(|inst| {
+                                let writes = written_storage(inst)
+                                    .any(|target| storage(target.absolute_addr()) == source);
+                                // A call may write it any number of times.
+                                match writes {
+                                    false => 0,
+                                    true if inst.call_effects().is_some() => 2,
+                                    true => 1,
                                 }
-                                _ => false,
                             })
-                            .count()
+                            .sum::<usize>()
                             > 1
                     }) {
                         if !ordered_available {
@@ -1736,9 +1903,7 @@ impl Plan {
                 model
                     .processes
                     .iter()
-                    .zip(&plan.kernels)
-                    .filter(|(_, kernel)| kernel.is_some())
-                    .flat_map(|(process, _)| process.nbas.iter().map(|site| storage(site.target))),
+                    .flat_map(|process| process.nbas.iter().map(|site| storage(site.target))),
             )
             .collect();
         let stable_input = |address| {
@@ -1821,15 +1986,9 @@ impl Plan {
                     .filter_map(|event| sir.eval_only_ffs.get(event))
                     .flatten()
                     .flat_map(instructions)
-                    .filter_map(|inst| match inst {
-                        SIRInstruction::Store(target, ..)
-                        | SIRInstruction::Commit(_, target, ..)
-                            if target.region == STABLE_REGION =>
-                        {
-                            Some(storage(target.absolute_addr()))
-                        }
-                        _ => None,
-                    })
+                    .flat_map(written_storage)
+                    .filter(|target| target.region == STABLE_REGION)
+                    .map(|target| storage(target.absolute_addr()))
                     .collect();
                 let mut pending = Vec::new();
                 for index in candidates {
@@ -1851,6 +2010,35 @@ impl Plan {
                 }
             }
         }
+        let nba_written: BTreeSet<_> = plan
+            .nba_processes
+            .iter()
+            .flat_map(|&process| &model.processes[process].nbas)
+            .filter_map(|site| event_storage.get(&storage(site.target)))
+            .flatten()
+            .copied()
+            .collect();
+        if !nba_written.is_empty() {
+            derived.extend(nba_written.iter().filter(|event| !edged.contains(event)));
+            needs_ordered = true;
+        }
+        let unhandled_rtl_events: Vec<_> = rtl_written
+            .difference(&derived)
+            .filter(|event| ordered_available || !stable_host_events.contains(event))
+            .copied()
+            .collect();
+        if ordered_available && !unhandled_rtl_events.is_empty() {
+            // Dependency proofs select the smaller schedule. Their failure
+            // selects generated ordered waves over every affected domain.
+            // Kernel-written events are already in `edged` and must appear
+            // only once in the level snapshot.
+            derived.extend(
+                unhandled_rtl_events
+                    .iter()
+                    .filter(|event| !edged.contains(event)),
+            );
+            needs_ordered = true;
+        }
         if needs_ordered {
             // The topology-based observer pruning above predates orphan
             // clocks. Ordered waves must preserve every real Active commit,
@@ -1868,11 +2056,6 @@ impl Plan {
                 plan.service_function.unwrap(),
             ));
         }
-        let unhandled_rtl_events: Vec<_> = rtl_written
-            .difference(&derived)
-            .filter(|event| !stable_host_events.contains(event))
-            .copied()
-            .collect();
         tracing::debug!(target: "celox::scheduler",
                 incremental_instructions = plan.incremental.as_ref().map(|cone| cone.units.iter().flat_map(instructions).count()),
                 incremental_source = ?plan.incremental.as_ref().map(|cone| program.get_path(&cone.source)),
@@ -1888,7 +2071,7 @@ impl Plan {
                 active_commits = ?active_commits.iter().map(|&event| program.get_path(&plan.events[event].signal)).collect::<Vec<_>>(),
                 kernels = ?plan.fallback.iter().enumerate().map(|(index, reason)| (index, schema.process_origins.get(index).map(ToString::to_string), reason, written(&sir.processes[index]).iter().map(|&event| program.get_path(&plan.events[event].signal)).collect::<Vec<_>>())).collect::<Vec<_>>(),
                 "compiled scheduler process plans");
-        if !unhandled_rtl_events.is_empty() {
+        if !ordered_available && !unhandled_rtl_events.is_empty() {
             tracing::debug!(target: "celox::scheduler",
                 signals = ?unhandled_rtl_events.iter().map(|&event| program.get_path(&plan.events[event].signal)).collect::<Vec<_>>(),
                 edged = ?edged.iter().map(|&event| program.get_path(&plan.events[event].signal)).collect::<Vec<_>>(),
@@ -1914,7 +2097,7 @@ impl Plan {
         plan.derived = derived.into_iter().collect();
         plan.gating = gating;
         let tracked = plan.tracked();
-        if !plan.active.is_empty()
+        if (!plan.active.is_empty() || plan.ordered.is_some())
             && (program.layout().widths[&slots.exit_arg] < event_bits * 2
                 || tracked.iter().any(|&event| {
                     plan.events[event].eval_only.is_none() || plan.events[event].apply.is_none()
@@ -1961,6 +2144,7 @@ impl Plan {
     fn edged(&self) -> Vec<usize> {
         let mut edged = self.written();
         edged.extend(&self.clocks);
+        edged.extend(&self.host_edges);
         edged.sort_unstable();
         edged.dedup();
         edged
@@ -1983,7 +2167,22 @@ impl Plan {
         let clock_bits = self.clocks.len().next_multiple_of(64).max(64);
         let mut b = Builder::new();
         let comb = b.new_block();
+        let native_nbas: HashSet<_> = self
+            .nba_processes
+            .iter()
+            .copied()
+            .filter(|&index| self.kernels[index].is_some())
+            .collect();
+        let nbas = cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen")))
+            .then_some(self.service_function)
+            .flatten()
+            .filter(|_| !schema.nba_sites.is_empty())
+            .map(|service| nba::Sites::new(program, &native_nbas, service, &self.events));
         let mut g = Generator {
+            program,
+            nbas: nbas.as_ref(),
+            observers: self.observers.as_ref(),
+            observer_service: self.service_function,
             outlined,
             outline_base,
             b,
@@ -2083,13 +2282,40 @@ impl Plan {
         // The caller supplies the dirty flag. Timed runs must start dirty:
         // checkpoint restores and partial-slot exits need a fresh settle.
         // A host clock batch may instead enter with already settled inputs.
+        let host_inputs = cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen")))
+            && self.service_function.is_some();
         let header = g.b.new_block();
         g.b.seal_block(SIRTerminator::Jump(header, Vec::new()));
 
         // The next slot: the earliest wake time of a kernel waiting for one.
         g.b.switch_to_block(header);
         let mut time = g.constant(u64::MAX, SCHEDULER_TIME_WIDTH);
-        let mut any = g.constant(0, 1);
+        let ready = g.load(slots.ready, g.ready_bits);
+        let zero = g.constant(0, g.ready_bits);
+        let mut any = g.binary(1, ready, BinaryOp::Ne, zero);
+        let now = g.load(slots.now, SCHEDULER_TIME_WIDTH);
+        let start = g.b.alloc_bit(SCHEDULER_TIME_WIDTH, false);
+        g.b.emit(SIRInstruction::Mux(start, any, now, time));
+        time = start;
+        if host_inputs {
+            let host = host_inputs::pending(&mut g);
+            let now = g.load(slots.now, SCHEDULER_TIME_WIDTH);
+            let next = g.b.alloc_bit(SCHEDULER_TIME_WIDTH, false);
+            g.b.emit(SIRInstruction::Mux(next, host, now, time));
+            time = next;
+            any = g.binary(1, any, BinaryOp::Or, host);
+        }
+        if host_inputs {
+            let entry = g.arena_header_load(std::mem::offset_of!(
+                crate::simulator::native_io::ArenaHeader,
+                region_entry
+            ));
+            let entry = g.equals(entry, 1);
+            let next = g.b.alloc_bit(SCHEDULER_TIME_WIDTH, false);
+            g.b.emit(SIRInstruction::Mux(next, entry, now, time));
+            time = next;
+            any = g.binary(1, any, BinaryOp::Or, entry);
+        }
         for &(index, status) in &delays {
             let wake = g.load(slots.wake[index], SCHEDULER_TIME_WIDTH);
             let waiting = g.waiting_for_time(index, status);
@@ -2099,6 +2325,9 @@ impl Plan {
             g.b.emit(SIRInstruction::Mux(next, earlier, wake, time));
             time = next;
             any = g.binary(1, any, BinaryOp::Or, waiting);
+        }
+        if let Some(nbas) = &nbas {
+            (time, any) = nbas.next_time(&mut g, time, any);
         }
         // Or the earliest next edge of a host clock, when the run has any.
         // The clocks armed at the start of the slot, which the re-arm at its
@@ -2183,16 +2412,35 @@ impl Plan {
                 );
             }
         }
-        let mut ready = g.constant(0, g.ready_bits);
+        let mut ready = g.load(slots.ready, g.ready_bits);
         for &(index, status) in &delays {
             let wake = g.load(slots.wake[index], SCHEDULER_TIME_WIDTH);
             let waiting = g.waiting_for_time(index, status);
             let due = g.binary(1, wake, BinaryOp::Eq, time);
-            let due = g.binary(1, due, BinaryOp::And, waiting);
+            let mut due = g.binary(1, due, BinaryOp::And, waiting);
+            if host_inputs && self.inactive.iter().any(|&(process, _)| process == index) {
+                // Imported #0 work belongs to Inactive. A computed positive
+                // delay instead resumes in Active at its future timestamp.
+                let process = &schema.processes[index];
+                let status = g.load(process.status, celox_design::PROCESS_STATUS_WIDTH);
+                let inactive = g.equals(status, u64::from(ProcessStatus::InactiveDelay.code()));
+                let amount = g.load(process.delay, celox_design::PROCESS_DELAY_WIDTH);
+                let zero = g.equals(amount, 0);
+                let inactive = g.binary(1, inactive, BinaryOp::And, zero);
+                let active = g.equals(inactive, 0);
+                due = g.binary(1, due, BinaryOp::And, active);
+            }
             let bit = g.bit(due, ordinals[index]);
             ready = g.binary(g.ready_bits, ready, BinaryOp::Or, bit);
         }
         g.store(slots.ready, g.ready_bits, ready);
+        if host_inputs {
+            let zero = g.constant(0, 64);
+            g.arena_header_store(
+                std::mem::offset_of!(crate::simulator::native_io::ArenaHeader, region_entry),
+                zero,
+            );
+        }
         // A pending settle runs, as at the end of the last slot, before a
         // kernel that observes it may run: one due now, any waiting one,
         // which may wake in any pass, or any one in a slot after which a
@@ -2221,6 +2469,13 @@ impl Plan {
                     let after = g.binary(1, time, BinaryOp::GtU, latest);
                     observed = g.binary(1, observed, BinaryOp::Or, after);
                 }
+                if host_inputs {
+                    // Raw host pulses advance waiting baselines before the
+                    // first settle. The entry path below performs that settle.
+                    let host = host_inputs::pending(&mut g);
+                    let ordinary = g.equals(host, 0);
+                    observed = g.binary(1, observed, BinaryOp::And, ordinary);
+                }
                 let settle = g.b.new_block();
                 let slot = g.b.new_block();
                 g.b.seal_block(SIRTerminator::Branch {
@@ -2234,6 +2489,9 @@ impl Plan {
             }
         }
         g.store(slots.now, SCHEDULER_TIME_WIDTH, time);
+        if let Some(nbas) = &nbas {
+            nbas.promote(&mut g, time);
+        }
         let fresh = g.constant(0, SCHEDULER_FLAG_WIDTH);
         g.store_at(
             slots.defer_limit_settle,
@@ -2277,6 +2535,8 @@ impl Plan {
         // exit in the middle of the slot; those of the clocks' events below,
         // when the run has clocks, unless the slot's waves compare against
         // them: a host clock no clock drives keeps the level the host set.
+        let host_entry = host_inputs.then(|| host_inputs::pending(&mut g));
+        let host_levels = host_entry.map(|_| g.load_levels());
         let mut levels = g.no_levels();
         for (bit, &event) in tracked.iter().enumerate() {
             if self.clocks.contains(&event) && self.derived.is_empty() {
@@ -2285,7 +2545,25 @@ impl Plan {
             let level = g.level(&self.events[event]);
             levels = g.with_level(levels, level, bit);
         }
+        if let (Some(host), Some(prior)) = (host_entry, host_levels) {
+            let value = g.b.alloc_bit(self.event_bits, false);
+            g.b.emit(SIRInstruction::Mux(
+                value,
+                host,
+                prior.values,
+                levels.values,
+            ));
+            levels.values = value;
+            if let (Some(old), Some(current)) = (prior.unknown, levels.unknown) {
+                let unknown = g.b.alloc_bit(self.event_bits, false);
+                g.b.emit(SIRInstruction::Mux(unknown, host, old, current));
+                levels.unknown = Some(unknown);
+            }
+        }
         g.store_levels(levels);
+        if let Some(host) = host_entry {
+            g.if_bit(host, 0, |g| host_inputs::replay(program, g, &checks));
+        }
         // The host clocks due now set their levels, in event order, before
         // any kernel runs; their edges start the slot's edges, which
         // collect in `exit_arg`. A clock whose edge applied waits for its
@@ -2303,18 +2581,39 @@ impl Plan {
         }
         let finish_exit = g.exit_block(SchedulerExit::Finish);
         let pick = g.b.new_block();
+        let entry_done = pick;
         if let Some((armed, clocked)) = started {
             let apply = g.b.new_block();
             g.b.seal_block(SIRTerminator::Branch {
                 cond: clocked,
                 true_block: (apply, Vec::new()),
-                false_block: (pick, Vec::new()),
+                false_block: (entry_done, Vec::new()),
             });
             g.b.switch_to_block(apply);
             let values = g.load(slots.clock_value, clock_bits);
             let mut fired = g.constant(0, clock_bits);
             let mut edges = g.constant(0, self.event_bits);
             let mut levels = g.load_levels();
+            // Distinct polarity domains can share physical clock storage.
+            // Capture every baseline before the batch writes any alias.
+            let shared_clocks = self
+                .clocks
+                .iter()
+                .map(|&index| {
+                    let signal = self.events[index].signal;
+                    g.shared.get(&signal).copied().unwrap_or(signal)
+                })
+                .collect::<HashSet<_>>()
+                .len()
+                != self.clocks.len();
+            let before: Vec<_> = if shared_clocks {
+                self.clocks
+                    .iter()
+                    .map(|&index| g.level(&self.events[index]))
+                    .collect()
+            } else {
+                Vec::new()
+            };
             for (bit, &index) in self.clocks.iter().enumerate() {
                 let event = &self.events[index];
                 let next_edge = g.clock_next(bit);
@@ -2322,15 +2621,25 @@ impl Plan {
                 let due = g.binary(1, next_edge, BinaryOp::Eq, time);
                 let due = g.binary(1, due, BinaryOp::And, on);
                 let value = g.mask_bit(values, bit);
-                let was = g.level(event);
+                let actual = g.level(event);
                 let position = tracked
                     .iter()
                     .position(|&tracked| tracked == index)
                     .expect("clocks are tracked");
+                let baseline = if shared_clocks { before[bit] } else { actual };
+                let was = if let (Some(host), Some(prior)) = (host_entry, host_levels) {
+                    let old = g.saved_level(prior, position);
+                    let was =
+                        g.b.alloc_bit(if g.four_state.is_some() { 2 } else { 1 }, false);
+                    g.b.emit(SIRInstruction::Mux(was, host, old, baseline));
+                    was
+                } else {
+                    baseline
+                };
                 levels = g.with_level(levels, was, position);
                 let is = if g.four_state.is_none() {
                     let is = g.b.alloc_bit(1, false);
-                    g.b.emit(SIRInstruction::Mux(is, due, value, was));
+                    g.b.emit(SIRInstruction::Mux(is, due, value, actual));
                     g.store(event.signal, 1, is);
                     is
                 } else {
@@ -2348,9 +2657,12 @@ impl Plan {
                     let known = g.b.alloc_bit(2, false);
                     g.b.emit(SIRInstruction::Concat(known, vec![zero, value]));
                     let is = g.b.alloc_bit(2, false);
-                    g.b.emit(SIRInstruction::Mux(is, due, known, was));
+                    g.b.emit(SIRInstruction::Mux(is, due, known, actual));
                     is
                 };
+                // Counters sample iff gates at this write, before the next
+                // scheduled clock changes a gate (IEEE 1800-2023 9.4.2.3).
+                g.count_host_clock(schema, event.signal, actual, is, due);
                 let changed = g.binary(1, was, BinaryOp::Ne, is);
                 if let Some(aliases) = &event.aliases {
                     for unit in aliases {
@@ -2363,11 +2675,24 @@ impl Plan {
                     let dirty = g.binary(SCHEDULER_FLAG_WIDTH, dirty, BinaryOp::Or, changed);
                     g.store(slots.dirty, SCHEDULER_FLAG_WIDTH, dirty);
                 }
-                let edge = g.edge(event, was, is);
-                let edge = g.event_bit(edge, index);
-                edges = g.binary(self.event_bits, edges, BinaryOp::Or, edge);
+                if !shared_clocks {
+                    let edge = g.edge(event, was, is);
+                    let edge = g.event_bit(edge, index);
+                    edges = g.binary(self.event_bits, edges, BinaryOp::Or, edge);
+                }
                 let bit = g.bit_of(due, bit, clock_bits);
                 fired = g.binary(clock_bits, fired, BinaryOp::Or, bit);
+            }
+            // Judge all domains against the completed scheduled batch;
+            // otherwise a preceding alias write consumes a later domain's edge.
+            if shared_clocks {
+                for &index in &self.clocks {
+                    let was = g.saved_level(levels, position(&tracked, index));
+                    let is = g.level(&self.events[index]);
+                    let edge = g.edge(&self.events[index], was, is);
+                    let edge = g.event_bit(edge, index);
+                    edges = g.binary(self.event_bits, edges, BinaryOp::Or, edge);
+                }
             }
             g.store_levels(levels);
             g.store(slots.exit_arg, self.event_bits, edges);
@@ -2383,13 +2708,13 @@ impl Plan {
                 g.b.seal_block(SIRTerminator::Branch {
                     cond: applied,
                     true_block: (check, Vec::new()),
-                    false_block: (pick, Vec::new()),
+                    false_block: (entry_done, Vec::new()),
                 });
                 g.b.switch_to_block(check);
-                g.check_waits(&checks);
+                g.check_waits_at(&checks, false);
             }
         }
-        g.b.seal_block(SIRTerminator::Jump(pick, Vec::new()));
+        g.b.seal_block(SIRTerminator::Jump(entry_done, Vec::new()));
 
         // A pass of the process phase: the lowest ready kernel runs, and
         // the waits see its writes before the next one while kernels remain
@@ -2488,11 +2813,6 @@ impl Plan {
                     );
                 }
             }
-            let before: Vec<_> = kernel
-                .writes
-                .iter()
-                .map(|&event| g.level(&self.events[event]))
-                .collect();
             let first_host = self
                 .service_processes
                 .contains(&index)
@@ -2506,7 +2826,24 @@ impl Plan {
                 .unwrap_or_default();
             g.b.seal_block(SIRTerminator::Jump(enter, enter_args));
             g.b.switch_to_block(enter);
+            let before: Vec<_> = kernel
+                .writes
+                .iter()
+                .map(|&event| g.level(&self.events[event]))
+                .collect();
             g.inline_writer(&program.sir.processes[index], finish_exit);
+            if !kernel.writes.is_empty() {
+                // Capture every continuation, including returns to a host service.
+                // A later continuation cannot erase an already observed pulse.
+                let mut edges = g.load(slots.exit_arg, self.event_bits);
+                for (&event, &was) in kernel.writes.iter().zip(&before) {
+                    let is = g.level(&self.events[event]);
+                    let edge = g.edge(&self.events[event], was, is);
+                    let bit = g.event_bit(edge, event);
+                    edges = g.binary(self.event_bits, edges, BinaryOp::Or, bit);
+                }
+                g.store(slots.exit_arg, self.event_bits, edges);
+            }
             let status = g.load(process.status, celox_design::PROCESS_STATUS_WIDTH);
             let code = |status: ProcessStatus| u64::from(status.code());
             if self.service_processes.contains(&index) {
@@ -2531,6 +2868,26 @@ impl Plan {
                 });
                 g.b.switch_to_block(call);
                 let resume = g.b.new_block();
+                if let (Some(nbas), Some(nba)) = (g.nbas, nba) {
+                    let capture = g.b.new_block();
+                    let host = g.b.new_block();
+                    g.b.seal_block(SIRTerminator::Branch {
+                        cond: nba,
+                        true_block: (capture, Vec::new()),
+                        false_block: (host, Vec::new()),
+                    });
+                    g.b.switch_to_block(capture);
+                    let site = g.load(process.delay, 64);
+                    nbas.capture(&mut g, index, site);
+                    guards.as_mut().expect("native NBA budget guards").charge(
+                        &mut g,
+                        index as u64,
+                        crate::simulator::native_io::CHECKPOINT,
+                        time,
+                    );
+                    g.b.seal_block(SIRTerminator::Jump(resume, Vec::new()));
+                    g.b.switch_to_block(host);
+                }
                 if let (Some(guards), Some(yielded)) = (&mut guards, yielded) {
                     let checkpoint = g.b.new_block();
                     let host_call = g.b.new_block();
@@ -2700,10 +3057,10 @@ impl Plan {
                 });
                 g.b.switch_to_block(in_range);
                 g.store(slots.wake[index], SCHEDULER_TIME_WIDTH, wake);
-                if kernel.wait.is_some() {
-                    let flag = g.constant(1, SCHEDULER_FLAG_WIDTH);
-                    g.store(slots.waiting[index], SCHEDULER_FLAG_WIDTH, flag);
-                }
+                // Restored Active work need not have an armed wakeup, even
+                // for kernels that only delay. Each new delay arms its slot.
+                let flag = g.constant(1, SCHEDULER_FLAG_WIDTH);
+                g.store(slots.waiting[index], SCHEDULER_FLAG_WIDTH, flag);
                 g.b.seal_block(SIRTerminator::Jump(resumed, Vec::new()));
                 g.b.switch_to_block(other);
             }
@@ -2743,17 +3100,6 @@ impl Plan {
                 });
                 g.b.switch_to_block(next);
             }
-            if kernel.wait.is_none() {
-                // The edges of this run, against the levels before it.
-                let mut edges = g.load(slots.exit_arg, self.event_bits);
-                for (&event, &was) in kernel.writes.iter().zip(&before) {
-                    let is = g.level(&self.events[event]);
-                    let edge = g.edge(&self.events[event], was, is);
-                    let bit = g.event_bit(edge, event);
-                    edges = g.binary(self.event_bits, edges, BinaryOp::Or, bit);
-                }
-                g.store(slots.exit_arg, self.event_bits, edges);
-            }
             // Before the next run, the waits see this one's writes.
             let ready = g.load(slots.ready, g.ready_bits);
             let zero = g.constant(0, g.ready_bits);
@@ -2766,8 +3112,7 @@ impl Plan {
             });
             g.b.switch_to_block(check);
             if self.service_processes.contains(&index)
-                || instructions(&program.sir.processes[index])
-                    .any(|inst| matches!(inst, SIRInstruction::ExternCall { .. }))
+                || instructions(&program.sir.processes[index]).any(makes_extern_calls)
             {
                 // Every opaque writer needs the same scan and returns to
                 // `pick`. Share its body: copying every wait after every
@@ -2802,11 +3147,11 @@ impl Plan {
                     false_block: (checked, Vec::new()),
                 });
                 g.b.switch_to_block(scan);
-                g.check_waits(&checks);
+                g.check_waits_at(&checks, false);
                 g.b.seal_block(SIRTerminator::Jump(checked, Vec::new()));
                 g.b.switch_to_block(checked);
             } else {
-                g.check_waits(&checks);
+                g.check_waits_at(&checks, false);
             }
             g.dispatch_continuations(&wait_continuations, internal_exit);
         }
@@ -2815,6 +3160,29 @@ impl Plan {
         // combinational logic. A deferred settle after a pass runs for the
         // kernels that may run in another.
         g.b.switch_to_block(pass_end);
+        if host_entry.is_some() {
+            let pending = host_inputs::pending(&mut g);
+            g.if_bit(pending, 0, |g| {
+                let zero = g.constant(0, 64);
+                g.arena_header_store(
+                    std::mem::offset_of!(crate::simulator::native_io::ArenaHeader, host_entry),
+                    zero,
+                );
+                // Raw host writes wake Active processes before the first settle.
+                // Judge host domains only after those processes have run, so a
+                // process can overwrite the host's level before any FF commits.
+                let mut edges = g.load(slots.exit_arg, self.event_bits);
+                let levels = g.load_levels();
+                for &index in &edged {
+                    let was = g.saved_level(levels, position(&tracked, index));
+                    let is = g.level(&self.events[index]);
+                    let edge = g.settled_edge(&self.events[index], was, is);
+                    let bit = g.event_bit(edge, index);
+                    edges = g.binary(self.event_bits, edges, BinaryOp::Or, bit);
+                }
+                g.store(slots.exit_arg, self.event_bits, edges);
+            });
+        }
         if self.cyclic {
             if let Some(guards) = &mut guards {
                 guards.charge(
@@ -2832,6 +3200,23 @@ impl Plan {
                     internal_exit,
                 );
             }
+        }
+        if !self.cyclic
+            && let Some(service) = self.service_function
+        {
+            let enabled = g.arena_header_load(std::mem::offset_of!(
+                crate::simulator::native_io::ArenaHeader,
+                slot_observer
+            ));
+            g.if_bit(enabled, 0, |g| {
+                g.service_call(
+                    service,
+                    u64::MAX,
+                    crate::simulator::native_io::SCHEDULER_PASS,
+                    time,
+                    internal_exit,
+                );
+            });
         }
         let none = g.constant(u64::MAX, SCHEDULER_TIME_WIDTH);
         g.store(slots.current, SCHEDULER_TIME_WIDTH, none);
@@ -2906,7 +3291,8 @@ impl Plan {
         let zero = g.constant(0, g.ready_bits);
         let more = g.binary(1, ready, BinaryOp::Ne, zero);
         let domains = g.b.new_block();
-        let resume_domains = (!self.active.is_empty()).then(|| g.b.new_block());
+        let resume_domains =
+            (!self.active.is_empty() || self.ordered.is_some()).then(|| g.b.new_block());
         let route_domains = resume_domains.map(|_| g.b.new_block()).unwrap_or(domains);
         let another = if wait_observers {
             g.b.new_block()
@@ -2938,7 +3324,8 @@ impl Plan {
 
         // The domains the edges trigger, then the NBA region.
         g.b.switch_to_block(domains);
-        if !self.active.is_empty() {
+        self.observe_slot(&mut g, &tracked, &checks, finish_exit, true);
+        if !self.active.is_empty() || self.ordered.is_some() {
             self.batch_active(
                 &mut g,
                 &tracked,
@@ -2948,7 +3335,13 @@ impl Plan {
                 pick,
                 resume_domains.expect("active resume block"),
             );
-        } else if !self.derived.is_empty() || !self.counted.is_empty() {
+        } else if !self.derived.is_empty()
+            || !self.counted.is_empty()
+            || self.events.iter().any(|event| event.any_settled)
+        {
+            // Unspecified domains use rising edges for scheduled writes, but
+            // any change for later settled waves. Keep that ordering when
+            // another clock's commit changes the domain's inputs.
             self.batch(&mut g, &tracked, slot_end, finish_exit, &checks);
         } else {
             let staged: Vec<&Staged> = waits.iter().flat_map(|(_, wait)| &wait.sites).collect();
@@ -3020,7 +3413,13 @@ impl Plan {
                 // their domains as soon as without clock events.
                 g.b.switch_to_block(one_domain);
                 let written = self.written();
-                for &index in written.iter().chain(&self.clocks) {
+                let mut seen = HashSet::default();
+                for &index in written
+                    .iter()
+                    .chain(&self.clocks)
+                    .chain(&self.host_edges)
+                    .filter(|&&index| seen.insert(index))
+                {
                     let event = &self.events[index];
                     let bit = g.single(index, self.event_bits);
                     let this = g.binary(1, mask, BinaryOp::Eq, bit);
@@ -3226,7 +3625,25 @@ impl Plan {
             g.b.seal_block(SIRTerminator::Jump(rearmed, Vec::new()));
             g.b.switch_to_block(rearmed);
         }
-        if waits.iter().any(|(_, wait)| wait.reactive) {
+        let reactive_waits = waits.iter().any(|(_, wait)| wait.reactive);
+        if reactive_waits || (self.service_function.is_some() && !waits.is_empty()) {
+            // A host callback can wake an otherwise undriven input wait. Its
+            // activation must drain natively after the domains too.
+            let observer_done = (!reactive_waits).then(|| g.b.new_block());
+            if let Some(done) = observer_done {
+                let enabled = g.arena_header_load(std::mem::offset_of!(
+                    crate::simulator::native_io::ArenaHeader,
+                    slot_observer
+                ));
+                let enabled = g.equals(enabled, 1);
+                let scan = g.b.new_block();
+                g.b.seal_block(SIRTerminator::Branch {
+                    cond: enabled,
+                    true_block: (scan, Vec::new()),
+                    false_block: (done, Vec::new()),
+                });
+                g.b.switch_to_block(scan);
+            }
             // NBA publication can wake data-sensitive kernels in this same
             // time slot. Their next pass must not evaluate the domains that
             // just ran a second time: compare against the levels now and
@@ -3275,6 +3692,10 @@ impl Plan {
             }
             g.b.seal_block(SIRTerminator::Jump(pick, Vec::new()));
             g.b.switch_to_block(drained);
+            if let Some(done) = observer_done {
+                g.b.seal_block(SIRTerminator::Jump(done, Vec::new()));
+                g.b.switch_to_block(done);
+            }
         }
         if assertions {
             // IEEE 1800-2023 4.4.2.5-6: drain all Observed evaluations,
@@ -3449,6 +3870,12 @@ impl Plan {
 
         // A wave after a commit: the domains not run yet whose clocks moved.
         g.b.switch_to_block(wave);
+        let pending = g.load_at(slots.exit_arg, self.event_bits, self.event_bits);
+        let zero = g.constant(0, self.event_bits);
+        let post = g.binary(1, pending, BinaryOp::Eq, zero);
+        g.if_bit(post, 0, |g| {
+            self.observe_slot(g, tracked, checks, finish_exit, false)
+        });
         if self
             .kernels
             .iter()
@@ -3661,6 +4088,7 @@ impl Plan {
 
         // A wave after a commit: the domains not run yet whose clocks moved.
         g.b.switch_to_block(wave);
+        self.observe_slot(g, tracked, checks, finish_exit, false);
         if self
             .kernels
             .iter()
@@ -3840,7 +4268,7 @@ impl Plan {
                 let bit = position(tracked, clock);
                 let was = g.saved_level(levels, bit);
                 let is = g.level(&self.events[clock]);
-                let edge = g.edge(&self.events[clock], was, is);
+                let edge = g.settled_edge(&self.events[clock], was, is);
                 let edge = g.binary(1, edge, BinaryOp::And, changed);
                 let edge = g.event_bit(edge, clock);
                 active = g.binary(self.event_bits, active, BinaryOp::Or, edge);
@@ -3873,7 +4301,7 @@ impl Plan {
         for (position, &index) in tracked.iter().enumerate() {
             let was = g.saved_level(levels, position);
             let is = g.level(&self.events[index]);
-            let edge = g.edge(&self.events[index], was, is);
+            let edge = g.settled_edge(&self.events[index], was, is);
             let bit = g.event_bit(edge, index);
             edges = g.binary(self.event_bits, edges, BinaryOp::Or, bit);
         }
@@ -3896,6 +4324,7 @@ impl Plan {
             let mut values = Vec::with_capacity(width);
             let mut unknowns = Vec::with_capacity(width);
             let mut falling = 0u64;
+            let mut any_change = 0u64;
             for (bit, &index) in events.iter().enumerate() {
                 let event = &self.events[index];
                 let level = g.level(event);
@@ -3906,6 +4335,9 @@ impl Plan {
                 }
                 if event.active == 0 {
                     falling |= 1u64 << bit;
+                }
+                if event.any_settled {
+                    any_change |= 1u64 << bit;
                 }
             }
             let pack = |g: &mut Generator<'_>, mut bits: Vec<RegisterId>| {
@@ -3928,9 +4360,14 @@ impl Plan {
             let is = g.binary(width, is, BinaryOp::Xor, falling);
             let all = g.ones(width);
             let not_was = g.binary(width, was, BinaryOp::Xor, all);
+            let mut changed = (any_change != 0).then(|| g.binary(width, was, BinaryOp::Xor, is));
             let edges = if let Some(old_unknown) = levels.unknown {
                 let old_unknown = slice(g, old_unknown);
                 let new_unknown = pack(g, unknowns);
+                if let Some(values) = changed {
+                    let masks = g.binary(width, old_unknown, BinaryOp::Xor, new_unknown);
+                    changed = Some(g.binary(width, values, BinaryOp::Or, masks));
+                }
                 // Table 9-2: leave known zero or reach known one, excluding
                 // all unknown-to-unknown transitions (including X <-> Z).
                 let leaves = g.binary(width, not_was, BinaryOp::Or, old_unknown);
@@ -3941,6 +4378,15 @@ impl Plan {
                 g.binary(width, edges, BinaryOp::And, some_known)
             } else {
                 g.binary(width, not_was, BinaryOp::And, is)
+            };
+            let edges = if let Some(changed) = changed {
+                let any = g.constant(any_change, width);
+                let ordinary = g.binary(width, any, BinaryOp::Xor, all);
+                let edges = g.binary(width, edges, BinaryOp::And, ordinary);
+                let changed = g.binary(width, changed, BinaryOp::And, any);
+                g.binary(width, edges, BinaryOp::Or, changed)
+            } else {
+                edges
             };
             for (bit, &index) in events.iter().enumerate() {
                 let lane = g.b.alloc_bit(1, false);
@@ -3975,6 +4421,10 @@ enum Phase {
 }
 
 struct Generator<'a> {
+    program: &'a LaidOutProgram,
+    nbas: Option<&'a nba::Sites>,
+    observers: Option<&'a observers::Observers>,
+    observer_service: Option<u32>,
     outlined: Option<&'a mut Vec<Unit>>,
     outline_base: u32,
     b: Builder,
@@ -4053,6 +4503,10 @@ impl Generator<'_> {
     }
 
     fn publish_service(&mut self, function: Option<u32>, checks: &[WaitCheck<'_>]) {
+        if let Some(nbas) = self.nbas {
+            nbas.publish(self, checks);
+            return;
+        }
         let Some(function) = function else {
             return;
         };
@@ -4093,7 +4547,7 @@ impl Generator<'_> {
         });
         self.b.switch_to_block(changed);
         self.mark_dirty();
-        self.check_waits(checks);
+        self.check_waits_at(checks, false);
         self.b.seal_block(SIRTerminator::Jump(again, Vec::new()));
         self.b.switch_to_block(done);
     }
@@ -4309,6 +4763,14 @@ impl Generator<'_> {
     /// edge.
     fn edge(&mut self, event: &Event, was: RegisterId, is: RegisterId) -> RegisterId {
         self.level_edge(event.active != 0, was, is)
+    }
+
+    fn settled_edge(&mut self, event: &Event, was: RegisterId, is: RegisterId) -> RegisterId {
+        if event.any_settled {
+            self.binary(1, was, BinaryOp::Ne, is)
+        } else {
+            self.edge(event, was, is)
+        }
     }
 
     /// Whether a change of an edge level from `was` to `is` is a rising
@@ -4556,6 +5018,22 @@ impl Generator<'_> {
         target: celox_sir::BlockId,
         internal_exit: celox_sir::BlockId,
     ) {
+        if !wait.alternatives.is_empty() {
+            let site = self.load(delay, SCHEDULER_TIME_WIDTH);
+            let blocks: Vec<_> = wait
+                .alternatives
+                .iter()
+                .map(|_| self.b.new_block())
+                .collect();
+            let sites: Vec<_> = wait.site_terms.iter().map(|&index| blocks[index]).collect();
+            self.dispatch_sites(site, &sites, internal_exit);
+            for (alternative, block) in wait.alternatives.iter().zip(blocks) {
+                self.b.switch_to_block(block);
+                self.capture_raw_wait(index, alternative);
+                self.b.seal_block(SIRTerminator::Jump(target, Vec::new()));
+            }
+            return;
+        }
         if wait.raw.is_some() {
             self.capture_raw_wait(index, wait);
             self.b.seal_block(SIRTerminator::Jump(target, Vec::new()));
@@ -4613,15 +5091,15 @@ impl Generator<'_> {
         unit: &Unit,
         time_slots: &[AbsoluteAddr],
     ) {
-        if instructions(unit).any(|inst| matches!(inst, SIRInstruction::ExternCall { .. })) {
-            self.check_waits(waits);
+        if instructions(unit).any(makes_extern_calls) {
+            self.check_waits_at(waits, false);
             return;
         }
         let storage = |address| self.shared.get(&address).copied().unwrap_or(address);
         let writes: HashSet<_> = instructions(unit)
-            .filter_map(SIRInstruction::memory_write)
-            .filter(|write| write.addr.region == STABLE_REGION)
-            .map(|write| storage(write.addr.absolute_addr()))
+            .flat_map(written_storage)
+            .filter(|write| write.region == STABLE_REGION)
+            .map(|write| storage(write.absolute_addr()))
             .chain(time_slots.iter().copied().map(storage))
             .collect();
         let affected: Vec<_> = waits
@@ -4642,13 +5120,17 @@ impl Generator<'_> {
             })
             .collect();
         tracing::debug!(target: "celox::scheduler", total=waits.len(), affected=affected.len(), "filtered post-kernel wait checks");
-        self.check_waits(&affected);
+        self.check_waits_at(&affected, false);
     }
 
     /// Test the waits of `waits` against their signals now
     /// (`check_waits`): a wait whose edge occurred since its baseline wakes
     /// its kernel; every changed signal becomes the baseline.
     fn check_waits(&mut self, waits: &[WaitCheck]) {
+        self.check_waits_at(waits, true);
+    }
+
+    fn check_waits_at(&mut self, waits: &[WaitCheck], settled: bool) {
         if waits.is_empty() {
             return;
         }
@@ -4663,8 +5145,10 @@ impl Generator<'_> {
                 let edge = self.binary(1, edge, BinaryOp::Or, pending);
                 waiting = self.binary(1, waiting, BinaryOp::And, edge);
             }
-            let wake = if wait.raw.is_some() {
-                self.check_raw_wait(check.index, wait, waiting)
+            let wake = if !wait.alternatives.is_empty() {
+                self.check_wait_site(check.index, check.delay, wait, waiting, settled)
+            } else if wait.raw.is_some() {
+                self.check_raw_wait(check.index, wait, waiting, settled)
             } else {
                 let baseline = self.load(self.slots.baseline[check.index], SCHEDULER_FLAG_WIDTH);
                 let level_width = if self.four_state.is_none() { 1 } else { 2 };
@@ -4833,10 +5317,7 @@ impl Generator<'_> {
         for unit in units {
             self.inline_writer_with_exit(unit, None);
         }
-        if units
-            .iter()
-            .any(|unit| emits_finish(unit, self.finish_sites))
-        {
+        if units.iter().any(|unit| self.unit_finishes(unit)) {
             self.check_finish(finish_exit);
         }
     }
@@ -4848,7 +5329,8 @@ impl Generator<'_> {
             // slots.dirty. Preserve intermediate changes as well as X/Z-only
             // changes; do not snapshot its notification flags again.
             self.inline_with_exit(unit, finish_exit);
-            if instructions(unit).any(|inst| matches!(inst, SIRInstruction::ExternCall { .. })) {
+            // The instrumentation marks after a call's writes as well.
+            if instructions(unit).any(makes_extern_calls) {
                 self.mark_dirty();
             }
             return;
@@ -4891,12 +5373,9 @@ impl Generator<'_> {
                 }
                 self.store(self.slots.dirty, SCHEDULER_FLAG_WIDTH, dirty);
             }
-        } else if instructions(unit).any(|inst| match inst {
-            SIRInstruction::ExternCall { .. } => true,
-            SIRInstruction::Store(target, ..) | SIRInstruction::Commit(_, target, ..) => {
-                self.settle_reads(target.absolute_addr())
-            }
-            _ => false,
+        } else if instructions(unit).any(|inst| {
+            makes_extern_calls(inst)
+                || written_storage(inst).any(|target| self.settle_reads(target.absolute_addr()))
         }) {
             self.mark_dirty();
         }
@@ -4910,15 +5389,23 @@ impl Generator<'_> {
         let mut ranges = Vec::new();
         let mut bits = 0;
         for instruction in instructions(unit) {
-            let (target, offset, width) = match instruction {
-                SIRInstruction::Store(target, offset, width, ..)
-                | SIRInstruction::Commit(_, target, offset, width, ..)
-                    if self.settle_reads(target.absolute_addr()) =>
-                {
-                    (target, offset, *width)
+            // An opaque call can change state outside explicit Stores.
+            if makes_extern_calls(instruction) {
+                return None;
+            }
+            let (target, offset, width) = match instruction.state_writes() {
+                StateAccess::Access(access) if self.settle_reads(access.addr.absolute_addr()) => {
+                    (access.addr, access.offset, access.width)
                 }
-                // An opaque call can change state outside explicit Stores.
-                SIRInstruction::ExternCall { .. } => return None,
+                // A call may write any part of these objects, which the
+                // bounded snapshots do not cover.
+                StateAccess::Objects(objects)
+                    if objects
+                        .iter()
+                        .any(|target| self.settle_reads(target.absolute_addr())) =>
+                {
+                    return None;
+                }
                 _ => continue,
             };
             if target.region != STABLE_REGION {
@@ -5044,7 +5531,10 @@ impl Generator<'_> {
         });
         self.b.switch_to_block(run);
         for unit in eager {
-            self.inline(unit, finish_exit);
+            self.inline_with_exit(unit, None);
+        }
+        if eager.iter().any(|unit| self.unit_finishes(unit)) {
+            self.check_finish(finish_exit);
         }
         self.b.seal_block(SIRTerminator::Jump(done, Vec::new()));
         self.b.switch_to_block(done);
@@ -5079,6 +5569,7 @@ impl Generator<'_> {
         internal_exit: celox_sir::BlockId,
     ) {
         self.b.switch_to_block(self.comb);
+        self.observers_before(internal_exit);
         if self.settle_reads.is_some() {
             let dirty = self.load(self.slots.dirty, SCHEDULER_FLAG_WIDTH);
             let zero = self.constant(0, SCHEDULER_FLAG_WIDTH);
@@ -5103,18 +5594,18 @@ impl Generator<'_> {
                 });
                 self.b.switch_to_block(partial);
                 for unit in &cone.units {
-                    self.inline(unit, finish_exit);
+                    self.inline_with_exit(unit, None);
                 }
                 self.b.seal_block(SIRTerminator::Jump(done, Vec::new()));
                 self.b.switch_to_block(full);
                 for unit in units {
-                    self.inline(unit, finish_exit);
+                    self.inline_with_exit(unit, None);
                 }
                 self.b.seal_block(SIRTerminator::Jump(done, Vec::new()));
                 self.b.switch_to_block(done);
             } else {
                 for unit in units {
-                    self.inline(unit, finish_exit);
+                    self.inline_with_exit(unit, None);
                 }
             }
             let clean = self.constant(0, SCHEDULER_FLAG_WIDTH);
@@ -5123,8 +5614,18 @@ impl Generator<'_> {
             self.b.switch_to_block(settled);
         } else {
             for unit in units {
-                self.inline(unit, finish_exit);
+                self.inline_with_exit(unit, None);
             }
+        }
+        self.observers_after(internal_exit);
+        // Match the backend's phase boundary: a captured finish must not
+        // skip later combinational writes, captures or observer snapshots.
+        if units.iter().any(|unit| self.unit_finishes(unit))
+            || self
+                .incremental
+                .is_some_and(|cone| cone.units.iter().any(|unit| self.unit_finishes(unit)))
+        {
+            self.check_finish(finish_exit);
         }
         let targets = self.continuations.clone();
         self.dispatch_continuations(&targets, internal_exit);
@@ -5192,10 +5693,22 @@ impl Generator<'_> {
         self.inline_with_exit(unit, Some(finish_exit));
     }
 
+    fn unit_finishes(&self, unit: &Unit) -> bool {
+        !self.finish_sites.is_empty()
+            && (emits_finish(unit, self.finish_sites)
+                || self.observers.is_some()
+                    && instructions(unit).any(|inst| matches!(inst,
+                        SIRInstruction::CombCaptureEvent { site_id, .. } if self.finish_sites.contains(site_id))))
+    }
+
     fn inline_with_exit(&mut self, unit: &Unit, finish_exit: Option<celox_sir::BlockId>) {
-        let finishes = !self.finish_sites.is_empty() && emits_finish(unit, self.finish_sites);
+        let captures = self.observers.is_some();
+        let finishes = self.unit_finishes(unit);
         let counts = self.event_batch.is_some()
-            && instructions(unit).any(|inst| matches!(inst, SIRInstruction::RuntimeEvent { .. }));
+            && instructions(unit).any(|inst| {
+                matches!(inst, SIRInstruction::RuntimeEvent { .. })
+                    || captures && matches!(inst, SIRInstruction::CombCaptureEvent { .. })
+            });
         if !finishes && !counts {
             self.inline_body(unit);
             return;
@@ -5245,6 +5758,24 @@ impl Generator<'_> {
     /// A copy of `unit` that sets the finish slot after every `$finish`
     /// record, and when `counts`, counts every record in the events slot.
     fn instrument(&self, unit: &Unit, counts: bool) -> Unit {
+        Self::instrument_records(
+            unit,
+            self.finish_sites,
+            self.slots,
+            counts,
+            self.observers.is_some(),
+        )
+    }
+
+    /// [`Self::instrument`] of `unit`, for a scheduler of `slots` whose
+    /// `$finish` records are `finish_sites`.
+    fn instrument_records(
+        unit: &Unit,
+        finish_sites: &HashSet<u32>,
+        slots: &SchedulerSlots<AbsoluteAddr>,
+        counts: bool,
+        captures: bool,
+    ) -> Unit {
         let mut unit = unit.clone();
         let mut next = unit
             .register_map
@@ -5257,15 +5788,53 @@ impl Generator<'_> {
         for block in unit.blocks.values_mut() {
             let mut instructions = Vec::with_capacity(block.instructions.len());
             for inst in block.instructions.drain(..) {
+                let capture = match &inst {
+                    SIRInstruction::CombCaptureEvent { site_id, .. } if captures => Some(*site_id),
+                    _ => None,
+                };
+                let enabled = capture.map(|site| {
+                    use celox_sir::native_memory::NativeMemoryOp as Memory;
+                    let [header, pointer, offset, word, shift, shifted, mask, enabled] =
+                        std::array::from_fn(|i| RegisterId(next + i));
+                    next += 8;
+                    wide.extend([header, pointer, offset, word, shift, shifted, mask, enabled]);
+                    instructions.extend([
+                        SIRInstruction::Imm(
+                            header,
+                            SIRValue::new(
+                                celox_state_layout::STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET
+                                    as u64,
+                            ),
+                        ),
+                        SIRInstruction::ExternCall {
+                            dst: Some(pointer),
+                            func: Memory::ReadState.function(),
+                            args: vec![header],
+                        },
+                        SIRInstruction::Imm(offset, SIRValue::new(u64::from(site / 8) * 8)),
+                        SIRInstruction::ExternCall {
+                            dst: Some(word),
+                            func: Memory::ReadIndirect.function(),
+                            args: vec![pointer, offset],
+                        },
+                        SIRInstruction::Imm(shift, SIRValue::new(u64::from(site % 8) * 8)),
+                        SIRInstruction::Binary(shifted, word, BinaryOp::Shr, shift),
+                        SIRInstruction::Imm(mask, SIRValue::new(255u64)),
+                        SIRInstruction::Binary(enabled, shifted, BinaryOp::And, mask),
+                    ]);
+                    enabled
+                });
                 let finish = matches!(&inst, SIRInstruction::RuntimeEvent { site_id, .. }
-                    if self.finish_sites.contains(site_id));
-                let record = matches!(&inst, SIRInstruction::RuntimeEvent { .. });
+                    if finish_sites.contains(site_id))
+                    || capture.is_some_and(|site| finish_sites.contains(&site));
+                let record =
+                    matches!(&inst, SIRInstruction::RuntimeEvent { .. }) || capture.is_some();
                 instructions.push(inst);
                 if counts && record {
                     let [count, one, sum] = std::array::from_fn(|index| RegisterId(next + index));
                     next += 3;
                     wide.extend([count, one, sum]);
-                    let events = stable(self.slots.events);
+                    let events = stable(slots.events);
                     instructions.extend([
                         SIRInstruction::Load(
                             count,
@@ -5274,7 +5843,7 @@ impl Generator<'_> {
                             SCHEDULER_TIME_WIDTH,
                         ),
                         SIRInstruction::Imm(one, SIRValue::new(1u64)),
-                        SIRInstruction::Binary(sum, count, BinaryOp::Add, one),
+                        SIRInstruction::Binary(sum, count, BinaryOp::Add, enabled.unwrap_or(one)),
                         SIRInstruction::Store(
                             events,
                             SIROffset::Static(0),
@@ -5286,19 +5855,32 @@ impl Generator<'_> {
                     ]);
                 }
                 if finish {
-                    // Each site defines its own register.
-                    let one = RegisterId(next);
-                    next += 1;
-                    registers.push(one);
-                    instructions.push(SIRInstruction::Imm(one, SIRValue::new(1u8)));
-                    instructions.push(SIRInstruction::Store(
-                        stable(self.slots.finish),
-                        SIROffset::Static(0),
-                        SCHEDULER_FLAG_WIDTH,
-                        one,
-                        Vec::new(),
-                        Vec::new(),
-                    ));
+                    let [one, previous, result] = std::array::from_fn(|i| RegisterId(next + i));
+                    next += 3;
+                    registers.extend([one, previous, result]);
+                    instructions.push(match enabled {
+                        Some(enabled) => {
+                            SIRInstruction::Slice(one, enabled, 0, SCHEDULER_FLAG_WIDTH)
+                        }
+                        None => SIRInstruction::Imm(one, SIRValue::new(1u8)),
+                    });
+                    instructions.extend([
+                        SIRInstruction::Load(
+                            previous,
+                            stable(slots.finish),
+                            SIROffset::Static(0),
+                            SCHEDULER_FLAG_WIDTH,
+                        ),
+                        SIRInstruction::Binary(result, previous, BinaryOp::Or, one),
+                        SIRInstruction::Store(
+                            stable(slots.finish),
+                            SIROffset::Static(0),
+                            SCHEDULER_FLAG_WIDTH,
+                            result,
+                            Vec::new(),
+                            Vec::new(),
+                        ),
+                    ]);
                 }
             }
             block.instructions = instructions;
@@ -5329,6 +5911,7 @@ impl Generator<'_> {
 #[derive(Clone, Copy)]
 struct WaitCheck<'a> {
     index: usize,
+    delay: AbsoluteAddr,
     /// Its bit in the ready mask.
     ordinal: usize,
     wait: &'a Wait,
@@ -5350,6 +5933,7 @@ fn waits_of<'a>(
             let kernel = kernel.as_ref()?;
             Some(WaitCheck {
                 index,
+                delay: schema.processes[index].delay,
                 ordinal: ordinals[index],
                 wait: kernel.wait.as_ref()?,
                 status: kernel.delays.then_some(schema.processes[index].status),
@@ -5397,16 +5981,13 @@ fn homes_overlap_only_whole(layout: &crate::backend::MemoryLayout) -> bool {
 
 /// The storage `unit` reads.
 fn loads(unit: &Unit) -> impl Iterator<Item = AbsoluteAddr> + '_ {
-    instructions(unit).filter_map(loaded_address)
+    instructions(unit).flat_map(loaded_addresses)
 }
 
-fn loaded_address(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<AbsoluteAddr> {
-    match inst {
-        SIRInstruction::Load(_, source, ..) | SIRInstruction::Commit(source, ..) => {
-            Some(source.absolute_addr())
-        }
-        _ => None,
-    }
+fn loaded_addresses(
+    inst: &SIRInstruction<RegionedAbsoluteAddr>,
+) -> impl Iterator<Item = AbsoluteAddr> + '_ {
+    read_storage(inst).map(RegionedAbsoluteAddr::absolute_addr)
 }
 
 /// Whether a settle of `units` may read what an earlier settle left: a load
@@ -5465,6 +6046,17 @@ fn retained_storage(
     // covering write. Keep scanning so independent homes are analyzed once.
     let mut step = |block: &celox_sir::BasicBlock<RegionedAbsoluteAddr>, covered: &mut Covered| {
         for inst in &block.instructions {
+            // A call may read any part of what it reads before anything in
+            // the settle stored it, and what it writes it need not write on
+            // every path, so it covers nothing.
+            if let StateAccess::Objects(sources) = inst.state_reads() {
+                retained.extend(
+                    sources
+                        .iter()
+                        .map(|source| storage(source.absolute_addr()))
+                        .filter(|home| stores.contains(home)),
+                );
+            }
             match inst {
                 SIRInstruction::Load(_, source, offset, width)
                 | SIRInstruction::Commit(source, _, offset, width, _) => {
@@ -5558,11 +6150,13 @@ fn retained_storage(
     retained
 }
 
-/// Whether `unit` may end with an error.
+/// Whether `unit` may end with an error: at one of its own error exits, or
+/// at a call whose callee may fail and ends it with the callee's error.
 fn fails(unit: &Unit) -> bool {
     unit.blocks
         .values()
         .any(|block| matches!(block.terminator, SIRTerminator::Error(_)))
+        || instructions(unit).any(SIRInstruction::may_fail)
 }
 
 /// The signals `statement` writes that may be reset events: those of
@@ -5596,6 +6190,7 @@ fn emits_finish(unit: &Unit, finish_sites: &HashSet<u32>) -> bool {
     instructions(unit).any(|inst| {
         matches!(inst, SIRInstruction::RuntimeEvent { site_id, .. }
             if finish_sites.contains(site_id))
+            || !finish_sites.is_empty() && calls_runtime_events(inst)
     })
 }
 
@@ -5620,6 +6215,10 @@ fn delay_bound(unit: &Unit, delay: AbsoluteAddr) -> u64 {
                 })
             }
             SIRInstruction::Commit(_, target, ..) if *target == delay => Some(u64::MAX),
+            // A call may store any delay.
+            _ if inst.call_effects().is_some() && inst.state_writes().touches(&delay) => {
+                Some(u64::MAX)
+            }
             _ => None,
         })
         .max()
@@ -5632,6 +6231,38 @@ fn stable(address: AbsoluteAddr) -> RegionedAbsoluteAddr {
 
 fn instructions(unit: &Unit) -> impl Iterator<Item = &SIRInstruction<RegionedAbsoluteAddr>> {
     unit.blocks.values().flat_map(|block| &block.instructions)
+}
+
+/// The storage `inst` may read: a Load's or Commit's source, or every object
+/// a call's effects read, each of which it may read in any part.
+/// [`Plan::new`] rejects units that may read any state (a native kernel),
+/// the one case no list names, so none is left out here.
+fn read_storage(
+    inst: &SIRInstruction<RegionedAbsoluteAddr>,
+) -> impl Iterator<Item = &RegionedAbsoluteAddr> {
+    inst.state_reads().objects().into_iter().flatten()
+}
+
+/// The storage `inst` may write: a Store's or Commit's destination, or
+/// every object a call's effects write (see [`read_storage`]).
+fn written_storage(
+    inst: &SIRInstruction<RegionedAbsoluteAddr>,
+) -> impl Iterator<Item = &RegionedAbsoluteAddr> {
+    inst.state_writes().objects().into_iter().flatten()
+}
+
+/// Whether `inst` makes an external call, itself or in a function it calls.
+/// The scheduler treats an external call as opaque: it may change state the
+/// SIR does not show.
+fn makes_extern_calls(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
+    inst.host_effects().extern_calls
+}
+
+/// Whether `inst` is a call whose callee may record runtime events, and so
+/// may record a `$finish`, which the callee flags itself
+/// (`instrument_recording_functions`).
+fn calls_runtime_events(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
+    inst.call_effects().is_some() && inst.host_effects().runtime_events
 }
 
 fn yielding_status(unit: &Unit, status: AbsoluteAddr) -> bool {
@@ -5647,10 +6278,14 @@ fn returns_status(unit: &Unit, status: AbsoluteAddr, wanted: ProcessStatus) -> b
             _ => None,
         })
         .collect();
-    instructions(unit).any(|inst| matches!(inst,
-        SIRInstruction::Store(target, SIROffset::Static(0), _, value, ..)
-            if *target == stable(status) && constants.get(value) == Some(&u64::from(wanted.code()))
-    ))
+    instructions(unit).any(|inst| {
+        matches!(inst,
+            SIRInstruction::Store(target, SIROffset::Static(0), _, value, ..)
+                if *target == stable(status) && constants.get(value) == Some(&u64::from(wanted.code()))
+        )
+            // A call may store any status.
+            || inst.call_effects().is_some() && inst.state_writes().touches(&stable(status))
+    })
 }
 
 /// Whether every status `unit` stores into `status` is a constant among
@@ -5674,6 +6309,8 @@ fn statuses_only(unit: &Unit, status: AbsoluteAddr, allowed: &[ProcessStatus]) -
             .get(value)
             .is_some_and(|code| allowed.contains(code)),
         SIRInstruction::Commit(_, target, ..) => *target != status,
+        // A call may store any status.
+        _ if inst.call_effects().is_some() => !inst.state_writes().touches(&status),
         _ => true,
     })
 }
@@ -5738,6 +6375,37 @@ pub(crate) fn count_test_settles(
     fused
 }
 
+/// What [`Plan::new`] decides for `program` that tests of call effects
+/// check: the storage the settle reads, why each kernel falls back, and the
+/// events RTL logic drives (`Plan::derived`).
+#[cfg(all(test, feature = "systemverilog"))]
+pub(crate) struct PlanSummary {
+    pub(crate) settle_reads: Option<HashSet<AbsoluteAddr>>,
+    pub(crate) fallback: Vec<Option<String>>,
+    pub(crate) derived: Vec<AbsoluteAddr>,
+    /// With deferred settles, per kernel whether its runs observe the
+    /// settled state (`Lazy::kernels`).
+    pub(crate) lazy: Option<Vec<bool>>,
+    pub(crate) incremental: bool,
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+pub(crate) fn plan_for_test(program: &LaidOutProgram) -> Result<PlanSummary, String> {
+    let schema = program.runtime.runtime_schema.scheduler.clone().unwrap();
+    let plan = Plan::new(program, &schema.slots, true)?;
+    Ok(PlanSummary {
+        derived: plan
+            .derived
+            .iter()
+            .map(|&event| plan.events[event].signal)
+            .collect(),
+        lazy: plan.lazy.as_ref().map(|lazy| lazy.kernels.clone()),
+        incremental: plan.incremental.is_some(),
+        settle_reads: plan.settle_reads,
+        fallback: plan.fallback,
+    })
+}
+
 /// Whether the compiled scheduler of `program` defers its settles, and
 /// whether its loads alone would have allowed that.
 #[cfg(test)]
@@ -5751,10 +6419,8 @@ pub(crate) fn defers_settles_for_test(program: &LaidOutProgram) -> (bool, bool) 
         .eval_comb
         .iter()
         .flat_map(instructions)
-        .filter_map(|inst| {
-            inst.memory_write()
-                .map(|write| storage(write.addr.absolute_addr()))
-        })
+        .flat_map(written_storage)
+        .map(|write| storage(write.absolute_addr()))
         .collect();
     (
         plan.lazy.is_some(),
@@ -6332,6 +6998,9 @@ impl Generator<'_> {
         signal: AbsoluteAddr,
         term: &celox_design::schedule::CompiledWaitTerm,
     ) -> RegisterId {
+        if term.plane_bits == 1 && term.mask_offset.is_some() {
+            return self.signal_level(signal);
+        }
         if term.mask_offset.is_none() {
             return self.load(signal, term.width);
         }
@@ -6381,14 +7050,20 @@ impl Generator<'_> {
     }
 
     fn capture_raw_wait(&mut self, process: usize, wait: &Wait) {
-        for ((&(signal, _kind), term), counter) in wait
+        for (ordinal, ((&(signal, _kind), term), counter)) in wait
             .terms
             .iter()
             .zip(&wait.raw.as_ref().unwrap().terms)
             .zip(&wait.counters)
+            .enumerate()
         {
             if let (Some(offset), Some(counter)) = (term.counter_offset, counter) {
                 let seen = self.load(*counter, 32);
+                self.store_at(self.slots.baseline[process], offset, 32, seen);
+            }
+            if let Some(offset) = term.gated_counter_offset {
+                let counter = wait.gates[ordinal].unwrap().counters.unwrap().gated;
+                let seen = self.load(counter, 32);
                 self.store_at(self.slots.baseline[process], offset, 32, seen);
             }
             let planes = self.raw_wait_planes(signal, term);
@@ -6466,9 +7141,16 @@ impl Generator<'_> {
 
     /// Test every expression in an OR event list against its own snapshot,
     /// before publishing one ready bit and clearing the process's wait flag.
-    fn check_raw_wait(&mut self, process: usize, wait: &Wait, waiting: RegisterId) -> RegisterId {
+    fn check_raw_wait(
+        &mut self,
+        process: usize,
+        wait: &Wait,
+        waiting: RegisterId,
+        settled: bool,
+    ) -> RegisterId {
         if wait.terms.len() >= 4
             && wait.counters.iter().all(Option::is_none)
+            && wait.gates.iter().all(Option::is_none)
             && wait
                 .terms
                 .iter()
@@ -6477,12 +7159,17 @@ impl Generator<'_> {
             return self.check_change_wait(process, wait, waiting);
         }
         let mut occurred = self.constant(0, 1);
-        for ((&(signal, kind), term), counter) in wait
+        for (ordinal, ((&(signal, kind), term), counter)) in wait
             .terms
             .iter()
             .zip(&wait.raw.as_ref().unwrap().terms)
             .zip(&wait.counters)
+            .enumerate()
         {
+            let gate = wait.gates.get(ordinal).copied().flatten();
+            if !settled && gate.is_some_and(|gate| !gate.at_write && gate.counters.is_none()) {
+                continue;
+            }
             let width = if term.mask_offset.is_some() {
                 term.plane_bits * 2
             } else {
@@ -6510,13 +7197,34 @@ impl Generator<'_> {
                     )
                 }
             };
+            let gate_holds = gate.map(|gate| {
+                let level = self.signal_level(gate.signal);
+                self.equals(level, 1)
+            });
             let edge = if let (Some(offset), Some(counter)) = (term.counter_offset, counter) {
                 let seen = self.load_at(self.slots.baseline[process], offset, 32);
                 let current = self.load(*counter, 32);
                 let counted = self.binary(1, seen, BinaryOp::Ne, current);
-                self.binary(1, edge, BinaryOp::Or, counted)
+                let next = self.b.alloc_bit(32, false);
+                self.b
+                    .emit(SIRInstruction::Mux(next, waiting, current, seen));
+                self.store_at(self.slots.baseline[process], offset, 32, next);
+                if let Some(gated_offset) = term.gated_counter_offset {
+                    let gated = gate.unwrap().counters.unwrap().gated;
+                    let seen = self.load_at(self.slots.baseline[process], gated_offset, 32);
+                    let current = self.load(gated, 32);
+                    let accepted = self.binary(1, seen, BinaryOp::Ne, current);
+                    let one = self.constant(1, 1);
+                    let uncounted = self.binary(1, counted, BinaryOp::Xor, one);
+                    let raw = self.binary(1, edge, BinaryOp::And, uncounted);
+                    let raw = self.binary(1, raw, BinaryOp::And, gate_holds.unwrap());
+                    self.binary(1, accepted, BinaryOp::Or, raw)
+                } else {
+                    let edge = self.binary(1, edge, BinaryOp::Or, counted);
+                    gate_holds.map_or(edge, |gate| self.binary(1, edge, BinaryOp::And, gate))
+                }
             } else {
-                edge
+                gate_holds.map_or(edge, |gate| self.binary(1, edge, BinaryOp::And, gate))
             };
             occurred = self.binary(1, occurred, BinaryOp::Or, edge);
             let next = self.b.alloc_bit(width, false);

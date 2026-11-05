@@ -36,7 +36,7 @@ pub(crate) struct Session {
     concrete_classes: Option<std::rc::Rc<classes::ConcreteClasses>>,
     /// The constants and types of the scope that declares each class, which
     /// its parameter defaults and body see (IEEE 1800-2023 8.25).
-    class_declaration_scopes: HashMap<String, (SharedMap<i128>, SharedMap<Type>)>,
+    class_declaration_scopes: HashMap<String, (SharedEnv, SharedMap<Type>)>,
     /// The specializations that class references have named, by class
     /// declaration (see [`classes::specializations`]).
     class_specialization_names: HashMap<String, Vec<classes::specializations::Named>>,
@@ -323,7 +323,8 @@ use parameters::{
 };
 use scoped_map::{ScopedMap, Signedness};
 use selects::{add_expr, product_expr};
-use shared_map::{SharedMap, ToShared};
+pub(crate) use shared_map::ConstEnv;
+use shared_map::{SharedEnv, SharedMap, ToShared};
 use statements::{
     assignment_op_expr, coerce_procedural_assignment_rhs, expr_from_lvalue, lvalue_expr_type,
 };
@@ -402,13 +403,13 @@ pub struct HierarchicalSignal {
 
 impl Source {
     pub(crate) fn from_syntax(syntax_tree: &SyntaxTree) -> Result<Self, AnalyzerError> {
-        Self::from_syntax_with_module_parameter_overrides(syntax_tree, "", &HashMap::default())
+        Self::from_syntax_with_module_parameter_overrides(syntax_tree, "", &ConstEnv::default())
     }
 
     pub(crate) fn from_syntax_with_module_parameter_overrides(
         syntax_tree: &SyntaxTree,
         module_name: &str,
-        parameter_overrides: &HashMap<String, i128>,
+        parameter_overrides: &ConstEnv,
     ) -> Result<Self, AnalyzerError> {
         let packages = packages::Packages::analyze(&[(syntax_tree, Path::new(""))])?;
         let session = &mut Session::with_packages(&packages, &mut packages.design());
@@ -473,7 +474,7 @@ impl Source {
     pub(crate) fn from_syntax_module_with_parameter_overrides(
         syntax_tree: &SyntaxTree,
         module_name: &str,
-        parameter_overrides: &HashMap<String, i128>,
+        parameter_overrides: &ConstEnv,
     ) -> Result<Self, AnalyzerError> {
         let parameter_overrides = parameter_overrides
             .iter()
@@ -931,7 +932,7 @@ impl Module {
             if name == override_module_name {
                 apply_parameter_overrides(&mut parameters, parameter_overrides)?;
             }
-            let mut const_env: SharedMap<i128> = imported.const_env.clone().into();
+            let mut const_env: SharedEnv = imported.const_env.clone().into();
             const_env.extend(const_env_from_parameters(syntax_tree, session, &parameters));
             type_aliases =
                 type_aliases_from_scope_with_env(syntax_tree, session, &const_env)?.into();
@@ -2064,7 +2065,7 @@ impl Parameter {
     pub(crate) fn resolved_value(
         &self,
         functions: &const_functions::ConstantFunctions,
-        constants: &HashMap<String, i128>,
+        constants: &ConstEnv,
         parameter_types: &HashMap<String, ExprType>,
     ) -> Option<i128> {
         if self.floating.is_some() {
@@ -2104,7 +2105,7 @@ impl Parameter {
         &self,
         tree: &AnalysisContext<'_>,
         session: &mut Session,
-        constants: &HashMap<String, i128>,
+        constants: &ConstEnv,
         parameter_types: &HashMap<String, ExprType>,
         literals: &HashMap<String, Expr>,
     ) -> (Option<i128>, Option<Expr>) {
@@ -2137,7 +2138,7 @@ impl Parameter {
         &self,
         tree: &AnalysisContext<'_>,
         session: &mut Session,
-        constants: &HashMap<String, i128>,
+        constants: &ConstEnv,
         parameter_types: &HashMap<String, ExprType>,
         literals: &HashMap<String, Expr>,
     ) -> Option<Expr> {
@@ -3491,7 +3492,7 @@ impl InsideItem {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct EnumMemberConstants {
     /// Evaluated values for the module constant environment.
-    numbers: HashMap<String, i128>,
+    numbers: ConstEnv,
     /// Resolved literal expressions for process-expression substitution.
     exprs: HashMap<String, Expr>,
     /// Base width and signedness retained for early constant substitution.
@@ -3543,7 +3544,7 @@ fn parameter_value_env_with_imported(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     parameters: &[Parameter],
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     imported: &scope::ScopeSymbols,
 ) -> HashMap<String, Expr> {
     let mut values = parameter_value_env(tree, session, parameters, const_env);
@@ -3615,7 +3616,7 @@ struct FunctionReturnMetadata {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct PackedDimensions {
     variables: ScopedMap<VariableDimensions>,
-    const_env: SharedMap<i128>,
+    const_env: SharedEnv,
     type_aliases: SharedMap<Type>,
     function_return_types: SharedMap<FunctionReturnMetadata>,
     functions: Arc<HashMap<String, Function>>,
@@ -3638,6 +3639,10 @@ struct PackedDimensions {
     class_scope: Option<String>,
     /// The method being bound is the constructor of `class_scope`.
     constructor: bool,
+    /// The name of the method being bound, which a call `name(...)` in its
+    /// body calls rather than reads its result variable (IEEE 1800-2023
+    /// 13.4.1).
+    method_name: Option<String>,
     /// Where array locator methods declare their iterator locals; `None`
     /// outside a procedural body.
     locator_locals: Option<locators::LocalSink>,
@@ -3668,7 +3673,7 @@ impl PackedDimensions {
 
     fn new(
         variables: impl Into<ScopedMap<VariableDimensions>>,
-        const_env: impl ToShared<i128>,
+        const_env: impl ToShared<i128, ConstEnv>,
         type_aliases: impl ToShared<Type>,
     ) -> Self {
         Self {
@@ -3688,6 +3693,7 @@ impl PackedDimensions {
             subroutine_param_names: Arc::default(),
             class_scope: None,
             constructor: false,
+            method_name: None,
             locator_locals: None,
             locator_iterators: Arc::default(),
             effect_values: Arc::default(),

@@ -102,7 +102,7 @@ mod tests {
                 };
                 let evaluate = |value: ConstExpr| {
                     let value: crate::ir::ConstExpr = value.into();
-                    crate::typecheck::eval_const_expr(&value, &HashMap::default()).unwrap()
+                    crate::typecheck::eval_const_expr(&value, &ConstEnv::default()).unwrap()
                 };
                 assert_eq!((evaluate(msb), evaluate(lsb)), (7, 4));
             }

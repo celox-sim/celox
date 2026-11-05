@@ -1,5 +1,6 @@
 //! Typed aggregate values/counts/selections are production native consumers.
 use super::*;
+use crate::ast::ConstEnv;
 use crate::ast::{ConstExpr, Source};
 use celox_sv_syntax::{Declarations, DimensionKind, ExprKind};
 fn subtract(tree: &mut SourceTree) {
@@ -51,7 +52,7 @@ fn native_typed_repetition_counts_and_operands_specialize_port_widths() {
     subtract(&mut tree);
     for (override_, expected, width) in [(None, 102, 8), (Some(4), 1638, 12)] {
         let overrides = override_
-            .map(|value| HashMap::from_iter([("R".into(), value)]))
+            .map(|value| ConstEnv::from_iter([("R".into(), value)]))
             .unwrap_or_default();
         let source =
             Source::from_syntax_with_module_parameter_overrides(&tree, "M", &overrides).unwrap();

@@ -75,7 +75,20 @@ impl<A: PartialEq> StateAccess<'_, A> {
     }
 }
 
-impl<A> StateAccess<'_, A> {
+impl<'a, A> StateAccess<'a, A> {
+    /// The objects it may touch, each in part or whole: the one access's,
+    /// or a call's. `None` when it may touch any state, which no list
+    /// names.
+    pub fn objects(self) -> Option<impl Iterator<Item = &'a A>> {
+        let (one, many): (Option<&'a A>, &'a [A]) = match self {
+            StateAccess::None => (None, &[]),
+            StateAccess::Access(access) => (Some(access.addr), &[]),
+            StateAccess::Objects(objects) => (None, objects),
+            StateAccess::Everything => return None,
+        };
+        Some(one.into_iter().chain(many))
+    }
+
     /// Whether it touches no state.
     pub fn is_none(&self) -> bool {
         match self {
@@ -500,6 +513,15 @@ impl<A> SIRInstruction<A> {
         }
     }
 
+    /// Whether executing the instruction may end its unit with an error
+    /// instead of going on: a call whose callee may fail
+    /// ([`crate::CallEffects::may_fail`]). Error exits are otherwise the
+    /// unit's own terminators.
+    pub fn may_fail(&self) -> bool {
+        self.call_effects()
+            .is_some_and(|effects| effects.may_fail || effects.kernel)
+    }
+
     /// Whether executing the instruction matters beyond the register it
     /// defines. Such an instruction is kept even when its result is unused,
     /// and is not duplicated, merged, or moved across other effects.
@@ -661,5 +683,17 @@ mod tests {
         };
         assert!(kernel.has_opaque_state_access());
         assert!(kernel.opaque_written_objects().is_none());
+        // The objects of an access are its one object, a call's its list,
+        // and no list names what a native kernel touches.
+        let objects = |access: crate::StateAccess<'_, u32>| {
+            access
+                .objects()
+                .map(|objects| objects.copied().collect::<Vec<_>>())
+        };
+        assert_eq!(objects(store.state_writes()), Some(vec![7]));
+        assert_eq!(objects(store.state_reads()), Some(vec![]));
+        assert_eq!(objects(writer.state_reads()), Some(vec![1]));
+        assert_eq!(objects(writer.state_writes()), Some(vec![2]));
+        assert_eq!(objects(kernel.state_writes()), None);
     }
 }

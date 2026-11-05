@@ -6,6 +6,15 @@ use crate::RuntimeErrorCode;
 
 #[repr(C)]
 pub(crate) struct Header {
+    pub nba: super::native_nba::Header,
+    pub slot_observer: u64,
+    pub host_entry: u64,
+    pub region_entry: u64,
+    pub host_values: *mut u64,
+    pub host_words: u64,
+    pub observers: *mut u64,
+    pub observer_initial: u64,
+    pub observer_evaluating: u64,
     pub records: *mut u64,
     pub record_capacity: u64,
     pub images: *mut u64,
@@ -29,6 +38,15 @@ pub(crate) struct Header {
 impl Default for Header {
     fn default() -> Self {
         Self {
+            nba: Default::default(),
+            slot_observer: 0,
+            host_entry: 0,
+            region_entry: 0,
+            host_values: std::ptr::null_mut(),
+            host_words: 0,
+            observers: std::ptr::null_mut(),
+            observer_initial: 1,
+            observer_evaluating: 0,
             records: std::ptr::null_mut(),
             record_capacity: 0,
             images: std::ptr::null_mut(),
@@ -69,11 +87,14 @@ impl Header {
 #[derive(Default)]
 pub(crate) struct Arena {
     pub header: Header,
+    pub observers: Vec<u64>,
+    pub host_values: Vec<u64>,
+    pub nba: super::native_nba::Pool,
     records: Vec<u64>,
     images: Vec<u64>,
 }
 
-// These pointers borrow the two allocations owned by this same object. They
+// These pointers borrow allocations owned by this same object. They
 // are accessed only by its exclusive owner or a synchronous generated call.
 unsafe impl Send for Arena {}
 unsafe impl Sync for Arena {}

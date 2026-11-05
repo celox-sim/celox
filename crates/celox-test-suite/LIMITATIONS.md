@@ -458,6 +458,35 @@ and randomization. Verilator 5.052 rejects the methods of such a type as
 unsupported, Icarus 13.0 does not parse the case, and xezim 0.11.3 loses the
 member bits above bit 63 (`sv_wide_enum_domains`, see the
 [probe](verification/repros/sv_wide_enum_domains_xezim.json)).
+A return statement's value is received by the result as an assignment to it
+would be (13.4.1), so its assignment patterns take their shape from the
+declared result type (10.9), and a virtual interface it returns must be of the
+result's interface (25.9). Icarus 13.0 does not parse the unpacked structures
+of the pattern case or virtual interface results. xezim 0.11.3 drops pattern
+elements of a fixed array and of a queue of structures
+(`sv_return_pattern_shapes`, see the
+[probe](verification/repros/sv_return_pattern_shapes_xezim.json)), and accepts
+a result of another interface (`sv_vif-X1`).
+The operands of a conditional received by a container take the container as
+their target (10.8), so either may be an assignment pattern, and the condition
+selects the one evaluated, whatever the type of the condition (11.4.11). A
+container receives any value of a compatible container type, whatever kind of
+expression gives it (7.6): a cast, a call, a popped element or a slice.
+Verilator 5.052 rejects the static cast of a dynamic array to a queue as
+unsupported, Icarus 13.0 does not parse the cases, and xezim 0.11.3 gives the
+container a single element (`sv_container_expression_values`, see the
+[probe](verification/repros/sv_container_expression_values_xezim.json)).
+A container assigned to one whose elements are bounded queues assigns each
+element to its queue, which keeps the elements up to its bound (7.6, 7.10.5),
+at every level of nesting, on every path that makes a container value from
+another: assignments, returns, input arguments, `new[]` sources, concatenation
+items, associative defaults and pattern elements. An output argument is copied
+out as it is, so Celox requires the actual's queues to have the formal's
+bounds at every level. Verilator 5.052 generates C++ for it that does not
+compile, so the case is excluded for it; Icarus 13.0 does not support queues
+of queues, and xezim 0.11.3 drops elements below the bound
+(`sv_nested_bounded_queues`; the source and the observed failures are in
+[`sv_nested_bounded_queues.json`](verification/repros/sv_nested_bounded_queues.json)).
 
 The new `$dist_uniform` seed-width case is excluded for Verilator 5.052 and
 Icarus 13.0. Verilator generates an invalid C++ reference binding for converted

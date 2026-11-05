@@ -9,7 +9,7 @@ pub(super) fn expression(
     native: &Declarations,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: impl ToShared<i128>,
+    env: impl ToShared<i128, ConstEnv>,
     aliases: impl ToShared<Type>,
 ) -> Converted<Option<ConstExpr>> {
     bind_in(
@@ -29,7 +29,7 @@ pub(super) fn value_expression(
     dimensions: &PackedDimensions,
 ) -> Converted<Option<ConstExpr>> {
     let mut context = dimensions.clone();
-    context.const_env = HashMap::default().into();
+    context.const_env = SharedEnv::default();
     context.type_aliases = SharedMap::default();
     bind_in_context(root, native, tree, session, &context, dimensions)
 }
@@ -529,7 +529,7 @@ pub(super) fn packed_ranges(
     dimensions: &[Dimension],
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
 ) -> Converted<Vec<PackedRange>> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
@@ -540,7 +540,7 @@ pub(super) fn unpacked_ranges(
     dimensions: &[Dimension],
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
 ) -> Converted<Vec<UnpackedRange>> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
@@ -554,7 +554,7 @@ pub(super) fn unpacked_dimension(
     dimension: &Dimension,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
 ) -> Converted<UnpackedRange> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
@@ -641,7 +641,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(
-                eval_ast_const_expr(&tree.functions, &value, &HashMap::default()),
+                eval_ast_const_expr(&tree.functions, &value, &ConstEnv::default()),
                 Some(expected)
             );
         }

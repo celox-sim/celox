@@ -185,30 +185,25 @@ fn call_result(
     }
     dimensions
         .function_return_types
-        .get(&callee_name(
-            tree,
-            *expression,
-            native,
-            dimensions,
-            session,
-        )?)
+        .get(&callee_name(tree, id, native, dimensions, session)?)
         .map(|metadata| metadata.chandle)
 }
 
-/// The subroutine that callee `callee`, a function, a method or a DPI-C
-/// import, names.
+/// The subroutine, a function, a method or a DPI-C import, that call `call`
+/// calls.
 fn callee_name(
     tree: &AnalysisContext<'_>,
-    callee: ExprId,
+    call: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
     session: &mut Session,
 ) -> Option<String> {
-    objects::method(tree, session, callee, native, dimensions)
+    objects::call_method(tree, session, call, native, dimensions)
         .ok()
         .flatten()
         .map(|(name, ..)| name)
         .or_else(|| {
+            let callee = objects::callee(call, native);
             direct::bound_callable_name(tree, session, callee, native, dimensions)
                 .ok()
                 .flatten()

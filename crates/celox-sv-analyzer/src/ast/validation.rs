@@ -277,7 +277,7 @@ fn validate_body_items(
 pub(super) fn reject_silently_ignored_constructs(
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     type_aliases: &HashMap<String, Type>,
     parameter_dimensions: &ScopedMap<VariableDimensions>,
     parameter_values: &HashMap<String, Expr>,
@@ -1220,7 +1220,7 @@ mod traversal_tests {
             let result = reject_silently_ignored_constructs(
                 &AnalysisContext::unspecialized(&tree),
                 session,
-                &HashMap::default(),
+                &ConstEnv::default(),
                 &HashMap::default(),
                 &ScopedMap::default(),
                 &HashMap::default(),

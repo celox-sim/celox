@@ -122,7 +122,7 @@ fn expr_is_constant_zero(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     expr: &Expr,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
 ) -> bool {
     let functions = &tree.functions;
     expr_to_const(session, expr.clone())

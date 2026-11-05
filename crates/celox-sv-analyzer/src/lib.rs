@@ -71,6 +71,11 @@ pub struct AnalysisOptions {
     /// A file to which the frontend appends the recursive call cycles of
     /// each module it lowers, a diagnostic that changes no lowering.
     pub recursion_report: Option<std::sync::Arc<std::path::Path>>,
+    /// Lower every subroutine that can be into a SIR function unit and call
+    /// it, instead of inlining it at each call. A test switch: designs keep
+    /// inlining unless it is set, and no subroutine that cannot be lowered
+    /// so is rejected for it.
+    pub force_out_of_line_calls: bool,
 }
 
 /// Errors reported by the SystemVerilog analyzer.
@@ -410,7 +415,7 @@ pub fn analyze_source_with_module_parameter_overrides(
         let source = ast::Source::from_syntax_with_module_parameter_overrides(
             &syntax_tree,
             module_name,
-            parameter_overrides,
+            &ast::ConstEnv::from(parameter_overrides),
         )?;
         analyze::analyze_source(source)
     })
@@ -538,7 +543,7 @@ pub fn analyze_source_module_with_parameter_overrides(
         let source = ast::Source::from_syntax_module_with_parameter_overrides(
             &syntax_tree,
             module_name,
-            parameter_overrides,
+            &ast::ConstEnv::from(parameter_overrides),
         )?;
         analyze::analyze_source(source)
     })

@@ -1,0 +1,22 @@
+{
+  "cases": [
+    "class::constrained_randomize_rand_objects"
+  ],
+  "source": "src/sv/cases/class.vtest",
+  "standard": "IEEE 1800-2023 8.13: a derived class inherits the properties of its base, which its constraints may name (18.5); 23.3.1: the classes of a module are the same whether the module is the top or instantiated.",
+  "method": "The shared case runs in verify-sv-xezim, whose testbench instantiates Top; the reduced source below runs without the adapter, with tb as the top and with -s Top.",
+  "reduced_source": "module Top;\n    class Leaf;\n        rand bit [3:0] v;\n    endclass\n    class SubLeaf extends Leaf;\n        constraint d { v != 4; }\n    endclass\n    initial begin\n        SubLeaf s = new;\n        $display(\"%0d %0d\", s.randomize(), s.v != 4);\n    end\nendmodule\nmodule tb;\n    Top dut();\nendmodule\n",
+  "observations": [
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.4",
+      "stdout": "Simulation error: Undeclared identifier 'v' in class constraint\n",
+      "note": "with -s Top it prints 1 1"
+    },
+    {
+      "tool": "celox",
+      "stdout": "1 1\n",
+      "note": "with tb as the top"
+    }
+  ]
+}

@@ -1217,6 +1217,99 @@ endmodule
   (top Top) (run_until 2) (assert_eq done 1)
   (expect_output "1 1 11\n2 2 21\n"))
 
+(case specializations_of_procedural_constants
+  (source "class.sv" #"
+package p;
+    typedef enum bit [1:0] {A, B, C} e_t;
+    class Resource;
+    endclass
+    class Box #(type T = int, int N = 1) extends Resource;
+        T value;
+        static function int width(); return $bits(T) * N; endfunction
+    endclass
+    class User;
+        static function int sum(Resource resource);
+            typedef bit [$bits(e_t):0] t;
+            // 7 converted to the parameter's type is 3.
+            localparam logic [1:0] W = 7;
+            typedef bit [W:0] w_t;
+            localparam int S = 2;
+            typedef bit [S-1:0] s_t;
+            int total;
+            total = Box#(t)::width() + Box#(w_t)::width();
+            begin
+                typedef bit [$bits(e_t)+1:0] t;
+                localparam int K = $bits(e_t);
+                // s_t keeps the bounds of its own block.
+                localparam int S = 4;
+                Box#(t, K) box;
+                if ($cast(box, resource))
+                    total += Box#(t, K)::width() + box.value;
+                total += Box#(s_t)::width();
+            end
+            return total;
+        endfunction
+    endclass
+endpackage
+module Top(output int sum, output bit done);
+    import p::*;
+    initial begin
+        localparam int M = $bits(e_t) + 1;
+        typedef logic [$bits(e_t)*4-1:0] b_t;
+        Box#(bit [3:0], 2) box = new;
+        box.value = 9;
+        sum = User::sum(box) + Box#(b_t, M)::width();
+        $display("%0d", sum);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 50) (assert_eq done 1)
+  (expect_output "50\n"))
+
+(case specializations_of_procedural_aggregate_types
+  (source "class.sv" #"
+package p;
+    typedef enum bit [1:0] {A, B, C} e_t;
+    class Box #(type T = int);
+        static int made;
+        static function int width(); made++; return $bits(T); endfunction
+    endclass
+    class User;
+        static function int sum();
+            typedef bit [$bits(e_t):0] t;
+            int total;
+            begin
+                typedef enum bit [2:0] {X, Y, Z} local_e;
+                typedef struct packed { bit [4:0] a; t b; } local_s;
+                typedef union packed { bit [5:0] a; bit [5:0] b; } local_u;
+                local_e e;
+                e = Z;
+                total = Box#(t)::width() * 1000 + Box#(local_e)::width() * 100
+                    + Box#(local_s)::width() * 10 + Box#(local_u)::width() / 6 + e;
+                void'(Box#(local_e)::width());
+            end
+            begin
+                // A typedef of another block is another type (6.22.1).
+                typedef enum bit [2:0] {X, Y, Z} local_e;
+                total += Box#(local_e)::width() * 10000 + Box#(local_e)::made * 100000;
+            end
+            return total;
+        endfunction
+    endclass
+endpackage
+module Top(output int sum, output bit done);
+    import p::*;
+    initial begin
+        sum = User::sum();
+        $display("%0d", sum);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 133383) (assert_eq done 1)
+  (expect_output "133383\n"))
+
 (case specializations_keep_their_parameter_scopes
   (source "class.sv" #"
 module Top(output bit done);
@@ -2377,6 +2470,341 @@ module Top(output bit done);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_state_properties
+  (source "class.sv" #"
+module Top(output int sum, output bit done);
+    class Node;
+        int id;
+    endclass
+    class Base;
+        string name = "base";
+        Node next;
+    endclass
+    class Packet extends Base;
+        int queue[$];
+        bit [127:0] wide;
+        int low;
+        rand bit [7:0] x;
+        rand bit [3:0] y;
+        constraint range { x inside {[10:20]}; x > low; y == (x & 8'hf); }
+    endclass
+    Packet p;
+    initial begin
+        p = new;
+        p.next = new;
+        p.next.id = 5;
+        p.queue = '{1, 2, 3};
+        p.wide = {64'hdead_beef_0000_0001, 64'h2};
+        p.low = 17;
+        for (int i = 0; i < 20; i++) begin
+            if (!p.randomize()) $fatal(1, "randomize");
+            if (p.x < 18 || p.x > 20 || p.y != p.x[3:0]) $fatal(1, "constraint %0d %0d", p.x, p.y);
+        end
+        sum = p.next.id + p.queue.size() + p.queue[2] + int'(p.wide[127:96] == 32'hdeadbeef) + p.name.len();
+        $display("%s %0d", p.name, sum);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 16) (assert_eq done 1)
+  (expect_output "base 16\n"))
+
+(case constrained_randomize_rand_objects
+  (source "class.sv" #"
+module Top(output int sum, output bit done);
+    class Leaf;
+        rand bit [3:0] v;
+        int pre, post;
+        constraint c { v inside {[3:5]}; }
+        function void pre_randomize(); pre++; endfunction
+        function void post_randomize(); post++; endfunction
+    endclass
+    class SubLeaf extends Leaf;
+        constraint d { v != 4; }
+    endclass
+    class Stuck extends Leaf;
+        constraint e { v == 9; }
+    endclass
+    class Node;
+        rand bit [3:0] w;
+        rand Leaf leaf;
+        rand Leaf none;
+        Leaf plain;
+        constraint k { w < 3; }
+    endclass
+    class Holder;
+        rand Leaf leaf;
+    endclass
+    Node n;
+    SubLeaf s;
+    Holder h;
+    int bad;
+    initial begin
+        n = new;
+        s = new;
+        n.leaf = s;
+        n.plain = new;
+        for (int i = 0; i < 20; i++) begin
+            if (!n.randomize()) $fatal(1, "randomize");
+            if (n.w >= 3 || !(s.v inside {3, 5})) bad++;
+        end
+        // A non-rand handle is not randomized; the hooks ran once per call.
+        sum = s.pre + s.post + n.plain.v + n.plain.pre;
+        // A class without constraints of its own solves its rand objects.
+        h = new;
+        h.leaf = new;
+        if (!h.randomize() || !(h.leaf.v inside {[3:5]}) || h.leaf.pre != 1) bad++;
+        // An unsatisfiable member fails the call, changes nothing and runs
+        // no post_randomize.
+        begin
+            Stuck stuck = new;
+            n.leaf = stuck;
+            n.w = 2;
+            if (n.randomize() || n.w != 2 || stuck.v != 0 || stuck.pre != 1 || stuck.post != 0) bad++;
+        end
+        $display("%0d %0d", sum, bad);
+        done = bad == 0;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 40) (assert_eq done 1)
+  (expect_output "40 0\n"))
+
+(case constrained_randomize_rand_arrays
+  (source "rand_arrays.sv" #"
+module Top(output int bad, output bit done);
+    typedef enum bit [1:0] { A = 1, B = 2 } e_t;
+    class Item;
+        rand bit [63:0] value[];
+        constraint max_values { value.size() > 0 && value.size() < 10; }
+    endclass
+    class Fifo;
+        rand bit [7:0] fifo[$];
+        int unsigned m_size = 4;
+        constraint valid_fifo_size { fifo.size() <= m_size; }
+    endclass
+    class Len;
+        rand int len;
+        rand int data[];
+        rand e_t kinds[];
+        rand bit [7:0] plain[];
+        constraint db { len inside {[0:15]}; data.size == len; kinds.size() == 3; }
+    endclass
+    Item item;
+    Fifo f;
+    Len l;
+    int nonzero;
+    initial begin
+        item = new;
+        f = new;
+        l = new;
+        l.plain = new[5];
+        for (int i = 0; i < 30; i++) begin
+            if (item.randomize() == 0 || item.value.size() < 1 || item.value.size() > 9) bad++;
+            foreach (item.value[j]) if (item.value[j] != 0) nonzero++;
+            if (f.randomize() == 0 || f.fifo.size() > 4) bad++;
+            if (l.randomize() == 0 || l.data.size() != l.len || l.kinds.size() != 3
+                || l.plain.size() != 5) bad++;
+            foreach (l.kinds[j]) if (!(l.kinds[j] inside {A, B})) bad++;
+        end
+        if (nonzero == 0) bad++;
+        $display("%0d", bad);
+        done = bad == 0;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq bad 0) (assert_eq done 1)
+  (expect_output "0\n"))
+
+(case constrained_randomize_shifts
+  (source "shifts.sv" #"
+module Top(output int bad, output bit done);
+    class Field;
+        rand bit [63:0] value;
+        int unsigned m_size;
+        constraint valid { if (64 > m_size) { value < (64'h1 << m_size); } }
+    endclass
+    class Shifts;
+        rand bit signed [7:0] s;
+        rand bit [7:0] u, z, w, n;
+        rand bit [63:0] m;
+        rand bit [2:0] k;
+        constraint c {
+            s == (8'sh80 >>> 2);
+            u == (8'h80 >> 3);
+            z == (8'hff << 9);
+            (8'h1 << k) == 8'h10;
+            w == (8'h0f <<< 4);
+            // A signed count shifts arithmetically in its own context.
+            n == (8'h1 << (8'sh80 >>> 2));
+            m == (64'h1 << (8'sh80 >>> 6));
+        }
+    endclass
+    Field f;
+    Shifts t;
+    initial begin
+        f = new;
+        t = new;
+        for (int size = 0; size <= 64; size += 4) begin
+            f.m_size = size;
+            for (int i = 0; i < 4; i++) begin
+                if (f.randomize() == 0) bad++;
+                if (size < 64 && f.value >= (64'h1 << size)) bad++;
+            end
+        end
+        if (t.randomize() == 0 || t.s != -32 || t.u != 16 || t.z != 0 || t.k != 4 || t.w != 8'hf0
+            || t.n != 0 || t.m != 0)
+            bad++;
+        $display("%0d", bad);
+        done = bad == 0;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq bad 0) (assert_eq done 1)
+  (expect_output "0\n"))
+
+(case output_arguments_write_class_properties
+  (source "outputs.sv" #"
+interface clk_if; int n; endinterface
+package p;
+  class Db #(type T = int);
+    static T saved;
+    static function void set(T t); saved = t; endfunction
+    static function bit read(inout T val); val = saved; return 1; endfunction
+  endclass
+endpackage
+typedef struct packed { bit [3:0] hi; bit [3:0] lo; } pair_t;
+class Holder;
+  int x;
+  byte b;
+  bit [7:0] bits;
+  pair_t pair;
+  virtual clk_if v;
+  Holder next;
+  int q[$];
+endclass
+class Env;
+  virtual clk_if m_if;
+  function void connect();
+    void'(p::Db#(virtual clk_if)::read(m_if));
+  endfunction
+endclass
+module Top(output int bad, output bit done);
+  clk_if i0();
+  Holder h, other;
+  Env e;
+  function void f(output int o); o = 300; endfunction
+  function void nib(output bit [3:0] o); o = 4'ha; endfunction
+  function void one(output bit o); o = 1; endfunction
+  function void inc(inout bit [3:0] io); io = io + 1; endfunction
+  int mq[$] = '{0, 0, 0};
+  int k;
+  function void bump(output int o); k = 2; o = 7; endfunction
+  function void g(inout int io); io = io + 1; endfunction
+  function void getv(output virtual clk_if o); o = i0; endfunction
+  function void geth(output Holder o); o = other; endfunction
+  function void getq(output int o[$]); o = '{1, 2, 3}; endfunction
+  function void retarget(output int o); h = other; o = 5; endfunction
+  task t(output int o); #1 o = 9; endtask
+  initial begin
+    Holder first;
+    h = new;
+    other = new;
+    f(h.x);
+    if (h.x != 300) bad++;
+    f(h.b);
+    if (h.b != 44) bad++;
+    g(h.x);
+    if (h.x != 301) bad++;
+    getv(h.v);
+    h.v.n = 3;
+    if (i0.n != 3) bad++;
+    geth(h.next);
+    if (h.next != other) bad++;
+    getq(h.q);
+    if (h.q.size() != 3 || h.q[2] != 3) bad++;
+    // The actual is assigned when the call returns (13.5): the property of
+    // the object the handle then refers to.
+    first = h;
+    retarget(h.x);
+    if (first.x != 301 || other.x != 5) bad++;
+    h = first;
+    // Selects, members and elements are written as assignments write them.
+    nib(h.bits[7:4]);
+    one(h.bits[0]);
+    if (h.bits != 8'ha1) bad++;
+    nib(h.pair.lo);
+    inc(h.pair.lo);
+    if (h.pair != 8'h0b) bad++;
+    f(h.q[1]);
+    if (h.q[1] != 300 || h.q[0] != 1) bad++;
+    // The index of an element is read when the call returns.
+    k = 1;
+    bump(mq[k]);
+    if (mq[1] != 0 || mq[2] != 7) bad++;
+    t(other.x);
+    if (other.x != 9 || $time != 1) bad++;
+    e = new;
+    p::Db#(virtual clk_if)::set(i0);
+    e.connect();
+    e.m_if.n = 4;
+    if (i0.n != 4) bad++;
+    $display("%0d", bad);
+    done = bad == 0;
+  end
+endmodule
+"#)
+  (top Top) (run_until 2) (assert_eq bad 0) (assert_eq done 1)
+  (expect_output "0\n"))
+
+(case virtual_interface_property_waits
+  (source "waits.sv" #"
+interface clk_if;
+    logic clk = 0;
+    logic other = 0;
+endinterface
+class Env;
+    virtual clk_if m_if;
+    int edges;
+    task run();
+        repeat (3) @(posedge m_if.clk);
+        edges = 3;
+    endtask
+    task wait_on(virtual clk_if vif);
+        @(posedge vif.clk or posedge vif.other);
+    endtask
+    task wait_local(virtual clk_if vif);
+        virtual clk_if copy;
+        copy = vif;
+        @(posedge copy.clk);
+    endtask
+endclass
+module Top(output int bad, output bit done);
+    clk_if i0();
+    clk_if i1();
+    Env e;
+    always #5 i0.clk = ~i0.clk;
+    always #6 i1.clk = ~i1.clk;
+    initial begin
+        e = new;
+        e.m_if = i0;
+        // A class property: posedges of i0.clk at 5, 15, 25.
+        e.run();
+        if (e.edges != 3 || $time != 25) bad++;
+        // An automatic local of a method: the next posedge of i1.clk at 30.
+        e.wait_local(i1);
+        if ($time != 30) bad++;
+        // A task argument with two items: i0.clk at 35.
+        e.wait_on(i0);
+        if ($time != 35) bad++;
+        $display("%0d", bad);
+        done = bad == 0;
+    end
+endmodule
+"#)
+  (top Top) (run_until 100) (assert_eq bad 0) (assert_eq done 1)
+  (expect_output "0\n"))
 
 (case constrained_randomize_inline
   (source "inline_constraints.sv" #"

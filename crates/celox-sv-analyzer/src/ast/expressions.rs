@@ -64,7 +64,7 @@ pub(super) fn guard_zero_divisions(
                 right: right.clone(),
             };
             let divisor_is_nonzero = expr_to_const(session, (*right).clone())
-                .and_then(|right| eval_ast_const_expr(functions, &right, &HashMap::default()))
+                .and_then(|right| eval_ast_const_expr(functions, &right, &ConstEnv::default()))
                 .is_some_and(|right| right != 0);
             if matches!(op, BinaryOp::Div | BinaryOp::Mod) && !divisor_is_nonzero {
                 Expr::Mux {

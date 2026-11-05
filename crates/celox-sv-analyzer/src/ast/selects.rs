@@ -927,7 +927,7 @@ pub(in crate::ast) fn const_index_has_unknown_value(
     // operations and case equality can make such an expression fully known.
     typecheck::eval_const_integral_literal_with_lookup(
         &index.clone().into(),
-        &dimensions.const_env,
+        &*dimensions.const_env,
         &|name| {
             parameter_type_from_const_env(&dimensions.const_env, name)
                 .map(|ty| (ty.width, ty.signed))
@@ -941,7 +941,7 @@ fn const_expr_is_out_of_range(
     index: &ConstExpr,
     left: &ConstExpr,
     right: &ConstExpr,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
 ) -> bool {
     let (Some(index), Some(left), Some(right)) = (
         eval_ast_const_expr(functions, index, const_env),

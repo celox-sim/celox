@@ -37,13 +37,14 @@ pub(super) use format_patterns::{
 pub(super) use lvalues::{net_lvalue, variable_lvalue};
 pub(super) use objects::{
     Cast as ObjectCast, Receiver as ObjectReceiver,
-    aggregate_property as object_aggregate_property, cast_to as object_cast_to,
-    check_access as check_member_access, check_assignment as check_handle_assignment,
-    check_writable, constraint_mode_call as object_constraint_mode_call,
-    constructor as object_constructor, method as object_method,
-    method_result as object_method_result, named_class, native_class as object_native_class,
-    property as object_property, rand_mode_call as object_rand_mode_call,
-    receiver as object_receiver, static_property as object_static_property,
+    aggregate_property as object_aggregate_property, call_method as object_call_method,
+    callee as call_callee, cast_to as object_cast_to, check_access as check_member_access,
+    check_assignment as check_handle_assignment, check_writable,
+    constraint_mode_call as object_constraint_mode_call, constructor as object_constructor,
+    method as object_method, method_result as object_method_result, named_class,
+    native_class as object_native_class, property as object_property,
+    rand_mode_call as object_rand_mode_call, receiver as object_receiver,
+    static_property as object_static_property,
     static_property_declaration as object_static_property_declaration, this as object_this,
 };
 pub(super) use streams::{
@@ -242,7 +243,7 @@ mod tests {
                 expr_to_const(session, value).and_then(|value| eval_ast_const_expr(
                     &tree.functions,
                     &value,
-                    &HashMap::default()
+                    &ConstEnv::default()
                 )),
                 Some(expected)
             );
