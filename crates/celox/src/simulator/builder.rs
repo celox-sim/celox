@@ -5180,6 +5180,68 @@ endmodule"#;
         not(feature = "arm64-codegen")
     ))]
     #[test]
+    fn hotspot_scheduler_outlines_kernels_past_its_inline_budget() {
+        // Hundreds of medium processes: inlining all of them would make the
+        // compiled scheduler one function of their combined size.
+        let mut source =
+            String::from("`timescale 1ns/1ns\nmodule Top; bit clk = 0; always #1 clk = ~clk;\n");
+        for index in 0..1000 {
+            source += &format!(
+                "logic [63:0] r{index} = {index};\ninitial forever begin @(posedge clk);\n"
+            );
+            for step in 0..40 {
+                source += &format!(
+                    "  if (r{index}[{bit}]) r{index} = r{index} * 3 + {step}; else r{index} = r{index} ^ (r{index} >> 3);\n",
+                    bit = step % 64
+                );
+            }
+            source += "end\n";
+        }
+        source += "endmodule\n";
+        let mut builder = crate::Simulation::from_sv_sources(
+            vec![(source.as_str(), std::path::Path::new("outlined-kernels.sv"))],
+            "Top",
+        )
+        .emit_triggers();
+        builder.native_file_calls = true;
+        let (program, _, _, _, _) = builder
+            .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, true)
+            .unwrap();
+        let scheduler = program.runtime.runtime_schema.scheduler.as_ref().unwrap();
+        assert!(scheduler.fallback.iter().all(Option::is_none));
+        let size = |unit: &crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>| {
+            unit.blocks
+                .values()
+                .map(|block| block.instructions.len())
+                .sum::<usize>()
+        };
+        let kernels: usize = program
+            .sir
+            .processes
+            .iter()
+            .enumerate()
+            .filter(|&(index, _)| Some(index) != scheduler.unit)
+            .map(|(_, unit)| size(unit))
+            .sum();
+        let (unit, outlined) = crate::scheduler::hotspot_scheduler(&program).unwrap();
+        assert!(
+            kernels > 2 * 262_144,
+            "the design must exceed the budget: {kernels}"
+        );
+        assert!(!outlined.is_empty());
+        assert!(
+            size(&unit) < kernels,
+            "scheduler {} inlines most of {kernels} kernel instructions",
+            size(&unit)
+        );
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    #[test]
     fn native_scheduler_host_wait_scans_grow_linearly() {
         for four_state in [false, true] {
             let size = |processes| {
