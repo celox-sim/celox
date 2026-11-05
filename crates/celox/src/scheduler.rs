@@ -889,6 +889,9 @@ impl Plan {
                 Some("a final procedure")
             } else if process.frame.is_some() {
                 Some("the process has dynamic activation frames")
+            } else if slots.call_top.is_some() {
+                // The runtime keeps the frames of a call it suspended inside.
+                Some("the process suspends inside function calls")
             } else if slots.program.is_some() {
                 Some("a program process runs in the reactive region set")
             } else if !process.host_requests.is_empty() && !service_processes.contains(&index) {

@@ -1745,6 +1745,7 @@ fn lower_processes(
             delay: lowering
                 .hidden
                 .declare(name("delay"), PROCESS_DELAY_WIDTH, false),
+            call_top: None,
         };
         lowering.process = index;
         lowering.process_wait_sites = 0;

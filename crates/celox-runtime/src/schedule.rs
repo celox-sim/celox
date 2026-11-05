@@ -362,6 +362,7 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                     }),
                 status: resolve(&process.slots.status),
                 delay: resolve(&process.slots.delay),
+                call_top: process.slots.call_top.as_ref().map(resolve),
                 wait_sites: process
                     .waits
                     .iter()

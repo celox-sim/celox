@@ -76,7 +76,7 @@ impl Ff<'_, '_> {
             .filter(|s| s.kind == HostRequestKind::Process)
             .count() as u32;
         self.host_request_sites.push(HostRequestSite {
-            process: 0,
+            process: celox_design::SiteProcess::own(0),
             kind: HostRequestKind::Process,
             operation: op as u32
                 | if self.process_predicate { 0x100 } else { 0 }
@@ -252,7 +252,7 @@ impl Ff<'_, '_> {
             .filter(|s| s.kind == HostRequestKind::Process)
             .count() as u32;
         self.host_request_sites.push(HostRequestSite {
-            process: 0,
+            process: celox_design::SiteProcess::own(0),
             kind: HostRequestKind::Process,
             operation: op as u32,
             args: values,

@@ -206,6 +206,35 @@ pub trait SimBackend {
         self.mark_settle_range(offset, bytes.len());
     }
 
+    /// Append the first `len` bytes of the call stack to `into`: the frames
+    /// of the calls a process suspended inside (see
+    /// [`celox_design::ProcessSlots::call_top`]).
+    fn save_call_stack(&self, len: usize, into: &mut Vec<u8>) {
+        let stack = self
+            .layout()
+            .call_stack
+            .expect("a program with function units");
+        assert!(len <= stack.size, "a frame past the call stack");
+        let (ptr, size) = self.memory_as_ptr();
+        assert!(
+            stack.base_offset + len <= size,
+            "a call stack past the image"
+        );
+        // Safety: the backend exposes `size` readable bytes at `ptr`.
+        into.extend_from_slice(unsafe {
+            std::slice::from_raw_parts(ptr.add(stack.base_offset), len)
+        });
+    }
+
+    /// Put back the frames [`Self::save_call_stack`] saved.
+    fn restore_call_stack(&mut self, bytes: &[u8]) {
+        let stack = self
+            .layout()
+            .call_stack
+            .expect("a program with function units");
+        self.write_memory(stack.base_offset, bytes);
+    }
+
     /// Set the flags of the settle partitions reading `offset..offset + len`,
     /// which the host wrote.
     fn mark_settle_range(&mut self, offset: usize, len: usize) {

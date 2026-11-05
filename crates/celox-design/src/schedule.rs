@@ -194,7 +194,9 @@ impl<A: Copy + Eq + std::hash::Hash> ScheduleModel<A> {
             processes[site.process].nbas.push(site.clone());
         }
         for site in &schema.host_request_sites {
-            processes[site.process].host_requests.push(site.clone());
+            processes[site.process.index()]
+                .host_requests
+                .push(site.clone());
         }
         let waited = schema
             .wait_sites

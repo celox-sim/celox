@@ -4,9 +4,10 @@
 //!
 //! Only a test switch turns this on (`AnalysisOptions::force_out_of_line_calls`):
 //! every subroutine that can be lowered so is, and every other one stays
-//! inlined. A subroutine qualifies when it cannot suspend its caller and
-//! makes no host request, both transitively (see [`Reason`]; its prints and
-//! messages are runtime events, which a unit raises), has no `ref`
+//! inlined. A subroutine qualifies when it cannot suspend its caller other
+//! than for a host request, nor make one a unit cannot make, both
+//! transitively (see [`Reason`]; its prints and messages are runtime
+//! events, which a unit raises), has no `ref`
 //! formal (the callees inlined into its unit may), and its unit touches no
 //! state but its frame, the variables it reads, and the static storage of
 //! subroutines. Nor may it make a store that assembly instruments per store
@@ -14,20 +15,35 @@
 //! combinational logic observes), since assembly sees only the stores of
 //! the units the runtime runs: the frontend keeps out the stores into what
 //! the module's source may observe ([`ProcModule::observe_storage`]), and assembly
-//! rejects a function that makes one all the same. Calls inside a function
-//! unit cannot suspend either, so every frame lives only while the unit run
-//! that entered it.
+//! rejects a function that makes one all the same.
+//!
+//! A unit whose body makes host requests (`$sformatf`, file I/O, `$sscanf`,
+//! plusargs, `$system`, the distribution functions) is resumable (see
+//! [`Function::resume`]): a request stores the unit's resume point and
+//! returns with the status, and each caller up the chain does the same at
+//! its call, down to the process kernel, which suspends. The kernel resumes
+//! at its call and calls again; each frame continues where it stopped. A
+//! request's values pass through staging module variables, its site is one
+//! of the module's function sites, which every kernel that calls such units
+//! lists after its own, and the runtime keeps the stack below the innermost
+//! live frame with the activation until it runs again
+//! ([`celox_design::ProcessSlots::call_top`]). Only processes can suspend,
+//! so a call from anything else to such a unit stays inlined. The runtime
+//! serves a request before anything else runs, so no frame lives past the
+//! time slot.
 //!
 //! The frame of a function holds its own frame base and call depth first
 //! (the caller passes both: a unit run by the runtime starts with an empty
-//! stack at offset zero and depth zero), then the state of the calling
+//! stack at offset zero and depth zero), then the resume slots of a
+//! resumable unit, then the state of the calling
 //! process that its body and the bodies it reaches use ([`ProcessState`]),
 //! then its automatic formals, its result and its locals, then the
 //! temporaries the lowering of its body created, which a recursive
 //! activation must not share. The process state is the RNG state and seed
 //! of `$urandom` and the seed of `$random`: the caller passes its own and
-//! takes the states back after the call, which, as a call cannot suspend,
-//! is drawing on them in place. A unit thereby serves every process. Static storage
+//! takes the states back whenever the call returns, also when it suspends,
+//! and passes them again when it continues the call, which is drawing on
+//! them in place. A unit thereby serves every process. Static storage
 //! that the analyzer found observable (`persistent_locals`, IEEE 1800-2023
 //! 13.4.2) stays a module variable shared by every activation.
 //!
@@ -59,8 +75,10 @@ pub(super) enum Reason {
     RefFormal,
     /// It, or a subroutine it calls, has a timing control, a fork or a wait.
     MaySuspend,
-    /// It, or a subroutine it calls, makes a host request: a system task,
-    /// `$sformatf`, file I/O, plusargs, `$system`, or a DPI-C import.
+    /// It, or a subroutine it calls, makes a host request a unit cannot
+    /// make: `$finish`, `$stop`, monitors, strobes, VCD tasks, process and
+    /// mailbox methods, or a DPI-C import; or a caller that cannot suspend
+    /// calls a unit that makes host requests.
     HostRequest,
     /// Anything else, described.
     Other(String),
@@ -98,6 +116,9 @@ pub(super) struct ProcessState {
     pub dist_seed: bool,
     /// The simulation time, which `$time` and its kin read.
     pub time: bool,
+    /// Whether the body makes host requests, which suspend the calling
+    /// process: a unit of it is resumable (see [`Function::resume`]).
+    pub suspends: bool,
 }
 
 /// What became of the calls of one subroutine.
@@ -150,6 +171,14 @@ pub(super) struct Function {
     /// of `$random`.
     pub random: Option<(usize, usize)>,
     pub dist_seed: Option<usize>,
+    /// For a unit that can suspend the calling process (see
+    /// [`ProcessState::suspends`]), the slot of its resume point, which a
+    /// call passes as zero to start the body and leaves as it is to
+    /// continue it. The three slots after it are outputs the unit leaves at
+    /// each return: the status, zero once the body completed or the
+    /// [`celox_design::ProcessStatus`] it suspends with; the delay word of
+    /// the suspension; and the end of the innermost live frame.
+    pub resume: Option<usize>,
 }
 
 impl Function {
@@ -732,9 +761,6 @@ impl ProcModule<'_> {
                 found = Some(reason);
             }
         };
-        if self.subroutine_makes_host_request(name) {
-            note(Reason::HostRequest);
-        }
         // The formals are the function's interface: a callee whose formals
         // a unit cannot pass stays inlined, and its body is then part of
         // the caller's unit, which binds them as any inlined call does.
@@ -800,6 +826,17 @@ impl ProcModule<'_> {
                             Some(SystemTaskKind::Message(_) | SystemTaskKind::Fatal) => {
                                 state.time = true;
                             }
+                            // File output suspends for its host request.
+                            None if matches!(
+                                task,
+                                sv::ir::SystemTask::Fdisplay(_)
+                                    | sv::ir::SystemTask::Fwrite(_)
+                                    | sv::ir::SystemTask::Fclose
+                                    | sv::ir::SystemTask::Fflush
+                            ) =>
+                            {
+                                state.suspends = true;
+                            }
                             Some(SystemTaskKind::Control(_)) | None => note(Reason::HostRequest),
                         },
                         _ => {}
@@ -812,7 +849,10 @@ impl ProcModule<'_> {
                     sv::ir::Callee::System(function) => {
                         use sv::ir::SystemFunction;
                         match function {
-                            _ if function.is_host_request() => note(Reason::HostRequest),
+                            // A process method acts on the calling process,
+                            // and some park it.
+                            SystemFunction::Process(_) => note(Reason::HostRequest),
+                            _ if function.is_host_request() => state.suspends = true,
                             SystemFunction::Urandom
                             | SystemFunction::UrandomRange
                             | SystemFunction::ScopeRandomize
@@ -832,7 +872,7 @@ impl ProcModule<'_> {
                         }
                     }
                     sv::ir::Callee::String(sv::ir::StringOp::Format { .. }) => {
-                        note(Reason::HostRequest);
+                        state.suspends = true;
                     }
                     sv::ir::Callee::Object(op) => match &*op {
                         // Construction seeds the object from the process

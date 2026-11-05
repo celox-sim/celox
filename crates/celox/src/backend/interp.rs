@@ -2439,6 +2439,21 @@ impl SimBackend for InterpBackend {
         }
     }
 
+    // The interpreter keeps its frames apart from the memory image.
+    fn save_call_stack(&self, len: usize, into: &mut Vec<u8>) {
+        let stack = &self.calls.stack;
+        into.extend_from_slice(&stack[..len.min(stack.len())]);
+        into.resize(len, 0);
+    }
+
+    fn restore_call_stack(&mut self, bytes: &[u8]) {
+        let stack = &mut self.calls.stack;
+        if stack.len() < bytes.len() {
+            stack.resize(bytes.len(), 0);
+        }
+        stack[..bytes.len()].copy_from_slice(bytes);
+    }
+
     fn vcd_tracking_enabled(&self) -> bool {
         self.memory.vcd_tracking_enabled()
     }

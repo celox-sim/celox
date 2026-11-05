@@ -251,6 +251,8 @@ pub struct ProcessRefs {
     pub starts_with_event_wait: bool,
     pub status: SignalRef,
     pub delay: SignalRef,
+    /// See [`celox_design::ProcessSlots::call_top`].
+    pub call_top: Option<SignalRef>,
     /// Wait sites by local index: their terms.
     pub wait_sites: Vec<Vec<TermRefs>>,
     /// Nonblocking sites by local index.
@@ -269,6 +271,7 @@ impl ProcessRefs {
             starts_with_event_wait: false,
             status,
             delay,
+            call_top: None,
             wait_sites: Vec::new(),
             nba_sites: Vec::new(),
             host_requests: Vec::new(),
