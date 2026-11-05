@@ -49,6 +49,13 @@ pub(crate) struct Session {
     /// The class specializations being made, which their own declarations
     /// may name before they are complete.
     class_specializations_building: Vec<String>,
+    /// The classes whose constraints are being bound, one inside another,
+    /// each with its base.
+    constraint_owners: Vec<(String, Option<String>)>,
+    /// The lexical class of the constraint being bound, whose members it
+    /// may access (IEEE 1800-2023 8.18), with a laid out class that it is
+    /// or derives from: its base while it is laid out, or itself.
+    constraint_scopes: Vec<(String, Option<String>)>,
     /// How many class specializations are being made, one inside another.
     class_specialization_depth: usize,
     /// The specializations of classes made so far, in order.

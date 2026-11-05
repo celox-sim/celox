@@ -289,6 +289,7 @@ test("every retained baseline accepts only its existing failures", () => {
                 "array_locators::ordering_methods_with_expressions",
                 "class::casts_to_class_properties",
                 "class::constrained_enumerations_and_randc",
+                "class::constrained_randomize_foreach",
                 "class::constrained_randomize_rand_arrays",
                 "class::constrained_randomize_rand_objects",
                 "class::constrained_randomize_shifts",

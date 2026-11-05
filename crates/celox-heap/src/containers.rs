@@ -307,6 +307,18 @@ impl Heap {
         }
     }
 
+    /// The value of element `index` of sequence `handle`.
+    pub(crate) fn sequence_element(&self, handle: Handle, index: usize) -> Option<u64> {
+        match self
+            .containers
+            .get(&handle)
+            .map(|container| &container.contents)
+        {
+            Some(Contents::Sequence(elements)) => elements.get(index).map(|element| element.value),
+            _ => None,
+        }
+    }
+
     /// A sequence with the two-state `elements`, of the layout of sequence
     /// `handle`, or of `layout` when it is empty.
     pub(crate) fn random_sequence(
