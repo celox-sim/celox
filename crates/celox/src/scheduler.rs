@@ -2377,7 +2377,8 @@ impl Plan {
             None => limit_exit,
         };
         // A run that stops here leaves the next slot it judged, `u64::MAX`
-        // with nothing to do, which `time` still holds then.
+        // with nothing to do, which `time` still holds then. Work at the
+        // last time is left unjudged, since it reads the same.
         let judged = g.b.new_block();
         g.b.seal_block(SIRTerminator::Branch {
             cond: stop,
@@ -2385,7 +2386,13 @@ impl Plan {
             false_block: (run, Vec::new()),
         });
         g.b.switch_to_block(judged);
-        g.store(slots.next, SCHEDULER_TIME_WIDTH, time);
+        let last = g.constant(u64::MAX, SCHEDULER_TIME_WIDTH);
+        let at_last = g.binary(1, time, BinaryOp::Eq, last);
+        let ambiguous = g.binary(1, at_last, BinaryOp::And, any);
+        let unknown = g.constant(celox_design::SCHEDULER_NEXT_UNJUDGED, SCHEDULER_TIME_WIDTH);
+        let next = g.b.alloc_bit(SCHEDULER_TIME_WIDTH, false);
+        g.b.emit(SIRInstruction::Mux(next, ambiguous, unknown, time));
+        g.store(slots.next, SCHEDULER_TIME_WIDTH, next);
         g.b.seal_block(SIRTerminator::Jump(stopped, Vec::new()));
         if self.lazy.is_some() {
             g.b.switch_to_block(stopped);
