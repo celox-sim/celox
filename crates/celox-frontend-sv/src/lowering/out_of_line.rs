@@ -761,19 +761,33 @@ impl ProcModule<'_> {
                         note(Reason::HostRequest);
                     }
                     sv::ir::Callee::Object(op) => match &*op {
+                        // Heap and container calls, which need nothing
+                        // but the heap.
                         sv::ir::ObjectOp::Load(_)
                         | sv::ir::ObjectOp::Store(_)
                         | sv::ir::ObjectOp::ClassOf
                         | sv::ir::ObjectOp::Check(_)
                         | sv::ir::ObjectOp::Box(_)
-                        | sv::ir::ObjectOp::Unbox(_) => {}
+                        | sv::ir::ObjectOp::Unbox(_)
+                        | sv::ir::ObjectOp::NewEvent
+                        | sv::ir::ObjectOp::Concat(_)
+                        | sv::ir::ObjectOp::Locator(_)
+                        | sv::ir::ObjectOp::Pattern(_)
+                        | sv::ir::ObjectOp::Stream(_)
+                        | sv::ir::ObjectOp::ConstraintModeGet(_)
+                        | sv::ir::ObjectOp::ConstraintModeSet(_)
+                        | sv::ir::ObjectOp::ModeGet(..)
+                        | sv::ir::ObjectOp::ModeSet(_)
+                        | sv::ir::ObjectOp::RegisterProgram(..)
+                        | sv::ir::ObjectOp::ProgramRegistered(_) => {}
                         sv::ir::ObjectOp::Container {
                             op: sv::ir::ContainerOp::Shuffle,
                             ..
                         } => note(Reason::Other("process random state".to_string())),
                         sv::ir::ObjectOp::Container { .. } => {}
                         // Construction draws on the process RNG (IEEE
-                        // 1800-2023 18.14), the others are not needed yet.
+                        // 1800-2023 18.14), and so do randomization and the
+                        // object RNG.
                         op => {
                             let debug = format!("{op:?}");
                             let variant = debug

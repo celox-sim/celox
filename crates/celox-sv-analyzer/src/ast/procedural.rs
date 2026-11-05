@@ -1922,11 +1922,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             }));
         }
         let call = match native.expression(root).kind {
-            celox_sv_syntax::ExprKind::Call { expression, .. } => {
-                if expression_binding::object_method(
+            celox_sv_syntax::ExprKind::Call { .. } => {
+                if expression_binding::object_call_method(
                     self.tree,
                     self.session,
-                    expression,
+                    root,
                     native,
                     &self.dims,
                 )?
@@ -4271,6 +4271,7 @@ pub(super) fn lower_subroutine(
     if let Some(class) = class {
         builder.enter_class_scope(class);
         builder.dims.constructor = constructor;
+        builder.dims.method_name = Some(name.clone());
         // Method formals and locals may shadow properties, but not another
         // declaration in the method's own lexical scope (8.5, 6.21).
         builder.push_scope();
@@ -4513,6 +4514,9 @@ pub(super) fn lower_subroutine(
     if class.is_some() {
         builder.pop_scope();
     }
+    // The locals of the array locator calls of the body are its own, as
+    // automatic as the rest of them (IEEE 1800-2023 7.12).
+    builder.flush_locator_locals();
     let static_types: HashMap<String, Type> = builder
         .state
         .statics
@@ -5600,6 +5604,7 @@ fn lower_class(
             classes::base_arguments(tree, builder.session, name).unwrap_or_default();
         let body = builder.constructor_prologue(&class, &this, &result, base_arguments)?;
         builder.pop_scope();
+        builder.flush_locator_locals();
         let mut subroutine = Subroutine {
             name: item.name(&classes::Class::subroutine_name(name, "new")),
             is_task: false,
