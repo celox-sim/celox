@@ -544,3 +544,44 @@ endmodule
     assert_eq!(events, reference_events);
     assert_eq!(q, reference_q);
 }
+
+#[test]
+fn a_resident_wake_at_the_last_time_still_runs() {
+    // One-slot runs end below the last time, with the kernel's next wake
+    // at it: the run loop must still take that slot.
+    let source = r#"`timescale 1ps/1ps
+module Top;
+    logic [7:0] q = 0;
+    logic done = 0;
+    initial begin
+        #10 q = 1;
+        #(64'hFFFF_FFFF_FFFF_FFF5) done = 1;
+    end
+endmodule
+"#;
+    for mode in [
+        celox::SchedulerMode::Compiled,
+        celox::SchedulerMode::Reference,
+    ] {
+        let mut sim = Simulation::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top")
+            .scheduler_mode(mode)
+            .build()
+            .unwrap();
+        let q = sim.signal("q");
+        let (seen, _) = mpsc::channel();
+        let observer = Settled {
+            watched: q,
+            flag: q,
+            at: u64::MAX,
+            last: 0,
+            seen,
+        };
+        sim.observe_slots(Box::new(observer), &[q]);
+        sim.run_until(u64::MAX).unwrap();
+        assert_eq!(sim.get(sim.signal("done")), 1u8.into(), "{mode:?}");
+        assert_eq!(sim.time(), u64::MAX);
+        if mode == celox::SchedulerMode::Compiled {
+            assert!(sim.scheduler_stats().compiled_slots > 0);
+        }
+    }
+}
