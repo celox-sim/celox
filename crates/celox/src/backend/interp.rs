@@ -1826,6 +1826,46 @@ impl InterpBackend {
         }
     }
 
+    /// Generate the first scheduler stage with this inline budget.
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    pub(crate) fn set_hotspot_inline_budget_for_test(&mut self, budget: usize) {
+        self.hotspots
+            .as_mut()
+            .expect("Hotspot must be enabled")
+            .set_inline_budget_for_test(budget);
+    }
+
+    /// Wait until `stages` scheduler stages are published, without running HDL.
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    pub(crate) fn wait_for_scheduler_stages_for_test(&mut self, stages: usize) {
+        let runtime = self.hotspots.as_mut().expect("Hotspot must be enabled");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while runtime.scheduler_stages_for_test() < stages {
+            assert!(
+                runtime
+                    .try_run(EntryKey::Process(usize::MAX), self.memory.as_mut_slice())
+                    .is_none()
+            );
+            let stats = runtime.stats();
+            assert_eq!(stats.failed_entries, 0, "{stats:?}");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "scheduler stage {stages} not published: {stats:?}"
+            );
+            std::thread::yield_now();
+        }
+    }
+
     fn install_event_buffers(&mut self) {
         use crate::backend::memory_layout::{
             STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET, STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
