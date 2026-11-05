@@ -5291,6 +5291,52 @@ endmodule"#;
         assert!(crate::scheduler::hotspot_scheduler(&program, None, Some(&cancel)).is_err());
     }
 
+    #[cfg(feature = "systemverilog")]
+    #[test]
+    fn always_comb_startup_gate_reads_process_statuses_once() {
+        // Every always_comb waits for the time-zero barrier. Testing every
+        // process status in each of them would make every status write
+        // dirty every gated unit in a partitioned settle.
+        let mut source = String::from("`timescale 1ns/1ns\nmodule Top; logic clk = 0;\n");
+        for index in 0..8 {
+            source += &format!("logic [7:0] a{index} = 0, b{index};\n");
+            source += &format!("initial begin #1; a{index} = {index}; end\n");
+            source += &format!("always_comb b{index} = a{index} + 8'd1;\n");
+        }
+        source += "always #5 clk = ~clk;\nendmodule\n";
+        let (program, _, _, _, _) = crate::Simulation::from_sv_sources(
+            vec![(source.as_str(), std::path::Path::new("startup-gate.sv"))],
+            "Top",
+        )
+        .emit_triggers()
+        .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false)
+        .unwrap();
+        let statuses: crate::HashSet<_> = program
+            .runtime
+            .runtime_schema
+            .processes
+            .iter()
+            .map(|process| process.status)
+            .collect();
+        assert!(statuses.len() >= 9);
+        let loads = program
+            .sir
+            .eval_comb
+            .iter()
+            .flat_map(|unit| unit.blocks.values())
+            .flat_map(|block| &block.instructions)
+            .filter(|instruction| {
+                matches!(instruction, crate::ir::SIRInstruction::Load(_, address, ..)
+                    if statuses.contains(&address.absolute_addr()))
+            })
+            .count();
+        assert!(
+            loads <= statuses.len(),
+            "{loads} status loads for {} statuses",
+            statuses.len()
+        );
+    }
+
     #[cfg(all(
         feature = "systemverilog",
         target_arch = "x86_64",
