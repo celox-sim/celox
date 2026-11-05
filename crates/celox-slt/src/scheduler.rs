@@ -3719,6 +3719,10 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
     let count = first_work.len();
     let mut reads = vec![BTreeSet::new(); count];
     let mut writes = vec![BTreeSet::new(); count];
+    // The bits each partition writes of each object, `None` once a write
+    // has no static range: only those bits are compared after it ran.
+    let mut written: Vec<HashMap<Addr, Option<Vec<(usize, usize)>>>> =
+        vec![HashMap::default(); count];
     let mut previous = vec![BTreeSet::new(); count];
     let mut pinned = vec![false; count];
     for (index, work) in prepared.scheduled_work.iter().enumerate() {
@@ -3747,22 +3751,39 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
                 // The unit may read more than its listed sources, such as
                 // force controls. It runs at its process's first projection
                 // and writes every output there.
+                let mut unit_writes = Vec::new();
+                let mut unknown = false;
                 for block in unit.blocks.values() {
                     for instruction in &block.instructions {
                         match instruction {
                             SIRInstruction::Load(_, address, ..) => {
                                 reads[partition].insert(*address);
                             }
-                            SIRInstruction::Store(address, ..) => {
+                            SIRInstruction::Store(address, offset, width, ..) => {
                                 writes[partition].insert(*address);
+                                unit_writes.push((*address, static_written_range(offset, *width)));
                             }
-                            SIRInstruction::Commit(source, target, ..) => {
+                            SIRInstruction::Commit(source, target, offset, width, _) => {
                                 reads[partition].insert(*source);
                                 writes[partition].insert(*target);
+                                unit_writes.push((*target, static_written_range(offset, *width)));
                             }
                             _ => {}
                         }
+                        // A callee's writes have no range here.
+                        if let Some(effects) = instruction.call_effects() {
+                            unit_writes
+                                .extend(effects.writes.iter().map(|address| (*address, None)));
+                        }
+                        unknown |= instruction.accesses_unknown_state();
                     }
+                }
+                for (address, range) in unit_writes {
+                    note_written_range(
+                        &mut written[partition],
+                        address,
+                        range.filter(|_| !unknown),
+                    );
                 }
                 for (atom, counter) in sensitivity_counters {
                     reads[partition].extend([atom.id, *counter]);
@@ -3780,6 +3801,11 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
             previous[partition].extend(path.previous_sources.iter().map(|atom| atom.id));
             if let Some(target) = path.target.var() {
                 writes[partition].insert(target.id);
+                note_written_range(
+                    &mut written[partition],
+                    target.id,
+                    Some((target.access.lsb, target.access.msb)),
+                );
             }
         }
     }
@@ -3834,18 +3860,26 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
                     .filter(|&element| element != 0 && width.is_multiple_of(element))
                     .unwrap_or(1);
                 let step = (MAX_WATCHED_WIDTH / element).max(1) * element;
-                for lsb in (0..width).step_by(step) {
-                    let chunk = (width - lsb).min(step);
-                    watched.push(WatchedChunk {
-                        object: *addr,
-                        offset: static_access_offset(
-                            addr,
-                            BitAccess::new(lsb, lsb + chunk - 1),
-                            unpacked_element_widths,
-                        ),
-                        width: chunk,
-                        readers: targets.clone(),
-                    });
+                // Only the bits the partition writes can change while it
+                // runs: compare those, in whole elements.
+                let ranges = match written[partition].get(addr) {
+                    Some(Some(ranges)) => written_spans(ranges, width, element),
+                    _ => vec![(0, width)],
+                };
+                for (start, end) in ranges {
+                    for lsb in (start..end).step_by(step) {
+                        let chunk = (end - lsb).min(step);
+                        watched.push(WatchedChunk {
+                            object: *addr,
+                            offset: static_access_offset(
+                                addr,
+                                BitAccess::new(lsb, lsb + chunk - 1),
+                                unpacked_element_widths,
+                            ),
+                            width: chunk,
+                            readers: targets.clone(),
+                        });
+                    }
                 }
             }
             PlannedPartition {
@@ -3864,6 +3898,57 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
         },
         partitioning.flags,
     ))
+}
+
+/// The inclusive bit range a store of `width` bits at `offset` writes, if
+/// the offset is static.
+fn static_written_range(offset: &SIROffset, width: usize) -> Option<(usize, usize)> {
+    let lsb = match offset {
+        SIROffset::Static(bit)
+        | SIROffset::PackedElements {
+            bit_offset: bit, ..
+        } => *bit,
+        SIROffset::Dynamic(_) | SIROffset::Element { .. } => return None,
+    };
+    Some((lsb, lsb + width.max(1) - 1))
+}
+
+/// Record a write of `range` (`None` when its bits are unknown) to `addr`.
+fn note_written_range<Addr: Eq + Hash>(
+    written: &mut HashMap<Addr, Option<Vec<(usize, usize)>>>,
+    addr: Addr,
+    range: Option<(usize, usize)>,
+) {
+    let ranges = written.entry(addr).or_insert_with(|| Some(Vec::new()));
+    match (ranges, range) {
+        (Some(ranges), Some(range)) => ranges.push(range),
+        (ranges, None) => *ranges = None,
+        (None, _) => {}
+    }
+}
+
+/// The disjoint half-open spans covering the inclusive bit `ranges` of an
+/// object `width` bits wide, each widened to whole elements of `element`
+/// bits.
+fn written_spans(ranges: &[(usize, usize)], width: usize, element: usize) -> Vec<(usize, usize)> {
+    let mut spans: Vec<(usize, usize)> = ranges
+        .iter()
+        .filter(|&&(lsb, _)| lsb < width)
+        .map(|&(lsb, msb)| {
+            let start = lsb / element * element;
+            let end = (msb + 1).div_ceil(element) * element;
+            (start, end.min(width))
+        })
+        .collect();
+    spans.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in spans {
+        match merged.last_mut() {
+            Some((_, last)) if start <= *last => *last = (*last).max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    merged
 }
 
 /// The `(target, source)` of a path that copies one whole variable into
@@ -5560,6 +5645,67 @@ mod tests {
         assert_eq!(stored, vec![0, 8, 8, 16, 16, 32]);
         // 11 and 12 are compared before their readers are marked.
         assert_eq!(compares, 2);
+    }
+
+    /// A partition that writes a slice of a wide variable compares that
+    /// slice before marking the readers, not the whole variable; an unpacked
+    /// array is compared in whole elements.
+    #[test]
+    fn settle_partitions_compare_only_the_written_bits() {
+        let loads_of_13 = |element_width: Option<usize>| {
+            let mut arena = SLTNodeArena::new();
+            let mut slice = simple_path(&mut arena, 13, Some(12));
+            slice.target = LogicPathTarget::Var(VarAtomBase::new(13, 8, 15));
+            let paths = vec![simple_path(&mut arena, 14, Some(13)), slice];
+            let widths = [(12, 8), (13, 64), (14, 8)].into_iter().collect();
+            let elements = element_width.map(|width| (13, width)).into_iter().collect();
+            let result = super::sort_with_unpacked_element_widths(
+                paths,
+                &arena,
+                &crate::HashSet::default(),
+                &crate::HashMap::default(),
+                false,
+                &widths,
+                &elements,
+                1,
+                Some(super::SettlePartitioning {
+                    flags: 99,
+                    target_cost: 1,
+                }),
+            )
+            .unwrap();
+            assert_eq!(result.partitions.len(), 2);
+            let mut loads = Vec::new();
+            for unit in &result.execution_units {
+                for block in unit.blocks.values() {
+                    for instruction in &block.instructions {
+                        if let SIRInstruction::Load(_, 13, offset, width) = instruction {
+                            loads.push((offset.clone(), *width));
+                        }
+                    }
+                }
+            }
+            loads.sort_unstable();
+            loads
+        };
+        // The reader's input, and the written slice before and after.
+        assert_eq!(
+            loads_of_13(None),
+            vec![
+                (SIROffset::Static(0), 8),
+                (SIROffset::Static(8), 8),
+                (SIROffset::Static(8), 8),
+            ]
+        );
+        // The slice lies in the first 16-bit element.
+        assert_eq!(
+            loads_of_13(Some(16)),
+            vec![
+                (SIROffset::Static(0), 8),
+                (SIROffset::Static(0), 16),
+                (SIROffset::Static(0), 16),
+            ]
+        );
     }
 
     #[test]
