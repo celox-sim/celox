@@ -3320,9 +3320,11 @@ mod host {
 
             let (laid_out, warnings, options, vcd_path, injected_components) = {
                 let vcd_recording = self.vcd_path.is_some();
+                // As in the timed `build_tiered`: only a native image runs
+                // derived-edge units, and it expands deferred ones itself.
                 self.into_laid_out_program(
                     crate::backend::tiered::tiered_layout_mode(vcd_recording),
-                    false,
+                    crate::backend::tiered::native_is_default_target(),
                 )?
             };
             validate_untimed_processes(laid_out.runtime())?;
@@ -3392,9 +3394,11 @@ mod host {
 
             let (laid_out, warnings, options, vcd_path, injected_components) = {
                 let vcd_recording = self.vcd_path.is_some();
+                // As in the timed `build_tiered`: only a native image runs
+                // derived-edge units, and it expands deferred ones itself.
                 self.into_laid_out_program(
                     crate::backend::tiered::tiered_layout_mode(vcd_recording),
-                    false,
+                    crate::backend::tiered::native_is_default_target(),
                 )?
             };
             validate_untimed_processes(laid_out.runtime())?;
@@ -4115,7 +4119,12 @@ mod host {
         ) -> Result<crate::Simulation<crate::backend::TieredBackend>, SimulatorError> {
             let layout = crate::backend::tiered::tiered_layout_mode(self.vcd_path.is_some());
             self.native_file_calls = true;
-            self.build_with_backend(layout, false, |program, options| {
+            // The interpreter and hotspot tiers walk derived-tick plans, and
+            // only a native image runs derived-edge units; it expands deferred
+            // ones itself. Expanding every unit here copies the comb settle
+            // into each of them, which exhausts memory on large designs.
+            let defer_derived_edges = crate::backend::tiered::native_is_default_target();
+            self.build_with_backend(layout, defer_derived_edges, |program, options| {
                 Ok(crate::backend::TieredBackend::new(program, options))
             })
         }

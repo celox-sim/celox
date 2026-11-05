@@ -3302,6 +3302,11 @@ module Top (
             .recv_timeout(Duration::from_secs(60))
             .unwrap();
         assert!(!laid_out.runtime.runtime_schema.derived_edges.is_empty());
+        // The derived-edge image expands its units from deferred recipes.
+        assert_eq!(
+            laid_out.deferred_derived_edges.len(),
+            2 * laid_out.runtime.runtime_schema.derived_edges.len()
+        );
         let mut optimizing_options = baseline_options.clone();
         baseline_options.x86_options.baseline = true;
         optimizing_options.x86_options.baseline = false;

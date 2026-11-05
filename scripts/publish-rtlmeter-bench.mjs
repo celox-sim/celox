@@ -33,7 +33,7 @@ export function rtlmeterMetrics(report, commit) {
     assert.ok(report.versions?.[engine] && digest(report.binarySha256?.[engine]));
   }
   assert.deepEqual(report.configuration, {
-    celox: "native O2; threads=1; cold source-to-finish",
+    celox: "tiered hotspot JIT O2; threads=1; cold source-to-finish",
     verilator: "--binary --timing --assert; -O3; C++ -O3; -j1; fresh Mdir",
     xezim: "release default VM; persistent caches disabled; full four-state",
   });
