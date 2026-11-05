@@ -375,8 +375,8 @@ impl Ff<'_, '_> {
                         (addr, &*offset, *width, true)
                     }
                     SIRInstruction::Commit(..) => return Err(other("commit")),
-                    SIRInstruction::RuntimeEvent { .. }
-                    | SIRInstruction::CombCaptureEvent { .. }
+                    SIRInstruction::RuntimeEvent { .. } => continue,
+                    SIRInstruction::CombCaptureEvent { .. }
                     | SIRInstruction::CombCaptureEnableIfChanged { .. } => {
                         return Err(Reason::HostRequest);
                     }
