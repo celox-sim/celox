@@ -1716,7 +1716,8 @@ pub(super) fn prepare_time_operands(
 /// string literal is the template. `$fatal` first takes a finish number.
 /// A `$display` or `$write` argument without a conversion of its own is
 /// displayed in the task's radix, directly after the previous one (IEEE
-/// 1800-2023 21.2.1.1).
+/// 1800-2023 21.2.1.1). A severity task's message has the syntax of
+/// `$display` (20.10), so its arguments convert the same way in decimal.
 pub(super) fn system_task_template(
     module: &ProcModule<'_>,
     kind: &SystemTaskKind,
@@ -1739,7 +1740,12 @@ pub(super) fn system_task_template(
     if matches!(kind, SystemTaskKind::Assertion(_)) && template.is_none() {
         template = Some("assertion failed".to_string());
     }
-    if let SystemTaskKind::Print(_, radix) = kind {
+    let radix = match kind {
+        SystemTaskKind::Print(_, radix) => Some(*radix),
+        SystemTaskKind::Message(_) | SystemTaskKind::Fatal => Some('d'),
+        SystemTaskKind::Control(_) | SystemTaskKind::Assertion(_) => None,
+    };
+    if let Some(radix) = radix {
         let converted = template.as_deref().map_or(0, template_arguments);
         let rest = values.len().saturating_sub(converted);
         if rest > 0 {
@@ -1756,7 +1762,7 @@ pub(super) fn system_task_template(
                         sv::ir::SystemTaskArg::Expr(expr) => module.expr_is_string(expr),
                         sv::ir::SystemTaskArg::Empty => false,
                     };
-                    text.push(if string { 's' } else { *radix });
+                    text.push(if string { 's' } else { radix });
                 }
             }
             template = Some(text);
