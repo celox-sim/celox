@@ -2103,6 +2103,10 @@ mod host {
         frontend_artifact: Option<celox_frontend_sdk::FrontendArtifact>,
         file_dependencies: celox_frontend_veryl::FileDependencyCollector,
         native_file_calls: bool,
+        /// Whether the build keeps the value change points of
+        /// [`Self::value_change_signals`]: not one that starts interpreted,
+        /// whose units have no host context until compiled.
+        value_change_points: bool,
         _marker: std::marker::PhantomData<Target>,
     }
 
@@ -2314,7 +2318,9 @@ mod host {
         /// (IEEE 1800-2023 38.36.1). Other updates of them are shown when the
         /// unit that makes them ends. Only processes that write such a signal
         /// change, and only around those writes. Needs the native backend
-        /// and [`Self::observable_updates`]; elsewhere the points are dropped.
+        /// and [`Self::observable_updates`]; elsewhere, and in a tiered
+        /// build, whose interpreted tier has no host context in its units,
+        /// the points are dropped.
         pub fn value_change_signals<S: Into<String>>(
             mut self,
             paths: impl IntoIterator<Item = S>,
@@ -2848,6 +2854,7 @@ mod host {
                 frontend_artifact: None,
                 file_dependencies: Default::default(),
                 native_file_calls: false,
+                value_change_points: true,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2871,6 +2878,7 @@ mod host {
                 frontend_artifact: None,
                 file_dependencies: Default::default(),
                 native_file_calls: false,
+                value_change_points: true,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2895,6 +2903,7 @@ mod host {
                 frontend_artifact: None,
                 file_dependencies: Default::default(),
                 native_file_calls: false,
+                value_change_points: true,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2924,6 +2933,7 @@ mod host {
                 frontend_artifact: None,
                 file_dependencies: Default::default(),
                 native_file_calls: false,
+                value_change_points: true,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2952,6 +2962,7 @@ mod host {
                 frontend_artifact: Some(artifact),
                 file_dependencies: Default::default(),
                 native_file_calls: false,
+                value_change_points: true,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2981,6 +2992,7 @@ mod host {
                 frontend_artifact: Some(artifact),
                 file_dependencies: Default::default(),
                 native_file_calls: false,
+                value_change_points: true,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -3161,7 +3173,10 @@ mod host {
                 }
             }
             #[cfg(feature = "host-runtime")]
-            crate::value_change::lower(&mut laid_out, self.native_file_calls);
+            crate::value_change::lower(
+                &mut laid_out,
+                self.native_file_calls && self.value_change_points,
+            );
 
             // Units generated from here on write state the settle may read.
             let first_generated_process = laid_out.sir.processes.len();
@@ -3979,6 +3994,7 @@ mod host {
                 frontend_artifact: None,
                 file_dependencies: Default::default(),
                 native_file_calls: false,
+                value_change_points: true,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -4002,6 +4018,7 @@ mod host {
                 frontend_artifact: None,
                 file_dependencies: Default::default(),
                 native_file_calls: false,
+                value_change_points: true,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -4027,6 +4044,7 @@ mod host {
                 frontend_artifact: Some(artifact),
                 file_dependencies: Default::default(),
                 native_file_calls: false,
+                value_change_points: true,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -4182,6 +4200,9 @@ mod host {
         ) -> Result<crate::Simulation<crate::backend::TieredBackend>, SimulatorError> {
             let layout = crate::backend::tiered::tiered_layout_mode(self.vcd_path.is_some());
             self.native_file_calls = true;
+            // The interpreted tier shows the updates of its units when they
+            // end; the compiled one does too, so that both show the same.
+            self.value_change_points = false;
             // The interpreter and hotspot tiers walk derived-tick plans, and
             // only a native image runs derived-edge units; it expands deferred
             // ones itself. Expanding every unit here copies the comb settle

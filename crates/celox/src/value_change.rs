@@ -303,3 +303,71 @@ pub(crate) fn lower(program: &mut crate::ir::LaidOutProgram, native: bool) -> bo
     }
     service.is_some()
 }
+
+#[cfg(all(
+    test,
+    feature = "systemverilog",
+    target_arch = "x86_64",
+    not(feature = "arm64-codegen")
+))]
+mod tests {
+    use crate::{SignalRef, SimBackend, Simulation, SlotIo, SlotObserver};
+    use std::sync::{Arc, Mutex};
+
+    /// Records the value of `signal` at each update.
+    struct Values {
+        signal: SignalRef,
+        seen: Arc<Mutex<Vec<(u64, u8)>>>,
+    }
+
+    impl<B: SimBackend> SlotObserver<B> for Values {
+        fn before_domains(&mut self, _: &mut SlotIo<'_, B>, _: u64) {}
+        fn end_of_slot(&mut self, _: &mut SlotIo<'_, B>, _: u64) {}
+        fn observes_updates(&self) -> bool {
+            true
+        }
+        fn after_update(&mut self, io: &mut SlotIo<'_, B>, time: u64) {
+            let value = u8::try_from(io.get(self.signal)).unwrap();
+            let mut seen = self.seen.lock().unwrap();
+            if seen.last().is_none_or(|&(_, last)| last != value) {
+                seen.push((time, value));
+            }
+        }
+    }
+
+    #[test]
+    fn a_tiered_build_shows_the_same_updates_in_each_tier() {
+        let source = r#"`timescale 1ns/1ns
+module Top;
+    logic x = 0;
+    initial forever begin
+        #5 x = 1;
+        x = 0;
+    end
+endmodule"#;
+        let mut sim = Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("value-change-tiers.sv"))],
+            "Top",
+        )
+        .observable_updates(true)
+        .value_change_signals(["Top.x"])
+        .hotspot_jit(true)
+        .build_tiered()
+        .unwrap();
+        let signal = sim.signal("x");
+        let seen = Arc::new(Mutex::new(vec![(0, 0)]));
+        sim.observe_slots(
+            Box::new(Values {
+                signal,
+                seen: seen.clone(),
+            }),
+            &[signal],
+        );
+        sim.run_until(7).unwrap();
+        sim.simulator.backend.publish_scheduler_for_test();
+        sim.run_until(12).unwrap();
+        // The interpreted tier has no host context in its units: neither
+        // tier shows the pulse inside the run.
+        assert_eq!(*seen.lock().unwrap(), vec![(0, 0)]);
+    }
+}
