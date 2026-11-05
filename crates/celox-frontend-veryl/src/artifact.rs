@@ -685,6 +685,7 @@ pub(crate) fn project_module_with_ids(
                 .collect(),
             processes: Vec::new(),
             functions: Vec::new(),
+            function_frames: Vec::new(),
             package_bindings: HashMap::default(),
             hierarchical_bindings: HashMap::default(),
             counter_slots: Vec::new(),

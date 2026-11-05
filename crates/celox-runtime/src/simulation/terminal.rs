@@ -21,6 +21,8 @@ impl<B: SimBackend> SimulationState<B> {
             self.suspended = None;
             self.host_pending = false;
             self.finalizing = Some(0);
+            // No process suspended inside a call resumes after the end.
+            self.process_state.call_stacks.clear();
         }
         let result = self.run_final_procedures(executor);
         if matches!(result, Err(Halt::Stop)) {
@@ -38,6 +40,7 @@ impl<B: SimBackend> SimulationState<B> {
         // A failed final procedure or output flush cannot make termination resumable.
         self.finished = true;
         self.finalizing = None;
+        self.process_state.call_stacks.clear();
         let output = self.finish_timed_boundary(executor, self.scheduler.time);
         let frozen = executor.try_freeze();
         match result {
@@ -111,7 +114,12 @@ impl<B: SimBackend> SimulationState<B> {
                     .unwrap_or(u64::from(seed) | (1 << 32));
                 executor.backend_mut().set(frame.random, random);
             }
-            executor.run_process(kernel)?;
+            // A stop inside a call keeps the frames, which other code may
+            // overwrite before finalization continues.
+            self.restore_call_stack(executor.backend_mut(), index);
+            let run = executor.run_process(kernel);
+            self.save_call_stack(executor.backend_mut(), index);
+            run?;
             self.save_final_activation(executor.backend(), index);
             returns += 1;
             self.charge(returns, Some(index))?;

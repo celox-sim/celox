@@ -397,6 +397,26 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
         }
     }
 
+    fn retain_call_stacks(&mut self, stacks: &[(usize, &celox_runtime::SavedCalls)]) {
+        for &(kernel, saved) in stacks {
+            let handles = self.saved_frame_handles(kernel, saved);
+            debug_assert!(handles.is_some(), "the saved frames end with the stack");
+            for (offset, kind) in handles.unwrap_or_default() {
+                let kind = match kind {
+                    celox_design::ValueKind::StrRef => celox_heap::HandleKind::String,
+                    celox_design::ValueKind::ObjRef => celox_heap::HandleKind::Object,
+                    celox_design::ValueKind::Bits => continue,
+                };
+                let mut raw = [0; celox_heap::HANDLE_BYTES];
+                raw.copy_from_slice(&saved.stack[offset..offset + celox_heap::HANDLE_BYTES]);
+                self.process_heap_roots.push(celox_heap::Root {
+                    kind,
+                    handle: celox_heap::Handle::from_le_bytes(raw),
+                });
+            }
+        }
+    }
+
     fn finish_timed_step(&mut self, timestamp: u64) {
         self.dirty = false;
         self.dump_unless_rewound(timestamp);

@@ -17,20 +17,22 @@
 //! the module's source may observe ([`ProcModule::observe_storage`]), and assembly
 //! rejects a function that makes one all the same.
 //!
-//! A unit whose body makes host requests (`$sformatf`, file I/O, `$sscanf`,
-//! plusargs, `$system`, the distribution functions) is resumable (see
-//! [`Function::resume`]): a request stores the unit's resume point and
-//! returns with the status, and each caller up the chain does the same at
-//! its call, down to the process kernel, which suspends. The kernel resumes
+//! A unit whose body suspends the process, for a host request (`$sformatf`,
+//! file I/O, `$sscanf`, plusargs, `$system`, the distribution functions), a
+//! `#` delay, `$stop` or `$finish`, is resumable (see [`Function::resume`]):
+//! a suspension stores the unit's resume point and returns with the status,
+//! and each caller up the chain does the same at its call, down to the
+//! process kernel, which suspends. The kernel resumes
 //! at its call and calls again; each frame continues where it stopped. A
 //! request's values pass through staging module variables, its site is one
 //! of the module's function sites, which every kernel that calls such units
 //! lists after its own, and the runtime keeps the stack below the innermost
 //! live frame with the activation until it runs again
 //! ([`celox_design::ProcessSlots::call_top`]). Only processes can suspend,
-//! so a call from anything else to such a unit stays inlined. The runtime
-//! serves a request before anything else runs, so no frame lives past the
-//! time slot.
+//! so a call from anything else to such a unit stays inlined. A delay or a
+//! stop keeps the frames past the time slot: the collector finds the
+//! handles in the saved frames through the module's resume table
+//! ([`celox_design::CallResume`]), and checkpoints keep the saved stack.
 //!
 //! The frame of a function holds its own frame base and call depth first
 //! (the caller passes both: a unit run by the runtime starts with an empty
@@ -73,12 +75,13 @@ type Addr = RegionedVarAddr;
 pub(super) enum Reason {
     /// It, or a subroutine it calls, has a `ref` formal.
     RefFormal,
-    /// It, or a subroutine it calls, has a timing control, a fork or a wait.
+    /// It, or a subroutine it calls, has an event control, a wait or a
+    /// fork.
     MaySuspend,
     /// It, or a subroutine it calls, makes a host request a unit cannot
-    /// make: `$finish`, `$stop`, monitors, strobes, VCD tasks, process and
-    /// mailbox methods, or a DPI-C import; or a caller that cannot suspend
-    /// calls a unit that makes host requests.
+    /// make: `$exit`, monitors, strobes, VCD tasks, process and mailbox
+    /// methods, or a DPI-C import; or a caller that cannot suspend calls a
+    /// unit that can suspend.
     HostRequest,
     /// Anything else, described.
     Other(String),
@@ -116,8 +119,9 @@ pub(super) struct ProcessState {
     pub dist_seed: bool,
     /// The simulation time, which `$time` and its kin read.
     pub time: bool,
-    /// Whether the body makes host requests, which suspend the calling
-    /// process: a unit of it is resumable (see [`Function::resume`]).
+    /// Whether the body suspends the calling process: for a host request,
+    /// a delay, `$stop` or `$finish`. A unit of it is resumable (see
+    /// [`Function::resume`]).
     pub suspends: bool,
 }
 
@@ -140,7 +144,9 @@ pub(super) struct Slot {
     pub address: SourceVarId,
     pub width: usize,
     pub four_state: bool,
-    pub handle: bool,
+    /// What the slot holds: a heap handle, which the collector scans, or
+    /// bits.
+    pub kind: celox_design::ValueKind,
 }
 
 /// A subroutine lowered out of line, or being lowered.
@@ -179,6 +185,9 @@ pub(super) struct Function {
     /// [`celox_design::ProcessStatus`] it suspends with; the delay word of
     /// the suspension; and the end of the innermost live frame.
     pub resume: Option<usize>,
+    /// The calls at which the unit can be suspended inside the callee, once
+    /// the body is lowered.
+    pub calls: Vec<celox_design::CallResume>,
 }
 
 impl Function {
@@ -314,11 +323,37 @@ impl OutOfLine {
                             offset,
                             width: slot.width,
                             four_state: slot.four_state,
-                            handle: slot.handle,
+                            handle: slot.kind != celox_design::ValueKind::Bits,
                         })
                         .collect(),
                 },
                 effects: Default::default(),
+            })
+            .collect()
+    }
+
+    /// What the runtime reads in a saved frame of each function, in the
+    /// order of [`Self::units`] (see [`celox_design::FunctionFrame`]); the
+    /// callees are module-local function indices.
+    pub(super) fn frames(&self) -> Vec<celox_design::FunctionFrame> {
+        self.functions
+            .iter()
+            .map(|function| celox_design::FunctionFrame {
+                size: function.size,
+                resume: function.resume.map(|slot| {
+                    (
+                        function.offsets[slot],
+                        celox_frontend_core::process::PROCESS_RESUME_WIDTH,
+                    )
+                }),
+                calls: function.calls.clone(),
+                handles: function
+                    .slots
+                    .iter()
+                    .zip(&function.offsets)
+                    .filter(|(slot, _)| slot.kind != celox_design::ValueKind::Bits)
+                    .map(|(slot, &offset)| (offset, slot.kind))
+                    .collect(),
             })
             .collect()
     }
@@ -403,7 +438,11 @@ fn static_names(subroutine: &sv::ir::Subroutine) -> Vec<&String> {
 /// functions, in `module.functions` with the calls renumbered: a function
 /// lowered for a call that then stayed inlined (from an `always_ff`
 /// process, say) is dropped.
-pub(super) fn attach_functions(module: &mut SimModule, mut functions: Vec<FunctionUnit<Addr>>) {
+pub(super) fn attach_functions(
+    module: &mut SimModule,
+    mut functions: Vec<FunctionUnit<Addr>>,
+    mut frames: Vec<celox_design::FunctionFrame>,
+) {
     fn calls<A>(unit: &ExecutionUnit<A>, called: &mut Vec<usize>) {
         for block in unit.blocks.values() {
             for instruction in &block.instructions {
@@ -437,6 +476,7 @@ pub(super) fn attach_functions(module: &mut SimModule, mut functions: Vec<Functi
     }
     if reached.iter().all(|&reached| reached) {
         module.functions = functions;
+        module.function_frames = frames;
         return;
     }
     let mut next = 0;
@@ -454,11 +494,27 @@ pub(super) fn attach_functions(module: &mut SimModule, mut functions: Vec<Functi
         position += 1;
         reached[position - 1]
     });
+    let mut position = 0;
+    frames.retain(|_| {
+        position += 1;
+        reached[position - 1]
+    });
     for function in &mut functions {
         renumber(&mut function.unit, &kept);
     }
+    // A call that can suspend inside its callee calls a kept function.
+    let resumes = frames.iter_mut().flat_map(|frame| &mut frame.calls).chain(
+        module
+            .processes
+            .iter_mut()
+            .flat_map(|process| &mut process.call_resumes),
+    );
+    for call in resumes {
+        call.function = kept[call.function as usize].expect("a called function is kept");
+    }
     for_each_unit_mut(module, &kept);
     module.functions = functions;
+    module.function_frames = frames;
 
     fn for_each_unit_mut(module: &mut SimModule, kept: &[Option<u32>]) {
         let units = module
@@ -791,8 +847,11 @@ impl ProcModule<'_> {
             for stmt in &subroutine.body {
                 stmt.walk(&mut |stmt| {
                     match stmt {
-                        sv::ir::Stmt::Delay { .. }
-                        | sv::ir::Stmt::WaitEvent(_)
+                        // A delay suspends the process with the unit's
+                        // frames, which the runtime keeps with the
+                        // activation until the delay ends.
+                        sv::ir::Stmt::Delay { .. } => state.suspends = true,
+                        sv::ir::Stmt::WaitEvent(_)
                         | sv::ir::Stmt::WaitImplicit { .. }
                         | sv::ir::Stmt::Wait(_)
                         | sv::ir::Stmt::WaitFork
@@ -812,7 +871,8 @@ impl ProcModule<'_> {
                         // body does; a message carries the time. `$finish`
                         // and `$stop` end or suspend the process, a deferred
                         // action waits in the process's queue (IEEE 1800-2023
-                        // 16.4.1), and the other tasks are host requests.
+                        // 16.4.1), and the other tasks are host requests;
+                        // `$exit` depends on the program it runs in.
                         sv::ir::Stmt::SystemTask {
                             task, assertion, ..
                         } => match system_task_kind(*task) {
@@ -837,6 +897,11 @@ impl ProcModule<'_> {
                             {
                                 state.suspends = true;
                             }
+                            // `$finish` ends and `$stop` suspends the
+                            // process, the unit's frames with it.
+                            Some(SystemTaskKind::Control(
+                                RuntimeEventKind::Finish | RuntimeEventKind::Stop,
+                            )) => state.suspends = true,
                             Some(SystemTaskKind::Control(_)) | None => note(Reason::HostRequest),
                         },
                         _ => {}

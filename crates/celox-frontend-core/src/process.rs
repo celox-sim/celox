@@ -299,19 +299,22 @@ impl<A: Copy> ProcessKernelBuilder<A> {
     /// Suspend inside a call: the callee left `status`, the delay word
     /// `request` and the end of the innermost live frame `top` (see
     /// [`ProcessSlots::call_top`]), all registers. The open block afterwards
-    /// is the resume point, which calls again to continue the callee.
+    /// is the resume point, which calls again to continue the callee; its
+    /// value is returned.
     pub fn suspend_in_call(
         &mut self,
         status: RegisterId,
         request: RegisterId,
         top: RegisterId,
         call_top: A,
-    ) -> Result<(), ProcessKernelError> {
+    ) -> Result<u32, ProcessKernelError> {
         let point = self.resume_blocks.len();
         if point > MAX_PROCESS_SUSPENSIONS {
             return Err(ProcessKernelError::TooManySuspensions);
         }
         self.slots.call_top = Some(call_top);
+        // The callee may suspend for a delay of any amount.
+        self.slots.const_delays = false;
         self.store_constant(self.slots.resume, PROCESS_RESUME_WIDTH, point as u64);
         self.store(self.slots.status, PROCESS_STATUS_WIDTH, status);
         self.store(self.slots.delay, PROCESS_DELAY_WIDTH, request);
@@ -320,7 +323,7 @@ impl<A: Copy> ProcessKernelBuilder<A> {
         let resume = self.builder.new_block();
         self.resume_blocks.push(resume);
         self.builder.switch_to_block(resume);
-        Ok(())
+        Ok(point as u32)
     }
 
     /// Suspend at wait site `site` of this process. The open block

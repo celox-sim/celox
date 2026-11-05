@@ -960,6 +960,39 @@ pub struct ProcessSlots<A> {
 /// Width of [`ProcessSlots::call_top`].
 pub const PROCESS_CALL_TOP_WIDTH: usize = 32;
 
+/// A call at which a process kernel or a function unit can be suspended
+/// inside the callee: the resume point the caller stores there, and the
+/// function it calls. A suspended chain of frames is walked through these
+/// (see [`FunctionFrame`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CallResume {
+    pub point: u32,
+    /// The index of the callee among the program's functions.
+    pub function: u32,
+}
+
+/// What the runtime needs to read the frame of a function unit that a
+/// process is suspended inside: the collector finds the heap handles of a
+/// saved call stack through it.
+///
+/// The first frame of a chain starts at offset zero of the stack and each
+/// callee's frame right after its caller's, so the frames are walked from
+/// the kernel's resume point down: the [`CallResume`] of that point names
+/// the first function, whose `resume` slot names the call it is suspended
+/// in, and so on.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FunctionFrame {
+    /// The bytes of the frame.
+    pub size: usize,
+    /// For a resumable unit, the byte offset and the width in bits of its
+    /// resume slot.
+    pub resume: Option<(usize, usize)>,
+    /// The calls at which it can be suspended inside the callee.
+    pub calls: Vec<CallResume>,
+    /// The byte offset and kind of each heap handle slot.
+    pub handles: Vec<(usize, ValueKind)>,
+}
+
 impl<A> ProcessSlots<A> {
     pub fn map<B>(self, mut map: impl FnMut(A) -> B) -> ProcessSlots<B> {
         ProcessSlots {
@@ -1417,6 +1450,12 @@ pub struct RuntimeSchema<A> {
     /// Source procedures of the process kernels, in kernel order.
     pub process_origins: Vec<ProcessOrigin>,
     pub process_frames: Vec<Option<ProcessFrame<A>>>,
+    /// For each kernel, in kernel order, the calls at which it can be
+    /// suspended inside the callee (see [`FunctionFrame`]); a missing entry
+    /// is none.
+    pub process_call_resumes: Vec<Vec<CallResume>>,
+    /// The frame of each function unit of the program, by function index.
+    pub function_frames: Vec<FunctionFrame>,
     /// Counted signals and their occurrence counters.
     pub watches: Vec<EventWatch<A>>,
     /// Bit ranges whose changes bump an occurrence counter: the sensitivity
@@ -1756,6 +1795,8 @@ impl<A> Default for RuntimeSchema<A> {
             processes: Vec::new(),
             process_origins: Vec::new(),
             process_frames: Vec::new(),
+            process_call_resumes: Vec::new(),
+            function_frames: Vec::new(),
             watches: Vec::new(),
             occurrence_probes: Vec::new(),
             wait_sites: Vec::new(),
