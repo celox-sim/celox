@@ -14,6 +14,11 @@ pub(in crate::ast) enum Mismatch {
     ElementType,
     /// A fixed-size target has another number of elements than the source.
     Size { actual: u128, target: u128 },
+    /// The source or the target is not a handle.
+    NotHandles,
+    /// The source's class neither is nor derives from or implements the
+    /// target's (8.16, 8.26.5).
+    ClassHandle,
 }
 
 /// What an assignment that the types allow still checks when it runs.
@@ -115,5 +120,27 @@ impl TyTable {
             return Err(Mismatch::ElementType);
         }
         Ok(assignable)
+    }
+
+    /// Whether a handle of type `source` may be assigned to a handle of type
+    /// `target` (IEEE 1800-2023 6.22.3): `null` to any class, chandle or
+    /// virtual interface handle (6.11.1, 6.14, 25.9), and a class to its own
+    /// class, a class it derives from or an interface class it implements
+    /// (8.16, 8.26.5), as far as the classes' supertypes are recorded.
+    pub fn assignable_handle(&self, source: TyId, target: TyId) -> Result<(), Mismatch> {
+        match (self.data(source), self.data(target)) {
+            (
+                TyData::Null,
+                TyData::Class(_) | TyData::Chandle | TyData::VirtualInterface { .. },
+            ) => Ok(()),
+            (TyData::Class(_), TyData::Class(_)) => {
+                if self.lineage(source).contains(&target) {
+                    Ok(())
+                } else {
+                    Err(Mismatch::ClassHandle)
+                }
+            }
+            _ => Err(Mismatch::NotHandles),
+        }
     }
 }
