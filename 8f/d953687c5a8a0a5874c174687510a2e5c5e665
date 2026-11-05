@@ -1,0 +1,1 @@
+Codex review: an enumerated destination with an unresolved domain is not numeric; $cast counts as an update, so deferred system-task arguments reject it.
