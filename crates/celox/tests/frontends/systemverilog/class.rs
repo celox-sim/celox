@@ -2836,3 +2836,43 @@ fn class_handle_results_take_handles_of_their_class() {
     sim.run_until(0).unwrap();
     assert_eq!(sim.get(sim.signal("seen")), 2u32.into());
 }
+
+#[test]
+fn class_handle_defaults_take_handles_of_their_formals_class() {
+    // IEEE 1800-2023 13.5.3: a default is assigned to its formal as an
+    // actual is (8.16).
+    for body in [
+        "B gb; function void f(A x = gb); endfunction initial f();",
+        "B gb; class H; function void f(A x = gb); endfunction endclass
+         initial begin H h; h = new; h.f(); end",
+    ] {
+        let source = format!("module Top; class A; endclass class B; endclass {body} endmodule");
+        let Err(error) = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build() else {
+            panic!("a default of an unrelated class's handle was accepted: {body}");
+        };
+        let error = error.to_string();
+        assert!(
+            error.contains("default of `x`") && error.contains("a handle of class `B` is not"),
+            "{error}"
+        );
+    }
+    let source = "module Top;
+        class A; virtual function int id(); return 1; endfunction endclass
+        class B extends A; virtual function int id(); return 2; endfunction endclass
+        int seen, none;
+        B gb;
+        function int f(A x = gb); return x == null ? 0 : x.id(); endfunction
+        function int g(A x = null); return x == null ? 7 : 0; endfunction
+        initial begin gb = new; seen = f(); none = g(); end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 2u32.into());
+    assert_eq!(sim.get(sim.signal("none")), 7u32.into());
+}
