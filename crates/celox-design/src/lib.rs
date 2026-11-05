@@ -1426,6 +1426,7 @@ pub struct DerivedEdgeUnits<A> {
 }
 
 /// Width of [`SchedulerSlots::limit`], [`SchedulerSlots::now`],
+/// [`SchedulerSlots::next`],
 /// [`SchedulerSlots::exit_arg`], [`SchedulerSlots::count`],
 /// [`SchedulerSlots::current`], [`SchedulerSlots::cont`] and every
 /// [`SchedulerSlots::wake`] object, and of each element of
@@ -1435,6 +1436,10 @@ pub const SCHEDULER_TIME_WIDTH: usize = 64;
 /// [`SchedulerSlots::clock_next`] and [`SchedulerSlots::clock_period`], and
 /// one bit of the clock masks, per entry of [`SchedulerSchema::clocks`].
 pub const SCHEDULER_CLOCKS: usize = 64;
+/// [`SchedulerSlots::next`] of a run that returned without judging its next
+/// slot. A judged next slot comes after the run's limit, so it is never at
+/// time zero.
+pub const SCHEDULER_NEXT_UNJUDGED: u64 = 0;
 /// Width of [`SchedulerSlots::exit`], [`SchedulerSlots::finish`],
 /// [`SchedulerSlots::dirty`] and every [`SchedulerSlots::waiting`] object.
 /// Wait baselines use at least this width; masks scale with the design.
@@ -1450,15 +1455,21 @@ pub const SCHEDULER_ASSERTION_PHASE_BIT: usize = 16;
 pub const SCHEDULER_HOST_CONTEXT_BIT: usize = 64;
 
 /// Hidden state objects through which a compiled scheduler and the runtime
-/// exchange a run of time slots. Between runs they hold no state: the
-/// runtime's scheduling state is the source of truth, so state files leave
-/// them out.
+/// exchange a run of time slots. Between the runs of one run loop of the
+/// runtime they may keep the state of the scheduler's kernels and clocks;
+/// outside it they hold no state: the runtime's scheduling state is the
+/// source of truth, so state files leave them out.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SchedulerSlots<A> {
     /// The last time the run may reach.
     pub limit: A,
     /// The time of the last slot the run reached.
     pub now: A,
+    /// After a [`SchedulerExit::Limit`] exit, the time of the next slot of
+    /// the scheduler's own work, `u64::MAX` for none, or
+    /// [`SCHEDULER_NEXT_UNJUDGED`] when the run returned at its budget or
+    /// event batch without judging it.
+    pub next: A,
     /// Why the run returned, a [`SchedulerExit`] code.
     pub exit: A,
     /// The process an exit concerns.
@@ -1528,6 +1539,7 @@ impl<A> SchedulerSlots<A> {
         SchedulerSlots {
             limit: map(self.limit),
             now: map(self.now),
+            next: map(self.next),
             exit: map(self.exit),
             exit_arg: map(self.exit_arg),
             finish: map(self.finish),
@@ -1556,6 +1568,7 @@ impl<A> SchedulerSlots<A> {
         [
             &self.limit,
             &self.now,
+            &self.next,
             &self.exit,
             &self.exit_arg,
             &self.finish,

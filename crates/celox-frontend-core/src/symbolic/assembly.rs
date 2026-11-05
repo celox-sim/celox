@@ -2934,6 +2934,7 @@ fn declare_scheduler_slots(
     Some(celox_design::SchedulerSlots {
         limit: declare("limit".into(), TIME),
         now: declare("now".into(), TIME),
+        next: declare("next".into(), TIME),
         exit: declare("exit".into(), FLAG),
         exit_arg: declare("exit_arg".into(), events * 2),
         finish: declare("finish".into(), FLAG),
