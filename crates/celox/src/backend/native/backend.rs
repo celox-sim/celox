@@ -1176,7 +1176,7 @@ pub(super) struct CompiledNativeFunction {
 }
 
 /// Allocated scheduler MIR without a guessed native callee scratch extent.
-#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[cfg(hotspot_jit)]
 pub(crate) struct PreparedHotspotScheduler {
     program: Arc<LaidOutProgram>,
     allocated: emit::AllocatedFunction,
@@ -1185,7 +1185,7 @@ pub(crate) struct PreparedHotspotScheduler {
     callees: Vec<Option<Arc<HotspotCode>>>,
 }
 
-#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[cfg(hotspot_jit)]
 impl PreparedHotspotScheduler {
     /// Optimize, allocate and compile independent callees while Comb compiles.
     /// Only linking and emission wait for its actual scratch extent.
@@ -1212,12 +1212,26 @@ impl PreparedHotspotScheduler {
             native.baseline,
             native.function.is_some(),
         )?;
+        #[cfg(target_arch = "x86_64")]
         let allocated = emit::allocate_owned_prepared_eu(
             unit,
             program.layout(),
             options.four_state,
             "hotspot",
             &native,
+            None,
+            || cancel.is_cancelled(),
+        )
+        .map_err(hotspot_pipeline_error)?;
+        // No tick loop and no function units: `validate_units` rejects calls.
+        #[cfg(target_arch = "aarch64")]
+        let allocated = emit::allocate_prepared_eu_with_functions(
+            &unit,
+            program.layout(),
+            options.four_state,
+            "hotspot",
+            native.native_tick_loop,
+            None,
             None,
             || cancel.is_cancelled(),
         )
@@ -1247,7 +1261,7 @@ impl PreparedHotspotScheduler {
     }
 }
 
-#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[cfg(hotspot_jit)]
 fn hotspot_pipeline_error(source: emit::ChainedEmitError) -> SimulatorError {
     if matches!(source, emit::ChainedEmitError::Cancelled) {
         codegen_err(CodegenError::Cancelled)
@@ -1257,7 +1271,7 @@ fn hotspot_pipeline_error(source: emit::ChainedEmitError) -> SimulatorError {
 }
 
 /// An independently owned complete entry using the program's existing state ABI.
-#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[cfg(hotspot_jit)]
 pub(crate) struct HotspotCode {
     code: jit_mem::JitCode,
     // Keep every linked mapping and its immutable address table alive until
@@ -1268,7 +1282,7 @@ pub(crate) struct HotspotCode {
     pub(crate) code_size: usize,
 }
 
-#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[cfg(hotspot_jit)]
 impl HotspotCode {
     pub(crate) fn compile(
         units: &[crate::ir::ExecutionUnit<RegionedAbsoluteAddr>],
@@ -1378,7 +1392,10 @@ impl HotspotCode {
                 symbols,
                 trace: None,
                 required_state_size: emitted.required_state_size as usize,
+                #[cfg(target_arch = "x86_64")]
                 required_native_features: emitted.required_image_features,
+                #[cfg(target_arch = "aarch64")]
+                required_native_features: 0,
             },
             caller_options.x86_options.diagnostics.perf_map,
         )?;
@@ -1419,7 +1436,7 @@ impl HotspotCode {
     }
 }
 
-#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[cfg(hotspot_jit)]
 impl celox_runtime::backend::NativeProcessCode for HotspotCode {
     unsafe fn invoke(
         &self,

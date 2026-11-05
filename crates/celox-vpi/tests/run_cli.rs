@@ -1249,7 +1249,10 @@ fn vcd_is_flushed_when_an_sv_run_fails_or_hits_the_step_limit() {
     }
 }
 
-#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+))]
 #[test]
 fn jit_strategy_defaults_and_overrides_reach_both_frontends() {
     for (name, source) in [
@@ -1297,7 +1300,10 @@ fn jit_strategy_defaults_and_overrides_reach_both_frontends() {
     }
 }
 
-#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+))]
 #[test]
 fn require_compiled_accepts_hotspot_execution_and_rejects_cold_runs() {
     let args = [

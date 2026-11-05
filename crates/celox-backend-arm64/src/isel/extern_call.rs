@@ -17,6 +17,10 @@ pub(super) fn lower_extern_call(
     func: u32,
     args: &[RegisterId],
 ) {
+    if let Some(op) = celox_sir::native_memory::NativeMemoryOp::decode(func) {
+        lower_native_memory(ctx, block, op, dst, args);
+        return;
+    }
     let args = args
         .iter()
         .map(|&arg| extern_argument(ctx, block, arg))
@@ -221,4 +225,54 @@ pub(super) fn lower_native_float_unary(
     });
     define_extern_result(ctx, block, dst, result);
     true
+}
+
+/// Expand a private scheduler memory operation into one 64-bit access; it
+/// never crosses the C ABI. Operands and results are whole words.
+fn lower_native_memory(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    op: celox_sir::native_memory::NativeMemoryOp,
+    dst: Option<RegisterId>,
+    args: &[RegisterId],
+) {
+    use celox_sir::native_memory::NativeMemoryOp::*;
+    let words: Vec<_> = args.iter().map(|&arg| ctx.reg_map.get(arg)).collect();
+    let result = dst.map(|_| ctx.alloc_vreg(SpillDesc::transient()));
+    match op {
+        ReadIndirect => block.push(MInst::LoadPtrIndexed {
+            dst: result.expect("a native memory read defines a result"),
+            ptr: words[0],
+            offset: 0,
+            index: words[1],
+            size: OpSize::S64,
+        }),
+        WriteIndirect => block.push(MInst::StorePtrIndexed {
+            ptr: words[0],
+            offset: 0,
+            index: words[1],
+            src: words[2],
+            size: OpSize::S64,
+        }),
+        ReadState => block.push(MInst::LoadIndexed {
+            dst: result.expect("a native memory read defines a result"),
+            base: BaseReg::SimState,
+            offset: 0,
+            index: words[0],
+            scale: 1,
+            size: OpSize::S64,
+            alias_range: None,
+        }),
+        WriteState => block.push(MInst::StoreIndexed {
+            base: BaseReg::SimState,
+            offset: 0,
+            index: words[0],
+            src: words[1],
+            size: OpSize::S64,
+            alias_range: None,
+        }),
+    }
+    if let (Some(dst), Some(result)) = (dst, result) {
+        define_extern_result(ctx, block, dst, result);
+    }
 }
