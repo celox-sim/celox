@@ -1840,3 +1840,74 @@ endmodule
     }
     assert_eq!(refused, 1, "only the handle's word is refused");
 }
+
+#[test]
+fn loads_refuse_saved_frames_that_do_not_fit() {
+    // A saved stack holds the whole chain, and its strings are the file's:
+    // a stack cut anywhere, or a string ID past the file's strings, does
+    // not load.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a);
+    task automatic hold(output int r);
+        string s = "abc";
+        #5 r = s.len();
+    endtask
+    task automatic outer(output int r);
+        int got;
+        hold(got);
+        r = got + 10;
+    endtask
+    initial outer(a);
+endmodule
+"#;
+    let build = || {
+        Simulation::from_sv_sources(vec![(source, Path::new("calls.sv"))], "Top")
+            .force_out_of_line_calls()
+            .build_interpreter()
+            .expect("builds")
+    };
+    let mut origin = build();
+    origin.run_until(1).expect("the design runs");
+    let file = origin.save_state().expect("the frames save");
+    fn stack(file: &mut celox::StateFile) -> &mut Vec<u8> {
+        &mut file
+            .schedule
+            .as_mut()
+            .expect("a schedule")
+            .processes
+            .call_stacks[0]
+            .stack
+    }
+    let len = stack(&mut file.clone()).len();
+    for cut in 0..len {
+        let mut changed = file.clone();
+        stack(&mut changed).truncate(cut);
+        assert!(build().load_state(&changed).is_err(), "cut at {cut}");
+    }
+    // The string's ID is 1; so may other words be: ones the task
+    // overwrites or does not read, resume points of call sites, whose chain
+    // no longer fits, and the innermost resume point, which the unit checks
+    // when it continues.
+    let mut refused = 0;
+    let words = stack(&mut file.clone()).clone();
+    for word in (0..len / 4).filter(|&w| words[w * 4..w * 4 + 4] == 1u32.to_le_bytes()) {
+        let mut changed = file.clone();
+        stack(&mut changed)[word * 4..word * 4 + 4].copy_from_slice(&99u32.to_le_bytes());
+        let mut target = build();
+        match target.load_state(&changed) {
+            Err(_) => refused += 1,
+            Ok(()) => match target.run_until(10) {
+                Ok(()) => {
+                    assert_eq!(target.get(target.signal("a")), 13u8.into(), "word {word}");
+                }
+                Err(error) => assert!(
+                    error.to_string().contains("invalid resume point"),
+                    "word {word}: {error}"
+                ),
+            },
+        }
+    }
+    // The string's word is among them, with the call sites' resume points,
+    // which no longer name the chain.
+    assert!(refused >= 1, "the string's word is refused");
+}

@@ -1071,15 +1071,22 @@ impl<B: SimBackend> Simulator<B> {
                 resume: saved.resume,
                 stack: saved.stack.clone(),
             };
-            // As on capture, no class handle is saved in a frame.
+            // As on capture, no class handle is saved in a frame, and each
+            // string is one of the file's.
             let valid = self
                 .saved_frame_handles(kernel(index), &calls)
                 .is_some_and(|handles| {
                     handles.iter().all(|&(offset, kind)| {
-                        kind != celox_design::ValueKind::ObjRef
-                            || calls.stack[offset..offset + celox_heap::HANDLE_BYTES]
-                                .iter()
-                                .all(|&byte| byte == 0)
+                        let word = u32::from_le_bytes(
+                            calls.stack[offset..offset + celox_heap::HANDLE_BYTES]
+                                .try_into()
+                                .expect("one handle"),
+                        ) as usize;
+                        match kind {
+                            celox_design::ValueKind::ObjRef => word == 0,
+                            celox_design::ValueKind::StrRef => word <= file.strings.len(),
+                            celox_design::ValueKind::Bits => true,
+                        }
                     })
                 });
             if !valid {

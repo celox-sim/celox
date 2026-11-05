@@ -48,7 +48,7 @@ impl<B: SimBackend> Simulator<B> {
     /// holds. The first frame is the callee of the kernel's call at its
     /// resume point, each next one the callee of the call its caller is
     /// suspended in (see [`celox_design::FunctionFrame`]). `None` when the
-    /// frames do not end where the stack does: it is not one this design
+    /// chain does not fit the stack exactly: it is not one this design
     /// saved.
     pub(crate) fn saved_frame_handles(
         &self,
@@ -69,9 +69,11 @@ impl<B: SimBackend> Simulator<B> {
             .get(kernel)
             .and_then(|calls| find(calls, saved.resume));
         let mut base = 0;
-        while let Some(frame) = next.and_then(|function| schema.function_frames.get(function)) {
+        while let Some(function) = next {
+            // A frame the chain names must be there whole.
+            let frame = schema.function_frames.get(function)?;
             if base + frame.size > stack.len() {
-                break;
+                return None;
             }
             handles.extend(
                 frame
