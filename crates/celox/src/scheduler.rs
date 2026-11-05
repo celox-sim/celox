@@ -3111,11 +3111,22 @@ impl Plan {
 
             let finished = g.equals(status, code(ProcessStatus::Finish));
             let not_finished = g.b.new_block();
+            // A run that finishes the simulation made its updates all the
+            // same.
+            let finishes = match updates {
+                Some(_) => g.b.new_block(),
+                None => finish_exit,
+            };
             g.b.seal_block(SIRTerminator::Branch {
                 cond: finished,
-                true_block: (finish_exit, Vec::new()),
+                true_block: (finishes, Vec::new()),
                 false_block: (not_finished, Vec::new()),
             });
+            if let Some(service) = updates {
+                g.b.switch_to_block(finishes);
+                g.report_update(service, &checks, finish_exit, AfterWrites::Ended);
+                g.b.seal_block(SIRTerminator::Jump(finish_exit, Vec::new()));
+            }
             g.b.switch_to_block(not_finished);
             let resumed = g.b.new_block();
             let done = g.equals(status, code(ProcessStatus::Done));

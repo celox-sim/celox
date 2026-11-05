@@ -103,6 +103,8 @@ pub(super) enum AfterWrites {
     /// They settle here, and the waits see them, before the scheduler goes
     /// on: a kernel that runs next reads what they drive.
     Settled,
+    /// The simulation ends: nothing reads them.
+    Ended,
 }
 
 impl Generator<'_> {
@@ -169,7 +171,7 @@ impl Generator<'_> {
         self.mark_dirty();
         host_inputs::replay(self.program, self, checks);
         match after {
-            AfterWrites::Settle => {
+            AfterWrites::Settle | AfterWrites::Ended => {
                 self.b.seal_block(SIRTerminator::Jump(done, Vec::new()));
             }
             AfterWrites::Again(block) => {

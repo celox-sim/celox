@@ -277,6 +277,51 @@ endmodule
     assert_eq!(seen, vec![(5, vec![1, 0]), (5, vec![1, 1])]);
 }
 
+#[test]
+fn an_update_is_seen_before_the_simulation_stops_or_finishes() {
+    let source = r#"`timescale 1ns/1ns
+module Top;
+    logic [7:0] x = 0;
+    initial begin
+        #5 x = 1;
+        $stop;
+        x = 2;
+        $finish;
+    end
+endmodule
+"#;
+    // Processes that stop run in the reference loop.
+    let mut sim = Simulation::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top")
+        .scheduler_mode(celox::SchedulerMode::Reference)
+        .observable_updates(true)
+        .build()
+        .unwrap();
+    let received = observe(&mut sim, &["x"], None);
+    sim.run_until(10).unwrap();
+    assert!(sim.is_stopped());
+    sim.run_until(10).unwrap();
+    assert_eq!(
+        received.try_iter().collect::<Vec<_>>(),
+        vec![(5, vec![1]), (5, vec![2])]
+    );
+}
+
+#[test]
+fn an_update_is_seen_before_a_compiled_process_finishes() {
+    let source = r#"`timescale 1ns/1ns
+module Top;
+    logic clk = 0;
+    logic [7:0] x = 0;
+    always #5 clk = ~clk;
+    initial begin
+        #5 x = 1;
+        $finish;
+    end
+endmodule
+"#;
+    assert_eq!(changes(source, &["x"], 20), vec![(5, vec![1])]);
+}
+
 #[cfg(feature = "cranelift")]
 #[test]
 fn a_build_without_native_services_shows_every_update_from_the_reference_loop() {
