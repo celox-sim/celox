@@ -1112,6 +1112,9 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                         ("icarus", "class::output_arguments_write_class_properties") => {
                             ("compile_error", "compile", "syntax error")
                         }
+                        ("icarus", "class::virtual_interface_property_waits") => {
+                            ("compile_error", "compile", "Invalid class item")
+                        }
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

@@ -216,6 +216,11 @@ pub enum LoopKind<E> {
     DoWhile,
     Repeat(E),
     Forever,
+    /// A `forever` loop that holds an event control through virtual
+    /// interfaces, run once (its body ends in a break): the reads of an
+    /// enclosing `@*` leave its reads out, which are its timing (IEEE
+    /// 1800-2023 9.4.2.2). It runs as `Forever`.
+    EventBlock,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -359,6 +364,7 @@ impl<E, L> StmtBase<E, L> {
                     LoopKind::DoWhile => LoopKind::DoWhile,
                     LoopKind::Repeat(count) => LoopKind::Repeat(fe(count)),
                     LoopKind::Forever => LoopKind::Forever,
+                    LoopKind::EventBlock => LoopKind::EventBlock,
                 },
                 init: body(init, fe, fl),
                 condition: condition.map(&mut *fe),

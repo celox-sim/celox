@@ -2758,6 +2758,54 @@ endmodule
   (top Top) (run_until 2) (assert_eq bad 0) (assert_eq done 1)
   (expect_output "0\n"))
 
+(case virtual_interface_property_waits
+  (source "waits.sv" #"
+interface clk_if;
+    logic clk = 0;
+    logic other = 0;
+endinterface
+class Env;
+    virtual clk_if m_if;
+    int edges;
+    task run();
+        repeat (3) @(posedge m_if.clk);
+        edges = 3;
+    endtask
+    task wait_on(virtual clk_if vif);
+        @(posedge vif.clk or posedge vif.other);
+    endtask
+    task wait_local(virtual clk_if vif);
+        virtual clk_if copy;
+        copy = vif;
+        @(posedge copy.clk);
+    endtask
+endclass
+module Top(output int bad, output bit done);
+    clk_if i0();
+    clk_if i1();
+    Env e;
+    always #5 i0.clk = ~i0.clk;
+    always #6 i1.clk = ~i1.clk;
+    initial begin
+        e = new;
+        e.m_if = i0;
+        // A class property: posedges of i0.clk at 5, 15, 25.
+        e.run();
+        if (e.edges != 3 || $time != 25) bad++;
+        // An automatic local of a method: the next posedge of i1.clk at 30.
+        e.wait_local(i1);
+        if ($time != 30) bad++;
+        // A task argument with two items: i0.clk at 35.
+        e.wait_on(i0);
+        if ($time != 35) bad++;
+        $display("%0d", bad);
+        done = bad == 0;
+    end
+endmodule
+"#)
+  (top Top) (run_until 100) (assert_eq bad 0) (assert_eq done 1)
+  (expect_output "0\n"))
+
 (case constrained_randomize_inline
   (source "inline_constraints.sv" #"
 module Top(output bit done);

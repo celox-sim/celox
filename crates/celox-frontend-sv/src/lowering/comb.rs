@@ -2870,7 +2870,7 @@ impl<'p, 'a> Comb<'p, 'a> {
                         None => false,
                     }
                 }
-                sv::ir::LoopKind::Forever => false,
+                sv::ir::LoopKind::Forever | sv::ir::LoopKind::EventBlock => false,
             };
             if !counted {
                 return Err(unsupported(
@@ -2936,7 +2936,7 @@ impl<'p, 'a> Comb<'p, 'a> {
                     *remaining -= 1;
                     None
                 }
-                (sv::ir::LoopKind::Forever, _) => None,
+                (sv::ir::LoopKind::Forever | sv::ir::LoopKind::EventBlock, _) => None,
                 (_, Some(condition)) => {
                     let (node, sources) = self.eval(
                         &mut store,

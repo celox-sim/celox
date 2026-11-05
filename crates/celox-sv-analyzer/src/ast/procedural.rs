@@ -92,6 +92,10 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
     /// patterns take their shape from it (10.9) and streams align to it
     /// (11.4.14).
     return_shape: Option<VariableDimensions>,
+    /// The formals of the subroutine that are references (`ref`), which
+    /// name the actual's storage rather than a local of their own (IEEE
+    /// 1800-2023 13.5.2).
+    reference_formals: HashSet<String>,
     /// Whether the function's result is a chandle, `None` without a result.
     return_chandle: Option<bool>,
     pub(super) sensitivity_body: Vec<Stmt>,
@@ -455,6 +459,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             automatic,
             task_timing: false,
             return_shape: None,
+            reference_formals: HashSet::default(),
             return_chandle: None,
             sensitivity_body: Vec::new(),
             tree,
@@ -4355,6 +4360,9 @@ pub(super) fn lower_subroutine(
         };
         if r#type.unpacked_struct().is_some() {
             aggregate_formals.push((lowered_params.len(), r#type.clone()));
+        }
+        if direction.is_reference() {
+            builder.reference_formals.insert(name.clone());
         }
         formal_types.insert(name.clone(), scoped_type(r#type.clone(), declaration_env));
         lowered_params.push(SubroutineParam {
