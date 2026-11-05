@@ -3640,9 +3640,10 @@ fn check_chandle_argument(
 
 /// Check actual `actual` of formal `position` of subroutine `name`, which
 /// the call assigns to the formal (IEEE 1800-2023 13.5): a chandle formal
-/// takes only a chandle or `null`, and an unpacked array formal an array of
-/// its type. Every call binds its actuals after this check; `ordinal`
-/// numbers the argument in diagnostics.
+/// takes only a chandle or `null`, an unpacked array formal an array of its
+/// type, and a class handle input or inout a handle its class takes (8.16).
+/// Every call binds its actuals after this check; `ordinal` numbers the
+/// argument in diagnostics.
 pub(in crate::ast) fn check_argument(
     name: &str,
     position: usize,
@@ -3667,8 +3668,26 @@ pub(in crate::ast) fn check_argument(
             || format!("argument {ordinal} of `{name}`"),
             dimensions,
         )?;
+        if let Some(class) = shape.class.as_deref().filter(|_| shape.unpacked.is_empty())
+            && copies_actual_in(dimensions, name, position)
+        {
+            objects::check_assignment(tree, session, actual, native, dimensions, class, || {
+                format!("argument {ordinal} of `{name}`")
+            })?;
+        }
     }
     Ok(())
+}
+
+/// Whether the call copies actual `position` of subroutine `name` into its
+/// formal: an input or inout (13.5.1).
+fn copies_actual_in(dimensions: &PackedDimensions, name: &str, position: usize) -> bool {
+    use crate::procedural::ParamDirection;
+    dimensions
+        .subroutine_directions
+        .get(name)
+        .and_then(|directions| directions.get(position))
+        .is_some_and(|direction| matches!(direction, ParamDirection::Input | ParamDirection::Inout))
 }
 
 /// Bind actual `actual` of formal `position` of subroutine `name`, which
