@@ -92,6 +92,14 @@ pub(crate) fn hotspot_scheduler(program: &LaidOutProgram) -> Result<(Unit, Vec<U
     Ok((unit, callees))
 }
 
+/// With callees available, a unit larger than this always compiles as one.
+const OUTLINE_INSTRUCTIONS: usize = 32_768;
+/// Inlined units beyond this many instructions make the compiled scheduler a
+/// function too large to allocate quickly; later units of at least
+/// [`OUTLINE_MIN_INSTRUCTIONS`] compile as callees instead.
+const INLINE_BUDGET_INSTRUCTIONS: usize = 262_144;
+const OUTLINE_MIN_INSTRUCTIONS: usize = 256;
+
 /// The narrowest event mask: one 64-bit word, which every design with at
 /// most 64 events uses. A design with more uses as many words as its events
 /// need.
@@ -2237,6 +2245,7 @@ impl Plan {
             .filter(|_| !schema.nba_sites.is_empty())
             .map(|service| nba::Sites::new(program, &native_nbas, service, &self.events));
         let mut g = Generator {
+            inlined_instructions: 0,
             program,
             nbas: nbas.as_ref(),
             observers: self.observers.as_ref(),
@@ -4537,6 +4546,8 @@ struct Generator<'a> {
     /// The runtime events after which a run returns at the end of its slot
     /// ([`SchedulerSlots::events`]), when the inlined units count theirs.
     event_batch: Option<u64>,
+    /// Instructions of the units inlined so far, for outlining.
+    inlined_instructions: usize,
 }
 
 impl Generator<'_> {
@@ -5811,8 +5822,14 @@ impl Generator<'_> {
     }
 
     fn inline_body(&mut self, unit: &Unit) {
+        let size = instructions(unit).take(OUTLINE_INSTRUCTIONS + 1).count();
+        // Native allocation grows faster than the function: past a budget,
+        // further kernels compile as callees instead of one huge scheduler.
+        let outline = size > OUTLINE_INSTRUCTIONS
+            || (size >= OUTLINE_MIN_INSTRUCTIONS
+                && self.inlined_instructions + size > INLINE_BUDGET_INSTRUCTIONS);
         if let Some(outlined) = &mut self.outlined
-            && instructions(unit).take(32_769).count() > 32_768
+            && outline
         {
             let index = match outlined.iter().position(|previous| previous == unit) {
                 Some(index) => index,
@@ -5828,6 +5845,7 @@ impl Generator<'_> {
                 args: Vec::new(),
             });
         } else {
+            self.inlined_instructions += size;
             self.b.inline_execution_unit(unit);
         }
     }
