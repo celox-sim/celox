@@ -1,0 +1,1 @@
+design containers of vifs (Container Get on a design variable) and static locals stay live; test
