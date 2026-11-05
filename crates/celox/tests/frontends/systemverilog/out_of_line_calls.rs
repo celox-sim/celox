@@ -1335,3 +1335,35 @@ endmodule
         }
     }
 }
+
+#[test]
+fn file_output_in_function_units_with_native_services() {
+    // The native backend serves file output of compiled kernels itself:
+    // the edge process's `$fwrite` goes there, while the initial process's
+    // calls into units that write files suspend through the reference loop.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int r);
+    bit clk = 0;
+    int count = 0;
+    function automatic int report(int n);
+        $fdisplay(1, "report %0d", n);
+        if (n > 0) $fwrite(1, "[%0d]", nested(n - 1));
+        return n * 2;
+    endfunction
+    function automatic int nested(int n);
+        $fwrite(1, "nested %0d;", n);
+        return n + 1;
+    endfunction
+    always #1 clk = ~clk;
+    always @(posedge clk) begin
+        count <= count + 1;
+        $fwrite(1, "edge %0d;", count);
+    end
+    initial begin
+        r = report(count + 2);
+        #3 r = report(count);
+    end
+endmodule
+"#;
+    same_as_inlined(source, 2, 6, &["r"]);
+}

@@ -73,7 +73,7 @@ impl Ff<'_, '_> {
             None => (1, ticks_per_unit.to_string()),
         };
         self.host_request_sites.push(HostRequestSite {
-            process: 0,
+            process: celox_design::SiteProcess::own(0),
             kind: HostRequestKind::Format,
             operation,
             args: inputs,

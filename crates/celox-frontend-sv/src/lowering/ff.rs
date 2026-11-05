@@ -2245,7 +2245,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             .filter(|site| site.kind == HostRequestKind::Vcd)
             .count() as u32;
         self.host_request_sites.push(HostRequestSite {
-            process: self.process,
+            process: celox_design::SiteProcess::own(self.process),
             kind: HostRequestKind::Vcd,
             operation: operation as u32,
             args: values,
@@ -3221,7 +3221,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             .filter(|site| site.kind == HostRequestKind::Distribution)
             .count() as u32;
         self.host_request_sites.push(HostRequestSite {
-            process: 0,
+            process: celox_design::SiteProcess::own(0),
             kind: HostRequestKind::Distribution,
             operation,
             args: operands,
@@ -3378,7 +3378,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             .filter(|site| site.kind == HostRequestKind::Plusargs)
             .count() as u32;
         self.host_request_sites.push(HostRequestSite {
-            process: 0,
+            process: celox_design::SiteProcess::own(0),
             kind: HostRequestKind::Plusargs,
             operation: u32::from(value_query),
             args: vec![HostRequestValue {

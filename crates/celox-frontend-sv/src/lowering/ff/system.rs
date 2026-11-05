@@ -23,7 +23,7 @@ impl Ff<'_, '_> {
             .filter(|site| site.kind == HostRequestKind::System)
             .count() as u32;
         self.host_request_sites.push(HostRequestSite {
-            process: 0,
+            process: celox_design::SiteProcess::own(0),
             kind: HostRequestKind::System,
             operation: 0,
             args: inputs,

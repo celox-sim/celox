@@ -520,13 +520,16 @@ impl<B: SimBackend> Simulator<B> {
                     }
                     Some(ProcessStatus::HostRequest) => {
                         celox_design::HostRequestKind::decode(delay).is_some_and(|(kind, index)| {
-                            self.program
-                                .runtime_schema
-                                .host_request_sites
-                                .iter()
-                                .filter(|site| site.process == kernel && site.kind == kind)
-                                .nth(index as usize)
-                                .is_some()
+                            celox_design::host_request_site(
+                                self.program
+                                    .runtime_schema
+                                    .host_request_sites
+                                    .iter()
+                                    .filter(|site| site.process.index() == kernel),
+                                kind,
+                                index,
+                            )
+                            .is_some()
                         })
                     }
                     Some(ProcessStatus::Nba) => {

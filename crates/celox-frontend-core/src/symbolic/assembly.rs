@@ -4823,16 +4823,14 @@ fn relocate_timing(
             }));
         metadata
             .host_request_sites
-            .extend(
-                module
-                    .host_request_sites
-                    .iter()
-                    .map(|site| HostRequestSite {
-                        process: process_index[&(instance, site.process_index())]
-                            | (site.process & celox_design::FUNCTION_SITE_PROCESS),
-                        ..site.map(locate)
-                    }),
-            );
+            .extend(module.host_request_sites.iter().map(|site| {
+                HostRequestSite {
+                    process: site
+                        .process
+                        .with_index(process_index[&(instance, site.process.index())]),
+                    ..site.map(locate)
+                }
+            }));
         metadata.time_slots.extend(module.time_slot.map(locate));
         metadata.sample_shadows.extend(
             module

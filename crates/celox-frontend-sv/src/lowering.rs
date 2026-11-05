@@ -6554,7 +6554,7 @@ fn lower_initial_processes(
             nba_sites.extend(kernel.nba_sites);
             nba_switches.extend(kernel.nba_switches);
             host_request_sites.extend(kernel.host_request_sites.into_iter().map(|mut site| {
-                site.process = index;
+                site.process = celox_design::SiteProcess::own(index);
                 site
             }));
             Ok(SymbolicProcess {
@@ -6572,7 +6572,7 @@ fn lower_initial_processes(
             if process.slots.call_top.is_some() {
                 host_request_sites.extend(pm.function_host_request_sites.iter().map(|site| {
                     celox_design::HostRequestSite {
-                        process: index | celox_design::FUNCTION_SITE_PROCESS,
+                        process: celox_design::SiteProcess::function(index),
                         ..site.clone()
                     }
                 }));

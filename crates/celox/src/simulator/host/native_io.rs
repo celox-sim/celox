@@ -50,6 +50,9 @@ pub(super) struct Metadata {
     pub events: SignalRef,
     /// Per process, indexed by that process's FileIo request index.
     pub sites: Vec<Vec<Option<WriteSite>>>,
+    /// Per process, the FileIo sites of the function units it calls, by
+    /// their index among those (see [`celox_design::SiteProcess`]).
+    pub function_sites: Vec<Vec<Option<WriteSite>>>,
     pub runtime_sites: Vec<RuntimeEventSite>,
     pub process_names: Vec<String>,
     pub nbas: Vec<Vec<celox_design::NbaSite<SignalRef>>>,
@@ -82,6 +85,8 @@ impl Metadata {
             .iter()
             .map(|_| Vec::new())
             .collect();
+        let mut function_sites: Vec<Vec<Option<WriteSite>>> =
+            sites.iter().map(|_| Vec::new()).collect();
         for request in &program.runtime_schema.host_request_sites {
             if request.kind != HostRequestKind::FileIo {
                 continue;
@@ -93,7 +98,7 @@ impl Metadata {
                     .iter()
                     .all(|arg| arg.id.array_layout.is_none());
             let site = if supported {
-                let process = &program.runtime_schema.processes[request.process];
+                let process = &program.runtime_schema.processes[request.process.index()];
                 let scope = program
                     .design
                     .instance(process.status.instance_id)
@@ -131,7 +136,12 @@ impl Metadata {
             } else {
                 None
             };
-            sites[request.process].push(site);
+            let listed = if request.process.is_function_site() {
+                &mut function_sites
+            } else {
+                &mut sites
+            };
+            listed[request.process.index()].push(site);
         }
         let scheduler = program.runtime_schema.scheduler.as_ref()?;
         let mut nbas: Vec<Vec<_>> = program
@@ -202,6 +212,7 @@ impl Metadata {
             },
             events: backend.resolve_signal(&scheduler.slots.events),
             sites,
+            function_sites,
             runtime_sites: program.runtime_schema.runtime_event_sites.clone(),
             process_names: program
                 .runtime_schema
@@ -863,11 +874,14 @@ impl Scope<'_> {
                 "native file-write request has another service kind",
             ));
         };
-        let site = self
-            .metadata
-            .sites
+        let listed = if index & celox_design::FUNCTION_SITE_NUMBER != 0 {
+            &self.metadata.function_sites
+        } else {
+            &self.metadata.sites
+        };
+        let site = listed
             .get(usize::try_from(process).unwrap_or(usize::MAX))
-            .and_then(|sites| sites.get(index as usize))
+            .and_then(|sites| sites.get((index & !celox_design::FUNCTION_SITE_NUMBER) as usize))
             .and_then(Option::as_ref)
             .ok_or_else(|| Self::fault("native file-write request is not registered"))?;
         let values = site
@@ -1044,6 +1058,7 @@ mod tests {
             context: target,
             events: signal(0, 64, false),
             sites: vec![],
+            function_sites: vec![],
             runtime_sites: vec![],
             process_names: vec![],
             flagged: vec![(0, 0), (0, 1)],

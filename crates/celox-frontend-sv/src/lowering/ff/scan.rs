@@ -104,7 +104,7 @@ impl Ff<'_, '_> {
             .filter(|site| site.kind == HostRequestKind::Scan)
             .count() as u32;
         self.host_request_sites.push(HostRequestSite {
-            process: 0,
+            process: celox_design::SiteProcess::own(0),
             kind: HostRequestKind::Scan,
             operation: u32::from(function == sv::ir::SystemFunction::Fscanf),
             args: inputs,

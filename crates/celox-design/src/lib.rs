@@ -745,10 +745,42 @@ impl<A: Copy> HostRequestValue<A> {
     }
 }
 
-/// Marks, in [`HostRequestSite::process`], a site of a function unit that
-/// the process may call: the module's function sites are listed for each
-/// of its processes after the process's own.
-pub const FUNCTION_SITE_PROCESS: usize = 1 << (usize::BITS - 1);
+/// The process a host request site is listed for, and whether the site is
+/// one of the process's own or of a function unit the process may call:
+/// the module's function sites are listed for each of its processes after
+/// the process's own. Kept as one word, as before function sites.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SiteProcess(usize);
+
+impl SiteProcess {
+    const FUNCTION: usize = 1 << (usize::BITS - 1);
+
+    /// A site of process `index` itself.
+    pub const fn own(index: usize) -> Self {
+        Self(index)
+    }
+
+    /// A site of a function unit, listed for process `index`.
+    pub const fn function(index: usize) -> Self {
+        Self(index | Self::FUNCTION)
+    }
+
+    /// The index of the process the site is listed for.
+    pub const fn index(self) -> usize {
+        self.0 & !Self::FUNCTION
+    }
+
+    /// Whether the site is in a function unit.
+    pub const fn is_function_site(self) -> bool {
+        self.0 & Self::FUNCTION != 0
+    }
+
+    /// The same kind of site, listed for process `index`.
+    pub const fn with_index(self, index: usize) -> Self {
+        Self(index | (self.0 & Self::FUNCTION))
+    }
+}
 
 /// Marks, in the site number of an encoded request
 /// ([`HostRequestKind::encode`]), a function site: the number counts the
@@ -757,27 +789,29 @@ pub const FUNCTION_SITE_NUMBER: u32 = 1 << 31;
 
 /// The site of a process's request for site number `site` of family `kind`
 /// (see [`FUNCTION_SITE_NUMBER`]), among the process's `sites`.
-pub fn host_request_site<A>(
-    sites: &[HostRequestSite<A>],
+pub fn host_request_site<'a, A: 'a>(
+    sites: impl IntoIterator<Item = &'a HostRequestSite<A>>,
     kind: HostRequestKind,
     site: u32,
-) -> Option<&HostRequestSite<A>> {
+) -> Option<&'a HostRequestSite<A>> {
     let function = site & FUNCTION_SITE_NUMBER != 0;
     sites
-        .iter()
-        .filter(|candidate| candidate.kind == kind && candidate.in_function() == function)
+        .into_iter()
+        .filter(|candidate| {
+            candidate.kind == kind && candidate.process.is_function_site() == function
+        })
         .nth((site & !FUNCTION_SITE_NUMBER) as usize)
 }
 
 /// One synchronous host request of a process. Sites are numbered within
 /// each process and family in their declaration order; the sites of
-/// function units are numbered apart (see [`FUNCTION_SITE_PROCESS`]). Argument slots are
+/// function units are numbered apart (see [`SiteProcess`]). Argument slots are
 /// evaluated by the kernel before it suspends; result slots are written by
 /// the host before the kernel resumes. `operation` and `strings` are the
 /// operation family's stable, backend-independent descriptor.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostRequestSite<A> {
-    pub process: usize,
+    pub process: SiteProcess,
     pub kind: HostRequestKind,
     pub operation: u32,
     pub args: Vec<HostRequestValue<A>>,
@@ -803,18 +837,6 @@ impl<A: Copy> HostRequestSite<A> {
 
     pub fn slots(&self) -> impl Iterator<Item = A> + '_ {
         self.args.iter().chain(&self.results).map(|value| value.id)
-    }
-}
-
-impl<A> HostRequestSite<A> {
-    /// Whether the site is in a function unit (see [`FUNCTION_SITE_PROCESS`]).
-    pub fn in_function(&self) -> bool {
-        self.process & FUNCTION_SITE_PROCESS != 0
-    }
-
-    /// The index of the process the site is listed for.
-    pub fn process_index(&self) -> usize {
-        self.process & !FUNCTION_SITE_PROCESS
     }
 }
 
@@ -2519,7 +2541,7 @@ mod tests {
             float_precision: None,
         };
         let site = HostRequestSite {
-            process: 2,
+            process: SiteProcess::own(2),
             kind: HostRequestKind::Plusargs,
             operation: 1,
             args: vec![value(3u32)],
@@ -2528,7 +2550,7 @@ mod tests {
         };
         let relocated = site.map(|id| id + 10);
         assert_eq!(relocated.slots().collect::<Vec<_>>(), vec![13, 15]);
-        assert_eq!(relocated.process, 2);
+        assert_eq!(relocated.process, SiteProcess::own(2));
         assert_eq!(relocated.args[0].width, 17);
         assert!(relocated.results[0].signed);
         assert_eq!(relocated.args[0].value_kind, ValueKind::StrRef);

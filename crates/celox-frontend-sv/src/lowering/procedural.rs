@@ -70,7 +70,7 @@ pub(super) struct ProcModule<'a> {
     pub runtime_event_sites: Vec<RuntimeEventSite>,
     /// The host request sites of the module's function units, which every
     /// process of the module lists after its own (see
-    /// [`celox_design::FUNCTION_SITE_PROCESS`]), numbered per family.
+    /// [`celox_design::SiteProcess`]), numbered per family.
     pub function_host_request_sites: Vec<celox_design::HostRequestSite<SourceVarId>>,
     /// Runtime errors (fatal assertions) of the module, by local code.
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
