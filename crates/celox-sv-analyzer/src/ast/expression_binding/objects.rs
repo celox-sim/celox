@@ -917,11 +917,30 @@ pub(in crate::ast) fn check_assignment(
     target: &str,
     context: impl FnOnce() -> String,
 ) -> Converted<()> {
-    let Some(source) = native_class(tree, session, id, native, dimensions) else {
+    let Ok(source_type) = expression_types::type_of(tree, session, id, native, dimensions) else {
         return Ok(());
     };
-    if derives_from(tree, session, dimensions, &source, target)? {
+    let Some(source) = expression_types::class_name(&session.types, source_type) else {
         return Ok(());
+    };
+    if source == target {
+        return Ok(());
+    }
+    if !classes::builtin(&source) && !classes::builtin(target) {
+        class(tree, session, dimensions, &source)?.record_lineage(
+            tree,
+            session,
+            &dimensions.const_env,
+            &dimensions.type_aliases,
+        );
+        let target_type = classes::handle_type_id(&mut session.types, target);
+        if session
+            .types
+            .assignable_handle(source_type, target_type)
+            .is_ok()
+        {
+            return Ok(());
+        }
     }
     Err(AnalyzerError::IncompatibleClassHandle {
         context: context(),
