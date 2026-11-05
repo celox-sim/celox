@@ -1458,7 +1458,10 @@ fn main() -> ExitCode {
 
 #[cfg(feature = "systemverilog")]
 fn report_sv_hotspots(_simulation: &celox::Simulation<celox::TieredBackend>, _test: &str) {
-    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    #[cfg(any(
+        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+    ))]
     if let Some(stats) = _simulation.hotspot_stats() {
         runner::print_hotspot_stats(_test, &stats);
     }

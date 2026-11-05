@@ -68,7 +68,7 @@ type Builder = SIRBuilder<RegionedAbsoluteAddr>;
 /// A compact native scheduler whose large bodies are separately compiled.
 /// Analyze the original units before outlining, so call opacity cannot change
 /// dirty tracking, finish handling, or event accounting.
-#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[cfg(hotspot_jit)]
 pub(crate) fn hotspot_scheduler(program: &LaidOutProgram) -> Result<(Unit, Vec<Unit>), String> {
     let schema = program
         .runtime

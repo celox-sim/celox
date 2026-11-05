@@ -60,6 +60,9 @@ pub(super) fn emit_call_extern(
     // unit, whose one argument is its frame's offset into the call stack.
     let heap = func == celox_sir::extern_abi::HEAP_HELPER_ID;
     let function = celox_sir::extern_abi::native_function_slot(func);
+    // Another generated function of the image: it takes only the state
+    // pointer, already in x0, and returns its status there.
+    let kernel = celox_sir::extern_abi::native_kernel_index(func);
     let leading = usize::from(heap || function.is_some());
     let positions = args.len() + leading;
     let register_args = positions.min(REGISTER_ARGS);
@@ -139,7 +142,7 @@ pub(super) fn emit_call_extern(
     } else if heap {
         -16
     } else {
-        i64::from(function.unwrap_or(func)) * 8
+        i64::from(function.or(kernel).unwrap_or(func)) * 8
     };
     emit_load_at(ops, SCRATCH1, SCRATCH1, offset, OpSize::S64);
     dynasm!(ops ; .arch aarch64 ; blr x17);
@@ -155,6 +158,9 @@ pub(super) fn emit_call_extern(
             ; str x17, [x16]
             ; mov x16, x0
         );
+    } else if kernel.is_some() {
+        // Keep the status in x16 while x0 is restored.
+        dynasm!(ops ; .arch aarch64 ; mov x16, x0);
     }
 
     // The result interferes with every value live across the call, so the

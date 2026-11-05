@@ -117,6 +117,9 @@ pub struct NapiOptions {
     pub dead_store_policy: Option<String>,
     /// Simulation threads, including the calling thread. Default: 1.
     pub threads: Option<u32>,
+    /// Tiered handles compile hot execution groups incrementally (hotspot
+    /// JIT). Default: true; `false` selects whole-image tiered compilation.
+    pub hotspot_jit: Option<bool>,
 }
 
 /// Parsed builder options from NapiOptions (common fields available on all targets).
@@ -149,6 +152,7 @@ struct ParsedOptions {
     common: ParsedOptionsCommon,
     cranelift_options: celox::CraneliftOptions,
     dead_store_policy: celox::DeadStorePolicy,
+    hotspot_jit: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -463,12 +467,14 @@ fn parse_options(options: &Option<NapiOptions>) -> Result<ParsedOptions> {
                 common,
                 cranelift_options,
                 dead_store_policy,
+                hotspot_jit: o.hotspot_jit.unwrap_or(true),
             })
         }
         None => Ok(ParsedOptions {
             common,
             cranelift_options: celox::CraneliftOptions::default(),
             dead_store_policy: celox::DeadStorePolicy::Off,
+            hotspot_jit: true,
         }),
     }
 }
@@ -676,6 +682,8 @@ fn apply_options<'a, T>(
         builder = builder.param(name, *value);
     }
     builder = builder.dead_store_policy(opts.dead_store_policy);
+    // Only tiered builds read it; compiled images are unaffected.
+    builder = builder.hotspot_jit(opts.hotspot_jit);
     builder
 }
 
@@ -4033,6 +4041,7 @@ mod tests {
             },
             cranelift_options: celox::CraneliftOptions::default(),
             dead_store_policy: celox::DeadStorePolicy::Off,
+            hotspot_jit: true,
         }
     }
 
@@ -4184,6 +4193,7 @@ mod tests {
                 parameters: None,
                 dead_store_policy: None,
                 threads: None,
+                hotspot_jit: None,
             });
             let mut handle = if mode == "tiered" {
                 NativeSimulatorHandle::new_tiered(napi_sources(source), "Top".into(), options)

@@ -117,7 +117,8 @@ fn benchmark_time_to_compiled(c: &mut Criterion) {
     ] {
         group.bench_with_input(BenchmarkId::from_parameter(name), &limit, |b, &limit| {
             b.iter(|| {
-                let mut sim = builder().build_tiered().unwrap();
+                // Whole-image promotion: hotspot JIT never adopts an image.
+                let mut sim = builder().hotspot_jit(false).build_tiered().unwrap();
                 let clk = sim.event("clk");
                 while !sim.is_compiled()
                     && sim.tiered_execution_stats().interpreted_evaluations < limit
@@ -161,7 +162,7 @@ fn benchmark_steady_state(c: &mut Criterion) {
         });
     });
 
-    let mut tiered = lcg_builder().build_tiered().unwrap();
+    let mut tiered = lcg_builder().hotspot_jit(false).build_tiered().unwrap();
     let tiered_clk = tiered.event("clk");
     while !tiered.is_compiled()
         && tiered.tiered_execution_stats().interpreted_evaluations < 1_000_000
