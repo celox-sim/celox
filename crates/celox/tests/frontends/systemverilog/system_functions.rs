@@ -171,6 +171,10 @@ sv_backends! {
         @case "system_functions::casts_evaluate_destination_operands_once";
     }
 
+    fn casts_between_numeric_types(sim) {
+        @case "system_functions::casts_between_numeric_types";
+    }
+
     fn casts_of_constants_to_enumerated_types(sim) {
         @case "system_functions::casts_of_constants_to_enumerated_types";
     }
@@ -1361,6 +1365,22 @@ fn source_line(source: &str, needle: &str) -> usize {
         .position(|line| line.contains(needle))
         .unwrap()
         + 1
+}
+
+/// A `$cast` to an enumerated type assigns only a member's value, also for a
+/// type whose members are not resolved; it is not cast as a number (IEEE
+/// 1800-2023 6.24.2).
+#[test]
+fn casts_to_wide_enumerated_types_are_not_numeric() {
+    for declaration in [
+        "typedef enum logic [129:0] {A = 130'd1, B = 130'd7} wide_e; wide_e w = A;",
+        "enum logic [129:0] {A = 130'd1, B = 130'd7} w = A;",
+    ] {
+        let error = build_error(&format!(
+            "module Top(output int ok); {declaration} initial ok = $cast(w, 130'd5); endmodule"
+        ));
+        assert!(error.contains("$cast"), "{declaration}: {error}");
+    }
 }
 
 fn build_error(source: &str) -> String {

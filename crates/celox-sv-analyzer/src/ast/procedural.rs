@@ -2953,6 +2953,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 }],
             }]);
         }
+        // A cast between numeric types is always valid; the effects of the
+        // statement made it (6.24.2).
+        if name == "$cast" && self.numeric_cast(root)?.is_some() {
+            return Ok(Vec::new());
+        }
         if name == "$cast"
             && let [destination, source] = arguments
             && let (Some(destination), Some(source), None, None) = (

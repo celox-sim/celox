@@ -1227,10 +1227,10 @@ chapter-6/6.23--type_op_compare.sv	2state	pass
 chapter-6/6.23--type_op_compare.sv	4state	pass
 chapter-6/6.24.1--cast_op.sv	2state	pass
 chapter-6/6.24.1--cast_op.sv	4state	pass
-chapter-6/6.24.2--cast_fn.sv	2state	fail
-chapter-6/6.24.2--cast_fn.sv	4state	fail
-chapter-6/6.24.2--cast_task.sv	2state	fail
-chapter-6/6.24.2--cast_task.sv	4state	fail
+chapter-6/6.24.2--cast_fn.sv	2state	pass
+chapter-6/6.24.2--cast_fn.sv	4state	pass
+chapter-6/6.24.2--cast_task.sv	2state	pass
+chapter-6/6.24.2--cast_task.sv	4state	pass
 chapter-6/6.24.3--bitstream_cast.sv	2state	pass
 chapter-6/6.24.3--bitstream_cast.sv	4state	pass
 chapter-6/6.5--variable_assignment.sv	2state	pass
