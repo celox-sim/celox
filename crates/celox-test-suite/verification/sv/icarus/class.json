@@ -1305,6 +1305,17 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:4: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "class::output_arguments_write_class_properties",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus 13.0 rejects class scope resolution with a syntax error: reading a static property (Counter::created), calling a static method (Counter::next()) and assigning a static property (Counter::last = \"set\"). IEEE 1800-2023 8.9, 8.10 and 8.23 define these accesses. Verilator passes both cases.",
       "expectation": "Simulation",
       "known_issue": {

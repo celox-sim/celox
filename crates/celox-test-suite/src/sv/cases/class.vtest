@@ -2664,6 +2664,100 @@ endmodule
   (top Top) (run_until 0) (assert_eq bad 0) (assert_eq done 1)
   (expect_output "0\n"))
 
+(case output_arguments_write_class_properties
+  (source "outputs.sv" #"
+interface clk_if; int n; endinterface
+package p;
+  class Db #(type T = int);
+    static T saved;
+    static function void set(T t); saved = t; endfunction
+    static function bit read(inout T val); val = saved; return 1; endfunction
+  endclass
+endpackage
+typedef struct packed { bit [3:0] hi; bit [3:0] lo; } pair_t;
+class Holder;
+  int x;
+  byte b;
+  bit [7:0] bits;
+  pair_t pair;
+  virtual clk_if v;
+  Holder next;
+  int q[$];
+endclass
+class Env;
+  virtual clk_if m_if;
+  function void connect();
+    void'(p::Db#(virtual clk_if)::read(m_if));
+  endfunction
+endclass
+module Top(output int bad, output bit done);
+  clk_if i0();
+  Holder h, other;
+  Env e;
+  function void f(output int o); o = 300; endfunction
+  function void nib(output bit [3:0] o); o = 4'ha; endfunction
+  function void one(output bit o); o = 1; endfunction
+  function void inc(inout bit [3:0] io); io = io + 1; endfunction
+  int mq[$] = '{0, 0, 0};
+  int k;
+  function void bump(output int o); k = 2; o = 7; endfunction
+  function void g(inout int io); io = io + 1; endfunction
+  function void getv(output virtual clk_if o); o = i0; endfunction
+  function void geth(output Holder o); o = other; endfunction
+  function void getq(output int o[$]); o = '{1, 2, 3}; endfunction
+  function void retarget(output int o); h = other; o = 5; endfunction
+  task t(output int o); #1 o = 9; endtask
+  initial begin
+    Holder first;
+    h = new;
+    other = new;
+    f(h.x);
+    if (h.x != 300) bad++;
+    f(h.b);
+    if (h.b != 44) bad++;
+    g(h.x);
+    if (h.x != 301) bad++;
+    getv(h.v);
+    h.v.n = 3;
+    if (i0.n != 3) bad++;
+    geth(h.next);
+    if (h.next != other) bad++;
+    getq(h.q);
+    if (h.q.size() != 3 || h.q[2] != 3) bad++;
+    // The actual is assigned when the call returns (13.5): the property of
+    // the object the handle then refers to.
+    first = h;
+    retarget(h.x);
+    if (first.x != 301 || other.x != 5) bad++;
+    h = first;
+    // Selects, members and elements are written as assignments write them.
+    nib(h.bits[7:4]);
+    one(h.bits[0]);
+    if (h.bits != 8'ha1) bad++;
+    nib(h.pair.lo);
+    inc(h.pair.lo);
+    if (h.pair != 8'h0b) bad++;
+    f(h.q[1]);
+    if (h.q[1] != 300 || h.q[0] != 1) bad++;
+    // The index of an element is read when the call returns.
+    k = 1;
+    bump(mq[k]);
+    if (mq[1] != 0 || mq[2] != 7) bad++;
+    t(other.x);
+    if (other.x != 9 || $time != 1) bad++;
+    e = new;
+    p::Db#(virtual clk_if)::set(i0);
+    e.connect();
+    e.m_if.n = 4;
+    if (i0.n != 4) bad++;
+    $display("%0d", bad);
+    done = bad == 0;
+  end
+endmodule
+"#)
+  (top Top) (run_until 2) (assert_eq bad 0) (assert_eq done 1)
+  (expect_output "0\n"))
+
 (case constrained_randomize_inline
   (source "inline_constraints.sv" #"
 module Top(output bit done);
