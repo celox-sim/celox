@@ -330,6 +330,40 @@ fn inherit(
     }
 }
 
+/// The tables that every specialization of class `name` is scoped in
+/// apart from its parameters: those of `dimensions`, around the class, with
+/// the constants and types of the scope that declares the class, which the
+/// constants of each specialization start from (IEEE 1800-2023 8.25).
+pub(in crate::ast) fn class_base(
+    session: &Session,
+    name: &str,
+    dimensions: &PackedDimensions,
+) -> ClassBase {
+    let mut outer = PackedDimensions {
+        const_env: dimensions.const_env.clone(),
+        type_aliases: dimensions.type_aliases.clone(),
+        parameter_values: dimensions.parameter_values.clone(),
+        constant_types: dimensions.constant_types.clone(),
+        ..PackedDimensions::default()
+    };
+    if let Some((env, aliases)) = session
+        .class_declaration_scopes
+        .get(&generic(session, name))
+    {
+        if env.identity() != outer.const_env.identity() {
+            outer
+                .const_env
+                .extend(env.iter().map(|(key, value)| (key.clone(), *value)));
+        }
+        if aliases.identity() != outer.type_aliases.identity() {
+            outer
+                .type_aliases
+                .extend(aliases.iter().map(|(key, ty)| (key.clone(), ty.clone())));
+        }
+    }
+    ClassBase::of(&outer)
+}
+
 /// `dimensions` and `literals` with the parameters of class `name` added,
 /// for binding the bodies of its methods.
 pub(in crate::ast) fn body_scope(
@@ -339,6 +373,7 @@ pub(in crate::ast) fn body_scope(
     literals: &HashMap<String, Expr>,
 ) -> (PackedDimensions, HashMap<String, Expr>) {
     let mut dimensions = dimensions.clone();
+    dimensions.class_base = Some(class_base(session, name, &dimensions));
     let mut literals = literals.clone();
     let own = generic(session, name);
     for specialization in lineage(session, name) {
