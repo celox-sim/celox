@@ -1,1 +1,6 @@
-Action callee checks reuse the process-kernel analyses (may suspend, uses the scheduler) over every body, subroutines included; event triggers and process control in actions or their callees are rejected.
+Revision history for #3172:
+
+rev 2 (content) 2026-11-05 05:52 UTC — Action callee checks reuse the process-kernel analyses (may suspend, uses the scheduler) over every body, subroutines included; event triggers and process control in actions or their callees are rejected.
+rev 1 (initial) 2026-11-05 05:52 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3172,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"676671f00df55c197accad4b76d7414bfabbfdcf","timestamp_iso":"2026-11-05T05:52:22Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"676671f00df55c197accad4b76d7414bfabbfdcf","new_sha":"87bc8a6116f8bbdec97b41b3e8aaea0b32877924","timestamp_iso":"2026-11-05T05:52:22Z","reason":"Action callee checks reuse the process-kernel analyses (may suspend, uses the scheduler) over every body, subroutines included; event triggers and process control in actions or their callees are rejected.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/676671f00df55c197accad4b76d7414bfabbfdcf...87bc8a6116f8bbdec97b41b3e8aaea0b32877924"}]} -->
