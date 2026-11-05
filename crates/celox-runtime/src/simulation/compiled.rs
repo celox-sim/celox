@@ -50,6 +50,20 @@ fn clock_slot<B: SimBackend>(
     scheduler.clock_of(id, event.signal)
 }
 
+/// The compiled scheduler of a model, which a run of it requires.
+#[inline]
+fn scheduler_refs(scheduler: &Option<SchedulerRefs>) -> Result<&SchedulerRefs, Halt> {
+    match scheduler {
+        Some(scheduler) => Ok(scheduler),
+        None => Err(missing_scheduler()),
+    }
+}
+
+#[cold]
+fn missing_scheduler() -> Halt {
+    SimulatorErrorCode::InternalError.into()
+}
+
 impl<B: SimBackend> SimulationState<B> {
     /// Whether a compiled scheduler may run slots of this simulation.
     pub(super) fn compiles_slots(&self) -> bool {
@@ -292,7 +306,10 @@ impl<B: SimBackend> SimulationState<B> {
             executor.put_compiled_host_inputs(host_entry, writes)?;
             self.host_pending = false;
         }
-        if executor.compiled_nba_queues() {
+        if executor.compiled_nba_queues()
+            && (!self.process_state.nba_queue.is_empty()
+                || !self.process_state.delayed_nba.is_empty())
+        {
             let immediate = std::mem::take(&mut self.process_state.nba_queue);
             let delayed = std::mem::take(&mut self.process_state.delayed_nba)
                 .into_iter()
@@ -312,16 +329,14 @@ impl<B: SimBackend> SimulationState<B> {
             || !regions.reactive.is_empty();
         if executor.compiled_region_queues() {
             executor.put_compiled_region_entry(region_entry);
-            regions.deferred_ready.clear();
-            regions.observed.clear();
-            regions.reactive.clear();
+            if region_entry {
+                regions.deferred_ready.clear();
+                regions.observed.clear();
+                regions.reactive.clear();
+            }
         }
         executor.set_compiled_host_budgets(self.round_budget, self.return_budget);
-        let scheduler = self
-            .model
-            .scheduler
-            .as_ref()
-            .ok_or(SimulatorErrorCode::InternalError)?;
+        let scheduler = scheduler_refs(&self.model.scheduler)?;
         let native_regions = executor.compiled_region_queues();
         let backend = executor.backend_mut();
         if host_entry {
@@ -334,17 +349,17 @@ impl<B: SimBackend> SimulationState<B> {
             backend.set_wide(scheduler.levels, values);
             backend.set_wide(scheduler.unknown_levels, unknowns);
         }
-        backend.set(scheduler.now, self.scheduler.time);
-        backend.set(scheduler.limit, limit);
-        backend.set(scheduler.exit, 0u8);
-        backend.set(scheduler.finish, 0u8);
+        backend.set_scheduler_slot(scheduler.now, self.scheduler.time);
+        backend.set_scheduler_slot(scheduler.limit, limit);
+        backend.set_scheduler_slot(scheduler.exit, 0u8);
+        backend.set_scheduler_slot(scheduler.finish, 0u8);
         // State may have been restored or a prior slot may have exited early.
         // Only hosts that prove their input state settled may enter clean.
-        backend.set(scheduler.dirty, 1u8);
-        backend.set(scheduler.count, 0u64);
+        backend.set_scheduler_slot(scheduler.dirty, 1u8);
+        backend.set_scheduler_slot(scheduler.count, 0u64);
         let budget = budget.min(backend.compiled_scheduler_budget());
-        backend.set(scheduler.budget, budget);
-        backend.set(scheduler.runtime_events, 0u64);
+        backend.set_scheduler_slot(scheduler.budget, budget);
+        backend.set_scheduler_slot(scheduler.runtime_events, 0u64);
         // Between the runs of a run loop that keeps them resident, the
         // scheduler's slots still hold its kernels and host clocks.
         let clocks = match self.native.take() {
@@ -354,48 +369,42 @@ impl<B: SimBackend> SimulationState<B> {
             }
             None => self.load_native(backend, native_regions)?,
         };
-        let scheduler = self
-            .model
-            .scheduler
-            .as_ref()
-            .ok_or(SimulatorErrorCode::InternalError)?;
+        let scheduler = scheduler_refs(&self.model.scheduler)?;
         let unit = scheduler.unit;
         self.stats.compiled_runs = self.stats.compiled_runs.saturating_add(1);
         let result = executor.run_process(unit);
-        self.process_state
-            .nba_queue
-            .extend(executor.take_compiled_nbas());
-        for (time, update) in executor.take_compiled_delayed_nbas() {
+        if executor.has_compiled_nbas() {
             self.process_state
-                .delayed_nba
-                .entry(time)
-                .or_default()
-                .push((false, update));
+                .nba_queue
+                .extend(executor.take_compiled_nbas());
+            for (time, update) in executor.take_compiled_delayed_nbas() {
+                self.process_state
+                    .delayed_nba
+                    .entry(time)
+                    .or_default()
+                    .push((false, update));
+            }
         }
 
-        let scheduler = self
-            .model
-            .scheduler
-            .as_ref()
-            .ok_or(SimulatorErrorCode::InternalError)?;
+        let scheduler = scheduler_refs(&self.model.scheduler)?;
         let backend = executor.backend();
-        let count: u64 = backend.get_as(scheduler.count);
-        let now: u64 = backend.get_as(scheduler.now);
-        let exit = SchedulerExit::from_code(backend.get_as(scheduler.exit));
-        let current: u64 = backend.get_as(scheduler.current);
+        let count: u64 = backend.get_scheduler_slot(scheduler.count);
+        let now: u64 = backend.get_scheduler_slot(scheduler.now);
+        let exit = SchedulerExit::from_code(backend.get_scheduler_slot(scheduler.exit));
+        let current: u64 = backend.get_scheduler_slot(scheduler.current);
         let complete = result.is_ok() && exit == Some(SchedulerExit::Limit);
         // A clock that overflows ends the run after its slot completed.
         let slot_complete = complete || exit == Some(SchedulerExit::ClockOverflow);
         let overflowed = scheduler
             .clocks
-            .get(backend.get_as::<u64>(scheduler.exit_index()) as usize)
+            .get(backend.get_scheduler_slot::<u64>(scheduler.exit_index()) as usize)
             .map(|&(event, _)| event);
         let clocked = clocks.iter().any(Option::is_some);
         // A run that reached its limit may leave its kernels and clocks in
         // the slots for the next run of the loop: the next slot of its own
         // work is all the runtime needs of them meanwhile.
         let next = if complete && resident {
-            backend.get_as::<u64>(scheduler.next)
+            backend.get_scheduler_slot::<u64>(scheduler.next)
         } else {
             celox_design::SCHEDULER_NEXT_UNJUDGED
         };
@@ -404,11 +413,7 @@ impl<B: SimBackend> SimulationState<B> {
         } else {
             self.store_native(backend, clocks, complete, current)?;
         }
-        let scheduler = self
-            .model
-            .scheduler
-            .as_ref()
-            .ok_or(SimulatorErrorCode::InternalError)?;
+        let scheduler = scheduler_refs(&self.model.scheduler)?;
         self.stats.compiled_slots += count;
         if count > 0 {
             self.scheduler.time = now;
@@ -434,11 +439,7 @@ impl<B: SimBackend> SimulationState<B> {
             let unknown = self.four_state.then(|| plane(scheduler.unknown_levels));
             // A run without clocks records no level of their events, which
             // only the clocks change.
-            let scheduler = self
-                .model
-                .scheduler
-                .as_ref()
-                .ok_or(SimulatorErrorCode::InternalError)?;
+            let scheduler = scheduler_refs(&self.model.scheduler)?;
             let recorded: Vec<(usize, u8)> = scheduler
                 .events
                 .iter()
@@ -510,11 +511,7 @@ impl<B: SimBackend> SimulationState<B> {
         backend: &mut B,
         native_regions: bool,
     ) -> Result<Vec<Option<B::Event>>, Halt> {
-        let scheduler = self
-            .model
-            .scheduler
-            .as_ref()
-            .ok_or(SimulatorErrorCode::InternalError)?;
+        let scheduler = scheduler_refs(&self.model.scheduler)?;
         for &(_, waiting) in scheduler.wake.iter().flatten() {
             backend.set(waiting, 0u8);
         }
@@ -688,11 +685,7 @@ impl<B: SimBackend> SimulationState<B> {
     /// ([`Self::load_native`] for what the runtime holds meanwhile: ready
     /// kernels and restored Inactive work).
     fn enter_resident(&mut self, backend: &mut B, native_regions: bool) -> Result<(), Halt> {
-        let scheduler = self
-            .model
-            .scheduler
-            .as_ref()
-            .ok_or(SimulatorErrorCode::InternalError)?;
+        let scheduler = scheduler_refs(&self.model.scheduler)?;
         // A resident run loop files nothing of the scheduler's kernels in
         // the runtime's queues: only the reference loop does, which unloads
         // them first.
@@ -720,7 +713,7 @@ impl<B: SimBackend> SimulationState<B> {
             }
             backend.set_wide(scheduler.ready, ready);
         }
-        if native_regions {
+        if native_regions && !self.process_state.inactive.is_empty() {
             for process in std::mem::take(&mut self.process_state.inactive) {
                 let (wake, waiting) =
                     scheduler.wake[process].ok_or(SimulatorErrorCode::InternalError)?;
@@ -741,11 +734,7 @@ impl<B: SimBackend> SimulationState<B> {
         complete: bool,
         current: u64,
     ) -> Result<(), Halt> {
-        let scheduler = self
-            .model
-            .scheduler
-            .as_ref()
-            .ok_or(SimulatorErrorCode::InternalError)?;
+        let scheduler = scheduler_refs(&self.model.scheduler)?;
         let ready = backend.get(scheduler.ready);
         for (index, counted) in self.model.counted.iter().enumerate() {
             for &(_, kind) in &counted.domains {
