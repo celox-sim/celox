@@ -139,6 +139,23 @@ pub(super) fn resolve(
                 // promotion (11.3.1, 11.6.1), but an ambiguous predicate
                 // can introduce X into an integral result (11.3.4, 11.4.11).
                 let predicate = results.pop()?;
+                // Arms of different classes take a class both assign to,
+                // which their recorded lineages give (11.4.11 c to e).
+                for arm in [left, right] {
+                    if !session.types.matches(left, right)
+                        && let Some(class) = class_name(&session.types, arm)
+                        && !classes::builtin(&class)
+                        && let Ok(class) = classes::shared_class(
+                            tree,
+                            &class,
+                            &dims.const_env,
+                            &dims.type_aliases,
+                            session,
+                        )
+                    {
+                        class.record_lineage(tree, session, &dims.const_env, &dims.type_aliases);
+                    }
+                }
                 conditional(&mut session.types, predicate, left, right)?
             }
             Job::Cast(cast) => cast.apply(&mut session.types, results.pop()?)?,
@@ -478,7 +495,21 @@ fn conditional(
         // 11.4.11 b: null does not change the other branch's class type.
         (TyData::Null, TyData::Class(_)) => Some(right),
         (TyData::Class(_), TyData::Null) => Some(left),
-        // Common class ancestors need the assignment relation (stage 5).
+        // 11.4.11 c, d: the class of the arm the other assigns to; e: else
+        // the closest base class both derive from.
+        (TyData::Class(_), TyData::Class(_)) => {
+            if table.assignable_handle(left, right).is_ok() {
+                Some(right)
+            } else if table.assignable_handle(right, left).is_ok() {
+                Some(left)
+            } else {
+                let bases = table.base_classes(left);
+                table
+                    .base_classes(right)
+                    .into_iter()
+                    .find(|base| bases.contains(base))
+            }
+        }
         // Other nonmatching nonintegral branches need contextual checking;
         // this singular-type query must not arbitrarily pick one branch.
         _ => None,

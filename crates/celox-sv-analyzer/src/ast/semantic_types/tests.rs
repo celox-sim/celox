@@ -325,4 +325,6 @@ fn class_handles_assign_to_their_classes_bases_and_interfaces() {
         );
     }
     assert_eq!(table.lineage(fifo), vec![fifo, base, put]);
+    assert_eq!(table.base_classes(fifo), vec![fifo, base]);
+    assert_eq!(table.base_classes(e), vec![e, c]);
 }

@@ -210,6 +210,20 @@ impl TyTable {
         self.supertypes.get(&class)
     }
 
+    /// Class `class` and its base classes, nearest first, as far as their
+    /// supertypes are recorded.
+    pub fn base_classes(&self, class: TyId) -> Vec<TyId> {
+        let mut classes = vec![class];
+        while let Some(base) = self
+            .supertypes(*classes.last().unwrap())
+            .and_then(|supertypes| supertypes.base)
+            && !classes.contains(&base)
+        {
+            classes.push(base);
+        }
+        classes
+    }
+
     /// Class `class` and every class it derives from or implements as far as
     /// their supertypes are recorded.
     pub fn lineage(&self, class: TyId) -> Vec<TyId> {
