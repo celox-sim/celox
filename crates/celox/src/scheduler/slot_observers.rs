@@ -111,11 +111,13 @@ impl Generator<'_> {
     /// The host that watches every update sees the one just made
     /// (`AFTER_UPDATE`) when the observer flag of the arena is set. Its
     /// writes are host inputs of the slot, settled as `after` says; the
-    /// settle shows the host its update in turn.
+    /// settle shows the host its update in turn. The edges they give
+    /// `events` are the slot's, as those of the writes before the domains.
     pub(super) fn report_update(
         &mut self,
         service: u32,
         checks: &[WaitCheck<'_>],
+        events: &[Event],
         finish: celox_sir::BlockId,
         after: AfterWrites,
     ) {
@@ -129,6 +131,7 @@ impl Generator<'_> {
             false_block: (done, Vec::new()),
         });
         self.b.switch_to_block(notify);
+        let before: Vec<_> = events.iter().map(|event| self.level(event)).collect();
         let context = self.load_at(
             self.slots.defer_limit_settle,
             celox_design::SCHEDULER_HOST_CONTEXT_BIT,
@@ -170,6 +173,16 @@ impl Generator<'_> {
         self.b.switch_to_block(writes);
         self.mark_dirty();
         host_inputs::replay(self.program, self, checks);
+        if !events.is_empty() {
+            let mut edges = self.load(self.slots.exit_arg, self.event_bits);
+            for (index, (event, was)) in events.iter().zip(before).enumerate() {
+                let is = self.level(event);
+                let edge = self.settled_edge(event, was, is);
+                let bit = self.event_bit(edge, index);
+                edges = self.binary(self.event_bits, edges, BinaryOp::Or, bit);
+            }
+            self.store(self.slots.exit_arg, self.event_bits, edges);
+        }
         match after {
             AfterWrites::Settle | AfterWrites::Ended => {
                 self.b.seal_block(SIRTerminator::Jump(done, Vec::new()));

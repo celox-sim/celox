@@ -522,11 +522,14 @@ impl<B: SimBackend> SimulationState<B> {
                 executor.backend_mut().set(signal, value);
             }
             // A signal the batch writes again pulses: its waits see each
-            // value. Otherwise one check after the batch sees the edge.
+            // value. So do they when the host sees the update, whose writes
+            // may restore the value. Otherwise one check after the batch
+            // sees the edge.
             if !self.process_state.waiters.is_empty()
-                && events_to_process[index + 1..]
-                    .iter()
-                    .any(|later| later.signal == signal)
+                && (self.shows_updates
+                    || events_to_process[index + 1..]
+                        .iter()
+                        .any(|later| later.signal == signal))
             {
                 self.observe(executor.backend_mut(), Some(signal))?;
             }

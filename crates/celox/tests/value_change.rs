@@ -344,3 +344,133 @@ endmodule
         vec![(5, vec![1, 0]), (5, vec![1, 1]), (10, vec![0, 1])]
     );
 }
+
+/// The final values of `results` after `run`, in each scheduler mode, under a
+/// [`Changes`] observer of `watched` that makes `write`. When `compiles`, the
+/// compiled run must run compiled slots.
+fn final_value(
+    source: &str,
+    watched: &[&str],
+    write: (&str, u64, &str, u64),
+    results: &[&str],
+    compiles: bool,
+    run: impl Fn(&mut Simulation),
+) -> Vec<Vec<u64>> {
+    [
+        celox::SchedulerMode::Reference,
+        celox::SchedulerMode::Compiled,
+    ]
+    .into_iter()
+    .map(|mode| {
+        let mut sim = Simulation::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top")
+            .scheduler_mode(mode)
+            .observable_updates(true)
+            .build()
+            .unwrap();
+        let _received = observe(&mut sim, watched, Some(write));
+        run(&mut sim);
+        if compiles && mode == celox::SchedulerMode::Compiled {
+            assert!(sim.scheduler_stats().compiled_slots > 0, "no compiled slot");
+        }
+        results
+            .iter()
+            .map(|name| u64::try_from(sim.get(sim.signal(name))).unwrap())
+            .collect()
+    })
+    .collect()
+}
+
+#[test]
+fn a_scheduled_edge_wakes_its_waiters_though_a_callback_undoes_it() {
+    let source = r#"`timescale 1ns/1ns
+module Top(input logic x);
+    logic [7:0] edges = 0;
+    logic [7:0] domain = 0;
+    // Only an event domain can be scheduled.
+    always @(posedge x) domain = domain + 1;
+    initial forever begin
+        @(posedge x);
+        edges = edges + 1;
+    end
+    always #7 ;
+endmodule
+"#;
+    let values = final_value(
+        source,
+        &["x"],
+        ("x", 1, "x", 0),
+        &["x", "edges"],
+        false,
+        |sim| {
+            sim.schedule("x", 5, 1).unwrap();
+            sim.run_until(6).unwrap();
+        },
+    );
+    assert_eq!(values, vec![vec![0, 1], vec![0, 1]]);
+}
+
+#[test]
+fn a_derived_clock_edge_a_callback_writes_triggers_its_domain() {
+    let source = r#"`timescale 1ns/1ns
+module Top(input logic clk);
+    logic [7:0] q = 0;
+    logic x = 0;
+    logic en = 1;
+    logic c = 0;
+    wire gated = clk & en;
+    always #5 c = ~c;
+    always_ff @(posedge c) x <= 1;
+    always_ff @(posedge gated) q <= q + 1;
+endmodule
+"#;
+    let values = final_value(
+        source,
+        &["x"],
+        ("x", 1, "clk", 1),
+        &["clk", "q"],
+        true,
+        |sim| {
+            sim.run_until(8).unwrap();
+        },
+    );
+    assert_eq!(values, vec![vec![1, 1], vec![1, 1]]);
+}
+
+#[test]
+fn a_clock_edge_a_callback_writes_triggers_its_domain() {
+    // `x` rises in a process run, at a flip-flop commit and as a scheduled
+    // value; the callback that sees it raises `clk`, which nothing else
+    // drives.
+    for (driver, schedules) in [
+        ("    initial #5 x = 1;\n", false),
+        (
+            "    logic c = 0;\n    always #5 c = ~c;\n    always_ff @(posedge c) x <= 1;\n",
+            false,
+        ),
+        (
+            "    logic [7:0] n = 0;\n    always @(posedge x) n = n + 1;\n    always #7 ;\n",
+            true,
+        ),
+    ] {
+        let x = if schedules { "input logic x" } else { "" };
+        let declared = if schedules { "" } else { "    logic x = 0;\n" };
+        let source = format!(
+            "`timescale 1ns/1ns\nmodule Top(input logic clk{}{x});\n    logic [7:0] q = 0;\n{declared}    always_ff @(posedge clk) q <= q + 1;\n{driver}endmodule\n",
+            if schedules { ", " } else { "" }
+        );
+        let values = final_value(
+            &source,
+            &["x"],
+            ("x", 1, "clk", 1),
+            &["clk", "q"],
+            true,
+            |sim| {
+                if schedules {
+                    sim.schedule("x", 5, 1).unwrap();
+                }
+                sim.run_until(8).unwrap();
+            },
+        );
+        assert_eq!(values, vec![vec![1, 1], vec![1, 1]], "{driver}");
+    }
+}

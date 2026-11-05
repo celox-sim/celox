@@ -2857,7 +2857,13 @@ impl Plan {
             }
         }
         if let Some(service) = updates {
-            g.report_update(service, &checks, finish_exit, AfterWrites::Settled);
+            g.report_update(
+                service,
+                &checks,
+                &self.events,
+                finish_exit,
+                AfterWrites::Settled,
+            );
         }
         g.b.seal_block(SIRTerminator::Jump(entry_done, Vec::new()));
 
@@ -3124,7 +3130,7 @@ impl Plan {
             });
             if let Some(service) = updates {
                 g.b.switch_to_block(finishes);
-                g.report_update(service, &checks, finish_exit, AfterWrites::Ended);
+                g.report_update(service, &checks, &[], finish_exit, AfterWrites::Ended);
                 g.b.seal_block(SIRTerminator::Jump(finish_exit, Vec::new()));
             }
             g.b.switch_to_block(not_finished);
@@ -3240,7 +3246,13 @@ impl Plan {
             }
             g.b.switch_to_block(resumed);
             if let Some(service) = updates {
-                g.report_update(service, &checks, finish_exit, AfterWrites::Settled);
+                g.report_update(
+                    service,
+                    &checks,
+                    &self.events,
+                    finish_exit,
+                    AfterWrites::Settled,
+                );
             }
             if assertions {
                 // Observed predicates all finish before any Reactive action;
@@ -3504,6 +3516,10 @@ impl Plan {
             self.batch(&mut g, &tracked, slot_end, finish_exit, &checks);
         } else {
             let staged: Vec<&Staged> = waits.iter().flat_map(|(_, wait)| &wait.sites).collect();
+            // A host that sees the updates of the wave can write a clock
+            // after its domains ran: the edge starts another wave.
+            let rewave = updates.map(|_| g.b.new_block());
+            let wave_end = rewave.map_or(slot_end, |_| g.b.new_block());
             let mask = g.load(slots.exit_arg, self.event_bits);
             let zero = g.constant(0, self.event_bits);
             let quiet = g.binary(1, mask, BinaryOp::Eq, zero);
@@ -3546,7 +3562,7 @@ impl Plan {
                     false_block: (slot_end, Vec::new()),
                 });
                 g.b.switch_to_block(publish_settle);
-                g.settle_then(slot_end);
+                g.settle_then(wave_end);
             }
 
             g.b.switch_to_block(triggered);
@@ -3688,6 +3704,12 @@ impl Plan {
             // The domains' results and the nonblocking values publish before
             // combinational logic settles.
             g.b.switch_to_block(evaluated);
+            if rewave.is_some() {
+                // The edges are consumed: what remains at the end of the
+                // wave the host wrote after them.
+                let zero = g.constant(0, self.event_bits);
+                g.store(slots.exit_arg, self.event_bits, zero);
+            }
             g.publish(&staged);
             g.publish_service(
                 self.service_function
@@ -3695,8 +3717,29 @@ impl Plan {
                 &checks,
             );
             match &self.lazy {
-                Some(lazy) => g.eager_then(&lazy.eager, slot_end),
-                None => g.settle_then(slot_end),
+                Some(lazy) => g.eager_then(&lazy.eager, wave_end),
+                None => g.settle_then(wave_end),
+            }
+            if let Some(rewave) = rewave {
+                g.b.switch_to_block(wave_end);
+                let edges = g.load(slots.exit_arg, self.event_bits);
+                let zero = g.constant(0, self.event_bits);
+                let quiet = g.binary(1, edges, BinaryOp::Eq, zero);
+                g.b.seal_block(SIRTerminator::Branch {
+                    cond: quiet,
+                    true_block: (slot_end, Vec::new()),
+                    false_block: (rewave, Vec::new()),
+                });
+                // Another pass judges them, as after the host clocks of
+                // the slot, against the levels now.
+                g.b.switch_to_block(rewave);
+                let mut levels = g.no_levels();
+                for (bit, &event) in tracked.iter().enumerate() {
+                    let level = g.level(&self.events[event]);
+                    levels = g.with_level(levels, level, bit);
+                }
+                g.store_levels(levels);
+                g.b.seal_block(SIRTerminator::Jump(pick, Vec::new()));
             }
         }
 
@@ -3945,7 +3988,7 @@ impl Plan {
             &program.sir.eval_comb,
             finish_exit,
             internal_exit,
-            updates.map(|service| (service, &checks[..])),
+            updates.map(|service| (service, &checks[..], &self.events[..])),
         );
         if let Some(lazy) = &self.lazy {
             g.emit_eager(&lazy.eager, finish_exit, internal_exit);
@@ -5739,12 +5782,12 @@ impl Generator<'_> {
         units: &[Unit],
         finish_exit: celox_sir::BlockId,
         internal_exit: celox_sir::BlockId,
-        updates: Option<(u32, &[WaitCheck<'_>])>,
+        updates: Option<(u32, &[WaitCheck<'_>], &[Event])>,
     ) {
         self.b.switch_to_block(self.comb);
         // The updates the settle follows, then its own.
-        if let Some((service, checks)) = updates {
-            self.report_update(service, checks, finish_exit, AfterWrites::Settle);
+        if let Some((service, checks, events)) = updates {
+            self.report_update(service, checks, events, finish_exit, AfterWrites::Settle);
         }
         self.observers_before(internal_exit);
         if self.settle_reads.is_some() {
@@ -5804,9 +5847,15 @@ impl Generator<'_> {
         {
             self.check_finish(finish_exit);
         }
-        if let Some((service, checks)) = updates {
+        if let Some((service, checks, events)) = updates {
             let comb = self.comb;
-            self.report_update(service, checks, finish_exit, AfterWrites::Again(comb));
+            self.report_update(
+                service,
+                checks,
+                events,
+                finish_exit,
+                AfterWrites::Again(comb),
+            );
         }
         let targets = self.continuations.clone();
         self.dispatch_continuations(&targets, internal_exit);
