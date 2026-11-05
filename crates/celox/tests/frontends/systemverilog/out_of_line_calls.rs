@@ -1911,3 +1911,37 @@ endmodule
     // which no longer name the chain.
     assert!(refused >= 1, "the string's word is refused");
 }
+
+#[test]
+fn finishing_drops_the_frames_of_every_suspended_call() {
+    // Another process, or the host, ends the simulation while a task waits
+    // with a class object in its frame: nothing resumes, so the finished
+    // simulation saves.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a);
+    class Box;
+        int v = 3;
+    endclass
+    task automatic hold(output int r);
+        Box box = new;
+        #10 r = box.v;
+    endtask
+    initial hold(a);
+    initial #2 $finish;
+endmodule
+"#;
+    let build = |source: &str| {
+        Simulation::from_sv_sources(vec![(source, Path::new("calls.sv"))], "Top")
+            .force_out_of_line_calls()
+            .build_interpreter()
+            .expect("builds")
+    };
+    let mut sim = build(source);
+    sim.run_until(5).expect("the design runs");
+    assert!(sim.save_state().is_ok(), "{:?}", sim.save_state().err());
+    let hosted = source.replace("    initial #2 $finish;\n", "");
+    let mut sim = build(&hosted);
+    sim.run_until(2).expect("the design runs");
+    sim.finish().expect("the host finishes");
+    assert!(sim.save_state().is_ok(), "{:?}", sim.save_state().err());
+}
