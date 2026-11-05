@@ -3745,6 +3745,64 @@ fn write_initial_run_to_plane(
 }
 
 impl NativeBackend {
+    /// Whether `signal` is a scalar of exactly `T`'s bytes.
+    #[inline]
+    fn exact_scalar<T>(signal: SignalRef) -> bool {
+        signal.width == std::mem::size_of::<T>() * 8 && signal.array_layout.is_none()
+    }
+
+    /// Write `val` to the scalar or array `signal` without marking it for
+    /// waveforms or settle partitions.
+    fn store_scalar<T: Copy>(&mut self, signal: SignalRef, val: T) {
+        let allocated_size = get_byte_size(signal.width);
+        let provided_size = std::mem::size_of::<T>();
+        let clear_mask = self.compiled.options.four_state && signal.is_4state;
+
+        let copy_size = provided_size.min(allocated_size);
+
+        if signal.array_layout.is_some() {
+            let value_bytes =
+                unsafe { std::slice::from_raw_parts(&val as *const T as *const u8, copy_size) };
+            self.write_signal_plane(signal, false, &BigUint::from_bytes_le(value_bytes));
+            if clear_mask {
+                self.write_signal_plane(signal, true, &BigUint::from(0u8));
+            }
+            return;
+        }
+
+        unsafe {
+            let base_ptr = (self.memory.as_mut_ptr() as *mut u8).add(signal.offset);
+            if !clear_mask && allocated_size == 1 {
+                let raw = if copy_size == 0 {
+                    0
+                } else {
+                    *(&val as *const T as *const u8)
+                };
+                let byte = if signal.width < 8 {
+                    raw & ((1u8 << signal.width) - 1)
+                } else {
+                    raw
+                };
+                *base_ptr = byte;
+                return;
+            }
+
+            if copy_size < allocated_size {
+                std::ptr::write_bytes(base_ptr, 0, allocated_size);
+            }
+            std::ptr::copy_nonoverlapping(&val as *const T as *const u8, base_ptr, copy_size);
+
+            if !signal.width.is_multiple_of(8) && allocated_size != 0 {
+                *base_ptr.add(allocated_size - 1) &= (1u8 << (signal.width % 8)) - 1;
+            }
+
+            if clear_mask {
+                let mask_ptr = base_ptr.add(allocated_size);
+                std::ptr::write_bytes(mask_ptr, 0, allocated_size);
+            }
+        }
+    }
+
     #[cfg(all(
         test,
         feature = "systemverilog",
@@ -4592,52 +4650,24 @@ impl super::super::SimBackend for NativeBackend {
 
     fn set<T: Copy>(&mut self, signal: SignalRef, val: T) {
         celox_runtime::backend::SimBackend::mark_vcd_signal(self, signal);
-        let allocated_size = get_byte_size(signal.width);
-        let provided_size = std::mem::size_of::<T>();
-        let clear_mask = self.compiled.options.four_state && signal.is_4state;
+        self.store_scalar(signal, val);
+    }
 
-        let copy_size = provided_size.min(allocated_size);
-
-        if signal.array_layout.is_some() {
-            let value_bytes =
-                unsafe { std::slice::from_raw_parts(&val as *const T as *const u8, copy_size) };
-            self.write_signal_plane(signal, false, &BigUint::from_bytes_le(value_bytes));
-            if clear_mask {
-                self.write_signal_plane(signal, true, &BigUint::from(0u8));
+    #[inline]
+    fn set_scheduler_slot<T: Copy>(&mut self, signal: SignalRef, val: T) {
+        if Self::exact_scalar::<T>(signal)
+            && !(self.compiled.options.four_state && signal.is_4state)
+        {
+            // SAFETY: the slot is a scalar of exactly `T`'s bytes inside the
+            // state image, without a mask plane to clear.
+            unsafe {
+                (self.memory.as_mut_ptr() as *mut u8)
+                    .add(signal.offset)
+                    .cast::<T>()
+                    .write_unaligned(val);
             }
-            return;
-        }
-
-        unsafe {
-            let base_ptr = (self.memory.as_mut_ptr() as *mut u8).add(signal.offset);
-            if !clear_mask && allocated_size == 1 {
-                let raw = if copy_size == 0 {
-                    0
-                } else {
-                    *(&val as *const T as *const u8)
-                };
-                let byte = if signal.width < 8 {
-                    raw & ((1u8 << signal.width) - 1)
-                } else {
-                    raw
-                };
-                *base_ptr = byte;
-                return;
-            }
-
-            if copy_size < allocated_size {
-                std::ptr::write_bytes(base_ptr, 0, allocated_size);
-            }
-            std::ptr::copy_nonoverlapping(&val as *const T as *const u8, base_ptr, copy_size);
-
-            if !signal.width.is_multiple_of(8) && allocated_size != 0 {
-                *base_ptr.add(allocated_size - 1) &= (1u8 << (signal.width % 8)) - 1;
-            }
-
-            if clear_mask {
-                let mask_ptr = base_ptr.add(allocated_size);
-                std::ptr::write_bytes(mask_ptr, 0, allocated_size);
-            }
+        } else {
+            self.store_scalar(signal, val);
         }
     }
 
@@ -4661,6 +4691,22 @@ impl super::super::SimBackend for NativeBackend {
 
     fn get(&self, signal: SignalRef) -> BigUint {
         self.read_signal_plane(signal, false)
+    }
+
+    #[inline]
+    fn get_scheduler_slot<T: Default + Copy>(&self, signal: SignalRef) -> T {
+        if Self::exact_scalar::<T>(signal) {
+            // SAFETY: the slot is a scalar of exactly `T`'s bytes inside the
+            // state image.
+            unsafe {
+                (self.memory.as_ptr() as *const u8)
+                    .add(signal.offset)
+                    .cast::<T>()
+                    .read_unaligned()
+            }
+        } else {
+            self.get_as(signal)
+        }
     }
 
     fn get_as<T: Default + Copy>(&self, signal: SignalRef) -> T {

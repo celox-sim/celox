@@ -1925,6 +1925,23 @@ impl SimBackend for TieredBackend {
         }
     }
 
+    fn set_scheduler_slot<T: Copy>(&mut self, signal: SignalRef, value: T) {
+        match &mut self.phase {
+            Phase::Interpreting(Some(interp)) => interp.set_scheduler_slot(signal, value),
+            #[cfg(feature = "cranelift")]
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.set_scheduler_slot(signal, value),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => {
+                native.set_scheduler_slot(signal, value)
+            }
+            Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
+        }
+    }
+
     fn set_wide(&mut self, signal: SignalRef, value: BigUint) {
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.set_wide(signal, value),
@@ -1983,6 +2000,21 @@ impl SimBackend for TieredBackend {
                 target_arch = "aarch64"
             ))]
             Phase::Compiled(CompiledTier::Native(native)) => native.get_as(signal),
+            Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
+        }
+    }
+
+    fn get_scheduler_slot<T: Default + Copy>(&self, signal: SignalRef) -> T {
+        match &self.phase {
+            Phase::Interpreting(Some(interp)) => interp.get_scheduler_slot(signal),
+            #[cfg(feature = "cranelift")]
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.get_scheduler_slot(signal),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.get_scheduler_slot(signal),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
