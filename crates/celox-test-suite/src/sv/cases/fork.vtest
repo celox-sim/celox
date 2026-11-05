@@ -301,3 +301,38 @@ endmodule"#)
  (run_until 10)
  (assert_eq rises 3)
  (assert_eq falls 3))
+
+; A fork branch calls the package subroutine a wildcard import binds, as any
+; other statement does (IEEE 1800-2023 26.3), timed or not, directly or
+; through a module task, and with static formals (13.3).
+(case branches_call_imported_package_tasks
+ (source "branches_call_imported_package_tasks.sv" #"package timed;
+ task automatic pause(input int d, output int r); #(d) r=d*10; endtask
+ task put(input int v, output int r); r=v; endtask
+ task wait_static(input int d); #(d); endtask
+endpackage
+module Top(output int a, output int b, output int c, output int d, output int q);
+ import timed::*;
+ task automatic twice(input int n, output int r);
+  int got;
+  pause(n, got);
+  #1 r=got+n;
+ endtask
+ initial begin
+  q=0;
+  fork pause(4, d); join_none
+  fork
+   pause(2, a);
+   put(5, b);
+   begin wait_static(3); twice(1, c); end
+  join
+  q=$time;
+ end
+endmodule"#)
+ (top Top)
+ (run_until 10)
+ (assert_eq a 20)
+ (assert_eq b 5)
+ (assert_eq c 11)
+ (assert_eq d 40)
+ (assert_eq q 5))
