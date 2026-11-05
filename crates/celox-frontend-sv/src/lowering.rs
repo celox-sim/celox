@@ -3723,7 +3723,11 @@ fn schedule_sources_collecting(
             // included: the glue lowered with the graph the module's
             // processes left.
             if let Some(functions) = calls.as_ref().and_then(|graph| graph.out_of_line.as_ref()) {
-                out_of_line::attach_functions(&mut sim_module, functions.units());
+                out_of_line::attach_functions(
+                    &mut sim_module,
+                    functions.units(),
+                    functions.frames(),
+                );
             }
             module_names.insert(module_id, key.name.clone());
             modules.insert(module_id, sim_module);
@@ -4838,6 +4842,7 @@ fn lower_module_with_overrides(
             reset_clock_map,
             processes,
             functions: Vec::new(),
+            function_frames: Vec::new(),
             package_bindings: HashMap::default(),
             hierarchical_bindings: HashMap::default(),
             counter_slots: Vec::new(),
@@ -6561,6 +6566,7 @@ fn lower_initial_processes(
                 kernel: kernel.unit,
                 frame: kernel.frame,
                 slots: kernel.slots,
+                call_resumes: kernel.call_resumes,
                 origin: process_origin(process),
             })
         })

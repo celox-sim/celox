@@ -954,7 +954,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         extern_functions,
         next_runtime_error_code,
         mut processes,
-        functions,
+        (functions, function_frames),
     ) = timed_sub!(
         "relocate_units",
         relocate_units(
@@ -2310,11 +2310,13 @@ pub fn schedule_symbolic_rtl_reporting_loops(
     let mut process_slots = Vec::with_capacity(processes.len());
     let mut process_frames = Vec::with_capacity(processes.len());
     let mut process_origins = Vec::with_capacity(processes.len());
+    let mut process_call_resumes = Vec::with_capacity(processes.len());
     for process in processes {
         process_kernels.push(process.kernel);
         process_slots.push(process.slots);
         process_frames.push(process.frame);
         process_origins.push(process.origin);
+        process_call_resumes.push(process.call_resumes);
     }
     let TimingMetadata {
         wait_sites,
@@ -2778,6 +2780,8 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             dead_store_policy: Default::default(),
             live_signals: Default::default(),
             process_frames,
+            process_call_resumes,
+            function_frames,
             processes: process_slots,
             process_origins,
             watches,
@@ -3898,7 +3902,10 @@ fn relocate_units(
         Vec<ExternFunction>,
         i64,
         Vec<RelocatedProcess>,
-        Vec<celox_sir::FunctionUnit<RegionedAbsoluteAddr>>,
+        (
+            Vec<celox_sir::FunctionUnit<RegionedAbsoluteAddr>>,
+            Vec<celox_design::FunctionFrame>,
+        ),
     ),
     ParserError,
 > {
@@ -3921,6 +3928,7 @@ fn relocate_units(
     let mut extern_function_indices = HashMap::<String, usize>::default();
     let mut next_runtime_error_code = 2000;
     let mut functions = Vec::new();
+    let mut function_frames = Vec::new();
     let mut parallel_ff_units = parallel_ff_units;
     let mut startup_statuses: Vec<_> = expanded
         .values()
@@ -4110,6 +4118,22 @@ fn relocate_units(
                 effects: Default::default(),
             });
         }
+        // The callees of each copy are the copies in the same instance.
+        let rebase = |calls: &[celox_design::CallResume]| {
+            calls
+                .iter()
+                .map(|call| celox_design::CallResume {
+                    function: call.function + function_base,
+                    ..*call
+                })
+                .collect::<Vec<_>>()
+        };
+        function_frames.extend(sim_module.function_frames.iter().map(|frame| {
+            celox_design::FunctionFrame {
+                calls: rebase(&frame.calls),
+                ..frame.clone()
+            }
+        }));
 
         // Lane-partitioning units of every trigger group: its independently
         // lowered parts when present, otherwise its whole evaluate/apply pair.
@@ -4297,6 +4321,7 @@ fn relocate_units(
                         scope: Some(scope.clone()),
                         ..process.origin.clone()
                     },
+                    call_resumes: rebase(&process.call_resumes),
                     key: (*id, index),
                 },
             ));
@@ -4421,7 +4446,7 @@ fn relocate_units(
             processes.sort_unstable_by_key(|(key, _)| *key);
             processes.into_iter().map(|(_, process)| process).collect()
         },
-        functions,
+        (functions, function_frames),
     ))
 }
 
@@ -4431,6 +4456,8 @@ struct RelocatedProcess {
     slots: ProcessSlots<AbsoluteAddr>,
     frame: Option<celox_design::ProcessFrame<AbsoluteAddr>>,
     origin: celox_design::ProcessOrigin,
+    /// The calls at which the kernel can be suspended inside the callee.
+    call_resumes: Vec<celox_design::CallResume>,
     /// The instance and the module-local index of the process.
     key: (InstanceId, usize),
 }

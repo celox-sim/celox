@@ -40,6 +40,8 @@ struct ResumeFrame {
     /// which only its innermost activation can be, and the unit copies them
     /// from and into its frame right before and after.
     staging: HashSet<SourceVarId>,
+    /// The calls at which it can be suspended inside the callee.
+    calls: Vec<celox_design::CallResume>,
 }
 
 impl Ff<'_, '_> {
@@ -226,6 +228,7 @@ impl Ff<'_, '_> {
                 top: ids[3],
                 blocks: Vec::new(),
                 staging: HashSet::default(),
+                calls: Vec::new(),
             });
         }
         // The calling process's state, which the caller passes in and,
@@ -274,6 +277,7 @@ impl Ff<'_, '_> {
             random: process_slots.0,
             dist_seed: process_slots.1,
             resume: resume_slot,
+            calls: Vec::new(),
         });
         functions.by_name.insert(subroutine.name.clone(), index);
         functions.lowering += 1;
@@ -289,9 +293,11 @@ impl Ff<'_, '_> {
         let lowered = Ff::new(&mut *self.m, 0).lower_function_unit(subroutine, frame);
         let functions = self.m.out_of_line().expect("lowering out of line");
         functions.lowering -= 1;
-        let (unit, size_patches, staging) =
+        let (unit, size_patches, staging, calls) =
             lowered.map_err(|error| Reason::Other(error.to_string()))?;
         self.finish_function(index, unit, size_patches, start, &staging)?;
+        let functions = self.m.out_of_line().expect("lowering out of line");
+        functions.functions[index].calls = calls;
         Ok(index)
     }
 
@@ -308,7 +314,7 @@ impl Ff<'_, '_> {
             address,
             width: variable.width,
             four_state: variable.is_4state && self.m.four_state,
-            handle: variable.value_kind != celox_design::ValueKind::Bits,
+            kind: variable.value_kind,
         }
     }
 
@@ -323,6 +329,7 @@ impl Ff<'_, '_> {
             ExecutionUnit<Addr>,
             Vec<(RegisterId, usize)>,
             HashSet<SourceVarId>,
+            Vec<celox_design::CallResume>,
         ),
         sv::AnalyzerError,
     > {
@@ -406,11 +413,11 @@ impl Ff<'_, '_> {
         }
         let unit = seal_drained_from(std::mem::take(&mut self.b), entry);
         let frame = self.frame.take().expect("lowering a function unit");
-        let staging = frame
+        let (staging, calls) = frame
             .resume
-            .map(|resume| resume.staging)
+            .map(|resume| (resume.staging, resume.calls))
             .unwrap_or_default();
-        Ok((unit, frame.size_patches, staging))
+        Ok((unit, frame.size_patches, staging, calls))
     }
 
     fn resume_frame(&mut self) -> Option<&mut ResumeFrame> {
@@ -496,6 +503,20 @@ impl Ff<'_, '_> {
         Ok(())
     }
 
+    /// Suspend the unit being lowered with `status` and the delay word
+    /// `request`, as a kernel suspends itself: for a delay, `$stop` or
+    /// `$finish`. The open block afterwards is the resume point.
+    pub(super) fn suspend_unit_with(
+        &mut self,
+        status: celox_design::ProcessStatus,
+        request: RegisterId,
+    ) -> Result<(), sv::AnalyzerError> {
+        let code = self.b.alloc_bit(celox_design::PROCESS_STATUS_WIDTH, false);
+        self.b
+            .emit(SIRInstruction::Imm(code, SIRValue::new(status.code())));
+        self.suspend_unit(code, request, None).map(drop)
+    }
+
     /// Store variable `from` into variable `to`, of the same shape.
     fn copy_variable(&mut self, from: SourceVarId, to: SourceVarId) {
         let variable = self.m.var(from);
@@ -516,13 +537,14 @@ impl Ff<'_, '_> {
 
     /// Suspend the unit being lowered with `status` and the delay word
     /// `request`, leaving `top` as the end of the innermost live frame, its
-    /// own when `None`. The open block afterwards is the resume point.
+    /// own when `None`. The open block afterwards is the resume point,
+    /// whose value it returns.
     fn suspend_unit(
         &mut self,
         status: RegisterId,
         request: RegisterId,
         top: Option<RegisterId>,
-    ) -> Result<(), sv::AnalyzerError> {
+    ) -> Result<u32, sv::AnalyzerError> {
         let frame = self.frame.as_ref().expect("lowering a function unit");
         let (own, base) = (frame.function, frame.base);
         let resume = frame
@@ -591,7 +613,7 @@ impl Ff<'_, '_> {
             .blocks
             .push(block);
         self.b.switch_to_block(block);
-        Ok(())
+        Ok(point as u32)
     }
 
     /// Move the frame variables of function `index` into its frame, add
@@ -879,10 +901,22 @@ impl Ff<'_, '_> {
                         id
                     }
                 };
-                self.with_kernel(|kernel| kernel.suspend_in_call(code, word, end, call_top))
+                let point = self
+                    .with_kernel(|kernel| kernel.suspend_in_call(code, word, end, call_top))
                     .map_err(kernel_error)?;
+                self.call_resumes.push(celox_design::CallResume {
+                    point,
+                    function: index as u32,
+                });
             } else {
-                self.suspend_unit(code, word, Some(end))?;
+                let point = self.suspend_unit(code, word, Some(end))?;
+                self.resume_frame()
+                    .expect("a unit that suspends is resumable")
+                    .calls
+                    .push(celox_design::CallResume {
+                        point,
+                        function: index as u32,
+                    });
             }
             let (base, depth) = self.call_frame(index, &subroutine.name, &function)?;
             let mut args = vec![(0, base), (1, depth)];

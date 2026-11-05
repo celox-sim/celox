@@ -56,11 +56,15 @@
 //! require version 4, and a heap section version 5. Versions 1 through 4
 //! remain readable. Version 6 adds future NBA updates after the Observed queue;
 //! older versions remain readable and are still written when sufficient.
+//! Version 7 adds, after the deferred ready queue, the call stacks of the
+//! processes suspended inside a call: count u32, then per stack: process |
+//! resume point u64 | stack bytes. A string handle in a saved frame is
+//! written like the value of a string object.
 
 use std::io::{self, Read, Write};
 
 const MAGIC: &[u8; 8] = b"CXSTATE\0";
-const VERSION: u16 = 6;
+const VERSION: u16 = 7;
 
 mod activations;
 use activations::*;
@@ -166,6 +170,19 @@ pub struct ProcessRecord {
     pub host_pending: bool,
     /// A process finished the simulation.
     pub finished: bool,
+    /// The frames of the calls processes are suspended inside.
+    pub call_stacks: Vec<CallStackRecord>,
+}
+
+/// The frames of the calls a process is suspended inside (see
+/// `celox_runtime::SavedCalls`): its kernel's resume point and the stack
+/// below the innermost live frame, with each string handle written as the
+/// value of a string object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallStackRecord {
+    pub process: ProcessRef,
+    pub resume: u64,
+    pub stack: Vec<u8>,
 }
 
 /// A process suspended at a wait.
@@ -263,7 +280,9 @@ impl StateFile {
             .map(|schedule| &schedule.processes)
             .filter(|processes| **processes != ProcessRecord::default());
         let version = processes.map_or(1, |p| {
-            if !p.delayed_nba.is_empty() || !p.deferred_ready.is_empty() {
+            if !p.call_stacks.is_empty() {
+                7
+            } else if !p.delayed_nba.is_empty() || !p.deferred_ready.is_empty() {
                 6
             } else if !p.observed.is_empty() {
                 4
@@ -652,6 +671,14 @@ fn put_processes(w: &mut impl Write, processes: &ProcessRecord, version: u16) ->
         }
         put_process_list(w, &processes.deferred_ready, version)?;
     }
+    if version >= 7 {
+        put_len(w, processes.call_stacks.len())?;
+        for saved in &processes.call_stacks {
+            put_process(w, &saved.process, version)?;
+            put_u64(w, saved.resume)?;
+            put_bytes(w, &saved.stack)?;
+        }
+    }
     Ok(())
 }
 
@@ -763,6 +790,17 @@ fn get_processes(r: &mut impl Read, version: u16) -> Result<ProcessRecord, State
             })
             .collect::<Result<_, StateFileError>>()?;
         result.deferred_ready = get_process_list(r, version)?;
+    }
+    if version >= 7 {
+        result.call_stacks = (0..get_u32(r)?)
+            .map(|_| {
+                Ok(CallStackRecord {
+                    process: get_process(r, version)?,
+                    resume: get_u64(r)?,
+                    stack: get_len_bytes(r)?,
+                })
+            })
+            .collect::<Result<_, StateFileError>>()?;
     }
     Ok(result)
 }

@@ -212,6 +212,11 @@ pub trait HostBoundary: UnitExecutor {
     /// Live values kept in dynamic process frames, outside backend state memory.
     fn retain_process_values(&mut self, _values: &[(crate::SignalRef, crate::timing::Value)]) {}
 
+    /// The frames of the calls that activations are suspended inside, kept
+    /// outside backend state memory: each with the kernel it runs, called
+    /// after [`Self::retain_process_values`] at the same safepoint.
+    fn retain_call_stacks(&mut self, _stacks: &[(usize, &super::SavedCalls)]) {}
+
     /// Called after the state for a simulation timestamp has stabilized.
     fn finish_timed_step(&mut self, _timestamp: u64) {}
 

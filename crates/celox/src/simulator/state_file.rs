@@ -733,6 +733,7 @@ impl<B: SimBackend> Simulator<B> {
             ..ProcessRecord::default()
         };
         self.capture_activation_values(state, &mut record, strings)?;
+        record.call_stacks = self.capture_call_stacks(state, process, strings)?;
         Ok(record)
     }
 
@@ -1059,6 +1060,75 @@ impl<B: SimBackend> Simulator<B> {
             }
         }
         self.validate_activation_schedule(record, &processes, &activations, &mut unknown);
+        // The string IDs of the frames stay until the load binds them.
+        let mut call_stacks = std::collections::BTreeMap::new();
+        let schema = self.state_schema();
+        // The resume point the process continues at, as the file restores
+        // it: in its activation's frame or in its kernel's slot.
+        let resume_point = |index: usize| -> Option<u64> {
+            let slot = &self.program.runtime_schema.processes[kernel(index)].resume;
+            let (value, mask) = match &self.program.runtime_schema.process_frames[kernel(index)] {
+                Some(frame) => {
+                    let position = frame.private.iter().position(|private| private == slot)?;
+                    let value = activations.get(index)?.private.get(position)?;
+                    (value.0.clone(), value.1.clone())
+                }
+                None => {
+                    let signal = self.backend.resolve_signal(slot);
+                    let object = schema.objects.iter().find(|o| o.signal == signal)?;
+                    let saved = file
+                        .objects
+                        .iter()
+                        .find(|saved| saved.path == object.path)?;
+                    let mask = saved.mask.as_deref().unwrap_or_default();
+                    (
+                        BigUint::from_bytes_le(&saved.value),
+                        BigUint::from_bytes_le(mask),
+                    )
+                }
+            };
+            (mask == BigUint::default())
+                .then(|| u64::try_from(&value).ok())
+                .flatten()
+        };
+        for saved in &record.call_stacks {
+            let Some(index) = process(&saved.process) else {
+                unknown.push(saved.process.to_string());
+                continue;
+            };
+            // One stack per process, which continues where the process does.
+            if call_stacks.contains_key(&index) || resume_point(index) != Some(saved.resume) {
+                unknown.push(format!("call stack of {}", saved.process));
+                continue;
+            }
+            let calls = celox_runtime::SavedCalls {
+                resume: saved.resume,
+                stack: saved.stack.clone(),
+            };
+            // As on capture, no class handle is saved in a frame, and each
+            // string is one of the file's.
+            let valid = self
+                .saved_frame_handles(kernel(index), &calls)
+                .is_some_and(|handles| {
+                    handles.iter().all(|&(offset, kind)| {
+                        let word = u32::from_le_bytes(
+                            calls.stack[offset..offset + celox_heap::HANDLE_BYTES]
+                                .try_into()
+                                .expect("one handle"),
+                        ) as usize;
+                        match kind {
+                            celox_design::ValueKind::ObjRef => word == 0,
+                            celox_design::ValueKind::StrRef => word <= file.strings.len(),
+                            celox_design::ValueKind::Bits => true,
+                        }
+                    })
+                });
+            if !valid {
+                unknown.push(format!("call stack of {}", saved.process));
+                continue;
+            }
+            call_stacks.insert(index, calls);
+        }
         if !unknown.is_empty() {
             return Err(unknown);
         }
@@ -1066,6 +1136,7 @@ impl<B: SimBackend> Simulator<B> {
             wakeups,
             ProcessState {
                 activations,
+                call_stacks,
                 cells,
                 waiters,
                 ready,

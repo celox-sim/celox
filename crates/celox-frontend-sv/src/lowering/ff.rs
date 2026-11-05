@@ -136,6 +136,9 @@ pub(super) struct Ff<'p, 'a> {
     /// when it suspends inside a call ([`ProcessSlots::call_top`]), once
     /// it calls a function that can suspend it.
     call_top: Option<SourceVarId>,
+    /// The calls at which the process kernel can be suspended inside the
+    /// callee.
+    call_resumes: Vec<celox_design::CallResume>,
     /// Whether every call is inlined, in code that must not call.
     inline_calls: bool,
 }
@@ -232,6 +235,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             history: Vec::new(),
             frame: None,
             call_top: None,
+            call_resumes: Vec::new(),
             inline_calls: false,
         }
     }
@@ -4041,6 +4045,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 | sv::ir::Stmt::WaitImplicit { .. }
                 | sv::ir::Stmt::Wait(_)
         ) && (self.kernel.is_none()
+            && !(matches!(stmt, sv::ir::Stmt::Delay { .. }) && self.can_request())
             || self
                 .active_calls
                 .iter()
@@ -4435,6 +4440,23 @@ impl<'p, 'a> Ff<'p, 'a> {
             SystemTaskKind::Control(RuntimeEventKind::Stop) if self.kernel.is_some() => {
                 self.with_kernel(ProcessKernelBuilder::stop)
                     .map_err(|error| unsupported(error.to_string()))?;
+                return Ok(true);
+            }
+            // A unit suspends the process with its frames. After `$finish`
+            // the process never resumes, so the code after its resume point
+            // is dead.
+            SystemTaskKind::Control(
+                event @ (RuntimeEventKind::Finish | RuntimeEventKind::Stop),
+            ) if self.can_request() => {
+                let status = if event == RuntimeEventKind::Finish {
+                    celox_design::ProcessStatus::Finish
+                } else {
+                    celox_design::ProcessStatus::Stop
+                };
+                let request = self.b.alloc_bit(celox_design::PROCESS_DELAY_WIDTH, false);
+                self.b
+                    .emit(SIRInstruction::Imm(request, SIRValue::new(0u64)));
+                self.suspend_unit_with(status, request)?;
                 return Ok(true);
             }
             _ => {}
@@ -7113,6 +7135,7 @@ impl Ff<'_, '_> {
             nba_sites: self.nba_sites,
             host_request_sites: self.host_request_sites,
             nba_switches: self.nba_switches,
+            call_resumes: self.call_resumes,
         })
     }
 
@@ -7596,6 +7619,9 @@ impl Ff<'_, '_> {
                 factor,
             ));
             delay = product;
+        }
+        if self.kernel.is_none() {
+            return self.suspend_unit_with(celox_design::ProcessStatus::InactiveDelay, delay);
         }
         self.with_kernel(|kernel| kernel.inactive_delay(delay, constant))
             .map_err(kernel_error)
@@ -8402,6 +8428,9 @@ pub(super) struct KernelUnit {
     pub nba_sites: Vec<NbaSite<SourceVarId>>,
     pub host_request_sites: Vec<celox_design::HostRequestSite<SourceVarId>>,
     pub nba_switches: Vec<NbaSwitch<SourceVarId>>,
+    /// The calls at which the kernel can be suspended inside the callee,
+    /// naming module-local functions.
+    pub call_resumes: Vec<celox_design::CallResume>,
 }
 
 /// Iterations, as a power of two, between the yields of a kernel loop that
