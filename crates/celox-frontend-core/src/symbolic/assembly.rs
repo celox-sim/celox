@@ -4828,7 +4828,8 @@ fn relocate_timing(
                     .host_request_sites
                     .iter()
                     .map(|site| HostRequestSite {
-                        process: process_index[&(instance, site.process)],
+                        process: process_index[&(instance, site.process_index())]
+                            | (site.process & celox_design::FUNCTION_SITE_PROCESS),
                         ..site.map(locate)
                     }),
             );

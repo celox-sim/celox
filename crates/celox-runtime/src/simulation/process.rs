@@ -135,7 +135,9 @@ impl<B: SimBackend> SimulationState<B> {
         if let Some(activation) = self.process_state.activations.get_mut(process) {
             activation.control.level_wait = false;
         }
+        self.restore_call_stack(executor.backend_mut(), process);
         let result = self.run_activation(executor, current_time, process, kernel, returns);
+        self.save_call_stack(executor.backend_mut(), process);
         self.save_activation(executor.backend(), process);
         if matches!(result, Ok(false)) {
             self.release_children(process);
@@ -255,12 +257,12 @@ impl<B: SimBackend> SimulationState<B> {
                 Some(ProcessStatus::HostRequest) => {
                     let (kind, index) = HostRequestKind::decode(delay())
                         .ok_or(SimulatorErrorCode::InternalError)?;
-                    let request = self.model.processes[process]
-                        .host_requests
-                        .iter()
-                        .filter(|site| site.kind == kind)
-                        .nth(index as usize)
-                        .ok_or(SimulatorErrorCode::InternalError)?;
+                    let request = celox_design::host_request_site(
+                        &self.model.processes[process].host_requests,
+                        kind,
+                        index,
+                    )
+                    .ok_or(SimulatorErrorCode::InternalError)?;
                     if kind == HostRequestKind::Process {
                         let request = request.clone();
                         *returns += 1;

@@ -183,6 +183,10 @@ pub struct SimulationState<B: SimBackend> {
     process_names: Vec<String>,
     /// The loop that runs time slots, and the slots each loop ran.
     stats: SchedulerStats,
+    /// The call stack below [`celox_design::ProcessSlots::call_top`] of
+    /// each activation suspended inside a call, by activation, kept while
+    /// other code runs on the one stack.
+    call_stacks: fxhash::FxHashMap<usize, Vec<u8>>,
     /// The bits of the compiled scheduler's events whose changes the host
     /// observes inside a slot: the kernels and host clocks that write them
     /// run in the reference loop.
@@ -264,6 +268,7 @@ impl<B: SimBackend> SimulationState<B> {
             slot_resumed: std::collections::VecDeque::new(),
             process_names: Vec::new(),
             stats: SchedulerStats::default(),
+            call_stacks: Default::default(),
             observed_events: Default::default(),
             observed_data: false,
         };

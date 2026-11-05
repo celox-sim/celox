@@ -745,8 +745,33 @@ impl<A: Copy> HostRequestValue<A> {
     }
 }
 
+/// Marks, in [`HostRequestSite::process`], a site of a function unit that
+/// the process may call: the module's function sites are listed for each
+/// of its processes after the process's own.
+pub const FUNCTION_SITE_PROCESS: usize = 1 << (usize::BITS - 1);
+
+/// Marks, in the site number of an encoded request
+/// ([`HostRequestKind::encode`]), a function site: the number counts the
+/// function sites of the family instead of the process's own.
+pub const FUNCTION_SITE_NUMBER: u32 = 1 << 31;
+
+/// The site of a process's request for site number `site` of family `kind`
+/// (see [`FUNCTION_SITE_NUMBER`]), among the process's `sites`.
+pub fn host_request_site<A>(
+    sites: &[HostRequestSite<A>],
+    kind: HostRequestKind,
+    site: u32,
+) -> Option<&HostRequestSite<A>> {
+    let function = site & FUNCTION_SITE_NUMBER != 0;
+    sites
+        .iter()
+        .filter(|candidate| candidate.kind == kind && candidate.in_function() == function)
+        .nth((site & !FUNCTION_SITE_NUMBER) as usize)
+}
+
 /// One synchronous host request of a process. Sites are numbered within
-/// each process and family in their declaration order. Argument slots are
+/// each process and family in their declaration order; the sites of
+/// function units are numbered apart (see [`FUNCTION_SITE_PROCESS`]). Argument slots are
 /// evaluated by the kernel before it suspends; result slots are written by
 /// the host before the kernel resumes. `operation` and `strings` are the
 /// operation family's stable, backend-independent descriptor.
@@ -778,6 +803,18 @@ impl<A: Copy> HostRequestSite<A> {
 
     pub fn slots(&self) -> impl Iterator<Item = A> + '_ {
         self.args.iter().chain(&self.results).map(|value| value.id)
+    }
+}
+
+impl<A> HostRequestSite<A> {
+    /// Whether the site is in a function unit (see [`FUNCTION_SITE_PROCESS`]).
+    pub fn in_function(&self) -> bool {
+        self.process & FUNCTION_SITE_PROCESS != 0
+    }
+
+    /// The index of the process the site is listed for.
+    pub fn process_index(&self) -> usize {
+        self.process & !FUNCTION_SITE_PROCESS
     }
 }
 
@@ -891,7 +928,15 @@ pub struct ProcessSlots<A> {
     pub resume: A,
     pub status: A,
     pub delay: A,
+    /// For a kernel that calls functions which can suspend it, where it
+    /// leaves the end of the innermost live frame when it suspends inside
+    /// a call (32 bits; zero otherwise). The runtime keeps the stack below
+    /// it with the activation until it runs again, and clears the slot.
+    pub call_top: Option<A>,
 }
+
+/// Width of [`ProcessSlots::call_top`].
+pub const PROCESS_CALL_TOP_WIDTH: usize = 32;
 
 impl<A> ProcessSlots<A> {
     pub fn map<B>(self, mut map: impl FnMut(A) -> B) -> ProcessSlots<B> {
@@ -903,6 +948,7 @@ impl<A> ProcessSlots<A> {
             resume: map(self.resume),
             status: map(self.status),
             delay: map(self.delay),
+            call_top: self.call_top.map(&mut map),
         }
     }
 

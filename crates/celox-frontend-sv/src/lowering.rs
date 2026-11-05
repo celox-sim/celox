@@ -6459,6 +6459,7 @@ fn lower_initial_processes(
                 resume: declare("resume", PROCESS_RESUME_WIDTH),
                 status: declare("status", PROCESS_STATUS_WIDTH),
                 delay: declare("delay", PROCESS_DELAY_WIDTH),
+                call_top: None,
             }
         })
         .collect();
@@ -6564,6 +6565,20 @@ fn lower_initial_processes(
             })
         })
         .collect::<Result<Vec<_>, sv::AnalyzerError>>();
+    // A kernel that can suspend inside a call lists the requests of the
+    // module's function units after its own.
+    if let Ok(processes) = &processes {
+        for (index, process) in processes.iter().enumerate() {
+            if process.slots.call_top.is_some() {
+                host_request_sites.extend(pm.function_host_request_sites.iter().map(|site| {
+                    celox_design::HostRequestSite {
+                        process: index | celox_design::FUNCTION_SITE_PROCESS,
+                        ..site.clone()
+                    }
+                }));
+            }
+        }
+    }
     *runtime_event_sites = std::mem::take(&mut pm.runtime_event_sites);
     *runtime_errors = std::mem::take(&mut pm.runtime_errors);
     *extern_functions = std::mem::take(&mut pm.extern_functions);

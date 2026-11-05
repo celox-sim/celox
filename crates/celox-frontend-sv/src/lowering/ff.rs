@@ -132,6 +132,10 @@ pub(super) struct Ff<'p, 'a> {
     history: Vec<History>,
     /// The function whose unit this lowers, if it lowers one.
     frame: Option<calls::FrameContext>,
+    /// The slot where a process kernel leaves the end of the live frames
+    /// when it suspends inside a call ([`ProcessSlots::call_top`]), once
+    /// it calls a function that can suspend it.
+    call_top: Option<SourceVarId>,
     /// Whether every call is inlined, in code that must not call.
     inline_calls: bool,
 }
@@ -227,6 +231,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             inferred_clock: None,
             history: Vec::new(),
             frame: None,
+            call_top: None,
             inline_calls: false,
         }
     }
@@ -3166,7 +3171,7 @@ impl<'p, 'a> Ff<'p, 'a> {
     ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
         use celox_design::{HostRequestKind, HostRequestSite, HostRequestValue};
         use sv::ir::{Expr, SystemFunction as F};
-        if self.kernel.is_none() {
+        if !self.can_request() {
             return Err(unsupported(format!(
                 "{} outside a timed process",
                 function.name()
@@ -3223,8 +3228,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             results: vec![value(ret_id), value(seed_id)],
             strings: Vec::new(),
         });
-        self.with_kernel(|kernel| kernel.host_request(HostRequestKind::Distribution, site))
-            .map_err(kernel_error)?;
+        self.request_host(HostRequestKind::Distribution, site)?;
         self.check_tagged_guards(&guards)?;
         self.write_system_actual(&lvalues, &seed_result)?;
         Ok(Expr::Ident(ret_name))
@@ -3318,7 +3322,7 @@ impl<'p, 'a> Ff<'p, 'a> {
     ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
         use celox_design::{HostRequestKind, HostRequestSite, HostRequestValue};
         use sv::ir::Expr;
-        if self.kernel.is_none() {
+        if !self.can_request() {
             return Err(unsupported(format!(
                 "{} outside a timed process",
                 function.name()
@@ -3388,8 +3392,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             results,
             strings: Vec::new(),
         });
-        self.with_kernel(|kernel| kernel.host_request(HostRequestKind::Plusargs, site))
-            .map_err(kernel_error)?;
+        self.request_host(HostRequestKind::Plusargs, site)?;
         if let Some((lvalues, result, guards)) = target {
             self.check_tagged_guards(&guards)?;
             self.write_system_actual(&lvalues, &result)?;
@@ -8941,10 +8944,15 @@ fn kernel_error(error: ProcessKernelError) -> sv::AnalyzerError {
     unsupported(error.to_string())
 }
 
-fn seal_drained(mut builder: SIRBuilder<Addr>) -> ExecutionUnit<Addr> {
+fn seal_drained(builder: SIRBuilder<Addr>) -> ExecutionUnit<Addr> {
+    seal_drained_from(builder, BlockId(0))
+}
+
+/// [`seal_drained`] for a unit entered at `entry`.
+fn seal_drained_from(mut builder: SIRBuilder<Addr>, entry: BlockId) -> ExecutionUnit<Addr> {
     let (blocks, register_map, _) = builder.drain();
     let mut unit = ExecutionUnit {
-        entry_block_id: BlockId(0),
+        entry_block_id: entry,
         blocks,
         register_map,
     };

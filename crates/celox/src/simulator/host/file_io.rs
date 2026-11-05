@@ -192,7 +192,7 @@ impl<B: SimBackend> Simulator<B> {
                 self.cancel_file_strobes(descriptor);
             }
             2 | 3 => {
-                let scope = self.process_scope(site.process);
+                let scope = self.process_scope(site.process_index());
                 let format = RuntimeEventSite {
                     kind: RuntimeEventKind::Write,
                     template: site.strings.first().cloned(),

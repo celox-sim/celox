@@ -2046,6 +2046,36 @@ impl SimBackend for TieredBackend {
         }
     }
 
+    fn save_call_stack(&self, len: usize, into: &mut Vec<u8>) {
+        match &self.phase {
+            Phase::Interpreting(Some(interp)) => interp.save_call_stack(len, into),
+            #[cfg(feature = "cranelift")]
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.save_call_stack(len, into),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.save_call_stack(len, into),
+            Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
+        }
+    }
+
+    fn restore_call_stack(&mut self, bytes: &[u8]) {
+        match &mut self.phase {
+            Phase::Interpreting(Some(interp)) => interp.restore_call_stack(bytes),
+            #[cfg(feature = "cranelift")]
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.restore_call_stack(bytes),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.restore_call_stack(bytes),
+            Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
+        }
+    }
+
     fn write_memory(&mut self, offset: usize, bytes: &[u8]) {
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.write_memory(offset, bytes),
