@@ -235,3 +235,42 @@ endmodule"#)
 endmodule"#)
  (top Top) (four_state) (run_until 5)
  (assert_eq passed 2) (assert_eq failed 1))
+
+; IEEE 1800-2023 16.14.1: an action is any statement, including calls of
+; functions and untimed tasks, which run in Reactive and see the NBA update.
+(case subroutine_calls_in_actions
+ (source "actions.sv" #"package report;
+ int count;
+ function automatic bit enabled(int level); return level < 2; endfunction
+ function automatic void note(int value); count += value; endfunction
+endpackage
+class Log;
+ static int total;
+ int seen;
+ static function void add(int value); total += value; endfunction
+ function void see(int value); seen += value; endfunction
+endclass
+module Top(output int passed, failed, noted, logged, seen, traced, sampled);
+ bit clk, data;
+ Log log = new;
+ function int bump(int by); passed += by; return passed; endfunction
+ task automatic inner(int value); traced = traced * 10 + value; endtask
+ task automatic trace(int value); inner(value); inner(value + 1); endtask
+ always @(posedge clk) data <= ~data;
+ p: assert property (@(posedge clk) data == 0)
+    begin void'(bump(1)); trace(1); sampled = data; end
+    else begin
+      if (report::enabled(1)) report::note(failed + 5);
+      failed++;
+      Log::add(2);
+      log.see(3);
+      seen = log.seen;
+    end
+ assign noted = report::count;
+ assign logged = Log::total;
+ initial begin #1 clk=1; #1 clk=0; #1 clk=1; #1 clk=0; #1 clk=1; end
+endmodule"#)
+ (top Top) (run_until 5)
+ (assert_eq passed 2) (assert_eq failed 1) (assert_eq noted 5)
+ (assert_eq logged 2) (assert_eq seen 3) (assert_eq traced 1212)
+ (assert_eq sampled 1))
