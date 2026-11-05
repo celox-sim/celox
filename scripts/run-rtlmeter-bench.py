@@ -19,7 +19,7 @@ MANIFEST = json.loads((ROOT / 'benchmarks/rtlmeter/manifest.json').read_text())
 ENGINES = ('celox', 'verilator', 'xezim')
 STATES = ('two-state', 'four-state')
 CONFIGURATION = {
-    'celox': 'native O2; threads=1; cold source-to-finish',
+    'celox': 'tiered hotspot JIT O2; threads=1; cold source-to-finish',
     'verilator': '--binary --timing --assert; -O3; C++ -O3; -j1; fresh Mdir',
     'xezim': 'release default VM; persistent caches disabled; full four-state',
 }
@@ -118,8 +118,10 @@ def commands(engine, state, spec, files, build, binaries, plusargs):
     includes = [f'-I{p}' for p in spec['includes']]
     defines = [f'-D{k}={v}' for k, v in sorted(spec['defines'].items())]
     if engine == 'celox':
-        return [[binaries[engine], 'run', '-f', files, '--top', spec['top'], '--backend', 'native',
-                 '--threads', '1', '-O', 'O2', '--four-state' if state == 'four-state' else '--two-state',
+        # Hotspot JIT starts on the interpreter and compiles hot groups in the
+        # background; an explicit mode fails instead of silently falling back.
+        return [[binaries[engine], 'run', '-f', files, '--top', spec['top'], '--backend', 'tiered',
+                 '--jit', 'hotspot', '--report', '--threads', '1', '-O', 'O2', '--four-state' if state == 'four-state' else '--two-state',
                  '--unlimited', '--no-checkpoint-on-signal', *includes, *defines, *plusargs]]
     if engine == 'xezim':
         if state != 'four-state':
@@ -254,6 +256,9 @@ def measure_case(name, source, celox, xezim, output, build_root, timeout=1800, s
                 count = accept(stdout, cycles.read_text() if cycles.exists() else '', outcome, spec['payload'], spec.get('successMarker', 'TEST PASSED'))
                 if count >= spec['maxCycles']:
                     raise ValueError('Workload reached the cycle limit instead of completing normally')
+                if engine == 'celox' and not any(line.startswith('CELOX_JIT_CONFIG mode=hotspot ')
+                                                 for line in stdout.splitlines()):
+                    raise ValueError('Celox did not run with the hotspot JIT')
                 row['samples'].append({'status': 'passed', 'processNs': outcome['elapsedNs'], 'cycles': count})
             except ValueError as error:
                 row.update(status='failed', reason=str(error))
