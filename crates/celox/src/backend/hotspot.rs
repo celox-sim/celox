@@ -100,7 +100,8 @@ impl EntryCode {
 enum Work {
     Group(Vec<ExecutionUnit<RegionedAbsoluteAddr>>),
     Block(BlockRequest),
-    Scheduler(SchedulerState, Arc<HotspotCode>),
+    /// A scheduler, and the inline budget of one still to be prepared.
+    Scheduler(SchedulerState, Arc<HotspotCode>, Option<usize>),
 }
 
 struct Request {
@@ -112,10 +113,17 @@ struct Completed {
     key: EntryKey,
     code: Result<EntryCode, String>,
     elapsed: Duration,
+    /// A scheduler whose inline budget outlined units: a fully inlined one
+    /// can replace it.
+    budgeted: bool,
 }
+
+type Prepared = Result<PreparedHotspotScheduler, crate::SimulatorError>;
 
 enum SchedulerState {
     Pending(Arc<crate::ir::LaidOutProgram>),
+    /// Prepared on its own thread, so the simulation keeps running.
+    Preparing(mpsc::Receiver<(Prepared, Duration)>),
     Prepared(Box<PreparedHotspotScheduler>),
 }
 
@@ -130,6 +138,13 @@ pub(crate) struct HotspotRuntime {
     stats: HotspotStats,
     scheduler: Option<SchedulerState>,
     scheduler_index: Option<usize>,
+    /// The program of the scheduler, while a later stage may still replace it.
+    scheduler_program: Option<Arc<crate::ir::LaidOutProgram>>,
+    preparer: Option<JoinHandle<()>>,
+    /// The inline budget of the first scheduler stage.
+    inline_budget: usize,
+    /// Scheduler stages published.
+    scheduler_stages: usize,
     options: Arc<SimulatorOptions>,
 }
 
@@ -154,17 +169,25 @@ impl HotspotRuntime {
                         break;
                     }
                     let start = Instant::now();
+                    let mut budgeted = false;
                     let code = match request.work {
-                        Work::Scheduler(state, comb) => {
+                        Work::Scheduler(state, comb, inline_budget) => {
                             let prepared = match state {
-                                SchedulerState::Pending(program) => {
-                                    PreparedHotspotScheduler::new(program, &options, &worker_cancel)
-                                        .map(Box::new)
-                                }
+                                SchedulerState::Pending(program) => PreparedHotspotScheduler::new(
+                                    program,
+                                    &options,
+                                    &worker_cancel,
+                                    inline_budget,
+                                )
+                                .map(Box::new),
                                 SchedulerState::Prepared(prepared) => Ok(prepared),
+                                SchedulerState::Preparing(_) => {
+                                    unreachable!("only prepared schedulers are submitted")
+                                }
                             };
                             prepared
                                 .and_then(|prepared| {
+                                    budgeted = prepared.budgeted;
                                     HotspotCode::compile_scheduler(
                                         *prepared,
                                         comb,
@@ -193,6 +216,7 @@ impl HotspotRuntime {
                             key: request.key,
                             code,
                             elapsed: start.elapsed(),
+                            budgeted,
                         })
                         .is_err()
                     {
@@ -211,6 +235,10 @@ impl HotspotRuntime {
             stats: HotspotStats::default(),
             scheduler: None,
             scheduler_index: None,
+            scheduler_program: None,
+            preparer: None,
+            inline_budget: crate::scheduler::INLINE_BUDGET_INSTRUCTIONS,
+            scheduler_stages: 0,
             options,
         })
     }
@@ -223,7 +251,9 @@ impl HotspotRuntime {
             .as_ref()
             .and_then(|s| s.unit);
         if self.scheduler_index.is_some() {
-            self.scheduler = Some(SchedulerState::Pending(Arc::new(program.clone())));
+            let program = Arc::new(program.clone());
+            self.scheduler_program = Some(Arc::clone(&program));
+            self.scheduler = Some(SchedulerState::Pending(program));
         }
     }
 
@@ -255,6 +285,26 @@ impl HotspotRuntime {
         }
     }
 
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    pub(crate) fn set_inline_budget_for_test(&mut self, budget: usize) {
+        self.inline_budget = budget;
+    }
+
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    pub(crate) fn scheduler_stages_for_test(&self) -> usize {
+        self.scheduler_stages
+    }
+
     pub(crate) fn has_compiled_scheduler(&self) -> bool {
         self.scheduler_index.is_some_and(|index| {
             self.entries
@@ -263,10 +313,14 @@ impl HotspotRuntime {
         })
     }
 
-    /// Use the owner thread for planning and allocation while the single worker
-    /// compiles an admitted large Comb. Doing this earlier on that worker would
-    /// delay useful small regions during initialization. Small groups keep the
-    /// original lazy worker path, so short simulations do no extra planning.
+    /// Plan and allocate the first scheduler stage while the single worker
+    /// compiles an admitted large Comb. Small groups keep the original lazy
+    /// worker path, so short simulations do no extra planning.
+    ///
+    /// With another CPU it is prepared on its own thread and the simulation
+    /// keeps running. On a single CPU the interpreter would only slow it
+    /// down: compiled slots then start soonest when the simulation thread
+    /// prepares it.
     fn prepare_large_scheduler(&mut self) {
         let Some(state) = self.scheduler.take() else {
             return;
@@ -275,28 +329,122 @@ impl HotspotRuntime {
             self.scheduler = Some(state);
             return;
         };
+        let budget = Some(self.inline_budget);
+        if !single_cpu() {
+            self.prepare_scheduler_stage(program, budget);
+            return;
+        }
         let start = Instant::now();
-        let prepared = PreparedHotspotScheduler::new(program, &self.options, &self.cancel);
+        let prepared = PreparedHotspotScheduler::new(program, &self.options, &self.cancel, budget);
         let elapsed = start.elapsed();
         self.stats.compile_time += elapsed;
         match prepared {
             Ok(prepared) => {
-                tracing::debug!(?elapsed, "hotspot scheduler prepared");
+                tracing::debug!(
+                    ?elapsed,
+                    budgeted = prepared.budgeted,
+                    "hotspot scheduler prepared"
+                );
                 self.scheduler = Some(SchedulerState::Prepared(Box::new(prepared)));
             }
             Err(error) => {
                 tracing::debug!(%error, "hotspot scheduler preparation failed");
-                self.stats.failed_entries += 1;
-                self.entries
-                    .entry(EntryKey::Process(self.scheduler_index.unwrap()))
-                    .or_default()
-                    .unavailable = true;
+                self.scheduler_failed();
+            }
+        }
+    }
+
+    fn prepare_scheduler_stage(
+        &mut self,
+        program: Arc<crate::ir::LaidOutProgram>,
+        inline_budget: Option<usize>,
+    ) {
+        if let Some(previous) = self.preparer.take() {
+            // It already sent its result, which is what started this stage.
+            let _ = previous.join();
+        }
+        let (sender, receiver) = mpsc::channel();
+        let options = Arc::clone(&self.options);
+        let cancel = self.cancel.clone();
+        // The final stage is an optimization of running code. On a single
+        // CPU it must not halve the speed of the stage it replaces.
+        let background = inline_budget.is_none() && single_cpu();
+        let spawned = std::thread::Builder::new()
+            .name("celox-jit-hotspot-scheduler".into())
+            .spawn(move || {
+                if background {
+                    lower_priority();
+                }
+                let start = Instant::now();
+                let prepared =
+                    PreparedHotspotScheduler::new(program, &options, &cancel, inline_budget);
+                let _ = sender.send((prepared, start.elapsed()));
+            });
+        match spawned {
+            Ok(handle) => {
+                self.preparer = Some(handle);
+                self.scheduler = Some(SchedulerState::Preparing(receiver));
+            }
+            Err(error) => {
+                tracing::debug!(%error, "hotspot scheduler preparation did not start");
+                self.scheduler_failed();
+            }
+        }
+    }
+
+    fn scheduler_failed(&mut self) {
+        self.scheduler_program = None;
+        let key = EntryKey::Process(self.scheduler_index.unwrap());
+        let entry = self.entries.entry(key).or_default();
+        // A published earlier stage keeps running.
+        if entry.code.is_none() {
+            self.stats.failed_entries += 1;
+            entry.unavailable = true;
+        }
+    }
+
+    /// Adopt a finished preparation; `false` while it is still running.
+    fn poll_preparation(&mut self) -> bool {
+        let Some(SchedulerState::Preparing(receiver)) = &self.scheduler else {
+            return true;
+        };
+        match receiver.try_recv() {
+            Ok((prepared, elapsed)) => {
+                self.stats.compile_time += elapsed;
+                match prepared {
+                    Ok(prepared) => {
+                        tracing::debug!(
+                            ?elapsed,
+                            budgeted = prepared.budgeted,
+                            "hotspot scheduler prepared"
+                        );
+                        self.scheduler = Some(SchedulerState::Prepared(Box::new(prepared)));
+                        true
+                    }
+                    Err(error) => {
+                        tracing::debug!(%error, "hotspot scheduler preparation failed");
+                        self.scheduler = None;
+                        self.scheduler_failed();
+                        false
+                    }
+                }
+            }
+            Err(mpsc::TryRecvError::Empty) => false,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.scheduler = None;
+                self.scheduler_failed();
+                false
             }
         }
     }
 
     fn request_scheduler(&mut self) {
-        if self.busy || self.cancel.is_cancelled() || self.scheduler.is_none() {
+        if self.busy
+            || self.cancel.is_cancelled()
+            || self.scheduler.is_none()
+            || !self.poll_preparation()
+            || self.scheduler.is_none()
+        {
             return;
         }
         let Some(EntryCode::Group(comb)) = self
@@ -311,12 +459,16 @@ impl HotspotRuntime {
         };
         let request = Request {
             key: EntryKey::Process(self.scheduler_index.unwrap()),
-            work: Work::Scheduler(self.scheduler.take().unwrap(), Arc::clone(comb)),
+            work: Work::Scheduler(
+                self.scheduler.take().unwrap(),
+                Arc::clone(comb),
+                Some(self.inline_budget),
+            ),
         };
         match sender.try_send(request) {
             Ok(()) => self.busy = true,
             Err(mpsc::TrySendError::Full(request)) => {
-                let Work::Scheduler(state, _) = request.work else {
+                let Work::Scheduler(state, ..) = request.work else {
                     unreachable!("only scheduler jobs are submitted here");
                 };
                 self.scheduler = Some(state);
@@ -336,6 +488,7 @@ impl HotspotRuntime {
         self.cancel.cancel();
         self.requests.take();
         self.scheduler = None;
+        self.scheduler_program = None;
         self.busy = false;
         active
     }
@@ -364,20 +517,38 @@ impl HotspotRuntime {
                     self.busy = false;
                     self.stats.compile_time += completed.elapsed;
                     let entry = self.entries.entry(completed.key).or_default();
+                    // A later scheduler stage replaces the published one.
+                    let replaced = entry
+                        .code
+                        .as_ref()
+                        .map_or(0, |code| code.native().code_size);
                     match completed.code {
                         Ok(code)
                             if code.native().required_state_size <= state_size
-                                && self
-                                    .stats
-                                    .code_bytes
+                                && (self.stats.code_bytes - replaced)
                                     .saturating_add(code.native().code_size)
                                     <= MAX_CODE_BYTES =>
                         {
                             tracing::debug!(key = ?completed.key, elapsed = ?completed.elapsed,
-                                bytes = code.native().code_size, "hotspot entry published");
-                            self.stats.code_bytes += code.native().code_size;
-                            self.stats.compiled_entries += 1;
+                                bytes = code.native().code_size, replaced_bytes = replaced,
+                                "hotspot entry published");
+                            self.stats.code_bytes =
+                                self.stats.code_bytes - replaced + code.native().code_size;
+                            if entry.code.is_none() {
+                                self.stats.compiled_entries += 1;
+                            }
                             entry.code = Some(code);
+                            if Some(completed.key) == self.scheduler_index.map(EntryKey::Process) {
+                                self.scheduler_stages += 1;
+                                match self.scheduler_program.take() {
+                                    // Inline what the budget outlined: the
+                                    // final scheduler is the fastest.
+                                    Some(program) if completed.budgeted => {
+                                        self.prepare_scheduler_stage(program, None);
+                                    }
+                                    _ => {}
+                                }
+                            }
                         }
                         Ok(code) => {
                             tracing::debug!(key = ?completed.key,
@@ -594,11 +765,29 @@ impl HotspotRuntime {
     }
 }
 
+pub(crate) fn single_cpu() -> bool {
+    std::thread::available_parallelism().map_or(true, |cpus| cpus.get() == 1)
+}
+
+/// Let the calling thread yield the CPU to the simulation.
+fn lower_priority() {
+    #[cfg(target_os = "linux")]
+    // Safety: plain system calls on the calling thread; a failure leaves its
+    // priority unchanged, which is only slower.
+    unsafe {
+        let thread = libc::syscall(libc::SYS_gettid) as libc::id_t;
+        libc::setpriority(libc::PRIO_PROCESS, thread, 10);
+    }
+}
+
 impl Drop for HotspotRuntime {
     fn drop(&mut self) {
         self.cancel();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
+        }
+        if let Some(preparer) = self.preparer.take() {
+            let _ = preparer.join();
         }
         tracing::debug!(stats = ?self.stats, "hotspot execution finished");
     }
@@ -810,6 +999,7 @@ endmodule
                     key: EntryKey::Comb,
                     code: Ok(EntryCode::Group(Arc::new(code))),
                     elapsed: Duration::ZERO,
+                    budgeted: false,
                 })
                 .unwrap();
             if cancelled {

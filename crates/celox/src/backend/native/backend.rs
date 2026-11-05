@@ -1179,6 +1179,8 @@ pub(super) struct CompiledNativeFunction {
 #[cfg(hotspot_jit)]
 pub(crate) struct PreparedHotspotScheduler {
     program: Arc<LaidOutProgram>,
+    /// Its inline budget outlined units a later stage can inline.
+    pub(crate) budgeted: bool,
     allocated: emit::AllocatedFunction,
     // Only the shared Comb entry is unresolved. All other outlined kernels
     // can compile independently while that entry is still on the worker.
@@ -1193,9 +1195,14 @@ impl PreparedHotspotScheduler {
         program: Arc<LaidOutProgram>,
         options: &SimulatorOptions,
         cancel: &CompileCancel,
+        inline_budget: Option<usize>,
     ) -> Result<Self, SimulatorError> {
-        let (unit, outlined) =
-            crate::scheduler::hotspot_scheduler(&program).map_err(codegen_message)?;
+        let crate::scheduler::HotspotScheduler {
+            unit,
+            callees: outlined,
+            budgeted,
+        } = crate::scheduler::hotspot_scheduler(&program, inline_budget)
+            .map_err(codegen_message)?;
         HotspotCode::validate_units(std::slice::from_ref(&unit))?;
         let mut native = options.x86_options.clone();
         native.baseline = false;
@@ -1255,6 +1262,7 @@ impl PreparedHotspotScheduler {
         }
         Ok(Self {
             program,
+            budgeted,
             allocated,
             callees,
         })
@@ -1361,6 +1369,7 @@ impl HotspotCode {
             program,
             allocated,
             callees: prepared_callees,
+            ..
         } = prepared;
         let mut callees = Vec::with_capacity(prepared_callees.len());
         let mut additional_bytes = 0usize;

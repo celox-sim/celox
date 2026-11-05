@@ -730,6 +730,19 @@ impl TieredBackend {
         assert!(!self.is_compiled(), "must not use whole-image promotion");
     }
 
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    pub(crate) fn interp_for_test(&mut self) -> &mut crate::backend::InterpBackend {
+        let Phase::Interpreting(Some(interp)) = &mut self.phase else {
+            panic!("scheduler test requires the mixed executor");
+        };
+        interp
+    }
+
     /// Build a tiered simulation targeting this host's default compiled
     /// tier: ready to run immediately on the interpreter while the compiled
     /// tier is prepared in the background.

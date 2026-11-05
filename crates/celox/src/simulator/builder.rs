@@ -4506,9 +4506,11 @@ endmodule"#;
                     assert!(units.is_some());
                 }
                 runtime.finish(EntryKey::Comb, None, Some(program.sir.eval_comb.clone()));
-                // Large groups prepare on the owner while the worker compiles
-                // Comb; small groups retain lazy preparation on that worker.
-                assert_eq!(runtime.stats().compile_time.is_zero(), !large);
+                // Large groups prepare while the worker compiles Comb: on the
+                // owner with a single CPU, otherwise on their own thread.
+                // Small groups retain lazy preparation on that worker.
+                let synchronous = large && crate::backend::hotspot::single_cpu();
+                assert_eq!(runtime.stats().compile_time.is_zero(), !synchronous);
                 assert_eq!(runtime.stats().compiled_entries, 0);
                 assert_eq!(runtime.stats().code_bytes, 0);
                 assert_eq!(runtime.stats().failed_entries, 0);
@@ -5223,17 +5225,22 @@ endmodule"#;
             .filter(|&(index, _)| Some(index) != scheduler.unit)
             .map(|(_, unit)| size(unit))
             .sum();
-        let (unit, outlined) = crate::scheduler::hotspot_scheduler(&program).unwrap();
+        let budget = crate::scheduler::INLINE_BUDGET_INSTRUCTIONS;
         assert!(
-            kernels > 2 * 262_144,
+            kernels > 2 * budget,
             "the design must exceed the budget: {kernels}"
         );
-        assert!(!outlined.is_empty());
+        let staged = crate::scheduler::hotspot_scheduler(&program, Some(budget)).unwrap();
+        assert!(staged.budgeted && !staged.callees.is_empty());
         assert!(
-            size(&unit) < kernels,
+            size(&staged.unit) < kernels,
             "scheduler {} inlines most of {kernels} kernel instructions",
-            size(&unit)
+            size(&staged.unit)
         );
+        // The final stage inlines them all.
+        let inlined = crate::scheduler::hotspot_scheduler(&program, None).unwrap();
+        assert!(!inlined.budgeted && inlined.callees.is_empty());
+        assert!(size(&inlined.unit) > kernels);
     }
 
     #[cfg(all(
@@ -5265,7 +5272,9 @@ endmodule"#;
                     .unwrap();
                 let scheduler = program.runtime.runtime_schema.scheduler.as_ref().unwrap();
                 assert!(scheduler.fallback.iter().all(Option::is_none));
-                let (unit, _) = crate::scheduler::hotspot_scheduler(&program).unwrap();
+                let unit = crate::scheduler::hotspot_scheduler(&program, None)
+                    .unwrap()
+                    .unit;
                 unit.blocks
                     .values()
                     .map(|block| block.instructions.len())
