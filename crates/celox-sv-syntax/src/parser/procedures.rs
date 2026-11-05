@@ -140,56 +140,46 @@ impl Parser<'_> {
 
     /// Boolean properties and one top-level, single-cycle overlapped
     /// implication need no temporal automaton. Keep other sequences opaque.
+    /// The cursor is at the `(` of the header; the event expression of its
+    /// leading clock may use `or` and `iff`.
     fn boolean_property_header(&self) -> bool {
-        let mut depth = 0usize;
+        let mut depth = 1usize;
         let mut implication = false;
-        for offset in 0..self.indices.len().saturating_sub(self.at) {
+        let mut offset = self.past_clocking_event(1);
+        loop {
             match self.nth(offset) {
+                "" => return false,
                 "(" => depth += 1,
                 ")" => {
-                    depth = depth.saturating_sub(1);
+                    depth -= 1;
                     if depth == 0 {
                         return true;
                     }
                 }
                 "|->" if depth == 1 && !implication => implication = true,
-                "##" | "|->" | "|=>" | "throughout" | "within" | "intersect" | "until"
-                | "s_until" | "until_with" | "s_until_with" | "implies" | "iff"
-                    if self.nth(offset.saturating_sub(1)) != "disable" =>
-                {
-                    return false;
-                }
+                "|->" => return false,
+                word if self.temporal(word, offset) => return false,
                 _ => {}
             }
+            offset += 1;
         }
-        false
     }
 
     /// A module assertion: deferred immediate checks use `always_comb`, while
     /// clocked concurrent checks wait for their event (IEEE 1800-2023 16.4, 16.14).
-    pub(super) fn module_assertion(&mut self) -> Result<ProcedureId> {
+    /// A deferred concurrent assertion waits once instances of named
+    /// sequences and properties are substituted, at the end of its design
+    /// element (`substitute_assertion_instances`).
+    pub(super) fn module_assertion(&mut self, defer: bool) -> Result<ProcedureId> {
         let start = self.at;
-        let mut body = self.statement_machine()?;
+        let body = self.statement_machine()?;
         let mut kind = ProcedureKind::AlwaysComb;
         if let StatementKind::Assertion {
-            header:
-                AssertionHeader::Concurrent {
-                    clock, module_item, ..
-                },
+            header: AssertionHeader::Concurrent { module_item, .. },
             ..
         } = &mut self.statements[body.0].kind
         {
             *module_item = true;
-            let control = *clock;
-            let assertion = body;
-            let mut wrapper = self.statements[body.0].clone();
-            wrapper.kind = StatementKind::Timing {
-                control,
-                body: assertion,
-            };
-            wrapper.label = None;
-            body = StatementId(self.statements.len());
-            self.statements.push(wrapper);
             kind = ProcedureKind::Always;
         }
         let id = ProcedureId(self.procedures.len());
@@ -200,6 +190,9 @@ impl Parser<'_> {
             authored_statements,
             tokens: self.range(start),
         });
+        if kind == ProcedureKind::Always && !defer {
+            self.wrap_module_assertion(id);
+        }
         Ok(id)
     }
 
@@ -377,7 +370,7 @@ impl Parser<'_> {
         })
     }
 
-    fn parenthesized_expression(&mut self) -> Result<ExprId> {
+    pub(super) fn parenthesized_expression(&mut self) -> Result<ExprId> {
         self.expect("(")?;
         let expression = self.expression(0)?;
         self.expect(")")?;
@@ -1179,31 +1172,14 @@ impl Parser<'_> {
                             if concurrent {
                                 self.at += 1;
                             }
-                            let typed_property = property
-                                && self.peek() == "("
-                                && self.nth(1) == "@"
-                                && self.boolean_property_header();
+                            let typed_property =
+                                property && self.peek() == "(" && self.boolean_property_header();
                             let property_header = if typed_property {
                                 self.expect("(")?;
-                                let clock = self.typed_timing_control()?;
-                                let disable = if self.eat("disable") {
-                                    self.expect("iff")?;
-                                    Some(self.parenthesized_expression()?)
-                                } else {
-                                    None
-                                };
-                                let first = self.expression(0)?;
-                                let (antecedent, condition) = if self.eat("|->") {
-                                    (Some(first), self.expression(0)?)
-                                } else {
-                                    (None, first)
-                                };
+                                let property = self.property_spec(false)?;
                                 self.expect(")")?;
                                 Some(AssertionHeader::Concurrent {
-                                    clock,
-                                    disable,
-                                    antecedent,
-                                    condition,
+                                    property,
                                     module_item: false,
                                     tokens: self.range(start),
                                 })

@@ -26,6 +26,28 @@
     },
     {
       "category": "Sequential",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-UNSUPPORTED: <case>/source_0.sv:6:3: Unsupported: multiclocked sequence or property\n                                          : ... note: In instance 'celox_suite_tb.dut'\n    6 |   @(negedge clk) cnt < 2;\n      |   ^\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.052\n%Error-UNSUPPORTED: <case>/source_0.sv:9:17: Unsupported: clocking event inside sequence expression\n                                           : ... note: In instance 'celox_suite_tb.dut'\n    9 |  sequence tick; @(posedge clk) cnt == 2; endsequence\n      |                 ^\n%Error: <case>/source_0.sv:11:2: Concurrent assertion has no clock (IEEE 1800-2023 16.16)\n                               : ... note: In instance 'celox_suite_tb.dut'\n                               : ... Suggest provide a clocking event, a default clocking, or a clocked procedural context\n   11 |  assert property (tick |-> zero) else tick_failed++;\n      |  ^~~~~~\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: Exiting due to 3 error(s)\n",
+      "expectation": "Simulation",
+      "name": "concurrent_assertions::named_sequence_leading_clock",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator build exit status: 139; see <case>/build.log\n%Error: Verilator internal fault, sorry. Suggest trying --debug --gdbbt\n%Error: Command Failed ulimit -s unlimited 2>/dev/null; exec /nix/store/i5hjqqy2qk6jac8mnnaxnlh8yfi49wjh-verilator-5.052/bin/verilator_bin --cc --exe --build -j 1 --vpi --public-flat-rw --timing --assert --coverage-user -Wno-fatal --x-initial 0 --x-assign 0 --prefix Vdut --top-module celox_suite_tb --Mdir <case>/obj -CFLAGS -O0 -MAKEFLAGS OPT_FAST=-O0\\ OPT_SLOW=-O0 <case>/timescale.sv <case>/source_0.sv <case>/testbench.sv <case>/harness.cpp\n",
+      "expectation": "Simulation",
+      "name": "concurrent_assertions::named_sequences_and_properties",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "Verilator 5.052 rejects the third (gate) argument of $past: Unsupported: $past expr2 and/or clock arguments. IEEE 1800-2023 16.9.3 permits this gating expression. Pinned xezim 0.11.4 and Celox pass the unchanged case.",
       "expectation": "Simulation",
       "known_issue": {
