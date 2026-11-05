@@ -302,7 +302,10 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
             |builder, (name, value)| builder.param(name, *value),
         );
         return Ok(match backend {
-            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+            #[cfg(any(
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+            ))]
             "hotspot" => Box::new(TimedBackend::new(builder.hotspot_jit(true).build_tiered()?)),
             "interpreter" => Box::new(TimedBackend::new(builder.build_interpreter()?)),
             "native" => Box::new(TimedBackend::new(builder.build_native()?)),
@@ -361,7 +364,10 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
         }
     };
     Ok(match backend {
-        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        #[cfg(any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        ))]
         "hotspot" => Box::new(CeloxBackend(
             builder.hotspot_jit(true).build_tiered().map_err(rejected)?,
         )),

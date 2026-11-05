@@ -770,6 +770,9 @@ jobs:
       - name: Test AArch64 facade integration
         run: cargo test --locked -p celox --lib --test native_exec
 
+      - name: Test hotspot JIT on AArch64
+        run: cargo test --locked -p celox --features systemverilog --lib hotspot
+
       - name: Test partial-word reduction AND on AArch64
         run: >-
           cargo test --locked -p celox --features systemverilog,cranelift,wasm-runtime,wasm-component

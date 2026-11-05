@@ -77,14 +77,15 @@ languages. Both languages support `--backend native|tiered|interpreter|cranelift
 (default: tiered; native when `--compile-only`, a native image, `--build-cache-dir` or an
 IR dump is requested). Tiered starts interpreted and adopts compiled code at a scheduler
 safe point while preserving pending events. The default `--jit auto` selects
-hotspot JIT for x86-64 tiered runs with one simulation thread and no force targets
+hotspot JIT for native x86-64 and AArch64 tiered runs with one simulation thread and no force targets
 or native block profiling. It compiles frequently executed groups and keeps cold
 work interpreted. Other configurations retain whole-image tiering.
 
 Use `--jit whole-image` to select the previous compilation strategy, or
 `--jit hotspot` to require a supported hotspot configuration. The existing
-`--hotspot-jit` flag is an alias for `--jit hotspot`. Rust builders retain their
-existing backend and tiering defaults; this automatic selection applies to the CLI.
+`--hotspot-jit` flag is an alias for `--jit hotspot`. Rust builders also default to
+hotspot JIT on the tiered backend (`SimulatorBuilder::hotspot_jit(false)` selects
+whole-image tiering).
 For example:
 
 ```sh
