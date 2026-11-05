@@ -310,7 +310,10 @@ fn check_assignment(
         return check_assignment(tree, session, *else_expression, target, context, dims);
     }
     let target = target.type_id(&mut session.types, &tree.functions, &dims.const_env);
-    let actual = native_unpacked_type(id, tree, session, dims);
+    // A selection of a variable is typed through its declaration; any other
+    // expression, such as a call returning an array, by its own type.
+    let actual = native_unpacked_type(id, tree, session, dims)
+        .or_else(|| expression_types::type_of(tree, session, id, tree.declarations(), dims).ok());
     let Some((actual, target)) = target
         .zip(actual)
         .and_then(|(target, actual)| incompatible_types(&session.types, actual, target))
