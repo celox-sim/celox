@@ -199,6 +199,25 @@ pub struct SharedNativeCode {
 unsafe impl Send for SharedNativeCode {}
 unsafe impl Sync for SharedNativeCode {}
 
+impl celox_runtime::backend::NativeProcessCode for SharedNativeCode {
+    unsafe fn invoke(
+        &self,
+        index: usize,
+        state: *mut u8,
+        size: usize,
+    ) -> Result<(), SimulatorErrorCode> {
+        if size < self.layout.total_size {
+            return Err(SimulatorErrorCode::InternalError);
+        }
+        let func = *self
+            .process_funcs
+            .get(index)
+            .ok_or(SimulatorErrorCode::InternalError)?;
+        // SAFETY: the invocation owner retains this code and its live image.
+        unsafe { NativeBackend::call_raw(state, func) }
+    }
+}
+
 impl SharedNativeCode {
     /// Attach a compiler-produced image to the precompiled host runtime.
     ///
@@ -1378,17 +1397,41 @@ impl HotspotCode {
         if memory.len().saturating_mul(8) < self.required_state_size {
             return Err(SimulatorErrorCode::InternalError);
         }
-        // The mapping owns the generated entry and the checked image covers
-        // all semantic storage and private scratch. The simulation owner holds
-        // exclusive access for the entire call.
-        let header = celox_state_layout::STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET / 8;
-        let previous = memory[header];
+        // SAFETY: the image is exclusively borrowed and its header is live.
+        unsafe { self.run_raw(memory.as_mut_ptr().cast()) }
+    }
+
+    unsafe fn run_raw(&self, state: *mut u8) -> Result<(), SimulatorErrorCode> {
+        // Detached invocations use raw state so no Rust slice remains live
+        // across their host callbacks. This mapping owns the immutable table.
+        let header = unsafe {
+            state
+                .add(celox_state_layout::STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET)
+                .cast::<u64>()
+        };
+        let previous = unsafe { header.read_unaligned() };
         if let Some(table) = &self.extern_functions {
-            memory[header] = table.as_ptr() as u64;
+            unsafe { header.write_unaligned(table.as_ptr() as u64) };
         }
-        let result = NativeBackend::call_func(memory, self.code.fn_ptr);
-        memory[header] = previous;
+        let result = unsafe { NativeBackend::call_raw(state, self.code.fn_ptr) };
+        unsafe { header.write_unaligned(previous) };
         result
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+impl celox_runtime::backend::NativeProcessCode for HotspotCode {
+    unsafe fn invoke(
+        &self,
+        _index: usize,
+        state: *mut u8,
+        size: usize,
+    ) -> Result<(), SimulatorErrorCode> {
+        if size < self.required_state_size {
+            return Err(SimulatorErrorCode::InternalError);
+        }
+        // SAFETY: the caller retains the image and header buffers throughout.
+        unsafe { self.run_raw(state) }
     }
 }
 
@@ -2322,11 +2365,22 @@ fn is_comb_runtime_effect(instruction: &SIRInstruction<RegionedAbsoluteAddr>) ->
     instruction.is_host_interaction()
 }
 
+/// Put the runtime effects of `unit` between its split `store_units`, each
+/// where it ran among the stores. The parts keep the unit's other
+/// instructions, so it must make no call (see `split_comb_execution_unit`),
+/// which would run in every part.
 fn interleave_comb_runtime_effects(
     unit: &ExecutionUnit<RegionedAbsoluteAddr>,
     ordered_stores: &[(BlockId, usize)],
     store_units: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
 ) -> Vec<ExecutionUnit<RegionedAbsoluteAddr>> {
+    debug_assert!(
+        unit.blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .all(|instruction| instruction.call_effects().is_none()),
+        "a unit with calls is not split"
+    );
     let ordered_sites = comb_block_execution_order(unit)
         .into_iter()
         .flat_map(|block_id| {
@@ -2390,6 +2444,18 @@ fn interleave_comb_runtime_effects(
 fn split_comb_execution_unit(
     unit: &ExecutionUnit<RegionedAbsoluteAddr>,
 ) -> Vec<ExecutionUnit<RegionedAbsoluteAddr>> {
+    // A unit is split at its Stores and Commits, each part recomputing what
+    // its store needs. A call is a writer the parts could neither split at
+    // nor repeat, so a unit that makes one stays whole: overrides are then
+    // reapplied after the unit rather than after each of its stores.
+    if unit
+        .blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+        .any(|instruction| instruction.call_effects().is_some())
+    {
+        return vec![unit.clone()];
+    }
     if unit.blocks.len() != 1 {
         let definitions = unit
             .blocks
@@ -3822,7 +3888,16 @@ impl NativeBackend {
         let runtime_event_buffer = Arc::new(RuntimeEventBuffer::new(
             shared.layout.runtime_event_buffer_size,
         ));
-        let comb_capture_enabled = vec![0; shared.layout.runtime_event_site_layouts.len().max(1)];
+        // Generated scheduler code clears these flags one complete word at a time.
+        let comb_capture_enabled = vec![
+            0;
+            shared
+                .layout
+                .runtime_event_site_layouts
+                .len()
+                .max(1)
+                .next_multiple_of(8)
+        ];
 
         // Initialize 4-state regions to X (v=1, m=1)
         for &(offset, allocated_size) in &shared.four_state_inits {
@@ -3862,9 +3937,18 @@ impl NativeBackend {
         shared: Arc<SharedNativeCode>,
         memory: MemoryImage,
         runtime_event_buffer: Arc<RuntimeEventBuffer>,
-        comb_capture_enabled: Vec<u8>,
+        mut comb_capture_enabled: Vec<u8>,
         heap: Box<celox_heap::Heap>,
     ) -> Self {
+        comb_capture_enabled.resize(
+            shared
+                .layout
+                .runtime_event_site_layouts
+                .len()
+                .max(1)
+                .next_multiple_of(8),
+            0,
+        );
         let slow_calls = shared.layout.settle_check();
         let mut backend = Self {
             compiled: shared,
@@ -4171,7 +4255,12 @@ impl NativeBackend {
     }
 
     fn call_func(memory: &mut [u64], func: NativeSimFunc) -> Result<(), SimulatorErrorCode> {
-        let ptr = memory.as_mut_ptr() as *mut u8;
+        // SAFETY: this call exclusively owns the initialized image.
+        unsafe { Self::call_raw(memory.as_mut_ptr().cast(), func) }
+    }
+
+    unsafe fn call_raw(ptr: *mut u8, func: NativeSimFunc) -> Result<(), SimulatorErrorCode> {
+        // SAFETY: the caller supplies the native image and exclusive execution.
         let ret = unsafe { func(ptr) };
         match ret {
             0 => Ok(()),
@@ -4426,6 +4515,25 @@ impl super::super::SimBackend for NativeBackend {
         self.call_func_timed(func)
     }
 
+    fn prepare_process(&mut self, index: usize) -> Option<celox_runtime::backend::PreparedProcess> {
+        self.compiled.process_funcs.get(index)?;
+        Some(celox_runtime::backend::PreparedProcess::new(
+            self.compiled.clone(),
+            self.memory.owner(),
+            index,
+            self.memory.as_mut_ptr().cast(),
+            self.memory.len_words() * 8,
+            self.execution_timing.is_some(),
+        ))
+    }
+
+    fn complete_process(&mut self, elapsed: Option<std::time::Duration>) {
+        if let (Some(elapsed), Some(timing)) = (elapsed, &mut self.execution_timing) {
+            timing.elapsed = timing.elapsed.saturating_add(elapsed);
+            timing.calls = timing.calls.saturating_add(1);
+        }
+    }
+
     fn resolve_signal(&self, addr: &AbsoluteAddr) -> SignalRef {
         let layout = &self.compiled.layout;
         let offset = layout.offsets.get(addr).copied().unwrap_or(0);
@@ -4630,6 +4738,7 @@ impl super::super::SimBackend for NativeBackend {
     fn comb_capture_event_enabled(&self) -> Vec<bool> {
         self.comb_capture_enabled
             .iter()
+            .take(self.compiled.layout.runtime_event_site_layouts.len())
             .map(|&enabled| enabled != 0)
             .collect()
     }
@@ -4724,6 +4833,73 @@ mod tests {
             installed, new_table as u64,
             "generated code must use its own helper and kernel table"
         );
+    }
+
+    /// A unit is split at each of its stores, except one that makes a
+    /// call, which no part could repeat or leave out.
+    #[test]
+    fn units_with_calls_are_not_split_at_their_stores() {
+        let addr = |id| {
+            RegionedAbsoluteAddr::from_absolute_addr(
+                celox_design::STABLE_REGION,
+                crate::ir::AbsoluteAddr {
+                    instance_id: celox_design::InstanceId(0),
+                    var_id: celox_design::StateObjectId(id),
+                },
+            )
+        };
+        let store = |id, value| {
+            SIRInstruction::Store(
+                addr(id),
+                celox_sir::SIROffset::Static(0),
+                8,
+                RegisterId(value),
+                Vec::new(),
+                Vec::new(),
+            )
+        };
+        let unit = |instructions| ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [(
+                BlockId(0),
+                celox_sir::BasicBlock {
+                    id: BlockId(0),
+                    params: Vec::new(),
+                    instructions,
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: (0..2)
+                .map(|id| {
+                    (
+                        RegisterId(id),
+                        celox_sir::RegisterType::Bit {
+                            width: 8,
+                            signed: false,
+                        },
+                    )
+                })
+                .collect(),
+        };
+        let stores = vec![
+            SIRInstruction::Imm(RegisterId(0), celox_sir::SIRValue::new(1u8)),
+            store(1, 0),
+            store(2, 0),
+        ];
+        assert_eq!(split_comb_execution_unit(&unit(stores.clone())).len(), 2);
+        let mut calling = stores;
+        calling.push(SIRInstruction::Call {
+            function: celox_sir::FunctionId(0),
+            frame: RegisterId(1),
+            args: Vec::new(),
+            outputs: Vec::new(),
+            dst: None,
+            effects: Default::default(),
+        });
+        let calling = unit(calling);
+        assert_eq!(split_comb_execution_unit(&calling), vec![calling]);
     }
 
     #[test]

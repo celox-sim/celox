@@ -7,7 +7,7 @@ mod symbolic;
 pub(super) fn functions_from_scope(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     dimensions: &PackedDimensions,
 ) -> Converted<HashMap<String, Function>> {
     let aliases = type_aliases_from_scope_with_env(tree, session, env)?;

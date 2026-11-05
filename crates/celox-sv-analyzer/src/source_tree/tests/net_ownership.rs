@@ -1,4 +1,5 @@
 use super::*;
+use crate::ast::ConstEnv;
 use crate::ast::{BinaryOp, ConstExpr, Expr, LValue, Source};
 use celox_sv_syntax::{DataTypeKind, Declarations};
 
@@ -32,7 +33,7 @@ fn native_lexical_and_generate_net_ids_supply_query_and_local_dependency_types()
 }
 fn number(value: &ConstExpr) -> i128 {
     let value: crate::ir::ConstExpr = value.clone().into();
-    crate::typecheck::eval_const_expr(&value, &HashMap::default()).unwrap()
+    crate::typecheck::eval_const_expr(&value, &ConstEnv::default()).unwrap()
 }
 fn subtract(tree: &mut SourceTree) {
     for expression in &mut tree.declarations.expressions {

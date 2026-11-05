@@ -1,8 +1,9 @@
 use super::*;
+use crate::ast::ConstEnv;
 use crate::ast::{ConstExpr, Expr, LValue, Stmt};
 fn bound(value: &ConstExpr) -> i128 {
     let value: crate::ir::ConstExpr = value.clone().into();
-    crate::typecheck::eval_const_expr(&value, &HashMap::from_iter([("i".into(), 8)])).unwrap()
+    crate::typecheck::eval_const_expr(&value, &ConstEnv::from_iter([("i".into(), 8)])).unwrap()
 }
 #[test]
 fn native_range_bounds_width_start_and_prefix_indices_drive_production() {

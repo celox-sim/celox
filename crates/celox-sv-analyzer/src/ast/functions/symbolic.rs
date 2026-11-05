@@ -386,7 +386,7 @@ mod tests {
             &PackedDimensions::default(),
         )
         .unwrap();
-        typecheck::eval_const_expr(&expr.into(), &HashMap::default()).unwrap()
+        typecheck::eval_const_expr(&expr.into(), &ConstEnv::default()).unwrap()
     }
     #[test]
     fn native_case_and_early_returns_preserve_continuations_and_label_priority() {
@@ -416,7 +416,7 @@ mod tests {
         let function = functions_from_scope(
             &tree,
             session,
-            &HashMap::default(),
+            &ConstEnv::default(),
             &PackedDimensions::default(),
         )
         .unwrap()

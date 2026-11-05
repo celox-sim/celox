@@ -44,6 +44,7 @@ mod ff;
 mod floating;
 mod hierarchy;
 mod masked;
+mod out_of_line;
 mod procedural;
 mod recursion;
 mod virtual_interfaces;
@@ -3626,6 +3627,7 @@ fn schedule_sources_collecting(
                     foreign_writes: foreign_writes.get(&module_id).unwrap_or(&no_foreign_writes),
                     analyzed: analyses.get(&module_id).or(discovery_analysis.as_ref()),
                     recursion_report: analysis_options.recursion_report.as_deref(),
+                    force_out_of_line: analysis_options.force_out_of_line_calls,
                     shared: SharedAlways {
                         temporaries: analysis_options.shared_always_temporaries,
                         foreign_references: foreign_references
@@ -3717,6 +3719,12 @@ fn schedule_sources_collecting(
                 recursion::append(&lowered.source, graph, path);
             }
             glued?;
+            // The functions of every lowering of the module, its glue
+            // included: the glue lowered with the graph the module's
+            // processes left.
+            if let Some(functions) = calls.as_ref().and_then(|graph| graph.out_of_line.as_ref()) {
+                out_of_line::attach_functions(&mut sim_module, functions.units());
+            }
             module_names.insert(module_id, key.name.clone());
             modules.insert(module_id, sim_module);
         }
@@ -4041,9 +4049,17 @@ fn specialize_module(
                 .map_or_else(|| path.clone(), |(flat, _)| flat.clone())
         })
         .collect::<Vec<_>>();
-    let mut calls = hierarchical
-        .recursion_report
-        .map(|_| recursion::CallGraph::default());
+    // The out-of-line functions are kept with the call graph, which every
+    // lowering of the module's processes already receives. A function unit
+    // must not store into storage whose stores assembly instruments
+    // (`SimModule::instrumented_storage`), which the module's source shows
+    // before it is lowered; waits and domains of other modules may watch
+    // what hierarchical names reach.
+    let mut calls = (hierarchical.recursion_report.is_some() || hierarchical.force_out_of_line)
+        .then(|| recursion::CallGraph::new(hierarchical.force_out_of_line));
+    if let Some(functions) = calls.as_mut().and_then(|graph| graph.out_of_line.as_mut()) {
+        functions.foreign = hierarchical.shared.foreign_references.clone();
+    }
     let lowered = lower_module(
         specialized,
         four_state,
@@ -4090,6 +4106,9 @@ struct HierarchicalNames<'a> {
     analyzed: Option<&'a sv::Ir>,
     /// Where to append the module's recursive call cycles, if anywhere.
     recursion_report: Option<&'a std::path::Path>,
+    /// Whether to lower each subroutine that can be out of line (see
+    /// `AnalysisOptions::force_out_of_line_calls`).
+    force_out_of_line: bool,
 }
 
 impl Default for HierarchicalNames<'_> {
@@ -4102,6 +4121,7 @@ impl Default for HierarchicalNames<'_> {
             shared: SharedAlways::default(),
             analyzed: None,
             recursion_report: None,
+            force_out_of_line: false,
         }
     }
 }
@@ -4732,6 +4752,11 @@ fn lower_module_with_overrides(
             warnings,
         );
         pm.calls = calls.as_deref_mut();
+        let foreign = pm
+            .out_of_line()
+            .map(|functions| std::mem::take(&mut functions.foreign))
+            .unwrap_or_default();
+        pm.observe_storage(module, &foreign);
         let blocks = lower_ff_processes(
             module,
             &mut pm,
@@ -4812,6 +4837,7 @@ fn lower_module_with_overrides(
             arena: SLTNodeArena::new(),
             reset_clock_map,
             processes,
+            functions: Vec::new(),
             package_bindings: HashMap::default(),
             hierarchical_bindings: HashMap::default(),
             counter_slots: Vec::new(),
@@ -6624,6 +6650,8 @@ fn lower_comb_processes(
         // would instead execute during the initial fixed-point evaluation.
         if process.kind() == sv::ir::CombProcessKind::AlwaysStar
             || pm.reads_simulation_state(process.body())
+            // The symbolic form would expand every call.
+            || pm.calls_out_of_line(process.body())
             || (process.kind() != sv::ir::CombProcessKind::ContinuousAssign
                 && pm.calls_task(process.body()))
         {

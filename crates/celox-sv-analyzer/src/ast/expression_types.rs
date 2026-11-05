@@ -112,7 +112,7 @@ fn resolve(
         {
             return Some(class(session, processes::CLASS));
         }
-        return function_result(tree, session, expression, native, dims);
+        return function_result(tree, session, id, native, dims);
     }
     // A parameter may also have a legacy packed layout for selects. Its
     // frozen declaration type owns nominal identity and the scalar kind.
@@ -271,19 +271,20 @@ fn resolve(
     })
 }
 
-/// The declared result of an ordinary function or class method, given its
+/// The declared result of the ordinary function or class method that `id`,
+/// a call or a method named without parentheses, calls, judged by its
 /// callee rather than its argument expressions. Legacy consumers of function
 /// metadata use this same query while they migrate to full expression types.
 pub(super) fn function_result(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    callee: ExprId,
+    id: ExprId,
     native: &Declarations,
     dims: &PackedDimensions,
 ) -> Option<TyId> {
-    let name = match objects::method(tree, session, callee, native, dims) {
+    let name = match objects::call_method(tree, session, id, native, dims) {
         Ok(Some((name, ..))) => name,
-        Ok(None) => expression_binding::callable_name(tree, callee, native)?,
+        Ok(None) => expression_binding::callable_name(tree, objects::callee(id, native), native)?,
         Err(_) => return None,
     };
     named_function_result(&name, dims)

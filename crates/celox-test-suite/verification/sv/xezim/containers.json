@@ -211,6 +211,61 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "containers::returned_patterns_take_the_result_type at 1912:3: expect_output: expected [49, 32, 53, 10, 51, 32, 50, 32, 54, 10, 55, 32, 55, 32, 55, 10, 57, 32, 51, 10, 50, 32, 51, 32, 52, 32, 50, 10, 50, 32, 54, 32, 55, 10], got [49, 32, 49, 10, 49, 32, 48, 32, 49, 10, 49, 32, 49, 32, 49, 10, 57, 32, 51, 10, 48, 32, 54, 55, 49, 48, 56, 56, 54, 52, 32, 54, 55, 49, 48, 56, 56, 54, 52, 32, 50, 10, 49, 32, 49, 32, 49, 10]",
+      "expectation": "Simulation",
+      "name": "containers::returned_patterns_take_the_result_type",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "containers::conditionals_received_by_containers at 1969:3: expect_output: expected [50, 32, 49, 10, 49, 32, 51, 10, 50, 32, 49, 10, 49, 32, 51, 10, 50, 32, 52, 32, 53, 10, 49, 32, 52, 10, 49, 32, 55, 10, 50, 10, 49, 32, 51, 10, 51, 32, 54, 10], got [49, 32, 48, 10, 49, 32, 49, 10, 49, 32, 48, 10, 49, 32, 49, 10, 49, 32, 49, 32, 48, 10, 49, 32, 48, 10, 49, 32, 49, 10, 49, 10, 49, 32, 49, 10, 49, 32, 48, 10]",
+      "expectation": "Simulation",
+      "name": "containers::conditionals_received_by_containers",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "containers::containers_received_from_any_expression at 1962:3: expect_output: expected [52, 32, 49, 32, 52, 10, 50, 32, 54, 10, 49, 32, 55, 10, 50, 32, 50, 10, 50, 32, 53, 10], got [49, 32, 48, 32, 48, 10, 49, 32, 49, 10, 48, 32, 48, 10, 49, 32, 49, 10, 49, 32, 48, 10]",
+      "expectation": "Simulation",
+      "name": "containers::containers_received_from_any_expression",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "containers::nested_bounded_queues_are_assigned_elementwise at 2002:3: expect_output: expected [50, 32, 50, 32, 49, 32, 50, 32, 51, 10, 50, 32, 50, 10, 50, 32, 50, 32, 49, 32, 53, 10, 50, 32, 50, 10, 50, 32, 49, 10, 50, 32, 57, 32, 49, 10], got [50, 32, 49, 32, 49, 32, 49, 32, 49, 10, 50, 32, 49, 10, 49, 32, 48, 32, 49, 32, 120, 10, 57, 32, 48, 10, 48, 32, 48, 10, 49, 32, 49, 32, 49, 10]",
+      "expectation": "Simulation",
+      "name": "containers::nested_bounded_queues_are_assigned_elementwise",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "containers::container_values_are_converted_on_every_path at 2047:3: expect_output: expected [50, 32, 49, 10, 50, 49, 32, 50, 49, 10, 50, 32, 49, 10, 51, 32, 52, 32, 50, 32, 50, 10, 51, 32, 50, 32, 50, 10, 50, 10, 50, 10, 50, 32, 50, 10], got [48, 32, 48, 10, 48, 32, 48, 10, 49, 32, 49, 10, 49, 32, 48, 32, 48, 32, 48, 10, 49, 32, 49, 32, 120, 10, 48, 10, 48, 10, 49, 32, 49, 10]",
+      "expectation": "Simulation",
+      "name": "containers::container_values_are_converted_on_every_path",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

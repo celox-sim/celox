@@ -10,6 +10,7 @@ use fxhash::FxHashMap as HashMap;
 
 use num_bigint::BigUint;
 
+use crate::ast::ConstEnv;
 use crate::ast::const_functions::Budget;
 use crate::ir::{BinaryOp, Callee, ConstExpr, PackedRange, SystemFunction, UnaryOp};
 
@@ -75,12 +76,12 @@ impl std::fmt::Display for UnpackedArrayType {
 }
 
 pub fn resolve_packed_width(ranges: &[PackedRange]) -> Option<usize> {
-    resolve_packed_width_with_env(ranges, &HashMap::default())
+    resolve_packed_width_with_env(ranges, &ConstEnv::default())
 }
 
 pub fn resolve_packed_width_with_env(
     ranges: &[PackedRange],
-    constants: &HashMap<String, i128>,
+    constants: &ConstEnv,
 ) -> Option<usize> {
     resolve_packed_width_in_env(ranges, constants)
 }
@@ -122,21 +123,34 @@ pub(crate) trait ConstantEnvironment {
     }
 }
 
-impl ConstantEnvironment for HashMap<String, i128> {
+/// A table of constant values that the public evaluators read.
+pub trait Constants {
+    fn constant(&self, name: &str) -> Option<&i128>;
+}
+
+impl Constants for HashMap<String, i128> {
+    fn constant(&self, name: &str) -> Option<&i128> {
+        self.get(name)
+    }
+}
+
+impl Constants for ConstEnv {
+    fn constant(&self, name: &str) -> Option<&i128> {
+        self.get(name)
+    }
+}
+
+impl<T: Constants> ConstantEnvironment for T {
     fn get(&self, name: &str) -> Option<&i128> {
-        HashMap::get(self, name)
+        self.constant(name)
     }
 }
 
 /// Width of flattened select bounds that differ by a constant offset.
-pub fn select_range_width(
-    msb: &ConstExpr,
-    lsb: &ConstExpr,
-    constants: &HashMap<String, i128>,
-) -> Option<usize> {
+pub fn select_range_width(msb: &ConstExpr, lsb: &ConstExpr, constants: &ConstEnv) -> Option<usize> {
     fn offset<'a>(
         expr: &'a ConstExpr,
-        constants: &HashMap<String, i128>,
+        constants: &ConstEnv,
     ) -> Option<(Option<&'a ConstExpr>, i128)> {
         if let Some(value) = eval_const_expr(expr, constants) {
             return Some((None, value));
@@ -169,7 +183,7 @@ pub fn select_range_width(
         .checked_add(1)
 }
 
-pub fn eval_const_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> Option<i128> {
+pub fn eval_const_expr(expr: &ConstExpr, constants: &impl Constants) -> Option<i128> {
     eval_const_expr_in_env(expr, constants)
 }
 
@@ -406,7 +420,7 @@ pub(crate) fn eval_const_expr_in_env_budgeted(
 /// SystemVerilog width and signedness rules for mixed-type operations.
 pub fn eval_const_expr_with_types(
     expr: &ConstExpr,
-    constants: &HashMap<String, i128>,
+    constants: &impl Constants,
     types: &HashMap<String, (usize, bool)>,
 ) -> Option<i128> {
     // Runtime select bounds often contain large inlined expressions. Reject a
@@ -422,16 +436,16 @@ pub fn eval_const_expr_with_types(
     eval_const_expr(&expr, constants)
 }
 
-fn requires_unbound_value(expr: &ConstExpr, constants: &HashMap<String, i128>) -> bool {
+fn requires_unbound_value(expr: &ConstExpr, constants: &impl Constants) -> bool {
     match expr {
         ConstExpr::Literal(_) | ConstExpr::Function { .. } => return false,
-        ConstExpr::Ident(name) => return !constants.contains_key(name),
+        ConstExpr::Ident(name) => return constants.constant(name).is_none(),
         _ => {}
     }
     let mut pending = vec![expr];
     while let Some(expr) = pending.pop() {
         match expr {
-            ConstExpr::Ident(name) if !constants.contains_key(name) => return true,
+            ConstExpr::Ident(name) if constants.constant(name).is_none() => return true,
             ConstExpr::Unary { expr, .. } | ConstExpr::Resize { expr, .. } => pending.push(expr),
             ConstExpr::Select { expr, bit } => pending.extend([bit.as_ref(), expr.as_ref()]),
             ConstExpr::SelectRange { expr, msb, lsb, .. } => {
@@ -458,12 +472,12 @@ fn requires_unbound_value(expr: &ConstExpr, constants: &HashMap<String, i128>) -
 /// [`substitute_typed_constants`] replaces with a sized literal.
 fn has_typed_constant(
     expr: &ConstExpr,
-    constants: &HashMap<String, i128>,
+    constants: &impl Constants,
     types: &HashMap<String, (usize, bool)>,
 ) -> bool {
     let has = |expr| has_typed_constant(expr, constants, types);
     match expr {
-        ConstExpr::Ident(name) => constants.contains_key(name) && types.contains_key(name),
+        ConstExpr::Ident(name) => constants.constant(name).is_some() && types.contains_key(name),
         ConstExpr::Literal(_) => false,
         ConstExpr::SelectRange { expr, msb, lsb, .. } => has(expr) || has(msb) || has(lsb),
         ConstExpr::Select { expr, bit } => has(expr) || has(bit),
@@ -483,14 +497,14 @@ fn has_typed_constant(
 /// Integral subexpressions retain their integer arithmetic before conversion.
 /// Callers that only validate a parameter binding should preserve the original
 /// expression so the receiving declaration still supplies its type context.
-pub fn eval_const_real_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> Option<f64> {
+pub fn eval_const_real_expr(expr: &ConstExpr, constants: &impl Constants) -> Option<f64> {
     real::evaluate(expr, constants)
 }
 
 /// Evaluate a literal constant expression without discarding four-state masks.
 pub fn eval_const_integral_literal_with_types(
     expr: &ConstExpr,
-    constants: &HashMap<String, i128>,
+    constants: &impl Constants,
     types: &HashMap<String, (usize, bool)>,
 ) -> Option<IntegralLiteral> {
     eval_const_integral_literal_with_lookup(expr, constants, &|name| types.get(name).copied())
@@ -499,7 +513,7 @@ pub fn eval_const_integral_literal_with_types(
 /// Query only the types of identifiers encountered during substitution.
 pub(crate) fn eval_const_integral_literal_with_lookup(
     expr: &ConstExpr,
-    constants: &HashMap<String, i128>,
+    constants: &impl Constants,
     types: &impl Fn(&str) -> Option<(usize, bool)>,
 ) -> Option<IntegralLiteral> {
     eval_const_integral_literal_in_env(expr, constants, types)
@@ -553,7 +567,7 @@ pub(crate) fn eval_const_assignment_in_env(
 /// context without discarding X/Z masks.
 pub fn context_size_const_integral_literal(
     expr: &ConstExpr,
-    constants: &HashMap<String, i128>,
+    constants: &impl Constants,
     types: &HashMap<String, (usize, bool)>,
     width: usize,
     signed: bool,
@@ -573,7 +587,7 @@ pub fn context_size_const_integral_literal(
 /// propagates its width into arithmetic operands before they are evaluated.
 pub(crate) fn eval_generate_case_operand(
     expr: &ConstExpr,
-    constants: &HashMap<String, i128>,
+    constants: &ConstEnv,
     types: &HashMap<String, (usize, bool)>,
     width: usize,
     signed: bool,
@@ -695,7 +709,7 @@ pub fn format_integral_literal_binary(literal: &IntegralLiteral) -> String {
 
 pub fn substitute_typed_constants(
     expr: ConstExpr,
-    constants: &HashMap<String, i128>,
+    constants: &impl Constants,
     types: &HashMap<String, (usize, bool)>,
 ) -> ConstExpr {
     substitute_typed_constants_with_lookup(expr, constants, &|name| types.get(name).copied())
@@ -2192,7 +2206,7 @@ mod literal_tests {
         };
         LITERAL_EVALUATIONS.with(|count| count.set(0));
         assert_eq!(
-            eval_const_expr_with_types(&expr, &HashMap::default(), &HashMap::default()),
+            eval_const_expr_with_types(&expr, &ConstEnv::default(), &HashMap::default()),
             Some(5)
         );
         assert_eq!(LITERAL_EVALUATIONS.with(|count| count.get()), 2);
@@ -2216,7 +2230,7 @@ mod literal_tests {
         assert_eq!(
             eval_const_expr_with_types(
                 &bound,
-                &HashMap::from_iter([("P".into(), 7)]),
+                &ConstEnv::from_iter([("P".into(), 7)]),
                 &HashMap::from_iter([("P".into(), (32, false))])
             ),
             None
@@ -2272,7 +2286,7 @@ mod literal_tests {
         ];
         for (expr, expected) in expressions {
             assert_eq!(
-                eval_const_expr_with_types(&expr, &HashMap::default(), &HashMap::default()),
+                eval_const_expr_with_types(&expr, &ConstEnv::default(), &HashMap::default()),
                 expected,
                 "{expr:?}"
             );
@@ -2285,7 +2299,7 @@ mod literal_tests {
         assert_eq!(
             eval_const_expr_with_types(
                 &sample,
-                &HashMap::from_iter([("runtime_index".into(), 3), ("P".into(), 7)]),
+                &ConstEnv::from_iter([("runtime_index".into(), 3), ("P".into(), 7)]),
                 &HashMap::from_iter([("P".into(), (32, false))])
             ),
             Some(21)
@@ -2303,7 +2317,7 @@ mod literal_tests {
             op,
             right: Box::new(right),
         };
-        let constants: HashMap<String, i128> = [("N".to_string(), 255), ("M".to_string(), 3)]
+        let constants: ConstEnv = [("N".to_string(), 255), ("M".to_string(), 3)]
             .into_iter()
             .collect();
         let types: HashMap<String, (usize, bool)> =
@@ -2518,7 +2532,7 @@ mod literal_tests {
 
     #[test]
     fn evaluates_nested_logical_parameter_chains() {
-        let constants = HashMap::from_iter([("P".to_string(), 1)]);
+        let constants = ConstEnv::from_iter([("P".to_string(), 1)]);
         let mut expr = ConstExpr::Ident("P".into());
         for _ in 0..64 {
             expr = ConstExpr::Binary {
@@ -2557,7 +2571,7 @@ mod literal_tests {
             signed: true,
         };
         assert_eq!(
-            eval_const_expr(&expr, &HashMap::from_iter([("value".into(), 3)])),
+            eval_const_expr(&expr, &ConstEnv::from_iter([("value".into(), 3)])),
             Some(-1)
         );
     }
@@ -2669,7 +2683,7 @@ mod literal_tests {
                     expected,
                     "{left} {op:?} {right}"
                 );
-                assert_eq!(eval_const_expr(&expr, &HashMap::default()), None);
+                assert_eq!(eval_const_expr(&expr, &ConstEnv::default()), None);
             }
         }
         for op in [UnaryOp::Plus, UnaryOp::Minus] {
@@ -2719,7 +2733,7 @@ mod literal_tests {
             assert_eq!(result.width, 1);
             assert!(!result.signed);
             assert_eq!(
-                eval_const_expr(&reduced, &HashMap::default()),
+                eval_const_expr(&reduced, &ConstEnv::default()),
                 integral_literal_as_i128(&result, false)
             );
         }
@@ -2775,7 +2789,7 @@ mod literal_tests {
                             "{op:?} 3'sb{a}{b}{c}"
                         );
                         assert_eq!(
-                            eval_const_expr(&expr, &HashMap::default()),
+                            eval_const_expr(&expr, &ConstEnv::default()),
                             truth.map(i128::from)
                         );
                         let complement = ConstExpr::Unary {
@@ -2787,7 +2801,7 @@ mod literal_tests {
                             integral_literal_from_truth(truth.map(|value| !value))
                         );
                         assert_eq!(
-                            eval_const_expr(&complement, &HashMap::default()),
+                            eval_const_expr(&complement, &ConstEnv::default()),
                             truth.map(|value| i128::from(!value))
                         );
                     }
@@ -2810,7 +2824,7 @@ mod literal_tests {
                     integral_literal_from_truth(truth)
                 );
                 assert_eq!(
-                    eval_const_expr(&expr, &HashMap::default()),
+                    eval_const_expr(&expr, &ConstEnv::default()),
                     truth.map(i128::from)
                 );
             }
@@ -2863,14 +2877,17 @@ mod literal_tests {
     fn preserves_128_bit_unsigned_literals_as_bit_patterns() {
         let expr = ConstExpr::Literal("128'h80000000000000000000000000000000".to_string());
 
-        assert_eq!(eval_const_expr(&expr, &HashMap::default()), Some(i128::MIN));
+        assert_eq!(
+            eval_const_expr(&expr, &ConstEnv::default()),
+            Some(i128::MIN)
+        );
         for op in [UnaryOp::Plus, UnaryOp::ToTwoState] {
             let unary = ConstExpr::Unary {
                 op,
                 expr: Box::new(expr.clone()),
             };
             assert_eq!(
-                eval_const_expr(&unary, &HashMap::default()),
+                eval_const_expr(&unary, &ConstEnv::default()),
                 Some(i128::MIN)
             );
         }
@@ -2903,8 +2920,8 @@ mod literal_tests {
             right: Box::new(ConstExpr::Literal("1'bz".to_string())),
         };
 
-        assert_eq!(eval_const_expr(&eq, &HashMap::default()), Some(1));
-        assert_eq!(eval_const_expr(&ne, &HashMap::default()), Some(1));
+        assert_eq!(eval_const_expr(&eq, &ConstEnv::default()), Some(1));
+        assert_eq!(eval_const_expr(&ne, &ConstEnv::default()), Some(1));
     }
 
     #[test]
@@ -2923,7 +2940,7 @@ mod literal_tests {
                     };
                     let literal = eval_const_integral_literal_with_types(
                         &expr,
-                        &HashMap::default(),
+                        &ConstEnv::default(),
                         &HashMap::default(),
                     )
                     .unwrap();
@@ -2940,10 +2957,13 @@ mod literal_tests {
             op: BinaryOp::LogicAnd,
             right: Box::new(ConstExpr::Literal("1'sb1".to_string())),
         };
-        assert_eq!(eval_const_expr(&expr, &HashMap::default()), Some(1));
-        let literal =
-            eval_const_integral_literal_with_types(&expr, &HashMap::default(), &HashMap::default())
-                .unwrap();
+        assert_eq!(eval_const_expr(&expr, &ConstEnv::default()), Some(1));
+        let literal = eval_const_integral_literal_with_types(
+            &expr,
+            &ConstEnv::default(),
+            &HashMap::default(),
+        )
+        .unwrap();
         assert_eq!(format_integral_literal_binary(&literal), "1'b1");
     }
 
@@ -2963,7 +2983,7 @@ mod literal_tests {
                     };
                     let literal = eval_const_integral_literal_with_types(
                         &expr,
-                        &HashMap::default(),
+                        &ConstEnv::default(),
                         &HashMap::default(),
                     )
                     .unwrap_or_else(|| panic!("failed to evaluate {expr:?}"));
@@ -3001,7 +3021,7 @@ mod literal_tests {
                 };
                 let literal = eval_const_integral_literal_with_types(
                     &expr,
-                    &HashMap::default(),
+                    &ConstEnv::default(),
                     &HashMap::default(),
                 )
                 .unwrap_or_else(|| panic!("failed to evaluate {expr:?}"));
@@ -3013,7 +3033,7 @@ mod literal_tests {
                     "{expr:?}"
                 );
                 assert_eq!(
-                    eval_const_expr(&expr, &HashMap::default()),
+                    eval_const_expr(&expr, &ConstEnv::default()),
                     expected.map(i128::from),
                     "{expr:?}"
                 );
@@ -3039,7 +3059,7 @@ mod literal_tests {
                     };
                     let literal = eval_const_integral_literal_with_types(
                         &expr,
-                        &HashMap::default(),
+                        &ConstEnv::default(),
                         &HashMap::default(),
                     )
                     .unwrap_or_else(|| panic!("failed to evaluate {expr:?}"));
@@ -3085,7 +3105,7 @@ mod literal_tests {
                 });
                 let literal = eval_const_integral_literal_with_types(
                     &expr,
-                    &HashMap::default(),
+                    &ConstEnv::default(),
                     &HashMap::default(),
                 )
                 .unwrap_or_else(|| panic!("failed to evaluate {expr:?}"));
@@ -3096,7 +3116,7 @@ mod literal_tests {
                     "{expr:?}"
                 );
                 assert_eq!(
-                    eval_const_expr(&expr, &HashMap::default()),
+                    eval_const_expr(&expr, &ConstEnv::default()),
                     expected.map(i128::from),
                     "{expr:?}"
                 );
@@ -3121,7 +3141,7 @@ mod literal_tests {
             };
             let literal = eval_const_integral_literal_with_types(
                 &expr,
-                &HashMap::default(),
+                &ConstEnv::default(),
                 &HashMap::default(),
             )
             .unwrap();
@@ -3144,14 +3164,14 @@ mod literal_tests {
 
         let merged = eval_const_integral_literal_with_types(
             &merged,
-            &HashMap::default(),
+            &ConstEnv::default(),
             &HashMap::default(),
         )
         .unwrap();
         assert_eq!(format_integral_literal_binary(&merged), "1'bx");
         let identical_z = eval_const_integral_literal_with_types(
             &identical_z,
-            &HashMap::default(),
+            &ConstEnv::default(),
             &HashMap::default(),
         )
         .unwrap();
@@ -3171,8 +3191,8 @@ mod literal_tests {
             right: Box::new(ConstExpr::Literal("'x".to_string())),
         };
 
-        assert_eq!(eval_const_expr(&eq, &HashMap::default()), Some(1));
-        assert_eq!(eval_const_expr(&ne, &HashMap::default()), Some(0));
+        assert_eq!(eval_const_expr(&eq, &ConstEnv::default()), Some(1));
+        assert_eq!(eval_const_expr(&ne, &ConstEnv::default()), Some(0));
     }
 
     #[test]
@@ -3193,9 +3213,9 @@ mod literal_tests {
             right: Box::new(ConstExpr::Literal("2'b10".to_string())),
         };
 
-        assert_eq!(eval_const_expr(&eq, &HashMap::default()), Some(1));
-        assert_eq!(eval_const_expr(&ne, &HashMap::default()), Some(1));
-        assert_eq!(eval_const_expr(&indeterminate, &HashMap::default()), None);
+        assert_eq!(eval_const_expr(&eq, &ConstEnv::default()), Some(1));
+        assert_eq!(eval_const_expr(&ne, &ConstEnv::default()), Some(1));
+        assert_eq!(eval_const_expr(&indeterminate, &ConstEnv::default()), None);
     }
 
     #[test]
@@ -3210,7 +3230,7 @@ mod literal_tests {
                 }),
             };
 
-            assert_eq!(eval_const_expr(&expr, &HashMap::default()), None);
+            assert_eq!(eval_const_expr(&expr, &ConstEnv::default()), None);
         }
     }
 
@@ -3225,8 +3245,8 @@ mod literal_tests {
             expr: Box::new(ConstExpr::Literal("8'sh00".to_string())),
         };
 
-        assert_eq!(eval_const_expr(&minus, &HashMap::default()), Some(1));
-        assert_eq!(eval_const_expr(&bit_not, &HashMap::default()), Some(-1));
+        assert_eq!(eval_const_expr(&minus, &ConstEnv::default()), Some(1));
+        assert_eq!(eval_const_expr(&bit_not, &ConstEnv::default()), Some(-1));
     }
 
     #[test]
@@ -3236,7 +3256,7 @@ mod literal_tests {
             expr: Box::new(ConstExpr::Literal("8'd1".to_string())),
         };
 
-        assert_eq!(eval_const_expr(&expr, &HashMap::default()), Some(0xff));
+        assert_eq!(eval_const_expr(&expr, &ConstEnv::default()), Some(0xff));
     }
 
     #[test]
@@ -3247,7 +3267,7 @@ mod literal_tests {
             right: Box::new(ConstExpr::Literal("8'h01".to_string())),
         };
 
-        assert_eq!(eval_const_expr(&expr, &HashMap::default()), Some(0));
+        assert_eq!(eval_const_expr(&expr, &ConstEnv::default()), Some(0));
     }
 
     #[test]
@@ -3258,7 +3278,7 @@ mod literal_tests {
             right: Box::new(ConstExpr::Literal("1".to_string())),
         };
 
-        assert_eq!(eval_const_expr(&expr, &HashMap::default()), Some(0x7f));
+        assert_eq!(eval_const_expr(&expr, &ConstEnv::default()), Some(0x7f));
     }
 
     #[test]
@@ -3269,7 +3289,7 @@ mod literal_tests {
             right: Box::new(ConstExpr::Literal("8'h01".to_string())),
         };
 
-        assert_eq!(eval_const_expr(&expr, &HashMap::default()), Some(0));
+        assert_eq!(eval_const_expr(&expr, &ConstEnv::default()), Some(0));
     }
 
     #[test]
@@ -3281,7 +3301,7 @@ mod literal_tests {
                 right: Box::new(ConstExpr::Literal("8'h02".to_string())),
             };
 
-            assert_eq!(eval_const_expr(&expr, &HashMap::default()), Some(expected));
+            assert_eq!(eval_const_expr(&expr, &ConstEnv::default()), Some(expected));
         }
     }
     #[test]

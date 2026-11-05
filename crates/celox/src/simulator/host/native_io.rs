@@ -1,11 +1,15 @@
-//! File writes and loop checkpoints called by a native scheduler through the ordinary
-//! extern-function ABI. The active scope borrows host services separately from
-//! the backend; the callback never re-enters a Simulator or its scheduler.
+//! Host services called through the native scheduler's extern-function ABI.
+//! Signal callbacks use a prepared invocation, with no backend method or state
+//! slice borrowed across generated execution. They never re-enter simulation
+//! scheduling; the generated caller settles their writes and resumes its waves.
 pub(crate) use super::native_arena::Header as ArenaHeader;
+pub(crate) use super::native_nba::Header as NbaHeader;
 use super::*;
 use celox_design::{HostRequestKind, HostRequestSite};
 
-pub(crate) const SYMBOL: &str = "__celox_native_services_v3";
+pub(crate) const SYMBOL: &str = "__celox_native_services_v11";
+
+pub(crate) const BEFORE_DOMAINS: u64 = u64::MAX - 14;
 
 pub(crate) const CHECKPOINT: u64 = u64::MAX;
 pub(crate) const SCHEDULER_RUN: u64 = u64::MAX - 1;
@@ -17,6 +21,11 @@ pub(crate) const ARENA_RESERVE_RECORDS: u64 = u64::MAX - 5;
 pub(crate) const ARENA_RESERVE_IMAGES: u64 = u64::MAX - 6;
 pub(crate) const ARENA_WAVE_LIMIT: u64 = u64::MAX - 7;
 pub(crate) const GUARD_FAULT: u64 = u64::MAX - 8;
+pub(crate) const COMB_BEFORE: u64 = u64::MAX - 9;
+pub(crate) const COMB_AFTER: u64 = u64::MAX - 10;
+pub(crate) const ARENA_RESERVE_NBA: u64 = u64::MAX - 11;
+pub(crate) const NBA_TIME_OVERFLOW: u64 = u64::MAX - 13;
+pub(crate) const ARENA_RESERVE_DELAYED_NBA: u64 = u64::MAX - 12;
 
 pub(crate) fn signature() -> celox_design::ExternSignature {
     let integer = celox_design::ExternType::Integer {
@@ -44,7 +53,10 @@ pub(super) struct Metadata {
     pub runtime_sites: Vec<RuntimeEventSite>,
     pub process_names: Vec<String>,
     pub nbas: Vec<Vec<celox_design::NbaSite<SignalRef>>>,
+    pub native_nbas: Vec<celox_design::NbaSite<SignalRef>>,
+    pub host_inputs: crate::HashMap<SignalRef, Vec<usize>>,
     pub flagged: Vec<(usize, usize)>,
+    pub deferred_groups: Vec<(u32, usize)>,
 }
 
 pub(crate) fn supported<A>(site: &HostRequestSite<A>) -> bool {
@@ -148,7 +160,37 @@ impl Metadata {
                     .map(move |(site, _)| (process, site))
             })
             .collect();
+        let mut deferred_groups = Vec::new();
+        for observer in &program.runtime_schema.comb_observers {
+            if matches!(
+                program.runtime_schema.runtime_event_sites[observer.site_id as usize].deferred,
+                Some(celox_design::DeferredSite::Action { .. })
+            ) && !deferred_groups
+                .iter()
+                .any(|&(group, _)| group == observer.activation_group)
+            {
+                deferred_groups.push((observer.activation_group, observer.site_id as usize));
+            }
+        }
+        let mut host_inputs: crate::HashMap<SignalRef, Vec<usize>> = crate::HashMap::default();
+        for (id, signal) in crate::scheduler::host_inputs::signals(&program.runtime_schema)
+            .into_iter()
+            .enumerate()
+        {
+            host_inputs
+                .entry(backend.resolve_signal(&signal))
+                .or_default()
+                .push(id);
+        }
         Some(Arc::new(Self {
+            host_inputs,
+            native_nbas: program
+                .runtime_schema
+                .nba_sites
+                .iter()
+                .map(|site| site.map(|address| backend.resolve_signal(&address)))
+                .collect(),
+            deferred_groups,
             nbas,
             flagged,
             layout: backend.layout().clone(),
@@ -171,6 +213,83 @@ impl Metadata {
     }
 }
 
+pub(super) trait ObserverService {
+    fn before_domains(
+        &mut self,
+        time: u64,
+        metadata: &Metadata,
+        arena: &mut super::native_arena::Arena,
+    ) -> u64;
+}
+
+pub(super) struct SlotService<'a, B: SimBackend> {
+    pub backend: &'a mut B,
+    pub observer: Option<&'a mut (dyn crate::SlotObserver<B> + 'static)>,
+    pub watch: &'a mut celox_runtime::HostWatch,
+    pub dirty: &'a mut bool,
+}
+
+impl<B: SimBackend> ObserverService for SlotService<'_, B> {
+    fn before_domains(
+        &mut self,
+        time: u64,
+        metadata: &Metadata,
+        arena: &mut super::native_arena::Arena,
+    ) -> u64 {
+        let mut io = crate::SlotIo::new(crate::IOContext {
+            backend: self.backend,
+            watch: self.watch,
+        });
+        if let Some(observer) = self.observer.as_deref_mut() {
+            observer.before_domains(&mut io, time);
+        }
+        let wrote = io.wrote();
+        let finish = io.finish_requested();
+        *self.dirty |= wrote;
+        if !finish {
+            pack_host_inputs(self.backend, metadata, arena, self.watch.take_log());
+        }
+        // A finish precedes host-write observation in the reference round.
+        // Keep its pending log in the saved state rather than a transient arena.
+        (u64::from(wrote) * 2) | (u64::from(finish) * 4)
+    }
+}
+
+pub(super) fn pack_host_inputs<B: SimBackend>(
+    backend: &B,
+    metadata: &Metadata,
+    arena: &mut super::native_arena::Arena,
+    writes: Vec<(SignalRef, (BigUint, BigUint))>,
+) {
+    arena.host_values.clear();
+    for (signal, value) in writes {
+        let Some(ids) = metadata.host_inputs.get(&signal) else {
+            continue;
+        };
+        let final_value = backend.get_four_state(signal);
+        let words = signal.width.div_ceil(64);
+        let masks = backend.layout().four_state && signal.is_4state;
+        let planes = if masks { 2 } else { 1 };
+        for &id in ids {
+            for (header_id, (value, mask)) in [(id as u64, &value), (0, &final_value)] {
+                let start = arena.host_values.len();
+                arena.host_values.resize(start + 8 + words * planes, 0);
+                arena.host_values[start] = header_id;
+                for (word, value) in value.iter_u64_digits().take(words).enumerate() {
+                    arena.host_values[start + 8 + word] = value;
+                }
+                if masks {
+                    for (word, value) in mask.iter_u64_digits().take(words).enumerate() {
+                        arena.host_values[start + 8 + words + word] = value;
+                    }
+                }
+            }
+        }
+    }
+    arena.header.host_values = arena.host_values.as_mut_ptr();
+    arena.header.host_words = arena.host_values.len() as u64;
+}
+
 #[repr(C)]
 pub(super) struct Scope<'a> {
     // Generated code reads this first pointer; Arena's first member is Header.
@@ -186,7 +305,10 @@ pub(super) struct Scope<'a> {
     pub return_budget: u64,
     pub round_budget: u64,
     pub nbas: &'a mut std::collections::VecDeque<celox_runtime::NbaUpdate>,
+    pub delayed: &'a mut std::collections::VecDeque<(u64, celox_runtime::NbaUpdate)>,
     pub pending_scan: usize,
+    pub comb_before: Vec<bool>,
+    pub observer: Option<&'a mut dyn ObserverService>,
 }
 
 impl Scope<'_> {
@@ -197,24 +319,69 @@ impl Scope<'_> {
         backend: &mut B,
         index: usize,
     ) -> (Result<(), RuntimeErrorCode>, Option<RuntimeErrorCode>) {
+        self.run_call(|| (backend.run_process(index), None)).0
+    }
+
+    pub(super) fn run_prepared(
+        &mut self,
+        call: celox_runtime::backend::PreparedProcess,
+    ) -> (
+        (Result<(), RuntimeErrorCode>, Option<RuntimeErrorCode>),
+        Option<std::time::Duration>,
+    ) {
+        self.run_call(|| {
+            // SAFETY: the owner retains the backend exclusively. Only SlotIo
+            // may borrow it synchronously; it cannot execute or promote code.
+            unsafe { call.invoke() }
+        })
+    }
+
+    fn run_call(
+        &mut self,
+        run: impl FnOnce() -> (Result<(), RuntimeErrorCode>, Option<std::time::Duration>),
+    ) -> (
+        (Result<(), RuntimeErrorCode>, Option<RuntimeErrorCode>),
+        Option<std::time::Duration>,
+    ) {
         self.arena.header.wave_limit = self.round_budget;
         self.arena.header.guard_valid = 0;
         self.arena.header.work_limit = self
             .round_budget
             .saturating_mul(self.metadata.process_names.len().max(1) as u64);
         self.arena.header.return_limit = self.return_budget;
+        if let Err(error) = self.import_nbas() {
+            let _ = self.export_nbas();
+            return ((Err(error), self.error.take()), None);
+        }
+        self.arena.header.slot_observer = u64::from(self.observer.is_some());
         let pointer = std::ptr::from_mut(self) as u64;
-        let slot = self.metadata.context;
-        let previous: u64 = backend.get_as(slot);
-        backend.set(slot, pointer);
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| backend.run_process(index)));
-        backend.set(slot, previous);
-        let result = match result {
+        let offset = self.metadata.context.offset;
+        if offset
+            .checked_add(8)
+            .is_none_or(|end| end > self.state_size)
+        {
+            return (
+                (
+                    Err(Self::fault("native service context exceeds state image")),
+                    None,
+                ),
+                None,
+            );
+        }
+        // SAFETY: the image is interior mutable and exclusively executed. The
+        // slot is validated above and no Rust reference into it is retained.
+        let slot = unsafe { self.state.add(offset).cast_mut().cast::<u64>() };
+        let previous = unsafe { slot.read_unaligned() };
+        unsafe { slot.write_unaligned(pointer) };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
+        unsafe { slot.write_unaligned(previous) };
+        self.arena.header.slot_observer = 0;
+        let (result, elapsed) = match result {
             Ok(result) => result,
             Err(panic) => std::panic::resume_unwind(panic),
         };
-        (result, self.error.take())
+        let exported = self.export_nbas();
+        ((result.and(exported), self.error.take()), elapsed)
     }
 
     fn store_value(
@@ -251,6 +418,173 @@ impl Scope<'_> {
             // described by the same layout. These writes bypass backend.set.
             unsafe { settle.mark_range(self.state.cast_mut(), signal.offset, plane * count) };
         }
+        Ok(())
+    }
+
+    fn import_record(
+        &mut self,
+        update: &celox_runtime::NbaUpdate,
+        due: Option<u64>,
+    ) -> Result<(), RuntimeErrorCode> {
+        // Snapshots identify logical targets, not generated site numbers.
+        // All static NBA destinations have a publication descriptor, including
+        // values staged by a cold initializer before the first native run.
+        let (id, site) = self
+            .metadata
+            .native_nbas
+            .iter()
+            .enumerate()
+            .filter(|(_, site)| {
+                site.target == update.target
+                    && site.width >= update.width
+                    && (update.value.1 == BigUint::default()
+                        || (self.metadata.layout.four_state && site.value.is_4state))
+            })
+            .max_by_key(|(_, site)| site.width)
+            .ok_or_else(|| Self::fault("queued NBA target has no native publication descriptor"))?;
+        let masks = self.metadata.layout.four_state && site.value.is_4state;
+        let words = site.width.div_ceil(64);
+        if update.value.0.bits() > (words * 64) as u64
+            || update.value.1.bits() > (words * 64) as u64
+        {
+            return Err(Self::fault("queued NBA exceeds its native staging format"));
+        }
+        let mut record = vec![0u64; 8 + words * if masks { 2 } else { 1 }];
+        record[1] = due.unwrap_or_default();
+        record[2] = id as u64;
+        record[3] = update.lsb as u64;
+        record[4] = update.width as u64;
+        record[6] = self.arena.header.nba.sequence;
+        record[7] = 1;
+        for (index, value) in update.value.0.iter_u64_digits().enumerate() {
+            record[8 + index] = value;
+        }
+        if masks {
+            for (index, mask) in update.value.1.iter_u64_digits().enumerate() {
+                record[8 + words + index] = mask;
+            }
+        }
+        if due.is_some() {
+            let required = self.arena.header.nba.delayed_len + 1;
+            self.arena
+                .nba
+                .reserve_delayed(&mut self.arena.header.nba, required)?;
+        }
+        let pointer = self.arena.nba.import(&mut self.arena.header.nba, &record)?;
+        if due.is_some() {
+            // Input is ordered by (time, issue order). A sorted array is also
+            // a min-heap; generated code owns all subsequent heap operations.
+            self.arena
+                .nba
+                .append_delayed(&mut self.arena.header.nba, pointer)?;
+            self.arena.header.nba.sequence += 1;
+        } else {
+            self.arena
+                .nba
+                .append_imported(&mut self.arena.header.nba, pointer)?;
+        }
+        Ok(())
+    }
+
+    fn import_nbas(&mut self) -> Result<(), RuntimeErrorCode> {
+        while let Some(update) = self.nbas.front().cloned() {
+            self.import_record(&update, None)?;
+            self.nbas.pop_front();
+        }
+        while let Some((time, update)) = self.delayed.front().cloned() {
+            self.import_record(&update, Some(time))?;
+            self.delayed.pop_front();
+        }
+        Ok(())
+    }
+
+    fn decode_nba(&self, pointer: u64) -> Result<celox_runtime::NbaUpdate, RuntimeErrorCode> {
+        let header = self
+            .arena
+            .nba
+            .record(pointer, 8)
+            .ok_or_else(|| Self::fault("invalid native NBA record"))?;
+        let site = usize::try_from(header[2])
+            .ok()
+            .and_then(|site| self.metadata.native_nbas.get(site))
+            .ok_or_else(|| Self::fault("invalid native NBA site"))?;
+        let lsb =
+            usize::try_from(header[3]).map_err(|_| Self::fault("invalid native NBA range"))?;
+        let width =
+            usize::try_from(header[4]).map_err(|_| Self::fault("invalid native NBA range"))?;
+        let words = site.width.div_ceil(64);
+        let masks = self.metadata.layout.four_state && site.value.is_4state;
+        let record = self
+            .arena
+            .nba
+            .record(pointer, 8 + words * if masks { 2 } else { 1 })
+            .ok_or_else(|| Self::fault("invalid native NBA value"))?;
+        let plane = |slice: &[u64]| {
+            BigUint::new(
+                slice
+                    .iter()
+                    .flat_map(|&word| [word as u32, (word >> 32) as u32])
+                    .collect(),
+            )
+        };
+        let value = plane(&record[8..8 + words]);
+        let mask = if masks {
+            plane(&record[8 + words..8 + words * 2])
+        } else {
+            BigUint::default()
+        };
+        Ok(celox_runtime::NbaUpdate {
+            target: site.target,
+            lsb,
+            width,
+            value: (value, mask),
+        })
+    }
+
+    /// Portable serialization at invocation boundaries; the generated scheduler
+    /// owns both queues throughout the run.
+    fn export_nbas(&mut self) -> Result<(), RuntimeErrorCode> {
+        while self.arena.header.nba.head != 0 {
+            let pointer = self.arena.header.nba.head;
+            let header = self
+                .arena
+                .nba
+                .record(pointer, 8)
+                .ok_or_else(|| Self::fault("invalid native NBA record"))?;
+            let (next, class) = (header[0], header[5]);
+            let update = self.decode_nba(pointer)?;
+            self.nbas.push_back(update);
+            self.arena
+                .nba
+                .release(&mut self.arena.header.nba, pointer, class)?;
+            self.arena.header.nba.head = next;
+        }
+        self.arena.header.nba.tail = 0;
+        let mut pending = Vec::new();
+        for &pointer in self.arena.nba.delayed_records(&self.arena.header.nba)? {
+            let record = self
+                .arena
+                .nba
+                .record(pointer, 8)
+                .ok_or_else(|| Self::fault("invalid native delayed NBA record"))?;
+            pending.push((record[1], record[6], pointer, record[5]));
+        }
+        pending.sort_unstable_by_key(|&(time, sequence, _, _)| (time, sequence));
+        // Decode before releasing any record, so malformed state cannot cause
+        // an exported queue to retain freed native pointers.
+        let updates: Result<Vec<_>, _> = pending
+            .iter()
+            .map(|&(time, _, pointer, _)| self.decode_nba(pointer).map(|update| (time, update)))
+            .collect();
+        let updates = updates?;
+        for (_, _, pointer, class) in pending {
+            self.arena
+                .nba
+                .release(&mut self.arena.header.nba, pointer, class)?;
+        }
+        self.delayed.extend(updates);
+        self.arena.header.nba.delayed_len = 0;
+        self.arena.header.nba.sequence = 0;
         Ok(())
     }
 
@@ -429,6 +763,93 @@ impl Scope<'_> {
         Ok((value, mask))
     }
 
+    fn drain_events(&self, pending: &mut PendingRuntimeEvents) -> Result<(), RuntimeErrorCode> {
+        let offset = celox_state_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET;
+        if offset + 8 > self.state_size {
+            return Err(Self::fault("native state has no runtime-event header"));
+        }
+        // SAFETY: the native ABI installs this live event-buffer pointer before
+        // entering compiled code; this callback executes synchronously after
+        // earlier records have been committed.
+        let pointer = unsafe { self.state.add(offset).cast::<*const u8>().read_unaligned() };
+        let layout = &self.metadata.layout;
+        let mut read_seq = self.read_seq.load(Ordering::Acquire);
+        let mut events = if pointer.is_null() {
+            Vec::new()
+        } else {
+            let size = celox_state_layout::RUNTIME_EVENT_HEADER_SIZE
+                + layout.runtime_event_capacity * layout.runtime_event_slot_size;
+            collect_runtime_events(
+                layout,
+                &self.metadata.runtime_sites,
+                &mut read_seq,
+                size,
+                |offset| unsafe { pointer.add(offset).cast::<u64>().read_volatile() },
+                |offset| unsafe {
+                    (&*pointer.add(offset).cast::<AtomicU64>()).load(Ordering::Acquire)
+                },
+            )
+        };
+        self.read_seq.store(read_seq, Ordering::Release);
+        // The active native backend installs its heap after code adoption;
+        // read the current pointer rather than retaining the earlier tier's.
+        let heap = unsafe {
+            self.state
+                .add(celox_state_layout::STATE_HEADER_HEAP_ADDR_OFFSET)
+                .cast::<*const celox_heap::Heap>()
+                .read_unaligned()
+                .as_ref()
+        }
+        .ok_or_else(|| Self::fault("native state has no active heap"))?;
+        for event in &mut events {
+            event.resolve_handles(heap);
+        }
+        pending.extend(events, layout.runtime_event_capacity);
+        pending.resolve_deferred_handles(heap);
+        Ok(())
+    }
+
+    fn capture_enabled(&self, site: usize) -> bool {
+        // SAFETY: the backend installs a live flags array for every event site;
+        // this scope and its metadata belong to that same state image.
+        unsafe {
+            let pointer = self
+                .state
+                .add(celox_state_layout::STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET)
+                .cast::<*const u8>()
+                .read_unaligned();
+            *pointer.add(site) != 0
+        }
+    }
+
+    fn before_comb(&mut self) -> Result<(), RuntimeErrorCode> {
+        self.comb_before = self
+            .metadata
+            .deferred_groups
+            .iter()
+            .map(|&(_, site)| self.capture_enabled(site))
+            .collect();
+        let mut pending = self.pending.lock().unwrap();
+        self.drain_events(&mut pending)?;
+        for (&(group, _), &active) in self.metadata.deferred_groups.iter().zip(&self.comb_before) {
+            if active {
+                pending.flush(group);
+            }
+        }
+        Ok(())
+    }
+
+    fn after_comb(&self) {
+        let mut pending = self.pending.lock().unwrap();
+        // Do not collect the new records before cancelling the prior activation.
+        for (&(group, site), &active) in self.metadata.deferred_groups.iter().zip(&self.comb_before)
+        {
+            if !active && self.capture_enabled(site) {
+                pending.flush(group);
+            }
+        }
+    }
+
     fn write(
         &mut self,
         process: u64,
@@ -483,48 +904,8 @@ impl Scope<'_> {
         args: Vec<RuntimeEventArgValue>,
     ) -> Result<(), RuntimeErrorCode> {
         let mut pending = self.pending.lock().unwrap();
-        let offset = celox_state_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET;
-        if offset + 8 > self.state_size {
-            return Err(Self::fault("native state has no runtime-event header"));
-        }
-        // SAFETY: the native ABI installs this live event-buffer pointer before
-        // entering compiled code; this callback executes synchronously after
-        // earlier records have been committed.
-        let pointer = unsafe { self.state.add(offset).cast::<*const u8>().read_unaligned() };
+        self.drain_events(&mut pending)?;
         let layout = &self.metadata.layout;
-        let mut read_seq = self.read_seq.load(Ordering::Acquire);
-        let mut events = if pointer.is_null() {
-            Vec::new()
-        } else {
-            let size = celox_state_layout::RUNTIME_EVENT_HEADER_SIZE
-                + layout.runtime_event_capacity * layout.runtime_event_slot_size;
-            collect_runtime_events(
-                layout,
-                &self.metadata.runtime_sites,
-                &mut read_seq,
-                size,
-                |offset| unsafe { pointer.add(offset).cast::<u64>().read_volatile() },
-                |offset| unsafe {
-                    (&*pointer.add(offset).cast::<AtomicU64>()).load(Ordering::Acquire)
-                },
-            )
-        };
-        self.read_seq.store(read_seq, Ordering::Release);
-        // The active native backend installs its heap after code adoption;
-        // read the current pointer rather than retaining the earlier tier's.
-        let heap = unsafe {
-            self.state
-                .add(celox_state_layout::STATE_HEADER_HEAP_ADDR_OFFSET)
-                .cast::<*const celox_heap::Heap>()
-                .read_unaligned()
-                .as_ref()
-        }
-        .ok_or_else(|| Self::fault("native state has no active heap"))?;
-        for event in &mut events {
-            event.resolve_handles(heap);
-        }
-        pending.extend(events, layout.runtime_event_capacity);
-        pending.resolve_deferred_handles(heap);
         pending.push(
             RawRuntimeEvent::Host {
                 site: Box::new(site),
@@ -558,10 +939,31 @@ pub(crate) extern "C" fn call(
     let scope = unsafe { &mut *(context as *mut Scope<'_>) };
     scope.calls = scope.calls.saturating_add(1);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if matches!(encoded, ARENA_RESERVE_RECORDS | ARENA_RESERVE_IMAGES) {
+        if encoded == BEFORE_DOMAINS {
+            return match scope.observer.as_deref_mut() {
+                Some(observer) => {
+                    Ok(observer.before_domains(timestamp, scope.metadata, scope.arena))
+                }
+                None => Ok(0),
+            };
+        } else if matches!(encoded, ARENA_RESERVE_RECORDS | ARENA_RESERVE_IMAGES) {
             scope
                 .arena
                 .reserve(encoded == ARENA_RESERVE_IMAGES, process)?;
+        } else if encoded == ARENA_RESERVE_NBA {
+            scope
+                .arena
+                .nba
+                .reserve_class(&mut scope.arena.header.nba, process)?;
+        } else if encoded == ARENA_RESERVE_DELAYED_NBA {
+            scope
+                .arena
+                .nba
+                .reserve_delayed(&mut scope.arena.header.nba, process)?;
+        } else if encoded == NBA_TIME_OVERFLOW {
+            return Err(Scope::fault(
+                "nonblocking assignment delay overflows simulation time",
+            ));
         } else if encoded == ARENA_WAVE_LIMIT {
             return Err(Scope::fault(
                 "native ordered domain waves exceeded the round budget",
@@ -579,6 +981,10 @@ pub(crate) extern "C" fn call(
             // One counter spans every activation/pass of process_phase.
             // A new phase after NBA publication starts a fresh counter.
             scope.arena.header.returns = 0;
+        } else if encoded == COMB_BEFORE {
+            scope.before_comb()?;
+        } else if encoded == COMB_AFTER {
+            scope.after_comb();
         } else if encoded == NBA_PUBLISH {
             return scope.publish_nba();
         } else {
@@ -641,6 +1047,9 @@ mod tests {
             runtime_sites: vec![],
             process_names: vec![],
             flagged: vec![(0, 0), (0, 1)],
+            deferred_groups: Vec::new(),
+            native_nbas: Vec::new(),
+            host_inputs: crate::HashMap::default(),
             nbas: vec![
                 staged
                     .iter()
@@ -677,7 +1086,10 @@ mod tests {
             return_budget: u64::MAX,
             round_budget: u64::MAX,
             nbas: &mut queue,
+            delayed: &mut std::collections::VecDeque::new(),
             pending_scan: 0,
+            comb_before: Vec::new(),
+            observer: None,
         };
         let value = |bits: u8, mask: u8| (BigUint::from(bits), BigUint::from(mask));
         let update = |target, lsb, width, bits, mask| celox_runtime::NbaUpdate {

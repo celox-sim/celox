@@ -7,7 +7,7 @@ fn lazy_types_preserve_width_signedness_and_masks_across_expression_shapes() {
     let session = &mut Session::default();
     let syntax = crate::source_tree::SourceTree::empty();
     let tree = AnalysisContext::unspecialized(&syntax);
-    let mut env = HashMap::from_iter([
+    let mut env = ConstEnv::from_iter([
         ("A".into(), -2),
         ("B".into(), 1),
         ("W".into(), -1),

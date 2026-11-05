@@ -500,11 +500,19 @@ fn bind_value_in(
                     }
                 }
                 // A container formal passed by value receives a copy of a
-                // container value, as an assignment does (13.5.1, 7.6).
+                // container value, as an assignment does (13.5.1, 7.6). A
+                // conditional is bound below, its operands receiving the
+                // container in turn.
                 if let Some(container) = target
                     .as_deref()
                     .filter(|shape| shape.unpacked.is_empty())
                     .and_then(|shape| shape.container.as_deref())
+                    .filter(|_| {
+                        !matches!(
+                            native.expression(ungroup(id, native)).kind,
+                            ExprKind::Conditional { .. }
+                        )
+                    })
                 {
                     if containers::dynamic_array_new(id, native).is_some() {
                         return Err(AnalyzerError::Parse(
@@ -858,15 +866,15 @@ fn bind_value_in(
                             cast_shape(*target, native, tree, session, dimensions)?.map(Rc::new),
                         )],
                     ),
-                    _ if let Some((callee, args)) = method_call => {
+                    _ if let Some((_, args)) = method_call => {
                         let (name, formals, receiver) =
-                            objects::method(tree, session, callee, native, dimensions)?
+                            objects::call_method(tree, session, id, native, dimensions)?
                                 .expect("checked by the guard");
                         let selection = name
                             .ends_with("::randomize")
                             .then(|| {
                                 objects::random_selection(
-                                    tree, session, dimensions, &name, args, native,
+                                    tree, session, dimensions, &name, args, native, false,
                                 )
                             })
                             .transpose()?;
@@ -2093,11 +2101,33 @@ fn bind_value_in(
                             let mut operands = operands.into_iter();
                             let mut values = Vec::new();
                             for (position, id) in args.into_iter().enumerate() {
-                                let value = if id.is_some() {
+                                let mut value = if id.is_some() {
                                     Some(operands.next().ok_or_else(disagreement)?)
                                 } else {
                                     None
                                 };
+                                // An output or inout actual is the target of the
+                                // assignment the return makes (IEEE 1800-2023
+                                // 13.5): a class property, a select or member of
+                                // one, or a container element is bound as the
+                                // place an assignment to it writes (see
+                                // `place_output`).
+                                if let Some(id) = id
+                                    && dimensions
+                                        .subroutine_directions
+                                        .get(&name)
+                                        .and_then(|directions| directions.get(position))
+                                        .is_some_and(|direction| {
+                                            matches!(
+                                                direction,
+                                                ParamDirection::Output | ParamDirection::Inout
+                                            )
+                                        })
+                                    && let Some(place) =
+                                        object_place(id, native, tree, session, dimensions)?
+                                {
+                                    value = Some(place_output(&place, tree, dimensions)?);
+                                }
                                 if let Some(value) = &value {
                                     expressions::validate_call_argument(
                                         &name, position, value, dimensions,
@@ -2574,16 +2604,18 @@ fn place_output(
     // The bits the place's selection names, as a variable's are named.
     let value = match &**select {
         LValue::Ident(_) => load,
+        // A member keeps its signedness, as a select of a variable does.
         LValue::Select {
             msb,
             lsb,
+            signed,
             array_slice_width: None,
             ..
         } => Expr::Select {
             expr: Box::new(load),
             msb: msb.clone(),
             lsb: lsb.clone(),
-            signed: false,
+            signed: *signed,
         },
         _ => return Err(unsupported("output actual of a slice of a place")),
     };

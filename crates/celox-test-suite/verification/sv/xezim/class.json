@@ -101,6 +101,17 @@
     },
     {
       "category": "Types",
+      "detail": "xezim build exit status: 1; see <case>/build.log\nParsed 3 file(s): 3 descriptions, 0 errors, 0 warnings\nSimulation error: Undeclared identifier 'v' in class constraint\n",
+      "expectation": "Simulation",
+      "name": "class::constrained_randomize_rand_objects",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "the simulation ended before the script did",
       "expectation": "Simulation",
       "name": "class::constructors_chain_to_base",
@@ -709,6 +720,28 @@
       "detail": "class::specializations_of_parameterized_classes at 763:3: expect_output: expected [49, 52, 32, 55, 32, 45, 51, 32, 49, 10, 52, 32, 49, 50, 32, 49, 32, 49, 10, 49, 48, 54, 32, 54, 32, 53, 54, 32, 49, 10], got [49, 52, 32, 55, 32, 45, 51, 32, 49, 10, 52, 32, 49, 50, 32, 49, 32, 49, 10, 49, 48, 52, 32, 52, 32, 53, 52, 32, 48, 10]",
       "expectation": "Simulation",
       "name": "class::specializations_of_parameterized_classes",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "class::specializations_of_procedural_aggregate_types at 1310:27: assert_eq sum: expected 0x20907, got 0xe3e05",
+      "expectation": "Simulation",
+      "name": "class::specializations_of_procedural_aggregate_types",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "class::specializations_of_procedural_constants at 1267:27: assert_eq sum: expected 0x32, got 0x1d",
+      "expectation": "Simulation",
+      "name": "class::specializations_of_procedural_constants",
       "phase": "execute",
       "status": "mismatch",
       "stronger_than_sv": false,

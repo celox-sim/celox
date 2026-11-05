@@ -714,6 +714,21 @@ pub struct TieredBackend {
 }
 
 impl TieredBackend {
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    pub(crate) fn publish_scheduler_for_test(&mut self) {
+        let Phase::Interpreting(Some(interp)) = &mut self.phase else {
+            panic!("scheduler test requires the mixed executor");
+        };
+        interp.publish_scheduler_for_test();
+        assert!(self.runs_compiled_scheduler());
+        assert!(!self.is_compiled(), "must not use whole-image promotion");
+    }
+
     /// Build a tiered simulation targeting this host's default compiled
     /// tier: ready to run immediately on the interpreter while the compiled
     /// tier is prepared in the background.
@@ -852,6 +867,34 @@ impl TieredBackend {
                 }
                 Ok(CompiledCode::Cranelift(shared))
             })
+        }
+    }
+
+    /// A deterministic scheduler test: either the ordinary native executor,
+    /// or the real mixed executor after its scheduler has been published.
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    pub(crate) fn for_scheduler_test(
+        laid_out: &LaidOutProgram,
+        options: &SimulatorOptions,
+    ) -> Result<Self, SimulatorError> {
+        if options.hotspot_jit {
+            Ok(Self::new(laid_out, options))
+        } else {
+            let mut interpreting = options.clone();
+            interpreting.tier_promotion = crate::TierPromotion::Never;
+            let mut backend =
+                Self::with_compiler(laid_out, &interpreting, |_, _, _| unreachable!());
+            backend.phase = Phase::Compiled(CompiledTier::Native(Box::new(
+                crate::NativeBackend::new(laid_out, options)?,
+            )));
+            backend.promotion = Promotion::Promoted;
+            backend.derived_edges_live = true;
+            Ok(backend)
         }
     }
 
@@ -1677,6 +1720,42 @@ impl SimBackend for TieredBackend {
         };
         self.pending_split_applies = self.pending_split_applies.saturating_sub(1);
         result
+    }
+
+    fn prepare_process(&mut self, index: usize) -> Option<celox_runtime::backend::PreparedProcess> {
+        self.maybe_promote();
+        self.maybe_upgrade();
+        let call = match &mut self.phase {
+            Phase::Interpreting(Some(interp)) => interp.prepare_process(index),
+            #[cfg(feature = "cranelift")]
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.prepare_process(index),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.prepare_process(index),
+            Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
+        };
+        if call.is_some() {
+            self.count_evaluation_for_current_tier();
+        }
+        call
+    }
+
+    fn complete_process(&mut self, elapsed: Option<std::time::Duration>) {
+        match &mut self.phase {
+            Phase::Interpreting(Some(interp)) => interp.complete_process(elapsed),
+            #[cfg(feature = "cranelift")]
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.complete_process(elapsed),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.complete_process(elapsed),
+            Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
+        }
     }
 
     fn run_process(&mut self, index: usize) -> Result<(), SimulatorErrorCode> {

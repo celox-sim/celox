@@ -164,7 +164,7 @@ pub(in crate::ast) fn domain(
                 // An element popped from a queue (7.10.2.4, 7.10.2.5).
                 scalar(&container.element)
             } else {
-                let name = match objects::method(tree, session, *expression, native, dimensions)? {
+                let name = match objects::call_method(tree, session, id, native, dimensions)? {
                     Some((name, _, _)) => Some(name),
                     None => call_name(tree, *expression, native),
                 };

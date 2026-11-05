@@ -162,12 +162,127 @@ fn lower_methods(
                 None
             }
             _ => {
-                let hook = |name| {
-                    class.method(name).map(|method| Stmt::Call {
-                        name: classes::Class::subroutine_name(&method.owner, &method.name),
-                        args: vec![Some(Expr::Ident(this.clone()))],
-                        arg_order: Vec::new(),
-                    })
+                // The hooks of the object, and with rand object handles
+                // those of each enabled object they reach, by its class
+                // (18.6.2), which the heap finds. A pre_randomize may change
+                // them, so each object's handles are read once its hook ran,
+                // at every depth, each object visited once; the solve takes
+                // the objects visited. post_randomize runs on the objects the
+                // solve took, begun right after it, before any hook can
+                // change a handle.
+                let visits = if class.has_rand_objects() {
+                    let members =
+                        classes::rand_member_classes(tree, builder.session, class, env, &aliases)?;
+                    let targets = ["pre_randomize", "post_randomize"]
+                        .map(|hook| classes::hook_targets(&members, hook));
+                    Some((
+                        builder.declare("$visits", int_type()),
+                        builder.declare("$visit", int_type()),
+                        builder.declare("$visited", handle.clone()),
+                        targets,
+                    ))
+                } else {
+                    None
+                };
+                let hook = |name: &str| -> Vec<Stmt> {
+                    let mut body: Vec<Stmt> = class
+                        .method(name)
+                        .map(|method| Stmt::Call {
+                            name: classes::Class::subroutine_name(&method.owner, &method.name),
+                            args: vec![Some(Expr::Ident(this.clone()))],
+                            arg_order: Vec::new(),
+                        })
+                        .into_iter()
+                        .collect();
+                    let Some((count, index, visited, targets)) = &visits else {
+                        return body;
+                    };
+                    let post = name == "post_randomize";
+                    let targets = &targets[usize::from(post)];
+                    let items = targets
+                        .iter()
+                        .map(|(id, target)| CaseItemBase {
+                            labels: vec![CaseLabel::Value(Expr::Literal(format!("32'd{id}")))],
+                            body: vec![Stmt::Call {
+                                name: target.clone(),
+                                args: vec![Some(Expr::Ident(visited.clone()))],
+                                arg_order: Vec::new(),
+                            }],
+                        })
+                        .collect::<Vec<_>>();
+                    let begin = Stmt::Assign {
+                        lhs: LValue::Ident(count.clone()),
+                        rhs: if post {
+                            classes::object_call(ObjectOp::VisitSolved, Vec::new())
+                        } else {
+                            classes::object_call(
+                                ObjectOp::VisitBegin,
+                                vec![Expr::Ident(this.clone())],
+                            )
+                        },
+                        nonblocking: false,
+                    };
+                    if post {
+                        body.insert(0, begin);
+                    } else {
+                        body.push(begin);
+                    }
+                    body.push(Stmt::Loop {
+                        kind: LoopKind::For,
+                        init: vec![Stmt::Assign {
+                            lhs: LValue::Ident(index.clone()),
+                            rhs: Expr::Literal("32'sd0".into()),
+                            nonblocking: false,
+                        }],
+                        condition: Some(Expr::Binary {
+                            left: Box::new(Expr::Ident(index.clone())),
+                            op: BinaryOp::Lt,
+                            right: Box::new(Expr::Ident(count.clone())),
+                        }),
+                        step: vec![Stmt::Assign {
+                            lhs: LValue::Ident(index.clone()),
+                            rhs: Expr::Binary {
+                                left: Box::new(Expr::Ident(index.clone())),
+                                op: BinaryOp::Add,
+                                right: Box::new(Expr::Literal("32'sd1".into())),
+                            },
+                            nonblocking: false,
+                        }],
+                        body: vec![
+                            Stmt::Assign {
+                                lhs: LValue::Ident(visited.clone()),
+                                rhs: classes::object_call(
+                                    ObjectOp::Visit,
+                                    vec![Expr::Ident(index.clone())],
+                                ),
+                                nonblocking: false,
+                            },
+                            Stmt::Case {
+                                kind: CaseKind::Exact,
+                                selector: classes::object_call(
+                                    ObjectOp::ClassOf,
+                                    vec![Expr::Ident(visited.clone())],
+                                ),
+                                items,
+                                default: None,
+                            },
+                        ]
+                        .into_iter()
+                        .chain((!post).then(|| Stmt::Assign {
+                            lhs: LValue::Ident(count.clone()),
+                            rhs: classes::object_call(
+                                ObjectOp::VisitExpand,
+                                vec![Expr::Ident(visited.clone())],
+                            ),
+                            nonblocking: false,
+                        }))
+                        .collect(),
+                    });
+                    body.push(Stmt::Eval(classes::object_call(
+                        ObjectOp::VisitEnd,
+                        Vec::new(),
+                    )));
+                    body
                 };
                 let mut select = vec![Stmt::Eval(classes::object_call(
                     ObjectOp::ModePush,
@@ -203,7 +318,7 @@ fn lower_methods(
                     body.push(Stmt::Return(Some(Expr::Ident(this.clone()))));
                     Some(builder.declare("$prepared", handle.clone()))
                 } else {
-                    if class.has_constraints || inline.is_some() {
+                    if class.solved() || inline.is_some() {
                         let mut program = class.constraint_program()?;
                         if let Some(inline) = inline {
                             program.constraints.extend(inline.constraints.clone());
@@ -245,6 +360,37 @@ fn lower_methods(
                         });
                     } else {
                         for property in &class.properties {
+                            // An array a call selects (18.11): its elements
+                            // are randomized at its size.
+                            if classes::constraints::random_array(property) {
+                                let program = celox_heap::randomization::Program {
+                                    arrays: vec![classes::constraints::array(property)?],
+                                    ..Default::default()
+                                };
+                                body.push(Stmt::If {
+                                    condition: Expr::Binary {
+                                        left: Box::new(Expr::Binary {
+                                            left: Box::new(Expr::Ident(argument.clone())),
+                                            op: BinaryOp::Ne,
+                                            right: Box::new(Expr::Literal("1".into())),
+                                        }),
+                                        op: BinaryOp::LogicAnd,
+                                        right: Box::new(classes::object_call(
+                                            ObjectOp::ModeGet(property.field.offset, false),
+                                            vec![Expr::Ident(this.clone())],
+                                        )),
+                                    },
+                                    then_body: vec![Stmt::Eval(classes::object_call(
+                                        ObjectOp::Randomize(program),
+                                        vec![
+                                            Expr::Ident(this.clone()),
+                                            Expr::Literal("1'b0".into()),
+                                        ],
+                                    ))],
+                                    else_body: Vec::new(),
+                                });
+                                continue;
+                            }
                             if property.constant
                                 || property.field.handle.is_some()
                                 || (property.r#type.is_enum
@@ -307,7 +453,7 @@ fn lower_methods(
                 if derived.is_abstract || derived.is_interface {
                     continue;
                 }
-                if (inline.is_some() && derived.constraint_program().is_err())
+                if (inline.is_some() && derived.check_constraint_program().is_err())
                     || (method == "randomize" && derived.check_randomize().is_err())
                     || !derived.derives_from(tree, builder.session, &class.name, env, &aliases)
                 {
@@ -364,6 +510,7 @@ fn lower_methods(
         result.push(Subroutine {
             name: method_name(&class.name, method),
             is_task: false,
+            automatic: true,
             automatic_locals: builder.state.locals[first_local..]
                 .iter()
                 .map(|local| local.name.clone())
@@ -515,7 +662,7 @@ pub(in crate::ast) fn inline_subroutines(
             if !class.is_abstract
                 && !class.is_interface
                 && class.check_randomize().is_ok()
-                && class.constraint_program().is_ok()
+                && class.check_constraint_program().is_ok()
                 && class.derives_from(
                     tree,
                     session,

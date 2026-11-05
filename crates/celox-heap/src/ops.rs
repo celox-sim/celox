@@ -110,6 +110,27 @@ pub const OBJECT_LOAD_NULLABLE: u64 = 68;
 /// `finish(record)` of a structure record whose fields are all stored: the
 /// handle of the one record with its contents, which may replace `record`.
 pub const OBJECT_FINISH_RECORD: u64 = 69;
+/// `register(class, program)`: register the constraint program in string b
+/// (a JSON [`crate::randomization::Registered`]) for class a, see
+/// [`Heap::register_program`].
+pub const OBJECT_REGISTER_PROGRAM: u64 = 70;
+/// Whether class a registered its constraint program.
+pub const OBJECT_PROGRAM_REGISTERED: u64 = 71;
+/// Begin the pre_randomize visits of a randomize call of object a: the number
+/// of objects its enabled rand object handles refer to, see
+/// [`Heap::begin_visits`].
+pub const OBJECT_VISIT_BEGIN: u64 = 72;
+/// The object at index a of the visits in progress.
+pub const OBJECT_VISIT: u64 = 73;
+/// End the visits in progress, see [`Heap::end_visits`].
+pub const OBJECT_VISIT_END: u64 = 74;
+/// Begin visits of the objects the last successful randomize solve took,
+/// as [`OBJECT_VISIT_BEGIN`] does, see [`Heap::begin_solved_visits`].
+pub const OBJECT_VISIT_SOLVED: u64 = 75;
+/// Add the objects the enabled rand object handles of visited object a
+/// refer to, once its pre_randomize ran: the number of objects now, see
+/// [`Heap::expand_visits`].
+pub const OBJECT_VISIT_EXPAND: u64 = 76;
 
 /// The opcode word of `op` with parameter `parameter`.
 pub const fn encode(op: u64, parameter: u64) -> u64 {
@@ -166,7 +187,8 @@ impl Heap {
             | crate::containers::CONCAT
             | crate::containers::SLICE
             | crate::containers::WITH_DEFAULT
-            | crate::containers::SHUFFLE) => self.container_call(op, parameter, a, b, c),
+            | crate::containers::SHUFFLE
+            | crate::containers::BOUND) => self.container_call(op, parameter, a, b, c),
             op @ crate::streams::NEW..=crate::streams::TRUNCATE => {
                 self.stream_call(op, parameter, a, b, c)
             }
@@ -284,6 +306,35 @@ impl Heap {
                 0
             }
             OBJECT_CLASS => self.class_of(a as Handle).into(),
+            OBJECT_REGISTER_PROGRAM => {
+                match serde_json::from_slice::<crate::randomization::Registered>(
+                    self.string(b as Handle),
+                ) {
+                    Ok(program) => self.register_program(a as u32, program),
+                    Err(error) => {
+                        self.fault
+                            .get_or_insert(crate::Fault::ConstraintRandomization(
+                                error.to_string(),
+                            ));
+                    }
+                }
+                0
+            }
+            OBJECT_PROGRAM_REGISTERED => self.program_registered(a as u32).into(),
+            OBJECT_VISIT_BEGIN => self.begin_visits(a as Handle) as u64,
+            OBJECT_VISIT_SOLVED => self.begin_solved_visits() as u64,
+            OBJECT_VISIT_EXPAND => self.expand_visits(a as Handle) as u64,
+            OBJECT_VISIT => self
+                .visits
+                .last()
+                .and_then(|visits| visits.objects.get(a as usize))
+                .copied()
+                .unwrap_or(crate::objects::NULL)
+                .into(),
+            OBJECT_VISIT_END => {
+                self.end_visits();
+                0
+            }
             op @ (OBJECT_RANDOMIZE | OBJECT_RANDOMIZE_INPUTS) => {
                 let input_bytes = (op == OBJECT_RANDOMIZE_INPUTS).then(|| self.take_buffer(c));
                 let result = (|| -> Result<_, String> {

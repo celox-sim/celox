@@ -69,11 +69,20 @@ impl<B: SimBackend> SimulationState<B> {
     {
         let scheduler = self.model.scheduler.as_ref()?;
         let pending = &self.process_state;
+        let native_nbas = executor.compiled_nba_queues();
+        let regions = [
+            &pending.inactive,
+            &pending.deferred_ready,
+            &pending.observed,
+            &pending.reactive,
+        ];
+        let region_pending = regions.iter().any(|queue| !queue.is_empty());
+        let native_regions = executor.compiled_region_queues();
         if self.finished
             || self.stopped
             || self.suspended.is_some()
             || self.declarations_pending
-            || self.host_pending
+            || (self.host_pending && !executor.compiled_host_inputs())
             // Non-event data has no per-writer event mask. Keep its wave
             // boundary visible before a compiled waiter can resume.
             || (self.observed_data
@@ -85,13 +94,19 @@ impl<B: SimBackend> SimulationState<B> {
                             .flatten()
                             .any(|term| term.driven)
                 }))
-            || !pending.observed.is_empty()
-            || self.reactive_pending()
-            || !pending.ready.is_empty()
-            || !pending.deferred_ready.is_empty()
-            || !pending.inactive.is_empty()
-            || !pending.nba_queue.is_empty()
-            || !pending.delayed_nba.is_empty()
+            || (region_pending && (!native_regions || regions.iter().flat_map(|queue| queue.iter()).any(|&process| {
+                self.model.processes[process].program.is_some()
+                    || scheduler.ordinals.get(process).is_none_or(Option::is_none)
+                    || self.writes_observed(scheduler, process)
+            })))
+            || !pending.re_inactive.is_empty()
+            || !pending.re_nba_queue.is_empty()
+            || (!pending.ready.is_empty() && (!executor.compiled_ready_queue() || pending.ready.iter().any(|&process| {
+                scheduler.ordinals.get(process).is_none_or(Option::is_none)
+                    || self.writes_observed(scheduler, process)
+            })))
+            || (!native_nbas && (!pending.nba_queue.is_empty() || !pending.delayed_nba.is_empty()))
+            || pending.delayed_nba.values().flatten().any(|(program, _)| *program)
             || !pending.nba_events.is_empty()
             // A derived clock changes with the slots of its sources, which
             // the scheduler does not tell apart.
@@ -103,7 +118,18 @@ impl<B: SimBackend> SimulationState<B> {
         {
             return None;
         }
-        let mut first = u64::MAX;
+        let mut first = if pending.nba_queue.is_empty()
+            && pending.ready.is_empty()
+            && !self.host_pending
+            && !region_pending
+        {
+            u64::MAX
+        } else {
+            self.scheduler.time
+        };
+        if let Some((&time, _)) = pending.delayed_nba.first_key_value() {
+            first = first.min(time);
+        }
         let mut other = u64::MAX;
         for &Reverse((time, process)) in self.process_wakeups.iter() {
             if scheduler.wake.get(process).is_some_and(Option::is_some)
@@ -136,7 +162,25 @@ impl<B: SimBackend> SimulationState<B> {
         let reference = other;
         // Time zero starts processes in their own order; the reference loop
         // runs it.
-        if first == u64::MAX || first == 0 || first > end || first >= reference {
+        let cold_zero = first == 0
+            && (!executor.compiled_host_inputs()
+                || self
+                    .process_wakeups
+                    .iter()
+                    .any(|&Reverse((time, process))| {
+                        time == 0
+                            && executor
+                                .backend()
+                                .get_as::<u8>(self.model.processes[process].status)
+                                == 0
+                    })
+                || pending.ready.iter().any(|&process| {
+                    executor
+                        .backend()
+                        .get_as::<u8>(self.model.processes[process].status)
+                        == 0
+                }));
+        if first == u64::MAX || cold_zero || first > end || first >= reference {
             return None;
         }
         let one_slot = match executor.compiled_slots() {
@@ -206,13 +250,55 @@ impl<B: SimBackend> SimulationState<B> {
         if self.one_slot_runs() && limit > self.scheduler.time {
             self.sample_values(executor.backend_mut());
         }
+        let host_entry = self.host_pending;
+        if executor.compiled_host_inputs() {
+            let writes = executor.take_host_writes();
+            executor.put_compiled_host_inputs(host_entry, writes)?;
+            self.host_pending = false;
+        }
+        if executor.compiled_nba_queues() {
+            let immediate = std::mem::take(&mut self.process_state.nba_queue);
+            let delayed = std::mem::take(&mut self.process_state.delayed_nba)
+                .into_iter()
+                .flat_map(|(time, updates)| {
+                    updates.into_iter().map(move |(program, update)| {
+                        debug_assert!(!program, "program queues use the Reactive regions");
+                        (time, update)
+                    })
+                })
+                .collect();
+            executor.put_compiled_nbas(immediate, delayed)?;
+        }
+        let regions = &mut self.process_state;
+        let region_entry = !regions.inactive.is_empty()
+            || !regions.deferred_ready.is_empty()
+            || !regions.observed.is_empty()
+            || !regions.reactive.is_empty();
+        if executor.compiled_region_queues() {
+            executor.put_compiled_region_entry(region_entry);
+            regions.deferred_ready.clear();
+            regions.observed.clear();
+            regions.reactive.clear();
+        }
         executor.set_compiled_host_budgets(self.round_budget, self.return_budget);
         let scheduler = self
             .model
             .scheduler
             .as_ref()
             .ok_or(SimulatorErrorCode::InternalError)?;
+        let native_regions = executor.compiled_region_queues();
         let backend = executor.backend_mut();
+        if host_entry {
+            let mut values = num_bigint::BigUint::default();
+            let mut unknowns = num_bigint::BigUint::default();
+            for (bit, &id) in scheduler.events.iter().enumerate() {
+                values.set_bit(bit as u64, self.last_clock_values.contains(id));
+                unknowns.set_bit(bit as u64, self.last_clock_unknown.contains(id));
+            }
+            backend.set_wide(scheduler.levels, values);
+            backend.set_wide(scheduler.unknown_levels, unknowns);
+        }
+        backend.set(scheduler.now, self.scheduler.time);
         backend.set(scheduler.limit, limit);
         backend.set(scheduler.exit, 0u8);
         backend.set(scheduler.finish, 0u8);
@@ -226,7 +312,17 @@ impl<B: SimBackend> SimulationState<B> {
         for &(_, waiting) in scheduler.wake.iter().flatten() {
             backend.set(waiting, 0u8);
         }
-        backend.set(scheduler.ready, 0u64);
+        let mut ready = num_bigint::BigUint::default();
+        for process in std::mem::take(&mut self.process_state.ready) {
+            let ordinal = scheduler
+                .ordinals
+                .get(process)
+                .copied()
+                .flatten()
+                .ok_or(SimulatorErrorCode::InternalError)?;
+            ready.set_bit(ordinal as u64, true);
+        }
+        backend.set_wide(scheduler.ready, ready);
         for (index, counted) in self.model.counted.iter().enumerate() {
             for &(_, kind) in &counted.domains {
                 backend.set(
@@ -242,12 +338,35 @@ impl<B: SimBackend> SimulationState<B> {
                 continue;
             };
             let (waiting, baseline) = (*waiting, *baseline);
-            if let Some(layout) = &scheduler.raw_waits[process] {
+            if let Some(layouts) = &scheduler.raw_waits[process] {
                 let Some(waiter) = self.process_state.waiters.get(process) else {
                     backend.set(waiting, 0u8);
                     continue;
                 };
-                let packed = pack_wait_snapshot(layout, &waiter.baselines)?;
+                let layout = layouts
+                    .get(waiter.site)
+                    .ok_or_else(|| Self::site_error(process, waiter.site))?;
+                let mut baselines = std::borrow::Cow::Borrowed(waiter.baselines.as_slice());
+                if let Some(gates) = self
+                    .model
+                    .wait_gates
+                    .get(process)
+                    .and_then(|sites| sites.get(waiter.site))
+                {
+                    let terms = &self.model.processes[process].wait_sites[waiter.site];
+                    for (index, gate) in gates.iter().enumerate() {
+                        if let Some(counters) = gate.and_then(|gate| gate.counters)
+                            && !matches!(baselines[index], Baseline::Gated { .. })
+                        {
+                            baselines.to_mut()[index].normalize_gate(
+                                backend,
+                                terms[index].signal,
+                                counters,
+                            );
+                        }
+                    }
+                }
+                let packed = pack_wait_snapshot(layout, &baselines)?;
                 backend.set(waiting, 1u8);
                 backend.set_wide(baseline, packed);
                 self.process_state.waiters.remove(process);
@@ -314,6 +433,14 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
         self.process_wakeups.extend(kept);
+        if native_regions {
+            for process in std::mem::take(&mut self.process_state.inactive) {
+                let (wake, waiting) =
+                    scheduler.wake[process].ok_or(SimulatorErrorCode::InternalError)?;
+                backend.set(wake, self.scheduler.time);
+                backend.set(waiting, 1u8);
+            }
+        }
         // The host clocks it runs wait in its clock slots during the run.
         let mut clocks = Vec::new();
         if !scheduler.clocks.is_empty() {
@@ -354,6 +481,13 @@ impl<B: SimBackend> SimulationState<B> {
         self.process_state
             .nba_queue
             .extend(executor.take_compiled_nbas());
+        for (time, update) in executor.take_compiled_delayed_nbas() {
+            self.process_state
+                .delayed_nba
+                .entry(time)
+                .or_default()
+                .push((false, update));
+        }
 
         let scheduler = self
             .model
@@ -455,7 +589,10 @@ impl<B: SimBackend> SimulationState<B> {
                 .wait_sites
                 .get(site)
                 .ok_or_else(|| Self::site_error(process, site))?;
-            if let Some(layout) = &scheduler.raw_waits[process] {
+            if let Some(layouts) = &scheduler.raw_waits[process] {
+                let layout = layouts
+                    .get(site)
+                    .ok_or_else(|| Self::site_error(process, site))?;
                 let mut packed = backend.get(baseline).to_bytes_le();
                 packed.resize(layout.bits.div_ceil(8), 0);
                 let mut restored = Ok(());
@@ -620,6 +757,11 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
         self.retain_activation_roots(executor);
+        // Backend safe points can interrupt a timestamp between generated
+        // rounds. Observers must see it only after its continuations finish.
+        if self.next_work_time() == Some(now) {
+            return Ok(now);
+        }
         executor.try_finish_timed_step(now)?;
         // What the host writes after the slot is an update of its time.
         if executor.take_slot_writes() {
@@ -646,7 +788,7 @@ fn pack_wait_snapshot(
     layout: &celox_design::schedule::CompiledWaitLayout,
     baselines: &[Baseline],
 ) -> Result<num_bigint::BigUint, SimulatorErrorCode> {
-    if layout.scalar_byte || baselines.len() != layout.terms.len() {
+    if baselines.len() != layout.terms.len() {
         return Err(SimulatorErrorCode::InternalError);
     }
     let mut packed = vec![0u8; layout.bits.div_ceil(8)];
@@ -655,22 +797,39 @@ fn pack_wait_snapshot(
         let len = bytes * if term.mask_offset.is_some() { 2 } else { 1 };
         let encoded;
         let raw = match baseline {
-            Baseline::Raw(raw) | Baseline::RawCounter { raw, .. } => raw.as_slice(),
+            Baseline::Raw(raw) | Baseline::RawCounter { raw, .. } | Baseline::Gated { raw, .. } => {
+                raw.as_slice()
+            }
             Baseline::Value(value) | Baseline::Counter { value, .. } => {
                 encoded = crate::timing::encode_planes(value, term.width, len);
                 &encoded
             }
-            _ => return Err(SimulatorErrorCode::InternalError),
         };
         if let Some(offset) = term.counter_offset {
-            let (Baseline::RawCounter { seen, .. } | Baseline::Counter { seen, .. }) = baseline
-            else {
-                return Err(SimulatorErrorCode::InternalError);
+            let seen = match baseline {
+                Baseline::RawCounter { seen, .. } | Baseline::Counter { seen, .. } => *seen,
+                Baseline::Gated { all, .. } => *all,
+                _ => return Err(SimulatorErrorCode::InternalError),
             };
             packed[offset / 8..offset / 8 + 4].copy_from_slice(&seen.to_le_bytes());
         }
+        if let Some(offset) = term.gated_counter_offset {
+            let Baseline::Gated { gated, .. } = baseline else {
+                return Err(SimulatorErrorCode::InternalError);
+            };
+            packed[offset / 8..offset / 8 + 4].copy_from_slice(&gated.to_le_bytes());
+        }
         if raw.len() < len {
             return Err(SimulatorErrorCode::InternalError);
+        }
+        if layout.scalar_byte {
+            packed[0] = (raw[0] & 1)
+                | if term.mask_offset.is_some() {
+                    (raw[1] & 1) << 1
+                } else {
+                    0
+                };
+            continue;
         }
         let at = term.value_offset / 8;
         packed[at..at + bytes].copy_from_slice(&raw[..bytes]);
@@ -694,7 +853,7 @@ fn unpack_wait_snapshot(
     packed: &[u8],
     baselines: &mut Vec<Baseline>,
 ) -> Result<(), SimulatorErrorCode> {
-    if layout.scalar_byte || packed.len() < layout.bits.div_ceil(8) {
+    if packed.len() < layout.bits.div_ceil(8) {
         return Err(SimulatorErrorCode::InternalError);
     }
     baselines.truncate(layout.terms.len());
@@ -704,19 +863,29 @@ fn unpack_wait_snapshot(
         let seen = term.counter_offset.map(|offset| {
             u32::from_le_bytes(packed[offset / 8..offset / 8 + 4].try_into().unwrap())
         });
-        let empty = || match seen {
-            Some(seen) => Baseline::RawCounter {
+        let gated = term.gated_counter_offset.map(|offset| {
+            u32::from_le_bytes(packed[offset / 8..offset / 8 + 4].try_into().unwrap())
+        });
+        let empty = || match (seen, gated) {
+            (Some(all), Some(gated)) => Baseline::Gated {
+                all,
+                gated,
+                raw: Vec::with_capacity(len),
+            },
+            (Some(seen), None) => Baseline::RawCounter {
                 seen,
                 raw: Vec::with_capacity(len),
             },
-            None => Baseline::Raw(Vec::with_capacity(len)),
+            _ => Baseline::Raw(Vec::with_capacity(len)),
         };
         if index == baselines.len() {
             baselines.push(empty());
         }
         if !matches!(
-            (&baselines[index], seen),
-            (Baseline::Raw(_), None) | (Baseline::RawCounter { .. }, Some(_))
+            (&baselines[index], seen, gated),
+            (Baseline::Raw(_), None, None)
+                | (Baseline::RawCounter { .. }, Some(_), None)
+                | (Baseline::Gated { .. }, Some(_), Some(_))
         ) {
             baselines[index] = empty();
         }
@@ -726,14 +895,40 @@ fn unpack_wait_snapshot(
                 *last = seen.unwrap();
                 raw
             }
+            Baseline::Gated {
+                all,
+                gated: last,
+                raw,
+            } => {
+                *all = seen.unwrap();
+                *last = gated.unwrap();
+                raw
+            }
             _ => unreachable!(),
         };
         raw.resize(len, 0);
+        if layout.scalar_byte {
+            raw[0] = packed[0] & 1;
+            if term.mask_offset.is_some() {
+                raw[1] = (packed[0] >> 1) & 1;
+            }
+            continue;
+        }
         let at = term.value_offset / 8;
         raw[..bytes].copy_from_slice(&packed[at..at + bytes]);
         if let Some(mask) = term.mask_offset {
             let at = mask / 8;
             raw[bytes..].copy_from_slice(&packed[at..at + bytes]);
+        }
+        // A narrower site reuses the preceding site's snapshot storage.
+        // Generated loads/stores touch logical bits only; the last byte can
+        // still contain high bits belonging to that preceding expression.
+        if term.width % 8 != 0 {
+            let keep = ((1u16 << (term.width % 8)) - 1) as u8;
+            raw[bytes - 1] &= keep;
+            if term.mask_offset.is_some() {
+                raw[len - 1] &= keep;
+            }
         }
     }
     Ok(())

@@ -128,7 +128,7 @@ impl BodyBuilder<'_, '_, '_> {
     /// and `iff` gates. The handle becoming `null` also wakes the process,
     /// which checks the handles after every wake and so reports the access
     /// through `null` rather than an edge of the selection it ends. A handle that an automatic
-    /// variable, an argument or a class property holds is unsupported.
+    /// variable, an argument or a class property holds is read when the wait begins.
     pub(super) fn virtual_event_control(
         &mut self,
         id: TimingControlId,
@@ -152,6 +152,9 @@ impl BodyBuilder<'_, '_, '_> {
         }
         self.allow_timing("event control")?;
         let mut handles: Vec<Expr> = Vec::new();
+        // The handles that no variable of the design holds, read once when
+        // the wait begins: a local copy of each, with the copy.
+        let mut copies: Vec<(Expr, Expr, Stmt)> = Vec::new();
         let mut events = Vec::with_capacity(items.len());
         for item in items {
             let edge = match item.edge {
@@ -181,12 +184,42 @@ impl BodyBuilder<'_, '_, '_> {
             ) {
                 Some((handle, ty, member)) => {
                     let handle = self.native_value(handle)?;
-                    if !self.watched_handle(&handle) {
-                        return Err(unsupported_watch());
+                    if self.reads_reference_formal(&handle) {
+                        return Err(unsupported(
+                            "wait on a member through a virtual interface that a ref formal names",
+                        ));
                     }
-                    if !handles.contains(&handle) {
-                        handles.push(handle.clone());
-                    }
+                    // A handle that an automatic variable, an argument or a
+                    // class property holds is read when the wait begins
+                    // (IEEE 1800-2023 9.4.2): the wait is on the member of
+                    // the instance it denotes then.
+                    let copied = !self.watched_handle(&handle);
+                    let handle = if !copied {
+                        if !handles.contains(&handle) {
+                            handles.push(handle.clone());
+                        }
+                        handle
+                    } else if let Some((_, copy, _)) = copies.iter().find(|(source, _, _)| {
+                        // A handle whose evaluation may have effects is read
+                        // for each item.
+                        *source == handle && virtual_interfaces::pure(&handle)
+                    }) {
+                        copy.clone()
+                    } else {
+                        let (_, unique) =
+                            self.hidden(virtual_interfaces::value_type((*ty).clone()));
+                        let copy = Expr::Ident(unique.clone());
+                        // Each activation of the wait has its own copy.
+                        copies.push((
+                            handle.clone(),
+                            copy.clone(),
+                            Stmt::Local {
+                                name: unique,
+                                init: Some(handle),
+                            },
+                        ));
+                        copy
+                    };
                     // A write of the selected member is an event at the
                     // write; a change of the selection, at the change.
                     for (signal, denotes) in
@@ -205,6 +238,11 @@ impl BodyBuilder<'_, '_, '_> {
                             }),
                         });
                     }
+                    // A copy does not change during the wait, so its
+                    // selection does not either.
+                    if copied {
+                        continue;
+                    }
                     virtual_interfaces::watched(self.tree, self.session, handle, &ty, &member)?
                 }
                 None => self.native_value(item.expression)?,
@@ -220,7 +258,17 @@ impl BodyBuilder<'_, '_, '_> {
             .iter()
             .map(|handle| Stmt::Eval(virtual_interfaces::null_check(handle)))
             .collect::<Vec<_>>();
-        let mut stmts = checks.clone();
+        // A copy is `null` for the whole wait if it is at its start.
+        let mut stmts = copies
+            .iter()
+            .flat_map(|(_, copy, assign)| {
+                [
+                    assign.clone(),
+                    Stmt::Eval(virtual_interfaces::null_check(copy)),
+                ]
+            })
+            .collect::<Vec<_>>();
+        stmts.extend(checks.clone());
         stmts.push(Stmt::WaitEvent(events));
         stmts.extend(checks);
         Ok(Some(vec![virtual_interfaces::event_block(stmts)]))
@@ -244,11 +292,37 @@ impl BodyBuilder<'_, '_, '_> {
     }
 
     /// Whether a wait can watch handle `handle`, of a virtual interface or a
-    /// named event, for changes: whether a variable of the design, not a
-    /// local or an argument of the subroutine, holds it.
+    /// named event, for changes: whether the variable it is read from is
+    /// storage of the design (see [`Self::design_storage`]), whatever selects
+    /// or container element reads read it there, and it calls no subroutine.
+    /// An event expression on it follows changes of the variable and of the
+    /// index operands (IEEE 1800-2023 9.4.2). A handle reached through an
+    /// object, a class property, has no storage of the design.
     pub(super) fn watched_handle(&self, handle: &Expr) -> bool {
-        matches!(handle, Expr::Ident(name)
-            if !self.state.locals.iter().any(|local| &local.name == name))
+        virtual_interfaces::reads_storage_only(handle)
+            && virtual_interfaces::base_variable(handle)
+                .is_some_and(|name| self.design_storage(name))
+    }
+
+    /// Whether variable `name` is storage of the design by its declaration:
+    /// a variable of the module, or a local with a static lifetime, which
+    /// keeps its storage between activations (6.21). An automatic local or
+    /// argument belongs to its activation.
+    fn design_storage(&self, name: &str) -> bool {
+        !self.state.locals.iter().any(|local| local.name == name)
+            || self.state.statics.iter().any(|(local, _)| local == name)
+    }
+
+    /// Whether handle expression `handle` reads a reference formal, which
+    /// names the actual's storage (IEEE 1800-2023 13.5.2).
+    fn reads_reference_formal(&self, handle: &Expr) -> bool {
+        let mut handle = handle.clone();
+        let mut found = false;
+        rename_expr_idents(&mut handle, &mut |name| {
+            found |= self.reference_formals.contains(name.as_str());
+            None
+        });
+        found
     }
 
     /// Whether `id` is `@*` (or `@(*)`), whose event expression the

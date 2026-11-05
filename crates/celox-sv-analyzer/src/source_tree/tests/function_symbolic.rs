@@ -1,5 +1,6 @@
 //! Symbolic declaration consumers must use native execution ownership/values.
 use super::*;
+use crate::ast::ConstEnv;
 use crate::ast::Session;
 use crate::ast::{Callee, ConstExpr, Source};
 use celox_sv_syntax::{ExprKind, StatementKind};
@@ -18,7 +19,7 @@ fn inline(tree: &SourceTree, input: i128) -> i128 {
         &expression,
         &HashMap::default(),
     );
-    crate::typecheck::eval_const_expr(&expression.into(), &HashMap::default()).unwrap()
+    crate::typecheck::eval_const_expr(&expression.into(), &ConstEnv::default()).unwrap()
 }
 #[test]
 fn native_function_operands_drive_symbolic_returns_and_local_continuations() {

@@ -30,7 +30,7 @@ impl VariableDimensions {
         &self,
         table: &mut semantic_types::TyTable,
         functions: &const_functions::ConstantFunctions,
-        env: &HashMap<String, i128>,
+        env: &ConstEnv,
     ) -> Option<semantic_types::TyId> {
         if let Some(id) = self
             .binding
@@ -52,7 +52,7 @@ impl VariableDimensions {
         &self,
         table: &mut semantic_types::TyTable,
         functions: &const_functions::ConstantFunctions,
-        env: &HashMap<String, i128>,
+        env: &ConstEnv,
     ) -> Option<semantic_types::TyId> {
         if let Some(id) = self
             .binding

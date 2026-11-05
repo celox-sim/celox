@@ -353,6 +353,10 @@ impl<B: SimBackend> SimulationState<B> {
             || !self.process_state.ready.is_empty()
             || !self.process_state.deferred_ready.is_empty()
             || !self.process_state.reactive.is_empty()
+            || !self.process_state.inactive.is_empty()
+            || !self.process_state.nba_queue.is_empty()
+            || !self.process_state.re_inactive.is_empty()
+            || !self.process_state.re_nba_queue.is_empty()
         {
             return Some(self.scheduler.time);
         }

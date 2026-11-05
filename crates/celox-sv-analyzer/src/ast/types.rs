@@ -11,7 +11,7 @@ pub(super) fn type_aliases_from_scope(
     type_aliases_in_scope(
         tree,
         session,
-        &HashMap::default(),
+        &ConstEnv::default(),
         &HashMap::default(),
         true,
         None,
@@ -22,7 +22,7 @@ pub(super) fn type_aliases_from_scope(
 pub(super) fn type_aliases_from_scope_with_env(
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
 ) -> Converted<HashMap<String, Type>> {
     type_aliases_in_scope(
         syntax_tree,
@@ -41,7 +41,7 @@ pub(super) fn type_aliases_from_body_with_env(
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
     items: &[celox_sv_syntax::BodyItemId],
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     inherited: &HashMap<String, Type>,
 ) -> Converted<HashMap<String, Type>> {
     type_aliases_in_scope(
@@ -63,7 +63,7 @@ pub(super) fn type_aliases_of_generate_scope(
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
     items: &[celox_sv_syntax::BodyItemId],
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     inherited: &HashMap<String, Type>,
     path: &str,
 ) -> Converted<HashMap<String, Type>> {
@@ -82,7 +82,7 @@ pub(super) fn type_aliases_of_generate_scope(
 fn type_aliases_in_scope(
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
     inherited: &HashMap<String, Type>,
     include_header: bool,
     items: Option<&[celox_sv_syntax::BodyItemId]>,
@@ -91,7 +91,7 @@ fn type_aliases_in_scope(
 ) -> Converted<HashMap<String, Type>> {
     // Each alias binds in a context that shares the tables; it is dropped
     // before the next alias is added, so the table grows without copies.
-    let const_env: SharedMap<i128> = const_env.clone().into();
+    let const_env: SharedEnv = const_env.clone().into();
     let const_env = &const_env;
     let mut aliases: SharedMap<Type> = scope::imported(syntax_tree).type_aliases.clone().into();
     aliases.extend(
@@ -177,9 +177,9 @@ pub(super) fn bind_alias(
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
     alias: &celox_sv_syntax::TypeAlias,
-    const_env: &SharedMap<i128>,
+    const_env: &SharedEnv,
     aliases: &SharedMap<Type>,
-    dimension_env: &SharedMap<i128>,
+    dimension_env: &SharedEnv,
     defer_class_defaults: bool,
     name: impl FnOnce() -> (String, type_names::TypedefName),
 ) -> Converted<Option<Type>> {
@@ -211,7 +211,7 @@ pub(super) fn bind_alias(
 pub(super) fn freeze_bounds(
     ty: &mut Type,
     functions: &const_functions::ConstantFunctions,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
 ) {
     for range in &mut ty.packed_ranges {
         if let Some(value) = eval_ast_const_expr(functions, &range.left, const_env) {
@@ -270,6 +270,51 @@ pub(super) fn declaration_name(
     (identity, typename)
 }
 
+/// Bind typedef `alias` of a procedural block or subroutine body, as
+/// procedural lowering and the discovery of the block's declarations both
+/// do: its base type in the scope's constants `const_env`, its dimensions
+/// also with the members of an enumeration it declares, which are added to
+/// `members`, and its bounds frozen in that scope (IEEE 1800-2023 6.18,
+/// 6.19). Each such typedef is a type of its own, also where another block
+/// declares one of the same name, named by its declaration; it is written
+/// with the name of its design element.
+pub(super) fn bind_local_alias(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    alias: &celox_sv_syntax::TypeAlias,
+    const_env: &SharedEnv,
+    aliases: &SharedMap<Type>,
+    members: &mut EnumMemberConstants,
+) -> Converted<Option<Type>> {
+    let TypeAliasTarget::DataType(target) = alias.target else {
+        return Ok(None);
+    };
+    let mut dimension_env = (**const_env).clone();
+    parameters::enum_members_of(tree, session, target, &mut dimension_env, aliases, members)?;
+    let dimension_env: SharedEnv = dimension_env.into();
+    let Some(mut ty) = bind_alias(
+        tree,
+        session,
+        alias,
+        const_env,
+        aliases,
+        &dimension_env,
+        false,
+        || {
+            let (identity, typename) = declaration_name(tree, alias, None);
+            (
+                format!("{identity}@native:{}", alias.tokens.start),
+                typename,
+            )
+        },
+    )?
+    else {
+        return Ok(None);
+    };
+    freeze_bounds(&mut ty, &tree.functions, &dimension_env);
+    Ok(Some(ty))
+}
+
 fn bound_literal(value: i128) -> ConstExpr {
     if value >= 0 {
         ConstExpr::Literal(value.to_string())
@@ -285,7 +330,7 @@ fn add_type_parameter(
     key: celox_sv_syntax::ParameterId,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &SharedMap<i128>,
+    env: &SharedEnv,
     aliases: &mut SharedMap<Type>,
 ) -> Converted<()> {
     let ParameterKind::Type { default } = parameter.kind else {
@@ -373,7 +418,7 @@ pub(super) fn type_with_unpacked_ranges(
 pub(super) fn validate_unpacked_dimension_sizes(
     functions: &const_functions::ConstantFunctions,
     ranges: &[UnpackedRange],
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
 ) -> Result<(), AnalyzerError> {
     if ranges.iter().any(|range| {
         range

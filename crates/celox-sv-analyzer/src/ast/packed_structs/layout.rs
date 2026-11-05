@@ -15,7 +15,7 @@ pub(in crate::ast) enum AggregateKind {
 pub(in crate::ast) fn capture_member_type(
     functions: &const_functions::ConstantFunctions,
     mut ty: Type,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
 ) -> Option<Type> {
     if !ty.unpacked_ranges.is_empty()
         || ty.unpacked_struct.is_some()
@@ -46,7 +46,7 @@ pub(in crate::ast) fn native_type(
     owner: Arc<str>,
     fields: Vec<(String, Type, bool)>,
     ranges: Vec<PackedRange>,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
 ) -> Option<Type> {
     let functions = &tree.functions;
     let mut names = HashSet::default();
@@ -75,7 +75,7 @@ fn finish_type(
     signed: bool,
     mut members: Vec<PackedMember>,
     ranges: Vec<PackedRange>,
-    const_env: &HashMap<String, i128>,
+    const_env: &ConstEnv,
 ) -> Option<Type> {
     let mut width = 0usize;
     // The first declared member occupies the most significant bits.

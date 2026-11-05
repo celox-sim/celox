@@ -32,7 +32,7 @@ struct Entry {
     interface_instance: Option<Arc<str>>,
     literal_use: LiteralUse,
     overrides: HashMap<String, ConstExpr>,
-    env: HashMap<String, i128>,
+    env: ConstEnv,
     aliases: HashMap<String, Type>,
     items: Vec<Item>,
     /// How many call sites the elaboration allocated.
@@ -62,7 +62,7 @@ fn address(tree: &SyntaxTree) -> usize {
 pub(super) fn items(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
+    env: &ConstEnv,
     aliases: &HashMap<String, Type>,
     literal_use: LiteralUse,
     elaborate: impl FnOnce(&mut Session) -> Result<Vec<Item>, AnalyzerError>,

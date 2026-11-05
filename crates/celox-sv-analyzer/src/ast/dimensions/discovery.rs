@@ -13,6 +13,9 @@ struct Key {
     arena: usize,
     scope: crate::source_tree::ScopeHandle,
     path: Vec<BodyItemId>,
+    /// The first token of the procedural block whose local constants
+    /// [`local_constants`] binds, apart from the queries of its scope.
+    block: Option<usize>,
 }
 #[derive(Default)]
 pub(in crate::ast) struct State {
@@ -30,6 +33,9 @@ pub(in crate::ast) struct State {
 /// A settled discovery of [`State::settled`]. `input` is held so that the
 /// identities of its tables stay unique.
 struct Settled {
+    /// Keeps the arena the key names from being freed for another arena at
+    /// the same address, which would take this entry for its own.
+    _arena: std::sync::Weak<celox_sv_syntax::Declarations>,
     input: PackedDimensions,
     specializations: usize,
     context: PackedDimensions,
@@ -54,13 +60,14 @@ pub(in crate::ast) fn same_tables(a: &PackedDimensions, b: &PackedDimensions) ->
         && Arc::ptr_eq(&a.constant_types, &b.constant_types)
         && a.class_scope == b.class_scope
         && a.constructor == b.constructor
+        && a.method_name == b.method_name
 }
 
 /// The signature entries that discovering a scope's own declarations added
 /// or changed, and the tables of the context they were bound in, held so
 /// that their identities stay unique.
 struct ClassSignatures {
-    const_env: SharedMap<i128>,
+    const_env: SharedEnv,
     type_aliases: SharedMap<Type>,
     function_return_types: SharedMap<FunctionReturnMetadata>,
     specializations: usize,
@@ -254,6 +261,36 @@ fn variables(
     }
     Ok(())
 }
+/// The value of local parameter `parameter`, bound with its declared type as
+/// procedural lowering binds it (IEEE 1800-2023 6.20.2).
+fn local_parameter_value(
+    parameter: &celox_sv_syntax::Parameter,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    context: &PackedDimensions,
+) -> Option<i128> {
+    let mut bound = Vec::new();
+    parameters::parameters_from_native(
+        &[parameter],
+        tree,
+        session,
+        &mut bound,
+        true,
+        &context.const_env,
+        &context.type_aliases,
+        &HashMap::default(),
+    )
+    .ok()?;
+    let [bound] = bound.as_slice() else {
+        return None;
+    };
+    let mut env = (*context.const_env).clone();
+    let mut types = parameter_types_from_const_env(&env);
+    let mut literals = HashMap::default();
+    parameters::bind_parameter(tree, session, &mut env, &mut types, &mut literals, bound)
+        .then(|| env.get(bound.name()).copied())
+        .flatten()
+}
 fn parameter(
     parameter: &celox_sv_syntax::Parameter,
     tree: &AnalysisContext<'_>,
@@ -280,19 +317,13 @@ fn parameter(
             dimensions,
             default,
         } => {
-            if local
-                && let Some(value) = default
-                    .and_then(|id| {
-                        constant_binding::bind(id, tree, session, context)
-                            .ok()
-                            .flatten()
-                    })
-                    .and_then(|value| {
-                        eval_ast_const_expr(&tree.functions, &value, &context.const_env)
-                    })
-            {
-                context.const_env.insert(n.clone(), value);
-            }
+            // A local parameter takes its value as procedural lowering binds
+            // it: converted to the parameter's type.
+            let value = if local && default.is_some() {
+                local_parameter_value(parameter, tree, session, context)
+            } else {
+                None
+            };
             // Elaborated bindings may shadow this authored parameter (notably
             // an implicit genvar localparam). Its scalar type markers then own
             // the type; restoring the outer declaration would lose that scope.
@@ -308,6 +339,11 @@ fn parameter(
                 if !dimensions.is_empty() || !ty.packed_ranges().is_empty() {
                     publish_shape(tree, session, key, context, n.clone(), &ty, local);
                 }
+            }
+            // After its shape, which hides an outer name as that of a local
+            // variable does: a local parameter is a constant (6.20.2).
+            if let Some(value) = value {
+                context.const_env.insert(n.clone(), value);
             }
             // Retain only this declaration's final binding. An imported
             // parameter or enumerator with the same name belongs to another
@@ -555,7 +591,7 @@ fn class_signatures(
         class_name,
         &env,
         &aliases,
-        |session: &mut Session, env: &SharedMap<i128>, aliases: &SharedMap<Type>| {
+        |session: &mut Session, env: &SharedEnv, aliases: &SharedMap<Type>| {
             let mut scope = context.clone();
             scope.const_env = env.clone();
             scope.type_aliases = aliases.clone();
@@ -1112,19 +1148,18 @@ fn local_declaration(
         }
         LocalDeclaration::TypeAlias(id) => {
             let alias = tree.declarations().type_alias(*id);
+            // Bound as procedural lowering binds it, with the same identity
+            // and its bounds frozen in its own scope.
             if let TypeAliasTarget::DataType(id) = alias.target
-                && let Some(ty) = type_binding::bind(id, tree, session, context)?
+                && let Some(ty) = types::bind_local_alias(
+                    tree,
+                    session,
+                    alias,
+                    &context.const_env,
+                    &context.type_aliases,
+                    &mut EnumMemberConstants::default(),
+                )?
             {
-                let mut ty = type_with_dimensions(ty, &alias.dimensions, tree, session, context)?;
-                ty.name_declaration(|| {
-                    let (identity, typename) = types::declaration_name(tree, alias, None);
-                    // Lexically nested typedefs may reuse a name. The native
-                    // declaration, rather than that spelling, owns this type.
-                    (
-                        format!("{identity}@native:{}", alias.tokens.start),
-                        typename,
-                    )
-                });
                 if context.constant_types.contains_key(&name(&alias.name)) {
                     Arc::make_mut(&mut context.constant_types).remove(&name(&alias.name));
                 }
@@ -1136,19 +1171,75 @@ fn local_declaration(
     }
     Ok(())
 }
-fn statement_scope(
-    ids: &[StatementId],
+/// Bind the local parameters and typedefs of the procedural blocks around
+/// `target`, a type inside a subroutine or procedure, in `context`, each in
+/// its own block as a query there binds them, so that the specializations
+/// the type names are discovered with those of the declarations of the scope
+/// (IEEE 1800-2023 6.18, 6.20.2, 8.25).
+pub(in crate::ast) fn local_constants(
     target: TokenRange,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     context: &mut PackedDimensions,
-    key: &Key,
 ) -> Converted<()> {
-    enum Lexical {
-        Statements(Vec<StatementId>),
-        For(Vec<celox_sv_syntax::ForVariableDeclaration>),
-        Foreach(Vec<celox_sv_syntax::Name>),
-    }
+    let native = tree.declarations();
+    // The body around `target`: of the innermost subroutine, or of a
+    // procedure.
+    let roots = native
+        .subroutines
+        .iter()
+        .filter(|subroutine| contains(subroutine.body_tokens, target))
+        .min_by_key(|subroutine| subroutine.body_tokens.end - subroutine.body_tokens.start)
+        .map(|subroutine| (subroutine.body_tokens, subroutine.items.clone()))
+        .or_else(|| {
+            native
+                .procedures
+                .iter()
+                .map(|procedure| (native.statement(procedure.body).tokens, procedure.body))
+                .find(|(tokens, _)| contains(*tokens, target))
+                .map(|(tokens, body)| (tokens, vec![body]))
+        });
+    let Some((body, roots)) = roots else {
+        return Ok(());
+    };
+    let key = Key {
+        arena: native as *const _ as usize,
+        scope: tree.scope_handle(),
+        path: Vec::new(),
+        block: Some(body.start),
+    };
+    let result = lexical_scopes(&roots, target, tree).and_then(|scopes| {
+        for lexical in scopes {
+            let Lexical::Statements(items) = lexical else {
+                continue;
+            };
+            for id in items {
+                if let StatementKind::Declaration(
+                    item @ (LocalDeclaration::Parameters(_) | LocalDeclaration::TypeAlias(_)),
+                ) = &native.statement(id).kind
+                {
+                    local_declaration(item, tree, session, context, &key)?;
+                }
+            }
+        }
+        Ok(())
+    });
+    session.dimensions.partial.remove(&key);
+    result
+}
+/// A lexical scope of a procedural body.
+enum Lexical {
+    Statements(Vec<StatementId>),
+    For(Vec<celox_sv_syntax::ForVariableDeclaration>),
+    Foreach(Vec<celox_sv_syntax::Name>),
+}
+/// The lexical scopes among the statements `ids` that contain `target`,
+/// outer scopes first.
+fn lexical_scopes(
+    ids: &[StatementId],
+    target: TokenRange,
+    tree: &AnalysisContext<'_>,
+) -> Converted<Vec<Lexical>> {
     let mut scopes = vec![Lexical::Statements(ids.to_vec())];
     let mut pending = ids.iter().rev().copied().collect::<Vec<_>>();
     let mut seen = HashSet::default();
@@ -1186,6 +1277,17 @@ fn statement_scope(
         }
         pending.extend(statement.kind.children());
     }
+    Ok(scopes)
+}
+fn statement_scope(
+    ids: &[StatementId],
+    target: TokenRange,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    context: &mut PackedDimensions,
+    key: &Key,
+) -> Converted<()> {
+    let scopes = lexical_scopes(ids, target, tree)?;
     for lexical in scopes {
         match lexical {
             Lexical::Statements(items) => {
@@ -1354,13 +1456,18 @@ pub(in crate::ast) fn query_operand_dimensions_id(
         arena: native as *const _ as usize,
         scope: tree.scope_handle(),
         path: owners.path.clone(),
+        block: None,
     };
     if let Some(mut partial) = session.dimensions.partial.get(&key).cloned() {
         overlay(&mut partial, input);
         return Ok(finish(partial));
     }
-    // Every query of a scope with the same input discovers the same
-    // declarations: a scope's queries settle them once.
+    // The scope's declarations are discovered from the scope's own inputs,
+    // without the locals the query's scope adds and the operand values of
+    // its statement. Every query of a scope with the same own inputs
+    // discovers the same declarations, so a scope's queries settle them once
+    // and each overlays its own context.
+    let own = scope_inputs(input);
     let specializations = session.class_specializations.len();
     let settled = session
         .dimensions
@@ -1369,17 +1476,18 @@ pub(in crate::ast) fn query_operand_dimensions_id(
         .filter(|settled| {
             !unshared_discovery()
                 && settled.specializations == specializations
-                && same_tables(&settled.input, input)
+                && settled.input == own
         })
         .map(|settled| settled.context.clone());
-    let context = match settled {
+    let mut context = match settled {
         Some(context) => context,
         None => {
-            let context = settle_scope(tree, session, &owners, &key, input)?;
+            let context = settle_scope(tree, session, &owners, &key, &own)?;
             session.dimensions.settled.insert(
                 key.clone(),
                 Settled {
-                    input: input.clone(),
+                    _arena: tree.declarations_incarnation(),
+                    input: own,
                     specializations: session.class_specializations.len(),
                     context: context.clone(),
                 },
@@ -1387,11 +1495,40 @@ pub(in crate::ast) fn query_operand_dimensions_id(
             context
         }
     };
+    with_query_context(&mut context, input);
     publish(&mut session.dimensions, &key, &context);
     // Reentrant queries see the published prefix until this one finishes.
     let result = query_published(root, tree, session, input, &owners, &key, context);
     session.dimensions.partial.remove(&key);
     result
+}
+
+/// The inputs of a query that its scope's declarations are discovered from:
+/// `input` without the locals and their signedness that the query's own
+/// scope adds to the shared tables, and without the operand values of the
+/// statement it is in.
+fn scope_inputs(input: &PackedDimensions) -> PackedDimensions {
+    PackedDimensions {
+        variables: input.variables.shared(),
+        expression_signedness: input.expression_signedness.shared(),
+        effect_values: Default::default(),
+        last_indices: Default::default(),
+        ..input.clone()
+    }
+}
+
+/// Give a scope's settled declarations the context of the query: the parts
+/// of `input` that [`scope_inputs`] leaves out. The query's locals follow
+/// from [`overlay`], which gives the query's tables precedence.
+fn with_query_context(context: &mut PackedDimensions, input: &PackedDimensions) {
+    context.effect_values = input.effect_values.clone();
+    context.last_indices = input.last_indices.clone();
+    context.expression_signedness.extend(
+        input
+            .expression_signedness
+            .iter()
+            .map(|(name, signed)| (name.clone(), *signed)),
+    );
 }
 
 fn query_published(
@@ -1539,9 +1676,7 @@ mod tests {
         let tree = AnalysisContext::unspecialized(&tree);
         let input = PackedDimensions::new(
             HashMap::default(),
-            &[("N".to_string(), 16)]
-                .into_iter()
-                .collect::<HashMap<_, _>>(),
+            &[("N".to_string(), 16)].into_iter().collect::<ConstEnv>(),
             &HashMap::default(),
         );
         let context = query_operand_dimensions_id(argument(&tree), &tree, session, &input).unwrap();
@@ -1567,8 +1702,11 @@ mod tests {
             "module M;import \"DPI-C\" function int f();if(1)begin:g import \"DPI-C\" function byte f();localparam N=$bits(f());end endmodule",
         );
         let tree = AnalysisContext::unspecialized(&tree);
-        let input =
-            PackedDimensions::new(HashMap::default(), &HashMap::default(), &HashMap::default());
+        let input = PackedDimensions::new(
+            HashMap::default(),
+            &ConstEnv::default(),
+            &HashMap::default(),
+        );
         let context = query_operand_dimensions_id(argument(&tree), &tree, session, &input).unwrap();
         assert_eq!(context.function_return_types["f"].width, Some(8));
         assert!(context.functions.is_empty());
@@ -1581,8 +1719,11 @@ mod tests {
             "module M;function int f();logic[7:0]a[0:3];begin logic[2:0]a[0:1];return $bits(a);end endfunction endmodule",
         );
         let tree = AnalysisContext::unspecialized(&tree);
-        let input =
-            PackedDimensions::new(HashMap::default(), &HashMap::default(), &HashMap::default());
+        let input = PackedDimensions::new(
+            HashMap::default(),
+            &ConstEnv::default(),
+            &HashMap::default(),
+        );
         let context = query_operand_dimensions_id(argument(&tree), &tree, session, &input).unwrap();
         let shape = context.get("a").unwrap();
         assert_eq!(width(&tree.functions, shape, &context), Some(3));

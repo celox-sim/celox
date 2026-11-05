@@ -524,6 +524,61 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 7; see <case>/build.log\n<case>/source_0.sv:6: sorry: Unpacked structs not supported.\n<case>/source_0.sv:15: syntax error\n<case>/source_0.sv:15: error: Malformed statement\n<case>/source_0.sv:18: syntax error\n<case>/source_0.sv:18: error: Malformed statement\n<case>/source_0.sv:21: syntax error\n<case>/source_0.sv:21: error: Malformed statement\n<case>/source_0.sv:34: warning: Static variable initialization requires explicit lifetime in this context.\n",
+      "expectation": "Simulation",
+      "name": "containers::returned_patterns_take_the_result_type",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:14: warning: Static variable initialization requires explicit lifetime in this context.\n<case>/source_0.sv:16: syntax error\n<case>/source_0.sv:16: error: Malformed statement\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "containers::conditionals_received_by_containers",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 3; see <case>/build.log\n<case>/source_0.sv:8: sorry: Streaming concatenation not supported.\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "containers::containers_received_from_any_expression",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 134; see <case>/build.log\n<case>/source_0.sv:4: Sorry: Queue of type `queue of netvector_t:bool signed[31:0]` is not yet supported.\n:0: Sorry: Queue of type `queue of netvector_t:bool signed[31:0]` is not yet supported.\n<case>/source_0.sv:8: Sorry: Queue of type `queue of netvector_t:bool signed[31:0]` is not yet supported.\n<case>/source_0.sv:8: Sorry: Queue of type `queue of netvector_t:bool signed[31:0]` is not yet supported.\n<case>/source_0.sv:9: Sorry: Queue of type `queue of netvector_t:bool signed[31:0]` is not yet supported.\n<case>/source_0.sv:10: Sorry: Queue of type `dynamic array of netvector_t:bool signed[31:0]` is not yet supported.\n<case>/source_0.sv:12: error: Type names are not valid expressions here.\n<case>/source_0.sv:12: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:12:               : Expression is: <type>\n<case>/source_0.sv:12:               : Expression type: 10PETypename\n<case>/source_0.sv:12: error: Dimensions must be constant.\n<case>/source_0.sv:12       : This size expression violates the rule: <type>\n<case>/source_0.sv:12: Sorry: Queue of type `11netuarray_t` is not yet supported.\n<case>/source_0.sv:12: error: Type names are not valid expressions here.\n<case>/source_0.sv:12: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:12:               : Expression is: <type>\n<case>/source_0.sv:12:               : Expression type: 10PETypename\n<case>/source_0.sv:12: error: Dimensions must be constant.\n<case>/source_0.sv:12       : This size expression violates the rule: <type>\n<case>/source_0.sv:12: Sorry: Queue of type `11netuarray_t` is not yet supported.\n<case>/source_0.sv:11: Sorry: Queue of type `queue of netvector_t:bool signed[31:0]` is not yet supported.\n<case>/source_0.sv:11: Sorry: Queue of type `queue of netvector_t:logic unsigned` is not yet supported.\n<case>/source_0.sv:11: Sorry: Queue of type `queue of netvector_t:bool signed[31:0]` is not yet supported.\n<case>/source_0.sv:11: Sorry: Queue of type `queue of netvector_t:logic unsigned` is not yet supported.\n<case>/source_0.sv:14: error: scalar type is not a valid context for assignment pattern.\n<case>/source_0.sv:14: error: scalar type is not a valid context for assignment pattern.\n<case>/source_0.sv:16: error: Object celox_suite_tb.dut.$unm_blk_1.c['sd0] has no method \"size(...)\".\n<case>/source_0.sv:16: error: Object celox_suite_tb.dut.$unm_blk_1.c['sd1] has no method \"size(...)\".\n<case>/source_0.sv:16: error: the number of indices (2) is greater than the number of dimensions (1).\n<case>/source_0.sv:16: error: Object celox_suite_tb.dut.$unm_blk_1.a['sd0] has no method \"size(...)\".\n<case>/source_0.sv:18: error: Object celox_suite_tb.dut.$unm_blk_1.d['sd0] has no method \"size(...)\".\n<case>/source_0.sv:19: error: scalar type is not a valid context for assignment pattern.\n<case>/source_0.sv:19: error: scalar type is not a valid context for assignment pattern.\n<case>/source_0.sv:21: error: Object celox_suite_tb.dut.$unm_blk_1.t['sd0]['sd0] has no method \"size(...)\".\n<case>/source_0.sv:21: error: Object celox_suite_tb.dut.$unm_blk_1.t['sd1]['sd0] has no method \"size(...)\".\n<case>/source_0.sv:21: error: Object celox_suite_tb.dut.$unm_blk_1.t['sd1]['sd1] has no method \"size(...)\".\n<case>/source_0.sv:21: error: the number of indices (3) is greater than the number of dimensions (1).\n<case>/source_0.sv:22: error: scalar type is not a valid context for assignment pattern.\n<case>/source_0.sv:24: error: Object celox_suite_tb.dut.$unm_blk_1.m[\"x\"] has no method \"size(...)\".\n<case>/source_0.sv:24: error: the number of indices (2) is greater than the number of dimensions (1).\n<case>/source_0.sv:26: error: Object celox_suite_tb.dut.$unm_blk_1.r['sd0] has no method \"size(...)\".\n<case>/source_0.sv:26: error: Object celox_suite_tb.dut.$unm_blk_1.r['sd1] has no method \"size(...)\".\n<case>/source_0.sv:28: assert: elab_lval.cc:722: failed assertion name_tail.index.size() == 1\nAborted (core dumped)\n",
+      "expectation": "Simulation",
+      "name": "containers::nested_bounded_queues_are_assigned_elementwise",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:27: syntax error\n<case>/source_0.sv:27: error: Malformed statement\n<case>/source_0.sv:30: syntax error\n<case>/source_0.sv:30: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "containers::container_values_are_converted_on_every_path",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

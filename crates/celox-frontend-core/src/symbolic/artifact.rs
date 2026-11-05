@@ -127,6 +127,12 @@ pub struct SimModule {
     pub reset_clock_map: HashMap<SourceVarId, SourceVarId>,
     /// Resumable processes in declaration order.
     pub processes: Vec<SymbolicProcess>,
+    /// Subroutines the frontend lowered out of line, which the module's
+    /// units enter through `SIRInstruction::Call`, by the module-local
+    /// `FunctionId` those calls name. Assembly places a copy of each in every
+    /// instance of the module, since a function reads and writes the state
+    /// of its instance. Their frame slots are addressed in the FRAME region.
+    pub functions: Vec<celox_sir::FunctionUnit<SymbolicRegionedAddr>>,
     /// Variables of the module that denote a variable of a package (IEEE
     /// 1800-2023 26.2). Every instance of the module refers to that one
     /// object instead of a state object of its own.
@@ -238,6 +244,57 @@ impl SimModule {
     pub fn instance_index(&self, name: &str, position: usize) -> usize {
         self.instance_index_bases.get(name).copied().unwrap_or(0) + position
     }
+
+    /// The variables of the module whose stores assembly instruments one
+    /// by one, because something observes each store: a wait reads them,
+    /// an occurrence counter or pending-change slot watches them, a
+    /// nonblocking site targets them, a combinational observer is
+    /// sensitive to them, or they clock or reset a flip-flop domain or are
+    /// declared as a clock or reset. Assembly instruments only the units
+    /// the runtime runs, never the function units they call, so a store
+    /// in a function unit into any of these would go unobserved: a
+    /// frontend keeps such stores out of function units, and assembly
+    /// rejects a function unit that makes one (see
+    /// `schedule_symbolic_rtl_reporting_loops`).
+    ///
+    /// Assembly adds what only the hierarchy shows: the signals that the
+    /// clock and reset ports of other instances alias.
+    pub fn instrumented_storage(&self) -> HashSet<SourceVarId> {
+        let domains = self
+            .eval_only_ff_blocks
+            .keys()
+            .chain(self.apply_ff_blocks.keys())
+            .chain(self.eval_apply_ff_blocks.keys())
+            .chain(self.split_commit_ff_blocks.keys())
+            .chain(self.parallel_ff_parts.keys())
+            .flat_map(|triggers| {
+                std::iter::once(triggers.clock).chain(triggers.resets.iter().copied())
+            });
+        let declared = self.variables.iter().filter_map(|(&id, variable)| {
+            matches!(
+                variable.metadata.kind,
+                celox_design::DomainKind::ClockPosedge
+                    | celox_design::DomainKind::ClockNegedge
+                    | celox_design::DomainKind::ResetAsyncHigh
+                    | celox_design::DomainKind::ResetAsyncLow
+            )
+            .then_some(id)
+        });
+        self.wait_sites
+            .iter()
+            .flat_map(WaitSite::reads)
+            .chain(self.counter_slots.iter().map(|slots| slots.signal))
+            .chain(self.pending_slots.iter().map(|slots| slots.signal))
+            .chain(self.nba_sites.iter().map(|site| site.target))
+            .chain(
+                self.comb_observers
+                    .iter()
+                    .flat_map(|observer| observer.sensitivity.iter().map(|atom| atom.id)),
+            )
+            .chain(domains)
+            .chain(declared)
+            .collect()
+    }
 }
 
 impl fmt::Debug for SimModule {
@@ -257,6 +314,7 @@ impl fmt::Debug for SimModule {
             .field("arena", &self.arena)
             .field("reset_clock_map", &self.reset_clock_map)
             .field("processes", &self.processes)
+            .field("functions", &self.functions)
             .field("package_bindings", &self.package_bindings)
             .field("hierarchical_bindings", &self.hierarchical_bindings)
             .finish()

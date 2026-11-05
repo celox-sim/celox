@@ -544,6 +544,28 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 8; see <case>/build.log\n<case>/source_0.sv:6: sorry: Constraint declarations not supported.\n<case>/source_0.sv:11: sorry: Constraint declarations not supported.\n<case>/source_0.sv:18: sorry: \"inside\" expressions not supported yet.\n<case>/source_0.sv:18: sorry: Constraint declarations not supported.\n<case>/source_0.sv:31: syntax error\n<case>/source_0.sv:31: error: Malformed statement\n<case>/source_0.sv:35: syntax error\n<case>/source_0.sv:35: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::constrained_randomize_rand_arrays",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 7; see <case>/build.log\n<case>/source_0.sv:6: sorry: \"inside\" expressions not supported yet.\n<case>/source_0.sv:6: sorry: Constraint declarations not supported.\n<case>/source_0.sv:11: sorry: Constraint declarations not supported.\n<case>/source_0.sv:14: sorry: Constraint declarations not supported.\n<case>/source_0.sv:21: sorry: Constraint declarations not supported.\n<case>/source_0.sv:37: sorry: \"inside\" expressions not supported yet.\n<case>/source_0.sv:44: sorry: \"inside\" expressions not supported yet.\n<case>/source_0.sv:48: warning: Static variable initialization requires explicit lifetime in this context.\n",
+      "expectation": "Simulation",
+      "name": "class::constrained_randomize_rand_objects",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
       "expectation": "Simulation",
       "known_issue": {
@@ -566,6 +588,28 @@
       "name": "class::constrained_randomize_scalar",
       "phase": "skip",
       "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:6: sorry: Constraint declarations not supported.\n<case>/source_0.sv:12: sorry: Constraint declarations not supported.\n",
+      "expectation": "Simulation",
+      "name": "class::constrained_randomize_shifts",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:16: sorry: \"inside\" expressions not supported yet.\n<case>/source_0.sv:16: sorry: Constraint declarations not supported.\n",
+      "expectation": "Simulation",
+      "name": "class::constrained_randomize_state_properties",
+      "phase": "compile",
+      "status": "compile_error",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
@@ -1261,6 +1305,17 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:4: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "class::output_arguments_write_class_properties",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus 13.0 rejects class scope resolution with a syntax error: reading a static property (Counter::created), calling a static method (Counter::next()) and assigning a static property (Counter::last = \"set\"). IEEE 1800-2023 8.9, 8.10 and 8.23 define these accesses. Verilator passes both cases.",
       "expectation": "Simulation",
       "known_issue": {
@@ -1876,6 +1931,28 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:4: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "class::specializations_of_procedural_aggregate_types",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:6: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "class::specializations_of_procedural_constants",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus 13.0 does not parse a parameter port list of a class (class Box #(int N = 4); is a syntax error), which IEEE 1800-2023 8.25 defines; each case declares a parameterized class. Verilator passes all but two cases, see sv_verilator_class_specialization_identity and sv_verilator_untyped_class_parameters.",
       "expectation": "Simulation",
       "known_issue": {
@@ -2096,6 +2173,17 @@
       "name": "class::untyped_class_parameters_take_the_type_of_their_value",
       "phase": "skip",
       "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 79; see <case>/build.log\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Invalid class item.\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:22: error: Syntax error in task/function port declaration.\n<case>/source_0.sv:23: syntax error\n<case>/source_0.sv:23: error: Malformed statement\n<case>/source_0.sv:24: syntax error\n<case>/source_0.sv:24: error: Malformed statement\n<case>/source_0.sv:25: syntax error\n<case>/source_0.sv:25: error: Malformed statement\n<case>/source_0.sv:26: syntax error\n<case>/source_0.sv:26: Syntax in assignment statement l-value.\n<case>/source_0.sv:27: syntax error\n<case>/source_0.sv:27: Syntax in assignment statement l-value.\n<case>/source_0.sv:28: syntax error\n<case>/source_0.sv:29: error: Malformed statement\n<case>/source_0.sv:42: syntax error\n<case>/testbench.sv:85: syntax error\n<case>/testbench.sv:88: error: Invalid class item.\n<case>/testbench.sv:89: syntax error\n<case>/testbench.sv:89: error: Invalid class item.\n<case>/testbench.sv:90: syntax error\n<case>/testbench.sv:91: error: Invalid class item.\n<case>/testbench.sv:92: syntax error\n<case>/testbench.sv:93: error: Invalid class item.\n<case>/testbench.sv:94: syntax error\n<case>/testbench.sv:94: error: Invalid class item.\n<case>/testbench.sv:95: syntax error\n<case>/testbench.sv:97: error: Invalid class item.\n<case>/testbench.sv:98: syntax error\n<case>/testbench.sv:98: error: t1 doesn't name a type.\n<case>/testbench.sv:99: syntax error\n<case>/testbench.sv:100: error: Invalid class item.\n<case>/testbench.sv:101: syntax error\n<case>/testbench.sv:101: error: Invalid class item.\n<case>/testbench.sv:102: syntax error\n<case>/testbench.sv:103: error: Invalid class item.\n<case>/testbench.sv:104: syntax error\n<case>/testbench.sv:104: error: settle_now doesn't name a type.\n<case>/testbench.sv:105: syntax error\n<case>/testbench.sv:106: error: Invalid class item.\n<case>/testbench.sv:107: syntax error\n<case>/testbench.sv:107: error: expected doesn't name a type.\n<case>/testbench.sv:108: syntax error\n<case>/testbench.sv:108: error: actual doesn't name a type.\n<case>/testbench.sv:109: syntax error\n<case>/testbench.sv:110: error: Invalid class item.\n<case>/testbench.sv:111: syntax error\n<case>/testbench.sv:111: error: Invalid class item.\n<case>/testbench.sv:112: syntax error\n<case>/testbench.sv:114: error: Invalid class item.\n<case>/testbench.sv:115: syntax error\n<case>/testbench.sv:115: error: Invalid class item.\n<case>/testbench.sv:116: syntax error\n<case>/testbench.sv:117: error: Invalid class item.\n<case>/testbench.sv:118: syntax error\n<case>/testbench.sv:118: error: expected doesn't name a type.\n<case>/testbench.sv:119: syntax error\n<case>/testbench.sv:119: error: actual doesn't name a type.\n<case>/testbench.sv:120: syntax error\n<case>/testbench.sv:121: error: Invalid class item.\n<case>/testbench.sv:122: syntax error\n<case>/testbench.sv:122: error: Invalid class item.\n<case>/testbench.sv:123: syntax error\n<case>/testbench.sv:125: error: Invalid class item.\n<case>/testbench.sv:126: syntax error\n<case>/testbench.sv:126: error: Invalid class item.\n<case>/testbench.sv:127: syntax error\n<case>/testbench.sv:128: error: Invalid class item.\n<case>/testbench.sv:129: syntax error\n<case>/testbench.sv:129: error: Invalid class item.\n<case>/testbench.sv:130: syntax error\n<case>/testbench.sv:131: error: Invalid class item.\n<case>/testbench.sv:133: syntax error\n<case>/testbench.sv:133: error: Invalid class item.\n<case>/testbench.sv:135: syntax error\n<case>/testbench.sv:135: error: Invalid class item.\n<case>/testbench.sv:136: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "class::virtual_interface_property_waits",
+      "phase": "compile",
+      "status": "compile_error",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []

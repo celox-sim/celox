@@ -124,7 +124,7 @@ mod tests {
         let ports = ports_from_scope(
             &AnalysisContext::unspecialized(&tree),
             session,
-            &HashMap::default(),
+            &ConstEnv::default(),
             &HashMap::default(),
             None,
         )
@@ -135,7 +135,7 @@ mod tests {
         assert_eq!(
             typecheck::eval_const_expr(
                 &ports[1].r#type().packed_ranges()[0].left().clone().into(),
-                &HashMap::default()
+                &ConstEnv::default()
             ),
             Some(7)
         );
@@ -153,7 +153,7 @@ mod tests {
         let ports = ports_from_scope(
             &AnalysisContext::unspecialized(&tree),
             session,
-            &HashMap::default(),
+            &ConstEnv::default(),
             &HashMap::default(),
             Some(&selection),
         )
@@ -163,7 +163,7 @@ mod tests {
         assert_eq!(
             typecheck::eval_const_expr(
                 &ports[0].r#type().packed_ranges()[0].left().clone().into(),
-                &HashMap::default()
+                &ConstEnv::default()
             ),
             Some(7)
         );

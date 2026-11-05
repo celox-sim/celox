@@ -50,6 +50,58 @@ pub trait UnitExecutor {
     /// enforce them without entering the reference scheduler.
     fn set_compiled_host_budgets(&mut self, _rounds: u64, _returns: u64) {}
 
+    /// Replay raw host writes and settle the host's current-time changes in
+    /// generated code before resuming HDL processes.
+    fn compiled_host_inputs(&self) -> bool {
+        false
+    }
+
+    fn put_compiled_host_inputs(
+        &mut self,
+        pending: bool,
+        writes: Vec<(SignalRef, Value)>,
+    ) -> Result<(), SimulatorErrorCode> {
+        if !pending && writes.is_empty() {
+            Ok(())
+        } else {
+            Err(SimulatorErrorCode::InternalError)
+        }
+    }
+
+    /// Import static Inactive, deferred Active and assertion region queues.
+    fn compiled_region_queues(&self) -> bool {
+        false
+    }
+
+    fn put_compiled_region_entry(&mut self, _pending: bool) {}
+
+    /// Import the current Active ready queue into the generated scheduler.
+    fn compiled_ready_queue(&self) -> bool {
+        false
+    }
+
+    /// Import portable NBA queues at invocation boundaries and schedule their
+    /// publication without the reference loop.
+    fn compiled_nba_queues(&self) -> bool {
+        false
+    }
+
+    fn put_compiled_nbas(
+        &mut self,
+        ready: Vec<super::NbaUpdate>,
+        delayed: Vec<(u64, super::NbaUpdate)>,
+    ) -> Result<(), SimulatorErrorCode> {
+        if ready.is_empty() && delayed.is_empty() {
+            Ok(())
+        } else {
+            Err(SimulatorErrorCode::InternalError)
+        }
+    }
+
+    fn take_compiled_delayed_nbas(&mut self) -> Vec<(u64, super::NbaUpdate)> {
+        Vec::new()
+    }
+
     /// Unpublished NBA values left by a native run, including an early error.
     fn take_compiled_nbas(&mut self) -> Vec<super::NbaUpdate> {
         Vec::new()

@@ -1,5 +1,6 @@
 //! Native procedure metadata selects actual process kinds and body seeds.
 use super::*;
+use crate::ast::ConstEnv;
 use crate::ast::{CombProcessKind, Expr, Source, Stmt};
 use celox_sv_syntax::{ProcedureKind, StatementId, StatementKind};
 fn parsed(process: &str) -> SourceTree {
@@ -216,7 +217,7 @@ fn native_direct_nested_unit_restrictions_are_preserved_for_selected_parent() {
         )
         .unwrap();
         let error =
-            Source::from_syntax_module_with_parameter_overrides(&tree, "M", &HashMap::default())
+            Source::from_syntax_module_with_parameter_overrides(&tree, "M", &ConstEnv::default())
                 .unwrap_err();
         assert!(error.to_string().contains(expected), "{error}");
     }
@@ -264,7 +265,7 @@ fn checker_and_nested_unit_validation_keep_the_legacy_root_and_active_leaf_contr
         )
         .unwrap();
         let result =
-            Source::from_syntax_module_with_parameter_overrides(&tree, "M", &HashMap::default());
+            Source::from_syntax_module_with_parameter_overrides(&tree, "M", &ConstEnv::default());
         if rejected {
             let error = result.unwrap_err();
             assert!(

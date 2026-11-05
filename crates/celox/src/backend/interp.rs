@@ -1804,6 +1804,44 @@ impl InterpBackend {
             .try_run(key, self.memory.as_mut_slice())
     }
 
+    /// Publish the real Hotspot scheduler without executing HDL during test
+    /// setup. Finite testbenches must not finish before compilation completes.
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    pub(crate) fn publish_scheduler_for_test(&mut self) {
+        let runtime = self.hotspots.as_mut().expect("Hotspot must be enabled");
+        assert!(runtime.scheduler_is_prepared_for_test());
+        let units = self
+            .eval_comb_units
+            .iter()
+            .map(|unit| unit.unit.as_ref().clone())
+            .collect::<Vec<_>>();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !runtime.has_compiled_scheduler() {
+            runtime.request_comb_for_test(&units);
+            // Poll publication through an absent entry, without running Comb
+            // or changing any simulation state. The production request path
+            // then links the scheduler against the published Comb group.
+            assert!(
+                runtime
+                    .try_run(EntryKey::Process(usize::MAX), self.memory.as_mut_slice())
+                    .is_none()
+            );
+            let stats = runtime.stats();
+            assert_eq!(stats.failed_entries, 0, "{stats:?}");
+            assert_eq!(stats.rejected_entries, 0, "{stats:?}");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "scheduler not published: {stats:?}"
+            );
+            std::thread::yield_now();
+        }
+    }
+
     fn install_event_buffers(&mut self) {
         use crate::backend::memory_layout::{
             STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET, STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
@@ -2055,6 +2093,31 @@ impl SimBackend for InterpBackend {
             #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
             (&mut self.hotspots, EntryKey::Apply(event.id())),
         )
+    }
+
+    fn prepare_process(
+        &mut self,
+        _index: usize,
+    ) -> Option<celox_runtime::backend::PreparedProcess> {
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        {
+            let size = self.memory.len_words() * 8;
+            let code = self
+                .hotspots
+                .as_mut()?
+                .prepare(EntryKey::Process(_index), size)?
+                .clone();
+            Some(celox_runtime::backend::PreparedProcess::new(
+                code,
+                self.memory.owner(),
+                _index,
+                self.memory.as_mut_ptr().cast(),
+                size,
+                false,
+            ))
+        }
+        #[cfg(not(all(target_arch = "x86_64", not(feature = "arm64-codegen"))))]
+        None
     }
 
     fn run_process(&mut self, index: usize) -> Result<(), SimulatorErrorCode> {

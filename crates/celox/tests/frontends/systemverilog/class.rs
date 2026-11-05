@@ -55,6 +55,8 @@ sv_backends! {
     fn class_named_method_arguments(sim) { @case "class::named_method_arguments"; }
     fn class_typedefs_of_interface_classes(sim) { @case "class::typedefs_of_interface_classes"; }
     fn class_specializations_in_generate_blocks(sim) { @case "class::specializations_in_generate_blocks"; }
+    fn class_specializations_of_procedural_constants(sim) { @case "class::specializations_of_procedural_constants"; }
+    fn class_specializations_of_procedural_aggregate_types(sim) { @case "class::specializations_of_procedural_aggregate_types"; }
     fn class_specializations_keep_their_parameter_scopes(sim) { @case "class::specializations_keep_their_parameter_scopes"; }
     fn class_untyped_class_parameters_take_the_type_of_their_value(sim) { @case "class::untyped_class_parameters_take_the_type_of_their_value"; }
     fn class_class_declarations_bind_in_their_scopes(sim) { @case "class::class_declarations_bind_in_their_scopes"; }
@@ -810,6 +812,379 @@ fn method_defaults_use_the_receiver_the_call_evaluated() {
     let r = sim.signal("r");
     sim.run_until(0).unwrap();
     assert_eq!(sim.get(r), BigUint::from(1u8));
+}
+
+/// A constraint may not name a property that a constraint program does not
+/// hold, and such a property may not be random; the class is otherwise
+/// randomized with it as state.
+#[test]
+fn constraints_on_handle_and_string_properties_are_rejected() {
+    let wide = "class C; rand bit [3:0] x; bit [127:0] w; constraint k { x < 5; } endclass";
+    for (body, call, want) in [
+        (
+            "class C; rand bit [3:0] x; string s; constraint k { x < s.len(); } endclass",
+            "c.randomize()",
+            "constraint",
+        ),
+        (
+            "class N; endclass class C; rand bit [3:0] x; N n; constraint k { x == n; } endclass",
+            "c.randomize()",
+            "a handle, string, container or property wider than 64 bits in a constraint",
+        ),
+        (
+            "class C; rand bit [3:0] x; bit [127:0] w; constraint k { x < w; } endclass",
+            "c.randomize()",
+            "a handle, string, container or property wider than 64 bits in a constraint",
+        ),
+        (
+            "class C; rand bit [3:0] x; rand string q[$]; constraint k { x < 5; } endclass",
+            "c.randomize()",
+            "rand dynamic arrays and queues currently require 2-state integral elements",
+        ),
+        (
+            "class C; rand bit [3:0] x; rand logic [3:0] d[]; constraint k { x < 5; } endclass",
+            "c.randomize()",
+            "rand dynamic arrays and queues currently require 2-state integral elements",
+        ),
+        (
+            "class C; rand bit [3:0] x; randc bit [3:0] d[]; constraint k { x < 5; } endclass",
+            "c.randomize()",
+            "a randc dynamic array or queue",
+        ),
+        // The size and indices of an associative array are not random (18.4).
+        (
+            "class C; rand bit [3:0] x; rand int a[int]; constraint k { x < 5; } endclass",
+            "c.randomize()",
+            "constraints currently require scalar integral rand properties",
+        ),
+        (
+            "class C; rand bit [3:0] x; rand bit [127:0] w; constraint k { x < 5; } endclass",
+            "c.randomize()",
+            "constraints currently require scalar integral rand properties",
+        ),
+        // Selecting a wide property makes it random, which the solver
+        // cannot do, with constraints of the class or of the call.
+        (
+            wide,
+            "c.randomize(w)",
+            "randomize argument wider than 64 bits under constraints",
+        ),
+        (
+            "class C; rand bit [3:0] x; bit [127:0] w; endclass",
+            "c.randomize(w) with { x < 5; }",
+            "randomize argument wider than 64 bits under constraints",
+        ),
+        // A base handle dispatches to the randomizer of a constrained
+        // derived class (18.6.2).
+        (
+            "class C; rand bit [3:0] x; bit [127:0] w; endclass \
+             class D extends C; constraint k { x < 5; } endclass",
+            "c.randomize(w)",
+            "randomize argument wider than 64 bits under constraints",
+        ),
+    ] {
+        let source =
+            format!("module Top; {body} C c; initial begin c = new; void'({call}); end endmodule");
+        let Err(error) = Simulator::from_sv_sources(vec![(&source, Path::new("class.sv"))], "Top")
+            .build_cranelift()
+        else {
+            panic!("{body} {call} is unsupported");
+        };
+        let error = error.to_string();
+        assert!(error.contains(want), "{body} {call}: {error}");
+    }
+}
+
+/// The objects rand object handles reach form a graph that may be cyclic:
+/// each object is solved, and its hooks run, once per call (IEEE 1800-2023
+/// 18.4, 18.6.2). Verilator 5.052 rejects a rand member of the containing
+/// class's type and does not finish compiling a cycle through two classes.
+#[test]
+fn rand_object_cycles_are_solved_once() {
+    let source = r#"module Top(output int sum, output bit done);
+    class Leaf;
+        rand bit [3:0] v;
+        int pre, post;
+        constraint c { v inside {[3:5]}; }
+        function void pre_randomize(); pre++; endfunction
+        function void post_randomize(); post++; endfunction
+    endclass
+    class SubLeaf extends Leaf;
+        constraint d { v != 4; }
+    endclass
+    class Stuck extends Leaf;
+        constraint e { v == 9; }
+    endclass
+    class Node;
+        rand bit [3:0] w;
+        rand Leaf leaf;
+        rand Leaf none;
+        Leaf plain;
+        rand Node self_ref;
+        constraint k { w < 3; }
+    endclass
+    class Holder;
+        rand Leaf leaf;
+    endclass
+    Node n;
+    SubLeaf s;
+    Holder h;
+    int bad;
+    initial begin
+        n = new;
+        s = new;
+        n.leaf = s;
+        n.plain = new;
+        n.self_ref = n;
+        for (int i = 0; i < 20; i++) begin
+            if (!n.randomize()) $fatal(1, "randomize");
+            if (n.w >= 3 || !(s.v inside {3, 5})) bad++;
+        end
+        // A non-rand handle is not randomized; the hooks ran once per call.
+        sum = s.pre + s.post + n.plain.v + n.plain.pre;
+        // A class without constraints of its own solves its rand objects.
+        h = new;
+        h.leaf = new;
+        if (!h.randomize() || !(h.leaf.v inside {[3:5]}) || h.leaf.pre != 1) bad++;
+        // An unsatisfiable member fails the call, changes nothing and runs
+        // no post_randomize.
+        begin
+            Stuck stuck = new;
+            n.leaf = stuck;
+            n.w = 2;
+            if (n.randomize() || n.w != 2 || stuck.v != 0 || stuck.pre != 1 || stuck.post != 0) bad++;
+        end
+        $display("%0d %0d", sum, bad);
+        done = bad == 0;
+    end
+endmodule
+"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("cycle.sv"))], "Top")
+        .build()
+        .unwrap();
+    let (sum, done) = (sim.signal("sum"), sim.signal("done"));
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sum), BigUint::from(40u8));
+    assert_eq!(sim.get(done), BigUint::from(1u8));
+}
+
+/// post_randomize runs on the rand object members the solve took, also when
+/// the containing object's post_randomize clears or replaces the handle
+/// first, and pre_randomize on those the object's own pre_randomize
+/// allocates (IEEE 1800-2023 18.6.2). A randomize call inside a hook does
+/// not change them, and the hooks it dispatches are those of the classes
+/// its rand handles can refer to, not the hook calling it. randomize(null)
+/// makes the rand handles state too (18.11, 18.11.1): it checks the
+/// object's own constraints and runs the hooks of no member.
+#[test]
+fn post_randomize_runs_on_the_solved_members() {
+    let source = r#"module Top(output int bad, output bit done);
+    class Leaf;
+        rand bit [3:0] v;
+        int pre, post;
+        constraint c { v inside {[3:5]}; }
+        function void pre_randomize(); pre++; endfunction
+        function void post_randomize(); post++; endfunction
+    endclass
+    class Other;
+        rand Leaf leaf;
+    endclass
+    class Parent;
+        rand Leaf leaf;
+        int mode;
+        Leaf spare;
+        Other other;
+        function void pre_randomize();
+            if (mode == 3) leaf = new;
+        endfunction
+        function void post_randomize();
+            if (mode == 1) leaf = null;
+            if (mode == 2) leaf = spare;
+            if (mode == 4) void'(other.randomize());
+        endfunction
+    endclass
+    Parent p;
+    Leaf first, second;
+    initial begin
+        p = new;
+        p.spare = new;
+        // Cleared by the parent's post_randomize.
+        first = new;
+        p.leaf = first;
+        p.mode = 1;
+        if (!p.randomize() || p.leaf != null || first.pre != 1 || first.post != 1
+            || !(first.v inside {[3:5]})) bad++;
+        // Replaced: the solved leaf's hook runs, the replacement's does not.
+        second = new;
+        p.leaf = second;
+        p.mode = 2;
+        if (!p.randomize() || p.leaf != p.spare || second.post != 1 || p.spare.pre != 0
+            || p.spare.post != 0) bad++;
+        // Allocated by the parent's pre_randomize: solved, both hooks run.
+        p.mode = 3;
+        p.leaf = null;
+        if (!p.randomize() || p.leaf == null || p.leaf.pre != 1 || p.leaf.post != 1
+            || !(p.leaf.v inside {[3:5]})) bad++;
+        // A randomize call in the parent's post_randomize keeps the
+        // parent's members.
+        p.mode = 4;
+        p.other = new;
+        p.other.leaf = new;
+        first = new;
+        p.leaf = first;
+        if (!p.randomize() || first.post != 1 || p.other.leaf.post != 1
+            || !(p.other.leaf.v inside {[3:5]})) bad++;
+        // randomize(null): the member's constraint and hooks are not part
+        // of the check.
+        p.mode = 0;
+        first = new;
+        first.v = 9;
+        p.leaf = first;
+        if (p.randomize(null) != 1 || first.v != 9 || first.pre != 0 || first.post != 0) bad++;
+        $display("%0d", bad);
+        done = 1;
+    end
+endmodule
+"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("hooks.sv"))], "Top")
+        .build()
+        .unwrap();
+    let (bad, done) = (sim.signal("bad"), sim.signal("done"));
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(done), BigUint::from(1u8));
+    assert_eq!(sim.get(bad), BigUint::from(0u8));
+}
+
+/// Each object's rand object handles are read once its pre_randomize ran,
+/// at every depth, so a member a nested hook allocates gets its
+/// pre_randomize, is solved and gets its post_randomize; each object of a
+/// cycle is visited once (IEEE 1800-2023 18.6.2).
+#[test]
+fn pre_randomize_discovers_members_at_every_depth() {
+    let source = r#"module Top(output int bad, output bit done);
+    class Leaf;
+        rand bit [3:0] v;
+        int pre, post;
+        constraint c { v inside {[3:5]}; }
+        function void pre_randomize(); pre++; endfunction
+        function void post_randomize(); post++; endfunction
+    endclass
+    class Node;
+        rand Leaf leaf;
+        int pre, post;
+        function void pre_randomize(); pre++; if (leaf == null) leaf = new; endfunction
+        function void post_randomize(); post++; endfunction
+    endclass
+    class Parent;
+        rand Node node;
+    endclass
+    class Pair;
+        rand bit [3:0] w;
+        rand Pair other;
+        int pre, post;
+        constraint k { w == 6; }
+        function void pre_randomize(); pre++; endfunction
+        function void post_randomize(); post++; endfunction
+    endclass
+    Parent p;
+    Pair a, b;
+    initial begin
+        p = new;
+        p.node = new;
+        if (!p.randomize() || p.node.leaf == null || p.node.pre != 1 || p.node.post != 1
+            || p.node.leaf.pre != 1 || p.node.leaf.post != 1
+            || !(p.node.leaf.v inside {[3:5]})) bad++;
+        a = new;
+        b = new;
+        a.other = b;
+        b.other = a;
+        if (!a.randomize() || a.w != 6 || b.w != 6 || a.pre != 1 || a.post != 1
+            || b.pre != 1 || b.post != 1) bad++;
+        $display("%0d", bad);
+        done = 1;
+    end
+endmodule
+"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("depth.sv"))], "Top")
+        .build()
+        .unwrap();
+    let (bad, done) = (sim.signal("bad"), sim.signal("done"));
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(done), BigUint::from(1u8));
+    assert_eq!(sim.get(bad), BigUint::from(0u8));
+}
+
+/// A rand array whose rand_mode is off keeps its size and elements (IEEE
+/// 1800-2023 18.8), an inline constraint may name its size (18.7), and
+/// randomize(null) checks its size constraint against its size and changes
+/// nothing (18.11.1); a disabled block names no size (18.9); a selected
+/// array is random for the call (18.11); a bounded queue takes at most its bound plus one
+/// elements (7.10). Verilator 5.052 resizes an array whose rand_mode is
+/// off, ignores the inline size constraint, does not support
+/// randomize(null) on a class with a rand container and does not finish
+/// randomizing a bounded queue; xezim 0.11.4 grows a bounded queue past its
+/// bound.
+#[test]
+fn rand_array_modes_inline_sizes_and_checks() {
+    let source = r#"module Top(output int bad, output bit done);
+    class Item;
+        rand bit [63:0] value[];
+        constraint max_values { value.size() > 0 && value.size() < 10; }
+        bit [7:0] other[];
+    endclass
+    class Plain;
+        int unsigned d[];
+        bit [3:0] x;
+    endclass
+    class Bounded;
+        rand bit few[$:2];
+        constraint c { few.size() >= 0; }
+    endclass
+    Item item;
+    Bounded b;
+    initial begin
+        item = new;
+        b = new;
+        for (int i = 0; i < 20; i++) if (b.randomize() == 0 || b.few.size() > 3) bad++;
+        item.value = '{7};
+        item.value.rand_mode(0);
+        if (item.randomize() == 0 || item.value.size() != 1 || item.value[0] != 7) bad++;
+        item.value.rand_mode(1);
+        if ((item.randomize() with { value.size() == 2; }) == 0 || item.value.size() != 2) bad++;
+        // A selected array is random for the call (18.11): at its size, or
+        // the size the call's constraints give.
+        begin
+            Plain plain = new;
+            int changed = 0;
+            plain.d = new[4];
+            for (int i = 0; i < 10; i++) begin
+                if (plain.randomize(d) == 0 || plain.d.size() != 4 || plain.x != 0) bad++;
+                foreach (plain.d[j]) if (plain.d[j] != 0) changed++;
+            end
+            if (changed == 0) bad++;
+            if ((item.randomize(other) with { other.size() == 3; }) == 0 || item.other.size() != 3)
+                bad++;
+        end
+        // Without its block, no constraint names the size: it is kept.
+        item.max_values.constraint_mode(0);
+        item.value = new[12];
+        if (item.randomize() == 0 || item.value.size() != 12) bad++;
+        item.max_values.constraint_mode(1);
+        item.value.delete();
+        if (item.randomize(null) != 0) bad++;
+        item.value = new[3];
+        if (item.randomize(null) != 1 || item.value.size() != 3 || item.value[0] != 0) bad++;
+        done = 1;
+    end
+endmodule
+"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("check.sv"))], "Top")
+        .build()
+        .unwrap();
+    let (bad, done) = (sim.signal("bad"), sim.signal("done"));
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(done), BigUint::from(1u8));
+    assert_eq!(sim.get(bad), BigUint::from(0u8));
 }
 
 #[test]
@@ -1685,6 +2060,12 @@ sv_backends! {
 sv_backends! {
     fn constrained_randomize_conditionals(sim) { @case "class::constrained_randomize_conditionals"; }
     fn constrained_randomize_nested_guards(sim) { @case "class::constrained_randomize_nested_guards"; }
+    fn constrained_randomize_state_properties(sim) { @case "class::constrained_randomize_state_properties"; }
+    fn constrained_randomize_rand_objects(sim) { @case "class::constrained_randomize_rand_objects"; }
+    fn output_arguments_write_class_properties(sim) { @case "class::output_arguments_write_class_properties"; }
+    fn virtual_interface_property_waits(sim) { @case "class::virtual_interface_property_waits"; }
+    fn constrained_randomize_rand_arrays(sim) { @case "class::constrained_randomize_rand_arrays"; }
+    fn constrained_randomize_shifts(sim) { @case "class::constrained_randomize_shifts"; }
 }
 
 sv_backends! {
@@ -1997,4 +2378,45 @@ sv_backends! {
         sim.run_until(0).unwrap();
         assert_eq!(sim.get(sim.signal("width")), 12u32.into());
     }
+}
+
+/// A signed member of a property keeps its signedness as an inout actual:
+/// the copy-in sign-extends it into a wider formal (IEEE 1800-2023 7.2.1,
+/// 13.5), and a copy-out through a container element is published to a
+/// forked waiter on the element as an assignment of it is (9.4.2).
+#[test]
+fn place_actuals_keep_signedness_and_publish_copy_outs() {
+    let source = r#"`timescale 1ns/1ns
+typedef struct packed { bit signed [3:0] s; bit [3:0] u; } sp_t;
+class Holder; sp_t sp; endclass
+module Top(output int seen, output int widened, output bit done);
+  Holder h;
+  int mq[$] = '{0, 0};
+  function void widen(inout bit signed [7:0] io); widened = io; io = io - 1; endfunction
+  task automatic bump(output int o); o = 7; endtask
+  initial begin
+    h = new;
+    h.sp.s = -1;
+    widen(h.sp.s);
+    if (h.sp.s != -2) widened = 0;
+    fork
+      begin @(mq[1]); seen = mq[1] == 7 ? 1 : 2; end
+      begin #1 bump(mq[1]); end
+    join
+    done = 1;
+  end
+endmodule
+"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("signed.sv"))], "Top")
+        .build()
+        .unwrap();
+    let (seen, widened, done) = (
+        sim.signal("seen"),
+        sim.signal("widened"),
+        sim.signal("done"),
+    );
+    sim.run_until(5).unwrap();
+    assert_eq!(sim.get(done), BigUint::from(1u8));
+    assert_eq!(sim.get(widened), BigUint::from(u32::MAX));
+    assert_eq!(sim.get(seen), BigUint::from(1u8));
 }
