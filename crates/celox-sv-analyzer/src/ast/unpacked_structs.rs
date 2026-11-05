@@ -538,13 +538,7 @@ pub(in crate::ast) fn native_struct(
         // A method of the scope class hides a module function of its name,
         // as call binding resolves it.
         ExprKind::Call { expression, .. } => {
-            match expression_binding::object_method_result(
-                tree,
-                session,
-                *expression,
-                native,
-                dims,
-            )? {
+            match expression_binding::object_method_result(tree, session, id, native, dims)? {
                 Some(ty) => ty.unpacked_struct().cloned(),
                 None => expression_binding::callable_name(tree, *expression, native)
                     .and_then(|name| dims.functions.get(&name))

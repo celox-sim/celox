@@ -866,9 +866,9 @@ fn bind_value_in(
                             cast_shape(*target, native, tree, session, dimensions)?.map(Rc::new),
                         )],
                     ),
-                    _ if let Some((callee, args)) = method_call => {
+                    _ if let Some((_, args)) = method_call => {
                         let (name, formals, receiver) =
-                            objects::method(tree, session, callee, native, dimensions)?
+                            objects::call_method(tree, session, id, native, dimensions)?
                                 .expect("checked by the guard");
                         let selection = name
                             .ends_with("::randomize")

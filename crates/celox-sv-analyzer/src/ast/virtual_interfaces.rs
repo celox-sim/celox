@@ -943,17 +943,13 @@ fn native_value_type(
             {
                 return Ok(Some(element.as_ref().clone()));
             }
-            let name = match expression_binding::object_method(
-                tree,
-                session,
-                *expression,
-                native,
-                dimensions,
-            ) {
-                Ok(Some((name, _, _))) => name,
-                _ => expression_binding::callable_name(tree, *expression, native)
-                    .ok_or_else(|| "the call".to_owned())?,
-            };
+            let name =
+                match expression_binding::object_call_method(tree, session, id, native, dimensions)
+                {
+                    Ok(Some((name, _, _))) => name,
+                    _ => expression_binding::callable_name(tree, *expression, native)
+                        .ok_or_else(|| "the call".to_owned())?,
+                };
             return match dimensions.function_return_types.get(&name) {
                 Some(result) => match &result.virtual_interface {
                     Some(ty) => Ok(Some(ty.as_ref().clone())),

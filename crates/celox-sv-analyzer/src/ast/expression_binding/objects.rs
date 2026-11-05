@@ -698,6 +698,55 @@ pub(in crate::ast) fn method(
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<(String, Vec<Option<String>>, Receiver)>> {
+    method_named(tree, session, id, native, dimensions, false)
+}
+
+/// The method that native expression `id` calls: the callee of a call
+/// `c(...)`, or, as [`method`] resolves it, a method named without its
+/// parentheses (13.5.5). Every resolution of a call goes through it, since
+/// only a call knows that the name of the enclosing method `m` in `m(...)`
+/// calls the method, where `m` alone is its result variable (IEEE 1800-2023
+/// 13.4.1).
+pub(in crate::ast) fn call_method(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<(String, Vec<Option<String>>, Receiver)>> {
+    match &native.expression(ungroup(id, native)).kind {
+        ExprKind::Call { expression, .. } => {
+            method_named(tree, session, *expression, native, dimensions, true)
+        }
+        _ => method(tree, session, id, native, dimensions),
+    }
+}
+
+/// The callee of call native expression `id`, or `id` itself when it is
+/// not a call.
+pub(in crate::ast) fn callee(id: ExprId, native: &Declarations) -> ExprId {
+    match &native.expression(ungroup(id, native)).kind {
+        ExprKind::Call { expression, .. } => *expression,
+        _ => id,
+    }
+}
+
+/// Whether unqualified `name` inside a method names a method of its class
+/// rather than a declaration that hides it: a call of the enclosing method
+/// by its name calls it, though the name alone is its result variable
+/// (IEEE 1800-2023 13.4.1).
+fn names_method(dimensions: &PackedDimensions, name: &str, called: bool) -> bool {
+    (called && dimensions.method_name.as_deref() == Some(name)) || dimensions.get(name).is_none()
+}
+
+fn method_named(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+    called: bool,
+) -> Converted<Option<(String, Vec<Option<String>>, Receiver)>> {
     let mut through_super = false;
     let (class_name, method_name, receiver) = match &native.expression(ungroup(id, native)).kind {
         ExprKind::Member {
@@ -725,7 +774,7 @@ pub(in crate::ast) fn method(
         }
         ExprKind::Name(name) => {
             let normalized = instances::normalize_identifier(&name.spelling);
-            if dimensions.get(&normalized).is_some() {
+            if !names_method(dimensions, &normalized, called) {
                 return Ok(None);
             }
             match scope_class(dimensions) {
@@ -852,7 +901,7 @@ pub(in crate::ast) fn method_call<'a>(
         ExprKind::Member { .. } => (id, &[][..]),
         _ => return Ok(None),
     };
-    Ok(method(tree, session, callee, native, dimensions)?.map(|_| (callee, arguments)))
+    Ok(call_method(tree, session, id, native, dimensions)?.map(|_| (callee, arguments)))
 }
 
 /// Check that the handle native expression `id` evaluates to may be
@@ -1480,14 +1529,11 @@ pub(super) fn randomize_with(
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
-    let (callee, arguments) = match &native.expression(ungroup(expression, native)).kind {
-        ExprKind::Call {
-            expression,
-            arguments,
-        } => (*expression, arguments.as_slice()),
-        _ => (expression, &[][..]),
+    let arguments = match &native.expression(ungroup(expression, native)).kind {
+        ExprKind::Call { arguments, .. } => arguments.as_slice(),
+        _ => &[][..],
     };
-    let (method_name, _, receiver) = method(tree, session, callee, native, dimensions)?
+    let (method_name, _, receiver) = call_method(tree, session, expression, native, dimensions)?
         .filter(|(name, _, _)| name.ends_with("::randomize"))
         .ok_or_else(|| unsupported("inline constraints require class randomize"))?;
     let owner = method_name.strip_suffix("::randomize").unwrap();
@@ -1635,8 +1681,9 @@ pub(super) fn randomize_with(
     })
 }
 
-/// The declared result type of the method that native callee expression
-/// `id` names (`h.m`, `C::m`, or unqualified inside a method), when known.
+/// The declared result type of the method that native expression `id`
+/// calls, as [`call_method`] resolves the call (`h.m`, `C::m`, or
+/// unqualified inside a method), when known.
 pub(in crate::ast) fn method_result(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
@@ -1644,7 +1691,11 @@ pub(in crate::ast) fn method_result(
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<Type>> {
-    let (class_name, name) = match &native.expression(ungroup(id, native)).kind {
+    let called = matches!(
+        native.expression(ungroup(id, native)).kind,
+        ExprKind::Call { .. }
+    );
+    let (class_name, name) = match &native.expression(ungroup(callee(id, native), native)).kind {
         ExprKind::Member {
             expression,
             separator,
@@ -1661,9 +1712,11 @@ pub(in crate::ast) fn method_result(
             _ => return Ok(None),
         },
         ExprKind::Name(name)
-            if dimensions
-                .get(&instances::normalize_identifier(&name.spelling))
-                .is_none() =>
+            if names_method(
+                dimensions,
+                &instances::normalize_identifier(&name.spelling),
+                called,
+            ) =>
         {
             (scope_class(dimensions), name)
         }
