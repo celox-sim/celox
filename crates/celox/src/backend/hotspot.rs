@@ -305,6 +305,54 @@ impl HotspotRuntime {
         self.scheduler_stages
     }
 
+    /// Complete the scheduler entry's job with a failure, or with code the
+    /// code budget rejects, as the worker would.
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    pub(crate) fn finish_scheduler_for_test(
+        &mut self,
+        layout: &crate::backend::MemoryLayout,
+        rejected: bool,
+    ) {
+        let key = EntryKey::Process(self.scheduler_index.expect("scheduler prepared"));
+        let code = if rejected {
+            let code = HotspotCode::compile(&[], layout, &self.options, &CompileCancel::new())
+                .map_err(|error| error.to_string())
+                .unwrap();
+            self.stats.code_bytes = MAX_CODE_BYTES;
+            Ok(EntryCode::Group(Arc::new(code)))
+        } else {
+            Err("injected".to_string())
+        };
+        let (sender, receiver) = mpsc::channel();
+        self.completed = receiver;
+        self.scheduler = None;
+        self.busy = true;
+        self.polls = 63;
+        sender
+            .send(Completed {
+                key,
+                code,
+                elapsed: Duration::ZERO,
+                budgeted: true,
+            })
+            .unwrap();
+    }
+
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    pub(crate) fn holds_scheduler_program_for_test(&self) -> bool {
+        self.scheduler_program.is_some()
+    }
+
     pub(crate) fn has_compiled_scheduler(&self) -> bool {
         self.scheduler_index.is_some_and(|index| {
             self.entries
@@ -516,6 +564,12 @@ impl HotspotRuntime {
                 Ok(completed) => {
                     self.busy = false;
                     self.stats.compile_time += completed.elapsed;
+                    let scheduler =
+                        Some(completed.key) == self.scheduler_index.map(EntryKey::Process);
+                    if scheduler && completed.code.is_err() {
+                        // No later stage can follow a failed one.
+                        self.scheduler_program = None;
+                    }
                     let entry = self.entries.entry(completed.key).or_default();
                     // A later scheduler stage replaces the published one.
                     let replaced = entry
@@ -538,12 +592,16 @@ impl HotspotRuntime {
                                 self.stats.compiled_entries += 1;
                             }
                             entry.code = Some(code);
-                            if Some(completed.key) == self.scheduler_index.map(EntryKey::Process) {
+                            if scheduler {
                                 self.scheduler_stages += 1;
                                 match self.scheduler_program.take() {
                                     // Inline what the budget outlined: the
-                                    // final scheduler is the fastest.
-                                    Some(program) if completed.budgeted => {
+                                    // final scheduler is the fastest. On a
+                                    // single CPU only when it can yield.
+                                    Some(program)
+                                        if completed.budgeted
+                                            && (CAN_LOWER_PRIORITY || !single_cpu()) =>
+                                    {
                                         self.prepare_scheduler_stage(program, None);
                                     }
                                     _ => {}
@@ -560,6 +618,9 @@ impl HotspotRuntime {
                                 "hotspot publication exceeded its memory or code budget");
                             entry.unavailable = true;
                             self.stats.rejected_entries += 1;
+                            if scheduler {
+                                self.scheduler_program = None;
+                            }
                         }
                         Err(error) => {
                             tracing::debug!(key = ?completed.key, error, "hotspot compilation failed");
@@ -768,6 +829,9 @@ impl HotspotRuntime {
 pub(crate) fn single_cpu() -> bool {
     std::thread::available_parallelism().map_or(true, |cpus| cpus.get() == 1)
 }
+
+/// Whether [`lower_priority`] has an effect on this host.
+const CAN_LOWER_PRIORITY: bool = cfg!(target_os = "linux");
 
 /// Let the calling thread yield the CPU to the simulation.
 fn lower_priority() {

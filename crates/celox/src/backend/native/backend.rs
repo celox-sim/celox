@@ -1201,8 +1201,15 @@ impl PreparedHotspotScheduler {
             unit,
             callees: outlined,
             budgeted,
-        } = crate::scheduler::hotspot_scheduler(&program, inline_budget)
-            .map_err(codegen_message)?;
+        } = crate::scheduler::hotspot_scheduler(&program, inline_budget, Some(cancel)).map_err(
+            |error| {
+                if cancel.is_cancelled() {
+                    crate::backend::compile_cancel::cancelled_error()
+                } else {
+                    codegen_message(error)
+                }
+            },
+        )?;
         HotspotCode::validate_units(std::slice::from_ref(&unit))?;
         let mut native = options.x86_options.clone();
         native.baseline = false;

@@ -76,6 +76,7 @@ type Builder = SIRBuilder<RegionedAbsoluteAddr>;
 pub(crate) fn hotspot_scheduler(
     program: &LaidOutProgram,
     inline_budget: Option<usize>,
+    cancel: Option<&crate::backend::compile_cancel::CompileCancel>,
 ) -> Result<HotspotScheduler, String> {
     let schema = program
         .runtime
@@ -98,8 +99,13 @@ pub(crate) fn hotspot_scheduler(
         callees: Vec::new(),
         inline_budget,
         budgeted: false,
+        cancel: cancel.cloned(),
+        cancelled: false,
     };
     let unit = plan.generate_with_outlines(program, &schema.slots, Some(&mut outlines), base);
+    if outlines.cancelled {
+        return Err("scheduler generation was cancelled".into());
+    }
     Ok(HotspotScheduler {
         unit,
         callees: outlines.callees,
@@ -121,6 +127,10 @@ struct Outlines {
     callees: Vec<Unit>,
     inline_budget: Option<usize>,
     budgeted: bool,
+    /// Generation stops inlining bodies once this is cancelled, and its
+    /// unit is discarded.
+    cancel: Option<crate::backend::compile_cancel::CompileCancel>,
+    cancelled: bool,
 }
 
 /// With callees available, a unit larger than this always compiles as one.
@@ -5854,6 +5864,16 @@ impl Generator<'_> {
     }
 
     fn inline_body(&mut self, unit: &Unit) {
+        if let Some(outlines) = self.outlined.as_deref_mut()
+            && (outlines.cancelled
+                || outlines
+                    .cancel
+                    .as_ref()
+                    .is_some_and(|cancel| cancel.is_cancelled()))
+        {
+            outlines.cancelled = true;
+            return;
+        }
         let size = instructions(unit).take(OUTLINE_INSTRUCTIONS + 1).count();
         let inlined = self.inlined_instructions;
         let outline = match self.outlined.as_deref_mut() {
