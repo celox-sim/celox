@@ -481,7 +481,8 @@ pub(super) fn class_name(table: &semantic_types::TyTable, id: TyId) -> Option<St
 
 /// Constant size/range queries may bind a constant function in an isolated
 /// session. Only its evaluated integer escapes; runtime call identities and
-/// temporary declaration/type caches never enter the caller's session.
+/// temporary declaration/type caches never enter the caller's session. It
+/// reads the scopes the caller has settled instead of settling them again.
 fn constant_session(session: &Session) -> Session {
     Session {
         foreign: session.foreign.clone(),
@@ -492,6 +493,7 @@ fn constant_session(session: &Session) -> Session {
         class_specializations_frozen: true,
         virtual_interfaces: session.virtual_interfaces.clone(),
         types: session.types.clone(),
+        dimensions: session.dimensions.lend(),
         ..Session::default()
     }
 }
