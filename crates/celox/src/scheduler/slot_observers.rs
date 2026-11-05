@@ -93,17 +93,29 @@ impl Plan {
     }
 }
 
+/// Where the code goes on after the host wrote at an update point.
+#[derive(Clone, Copy)]
+pub(super) enum AfterWrites {
+    /// The settle that follows settles them.
+    Settle,
+    /// The settle starting at this block runs again.
+    Again(celox_sir::BlockId),
+    /// They settle here, and the waits see them, before the scheduler goes
+    /// on: a kernel that runs next reads what they drive.
+    Settled,
+}
+
 impl Generator<'_> {
     /// The host that watches every update sees the one just made
     /// (`AFTER_UPDATE`) when the observer flag of the arena is set. Its
-    /// writes are host inputs of the slot; with `again`, the code there
-    /// settles them, and shows the host that update in turn.
+    /// writes are host inputs of the slot, settled as `after` says; the
+    /// settle shows the host its update in turn.
     pub(super) fn report_update(
         &mut self,
         service: u32,
         checks: &[WaitCheck<'_>],
         finish: celox_sir::BlockId,
-        again: Option<celox_sir::BlockId>,
+        after: AfterWrites,
     ) {
         let enabled = self.arena_header_load(offset_of!(ArenaHeader, observes_updates));
         let enabled = self.equals(enabled, 1);
@@ -156,12 +168,18 @@ impl Generator<'_> {
         self.b.switch_to_block(writes);
         self.mark_dirty();
         host_inputs::replay(self.program, self, checks);
-        match again {
-            Some(block) => {
+        match after {
+            AfterWrites::Settle => {
+                self.b.seal_block(SIRTerminator::Jump(done, Vec::new()));
+            }
+            AfterWrites::Again(block) => {
                 self.b.seal_block(SIRTerminator::Jump(block, Vec::new()));
             }
-            None => {
-                self.check_waits_at(checks, false);
+            AfterWrites::Settled => {
+                let settled = self.b.new_block();
+                self.settle_then(settled);
+                self.b.switch_to_block(settled);
+                self.check_waits(checks);
                 self.b.seal_block(SIRTerminator::Jump(done, Vec::new()));
             }
         }

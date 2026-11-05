@@ -483,11 +483,11 @@ impl<B: SimBackend> SimulationState<B> {
         E: SimulationExecutor<Backend = B>,
     {
         self.advance_time(executor.backend_mut(), current_time);
+        // The host's interest holds for the round.
+        self.shows_updates = executor.observes_updates();
         if !self.model.timed {
             return self.batch_round(executor, current_time, events_to_process);
         }
-        // The host's interest holds for the round.
-        self.shows_updates = executor.observes_updates();
         // Host writes the waits must see one at a time.
         for (signal, value) in executor.take_host_writes() {
             self.observe_host_write(signal, &value);
@@ -530,14 +530,13 @@ impl<B: SimBackend> SimulationState<B> {
             {
                 self.observe(executor.backend_mut(), Some(signal))?;
             }
+            // Each scheduled value is an update of its own.
+            self.report_update(executor)?;
         }
         if !self.process_state.waiters.is_empty() && !events_to_process.is_empty() {
             // The scheduled values wake their processes before the process
             // phase runs.
             self.observe(executor.backend_mut(), None)?;
-        }
-        if !events_to_process.is_empty() {
-            self.report_update(executor)?;
         }
 
         let mut round = self.scratch.take().unwrap_or_default();

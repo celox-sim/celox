@@ -39,6 +39,7 @@ mod ordered;
 mod regions;
 mod slice;
 mod slot_observers;
+use slot_observers::AfterWrites;
 mod steps;
 mod testbench;
 mod waits;
@@ -268,6 +269,8 @@ pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool) {
     instrument_recording_functions(program, &schema.slots);
     let kernels = program.runtime.runtime_schema.processes.len();
     let mut lazy = false;
+    // The points exist only in a scheduler that can call the host.
+    let mut update_points = false;
     let (fallback, unit, events, clocks, kernel_events) =
         match Plan::new(program, &schema.slots, wiring_clocks) {
             Err(reason) => (
@@ -279,6 +282,7 @@ pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool) {
             ),
             Ok(plan) => {
                 lazy = plan.lazy.is_some();
+                update_points = schema.update_points && plan.service_function.is_some();
                 let fallback = plan.fallback.clone();
                 // Without kernels, slots of host clocks alone.
                 let unit = (plan.kernels.iter().any(Option::is_some)
@@ -323,6 +327,7 @@ pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool) {
         .as_mut()
         .expect("checked above");
     scheduler.fallback = fallback;
+    scheduler.update_points = update_points;
     scheduler.events = events;
     scheduler.clocks = clocks;
     scheduler.kernel_events = kernel_events;
@@ -2852,7 +2857,7 @@ impl Plan {
             }
         }
         if let Some(service) = updates {
-            g.report_update(service, &checks, finish_exit, None);
+            g.report_update(service, &checks, finish_exit, AfterWrites::Settled);
         }
         g.b.seal_block(SIRTerminator::Jump(entry_done, Vec::new()));
 
@@ -3224,7 +3229,7 @@ impl Plan {
             }
             g.b.switch_to_block(resumed);
             if let Some(service) = updates {
-                g.report_update(service, &checks, finish_exit, None);
+                g.report_update(service, &checks, finish_exit, AfterWrites::Settled);
             }
             if assertions {
                 // Observed predicates all finish before any Reactive action;
@@ -5728,7 +5733,7 @@ impl Generator<'_> {
         self.b.switch_to_block(self.comb);
         // The updates the settle follows, then its own.
         if let Some((service, checks)) = updates {
-            self.report_update(service, checks, finish_exit, None);
+            self.report_update(service, checks, finish_exit, AfterWrites::Settle);
         }
         self.observers_before(internal_exit);
         if self.settle_reads.is_some() {
@@ -5790,7 +5795,7 @@ impl Generator<'_> {
         }
         if let Some((service, checks)) = updates {
             let comb = self.comb;
-            self.report_update(service, checks, finish_exit, Some(comb));
+            self.report_update(service, checks, finish_exit, AfterWrites::Again(comb));
         }
         let targets = self.continuations.clone();
         self.dispatch_continuations(&targets, internal_exit);

@@ -135,6 +135,8 @@ impl<B: SimBackend> SimulationState<B> {
                 }
                 None => backend.set(event.signal, event.next_val),
             }
+            // Each scheduled value is an update of its own.
+            self.report_update(executor)?;
         }
 
         let mut triggered_domains = BitSet::with_capacity(num_events);
@@ -222,6 +224,7 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
 
+        self.report_update(executor)?;
         let mut comb_already_done = false;
         loop {
             let mut any_new_outer_loop_trigger = false;
@@ -246,6 +249,7 @@ impl<B: SimBackend> SimulationState<B> {
                             executor.stage_external_event(event, current_time)?;
                             executor.eval_apply_ff_at(event)?;
                             executor.fire_external_event(event, current_time)?;
+                            self.report_update(executor)?;
                             executor.eval_comb()?;
                             if track_stable_edges {
                                 self.replace_triggers_with_stable_edges(executor.backend_mut());
@@ -256,6 +260,7 @@ impl<B: SimBackend> SimulationState<B> {
                                     &mut edge_approved,
                                 );
                             }
+                            self.report_update(executor)?;
                             comb_already_done = true;
                             break;
                         }
@@ -319,6 +324,7 @@ impl<B: SimBackend> SimulationState<B> {
                     executor.fire_external_event(event, current_time)?;
                 }
             }
+            self.report_update(executor)?;
 
             if comb_already_done {
                 comb_already_done = false;
@@ -330,6 +336,7 @@ impl<B: SimBackend> SimulationState<B> {
                 if counted {
                     self.mark_counted_domains_in_batch(executor.backend_mut(), &mut edge_approved);
                 }
+                self.report_update(executor)?;
             }
         }
 
