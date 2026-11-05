@@ -93,6 +93,82 @@ impl Plan {
     }
 }
 
+impl Generator<'_> {
+    /// The host that watches every update sees the one just made
+    /// (`AFTER_UPDATE`) when the observer flag of the arena is set. Its
+    /// writes are host inputs of the slot; with `again`, the code there
+    /// settles them, and shows the host that update in turn.
+    pub(super) fn report_update(
+        &mut self,
+        service: u32,
+        checks: &[WaitCheck<'_>],
+        finish: celox_sir::BlockId,
+        again: Option<celox_sir::BlockId>,
+    ) {
+        let enabled = self.arena_header_load(offset_of!(ArenaHeader, observes_updates));
+        let enabled = self.equals(enabled, 1);
+        let notify = self.b.new_block();
+        let done = self.b.new_block();
+        self.b.seal_block(SIRTerminator::Branch {
+            cond: enabled,
+            true_block: (notify, Vec::new()),
+            false_block: (done, Vec::new()),
+        });
+        self.b.switch_to_block(notify);
+        let context = self.load_at(
+            self.slots.defer_limit_settle,
+            celox_design::SCHEDULER_HOST_CONTEXT_BIT,
+            64,
+        );
+        let zero = self.constant(0, 64);
+        let request = self.constant(native_io::AFTER_UPDATE, 64);
+        let time = self.load(self.slots.now, 64);
+        let result = self.b.alloc_bit(64, false);
+        self.b.emit(SIRInstruction::ExternCall {
+            dst: Some(result),
+            func: service,
+            args: vec![context, zero, request, time, zero],
+        });
+        let error = self.mask_bit(result, 0);
+        let failed = self.exit_block(SchedulerExit::Internal);
+        let success = self.b.new_block();
+        self.b.seal_block(SIRTerminator::Branch {
+            cond: error,
+            true_block: (failed, Vec::new()),
+            false_block: (success, Vec::new()),
+        });
+        self.b.switch_to_block(success);
+        let stopped = self.mask_bit(result, 2);
+        let continued = self.b.new_block();
+        self.b.seal_block(SIRTerminator::Branch {
+            cond: stopped,
+            true_block: (finish, Vec::new()),
+            false_block: (continued, Vec::new()),
+        });
+        self.b.switch_to_block(continued);
+        let wrote = self.mask_bit(result, 1);
+        let writes = self.b.new_block();
+        self.b.seal_block(SIRTerminator::Branch {
+            cond: wrote,
+            true_block: (writes, Vec::new()),
+            false_block: (done, Vec::new()),
+        });
+        self.b.switch_to_block(writes);
+        self.mark_dirty();
+        host_inputs::replay(self.program, self, checks);
+        match again {
+            Some(block) => {
+                self.b.seal_block(SIRTerminator::Jump(block, Vec::new()));
+            }
+            None => {
+                self.check_waits_at(checks, false);
+                self.b.seal_block(SIRTerminator::Jump(done, Vec::new()));
+            }
+        }
+        self.b.switch_to_block(done);
+    }
+}
+
 #[cfg(all(
     test,
     feature = "systemverilog",

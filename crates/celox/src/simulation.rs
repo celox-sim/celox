@@ -86,6 +86,20 @@ pub trait SlotObserver<B: SimBackend> {
     /// same region, which a simulator may process in any order (IEEE
     /// 1800-2023 4.7).
     fn end_of_slot(&mut self, io: &mut crate::SlotIo<'_, B>, time: u64);
+
+    /// Whether the simulation shows the observer every update of a slot
+    /// through [`Self::after_update`]. Asked when the observer is attached.
+    fn observes_updates(&self) -> bool {
+        false
+    }
+
+    /// An update of the slot may have changed a watched value: a process
+    /// ran until it suspended, flip-flop domains committed, nonblocking
+    /// assignments were published, scheduled values applied, or
+    /// combinational logic settled. A value change callback runs here, after
+    /// the change and before the simulation goes on (IEEE 1800-2023 38.36.1,
+    /// 4.10). Writes are blocking writes of the host at `time`.
+    fn after_update(&mut self, _io: &mut crate::SlotIo<'_, B>, _time: u64) {}
 }
 
 /// Manages simulation time, periodic clocks, and an event queue.
@@ -352,13 +366,36 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
         std::mem::take(&mut self.slot_writes)
     }
 
+    #[inline]
+    fn observes_updates(&self) -> bool {
+        self.observes_updates && !self.frozen
+    }
+
+    fn after_update(&mut self, timestamp: u64) -> Result<bool, Halt> {
+        self.show_slot(timestamp, |observer, io, time| {
+            observer.after_update(io, time)
+        })
+    }
+
     fn await_runtime_event_room(&mut self) {
         Simulator::await_runtime_event_room(self);
     }
 
     fn compiled_slots(&self) -> celox_runtime::CompiledSlots {
         use celox_runtime::CompiledSlots;
-        if self.frozen || !self.components.is_empty() || !self.backend.runs_compiled_scheduler() {
+        // A scheduler generated without update points cannot show the
+        // host each update.
+        if self.frozen
+            || (self.observes_updates
+                && !self
+                    .program
+                    .runtime_schema
+                    .scheduler
+                    .as_ref()
+                    .is_some_and(|scheduler| scheduler.update_points))
+            || !self.components.is_empty()
+            || !self.backend.runs_compiled_scheduler()
+        {
             return CompiledSlots::None;
         }
         // Waveforms record, the heap collects, deferred assertions mature
@@ -879,7 +916,9 @@ impl<B: SimBackend> Simulation<B> {
     /// simulation stops checking: the shadow does not see the observer's
     /// writes.
     pub fn observe_slots(&mut self, observer: Box<dyn SlotObserver<B>>, signals: &[SignalRef]) {
+        self.simulator.observes_updates = observer.observes_updates();
         self.simulator.slot_observer = Some(observer);
+        let signals = self.reference_observed(signals);
         self.state.set_observed_signals(signals.iter().copied());
         if self.shadow.take().is_some() {
             self.unchecked = Some("a slot observer writes state the shadow does not see");
@@ -888,13 +927,29 @@ impl<B: SimBackend> Simulation<B> {
 
     /// Replace the signals the observer of [`Self::observe_slots`] watches.
     pub fn set_observed_signals(&mut self, signals: &[SignalRef]) {
+        let signals = self.reference_observed(signals);
         self.state.set_observed_signals(signals.iter().copied());
+    }
+
+    /// The observed signals whose changes keep slots in the reference loop:
+    /// none when the compiled scheduler shows the observer every update.
+    fn reference_observed<'a>(&self, signals: &'a [SignalRef]) -> &'a [SignalRef] {
+        let shown = self.simulator.observes_updates
+            && self
+                .simulator
+                .program
+                .runtime_schema
+                .scheduler
+                .as_ref()
+                .is_some_and(|scheduler| scheduler.update_points);
+        if shown { &[] } else { signals }
     }
 
     /// Stop showing the time slots to the observer of
     /// [`Self::observe_slots`], and return it.
     pub fn stop_observing_slots(&mut self) -> Option<Box<dyn SlotObserver<B>>> {
         self.state.set_observed_signals([]);
+        self.simulator.observes_updates = false;
         self.simulator.slot_observer.take()
     }
 

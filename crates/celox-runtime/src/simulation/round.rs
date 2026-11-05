@@ -111,6 +111,41 @@ impl Round {
 }
 
 impl<B: SimBackend> SimulationState<B> {
+    /// Show the host an update of the slot
+    /// ([`super::host::HostBoundary::after_update`]) and settle what it
+    /// writes, until it writes nothing.
+    #[inline]
+    pub(super) fn report_update<E>(&mut self, executor: &mut E) -> Result<(), Halt>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        if self.shows_updates {
+            self.show_update(executor)
+        } else {
+            Ok(())
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn show_update<E>(&mut self, executor: &mut E) -> Result<(), Halt>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        while executor.after_update(self.scheduler.time)? {
+            self.charge_pass()?;
+            // The writes are blocking updates of the host: the waits see
+            // them, and the logic they drive settles, which is another
+            // update.
+            for (signal, value) in executor.take_host_writes() {
+                self.observe_host_write(signal, &value);
+            }
+            executor.eval_comb()?;
+            self.observe_driven(executor.backend_mut())?;
+        }
+        Ok(())
+    }
+
     /// Settle combinational logic after the round's sources changed, and
     /// keep the triggers the round considers stable.
     #[inline]
@@ -150,7 +185,7 @@ impl<B: SimBackend> SimulationState<B> {
         if !self.model.counted.is_empty() {
             self.mark_counted_domains(executor.backend_mut(), round);
         }
-        Ok(())
+        self.report_update(executor)
     }
 
     /// Host-created edges are valid independently of the suspended round's
@@ -328,6 +363,9 @@ impl<B: SimBackend> SimulationState<B> {
             round.scheduled_trigger_ids.insert(id);
             round.edge_approved.insert(id);
         }
+        if committed {
+            self.report_update(executor)?;
+        }
         Ok(committed)
     }
 
@@ -448,6 +486,8 @@ impl<B: SimBackend> SimulationState<B> {
         if !self.model.timed {
             return self.batch_round(executor, current_time, events_to_process);
         }
+        // The host's interest holds for the round.
+        self.shows_updates = executor.observes_updates();
         // Host writes the waits must see one at a time.
         for (signal, value) in executor.take_host_writes() {
             self.observe_host_write(signal, &value);
@@ -496,6 +536,9 @@ impl<B: SimBackend> SimulationState<B> {
             // phase runs.
             self.observe(executor.backend_mut(), None)?;
         }
+        if !events_to_process.is_empty() {
+            self.report_update(executor)?;
+        }
 
         let mut round = self.scratch.take().unwrap_or_default();
         round.reset(events_to_process.is_empty(), reactive);
@@ -532,6 +575,8 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
+        // A round a stop suspended continues here.
+        self.shows_updates = executor.observes_updates();
         match self.process_phase(executor, current_time, &mut round, entry) {
             Ok(()) => {}
             Err(Halt::Stop) => {
@@ -590,6 +635,7 @@ impl<B: SimBackend> SimulationState<B> {
                             executor.eval_apply_ff_at(event)?;
                             executor.fire_external_event(event, current_time)?;
                             self.publish_nba(executor, &mut round)?;
+                            self.report_update(executor)?;
                             executor.eval_comb()?;
                             if round.track_stable_edges {
                                 self.replace_triggers_with_stable_edges(executor.backend_mut());
@@ -602,6 +648,7 @@ impl<B: SimBackend> SimulationState<B> {
                             if !self.model.counted.is_empty() {
                                 self.mark_counted_domains(executor.backend_mut(), &mut round);
                             }
+                            self.report_update(executor)?;
                             // Each update is seen by the waits on it
                             // (IEEE 1800-2023 4.5).
                             self.observe_driven(executor.backend_mut())?;
@@ -682,6 +729,7 @@ impl<B: SimBackend> SimulationState<B> {
                 // The NBA region still publishes the processes' assignments,
                 // which may trigger further domains.
                 if self.publish_nba(executor, &mut round)? || published {
+                    self.report_update(executor)?;
                     self.settle_marked(executor, &mut round)?;
                     continue;
                 }
@@ -703,6 +751,7 @@ impl<B: SimBackend> SimulationState<B> {
                 }
             }
             self.publish_nba(executor, &mut round)?;
+            self.report_update(executor)?;
 
             if comb_already_done {
                 comb_already_done = false;
@@ -717,6 +766,7 @@ impl<B: SimBackend> SimulationState<B> {
                 if !self.model.counted.is_empty() {
                     self.mark_counted_domains(executor.backend_mut(), &mut round);
                 }
+                self.report_update(executor)?;
                 // A combinational value between two waves of domains is
                 // an update the waits see (IEEE 1800-2023 4.5).
                 self.observe_driven(executor.backend_mut())?;

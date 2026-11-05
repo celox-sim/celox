@@ -343,6 +343,7 @@ impl<B: SimBackend> SimulationState<B> {
                     self.record_transitions(executor.backend(), round);
                 }
                 let again = again?;
+                self.report_update(executor)?;
                 // Before the next run, its edges must be seen. After the last
                 // one, the check following the settle sees them: a settle
                 // does not write what processes write.

@@ -2650,6 +2650,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         clocks: Vec::new(),
         kernel_events: Vec::new(),
         domain_waits: Vec::new(),
+        update_points: false,
     });
     // The runtime reads counters, the signals waits watch and staged
     // nonblocking values directly; no unit loads a wait's signal.

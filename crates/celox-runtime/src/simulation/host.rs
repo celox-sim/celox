@@ -168,6 +168,22 @@ pub trait HostBoundary: UnitExecutor {
         Ok(false)
     }
 
+    /// Whether the host watches the updates of a slot through
+    /// [`Self::after_update`].
+    fn observes_updates(&self) -> bool {
+        false
+    }
+
+    /// Called after each update of a slot that may change a value the host
+    /// watches: a process ran until it suspended, flip-flop domains
+    /// committed, nonblocking assignments were published, scheduled values
+    /// applied, or combinational logic settled. A value change callback runs
+    /// after the change (IEEE 1800-2023 38.36.1, 4.10). Returns whether the
+    /// host wrote state, as [`Self::before_domains`] does.
+    fn after_update(&mut self, _timestamp: u64) -> Result<bool, Halt> {
+        Ok(false)
+    }
+
     /// Whether the host wrote state in [`Self::try_finish_timed_step`]
     /// since the last call. The writes are updates of that slot's time: the
     /// next step settles them there.

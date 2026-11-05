@@ -1563,9 +1563,14 @@ impl Plan {
         );
         let retained = retained_storage(&sir.eval_comb, &storage, &retained_candidates);
         let mut eager_candidate_instructions = None;
+        // A host watching every update sees each settle as it happens.
+        let update_points = schema
+            .scheduler
+            .as_ref()
+            .is_some_and(|scheduler| scheduler.update_points);
         let eager = settle_reads
             .as_ref()
-            .filter(|_| !sir.eval_comb.iter().any(fails))
+            .filter(|_| !update_points && !sir.eval_comb.iter().any(fails))
             .and_then(|_| {
                 let stateful = sir.eval_comb_stateful.as_ref();
                 let eager = stateful.and_then(|stateful| {
@@ -2702,6 +2707,16 @@ impl Plan {
             );
         }
         let finish_exit = g.exit_block(SchedulerExit::Finish);
+        // A host that watches every update sees each kernel run, the host
+        // clocks a slot applies and each settle (IEEE 1800-2023 38.36.1).
+        let updates = self.service_function.filter(|_| {
+            program
+                .runtime
+                .runtime_schema
+                .scheduler
+                .as_ref()
+                .is_some_and(|scheduler| scheduler.update_points)
+        });
         let pick = g.b.new_block();
         let entry_done = pick;
         if let Some((armed, clocked)) = started {
@@ -2835,6 +2850,9 @@ impl Plan {
                 g.b.switch_to_block(check);
                 g.check_waits_at(&checks, false);
             }
+        }
+        if let Some(service) = updates {
+            g.report_update(service, &checks, finish_exit, None);
         }
         g.b.seal_block(SIRTerminator::Jump(entry_done, Vec::new()));
 
@@ -3205,6 +3223,9 @@ impl Plan {
                 }
             }
             g.b.switch_to_block(resumed);
+            if let Some(service) = updates {
+                g.report_update(service, &checks, finish_exit, None);
+            }
             if assertions {
                 // Observed predicates all finish before any Reactive action;
                 // design work produced by actions waits for the next Active pass.
@@ -3904,7 +3925,12 @@ impl Plan {
         let unknown = g.constant(celox_design::SCHEDULER_NEXT_UNJUDGED, SCHEDULER_TIME_WIDTH);
         g.store(slots.next, SCHEDULER_TIME_WIDTH, unknown);
         g.b.seal_block(SIRTerminator::Jump(stopped, Vec::new()));
-        g.emit_settle(&program.sir.eval_comb, finish_exit, internal_exit);
+        g.emit_settle(
+            &program.sir.eval_comb,
+            finish_exit,
+            internal_exit,
+            updates.map(|service| (service, &checks[..])),
+        );
         if let Some(lazy) = &self.lazy {
             g.emit_eager(&lazy.eager, finish_exit, internal_exit);
         }
@@ -5697,8 +5723,13 @@ impl Generator<'_> {
         units: &[Unit],
         finish_exit: celox_sir::BlockId,
         internal_exit: celox_sir::BlockId,
+        updates: Option<(u32, &[WaitCheck<'_>])>,
     ) {
         self.b.switch_to_block(self.comb);
+        // The updates the settle follows, then its own.
+        if let Some((service, checks)) = updates {
+            self.report_update(service, checks, finish_exit, None);
+        }
         self.observers_before(internal_exit);
         if self.settle_reads.is_some() {
             let dirty = self.load(self.slots.dirty, SCHEDULER_FLAG_WIDTH);
@@ -5756,6 +5787,10 @@ impl Generator<'_> {
                 .is_some_and(|cone| cone.units.iter().any(|unit| self.unit_finishes(unit)))
         {
             self.check_finish(finish_exit);
+        }
+        if let Some((service, checks)) = updates {
+            let comb = self.comb;
+            self.report_update(service, checks, finish_exit, Some(comb));
         }
         let targets = self.continuations.clone();
         self.dispatch_continuations(&targets, internal_exit);

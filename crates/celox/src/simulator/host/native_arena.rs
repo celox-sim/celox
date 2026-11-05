@@ -33,6 +33,8 @@ pub(crate) struct Header {
     pub return_limit: u64,
     pub recent_next: u64,
     pub recent: [u64; 64],
+    /// The slot observer watches every update (`AFTER_UPDATE`).
+    pub observes_updates: u64,
 }
 
 impl Default for Header {
@@ -65,6 +67,7 @@ impl Default for Header {
             return_limit: u64::MAX,
             recent_next: 0,
             recent: [u64::MAX; 64],
+            observes_updates: 0,
         }
     }
 }

@@ -1723,6 +1723,9 @@ mod host {
         /// Emit the additional combinational entries needed to reapply foreign
         /// force overrides between procedural store boundaries.
         pub native_force_support: bool,
+        /// Generate the compiled scheduler with a host observation point at
+        /// every update (see [`SimulatorBuilder::observable_updates`]).
+        pub observable_updates: bool,
         /// Cross-check every partitioned settle against one that runs every
         /// partition (see [`SimulatorBuilder::settle_check`]).
         pub settle_check: bool,
@@ -2053,6 +2056,7 @@ mod host {
                 sir_transform: None,
                 settle_check: false,
                 native_force_support: false,
+                observable_updates: false,
                 signal_access: crate::SignalAccessOptions::default(),
                 dead_store_policy: DeadStorePolicy::Off,
                 tier_promotion: TierPromotion::Always,
@@ -2290,6 +2294,17 @@ mod host {
         pub fn native_force_support(mut self, enable: bool) -> Self {
             self.options.native_force_support = enable;
             self.enforce_native_force_optimizer();
+            self
+        }
+
+        /// Generate the compiled scheduler so that a slot observer that
+        /// watches every update ([`crate::SlotObserver::observes_updates`]),
+        /// such as VPI value change callbacks, sees each of them inside
+        /// compiled slots. Without it, such an observer's slots run in the
+        /// reference loop. The points cost a test of the observer flag each
+        /// and keep combinational settles from being deferred.
+        pub fn observable_updates(mut self, enable: bool) -> Self {
+            self.options.observable_updates = enable;
             self
         }
 
@@ -3115,6 +3130,9 @@ mod host {
             {
                 if self.native_file_calls {
                     crate::scheduler::enable_native_services(&mut laid_out);
+                }
+                if let Some(scheduler) = laid_out.runtime.runtime_schema.scheduler.as_mut() {
+                    scheduler.update_points = self.options.observable_updates;
                 }
                 crate::scheduler::attach(
                     &mut laid_out,
