@@ -282,6 +282,76 @@ pub fn emit_prepared_eu_with_functions(
     mut trace: Option<&mut NativeFunctionTrace>,
     is_cancelled: impl Fn() -> bool,
 ) -> Result<EmitResult, ChainedEmitError> {
+    let allocated = allocate_prepared_eu_with_functions(
+        sir_eu,
+        layout,
+        four_state,
+        label,
+        native_tick_loop,
+        functions,
+        trace.as_deref_mut(),
+        &is_cancelled,
+    )?;
+    allocated.emit(arena_base, trace, is_cancelled)
+}
+
+/// Allocated AArch64 code whose private arena has not yet been placed.
+///
+/// Selection, optimization and allocation depend on the semantic layout, not
+/// on the scratch extents of generated callees, so a caller can allocate
+/// while its callees still compile and emit once their extents are known.
+pub struct AllocatedFunction {
+    allocation: crate::regalloc::TargetAllocation,
+    semantic_size: usize,
+    tick_loop: bool,
+    check_runtime_events: bool,
+    frame: FunctionFrame,
+}
+
+impl AllocatedFunction {
+    /// Emit with the private arena at `arena_base` (at least the end of the
+    /// semantic state) when given, as [`emit_prepared_eu_with_arena`] does.
+    pub fn emit(
+        self,
+        arena_base: Option<usize>,
+        trace: Option<&mut NativeFunctionTrace>,
+        is_cancelled: impl Fn() -> bool,
+    ) -> Result<EmitResult, ChainedEmitError> {
+        if is_cancelled() {
+            return Err(ChainedEmitError::Cancelled);
+        }
+        let state_size = arena_base.map_or(self.semantic_size, |base| base.max(self.semantic_size));
+        let result = emit_function(
+            &self.allocation.allocated.function,
+            &self.allocation.allocated.assignment,
+            self.allocation.spill_frame_size,
+            state_size,
+            &self.allocation.allocated.edge_copies,
+            self.tick_loop,
+            self.check_runtime_events,
+            self.frame,
+        )?;
+        if let Some(trace) = trace {
+            trace.disassembly = disassemble(&result.code[..result.text_size], 0);
+        }
+        Ok(result)
+    }
+}
+
+/// Select, optimize and allocate one prepared SIR execution unit, leaving
+/// only emission, which places the private arena, to
+/// [`AllocatedFunction::emit`].
+#[allow(clippy::too_many_arguments)]
+pub fn allocate_prepared_eu_with_functions(
+    sir_eu: &crate::ExecutionUnit<crate::RegionedAbsoluteAddr>,
+    layout: &crate::MemoryLayout,
+    four_state: bool,
+    label: &str,
+    native_tick_loop: bool,
+    functions: Option<crate::FunctionCalls<'_>>,
+    mut trace: Option<&mut NativeFunctionTrace>,
+    is_cancelled: impl Fn() -> bool,
+) -> Result<AllocatedFunction, ChainedEmitError> {
     // A function unit's slots become state objects in its frame window.
     let mut function_layout = None;
     let mut window = None;
@@ -327,7 +397,6 @@ pub fn emit_prepared_eu_with_functions(
         .merged_total_size
         .checked_add(layout.triggered_bits_total_size)
         .ok_or(PrepareError::StateSizeOverflow)?;
-    let state_size = arena_base.map_or(semantic_size, |base| base.max(semantic_size));
     let mut function = crate::isel::lower_execution_unit_with_functions(
         sir_eu,
         layout,
@@ -350,7 +419,7 @@ pub fn emit_prepared_eu_with_functions(
             }
         })?;
     checkpoint()?;
-    if let Some(trace) = trace.as_deref_mut() {
+    if let Some(trace) = trace {
         trace.mir_after_regalloc = format!("{:#?}", allocation.allocated.function);
         let mut assignments = allocation
             .allocated
@@ -365,20 +434,13 @@ pub fn emit_prepared_eu_with_functions(
             .collect();
         trace.spill_frame_size = allocation.spill_frame_size;
     }
-    let result = emit_function(
-        &allocation.allocated.function,
-        &allocation.allocated.assignment,
-        allocation.spill_frame_size,
-        state_size,
-        &allocation.allocated.edge_copies,
+    Ok(AllocatedFunction {
+        allocation,
+        semantic_size,
         tick_loop,
         check_runtime_events,
         frame,
-    )?;
-    if let Some(trace) = trace {
-        trace.disassembly = disassemble(&result.code[..result.text_size], 0);
-    }
-    Ok(result)
+    })
 }
 
 /// Emit the canonical no-op simulation kernel directly in AArch64 MIR.
@@ -731,7 +793,9 @@ fn emit_function_with_branches(
                     pinned_fp,
                     frame.call_stack,
                 )?;
-                if celox_sir::extern_abi::native_function_slot(*func).is_some() {
+                if celox_sir::extern_abi::native_function_slot(*func).is_some()
+                    || celox_sir::extern_abi::native_kernel_index(*func).is_some()
+                {
                     // A nonzero status of the callee, which the call left in
                     // x16, ends this function with it, as `ReturnError` does.
                     let returned = ops.new_dynamic_label();

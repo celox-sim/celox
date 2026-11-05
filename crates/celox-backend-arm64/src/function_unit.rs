@@ -156,18 +156,25 @@ pub(crate) fn may_raise_runtime_events(unit: &ExecutionUnit<RegionedAbsoluteAddr
     })
 }
 
-/// `unit` with every block that holds a `Call` split after each call, or
-/// `None` when it holds none.
+/// `unit` with every block that holds a `Call`, a native kernel call or a
+/// native state write split after each, or `None` when it holds none.
 ///
 /// Instruction selection plans its fusions (load caches, packed compares
 /// and stores, slice origins) within one block from the loads and stores
-/// they see, and a call writes state that its instruction does not name.
+/// they see, and a call (or an indexed native state write) writes state that
+/// its instruction does not name.
 /// Ending a block at each call keeps every such plan on one side of it.
 pub(crate) fn split_at_calls(
     unit: &ExecutionUnit<RegionedAbsoluteAddr>,
 ) -> Option<ExecutionUnit<RegionedAbsoluteAddr>> {
-    let is_call = |instruction: &crate::SIRInstruction<RegionedAbsoluteAddr>| {
-        matches!(instruction, crate::SIRInstruction::Call { .. })
+    let is_call = |instruction: &crate::SIRInstruction<RegionedAbsoluteAddr>| match instruction {
+        crate::SIRInstruction::Call { .. } => true,
+        crate::SIRInstruction::ExternCall { func, .. } => {
+            celox_sir::extern_abi::native_kernel_index(*func).is_some()
+                || celox_sir::native_memory::NativeMemoryOp::decode(*func)
+                    == Some(celox_sir::native_memory::NativeMemoryOp::WriteState)
+        }
+        _ => false,
     };
     if !unit
         .blocks

@@ -1,10 +1,6 @@
 #[cfg(feature = "host-runtime")]
 pub(crate) mod compile_cancel;
-#[cfg(all(
-    feature = "host-runtime",
-    target_arch = "x86_64",
-    not(feature = "arm64-codegen")
-))]
+#[cfg(all(feature = "host-runtime", hotspot_jit))]
 pub(crate) mod hotspot;
 #[cfg(feature = "host-runtime")]
 pub(crate) mod interp;
@@ -38,7 +34,7 @@ pub use traits::{EventHandle, SimBackend};
 
 #[cfg(feature = "host-runtime")]
 mod host {
-    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    #[cfg(hotspot_jit)]
     pub use super::hotspot::HotspotStats;
     pub use super::interp::InterpBackend;
     #[cfg(feature = "cranelift")]

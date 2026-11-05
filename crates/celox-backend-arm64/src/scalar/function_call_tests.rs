@@ -1115,3 +1115,182 @@ fn clears_wide_frame_slots_with_one_store() {
         }
     }
 }
+
+/// A generated kernel that adds 5 to `OUT`, then raises error 9 when `fail`.
+fn adding_kernel(fail: bool) -> ExecutionUnit<RegionedAbsoluteAddr> {
+    let unit = ExecutionUnit {
+        entry_block_id: crate::BlockId(0),
+        blocks: [block(
+            0,
+            vec![
+                load(0, state(OUT), 32),
+                imm(1, 5),
+                binary(2, 0, BinaryOp::Add, 1),
+                store(state(OUT), 32, 2),
+            ],
+            if fail {
+                SIRTerminator::Error(9)
+            } else {
+                SIRTerminator::Return
+            },
+        )]
+        .into_iter()
+        .collect(),
+        register_map: (0..=2).map(|id| (reg(id), bit(32))).collect(),
+    };
+    unit.verify();
+    unit
+}
+
+/// A unit that loads `OUT`, calls native kernel 0, loads `OUT` again, and
+/// stores the first load to `SP`, a register defined before the call to
+/// `KEEP` and the second load to `MARK`.
+fn kernel_caller() -> ExecutionUnit<RegionedAbsoluteAddr> {
+    let unit = ExecutionUnit {
+        entry_block_id: crate::BlockId(0),
+        blocks: [block(
+            0,
+            vec![
+                imm(2, 0x1234),
+                load(0, state(OUT), 32),
+                SIRInstruction::ExternCall {
+                    dst: None,
+                    func: celox_sir::extern_abi::NATIVE_KERNEL_CALL_TAG,
+                    args: vec![],
+                },
+                load(1, state(OUT), 8),
+                store(state(SP), 32, 0),
+                store(state(KEEP), 32, 2),
+                store(state(MARK), 8, 1),
+            ],
+            SIRTerminator::Return,
+        )]
+        .into_iter()
+        .collect(),
+        register_map: [(0, 32), (1, 8), (2, 32)]
+            .into_iter()
+            .map(|(id, width)| (reg(id), bit(width)))
+            .collect(),
+    };
+    unit.verify();
+    unit
+}
+
+/// A native kernel call reads state the callee wrote, keeps values live
+/// across it, and returns the callee's error. The caller is allocated before
+/// its arena is placed above the callee's.
+#[test]
+fn native_kernel_calls_see_callee_writes_and_propagate_errors() {
+    for fail in [false, true] {
+        let layout = layout(false);
+        let kernel = emit_prepared_eu(
+            &adding_kernel(fail),
+            &layout,
+            false,
+            "kernel",
+            false,
+            None,
+            || false,
+        )
+        .unwrap();
+        let arena = kernel.required_state_size as usize;
+        let caller = allocate_prepared_eu_with_functions(
+            &kernel_caller(),
+            &layout,
+            false,
+            "caller",
+            false,
+            None,
+            None,
+            || false,
+        )
+        .unwrap()
+        .emit(Some(arena), None, || false)
+        .unwrap();
+        assert!(caller.required_state_size as usize >= arena);
+        #[cfg(target_arch = "aarch64")]
+        {
+            let compiled = Compiled {
+                functions: vec![kernel],
+                caller,
+                first_slot: 0,
+            };
+            let out = layout.offsets[&object(OUT)];
+            let (status, memory) = run::Program::load(&compiled, &[])
+                .run_with(|memory| memory[out..out + 4].copy_from_slice(&10u32.to_le_bytes()));
+            assert_eq!(word(&layout, &memory, OUT), 15);
+            if fail {
+                assert_eq!(status, 9);
+                assert_eq!(word(&layout, &memory, KEEP), 0);
+                assert_eq!(word(&layout, &memory, MARK), 0);
+            } else {
+                assert_eq!(status, 0);
+                assert_eq!(word(&layout, &memory, SP), 10);
+                assert_eq!(word(&layout, &memory, KEEP), 0x1234);
+                assert_eq!(word(&layout, &memory, MARK), 15);
+            }
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        let _ = (kernel, caller);
+    }
+}
+
+/// The private scheduler memory operations: a state word copied through
+/// indexed state accesses, and a word read and written through a pointer.
+#[test]
+fn native_memory_operations_access_state_and_indirect_words() {
+    use celox_sir::native_memory::NativeMemoryOp as Memory;
+    let layout = layout(false);
+    let mut words = Box::new([0u64, 41]);
+    let pointer = words.as_mut_ptr() as u64;
+    let call = |dst: Option<usize>, op: Memory, args: &[usize]| SIRInstruction::ExternCall {
+        dst: dst.map(reg),
+        func: op.function(),
+        args: args.iter().map(|&id| reg(id)).collect(),
+    };
+    let unit = ExecutionUnit {
+        entry_block_id: crate::BlockId(0),
+        blocks: [block(
+            0,
+            vec![
+                imm(0, layout.offsets[&object(OUT)] as u64),
+                call(Some(1), Memory::ReadState, &[0]),
+                imm(2, layout.offsets[&object(KEEP)] as u64),
+                call(None, Memory::WriteState, &[2, 1]),
+                imm(3, pointer),
+                imm(4, 8),
+                call(Some(5), Memory::ReadIndirect, &[3, 4]),
+                imm(6, 1),
+                binary(7, 5, BinaryOp::Add, 6),
+                imm(8, 0),
+                call(None, Memory::WriteIndirect, &[3, 8, 7]),
+                load(9, state(KEEP), 32),
+                store(state(SP), 32, 9),
+            ],
+            SIRTerminator::Return,
+        )]
+        .into_iter()
+        .collect(),
+        register_map: (0..=9)
+            .map(|id| (reg(id), bit(if id == 9 { 32 } else { 64 })))
+            .collect(),
+    };
+    unit.verify();
+    let compiled = Compiled {
+        functions: vec![],
+        caller: emit_prepared_eu(&unit, &layout, false, "memory", false, None, || false).unwrap(),
+        first_slot: 0,
+    };
+    #[cfg(target_arch = "aarch64")]
+    {
+        let out = layout.offsets[&object(OUT)];
+        let (status, memory) = run::Program::load(&compiled, &[]).run_with(|memory| {
+            memory[out..out + 8].copy_from_slice(&0x0123_4567_89ab_cdefu64.to_le_bytes())
+        });
+        assert_eq!(status, 0);
+        assert_eq!(word(&layout, &memory, KEEP), 0x89ab_cdef);
+        assert_eq!(word(&layout, &memory, SP), 0x89ab_cdef);
+        assert_eq!(*words, [42, 41]);
+    }
+    let _ = (compiled, &mut words);
+}
