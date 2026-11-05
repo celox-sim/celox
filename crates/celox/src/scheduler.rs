@@ -68,8 +68,16 @@ type Builder = SIRBuilder<RegionedAbsoluteAddr>;
 /// A compact native scheduler whose large bodies are separately compiled.
 /// Analyze the original units before outlining, so call opacity cannot change
 /// dirty tracking, finish handling, or event accounting.
+///
+/// Units larger than [`OUTLINE_INSTRUCTIONS`] are always callees. With an
+/// `inline_budget`, so are units of at least [`OUTLINE_MIN_INSTRUCTIONS`]
+/// once the inlined ones exceed it: a smaller function that compiles sooner.
 #[cfg(hotspot_jit)]
-pub(crate) fn hotspot_scheduler(program: &LaidOutProgram) -> Result<(Unit, Vec<Unit>), String> {
+pub(crate) fn hotspot_scheduler(
+    program: &LaidOutProgram,
+    inline_budget: Option<usize>,
+    cancel: Option<&crate::backend::compile_cancel::CompileCancel>,
+) -> Result<HotspotScheduler, String> {
     let schema = program
         .runtime
         .runtime_schema
@@ -87,17 +95,51 @@ pub(crate) fn hotspot_scheduler(program: &LaidOutProgram) -> Result<(Unit, Vec<U
     }
     let base = u32::try_from(program.runtime.runtime_schema.extern_functions.len())
         .map_err(|_| "too many extern functions")?;
-    let mut callees = Vec::new();
-    let unit = plan.generate_with_outlines(program, &schema.slots, Some(&mut callees), base);
-    Ok((unit, callees))
+    let mut outlines = Outlines {
+        callees: Vec::new(),
+        inline_budget,
+        budgeted: false,
+        cancel: cancel.cloned(),
+        cancelled: false,
+    };
+    let unit = plan.generate_with_outlines(program, &schema.slots, Some(&mut outlines), base);
+    if outlines.cancelled {
+        return Err("scheduler generation was cancelled".into());
+    }
+    Ok(HotspotScheduler {
+        unit,
+        callees: outlines.callees,
+        budgeted: outlines.budgeted,
+    })
+}
+
+/// A generated hotspot scheduler and its separately compiled bodies.
+#[cfg(hotspot_jit)]
+pub(crate) struct HotspotScheduler {
+    pub unit: Unit,
+    pub callees: Vec<Unit>,
+    /// The inline budget outlined a unit: generating without it inlines more.
+    pub budgeted: bool,
+}
+
+/// The bodies a generated scheduler calls instead of inlining them.
+struct Outlines {
+    callees: Vec<Unit>,
+    inline_budget: Option<usize>,
+    budgeted: bool,
+    /// Generation stops inlining bodies once this is cancelled, and its
+    /// unit is discarded.
+    cancel: Option<crate::backend::compile_cancel::CompileCancel>,
+    cancelled: bool,
 }
 
 /// With callees available, a unit larger than this always compiles as one.
 const OUTLINE_INSTRUCTIONS: usize = 32_768;
 /// Inlined units beyond this many instructions make the compiled scheduler a
-/// function too large to allocate quickly; later units of at least
-/// [`OUTLINE_MIN_INSTRUCTIONS`] compile as callees instead.
-const INLINE_BUDGET_INSTRUCTIONS: usize = 262_144;
+/// function too large to allocate quickly; with this budget, later units of
+/// at least [`OUTLINE_MIN_INSTRUCTIONS`] compile as callees instead.
+#[cfg(hotspot_jit)]
+pub(crate) const INLINE_BUDGET_INSTRUCTIONS: usize = 262_144;
 const OUTLINE_MIN_INSTRUCTIONS: usize = 256;
 
 /// The narrowest event mask: one 64-bit word, which every design with at
@@ -2224,7 +2266,7 @@ impl Plan {
         &self,
         program: &LaidOutProgram,
         slots: &SchedulerSlots<AbsoluteAddr>,
-        outlined: Option<&mut Vec<Unit>>,
+        outlined: Option<&mut Outlines>,
         outline_base: u32,
     ) -> Unit {
         let schema = &program.runtime.runtime_schema;
@@ -4511,7 +4553,7 @@ struct Generator<'a> {
     nbas: Option<&'a nba::Sites>,
     observers: Option<&'a observers::Observers>,
     observer_service: Option<u32>,
-    outlined: Option<&'a mut Vec<Unit>>,
+    outlined: Option<&'a mut Outlines>,
     outline_base: u32,
     b: Builder,
     slots: &'a SchedulerSlots<AbsoluteAddr>,
@@ -5822,15 +5864,33 @@ impl Generator<'_> {
     }
 
     fn inline_body(&mut self, unit: &Unit) {
-        let size = instructions(unit).take(OUTLINE_INSTRUCTIONS + 1).count();
-        // Native allocation grows faster than the function: past a budget,
-        // further kernels compile as callees instead of one huge scheduler.
-        let outline = size > OUTLINE_INSTRUCTIONS
-            || (size >= OUTLINE_MIN_INSTRUCTIONS
-                && self.inlined_instructions + size > INLINE_BUDGET_INSTRUCTIONS);
-        if let Some(outlined) = &mut self.outlined
-            && outline
+        if let Some(outlines) = self.outlined.as_deref_mut()
+            && (outlines.cancelled
+                || outlines
+                    .cancel
+                    .as_ref()
+                    .is_some_and(|cancel| cancel.is_cancelled()))
         {
+            outlines.cancelled = true;
+            return;
+        }
+        let size = instructions(unit).take(OUTLINE_INSTRUCTIONS + 1).count();
+        let inlined = self.inlined_instructions;
+        let outline = match self.outlined.as_deref_mut() {
+            Some(outlines) => {
+                // Native allocation grows faster than the function: past a
+                // budget, further kernels compile as callees.
+                let budgeted = size >= OUTLINE_MIN_INSTRUCTIONS
+                    && outlines
+                        .inline_budget
+                        .is_some_and(|budget| inlined + size > budget);
+                outlines.budgeted |= budgeted && size <= OUTLINE_INSTRUCTIONS;
+                (size > OUTLINE_INSTRUCTIONS || budgeted).then_some(outlines)
+            }
+            None => None,
+        };
+        if let Some(outlines) = outline {
+            let outlined = &mut outlines.callees;
             let index = match outlined.iter().position(|previous| previous == unit) {
                 Some(index) => index,
                 None => {

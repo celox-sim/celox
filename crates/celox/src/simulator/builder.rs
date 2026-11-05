@@ -4447,6 +4447,50 @@ endmodule"#;
         }
     }
 
+    #[cfg(all(
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    #[test]
+    fn hotspot_scheduler_releases_its_program_after_a_failed_stage() {
+        use crate::backend::hotspot::{EntryKey, HotspotRuntime, SCRATCH_BYTES};
+        let source = r#"`timescale 1ns/1ns
+module Top;
+  logic clk = 0;
+  logic [7:0] q = 0;
+  always #5 clk = ~clk;
+  always_ff @(posedge clk) q <= q + 1;
+endmodule"#;
+        let (program, _, options, _, _) = crate::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("failed-scheduler.sv"))],
+            "Top",
+        )
+        .emit_triggers()
+        .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false)
+        .unwrap();
+        for rejected in [false, true] {
+            let mut runtime = HotspotRuntime::new(program.layout(), &options).unwrap();
+            runtime.prepare_scheduler(&program);
+            assert!(runtime.holds_scheduler_program_for_test());
+            runtime.finish_scheduler_for_test(program.layout(), rejected);
+            let mut memory =
+                vec![0; program.layout().merged_total_size.div_ceil(8) + SCRATCH_BYTES / 8];
+            let poll = EntryKey::Block(0, usize::MAX, 0, crate::ir::BlockId(0));
+            assert!(runtime.try_run(poll, &mut memory).is_none());
+            let stats = runtime.stats();
+            assert_eq!(
+                (stats.failed_entries, stats.rejected_entries),
+                if rejected { (0, 1) } else { (1, 0) }
+            );
+            assert!(!runtime.has_compiled_scheduler());
+            assert!(
+                !runtime.holds_scheduler_program_for_test(),
+                "rejected={rejected}"
+            );
+        }
+    }
+
     #[cfg(all(test, feature = "systemverilog", hotspot_jit))]
     #[test]
     fn hotspot_scheduler_overlaps_large_comb_and_links_after_publication() {
@@ -4506,9 +4550,11 @@ endmodule"#;
                     assert!(units.is_some());
                 }
                 runtime.finish(EntryKey::Comb, None, Some(program.sir.eval_comb.clone()));
-                // Large groups prepare on the owner while the worker compiles
-                // Comb; small groups retain lazy preparation on that worker.
-                assert_eq!(runtime.stats().compile_time.is_zero(), !large);
+                // Large groups prepare while the worker compiles Comb: on the
+                // owner with a single CPU, otherwise on their own thread.
+                // Small groups retain lazy preparation on that worker.
+                let synchronous = large && crate::backend::hotspot::single_cpu();
+                assert_eq!(runtime.stats().compile_time.is_zero(), !synchronous);
                 assert_eq!(runtime.stats().compiled_entries, 0);
                 assert_eq!(runtime.stats().code_bytes, 0);
                 assert_eq!(runtime.stats().failed_entries, 0);
@@ -5223,17 +5269,26 @@ endmodule"#;
             .filter(|&(index, _)| Some(index) != scheduler.unit)
             .map(|(_, unit)| size(unit))
             .sum();
-        let (unit, outlined) = crate::scheduler::hotspot_scheduler(&program).unwrap();
+        let budget = crate::scheduler::INLINE_BUDGET_INSTRUCTIONS;
         assert!(
-            kernels > 2 * 262_144,
+            kernels > 2 * budget,
             "the design must exceed the budget: {kernels}"
         );
-        assert!(!outlined.is_empty());
+        let staged = crate::scheduler::hotspot_scheduler(&program, Some(budget), None).unwrap();
+        assert!(staged.budgeted && !staged.callees.is_empty());
         assert!(
-            size(&unit) < kernels,
+            size(&staged.unit) < kernels,
             "scheduler {} inlines most of {kernels} kernel instructions",
-            size(&unit)
+            size(&staged.unit)
         );
+        // The final stage inlines them all.
+        let inlined = crate::scheduler::hotspot_scheduler(&program, None, None).unwrap();
+        assert!(!inlined.budgeted && inlined.callees.is_empty());
+        assert!(size(&inlined.unit) > kernels);
+        // A cancelled generation stops inlining and returns no scheduler.
+        let cancel = crate::backend::compile_cancel::CompileCancel::new();
+        cancel.cancel();
+        assert!(crate::scheduler::hotspot_scheduler(&program, None, Some(&cancel)).is_err());
     }
 
     #[cfg(all(
@@ -5265,7 +5320,9 @@ endmodule"#;
                     .unwrap();
                 let scheduler = program.runtime.runtime_schema.scheduler.as_ref().unwrap();
                 assert!(scheduler.fallback.iter().all(Option::is_none));
-                let (unit, _) = crate::scheduler::hotspot_scheduler(&program).unwrap();
+                let unit = crate::scheduler::hotspot_scheduler(&program, None, None)
+                    .unwrap()
+                    .unit;
                 unit.blocks
                     .values()
                     .map(|block| block.instructions.len())
