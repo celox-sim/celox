@@ -187,6 +187,7 @@ export interface NapiOptions {
 	parameters?: NapiParamOverride[];
 	deadStorePolicy?: string;
 	threads?: number;
+	hotspotJit?: boolean;
 }
 
 export interface NapiSourceFile {
@@ -547,6 +548,10 @@ export function buildNapiOpts(
 	}
 	if (options.threads != null && options.threads !== 1) {
 		napiOpts.threads = options.threads;
+		hasOpt = true;
+	}
+	if (options.hotspotJit === false) {
+		napiOpts.hotspotJit = false;
 		hasOpt = true;
 	}
 

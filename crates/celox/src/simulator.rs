@@ -3977,7 +3977,7 @@ mod host {
 
     impl Simulator<crate::backend::TieredBackend> {
         /// Counts for incremental JIT execution, or `None` for whole-image tiering.
-        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        #[cfg(hotspot_jit)]
         pub fn hotspot_stats(&self) -> Option<crate::backend::HotspotStats> {
             self.backend.hotspot_stats()
         }

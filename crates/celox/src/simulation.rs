@@ -2731,7 +2731,7 @@ module Top (
     }
 }
 
-#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[cfg(hotspot_jit)]
 impl Simulation<crate::backend::TieredBackend> {
     /// Counts for incremental JIT execution, or `None` for whole-image tiering.
     pub fn hotspot_stats(&self) -> Option<crate::backend::HotspotStats> {

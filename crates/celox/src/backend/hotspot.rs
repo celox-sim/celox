@@ -227,12 +227,22 @@ impl HotspotRuntime {
         }
     }
 
-    #[cfg(all(test, feature = "systemverilog"))]
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
     pub(crate) fn scheduler_is_prepared_for_test(&self) -> bool {
         self.scheduler_index.is_some()
     }
 
-    #[cfg(all(test, feature = "systemverilog"))]
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
     pub(crate) fn request_comb_for_test(&mut self, units: &[ExecutionUnit<RegionedAbsoluteAddr>]) {
         if !self.busy
             && self

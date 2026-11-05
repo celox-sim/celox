@@ -1732,8 +1732,12 @@ mod host {
         pub dead_store_policy: DeadStorePolicy,
         /// When the tiered backend adopts background-compiled code.
         pub tier_promotion: TierPromotion,
-        /// Experimentally compile hot execution groups independently on x86-64.
-        /// The default remains whole-image tiered compilation.
+        /// Compile hot execution groups independently on the tiered backend
+        /// (native x86-64 and AArch64 hosts), keeping cold work interpreted.
+        /// On by default; `false` selects whole-image tiered compilation.
+        /// Configurations it does not support (other hosts, parallel lanes,
+        /// force targets, deferred promotion, codegen traces) keep whole-image
+        /// tiering.
         pub hotspot_jit: bool,
         /// Allow Celox to lower function side effects that Veryl rejects in
         /// `always_ff` for SystemVerilog compatibility.
@@ -2052,7 +2056,7 @@ mod host {
                 signal_access: crate::SignalAccessOptions::default(),
                 dead_store_policy: DeadStorePolicy::Off,
                 tier_promotion: TierPromotion::Always,
-                hotspot_jit: false,
+                hotspot_jit: true,
                 allow_always_ff_function_effects: false,
                 allow_inferred_latches: false,
                 dpi: crate::DpiSymbols::default(),
@@ -2570,8 +2574,9 @@ mod host {
             self
         }
 
-        /// Enable experimental incremental compilation on the tiered backend.
-        /// Unsupported hosts retain the ordinary tiered execution policy.
+        /// Select incremental (hotspot) compilation on the tiered backend, the
+        /// default, or whole-image tiered compilation with `false`.
+        /// Unsupported configurations retain whole-image tiering.
         pub fn hotspot_jit(mut self, enabled: bool) -> Self {
             self.options.hotspot_jit = enabled;
             self
@@ -4433,12 +4438,7 @@ endmodule"#;
         }
     }
 
-    #[cfg(all(
-        test,
-        feature = "systemverilog",
-        target_arch = "x86_64",
-        not(feature = "arm64-codegen")
-    ))]
+    #[cfg(all(test, feature = "systemverilog", hotspot_jit))]
     #[test]
     fn hotspot_scheduler_overlaps_large_comb_and_links_after_publication() {
         use crate::backend::hotspot::{EntryKey, HotspotRuntime, SCRATCH_BYTES};

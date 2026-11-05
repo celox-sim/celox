@@ -469,6 +469,14 @@ export interface SimulatorOptions {
 	 * factories, and addons without tiered support (e.g. WASM).
 	 */
 	tier?: boolean;
+	/**
+	 * With `tier`, compile hot execution groups incrementally (hotspot JIT)
+	 * and keep cold work interpreted, on native x86-64 and AArch64 hosts.
+	 * Default: true. `false` selects whole-image tiered compilation, whose
+	 * adoption `tierCompiled()` reports. Configurations hotspot JIT does not
+	 * support (other hosts, `threads` > 1) use whole-image tiering.
+	 */
+	hotspotJit?: boolean;
 }
 
 /** A parameter override for a top-level module parameter. */
