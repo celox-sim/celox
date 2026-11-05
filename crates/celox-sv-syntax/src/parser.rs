@@ -22,6 +22,7 @@ mod non_ansi;
 mod numbers;
 mod packages;
 mod procedures;
+mod properties;
 #[cfg(test)]
 mod source_tests;
 mod subroutines;
@@ -68,6 +69,7 @@ pub struct Declarations {
     pub dpi_declarations: Vec<DpiDeclaration>,
     pub package_bindings: Vec<PackageBinding>,
     pub modport_declarations: Vec<ModportDeclaration>,
+    pub assertion_declarations: Vec<AssertionDeclaration>,
     pub type_aliases: Vec<TypeAlias>,
     pub time_declarations: Vec<TimeDeclaration>,
     pub time_directives: Vec<TimeDirective>,
@@ -119,6 +121,7 @@ impl Declarations {
             dpi_declarations: Vec::new(),
             package_bindings: Vec::new(),
             modport_declarations: Vec::new(),
+            assertion_declarations: Vec::new(),
             type_aliases: Vec::new(),
             time_declarations: Vec::new(),
             time_directives: Vec::new(),
@@ -145,6 +148,7 @@ impl Declarations {
         let dpi_declarations = parser.dpi_declarations;
         let package_bindings = parser.package_bindings;
         let modport_declarations = parser.modport_declarations;
+        let assertion_declarations = parser.assertion_declarations;
         let type_aliases = parser.type_aliases;
         let time_declarations = parser.time_declarations;
         let time_directives = parser.time_directives;
@@ -168,6 +172,7 @@ impl Declarations {
             dpi_declarations,
             package_bindings,
             modport_declarations,
+            assertion_declarations,
             type_aliases,
             time_declarations,
             time_directives,
@@ -234,6 +239,10 @@ impl Declarations {
 
     pub fn modport_declaration(&self, id: ModportDeclarationId) -> &ModportDeclaration {
         &self.modport_declarations[id.0]
+    }
+
+    pub fn assertion_declaration(&self, id: AssertionDeclarationId) -> &AssertionDeclaration {
+        &self.assertion_declarations[id.0]
     }
 
     pub fn type_alias(&self, id: TypeAliasId) -> &TypeAlias {
@@ -336,6 +345,7 @@ struct Parser<'a> {
     dpi_declarations: Vec<DpiDeclaration>,
     package_bindings: Vec<PackageBinding>,
     modport_declarations: Vec<ModportDeclaration>,
+    assertion_declarations: Vec<AssertionDeclaration>,
     type_aliases: Vec<TypeAlias>,
     time_declarations: Vec<TimeDeclaration>,
     time_directives: Vec<TimeDirective>,
@@ -412,6 +422,23 @@ impl Parser<'_> {
     }
     fn unsupported(&self, message: impl Into<String>) -> ParseError {
         let mut error = self.error(message);
+        error.kind = ParseErrorKind::UnsupportedSyntax;
+        error
+    }
+    /// An error at the first token of `tokens`, which precede the cursor.
+    fn error_at(&self, tokens: TokenRange, message: impl Into<String>) -> ParseError {
+        let token = self
+            .tokens
+            .get(tokens.start)
+            .or_else(|| self.tokens.last())
+            .expect("parser errors require an input token");
+        ParseError {
+            kind: ParseErrorKind::MalformedHeader,
+            diagnostic: self.sources.error(token.origin, message),
+        }
+    }
+    fn unsupported_at(&self, tokens: TokenRange, message: impl Into<String>) -> ParseError {
+        let mut error = self.error_at(tokens, message);
         error.kind = ParseErrorKind::UnsupportedSyntax;
         error
     }

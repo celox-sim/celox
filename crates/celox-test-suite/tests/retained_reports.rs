@@ -1156,6 +1156,27 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "execute",
                             "assert_eq sampled: expected 0x1, got 0x0",
                         ),
+                        ("verilator", "concurrent_assertions::named_sequences_and_properties") => {
+                            ("compile_error", "compile", "Verilator internal fault")
+                        }
+                        ("verilator", "concurrent_assertions::named_sequence_leading_clock") => (
+                            "compile_error",
+                            "compile",
+                            "Unsupported: multiclocked sequence or property",
+                        ),
+                        ("icarus", "concurrent_assertions::named_sequences_and_properties") => (
+                            "compile_error",
+                            "compile",
+                            "source_0.sv:5: sorry: concurrent_assertion_item not supported",
+                        ),
+                        ("icarus", "concurrent_assertions::named_sequence_leading_clock") => {
+                            ("compile_error", "compile", "source_0.sv:5: syntax error")
+                        }
+                        ("xezim", "concurrent_assertions::named_sequence_leading_clock") => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq low_passed: expected 0x1, got 0x2",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }
