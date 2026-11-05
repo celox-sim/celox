@@ -58,9 +58,9 @@ def classify(row, log):
         category, diagnostic = "compile_error", "illegal_context"
     elif re.search(r"^.*include directory is unavailable:", text, re.MULTILINE):
         category, diagnostic = "environment", "missing_include_directory"
-    elif re.search(r"^\$fatal: |^\d+ runtime events were lost$", text, re.MULTILINE):
+    elif re.search(r"^\$fatal: |^\d+ runtime events were lost$|^run-time errors reported: \d+$", text, re.MULTILINE):
         category, diagnostic = "runtime_error", "runtime_diagnostic"
-        evidence = re.search(r"^\$fatal: .*|^\d+ runtime events were lost$", text, re.MULTILINE)[0]
+        evidence = re.search(r"^\$fatal: .*|^\d+ runtime events were lost$|^run-time errors reported: \d+$", text, re.MULTILINE)[0]
     if row["result"] == "pass" and success == "1":
         diagnostic, evidence = "", ""
     if log and any(row.get(key) and metadata.get(key) != row[key] for key in ("rc", "mode", "tool_success")):
