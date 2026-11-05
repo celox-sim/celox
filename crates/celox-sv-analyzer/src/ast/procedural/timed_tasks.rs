@@ -13,54 +13,20 @@ pub(in crate::ast) fn classify<'a>(
         .iter()
         .map(|sub| (sub.name.as_str(), *sub))
         .collect();
-    let mut timed = HashSet::default();
-    loop {
-        let previous = timed.len();
-        for subroutine in &subroutines {
-            if requires_process(&subroutine.body, &timed, &definitions) {
-                timed.insert(subroutine.name.clone());
-            }
-        }
-        if previous == timed.len() {
-            break;
-        }
-    }
-    // Subroutines that use the scheduler, as an event trigger does, without
-    // necessarily blocking.
-    let mut scheduled = HashSet::default();
-    loop {
-        let previous = scheduled.len();
-        for subroutine in &subroutines {
-            if uses_scheduler(&subroutine.body, &scheduled, &definitions) {
-                scheduled.insert(subroutine.name.clone());
-            }
-        }
-        if previous == scheduled.len() {
-            break;
-        }
-    }
+    let known = subroutine_effects(&subroutines, &definitions);
+    let timed: HashSet<String> = known
+        .iter()
+        .filter(|(_, effects)| effects.suspends)
+        .map(|(name, _)| name.clone())
+        .collect();
     // A wait condition only registers the events it reads `triggered` of
     // itself; one read in a called function would miss its wakeup.
-    let mut triggered_readers = HashSet::default();
-    loop {
-        let previous = triggered_readers.len();
-        for subroutine in &subroutines {
-            if reads_triggered(&subroutine.body, &triggered_readers) {
-                triggered_readers.insert(subroutine.name.clone());
-            }
-        }
-        if previous == triggered_readers.len() {
-            break;
-        }
-    }
+    let triggered_readers = callers_closure(&subroutines, |subroutine, readers| {
+        reads_triggered(&subroutine.body, readers)
+    });
+    concurrent_actions(&subroutines, &definitions, &known, comb, ff, processes)?;
     if !triggered_readers.is_empty() {
-        let bodies = subroutines
-            .iter()
-            .map(|subroutine| &subroutine.body)
-            .chain(comb.iter().map(|process| &process.body))
-            .chain(ff.iter().map(|process| &process.body))
-            .chain(processes.iter().map(|process| &process.body));
-        for body in bodies {
+        for body in bodies(&subroutines, comb, ff, processes) {
             let mut found = false;
             for statement in body {
                 statement.walk(&mut |statement| {
@@ -81,7 +47,7 @@ pub(in crate::ast) fn classify<'a>(
     for subroutine in &subroutines {
         let is_timed = timed.contains(&subroutine.name);
         if !subroutine.is_task {
-            let (blocking, _, calls) = super::final_procedures::effects(
+            let (blocking, _, calls, _) = super::final_procedures::effects(
                 subroutine.body.iter().chain(&subroutine.sensitivity_body),
                 &definitions,
             );
@@ -148,7 +114,7 @@ pub(in crate::ast) fn classify<'a>(
         }
     }
     for process in processes.iter().filter(|process| process.is_initializer()) {
-        if requires_process(&process.body, &timed, &definitions) {
+        if body_effects(&process.body, &known, &definitions).suspends {
             return Err(unsupported(
                 "background process scheduled by a declaration initializer; IEEE 1800-2023 13.4.4 requires an initial/always process",
             ));
@@ -157,8 +123,9 @@ pub(in crate::ast) fn classify<'a>(
     let initial_count = processes.len();
     let mut retained = Vec::new();
     for process in std::mem::take(comb) {
-        let blocks = requires_process(&process.body, &timed, &definitions);
-        if !blocks && !uses_scheduler(&process.body, &scheduled, &definitions) {
+        let effects = body_effects(&process.body, &known, &definitions);
+        let blocks = effects.suspends;
+        if !blocks && !effects.uses_kernel() {
             if process.kind == CombProcessKind::AlwaysLatch && assigns_nonblocking(&process.body) {
                 let wait =
                     timing::implicit_event_kind(&process.body, &process.sensitivity_body, true);
@@ -240,8 +207,9 @@ pub(in crate::ast) fn classify<'a>(
     *comb = retained;
     let mut retained = Vec::new();
     for process in std::mem::take(ff) {
-        let blocks = requires_process(&process.body, &timed, &definitions);
-        if !blocks && !uses_scheduler(&process.body, &scheduled, &definitions) {
+        let effects = body_effects(&process.body, &known, &definitions);
+        let blocks = effects.suspends;
+        if !blocks && !effects.uses_kernel() {
             retained.push(process);
             continue;
         }
@@ -289,50 +257,235 @@ pub(in crate::ast) fn classify<'a>(
     Ok(())
 }
 
-fn requires_process(
-    body: &[Stmt],
-    timed: &HashSet<String>,
-    definitions: &HashMap<&str, &Subroutine>,
-) -> bool {
-    let mut result = false;
-    for statement in body {
-        statement.walk(&mut |statement| {
-            result |= events::blocks(statement)
-                || matches!(
-                    statement,
-                    Stmt::Delay { .. }
-                        | Stmt::WaitEvent(_)
-                        | Stmt::WaitImplicit { .. }
-                        | Stmt::Wait(_)
-                        | Stmt::AssertionRegion { .. }
-                        | Stmt::WaitFork
-                        | Stmt::Fork { .. }
-                );
-        });
+/// The subroutines for which `holds` is true, given those already found:
+/// a property of a body that also holds of a call of a subroutine having it.
+fn callers_closure(
+    subroutines: &[&Subroutine],
+    mut holds: impl FnMut(&Subroutine, &HashSet<String>) -> bool,
+) -> HashSet<String> {
+    let mut found = HashSet::default();
+    loop {
+        let previous = found.len();
+        for subroutine in subroutines {
+            if !found.contains(&subroutine.name) && holds(subroutine, &found) {
+                found.insert(subroutine.name.clone());
+            }
+        }
+        if previous == found.len() {
+            return found;
+        }
     }
-    let (_, _, calls) = super::final_procedures::effects(body.iter(), definitions);
-    result || calls.iter().any(|name| timed.contains(name))
 }
 
-/// Whether `body` calls a scheduler operation, such as an event trigger,
-/// which only a process kernel can run, directly or through `scheduled`.
-fn uses_scheduler(
+/// Every body of statements: those of subroutines and of processes.
+fn bodies<'a>(
+    subroutines: &'a [&'a Subroutine],
+    comb: &'a [CombProcess],
+    ff: &'a [FfProcess],
+    processes: &'a [InitialProcess],
+) -> impl Iterator<Item = &'a Vec<Stmt>> {
+    subroutines
+        .iter()
+        .map(|subroutine| &subroutine.body)
+        .chain(comb.iter().map(|process| &process.body))
+        .chain(ff.iter().map(|process| &process.body))
+        .chain(processes.iter().map(|process| &process.body))
+}
+
+/// What statements do to the scheduler, directly or through the subroutines
+/// they call.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Effects {
+    /// They may suspend the calling process, or need its process kernel as
+    /// if they did: a delay, an event control, a wait, a fork.
+    suspends: bool,
+    /// They wake, schedule or control other processes: an event trigger,
+    /// `disable fork`, `kill`, keys returned to a semaphore.
+    controls: bool,
+    /// They read or update the state of a process or synchronization
+    /// object, such as `e.triggered` or `process::self()`, which only a
+    /// process kernel can run.
+    reads_process: bool,
+    nonblocking: bool,
+}
+
+impl Effects {
+    fn union(self, other: Self) -> Self {
+        Self {
+            suspends: self.suspends || other.suspends,
+            controls: self.controls || other.controls,
+            reads_process: self.reads_process || other.reads_process,
+            nonblocking: self.nonblocking || other.nonblocking,
+        }
+    }
+
+    /// Whether only a process kernel can run them without suspending.
+    fn uses_kernel(self) -> bool {
+        self.controls || self.reads_process
+    }
+}
+
+/// The effects of `statement` itself, without its child statements and
+/// the subroutines it calls.
+fn statement_effects(statement: &Stmt) -> Effects {
+    let mut effects = Effects::default();
+    match statement {
+        Stmt::Assign { nonblocking, .. } | Stmt::AssignConcat { nonblocking, .. } => {
+            effects.nonblocking = *nonblocking;
+        }
+        // Its delay control is a child statement.
+        Stmt::DelayedNonblocking { .. } => effects.nonblocking = true,
+        // A fork needs a process kernel even when it does not wait.
+        Stmt::Delay { .. }
+        | Stmt::WaitEvent(_)
+        | Stmt::WaitImplicit { .. }
+        | Stmt::Wait(_)
+        | Stmt::WaitFork
+        | Stmt::Fork { .. }
+        | Stmt::DeferActive
+        | Stmt::AssertionRegion { .. } => effects.suspends = true,
+        Stmt::DisableFork => effects.controls = true,
+        Stmt::If { .. }
+        | Stmt::Case { .. }
+        | Stmt::Loop { .. }
+        | Stmt::Break
+        | Stmt::Continue
+        | Stmt::Return(_)
+        | Stmt::Call { .. }
+        | Stmt::Eval(_)
+        | Stmt::SystemTask { .. }
+        | Stmt::Local { .. } => {}
+    }
+    for expr in lifetimes::stmt_exprs(statement) {
+        effects = effects.union(expression_effects(expr));
+    }
+    effects
+}
+
+/// The effects of the process operations in `expr`.
+fn expression_effects(expr: &Expr) -> Effects {
+    let mut effects = Effects::default();
+    const_functions::visit_expr_calls(expr, &mut |callee, _| {
+        if let Callee::System(SystemFunction::Process(op)) = callee {
+            match events::process_effect(*op) {
+                events::ProcessEffect::Blocks => effects.suspends = true,
+                events::ProcessEffect::Schedules => effects.controls = true,
+                events::ProcessEffect::Reads => effects.reads_process = true,
+            }
+        }
+    });
+    effects
+}
+
+/// The effects of `body`, with those `known` of the subroutines it calls.
+fn body_effects(
     body: &[Stmt],
-    scheduled: &HashSet<String>,
+    known: &HashMap<String, Effects>,
     definitions: &HashMap<&str, &Subroutine>,
-) -> bool {
-    let mut result = false;
+) -> Effects {
+    let mut effects = Effects::default();
     for statement in body {
         statement.walk(&mut |statement| {
-            for expr in lifetimes::stmt_exprs(statement) {
-                const_functions::visit_expr_calls(expr, &mut |callee, _| {
-                    result |= matches!(callee, Callee::System(SystemFunction::Process(_)));
-                });
-            }
+            effects = effects.union(statement_effects(statement));
         });
     }
-    let (_, _, calls) = super::final_procedures::effects(body.iter(), definitions);
-    result || calls.iter().any(|name| scheduled.contains(name))
+    // A call evaluates the defaults of its omitted arguments.
+    let (_, _, calls, defaults) = super::final_procedures::effects(body.iter(), definitions);
+    let effects = defaults.into_iter().fold(effects, |effects, default| {
+        effects.union(expression_effects(default))
+    });
+    calls
+        .iter()
+        .filter_map(|name| known.get(name))
+        .fold(effects, |effects, callee| effects.union(*callee))
+}
+
+/// The effects of every subroutine, through the subroutines it calls.
+fn subroutine_effects(
+    subroutines: &[&Subroutine],
+    definitions: &HashMap<&str, &Subroutine>,
+) -> HashMap<String, Effects> {
+    let mut known = HashMap::default();
+    loop {
+        let mut changed = false;
+        for subroutine in subroutines {
+            let effects = body_effects(&subroutine.body, &known, definitions);
+            if known.get(&subroutine.name) != Some(&effects) {
+                known.insert(subroutine.name.clone(), effects);
+                changed = true;
+            }
+        }
+        if !changed {
+            return known;
+        }
+    }
+}
+
+/// A concurrent assertion action runs in the Reactive region of the
+/// assertion's process (IEEE 1800-2023 16.14.1), which must not suspend
+/// before the next clocking event or schedule work after the action: no
+/// nonblocking assignment, process, event trigger or other process control.
+/// The action, with the subroutines it calls, is judged by the effects that
+/// select process kernels; reading process or event state is allowed.
+fn concurrent_actions(
+    subroutines: &[&Subroutine],
+    definitions: &HashMap<&str, &Subroutine>,
+    known: &HashMap<String, Effects>,
+    comb: &[CombProcess],
+    ff: &[FfProcess],
+    processes: &[InitialProcess],
+) -> Result<(), AnalyzerError> {
+    let mut actions = Vec::new();
+    for body in bodies(subroutines, comb, ff, processes) {
+        for statement in body {
+            statement.walk(&mut |statement| {
+                if let Stmt::If {
+                    then_body,
+                    else_body,
+                    ..
+                } = statement
+                {
+                    for branch in [then_body, else_body] {
+                        if let [Stmt::AssertionRegion { reactive: true }, action @ ..] =
+                            branch.as_slice()
+                        {
+                            actions.push(action);
+                        }
+                    }
+                }
+            });
+        }
+    }
+    for action in actions {
+        let effects = body_effects(action, known, definitions);
+        let (_, _, calls, _) = super::final_procedures::effects(action.iter(), definitions);
+        let callee = |has: fn(&Effects) -> bool| {
+            calls
+                .iter()
+                .filter(|name| known.get(*name).is_some_and(has))
+                .min()
+                .map_or(String::new(), |name| format!(" (through `{name}`)"))
+        };
+        if effects.suspends {
+            return Err(unsupported(format!(
+                "concurrent assertion action that may suspend{}",
+                callee(|effects| effects.suspends)
+            )));
+        }
+        if effects.controls {
+            return Err(unsupported(format!(
+                "concurrent assertion action that triggers an event or controls a process{}",
+                callee(|effects| effects.controls)
+            )));
+        }
+        if effects.nonblocking {
+            return Err(unsupported(format!(
+                "concurrent assertion action that performs a nonblocking assignment{}",
+                callee(|effects| effects.nonblocking)
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Whether `body` reads the `triggered` state of an event, directly or

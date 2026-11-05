@@ -1930,8 +1930,13 @@ disable conditions do not disable the assertion. These rules follow IEEE
 1800-2023 16.5, 16.5.1 and 16.14.1. Clause 16.5 leaves multiple clocking-event transitions within one time step
 undefined.
 
-This subset supports untimed blocking actions and report/severity tasks.
+This subset supports untimed blocking actions, report/severity tasks, and
+calls to functions, tasks, package subroutines and class methods. A called
+subroutine, or anything it calls, must not suspend, perform a nonblocking
+assignment, start or control a process (`disable fork` included), or
+trigger an event; neither may the action itself. Reading event or process
+state, such as `e.triggered`, is allowed.
 Procedural concurrent assertions, implicit/default clocking, named properties
 and sequences, delays/repetition/implication, sampled-history and user-function
-predicates, and timed/NBA/subroutine action statements remain unsupported.
+predicates, and timed/NBA action statements remain unsupported.
 Explicit `disable iff` follows the clock in the supported syntax.

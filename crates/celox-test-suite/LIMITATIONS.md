@@ -1500,6 +1500,11 @@ evidence, not an exclusion. [Top/Wrapped reproductions](verification/repros/sv_c
 identify the actual installed xezim binary; the current flake pin's stale dependency
 lock prevented building that pin. No current-pin conformance is claimed.
 
+`concurrent_assertions::subroutine_calls_in_actions` calls functions, tasks,
+package subroutines and class methods from pass and fail actions (16.14.1).
+Verilator 5.052 reads `data` in the pass action before its NBA (0 instead of 1),
+and Icarus 13.0 rejects the action blocks. Pinned xezim 0.11.4 passes the case.
+
 ### Sampled history in assertions
 
 The five `concurrent_assertions::sampled_history_*` cases check IEEE 1800-2023
