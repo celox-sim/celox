@@ -3,10 +3,9 @@
 Heliodor is Celox's large external Veryl workload. It boots a pinned Linux image
 and compares Celox's native and tiered JIT backends with synchronous and tiered
 Veryl-CC using the same design revision and input workload on each architecture.
-Celox tiered starts on the interpreter while native code is generated in the
-background. On x86-64 it first adopts a baseline native image, then replaces it
-with the optimizing image at a safe point, preserving live state and event buffers.
-Code-generation tracing uses the optimizing pipeline directly.
+Celox tiered uses the hotspot JIT: it starts on the interpreter and compiles
+frequently executed groups in the background, switching each one to native code
+as soon as it is ready while the rest keeps running interpreted.
 Veryl-CC tiered starts on Cranelift and switches to C code as its
 background compilation completes, matching `veryl test --backend cc`'s default
 `aot_c_async=true` setting. The synchronous Veryl-CC runner explicitly sets
@@ -45,8 +44,7 @@ A run is accepted only when it:
 - records total completion time, retaining timing details for diagnosis;
 - compares runners built from the intended Celox and Veryl revisions;
 - preserves the logs needed to diagnose a timeout or semantic mismatch;
-- proves that Celox tiered promoted and executed at least one generated-code
-  evaluation before Linux completed;
+- proves that Celox tiered executed generated code before Linux completed;
 - confirms that Veryl-CC tiered enabled asynchronous C compilation and executed
   at least one compiled or fallback dispatch.
 
@@ -163,12 +161,11 @@ host vCPU (`HELIODOR_CELOX_THREADS`, default `nproc` clamped to 2–64). Its own
 comparison groups' time budgets unchanged. The dashboard shows it as
 "multi-threaded" next to single-threaded native execution.
 
-`celox-tiered` also uses `HELIODOR_CELOX_THREADS` on both AArch64 and x86-64.
-It starts on the interpreter and adopts native kernels with parallel execution
-enabled once compilation finishes. The scheduler can keep sequential kernels
-when parallel execution is not worthwhile. Set `HELIODOR_CELOX_THREADS=1` for
-the previous single-threaded tiered configuration. Earlier tiered measurements
-used one simulation thread; account for this when comparing historical timings.
+`celox-tiered` runs `celox run --backend tiered --jit hotspot --threads 1` on
+both AArch64 and x86-64; the hotspot JIT is single-threaded, so
+`HELIODOR_CELOX_THREADS` does not apply. Earlier tiered measurements used
+whole-image promotion, most recently with parallel kernels; account for this
+when comparing historical timings.
 
 Recent complete eight-hart runs total 10–13 hours on x86-64 and 17–18 hours on
 AArch64. AArch64 four-hart runs total 5–7 hours, so splitting them into equivalent
