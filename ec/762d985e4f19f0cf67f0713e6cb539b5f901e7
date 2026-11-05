@@ -1,0 +1,6 @@
+Revision history for #3163:
+
+rev 2 (content) 2026-11-05 02:09 UTC — five PR shards (60-min limit kept), shard math in the body
+rev 1 (initial) 2026-11-05 02:09 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3163,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"966289742868710b616dc69e1d7c78503b572b65","timestamp_iso":"2026-11-05T02:09:09Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"966289742868710b616dc69e1d7c78503b572b65","new_sha":"a6a177b55e06576880244bc140622eb380ba4f87","timestamp_iso":"2026-11-05T02:09:09Z","reason":"five PR shards (60-min limit kept), shard math in the body","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/966289742868710b616dc69e1d7c78503b572b65...a6a177b55e06576880244bc140622eb380ba4f87"}]} -->
