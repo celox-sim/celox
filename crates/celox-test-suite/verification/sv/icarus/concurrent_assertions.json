@@ -50,6 +50,28 @@
     },
     {
       "category": "Sequential",
+      "detail": "Icarus build exit status: 17; see <case>/build.log\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:5: error: Invalid module item.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Invalid module item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:8: error: Invalid module item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Invalid module instantiation\n<case>/source_0.sv:8: error: generate else is missing matching if.\n<case>/source_0.sv:9: error: Invalid module item.\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Invalid module item.\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:10: error: Invalid module item.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Invalid module instantiation\n<case>/source_0.sv:11: error: Invalid module item.\n",
+      "expectation": "Simulation",
+      "name": "concurrent_assertions::named_sequence_leading_clock",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 16; see <case>/build.log\n<case>/source_0.sv:5: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Invalid module item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Invalid module item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:9: error: Invalid module item.\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Invalid module instantiation\n<case>/source_0.sv:10: error: Invalid module item.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Invalid module instantiation\n<case>/source_0.sv:11: error: Invalid module item.\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: error: Invalid module instantiation\n<case>/source_0.sv:12: error: Invalid module item.\n",
+      "expectation": "Simulation",
+      "name": "concurrent_assertions::named_sequences_and_properties",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "Icarus 13.0 rejects concurrent assertion items and property syntax. IEEE 1800-2023 16.5 and 16.14.1 permit these explicitly clocked Boolean assert/assume/cover properties and their actions. Assertions stay enabled; no -gno-assertions workaround is used.",
       "expectation": "Simulation",
       "known_issue": {

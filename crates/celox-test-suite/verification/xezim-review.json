@@ -1054,6 +1054,10 @@
     "sv_associative_function_results": {
       "title": "Assigning a function's associative array result leaves the target's entries: with a function returning '{\"a\": v, default: 0}, m = make(5) keeps the earlier entries of m and its default instead of the returned array",
       "standard": "IEEE 1800-2023 13.4.1, 7.9.9, 10.9.1"
+    },
+    "sv_semantic_leading_clock": {
+      "title": "An instantiated sequence's explicit clock does not override the assertion's, and a clocked antecedent does not clock an implication",
+      "standard": "IEEE 1800-2023 16.16.1"
     }
   },
   "cases": [
@@ -4639,6 +4643,14 @@
       "classification": "xezim_bug",
       "bug": "sv_concurrent_observed_reactive",
       "note": "The first assertion action sets reset=1 in Reactive. The second assertion must already have decided with reset=0 in Observed, so both counters must be 1. Installed xezim produces first=1 second=0; Verilator gives 1/1. Reproduced without the suite harness in Top and Wrapped. Exact source, commands and installed-build limitation are in verification/repros/sv_concurrent_regions.json."
+    },
+    {
+      "suite": "sv",
+      "name": "concurrent_assertions::named_sequence_leading_clock",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_semantic_leading_clock",
+      "note": "assert property (@(posedge clk) low) with sequence low; @(negedge clk) cnt < 2; endsequence is clocked by negedge clk (16.16.1: the semantic leading clock of @(c) m is that of m when m has an explicit one), giving low_passed=1, low_failed=2; xezim 0.11.4 checks at posedge (low_passed=2). It also never fails assert property (tick |-> zero), whose leading clock is the antecedent's @(posedge clk). Observed through the suite harness; xezim passes named_sequences_and_properties, which uses the same declarations without overriding clocks."
     },
     {
       "suite": "sv",
