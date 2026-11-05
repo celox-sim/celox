@@ -3438,3 +3438,31 @@ fn named_assertion_instances_follow_clock_and_disable_rules() {
         assert!(error.contains(expected), "{source}: {error}");
     }
 }
+
+/// Only an abstract or interface class declares pure virtual methods (IEEE
+/// 1800-2023 8.21, 8.26), also when nothing uses the class.
+#[test]
+fn pure_virtual_methods_need_an_abstract_class() {
+    for class in [
+        "class C; pure virtual task t; endclass",
+        "class C; int x; pure virtual function int f(int a); endclass",
+    ] {
+        let error = Declarations::parse(
+            &format!("{class} module M; endmodule"),
+            std::path::Path::new("pure.sv"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("pure virtual method in class `C`, which is not declared `virtual`"),
+            "{class}: {error}"
+        );
+    }
+    for class in [
+        "virtual class C; pure virtual task t; endclass",
+        "interface class I; pure virtual function int f(); endclass",
+        "class C; virtual task t; endtask extern virtual function int f(); endclass",
+    ] {
+        parse(&format!("{class} module M; endmodule"));
+    }
+}
