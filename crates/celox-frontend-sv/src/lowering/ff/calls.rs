@@ -14,6 +14,11 @@ pub(super) struct FrameContext {
     /// depth of the activation.
     base: SourceVarId,
     depth: SourceVarId,
+    /// The variables of the slots of the calling process's state that the
+    /// body uses (see [`super::super::out_of_line::ProcessState`]): the RNG
+    /// state and the name of the process seed, and the seed of `$random`.
+    pub(super) random: Option<((SourceVarId, String), String)>,
+    pub(super) dist_seed: Option<(SourceVarId, String)>,
     /// Registers holding a frame size not known yet (see
     /// [`Function::size_patches`]).
     size_patches: Vec<(RegisterId, usize)>,
@@ -159,12 +164,36 @@ impl Ff<'_, '_> {
     }
 
     fn lower_function_from(&mut self, subroutine: &sv::ir::Subroutine) -> Result<usize, Reason> {
+        let process = self.m.process_state(&subroutine.name);
+        // The simulation time is a module variable, which the unit reads.
+        if process.time {
+            self.m.time_slot();
+        }
         let start = self.m.next_id;
         let (base, _) = self.m.temp("call_frame", 32, false, false);
         let (depth, _) = self.m.temp("call_depth", 32, false, false);
         // Only the automatic storage of the subroutine lives in its frame;
         // its static storage stays module variables (IEEE 1800-2023 13.4.2).
         let mut slots = vec![self.slot_of(base), self.slot_of(depth)];
+        // The calling process's state, which the caller passes in and,
+        // for the RNG states, takes back.
+        let mut random = None;
+        let mut process_slots = (None, None);
+        if process.random {
+            process_slots.0 = Some((slots.len(), slots.len() + 1));
+            let state = self.m.temp("call_random", 33, false, false);
+            let (seed, seed_name) = self.m.temp("call_random_seed", 32, false, false);
+            slots.push(self.slot_of(state.0));
+            slots.push(self.slot_of(seed));
+            random = Some((state, seed_name));
+        }
+        let mut dist_seed = None;
+        if process.dist_seed {
+            process_slots.1 = Some(slots.len());
+            let seed = self.m.temp("call_dist_seed", 32, false, false);
+            slots.push(self.slot_of(seed.0));
+            dist_seed = Some(seed);
+        }
         for name in automatic_names(subroutine) {
             let Some(id) = self.m.id(name) else {
                 continue;
@@ -189,10 +218,20 @@ impl Ff<'_, '_> {
             writes: HashSet::default(),
             callees: Vec::new(),
             size_patches: Vec::new(),
+            random: process_slots.0,
+            dist_seed: process_slots.1,
         });
         functions.by_name.insert(subroutine.name.clone(), index);
         functions.lowering += 1;
-        let lowered = Ff::new(&mut *self.m, 0).lower_function_unit(index, subroutine, base, depth);
+        let frame = FrameContext {
+            function: index,
+            base,
+            depth,
+            random,
+            dist_seed,
+            size_patches: Vec::new(),
+        };
+        let lowered = Ff::new(&mut *self.m, 0).lower_function_unit(subroutine, frame);
         let functions = self.m.out_of_line().expect("lowering out of line");
         functions.lowering -= 1;
         let (unit, size_patches) = lowered.map_err(|error| Reason::Other(error.to_string()))?;
@@ -221,18 +260,16 @@ impl Ff<'_, '_> {
     /// a fresh [`Ff`].
     fn lower_function_unit(
         mut self,
-        index: usize,
         subroutine: &sv::ir::Subroutine,
-        base: SourceVarId,
-        depth: SourceVarId,
+        frame: FrameContext,
     ) -> Result<(ExecutionUnit<Addr>, Vec<(RegisterId, usize)>), sv::AnalyzerError> {
         self.direct = true;
-        self.frame = Some(FrameContext {
-            function: index,
-            base,
-            depth,
-            size_patches: Vec::new(),
-        });
+        // The body draws on the RNG states in the frame, which the caller
+        // passes.
+        let (random, dist_seed) = (frame.random.is_some(), frame.dist_seed.is_some());
+        self.random = frame.random.as_ref().map(|(state, _)| state.clone());
+        self.dist_seed = frame.dist_seed.clone();
+        self.frame = Some(frame);
         let return_block = self.b.new_block();
         self.functions.push(FunctionBlocks {
             return_block,
@@ -260,8 +297,8 @@ impl Ff<'_, '_> {
             || !self.wait_sites.is_empty()
             || !self.nba_sites.is_empty()
             || !self.event_probes.is_empty()
-            || self.random.is_some()
-            || self.dist_seed.is_some()
+            || (self.random.is_some() && !random)
+            || (self.dist_seed.is_some() && !dist_seed)
         {
             return Err(unsupported("process state in a function unit"));
         }
@@ -475,6 +512,23 @@ impl Ff<'_, '_> {
                 .slot(self.m.declared(formal))
                 .ok_or_else(|| unsupported("output formal without a frame slot"))?;
             outputs.push((slot, temp));
+        }
+        // The calling process's RNG states go in and come back, and its
+        // seed goes in: the unit draws as an inlined body would.
+        if let Some((state_slot, seed_slot)) = function.random {
+            let (state, name) = self.urandom_state();
+            let value = self.eval(&sv::ir::Expr::Ident(name), None)?;
+            args.push((state_slot, value));
+            let seed = self.process_seed();
+            let seed = self.eval(&seed, Some((32, false)))?;
+            args.push((seed_slot, seed));
+            outputs.push((state_slot, state));
+        }
+        if let Some(slot) = function.dist_seed {
+            let (seed, name) = self.dist_seed();
+            let value = self.eval(&sv::ir::Expr::Ident(name), None)?;
+            args.push((slot, value));
+            outputs.push((slot, seed));
         }
         let width: usize = outputs
             .iter()
