@@ -171,6 +171,9 @@ impl Generator<'_> {
             false_block: (done, Vec::new()),
         });
         self.b.switch_to_block(writes);
+        // Each settle of the host's writes is a pass, which the round
+        // budget bounds (as `show_update` charges them).
+        self.service_call(service, u64::MAX, native_io::SCHEDULER_PASS, time, failed);
         self.mark_dirty();
         host_inputs::replay(self.program, self, checks);
         if !events.is_empty() {
@@ -383,6 +386,53 @@ endmodule"#;
         assert!(error.contains("does not settle"), "{error}");
         assert_eq!(sim.scheduler_stats().reference_steps, before);
     }
+    /// Writes `data` anew at every update of time 5.
+    struct UpdateFeedback {
+        data: SignalRef,
+        calls: usize,
+    }
+
+    impl<B: SimBackend> SlotObserver<B> for UpdateFeedback {
+        fn before_domains(&mut self, _: &mut SlotIo<'_, B>, _: u64) {}
+        fn end_of_slot(&mut self, _: &mut SlotIo<'_, B>, _: u64) {}
+        fn observes_updates(&self) -> bool {
+            true
+        }
+        fn after_update(&mut self, io: &mut SlotIo<'_, B>, time: u64) {
+            if time == 5 {
+                self.calls += 1;
+                assert!(self.calls < 64, "callback loop escaped the native budget");
+                io.set(self.data, self.calls as u32);
+            }
+        }
+    }
+
+    #[test]
+    fn update_callback_feedback_obeys_the_native_round_budget() {
+        let source = r#"`timescale 1ns/1ns
+module Top;
+    int d = 0, x = 0;
+    wire [31:0] e = d + 1;
+    initial #5 x = 1;
+endmodule"#;
+        for mode in [SchedulerMode::Reference, SchedulerMode::Compiled] {
+            let mut sim = Simulation::from_sv_sources(
+                vec![(source, std::path::Path::new("native-update-budget.sv"))],
+                "Top",
+            )
+            .scheduler_mode(mode)
+            .observable_updates(true)
+            .build_native()
+            .unwrap();
+            let data = sim.signal("d");
+            sim.observe_slots(Box::new(UpdateFeedback { data, calls: 0 }), &[data]);
+            sim.run_until(1).unwrap();
+            sim.state.set_slot_budgets(3, 16);
+            let error = sim.run_until(6).unwrap_err().to_string();
+            assert!(error.contains("does not settle"), "{mode:?}: {error}");
+        }
+    }
+
     fn host_clock<B: SimBackend + 'static>(
         mut sim: Simulation<B>,
         mode: SchedulerMode,

@@ -474,3 +474,22 @@ fn a_clock_edge_a_callback_writes_triggers_its_domain() {
         assert_eq!(values, vec![vec![1, 1], vec![1, 1]], "{driver}");
     }
 }
+
+#[test]
+fn each_host_clock_of_a_slot_is_seen() {
+    let source = r#"`timescale 1ns/1ns
+module Top(input logic a, input logic b);
+    logic [7:0] qa = 0;
+    logic [7:0] qb = 0;
+    always_ff @(posedge a) qa <= qa + 1;
+    always_ff @(posedge b) qb <= qb + 1;
+    always #100 ;
+endmodule
+"#;
+    let seen = changes_of(source, &["a", "b"], None, |sim| {
+        sim.add_clock("a", 10, 5);
+        sim.add_clock("b", 10, 5);
+        sim.run_until(6).unwrap();
+    });
+    assert_eq!(seen, vec![(5, vec![1, 0]), (5, vec![1, 1])]);
+}

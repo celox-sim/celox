@@ -2732,6 +2732,8 @@ impl Plan {
                 false_block: (entry_done, Vec::new()),
             });
             g.b.switch_to_block(apply);
+            // With several clocks the host sees each one's update.
+            let each_clock = updates.filter(|_| self.clocks.len() > 1);
             let values = g.load(slots.clock_value, clock_bits);
             let mut fired = g.constant(0, clock_bits);
             let mut edges = g.constant(0, self.event_bits);
@@ -2822,8 +2824,29 @@ impl Plan {
                     let edge = g.event_bit(edge, index);
                     edges = g.binary(self.event_bits, edges, BinaryOp::Or, edge);
                 }
-                let bit = g.bit_of(due, bit, clock_bits);
-                fired = g.binary(clock_bits, fired, BinaryOp::Or, bit);
+                let bit_set = g.bit_of(due, bit, clock_bits);
+                fired = g.binary(clock_bits, fired, BinaryOp::Or, bit_set);
+                // Each due clock is an update of its own, which its waits
+                // see before the host does: a callback that restores the
+                // level cannot hide the edge (as `step_round`). What the
+                // host writes settles after the last clock: a settle here
+                // would leave the batch's registers behind.
+                if let Some(service) = each_clock {
+                    g.if_bit(due, 0, |g| {
+                        let enabled = g.arena_header_load(std::mem::offset_of!(
+                            crate::simulator::native_io::ArenaHeader,
+                            observes_updates
+                        ));
+                        g.if_bit(enabled, 0, |g| g.check_waits_at(&checks, false));
+                        g.report_update(
+                            service,
+                            &checks,
+                            &self.events,
+                            finish_exit,
+                            AfterWrites::Settle,
+                        );
+                    });
+                }
             }
             // Judge all domains against the completed scheduled batch;
             // otherwise a preceding alias write consumes a later domain's edge.
@@ -2837,6 +2860,9 @@ impl Plan {
                 }
             }
             g.store_levels(levels);
+            // With the edges the host's writes at the clocks' updates gave.
+            let written = g.load(slots.exit_arg, self.event_bits);
+            let edges = g.binary(self.event_bits, edges, BinaryOp::Or, written);
             g.store(slots.exit_arg, self.event_bits, edges);
             let all = g.ones(clock_bits);
             let unfired = g.binary(clock_bits, fired, BinaryOp::Xor, all);
