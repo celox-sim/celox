@@ -902,10 +902,17 @@ pub(super) fn shared_class(
         return Ok(class);
     };
     let (scope_env, scope_aliases) = specializations::shared_scope(session, name, env, aliases);
-    // The types of the class are bound in one context of its scope.
+    // The types of the class are bound in one context of its scope, which
+    // the declarations of the scope around it are discovered without.
+    let outer = PackedDimensions {
+        const_env: env.clone(),
+        type_aliases: aliases.clone(),
+        ..PackedDimensions::default()
+    };
     let context = PackedDimensions {
         const_env: scope_env.clone(),
         type_aliases: scope_aliases.clone(),
+        class_base: Some(specializations::class_base(session, name, &outer)),
         ..PackedDimensions::default()
     };
     let (env, aliases) = (&*scope_env, &*scope_aliases);

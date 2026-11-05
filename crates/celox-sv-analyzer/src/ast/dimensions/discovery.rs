@@ -27,7 +27,27 @@ pub(in crate::ast) struct State {
     /// The declarations a query discovered in each scope, before the parts
     /// that depend on its operand, while the query's input and the set of
     /// specializations stay the same.
-    settled: HashMap<Key, Settled>,
+    settled: std::rc::Rc<HashMap<Key, Vec<std::rc::Rc<Settled>>>>,
+}
+
+/// The most settled discoveries [`State::settled`] holds for one key: the
+/// queries of a scope may alternate between a few own inputs, as constant
+/// bindings that see only the argument names of the constant functions do.
+const SETTLED_PER_KEY: usize = 4;
+
+impl State {
+    /// The state of a disposable session that binds constants for the
+    /// session of `self`: it reads the scopes `self` has settled and the
+    /// prefixes `self` has published, as a reentrant query of `self` does,
+    /// while what it discovers itself stays its own, as its semantic types
+    /// do.
+    pub(in crate::ast) fn lend(&self) -> Self {
+        Self {
+            partial: self.partial.clone(),
+            class_signatures: self.class_signatures.clone(),
+            settled: self.settled.clone(),
+        }
+    }
 }
 
 /// A settled discovery of [`State::settled`]. `input` is held so that the
@@ -593,6 +613,9 @@ fn class_signatures(
         &aliases,
         |session: &mut Session, env: &SharedEnv, aliases: &SharedMap<Type>| {
             let mut scope = context.clone();
+            scope.class_base = Some(classes::specializations::class_base(
+                session, class_name, context,
+            ));
             scope.const_env = env.clone();
             scope.type_aliases = aliases.clone();
             method_signatures(
@@ -1348,6 +1371,23 @@ fn overlay(context: &mut PackedDimensions, input: &PackedDimensions) {
         .function_return_types
         .extend(input.function_return_types.clone());
     context.parameter_values = input.parameter_values.clone();
+    // A specialization's parameters hide the constants of the scope around
+    // its class, and its enumeration constants those of the scope.
+    if let Some(base) = &input.class_base {
+        for key in base.0.const_env.keys() {
+            if !input.const_env.contains_key(key) {
+                context.const_env.remove(key);
+            }
+        }
+        for (name, binding) in input.constant_types.iter() {
+            if base.0.constant_types.get(name) != Some(binding) {
+                Arc::make_mut(&mut context.constant_types).insert(name.clone(), binding.clone());
+            }
+        }
+        context.class_scope = input.class_scope.clone();
+        context.constructor = input.constructor;
+        context.class_base = input.class_base.clone();
+    }
     if !input.constant_types.is_empty() {
         for (name, binding) in input.constant_types.iter() {
             if !context.constant_types.contains_key(name) {
@@ -1473,7 +1513,9 @@ pub(in crate::ast) fn query_operand_dimensions_id(
         .dimensions
         .settled
         .get(&key)
-        .filter(|settled| {
+        .into_iter()
+        .flatten()
+        .find(|settled| {
             !unshared_discovery()
                 && settled.specializations == specializations
                 && settled.input == own
@@ -1483,15 +1525,21 @@ pub(in crate::ast) fn query_operand_dimensions_id(
         Some(context) => context,
         None => {
             let context = settle_scope(tree, session, &owners, &key, &own)?;
-            session.dimensions.settled.insert(
-                key.clone(),
-                Settled {
-                    _arena: tree.declarations_incarnation(),
-                    input: own,
-                    specializations: session.class_specializations.len(),
-                    context: context.clone(),
-                },
-            );
+            let specializations = session.class_specializations.len();
+            let entries = std::rc::Rc::make_mut(&mut session.dimensions.settled)
+                .entry(key.clone())
+                .or_default();
+            // Entries of fewer specializations are never found again.
+            entries.retain(|settled| settled.specializations == specializations);
+            if entries.len() == SETTLED_PER_KEY {
+                entries.remove(0);
+            }
+            entries.push(std::rc::Rc::new(Settled {
+                _arena: tree.declarations_incarnation(),
+                input: own,
+                specializations,
+                context: context.clone(),
+            }));
             context
         }
     };
@@ -1508,13 +1556,25 @@ pub(in crate::ast) fn query_operand_dimensions_id(
 /// scope adds to the shared tables, and without the operand values of the
 /// statement it is in.
 fn scope_inputs(input: &PackedDimensions) -> PackedDimensions {
-    PackedDimensions {
+    let mut own = PackedDimensions {
         variables: input.variables.shared(),
         expression_signedness: input.expression_signedness.shared(),
         effect_values: Default::default(),
         last_indices: Default::default(),
         ..input.clone()
+    };
+    // In a class specialization, the tables of the scope around the class,
+    // the same for all of its specializations, which [`overlay`] adds the
+    // specialization back to.
+    if let Some(base) = own.class_base.take() {
+        own.const_env = base.0.const_env.clone();
+        own.type_aliases = base.0.type_aliases.clone();
+        own.parameter_values = base.0.parameter_values.clone();
+        own.constant_types = base.0.constant_types.clone();
+        own.class_scope = None;
+        own.constructor = false;
     }
+    own
 }
 
 /// Give a scope's settled declarations the context of the query: the parts
