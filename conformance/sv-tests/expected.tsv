@@ -3077,8 +3077,8 @@ generic/member/class_member_test_40.sv	2state	pass
 generic/member/class_member_test_40.sv	4state	pass
 generic/member/class_member_test_41.sv	2state	pass
 generic/member/class_member_test_41.sv	4state	pass
-generic/member/class_member_test_5.sv	2state	fail
-generic/member/class_member_test_5.sv	4state	fail
+generic/member/class_member_test_5.sv	2state	pass
+generic/member/class_member_test_5.sv	4state	pass
 generic/member/class_member_test_6.sv	2state	pass
 generic/member/class_member_test_6.sv	4state	pass
 generic/member/class_member_test_7.sv	2state	pass

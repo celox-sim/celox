@@ -141,15 +141,29 @@ impl Parser<'_> {
     }
 
     /// Record subroutine `id`, which starts at token `keyword`, as a method
-    /// of the innermost open class.
-    pub(super) fn class_method(&mut self, keyword: usize, id: SubroutineId) {
+    /// of the innermost open class. Only an abstract or interface class
+    /// declares pure virtual methods (IEEE 1800-2023 8.21, 8.26).
+    pub(super) fn class_method(&mut self, keyword: usize, id: SubroutineId) -> Result<()> {
         let qualifiers = self.method_qualifiers(keyword);
+        let Some(class) = self.class_stack.last() else {
+            return Ok(());
+        };
+        if qualifiers.is_pure && !class.virtual_class && !class.interface {
+            return Err(self.error_at(
+                self.subroutines[id.0].tokens,
+                format!(
+                    "pure virtual method in class `{}`, which is not declared `virtual`",
+                    class.name.value()
+                ),
+            ));
+        }
         if let Some(class) = self.class_stack.last_mut() {
             class.methods.push(ClassMethod {
                 qualifiers,
                 subroutine: id,
             });
         }
+        Ok(())
     }
 
     /// Record a parameter or type declaration that is an item of the
