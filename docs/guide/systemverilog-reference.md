@@ -1936,7 +1936,18 @@ subroutine, or anything it calls, must not suspend, perform a nonblocking
 assignment, start or control a process (`disable fork` included), or
 trigger an event; neither may the action itself. Reading event or process
 state, such as `e.triggered`, is allowed.
+A named property or sequence without formal arguments or assertion variables,
+whose body is a Boolean property of this subset, may be asserted where a
+property is written, also before its declaration, when both are items of the
+same module outside generate blocks (IEEE 1800-2023 16.8, 16.12). Its
+clocking event and `disable iff` apply; an explicit clocking event of the
+instance, or of a sequence used as the antecedent, overrides the assertion's
+(16.16.1). A property with `disable iff` must be the whole asserted property,
+optionally after the assertion's clocking event, and a consequent instance may
+not have a different clock or an implication.
+
 Procedural concurrent assertions, implicit/default clocking, named properties
-and sequences, delays/repetition/implication, sampled-history and user-function
-predicates, and timed/NBA action statements remain unsupported.
+and sequences with formal arguments or elsewhere, delays/repetition,
+sampled-history and user-function predicates, and timed/NBA action statements
+remain unsupported.
 Explicit `disable iff` follows the clock in the supported syntax.

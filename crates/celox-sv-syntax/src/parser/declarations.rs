@@ -16,6 +16,10 @@ struct UnitFrame {
     typed_category: Option<String>,
     checkers: Vec<CheckerFrame>,
     classes: Vec<ClassFrame>,
+    /// Named sequences and properties and concurrent assertions that are
+    /// items of the design element itself, for instance substitution.
+    assertion_declarations: Vec<AssertionDeclarationId>,
+    concurrent_assertions: Vec<ProcedureId>,
 }
 
 struct ClassFrame {
@@ -45,6 +49,14 @@ impl UnitFrame {
                 )
             })
         })
+    }
+    /// Whether the next item is an item of the design element itself,
+    /// outside generate blocks, checkers, classes and other scopes.
+    fn element_item(&self) -> bool {
+        self.scopes.iter().all(|scope| *scope == "endgenerate")
+            && self.checkers.is_empty()
+            && self.classes.is_empty()
+            && self.builder.element_scope()
     }
     fn parses_items(&self) -> bool {
         !self.typed_scope() || self.checker_ready()
@@ -538,6 +550,8 @@ impl Parser<'_> {
             typed_category: None,
             checkers: Vec::new(),
             classes: Vec::new(),
+            assertion_declarations: Vec::new(),
+            concurrent_assertions: Vec::new(),
         })
     }
 
@@ -548,6 +562,10 @@ impl Parser<'_> {
                 if !frame.checkers.is_empty() || !frame.builder.finished() {
                     return Err(self.error("unfinished generate body item"));
                 }
+                self.substitute_assertion_instances(
+                    &frame.assertion_declarations,
+                    &frame.concurrent_assertions,
+                )?;
                 frame.unit.items = std::mem::take(&mut frame.builder.roots);
                 self.adopt_non_ansi_ports(&mut frame.unit)?;
                 self.declare_implicit_nets(&mut frame.unit)?;
@@ -663,6 +681,31 @@ impl Parser<'_> {
                 frame.item_start = true;
                 frames.push(frame);
                 continue;
+            }
+            // Other declarations, and those in checkers and clocking blocks,
+            // keep their captured grammar boundary.
+            if frame.item_start
+                && frame.delimiters.is_empty()
+                && frame.parses_items()
+                && frame.checkers.is_empty()
+                && frame
+                    .scopes
+                    .iter()
+                    .all(|scope| matches!(*scope, "endgenerate" | "end" | "endcase"))
+                && matches!(self.peek(), "property" | "sequence")
+            {
+                let start = self.at;
+                if let Some(id) = self.assertion_declaration()? {
+                    if frame.element_item() {
+                        frame.assertion_declarations.push(id);
+                    }
+                    frame.record(self, start, BodyItemKind::Assertion(id))?;
+                    frame.conditional = frame.builder.active();
+                    frame.prototype = false;
+                    frame.item_start = true;
+                    frames.push(frame);
+                    continue;
+                }
             }
             if self.dpi_start() {
                 let start = self.at;
@@ -841,7 +884,12 @@ impl Parser<'_> {
                 let assigns = self.assign_statements.len();
                 let start = self.at;
                 let id = if static_deferred {
-                    self.module_assertion()?
+                    let element = frame.element_item();
+                    let id = self.module_assertion(element)?;
+                    if element && self.procedures[id.0].kind == ProcedureKind::Always {
+                        frame.concurrent_assertions.push(id);
+                    }
+                    id
                 } else {
                     self.procedure()?
                 };
