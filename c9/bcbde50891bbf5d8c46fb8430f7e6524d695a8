@@ -1,6 +1,1 @@
-Revision history for #3200:
-
-rev 2 (content) 2026-11-05 14:25 UTC — Allow the assertion's clocking event before a named property with disable iff (16.12.1); only an outer disable iff or an implication makes the instance an operand.
-rev 1 (initial) 2026-11-05 14:25 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":3200,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"5d0bab4662b2c64e9afa6c95227326844025175a","timestamp_iso":"2026-11-05T14:25:43Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"5d0bab4662b2c64e9afa6c95227326844025175a","new_sha":"287455b69763d7e600b489af9809b1d2e8ad3c85","timestamp_iso":"2026-11-05T14:25:43Z","reason":"Allow the assertion's clocking event before a named property with disable iff (16.12.1); only an outer disable iff or an implication makes the instance an operand.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/5d0bab4662b2c64e9afa6c95227326844025175a...287455b69763d7e600b489af9809b1d2e8ad3c85"}]} -->
+Carry the expected.tsv update for 16.15--property-disable-iff in this commit; a separate PR fails per-PR conformance.
