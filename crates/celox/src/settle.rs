@@ -10,7 +10,7 @@ use crate::ir::{
     ExecutionUnit, LaidOutProgram, RegionedAbsoluteAddr, RegisterId, RegisterType, SIRInstruction,
     SIROffset, STABLE_REGION,
 };
-use celox_sir::SIRValue;
+use celox_sir::{SIRTerminator, SIRValue};
 use celox_state_layout::{SettleLayout, SettleObject};
 
 /// The flag layout of `program`'s partitioned settle, if it has one.
@@ -312,9 +312,19 @@ impl<'a> Marker<'a> {
             .copied()
             .filter(|block| include(*block))
             .collect();
+        let mut next_block = unit
+            .blocks
+            .keys()
+            .map(|block| block.0 + 1)
+            .max()
+            .unwrap_or(0);
         for block_id in block_ids {
             let block = unit.blocks.get_mut(&block_id).expect("listed block");
             let old_instructions = std::mem::take(&mut block.instructions);
+            let terminator = std::mem::replace(&mut block.terminator, SIRTerminator::Return);
+            // The block is split after each compared store that marks: the
+            // marks run only when the store changed the state.
+            let mut current = block_id;
             let mut one = None;
             let mut instructions = Vec::with_capacity(old_instructions.len());
             for instruction in old_instructions {
@@ -392,58 +402,45 @@ impl<'a> Marker<'a> {
                     celox_sir::BinaryOp::NeCase,
                     new,
                 ));
-                if let Some(dirty) = self.scheduler_dirty {
-                    let previous = alloc(unit, byte.clone());
-                    let pending = alloc(unit, byte.clone());
-                    instructions.push(SIRInstruction::Load(
-                        previous,
-                        dirty,
-                        SIROffset::Static(0),
-                        8,
-                    ));
-                    instructions.push(SIRInstruction::Binary(
-                        pending,
-                        previous,
-                        celox_sir::BinaryOp::Or,
-                        changed,
-                    ));
-                    instructions.push(SIRInstruction::Store(
-                        dirty,
-                        SIROffset::Static(0),
-                        8,
-                        pending,
-                        Vec::new(),
-                        Vec::new(),
-                    ));
+                // Most stores leave the state as it was: branch over the marks
+                // rather than OR the predicate into every reader's flag.
+                let mark = celox_sir::BlockId(next_block);
+                let rest = celox_sir::BlockId(next_block + 1);
+                next_block += 2;
+                {
+                    let block = unit.blocks.get_mut(&current).expect("split block");
+                    block.instructions = std::mem::take(&mut instructions);
+                    block.terminator = SIRTerminator::Branch {
+                        cond: changed,
+                        true_block: (mark, Vec::new()),
+                        false_block: (rest, Vec::new()),
+                    };
                 }
-                for partition in readers {
-                    let flag = alloc(unit, byte.clone());
-                    let marked = alloc(unit, byte.clone());
-                    let offset = SIROffset::Static(partition as usize * 8);
-                    instructions.push(SIRInstruction::Load(flag, self.flags, offset.clone(), 8));
-                    // Flags are boolean bytes. OR preserves a notification
-                    // already pending without selecting 1 separately for
-                    // every reader of this same state-change predicate.
-                    instructions.push(SIRInstruction::Binary(
-                        marked,
-                        flag,
-                        celox_sir::BinaryOp::Or,
-                        changed,
-                    ));
-                    instructions.push(SIRInstruction::Store(
-                        self.flags,
-                        offset,
-                        8,
-                        marked,
-                        Vec::new(),
-                        Vec::new(),
-                    ));
-                }
+                let mut marks = Vec::new();
+                self.mark_unconditionally(&mut marks, one, readers);
+                unit.blocks.insert(
+                    mark,
+                    celox_sir::BasicBlock {
+                        id: mark,
+                        params: Vec::new(),
+                        instructions: marks,
+                        terminator: SIRTerminator::Jump(rest, Vec::new()),
+                    },
+                );
+                unit.blocks.insert(
+                    rest,
+                    celox_sir::BasicBlock {
+                        id: rest,
+                        params: Vec::new(),
+                        instructions: Vec::new(),
+                        terminator: SIRTerminator::Return,
+                    },
+                );
+                current = rest;
             }
-            unit.blocks
-                .get_mut(&block_id)
-                .expect("listed block")
-                .instructions = instructions;
+            let block = unit.blocks.get_mut(&current).expect("last segment");
+            block.instructions = instructions;
+            block.terminator = terminator;
         }
     }
 }
