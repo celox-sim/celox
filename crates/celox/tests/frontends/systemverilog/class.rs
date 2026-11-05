@@ -2685,3 +2685,55 @@ endmodule
     assert_eq!(sim.get(widened), BigUint::from(u32::MAX));
     assert_eq!(sim.get(seen), BigUint::from(1u8));
 }
+
+#[test]
+fn conditional_handles_of_sibling_classes_take_their_common_base() {
+    // IEEE 1800-2023 11.4.11 c to e: a derived arm takes the other arm's
+    // class, and arms of sibling classes their closest common base class.
+    let source = "module Top;
+        class A; virtual function int id(); return 1; endfunction endclass
+        class B extends A; virtual function int id(); return 2; endfunction endclass
+        class C extends B; virtual function int id(); return 3; endfunction endclass
+        class D extends B; virtual function int id(); return 4; endfunction endclass
+        bit s;
+        int sibling, derived, method;
+        initial begin
+            C c; D d; B b; A a;
+            c = new; d = new;
+            s = 1;
+            b = s ? c : d;
+            sibling = b.id();
+            a = s ? d : b;
+            derived = a.id();
+            method = (s ? d : c).id();
+        end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("sibling")), 3u32.into());
+    assert_eq!(sim.get(sim.signal("derived")), 4u32.into());
+    assert_eq!(sim.get(sim.signal("method")), 4u32.into());
+    // The result has the common base class, which a derived class's
+    // variable does not take without `$cast` (8.16).
+    let source = "module Top;
+        class A; endclass
+        class B extends A; endclass
+        class C extends B; endclass
+        class D extends B; endclass
+        bit s;
+        initial begin C c; D d; c = new; d = new; c = s ? c : d; end
+    endmodule";
+    let Err(error) =
+        Simulator::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top").build_cranelift()
+    else {
+        panic!("a handle of the common base class was assigned to a derived class's variable");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("a handle of class `B` is not assignment compatible"),
+        "{error}"
+    );
+}
