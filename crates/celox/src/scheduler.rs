@@ -265,6 +265,7 @@ pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool) {
                 (fallback, unit, events, clocks, kernel_events)
             }
         };
+    let domain_waits = domain_waits(program);
     let scheduler = program
         .runtime
         .runtime_schema
@@ -275,11 +276,65 @@ pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool) {
     scheduler.events = events;
     scheduler.clocks = clocks;
     scheduler.kernel_events = kernel_events;
+    scheduler.domain_waits = domain_waits;
     if let Some(unit) = unit {
         scheduler.unit = Some(program.sir.processes.len());
         program.sir.processes.push(unit);
     }
     testbench::attach(program, lazy);
+}
+
+/// [`celox_design::SchedulerSchema::domain_waits`] of `program`.
+fn domain_waits(program: &LaidOutProgram) -> Vec<bool> {
+    let schema = &program.runtime.runtime_schema;
+    let sir = &program.sir;
+    let mut written = HashSet::default();
+    for unit in sir
+        .eval_comb
+        .iter()
+        .chain(sir.eval_apply_ffs.values().flatten())
+        .chain(sir.eval_comb_apply_ffs.values().flatten())
+        .chain(sir.eval_only_ffs.values().flatten())
+        .chain(sir.apply_ffs.values().flatten())
+        .chain(
+            sir.parallel
+                .iter()
+                .flat_map(|parallel| parallel.units().map(|unit| &unit.unit)),
+        )
+    {
+        for instruction in unit.blocks.values().flat_map(|block| &block.instructions) {
+            match instruction.state_writes() {
+                celox_sir::StateAccess::Access(write) => {
+                    written.insert(write.addr.absolute_addr());
+                }
+                access => match access.objects() {
+                    Some(objects) => {
+                        written.extend(objects.map(|object| object.absolute_addr()));
+                    }
+                    // A write anywhere may reach every wait.
+                    None => return vec![true; schema.processes.len()],
+                },
+            }
+        }
+    }
+    written.extend(schema.nba_sites.iter().map(|site| site.target));
+    let mut domain = vec![false; schema.processes.len()];
+    for site in &schema.wait_sites {
+        let probes = schema
+            .process_frames
+            .get(site.process)
+            .and_then(Option::as_ref)
+            .map_or(&[][..], |frame| &frame.event_probes[..]);
+        let settled = site.terms.iter().enumerate().any(|(index, &(signal, _))| {
+            written.contains(&signal)
+                || site.gate(index).is_some_and(|gate| gate.counters.is_none())
+                || probes.iter().any(|probe| probe.result == signal)
+        });
+        if let Some(domain) = domain.get_mut(site.process) {
+            *domain |= settled;
+        }
+    }
+    domain
 }
 
 /// `program` with its compiled scheduler, and the testbench unit that
