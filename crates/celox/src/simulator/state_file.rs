@@ -1062,11 +1062,45 @@ impl<B: SimBackend> Simulator<B> {
         self.validate_activation_schedule(record, &processes, &activations, &mut unknown);
         // The string IDs of the frames stay until the load binds them.
         let mut call_stacks = std::collections::BTreeMap::new();
+        let schema = self.state_schema();
+        // The resume point the process continues at, as the file restores
+        // it: in its activation's frame or in its kernel's slot.
+        let resume_point = |index: usize| -> Option<u64> {
+            let slot = &self.program.runtime_schema.processes[kernel(index)].resume;
+            let (value, mask) = match &self.program.runtime_schema.process_frames[kernel(index)] {
+                Some(frame) => {
+                    let position = frame.private.iter().position(|private| private == slot)?;
+                    let value = activations.get(index)?.private.get(position)?;
+                    (value.0.clone(), value.1.clone())
+                }
+                None => {
+                    let signal = self.backend.resolve_signal(slot);
+                    let object = schema.objects.iter().find(|o| o.signal == signal)?;
+                    let saved = file
+                        .objects
+                        .iter()
+                        .find(|saved| saved.path == object.path)?;
+                    let mask = saved.mask.as_deref().unwrap_or_default();
+                    (
+                        BigUint::from_bytes_le(&saved.value),
+                        BigUint::from_bytes_le(mask),
+                    )
+                }
+            };
+            (mask == BigUint::default())
+                .then(|| u64::try_from(&value).ok())
+                .flatten()
+        };
         for saved in &record.call_stacks {
             let Some(index) = process(&saved.process) else {
                 unknown.push(saved.process.to_string());
                 continue;
             };
+            // One stack per process, which continues where the process does.
+            if call_stacks.contains_key(&index) || resume_point(index) != Some(saved.resume) {
+                unknown.push(format!("call stack of {}", saved.process));
+                continue;
+            }
             let calls = celox_runtime::SavedCalls {
                 resume: saved.resume,
                 stack: saved.stack.clone(),

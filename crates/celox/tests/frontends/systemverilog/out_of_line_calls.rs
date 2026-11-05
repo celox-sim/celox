@@ -1843,9 +1843,10 @@ endmodule
 
 #[test]
 fn loads_refuse_saved_frames_that_do_not_fit() {
-    // A saved stack holds the whole chain, and its strings are the file's:
-    // a stack cut anywhere, or a string ID past the file's strings, does
-    // not load.
+    // A saved stack holds the whole chain, its strings are the file's, and
+    // it continues where its process does: a stack cut anywhere, a string
+    // ID past the file's strings, a second stack for the process or another
+    // resume point does not load.
     let source = r#"`timescale 1ns/1ns
 module Top(output int a);
     task automatic hold(output int r);
@@ -1910,6 +1911,32 @@ endmodule
     // The string's word is among them, with the call sites' resume points,
     // which no longer name the chain.
     assert!(refused >= 1, "the string's word is refused");
+    // One stack per process, at the resume point the process continues at.
+    let mut changed = file.clone();
+    let processes = &mut changed.schedule.as_mut().expect("a schedule").processes;
+    processes.call_stacks.push(processes.call_stacks[0].clone());
+    assert!(build().load_state(&changed).is_err(), "a second stack");
+    let resume = file
+        .schedule
+        .as_ref()
+        .expect("a schedule")
+        .processes
+        .call_stacks[0]
+        .resume;
+    for other in (0..8).filter(|&point| point != resume) {
+        let mut changed = file.clone();
+        changed
+            .schedule
+            .as_mut()
+            .expect("a schedule")
+            .processes
+            .call_stacks[0]
+            .resume = other;
+        assert!(
+            build().load_state(&changed).is_err(),
+            "resume point {other}"
+        );
+    }
 }
 
 #[test]
