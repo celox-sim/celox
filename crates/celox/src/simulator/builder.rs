@@ -2327,12 +2327,23 @@ mod host {
             self
         }
 
+        /// The paths given to [`Self::value_change_signals`], which a new
+        /// optimizer profile keeps.
+        fn watched_objects(&self) -> Vec<String> {
+            self.options
+                .optimize_options
+                .value_change_objects()
+                .to_vec()
+        }
+
         fn enforce_native_force_optimizer(&mut self) {
             if !self.options.native_force_support {
                 return;
             }
             let diagnostics = self.options.optimize_options.diagnostics.clone();
-            self.options.optimize_options = crate::optimizer::OptimizeOptions::none();
+            let watched = self.watched_objects();
+            self.options.optimize_options =
+                crate::optimizer::OptimizeOptions::none().with_value_change_objects(watched);
             self.options.optimize_options.diagnostics = diagnostics;
             self.options.dead_store_policy = DeadStorePolicy::Off;
         }
@@ -2343,11 +2354,7 @@ mod host {
             let lanes = self.options.optimize_options.parallel_lanes();
             let partition = self.options.optimize_options.parallel_partition();
             let settle = self.options.optimize_options.settle_partition();
-            let watched = self
-                .options
-                .optimize_options
-                .value_change_objects()
-                .to_vec();
+            let watched = self.watched_objects();
             self.options.optimize_options = crate::optimizer::OptimizeOptions::new(level)
                 .with_parallel_lanes(lanes)
                 .with_parallel_partition(partition)
@@ -2388,6 +2395,7 @@ mod host {
             let lanes = self.options.optimize_options.parallel_lanes();
             let partition = self.options.optimize_options.parallel_partition();
             let settle = self.options.optimize_options.settle_partition();
+            let watched = self.watched_objects();
             self.options.optimize_options = if enable {
                 crate::optimizer::OptimizeOptions::all()
             } else {
@@ -2395,7 +2403,8 @@ mod host {
             }
             .with_parallel_lanes(lanes)
             .with_parallel_partition(partition)
-            .with_settle_partition(settle);
+            .with_settle_partition(settle)
+            .with_value_change_objects(watched);
             self
         }
 
@@ -2430,10 +2439,16 @@ mod host {
             } else {
                 self.options.optimize_options.settle_partition()
             };
+            let watched = if options.value_change_objects().is_empty() {
+                self.watched_objects()
+            } else {
+                options.value_change_objects().to_vec()
+            };
             self.options.optimize_options = options
                 .with_parallel_lanes(lanes)
                 .with_parallel_partition(partition)
-                .with_settle_partition(settle);
+                .with_settle_partition(settle)
+                .with_value_change_objects(watched);
             self
         }
 
@@ -5149,6 +5164,7 @@ endmodule"#;
             .live_signals
             .iter()
             .chain(&options.signal_access.force_signals)
+            .chain(options.optimize_options.value_change_objects())
         {
             let addr = program
                 .hierarchical_signal_addr(path)

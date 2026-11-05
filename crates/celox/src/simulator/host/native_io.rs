@@ -16,6 +16,8 @@ pub(crate) const AFTER_UPDATE: u64 = u64::MAX - 15;
 /// show the observer the update now. What it does in return takes effect at
 /// the next `AFTER_UPDATE`, which follows the unit.
 pub(crate) const VALUE_CHANGE: u64 = u64::MAX - 16;
+/// The bit of an `AFTER_UPDATE` result that requests a finish.
+pub(crate) const FINISHED: u64 = 4;
 
 pub(crate) const CHECKPOINT: u64 = u64::MAX;
 pub(crate) const SCHEDULER_RUN: u64 = u64::MAX - 1;
@@ -280,12 +282,20 @@ impl<B: SimBackend> ObserverService for SlotService<'_, B> {
         arena: &mut super::native_arena::Arena,
     ) -> u64 {
         let changed = std::mem::take(self.changed);
+        // A finish requested at a value change point ends the run before
+        // the observer sees another update, as in the reference loop.
+        if changed & FINISHED != 0 {
+            return changed;
+        }
         self.show(time, Some((metadata, arena)), |observer, io, time| {
             observer.after_update(io, time)
         }) | changed
     }
 
     fn value_change(&mut self, time: u64) {
+        if *self.changed & FINISHED != 0 {
+            return;
+        }
         *self.changed |= self.show(time, None, |observer, io, time| {
             observer.after_update(io, time)
         });
@@ -317,7 +327,7 @@ impl<B: SimBackend> SlotService<'_, B> {
         }
         // A finish precedes host-write observation in the reference round.
         // Keep its pending log in the saved state rather than a transient arena.
-        (u64::from(wrote) * 2) | (u64::from(finish) * 4)
+        (u64::from(wrote) * 2) | (u64::from(finish) * FINISHED)
     }
 }
 
@@ -1004,7 +1014,9 @@ pub(crate) extern "C" fn call(
     detail: u64,
 ) -> u64 {
     if context == 0 {
-        return 1;
+        // A kernel run outside a scope has no observer to show its value
+        // changes to.
+        return u64::from(encoded != VALUE_CHANGE);
     }
     // SAFETY: Scope::run passes its exclusively borrowed scope through the
     // private context slot for this synchronous call and restores the slot

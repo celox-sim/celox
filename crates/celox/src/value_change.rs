@@ -96,34 +96,100 @@ pub(crate) fn has_points<A>(unit: &ExecutionUnit<A>) -> bool {
     })
 }
 
-/// Replace every value change point of `unit` with what `lower` makes of it:
-/// the instructions to emit in its place, given its site register.
+/// What a value change point becomes: the instructions in its place and,
+/// when the call may fail, the one-bit register that is set when it did.
+pub(crate) struct Lowered<A> {
+    pub instructions: Vec<SIRInstruction<A>>,
+    pub failed: Option<RegisterId>,
+}
+
+/// Replace every value change point of `unit` with what `lower` makes of it,
+/// given its site register. A point that may fail ends its block: the unit
+/// goes on in a new block when the call succeeded and ends with an error
+/// otherwise, so that nothing runs after a failed callback.
 pub(crate) fn lower_unit<A>(
     unit: &mut ExecutionUnit<A>,
-    mut lower: impl FnMut(&mut ExecutionUnit<A>, RegisterId) -> Vec<SIRInstruction<A>>,
+    mut lower: impl FnMut(&mut ExecutionUnit<A>, RegisterId) -> Lowered<A>,
 ) {
-    let ids: Vec<_> = unit.blocks.keys().copied().collect();
-    for id in ids {
+    let is_point = |instruction: &SIRInstruction<A>| {
+        matches!(
+            instruction,
+            SIRInstruction::ExternCall { func, .. } if *func == VALUE_CHANGE_ID
+        )
+    };
+    let mut next_block = unit.blocks.keys().map(|id| id.0 + 1).max().unwrap_or(0);
+    let mut error = None;
+    let mut pending: Vec<_> = unit
+        .blocks
+        .iter()
+        .filter(|(_, block)| block.instructions.iter().any(is_point))
+        .map(|(id, _)| *id)
+        .collect();
+    while let Some(id) = pending.pop() {
         let block = unit.blocks.get_mut(&id).expect("listed block");
-        if !block.instructions.iter().any(|instruction| {
-            matches!(
-                instruction,
-                SIRInstruction::ExternCall { func, .. } if *func == VALUE_CHANGE_ID
-            )
-        }) {
-            continue;
-        }
-        let old = std::mem::take(&mut block.instructions);
+        let mut old = std::mem::take(&mut block.instructions).into_iter();
         let mut instructions = Vec::with_capacity(old.len());
-        for instruction in old {
-            match instruction {
-                SIRInstruction::ExternCall { func, args, .. } if func == VALUE_CHANGE_ID => {
-                    instructions.extend(lower(unit, args[0]));
-                }
-                instruction => instructions.push(instruction),
+        let mut split = None;
+        for instruction in old.by_ref() {
+            let SIRInstruction::ExternCall { func, args, .. } = &instruction else {
+                instructions.push(instruction);
+                continue;
+            };
+            if *func != VALUE_CHANGE_ID {
+                instructions.push(instruction);
+                continue;
+            }
+            let lowered = lower(unit, args[0]);
+            instructions.extend(lowered.instructions);
+            if let Some(failed) = lowered.failed {
+                split = Some(failed);
+                break;
             }
         }
-        unit.blocks.get_mut(&id).expect("listed block").instructions = instructions;
+        let rest: Vec<_> = old.collect();
+        let block = unit.blocks.get_mut(&id).expect("listed block");
+        block.instructions = instructions;
+        let Some(failed) = split else {
+            continue;
+        };
+        let error = *error.get_or_insert_with(|| {
+            let id = celox_sir::BlockId(next_block);
+            next_block += 1;
+            unit.blocks.insert(
+                id,
+                celox_sir::BasicBlock {
+                    id,
+                    params: Vec::new(),
+                    instructions: Vec::new(),
+                    terminator: celox_sir::SIRTerminator::Error(1),
+                },
+            );
+            id
+        });
+        let continued = celox_sir::BlockId(next_block);
+        next_block += 1;
+        let block = unit.blocks.get_mut(&id).expect("listed block");
+        let terminator = std::mem::replace(
+            &mut block.terminator,
+            celox_sir::SIRTerminator::Branch {
+                cond: failed,
+                true_block: (error, Vec::new()),
+                false_block: (continued, Vec::new()),
+            },
+        );
+        let more = rest.iter().any(is_point);
+        unit.blocks.insert(
+            continued,
+            celox_sir::BasicBlock {
+                id: continued,
+                params: Vec::new(),
+                instructions: rest,
+                terminator,
+            },
+        );
+        if more {
+            pending.push(continued);
+        }
     }
 }
 
@@ -174,7 +240,10 @@ pub(crate) fn lower(program: &mut crate::ir::LaidOutProgram, native: bool) -> bo
     for unit in &mut program.sir.processes {
         lower_unit(unit, |unit, site| {
             let Some((service, (context_slot, now))) = service else {
-                return Vec::new();
+                return Lowered {
+                    instructions: Vec::new(),
+                    failed: None,
+                };
             };
             let mut next = unit
                 .register_map
@@ -194,9 +263,18 @@ pub(crate) fn lower(program: &mut crate::ir::LaidOutProgram, native: bool) -> bo
                 );
                 id
             };
-            let (context, request, time, zero) = (register(), register(), register(), register());
+            let (context, request, time, zero, status) =
+                (register(), register(), register(), register(), register());
+            let failed = RegisterId(next);
+            unit.register_map.insert(
+                failed,
+                RegisterType::Bit {
+                    width: 1,
+                    signed: false,
+                },
+            );
             let stable = |address| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, address);
-            vec![
+            let instructions = vec![
                 SIRInstruction::Load(
                     context,
                     stable(context_slot),
@@ -210,11 +288,17 @@ pub(crate) fn lower(program: &mut crate::ir::LaidOutProgram, native: bool) -> bo
                 SIRInstruction::Load(time, stable(now), SIROffset::Static(0), 64),
                 SIRInstruction::Imm(zero, SIRValue::new(0u64)),
                 SIRInstruction::ExternCall {
-                    dst: None,
+                    dst: Some(status),
                     func: service,
                     args: vec![context, site, request, time, zero],
                 },
-            ]
+                // A callback that panicked leaves its failure in the scope.
+                SIRInstruction::Binary(failed, status, celox_sir::BinaryOp::Ne, zero),
+            ];
+            Lowered {
+                instructions,
+                failed: Some(failed),
+            }
         });
     }
     service.is_some()

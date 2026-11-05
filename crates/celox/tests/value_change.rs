@@ -617,3 +617,160 @@ endmodule
         vec![(20, vec![1]), (20, vec![0]), (30, vec![1]), (30, vec![0])]
     );
 }
+
+/// Records `signal` at each update that leaves it nonzero and, when it
+/// reads `value`, finishes the simulation or panics.
+struct Ending {
+    signal: SignalRef,
+    value: u64,
+    panics: bool,
+    seen: mpsc::Sender<(u64, u64)>,
+}
+
+impl<B: SimBackend> SlotObserver<B> for Ending {
+    fn before_domains(&mut self, _: &mut SlotIo<'_, B>, _: u64) {}
+
+    fn end_of_slot(&mut self, _: &mut SlotIo<'_, B>, _: u64) {}
+
+    fn observes_updates(&self) -> bool {
+        true
+    }
+
+    fn after_update(&mut self, io: &mut SlotIo<'_, B>, time: u64) {
+        let value = u64::try_from(io.get(self.signal)).unwrap();
+        if value != 0 {
+            self.seen.send((time, value)).unwrap();
+        }
+        if value == self.value {
+            assert!(!self.panics, "callback fails");
+            io.request_finish();
+        }
+    }
+}
+
+/// In each scheduler mode, run a build with points after the updates of
+/// `x` to `end` under an [`Ending`] observer of `x`, and return the result,
+/// the values it saw and the final value of `y`.
+fn end_at_point(
+    source: &str,
+    panics: bool,
+    end: u64,
+) -> Vec<(Result<(), String>, Vec<(u64, u64)>, u64)> {
+    [
+        celox::SchedulerMode::Reference,
+        celox::SchedulerMode::Compiled,
+    ]
+    .into_iter()
+    .map(|mode| {
+        let mut sim = Simulation::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top")
+            .scheduler_mode(mode)
+            .observable_updates(true)
+            .value_change_signals(["Top.x"])
+            .build()
+            .unwrap();
+        let (sender, received) = mpsc::channel();
+        let signal = sim.signal("x");
+        sim.observe_slots(
+            Box::new(Ending {
+                signal,
+                value: 1,
+                panics,
+                seen: sender,
+            }),
+            &[signal],
+        );
+        let result = sim.run_until(end).map_err(|error| error.to_string());
+        let y = u64::try_from(sim.get(sim.signal("y"))).unwrap();
+        (result, received.try_iter().collect(), y)
+    })
+    .collect()
+}
+
+const ENDING_AT_A_POINT: &str = r#"`timescale 1ns/1ns
+module Top;
+    logic clk = 0;
+    logic [7:0] x = 0;
+    logic [7:0] y = 0;
+    always #5 clk = ~clk;
+    initial begin
+        #5 x = 1;
+        x = 2;
+        y = 1;
+    end
+endmodule
+"#;
+
+#[test]
+fn a_finish_at_a_point_ends_the_run_before_the_next_callback() {
+    for (result, seen, _) in end_at_point(ENDING_AT_A_POINT, false, 20) {
+        assert_eq!(result, Ok(()));
+        // The finish takes effect when the process run ends; the callback
+        // does not see the update after the one that requested it.
+        assert_eq!(seen, vec![(5, 1)]);
+    }
+}
+
+#[test]
+fn a_failed_callback_ends_the_process_at_its_point() {
+    for (result, seen, y) in end_at_point(ENDING_AT_A_POINT, true, 20) {
+        let error = result.unwrap_err();
+        assert!(error.contains("panicked"), "{error}");
+        assert_eq!(seen, vec![(5, 1)]);
+        assert_eq!(y, 0, "the process went on after the failed callback");
+    }
+}
+
+#[test]
+fn a_new_optimizer_profile_keeps_the_watched_signals() {
+    let source = r#"`timescale 1ns/1ns
+module Top;
+    logic x = 0;
+    initial begin
+        #5 x = 1;
+        x = 0;
+    end
+endmodule
+"#;
+    type Profile = fn(
+        celox::SimulatorBuilder<'static, Simulation>,
+    ) -> celox::SimulatorBuilder<'static, Simulation>;
+    let profiles: [Profile; 4] = [
+        |builder| builder.optimize(false),
+        |builder| builder.optimize(true),
+        |builder| builder.opt_level(celox::OptLevel::O2),
+        |builder| builder.optimize_options(celox::OptimizeOptions::none()),
+    ];
+    for profile in profiles {
+        let builder = Simulation::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top")
+            .observable_updates(true)
+            .value_change_signals(["Top.x"]);
+        let mut sim = profile(builder).build().unwrap();
+        let received = observe(&mut sim, &["x"], None);
+        sim.run_until(10).unwrap();
+        assert_eq!(
+            received.try_iter().collect::<Vec<_>>(),
+            vec![(5, vec![1]), (5, vec![0])]
+        );
+    }
+}
+
+#[test]
+fn dead_store_elimination_keeps_the_watched_signals() {
+    let source = r#"`timescale 1ns/1ns
+module Top;
+    logic [7:0] a = 0;
+    logic [7:0] w;
+    assign w = a + 1;
+    initial #5 a = 1;
+endmodule
+"#;
+    let mut sim = Simulation::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top")
+        .opt_level(celox::OptLevel::O2)
+        .observable_updates(true)
+        .value_change_signals(["Top.w"])
+        .build()
+        .unwrap();
+    let received = observe(&mut sim, &["w"], None);
+    sim.run_until(10).unwrap();
+    assert_eq!(received.try_iter().collect::<Vec<_>>(), vec![(5, vec![2])]);
+}
