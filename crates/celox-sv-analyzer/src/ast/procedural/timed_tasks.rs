@@ -377,12 +377,14 @@ fn expression_effects(expr: &Expr) -> Effects {
     effects
 }
 
-/// The effects of `body`, with those `known` of the subroutines it calls.
-fn body_effects(
+/// The effects of `body` itself, with the defaults of the omitted arguments
+/// its calls evaluate, and the subroutines it calls.
+fn own_effects(
     body: &[Stmt],
-    known: &HashMap<String, Effects>,
     definitions: &HashMap<&str, &Subroutine>,
-) -> Effects {
+) -> (Effects, HashSet<String>) {
+    #[cfg(test)]
+    OWN_EFFECT_WALKS.with(|count| count.set(count.get() + 1));
     let mut effects = Effects::default();
     for statement in body {
         statement.walk(&mut |statement| {
@@ -394,22 +396,47 @@ fn body_effects(
     let effects = defaults.into_iter().fold(effects, |effects, default| {
         effects.union(expression_effects(default))
     });
+    (effects, calls)
+}
+
+/// `effects` with those `known` of the subroutines `calls` names.
+fn with_callees(
+    effects: Effects,
+    calls: &HashSet<String>,
+    known: &HashMap<String, Effects>,
+) -> Effects {
     calls
         .iter()
         .filter_map(|name| known.get(name))
         .fold(effects, |effects, callee| effects.union(*callee))
 }
 
-/// The effects of every subroutine, through the subroutines it calls.
+/// The effects of `body`, with those `known` of the subroutines it calls.
+fn body_effects(
+    body: &[Stmt],
+    known: &HashMap<String, Effects>,
+    definitions: &HashMap<&str, &Subroutine>,
+) -> Effects {
+    let (effects, calls) = own_effects(body, definitions);
+    with_callees(effects, &calls, known)
+}
+
+/// The effects of every subroutine, through the subroutines it calls. Each
+/// body is walked once; the effects then propagate through the calls until
+/// they settle, one pass per step of the longest call chain.
 fn subroutine_effects(
     subroutines: &[&Subroutine],
     definitions: &HashMap<&str, &Subroutine>,
 ) -> HashMap<String, Effects> {
+    let own = subroutines
+        .iter()
+        .map(|subroutine| own_effects(&subroutine.body, definitions))
+        .collect::<Vec<_>>();
     let mut known = HashMap::default();
     loop {
         let mut changed = false;
-        for subroutine in subroutines {
-            let effects = body_effects(&subroutine.body, &known, definitions);
+        for (subroutine, (effects, calls)) in subroutines.iter().zip(&own) {
+            let effects = with_callees(*effects, calls, &known);
             if known.get(&subroutine.name) != Some(&effects) {
                 known.insert(subroutine.name.clone(), effects);
                 changed = true;
@@ -525,4 +552,38 @@ fn assigns_nonblocking(body: &[Stmt]) -> bool {
         });
     }
     result
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Walks of a body for its own effects.
+    static OWN_EFFECT_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn subroutine_effects_walk_each_body_once() {
+        // Each task of a chain calls the next, and the last one waits: the
+        // suspension takes a pass per call to reach the first task, which
+        // walks each body once, not once per pass.
+        let walks = |chain: usize| {
+            let tasks = (0..chain)
+                .map(|i| {
+                    if i + 1 < chain {
+                        format!("task automatic t{i}(); t{}(); endtask\n", i + 1)
+                    } else {
+                        format!("task automatic t{i}(); #1; endtask\n")
+                    }
+                })
+                .collect::<String>();
+            let source = format!("module Top;\n{tasks}initial t0();\nendmodule\n");
+            super::OWN_EFFECT_WALKS.with(|count| count.set(0));
+            crate::analyze_source(&source, std::path::Path::new("effect-walks.sv"))
+                .expect("the module analyzes");
+            super::OWN_EFFECT_WALKS.with(|count| count.get())
+        };
+        let step = walks(3) - walks(2);
+        assert_eq!(walks(18) - walks(2), 16 * step);
+    }
 }
