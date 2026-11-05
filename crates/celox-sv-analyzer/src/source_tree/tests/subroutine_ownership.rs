@@ -58,7 +58,7 @@ mod tests {
     #[test]
     fn prototypes_constructors_and_epsilon_formals_have_explicit_classes() {
         for source in [
-            "class C;extern function int f(input int a);pure virtual task t(input int a);function new(int a);super.new(a);endfunction endclass module M;endmodule",
+            "virtual class C;extern function int f(input int a);pure virtual task t(input int a);function new(int a);super.new(a);endfunction endclass module M;endmodule",
             "module M;function int f();return 1;endfunction task t();endtask endmodule",
             "function int f(input int a);return a;endfunction module M;endmodule",
             "checker C(input logic a);assert property(a);endchecker function int f();return 1;endfunction module M;endmodule",

@@ -273,7 +273,7 @@ impl Parser<'_> {
             {
                 let keyword = self.at;
                 let id = self.subroutine(prototype)?;
-                self.class_method(keyword, id);
+                self.class_method(keyword, id)?;
                 prototype = false;
                 Some(BodyItemKind::Subroutine(id))
             } else if root
@@ -818,7 +818,7 @@ impl Parser<'_> {
                 let assigns = self.assign_statements.len();
                 let start = self.at;
                 let id = self.subroutine(frame.prototype)?;
-                self.class_method(start, id);
+                self.class_method(start, id)?;
                 frame.unit.subroutines.push(id);
                 frame.record(self, start, BodyItemKind::Subroutine(id))?;
                 frame.unit.parameter_declarations.extend(
