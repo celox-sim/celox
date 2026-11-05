@@ -1517,6 +1517,12 @@ pub struct SettlePartitions<A> {
     /// its writers as well, so that, as in a single pass, the settle
     /// recomputes it.
     pub marks: Vec<(A, Vec<u32>)>,
+    /// After the full byte, one flag byte per process of
+    /// [`RuntimeSchema::processes`]: the compiled scheduler checks a
+    /// process's edge wait only when its flag is set, and `marks` list the
+    /// flag (`partitions + 2 + process`) for the signals and counters the
+    /// wait watches. Zero when the flags have no such bytes.
+    pub waits: u32,
 }
 
 /// The process units that run the edges of one event together with its

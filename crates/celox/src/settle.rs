@@ -52,11 +52,13 @@ pub(crate) fn layout(
             _ => merged.push(object),
         }
     }
-    Some(SettleLayout::new(
+    let mut settle_layout = SettleLayout::new(
         layout.offsets[&settle.flags],
         settle.partitions as usize,
         merged,
-    ))
+    );
+    settle_layout.wait_flags = settle.waits as usize;
+    Some(settle_layout)
 }
 
 /// Run a settle through `run` and cross-check it ([`SettleLayout::check`]):

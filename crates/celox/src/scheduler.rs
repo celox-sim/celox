@@ -5382,108 +5382,159 @@ impl Generator<'_> {
         if waits.is_empty() {
             return;
         }
+        // A process's wait flag is set when a signal its wait watches
+        // changes (`SettlePartitions::waits`): a wait checked since can wake
+        // only once the flag is set again, so a clear flag skips the check.
+        // The untracked byte stands for changes no one reports.
+        let gate = self
+            .program
+            .runtime()
+            .runtime_schema
+            .settle_partitions
+            .as_ref()
+            .filter(|settle| settle.waits > 0)
+            .map(|settle| {
+                (
+                    settle.flags,
+                    settle.partitions as usize,
+                    settle.waits as usize,
+                )
+            });
+        let untracked = gate.map(|(flags, partitions, _)| {
+            let byte = self.load_at(flags, partitions * 8, SCHEDULER_FLAG_WIDTH);
+            let zero = self.constant(0, SCHEDULER_FLAG_WIDTH);
+            self.binary(1, byte, BinaryOp::Ne, zero)
+        });
         let mut woken = self.constant(0, self.ready_bits);
         for check in waits {
-            let wait = check.wait;
-            let flag = self.waiting(check.index);
-            let mut waiting = flag;
-            if let Some(status) = check.status {
-                let edge = self.equals_at(status, ProcessStatus::Wait);
-                let pending = self.equals_at(status, ProcessStatus::Pending);
-                let edge = self.binary(1, edge, BinaryOp::Or, pending);
-                waiting = self.binary(1, waiting, BinaryOp::And, edge);
-            }
-            let wake = if !wait.alternatives.is_empty() {
-                self.check_wait_site(check.index, check.delay, wait, waiting, settled)
-            } else if wait.raw.is_some() {
-                self.check_raw_wait(check.index, wait, waiting, settled)
-            } else {
-                let baseline = self.load(self.slots.baseline[check.index], SCHEDULER_FLAG_WIDTH);
-                let level_width = if self.four_state.is_none() { 1 } else { 2 };
-                // With several edges, the byte holds the edge's index above the
-                // level (`BASELINE_TERM_SHIFT`).
-                let (stored, term) = if wait.terms.len() == 1 {
-                    (baseline, None)
-                } else {
-                    let level = self.b.alloc_bit(level_width, false);
-                    self.b
-                        .emit(SIRInstruction::Slice(level, baseline, 0, level_width));
-                    let level = self.widen_to(level, level_width, SCHEDULER_FLAG_WIDTH);
-                    let shift = self.constant(u64::from(BASELINE_TERM_SHIFT), SCHEDULER_FLAG_WIDTH);
-                    let term = self.binary(SCHEDULER_FLAG_WIDTH, baseline, BinaryOp::Shr, shift);
-                    (level, Some(term))
-                };
-                let mut occurred = self.constant(0, 1);
-                let mut current = None;
-                let mut levels: Vec<(AbsoluteAddr, RegisterId)> = Vec::new();
-                for (ordinal, &(signal, kind)) in wait.terms.iter().enumerate() {
-                    let is = match levels.iter().find(|(known, _)| *known == signal) {
-                        Some(&(_, level)) => level,
-                        None => {
-                            let level = self.signal_level(signal);
-                            levels.push((signal, level));
-                            level
-                        }
-                    };
-                    let mut edge = self.occurred(stored, is, kind);
-                    if let Some(counter) = wait.counters[ordinal] {
-                        let previous = self.load_at(
-                            self.slots.baseline[check.index],
-                            SCHEDULER_FLAG_WIDTH,
-                            32,
-                        );
-                        let current = self.load(counter, 32);
-                        let counted = self.binary(1, previous, BinaryOp::Ne, current);
-                        edge = self.binary(1, edge, BinaryOp::Or, counted);
-                    }
-                    let (edge, is) = match term {
-                        None => (edge, is),
-                        Some(term) => {
-                            let selected = self.equals(term, ordinal as u64);
-                            let edge = self.binary(1, edge, BinaryOp::And, selected);
-                            let is = match current {
-                                None => is,
-                                Some(other) => {
-                                    let level = self.b.alloc_bit(level_width, false);
-                                    self.b.emit(SIRInstruction::Mux(level, selected, is, other));
-                                    level
-                                }
-                            };
-                            (edge, is)
-                        }
-                    };
-                    occurred = self.binary(1, occurred, BinaryOp::Or, edge);
-                    current = Some(is);
+            let wake = match (gate, untracked) {
+                (Some((flags, partitions, waits)), Some(untracked)) if check.index < waits => {
+                    let offset = (partitions + 2 + check.index) * 8;
+                    let byte = self.load_at(flags, offset, SCHEDULER_FLAG_WIDTH);
+                    let zero = self.constant(0, SCHEDULER_FLAG_WIDTH);
+                    let dirty = self.binary(1, byte, BinaryOp::Ne, zero);
+                    let dirty = self.binary(1, dirty, BinaryOp::Or, untracked);
+                    let wake = self.b.alloc_bit(1, false);
+                    let join = self.b.new_block_with(vec![wake]);
+                    let run = self.b.new_block();
+                    let clean = self.constant(0, 1);
+                    self.b.seal_block(SIRTerminator::Branch {
+                        cond: dirty,
+                        true_block: (run, Vec::new()),
+                        false_block: (join, vec![clean]),
+                    });
+                    self.b.switch_to_block(run);
+                    self.store_at(flags, offset, SCHEDULER_FLAG_WIDTH, zero);
+                    let woke = self.check_wait(check, settled);
+                    self.b.seal_block(SIRTerminator::Jump(join, vec![woke]));
+                    self.b.switch_to_block(join);
+                    wake
                 }
-                let is = current.expect("a wait has an edge");
-                let wake = self.binary(1, occurred, BinaryOp::And, waiting);
-                let mut level = self.baseline_byte(is);
-                if term.is_some() {
-                    // Keep the edge's index.
-                    let mask = self.constant(
-                        (1 << SCHEDULER_FLAG_WIDTH) - (1 << BASELINE_TERM_SHIFT),
-                        SCHEDULER_FLAG_WIDTH,
-                    );
-                    let index = self.binary(SCHEDULER_FLAG_WIDTH, baseline, BinaryOp::And, mask);
-                    level = self.binary(SCHEDULER_FLAG_WIDTH, level, BinaryOp::Or, index);
-                }
-                let next = self.b.alloc_bit(SCHEDULER_FLAG_WIDTH, false);
-                self.b
-                    .emit(SIRInstruction::Mux(next, waiting, level, baseline));
-                self.store(self.slots.baseline[check.index], SCHEDULER_FLAG_WIDTH, next);
-                wake
+                _ => self.check_wait(check, settled),
             };
-            let one = self.constant(1, 1);
-            let stays = self.binary(1, wake, BinaryOp::Xor, one);
-            let still = self.binary(1, flag, BinaryOp::And, stays);
-            let flag = self.widen(still, SCHEDULER_FLAG_WIDTH);
-            self.store(self.slots.waiting[check.index], SCHEDULER_FLAG_WIDTH, flag);
             let bit = self.bit(wake, check.ordinal);
             woken = self.binary(self.ready_bits, woken, BinaryOp::Or, bit);
         }
         let ready = self.load(self.slots.ready, self.ready_bits);
         let ready = self.binary(self.ready_bits, ready, BinaryOp::Or, woken);
         self.store(self.slots.ready, self.ready_bits, ready);
+    }
+
+    /// Check the wait of `check`, advance its baseline and clear its waiting
+    /// flag when it woke; whether it woke.
+    fn check_wait(&mut self, check: &WaitCheck, settled: bool) -> RegisterId {
+        let wait = check.wait;
+        let flag = self.waiting(check.index);
+        let mut waiting = flag;
+        if let Some(status) = check.status {
+            let edge = self.equals_at(status, ProcessStatus::Wait);
+            let pending = self.equals_at(status, ProcessStatus::Pending);
+            let edge = self.binary(1, edge, BinaryOp::Or, pending);
+            waiting = self.binary(1, waiting, BinaryOp::And, edge);
+        }
+        let wake = if !wait.alternatives.is_empty() {
+            self.check_wait_site(check.index, check.delay, wait, waiting, settled)
+        } else if wait.raw.is_some() {
+            self.check_raw_wait(check.index, wait, waiting, settled)
+        } else {
+            let baseline = self.load(self.slots.baseline[check.index], SCHEDULER_FLAG_WIDTH);
+            let level_width = if self.four_state.is_none() { 1 } else { 2 };
+            // With several edges, the byte holds the edge's index above the
+            // level (`BASELINE_TERM_SHIFT`).
+            let (stored, term) = if wait.terms.len() == 1 {
+                (baseline, None)
+            } else {
+                let level = self.b.alloc_bit(level_width, false);
+                self.b
+                    .emit(SIRInstruction::Slice(level, baseline, 0, level_width));
+                let level = self.widen_to(level, level_width, SCHEDULER_FLAG_WIDTH);
+                let shift = self.constant(u64::from(BASELINE_TERM_SHIFT), SCHEDULER_FLAG_WIDTH);
+                let term = self.binary(SCHEDULER_FLAG_WIDTH, baseline, BinaryOp::Shr, shift);
+                (level, Some(term))
+            };
+            let mut occurred = self.constant(0, 1);
+            let mut current = None;
+            let mut levels: Vec<(AbsoluteAddr, RegisterId)> = Vec::new();
+            for (ordinal, &(signal, kind)) in wait.terms.iter().enumerate() {
+                let is = match levels.iter().find(|(known, _)| *known == signal) {
+                    Some(&(_, level)) => level,
+                    None => {
+                        let level = self.signal_level(signal);
+                        levels.push((signal, level));
+                        level
+                    }
+                };
+                let mut edge = self.occurred(stored, is, kind);
+                if let Some(counter) = wait.counters[ordinal] {
+                    let previous =
+                        self.load_at(self.slots.baseline[check.index], SCHEDULER_FLAG_WIDTH, 32);
+                    let current = self.load(counter, 32);
+                    let counted = self.binary(1, previous, BinaryOp::Ne, current);
+                    edge = self.binary(1, edge, BinaryOp::Or, counted);
+                }
+                let (edge, is) = match term {
+                    None => (edge, is),
+                    Some(term) => {
+                        let selected = self.equals(term, ordinal as u64);
+                        let edge = self.binary(1, edge, BinaryOp::And, selected);
+                        let is = match current {
+                            None => is,
+                            Some(other) => {
+                                let level = self.b.alloc_bit(level_width, false);
+                                self.b.emit(SIRInstruction::Mux(level, selected, is, other));
+                                level
+                            }
+                        };
+                        (edge, is)
+                    }
+                };
+                occurred = self.binary(1, occurred, BinaryOp::Or, edge);
+                current = Some(is);
+            }
+            let is = current.expect("a wait has an edge");
+            let wake = self.binary(1, occurred, BinaryOp::And, waiting);
+            let mut level = self.baseline_byte(is);
+            if term.is_some() {
+                // Keep the edge's index.
+                let mask = self.constant(
+                    (1 << SCHEDULER_FLAG_WIDTH) - (1 << BASELINE_TERM_SHIFT),
+                    SCHEDULER_FLAG_WIDTH,
+                );
+                let index = self.binary(SCHEDULER_FLAG_WIDTH, baseline, BinaryOp::And, mask);
+                level = self.binary(SCHEDULER_FLAG_WIDTH, level, BinaryOp::Or, index);
+            }
+            let next = self.b.alloc_bit(SCHEDULER_FLAG_WIDTH, false);
+            self.b
+                .emit(SIRInstruction::Mux(next, waiting, level, baseline));
+            self.store(self.slots.baseline[check.index], SCHEDULER_FLAG_WIDTH, next);
+            wake
+        };
+        let one = self.constant(1, 1);
+        let stays = self.binary(1, wake, BinaryOp::Xor, one);
+        let still = self.binary(1, flag, BinaryOp::And, stays);
+        let flag = self.widen(still, SCHEDULER_FLAG_WIDTH);
+        self.store(self.slots.waiting[check.index], SCHEDULER_FLAG_WIDTH, flag);
+        wake
     }
 
     /// Whether the edge `kind` occurred from the level of the baseline byte
@@ -7200,6 +7251,66 @@ endmodule"#;
                 simulation.scheduler_stats()
             );
         }
+    }
+
+    /// With a partitioned settle, a process's edge wait is checked only when
+    /// a signal it watches changed, whoever changed it: a clock toggled by a
+    /// delay process, a register, an asynchronous reset, combinational logic.
+    /// Every waiter wakes as in the reference scheduler.
+    #[test]
+    fn partitioned_settle_wait_flags_wake_every_waiter() {
+        let source = r#"`timescale 1ns/1ns
+module Top;
+    bit clk = 0;
+    bit rst_n = 0;
+    bit [7:0] count = 0;
+    bit [7:0] twice_seen = 0;
+    bit [7:0] odd_seen = 0;
+    bit [7:0] resets = 0;
+    wire [7:0] twice = count + count;
+    wire odd = count[0];
+    always #1 clk = !clk;
+    initial begin #3; rst_n = 1; #20; rst_n = 0; #4; rst_n = 1; end
+    always @(posedge clk or negedge rst_n) if (!rst_n) count = 0; else count = count + 1;
+    always @(twice) twice_seen = twice_seen + 1;
+    always @(posedge odd) odd_seen = odd_seen + 1;
+    always @(negedge rst_n) resets = resets + 1;
+    initial begin #40; $finish; end
+endmodule"#;
+        let run = |partitioned: bool| {
+            let builder = crate::Simulation::from_sv_sources(
+                vec![(source, std::path::Path::new("wait-flags.sv"))],
+                "Top",
+            )
+            .scheduler_mode(crate::SchedulerMode::Differential);
+            let builder = if partitioned {
+                builder
+                    .settle_partition(crate::SettlePartition::Always)
+                    .settle_check(true)
+            } else {
+                builder.disable_pass(crate::SirPass::PartitionedSettle)
+            };
+            let mut simulation = builder.build_native().unwrap();
+            simulation.run_until(41).unwrap();
+            assert!(simulation.is_finished());
+            let stats = simulation.scheduler_stats();
+            assert_eq!(stats.unchecked, None, "{stats:?}");
+            assert!(stats.checked_steps > 0, "{stats:?}");
+            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+            assert!(stats.compiled_slots > 0, "{stats:?}");
+            ["count", "twice_seen", "odd_seen", "resets"].map(|name| {
+                let signal = simulation.signal(name);
+                simulation.get(signal)
+            })
+        };
+        let partitioned = run(true);
+        assert_eq!(partitioned, run(false));
+        assert!(
+            partitioned
+                .iter()
+                .all(|value| *value != num_bigint::BigUint::ZERO),
+            "{partitioned:?}"
+        );
     }
 
     #[test]

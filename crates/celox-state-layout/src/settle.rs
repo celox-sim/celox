@@ -27,6 +27,10 @@ pub struct SettleLayout {
     /// partition flagged and panic where the results differ.
     #[serde(default)]
     pub check: bool,
+    /// Flag bytes after the full byte: one per process, set when a signal
+    /// its edge wait watches changes, cleared when the wait is checked.
+    #[serde(default)]
+    pub wait_flags: usize,
 }
 
 impl SettleLayout {
@@ -37,6 +41,7 @@ impl SettleLayout {
             partitions,
             objects,
             check: false,
+            wait_flags: 0,
         }
     }
 
@@ -58,9 +63,10 @@ impl SettleLayout {
         }
     }
 
-    /// The bytes of the flags, the untracked and the full byte included.
+    /// The bytes of the flags: the untracked byte, the full byte and the
+    /// wait flags included.
     pub fn flags(&self) -> std::ops::Range<usize> {
-        self.flags_offset..self.flags_offset + self.partitions + 2
+        self.flags_offset..self.flags_offset + self.partitions + 2 + self.wait_flags
     }
 
     /// Run every partition on every settle from now on: a raw view of the

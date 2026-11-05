@@ -2446,11 +2446,16 @@ pub struct ScheduleResult<Addr> {
 /// is computed when the settle starts: it runs every partition of this
 /// settle when the untracked byte or enough flags are set, and the
 /// partitions then skip comparing what they wrote.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct SettlePartitioning<Addr> {
     pub flags: Addr,
     /// Approximate expression nodes per partition.
     pub target_cost: usize,
+    /// Readers outside the settle of the state it writes, by the index of
+    /// their flag byte after the partitions' bytes, the untracked byte and
+    /// the full byte: the partitions changing the state set those flags as
+    /// they set the flags of the partitions reading it.
+    pub external_readers: HashMap<Addr, Vec<usize>>,
 }
 
 /// One partition of a partitioned settle.
@@ -3832,6 +3837,24 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
     for (partition, read) in reads.iter().enumerate() {
         for &addr in read {
             readers.entry(addr).or_default().push(partition);
+        }
+    }
+    // An external reader of a copy's target reads its source too.
+    for (addr, flags) in &partitioning.external_readers {
+        let mut current = *addr;
+        let mut steps = 0;
+        loop {
+            let readers = readers.entry(current).or_default();
+            readers.extend(flags.iter().map(|flag| count + 2 + flag));
+            readers.sort_unstable();
+            readers.dedup();
+            match copy_source.get(&current) {
+                Some(&source) if steps <= copy_source.len() => {
+                    current = source;
+                    steps += 1;
+                }
+                _ => break,
+            }
         }
     }
     let partitions = (0..count)
@@ -5585,6 +5608,7 @@ mod tests {
             Some(super::SettlePartitioning {
                 flags: 99,
                 target_cost: 1,
+                external_readers: crate::HashMap::default(),
             }),
         )
         .unwrap()
@@ -5671,6 +5695,7 @@ mod tests {
                 Some(super::SettlePartitioning {
                     flags: 99,
                     target_cost: 1,
+                    external_readers: crate::HashMap::default(),
                 }),
             )
             .unwrap();
@@ -5705,6 +5730,57 @@ mod tests {
                 (SIROffset::Static(0), 16),
                 (SIROffset::Static(0), 16),
             ]
+        );
+    }
+
+    /// A partition that changes state an external reader watches sets the
+    /// reader's flag, which follows the partitions' bytes, the untracked
+    /// byte and the full byte.
+    #[test]
+    fn settle_partitions_mark_external_readers() {
+        let mut arena = SLTNodeArena::new();
+        let paths = vec![
+            simple_path(&mut arena, 13, Some(12)),
+            simple_path(&mut arena, 12, Some(11)),
+            simple_path(&mut arena, 11, Some(10)),
+        ];
+        let widths = (10..14).map(|id| (id, 8)).collect();
+        let result = super::sort_with_unpacked_element_widths(
+            paths,
+            &arena,
+            &crate::HashSet::default(),
+            &crate::HashMap::default(),
+            false,
+            &widths,
+            &crate::HashMap::default(),
+            1,
+            Some(super::SettlePartitioning {
+                flags: 99,
+                target_cost: 1,
+                external_readers: [(11, vec![1])].into_iter().collect(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(result.partitions.len(), 3);
+        let mut stored = Vec::new();
+        for unit in &result.execution_units {
+            for block in unit.blocks.values() {
+                for instruction in &block.instructions {
+                    if let SIRInstruction::Store(99, SIROffset::Static(bit), width, ..) =
+                        instruction
+                    {
+                        stored.push((*bit, *width));
+                    }
+                }
+            }
+        }
+        stored.sort_unstable();
+        // The three clears, the mark of partition 2, the full byte, and one
+        // packed store of partition 1's flag with external flag 1 at byte
+        // 3 + 2 + 1, both set when 11 changed.
+        assert_eq!(
+            stored,
+            vec![(0, 8), (0, 56), (8, 8), (16, 8), (16, 8), (32, 8)]
         );
     }
 
@@ -6616,6 +6692,7 @@ mod tests {
             Some(super::SettlePartitioning {
                 flags: 99,
                 target_cost: 1,
+                external_readers: crate::HashMap::default(),
             }),
         ] {
             let result = super::sort_with_unpacked_element_widths(
