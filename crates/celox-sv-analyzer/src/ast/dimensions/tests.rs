@@ -827,6 +827,33 @@ fn discovery_settles_the_scope_of_a_class_once_for_its_specializations() {
 }
 
 #[test]
+fn discovery_settles_the_scope_of_a_class_once_for_its_methods() {
+    // The queries of each method of a class share the scope around it:
+    // which method a query is in does not change the declarations of the
+    // scope, so they are discovered once however many methods there are.
+    let settles = |methods: usize| {
+        let functions = (0..methods)
+            .map(|i| {
+                format!(
+                    "function int f{i}(); bit [{i}:0] a; bit [3:0] b; return $bits(a) + $bits(b); endfunction\n"
+                )
+            })
+            .collect::<String>();
+        let source = format!(
+            "package p;
+                class A; {functions} endclass
+            endpackage
+            module Top; endmodule"
+        );
+        SCOPE_SETTLES.with(|count| count.set(0));
+        crate::analyze_source(&source, Path::new("method-scope-settles.sv"))
+            .expect("the package analyzes");
+        SCOPE_SETTLES.with(|count| count.get())
+    };
+    assert_eq!(settles(2), settles(16));
+}
+
+#[test]
 fn constant_sizes_read_the_settled_scope() {
     // The size of each cast and the count of each replication is bound in
     // a disposable session, which reads the scope its caller settled
