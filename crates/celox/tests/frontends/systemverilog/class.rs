@@ -2062,6 +2062,7 @@ sv_backends! {
     fn constrained_randomize_nested_guards(sim) { @case "class::constrained_randomize_nested_guards"; }
     fn constrained_randomize_state_properties(sim) { @case "class::constrained_randomize_state_properties"; }
     fn constrained_randomize_rand_objects(sim) { @case "class::constrained_randomize_rand_objects"; }
+    fn output_arguments_write_class_properties(sim) { @case "class::output_arguments_write_class_properties"; }
     fn constrained_randomize_rand_arrays(sim) { @case "class::constrained_randomize_rand_arrays"; }
     fn constrained_randomize_shifts(sim) { @case "class::constrained_randomize_shifts"; }
 }
@@ -2376,4 +2377,45 @@ sv_backends! {
         sim.run_until(0).unwrap();
         assert_eq!(sim.get(sim.signal("width")), 12u32.into());
     }
+}
+
+/// A signed member of a property keeps its signedness as an inout actual:
+/// the copy-in sign-extends it into a wider formal (IEEE 1800-2023 7.2.1,
+/// 13.5), and a copy-out through a container element is published to a
+/// forked waiter on the element as an assignment of it is (9.4.2).
+#[test]
+fn place_actuals_keep_signedness_and_publish_copy_outs() {
+    let source = r#"`timescale 1ns/1ns
+typedef struct packed { bit signed [3:0] s; bit [3:0] u; } sp_t;
+class Holder; sp_t sp; endclass
+module Top(output int seen, output int widened, output bit done);
+  Holder h;
+  int mq[$] = '{0, 0};
+  function void widen(inout bit signed [7:0] io); widened = io; io = io - 1; endfunction
+  task automatic bump(output int o); o = 7; endtask
+  initial begin
+    h = new;
+    h.sp.s = -1;
+    widen(h.sp.s);
+    if (h.sp.s != -2) widened = 0;
+    fork
+      begin @(mq[1]); seen = mq[1] == 7 ? 1 : 2; end
+      begin #1 bump(mq[1]); end
+    join
+    done = 1;
+  end
+endmodule
+"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("signed.sv"))], "Top")
+        .build()
+        .unwrap();
+    let (seen, widened, done) = (
+        sim.signal("seen"),
+        sim.signal("widened"),
+        sim.signal("done"),
+    );
+    sim.run_until(5).unwrap();
+    assert_eq!(sim.get(done), BigUint::from(1u8));
+    assert_eq!(sim.get(widened), BigUint::from(u32::MAX));
+    assert_eq!(sim.get(seen), BigUint::from(1u8));
 }

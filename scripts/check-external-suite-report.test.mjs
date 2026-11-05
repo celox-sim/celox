@@ -317,6 +317,7 @@ test("every retained baseline accepts only its existing failures", () => {
                 "class::methods_called_without_parentheses",
                 "class::named_aggregate_type_arguments",
                 "class::nested_value_selects",
+                "class::output_arguments_write_class_properties",
                 "class::package_constant_class_defaults",
                 "class::package_constant_type_arguments",
                 "class::packed_structure_property_members",
