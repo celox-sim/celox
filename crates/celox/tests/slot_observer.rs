@@ -585,3 +585,144 @@ endmodule
         }
     }
 }
+
+/// Records the values of `signals` the host sees before the domains of each
+/// wave and at the end of each slot.
+struct Snapshots {
+    signals: Vec<SignalRef>,
+    seen: mpsc::Sender<(bool, u64, Vec<u64>)>,
+}
+
+impl Snapshots {
+    fn send<B: SimBackend>(&self, io: &mut SlotIo<'_, B>, end: bool, time: u64) {
+        let values = self
+            .signals
+            .iter()
+            .map(|&signal| u64::try_from(io.get(signal)).unwrap())
+            .collect();
+        self.seen.send((end, time, values)).unwrap();
+    }
+}
+
+impl<B: SimBackend> SlotObserver<B> for Snapshots {
+    fn before_domains(&mut self, io: &mut SlotIo<'_, B>, time: u64) {
+        self.send(io, false, time);
+    }
+
+    fn end_of_slot(&mut self, io: &mut SlotIo<'_, B>, time: u64) {
+        self.send(io, true, time);
+    }
+}
+
+/// What a host watching the data `watched` sees of `source` to `end`, and
+/// the slots the compiled scheduler ran.
+fn watched_run(
+    source: &str,
+    watched: &[&str],
+    mode: celox::SchedulerMode,
+    end: u64,
+) -> (Vec<(bool, u64, Vec<u64>)>, u64) {
+    let mut sim = Simulation::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top")
+        .scheduler_mode(mode)
+        .build()
+        .unwrap();
+    let signals: Vec<_> = watched.iter().map(|name| sim.signal(name)).collect();
+    let (seen, received) = mpsc::channel();
+    sim.observe_slots(
+        Box::new(Snapshots {
+            signals: signals.clone(),
+            seen,
+        }),
+        &signals,
+    );
+    sim.run_until(end).unwrap();
+    (
+        received.try_iter().collect(),
+        sim.scheduler_stats().compiled_slots,
+    )
+}
+
+/// The states of each slot `seen` shows, without repeating one: the host
+/// sees every state the reference loop shows it, and the compiled
+/// scheduler may show one again at fewer wave boundaries.
+fn distinct(seen: Vec<(bool, u64, Vec<u64>)>) -> Vec<(u64, Vec<u64>)> {
+    let mut states: Vec<(u64, Vec<u64>)> = seen
+        .into_iter()
+        .map(|(_, time, values)| (time, values))
+        .collect();
+    states.dedup();
+    states
+}
+
+/// Each design's watched data, as the host sees it inside and at the end of
+/// its slots, matches the reference loop's; `compiled` says whether the
+/// compiled scheduler may run its slots meanwhile.
+fn watched_data_matches_the_reference_loop(source: &str, watched: &[&str], compiled: bool) {
+    let (seen, slots) = watched_run(source, watched, celox::SchedulerMode::Compiled, 60);
+    let (reference, _) = watched_run(source, watched, celox::SchedulerMode::Reference, 60);
+    assert_eq!(distinct(seen), distinct(reference));
+    assert_eq!(slots > 0, compiled, "compiled slots {slots}");
+}
+
+#[test]
+fn watched_data_written_by_processes_woken_by_process_writes_stays_compiled() {
+    for assign in ["=", "<="] {
+        let source = format!(
+            r#"`timescale 1ns/1ns
+module Top(output logic [31:0] out);
+    logic clk = 0;
+    logic [31:0] stim = 0;
+    always #5 clk = ~clk;
+    initial forever @(posedge clk) stim {assign} stim + 3;
+    assign out = stim;
+endmodule
+"#
+        );
+        watched_data_matches_the_reference_loop(&source, &["out"], true);
+    }
+    // A process wakes another through a blocking write of data.
+    let source = r#"`timescale 1ns/1ns
+module Top;
+    logic [7:0] x = 0;
+    logic [7:0] y = 0;
+    always #5 x = x + 1;
+    initial forever begin
+        @(x);
+        y = x * 2;
+    end
+endmodule
+"#;
+    watched_data_matches_the_reference_loop(source, &["x", "y"], true);
+}
+
+#[test]
+fn watched_data_woken_through_domains_keeps_the_reference_boundary() {
+    // A sequential domain wakes the waiter.
+    let source = r#"`timescale 1ns/1ns
+module Top;
+    logic clk = 0;
+    logic [7:0] count = 0;
+    logic [7:0] mirror = 0;
+    always #5 clk = ~clk;
+    always_ff @(posedge clk) count <= count + 1;
+    initial forever begin
+        @(count);
+        mirror = count;
+    end
+endmodule
+"#;
+    watched_data_matches_the_reference_loop(source, &["mirror"], false);
+    // A combinational clock of process-written data wakes it.
+    let source = r#"`timescale 1ns/1ns
+module Top;
+    logic clk = 0;
+    logic en = 1;
+    logic [7:0] q = 0;
+    wire gclk = clk & en;
+    always #5 clk = ~clk;
+    always #35 en = ~en;
+    initial forever @(posedge gclk) q = q + 1;
+endmodule
+"#;
+    watched_data_matches_the_reference_loop(source, &["q"], false);
+}

@@ -148,6 +148,9 @@ pub(crate) struct SchedulerRefs {
     pub(crate) clocks: Vec<(usize, SignalRef)>,
     /// Per process kernel, the bits of `levels` of the events it writes.
     pub(crate) kernel_events: Vec<EventMask>,
+    /// Per process kernel, whether a domain may wake one of its waits
+    /// (`SchedulerSchema::domain_waits`).
+    pub(crate) domain_waits: Vec<bool>,
     /// Per clock slot, the bit of `levels` of its event.
     pub(crate) clock_events: Vec<EventMask>,
     /// The bits of `levels` of clocks derived from the others, which any
@@ -616,6 +619,7 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                             )
                         })
                         .collect(),
+                    domain_waits: scheduler.domain_waits.clone(),
                     clock_events: scheduler
                         .clocks
                         .iter()

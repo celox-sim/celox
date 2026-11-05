@@ -336,7 +336,10 @@ impl<B: SimBackend> SimulationState<B> {
         let mut native_time = None;
         let mut native_rounds = 0u64;
         let mut host_only = false;
+        // The observed signals do not change during the loop.
+        let observable = !self.observation_needs_reference();
         while self.compiles_slots()
+            && observable
             && self.finalizing.is_none()
             && self.suspended.is_none()
             && !self.declarations_pending
@@ -625,8 +628,8 @@ impl<B: SimBackend> SimulationState<B> {
     /// signal run in the reference loop, where the host sees the change
     /// before any domain commits; the other kernels' slots stay compiled.
     /// When data without an event bit is observed, slots that can resume
-    /// design-driven waiters also use the reference loop, preserving the
-    /// boundary between a data change and the processes it wakes.
+    /// waiters a domain wakes also use the reference loop, preserving the
+    /// boundary between a domain's change and the processes it wakes.
     pub fn set_observed_signals(&mut self, signals: impl IntoIterator<Item = SignalRef>) {
         // Residency is judged once per run loop, from the observed events.
         debug_assert!(self.native.is_none());

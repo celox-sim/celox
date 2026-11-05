@@ -1713,6 +1713,12 @@ pub struct SchedulerSchema<A> {
     /// Per process kernel, the event signals it writes, as indices into
     /// [`Self::events`]; empty for a kernel the scheduler does not run.
     pub kernel_events: Vec<Vec<usize>>,
+    /// Per process kernel, whether a domain may change what one of its
+    /// waits waits for: a combinational or sequential unit or a
+    /// nonblocking assignment may write its signal, or a gate or probe is
+    /// judged only after settling. The reference loop resumes such a kernel
+    /// a round after the wave, which a host observing data sees in between.
+    pub domain_waits: Vec<bool>,
 }
 
 impl<A> SchedulerSchema<A> {
@@ -1725,6 +1731,7 @@ impl<A> SchedulerSchema<A> {
             events: self.events.into_iter().map(&mut map).collect(),
             clocks: self.clocks.into_iter().map(map).collect(),
             kernel_events: self.kernel_events,
+            domain_waits: self.domain_waits,
         }
     }
 }

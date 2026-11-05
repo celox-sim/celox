@@ -78,7 +78,9 @@ impl<B: SimBackend> SimulationState<B> {
     /// nothing else is pending: no process waits for an event or is ready,
     /// no nonblocking assignment is queued, no host change awaits a settle,
     /// and the slot comes before every scheduled event and every wakeup of
-    /// another kernel.
+    /// another kernel. The caller has checked, once for its run loop, that
+    /// what the host observes leaves the slots compiled
+    /// ([`Self::observation_needs_reference`]).
     pub(super) fn compiled_limit<E>(&self, executor: &E, end: u64, one_slot: bool) -> Option<u64>
     where
         E: SimulationExecutor<Backend = B>,
@@ -99,7 +101,6 @@ impl<B: SimBackend> SimulationState<B> {
             || self.suspended.is_some()
             || self.declarations_pending
             || (self.host_pending && !executor.compiled_host_inputs())
-            || self.observation_needs_reference()
             || (region_pending
                 && (!native_regions
                     || regions
@@ -220,11 +221,14 @@ impl<B: SimBackend> SimulationState<B> {
         let Some(scheduler) = &self.model.scheduler else {
             return false;
         };
-        // Non-event data has no per-writer event mask. Keep its wave
-        // boundary visible before a compiled waiter can resume.
+        // Non-event data has no per-writer event mask. The reference loop
+        // resumes a kernel a domain woke a round after the wave, and the
+        // host sees the data in between: such kernels need its boundary.
+        // A kernel another kernel's write wakes resumes in the same round.
         (self.observed_data
             && scheduler.waits.iter().enumerate().any(|(index, wait)| {
                 wait.is_some()
+                    && scheduler.domain_waits.get(index).copied().unwrap_or(true)
                     && self.model.processes[index]
                         .wait_sites
                         .iter()
