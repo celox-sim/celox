@@ -102,6 +102,13 @@ pub trait UnitExecutor {
         Vec::new()
     }
 
+    /// Whether a native run may have left NBA values for
+    /// [`Self::take_compiled_nbas`] or [`Self::take_compiled_delayed_nbas`].
+    /// By default, whenever native runs hold the queues.
+    fn has_compiled_nbas(&self) -> bool {
+        self.compiled_nba_queues()
+    }
+
     /// Unpublished NBA values left by a native run, including an early error.
     fn take_compiled_nbas(&mut self) -> Vec<super::NbaUpdate> {
         Vec::new()

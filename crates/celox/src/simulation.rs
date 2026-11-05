@@ -245,6 +245,10 @@ impl<B: SimBackend> UnitExecutor for Simulator<B> {
         self.native_delayed_nbas.drain(..).collect()
     }
 
+    fn has_compiled_nbas(&self) -> bool {
+        !self.native_nba_queue.is_empty() || !self.native_delayed_nbas.is_empty()
+    }
+
     fn take_compiled_nbas(&mut self) -> Vec<celox_runtime::NbaUpdate> {
         self.native_nba_queue.drain(..).collect()
     }

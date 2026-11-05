@@ -173,10 +173,19 @@ pub trait SimBackend {
 
     // ── get / set ───────────────────────────────────────────────
     fn set<T: Copy>(&mut self, signal: SignalRef, val: T);
+    /// Write a slot of the compiled scheduler, which no waveform traces and
+    /// no settle partition reads, so the write marks neither.
+    fn set_scheduler_slot<T: Copy>(&mut self, signal: SignalRef, val: T) {
+        self.set(signal, val);
+    }
     fn set_wide(&mut self, signal: SignalRef, val: BigUint);
     fn set_four_state(&mut self, signal: SignalRef, val: BigUint, mask: BigUint);
     fn get(&self, signal: SignalRef) -> BigUint;
     fn get_as<T: Default + Copy>(&self, signal: SignalRef) -> T;
+    /// Read a slot of the compiled scheduler ([`Self::set_scheduler_slot`]).
+    fn get_scheduler_slot<T: Default + Copy>(&self, signal: SignalRef) -> T {
+        self.get_as(signal)
+    }
     fn get_four_state(&self, signal: SignalRef) -> (BigUint, BigUint);
 
     // ── memory / layout ─────────────────────────────────────────
