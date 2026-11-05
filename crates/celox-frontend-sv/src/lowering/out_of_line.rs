@@ -5,7 +5,8 @@
 //! Only a test switch turns this on (`AnalysisOptions::force_out_of_line_calls`):
 //! every subroutine that can be lowered so is, and every other one stays
 //! inlined. A subroutine qualifies when it cannot suspend its caller and
-//! makes no host request, both transitively (see [`Reason`]), has no `ref`
+//! makes no host request, both transitively (see [`Reason`]; its prints and
+//! messages are runtime events, which a unit raises), has no `ref`
 //! formal (the callees inlined into its unit may), and its unit touches no
 //! state but its frame, the variables it reads, and the static storage of
 //! subroutines. Nor may it make a store that assembly instruments per store
@@ -40,7 +41,10 @@
 //! out of line only if the function writes no module variable and reads
 //! none the process writes, so both see the same values.
 
-use super::procedural::{ProcModule, collect_calls, default_calls, expr_idents, stmt_calls};
+use super::procedural::{
+    ProcModule, SystemTaskKind, collect_calls, default_calls, expr_idents, stmt_calls,
+    system_task_kind,
+};
 use super::*;
 use celox_sir::{FrameLayout, FrameSlot, FunctionUnit, RegisterId};
 use std::collections::BTreeMap;
@@ -777,7 +781,27 @@ impl ProcModule<'_> {
                         | sv::ir::Stmt::AssignConcat {
                             nonblocking: true, ..
                         } => note(Reason::Other("instrumented store".to_string())),
-                        sv::ir::Stmt::SystemTask { .. } => note(Reason::HostRequest),
+                        // Prints, messages and Veryl's assertion calls are
+                        // runtime events, which a unit raises as an inlined
+                        // body does; a message carries the time. `$finish`
+                        // and `$stop` end or suspend the process, a deferred
+                        // action waits in the process's queue (IEEE 1800-2023
+                        // 16.4.1), and the other tasks are host requests.
+                        sv::ir::Stmt::SystemTask {
+                            task, assertion, ..
+                        } => match system_task_kind(*task) {
+                            _ if assertion.as_ref().is_some_and(|assertion| {
+                                assertion.deferral != celox_design::AssertionDeferral::None
+                            }) =>
+                            {
+                                note(Reason::HostRequest);
+                            }
+                            Some(SystemTaskKind::Print(..) | SystemTaskKind::Assertion(_)) => {}
+                            Some(SystemTaskKind::Message(_) | SystemTaskKind::Fatal) => {
+                                state.time = true;
+                            }
+                            Some(SystemTaskKind::Control(_)) | None => note(Reason::HostRequest),
+                        },
                         _ => {}
                     }
                     stmt_calls(stmt, &mut calls);

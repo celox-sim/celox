@@ -6,21 +6,23 @@
 use super::*;
 use celox::{SimBackend, Simulation, SimulatorBuilder};
 
-/// The four-state value of each of `outputs` at time `until`, or the
-/// runtime error that stopped the run.
-fn outputs<B: SimBackend>(
-    mut sim: Simulation<B>,
-    until: u64,
-    outputs: &[&str],
-) -> Result<Vec<(BigUint, BigUint)>, String> {
+/// What a run gives: the four-state value of each output, and the runtime
+/// events it raised.
+type Run = (Vec<(BigUint, BigUint)>, Vec<celox::RuntimeEvent>);
+
+/// The four-state value of each of `outputs` at time `until` and the
+/// runtime events raised until then, or the runtime error that stopped the
+/// run.
+fn run<B: SimBackend>(mut sim: Simulation<B>, until: u64, outputs: &[&str]) -> Result<Run, String> {
     sim.run_until(until).map_err(|error| error.to_string())?;
-    Ok(outputs
+    let values = outputs
         .iter()
         .map(|name| {
             let signal = sim.signal(name);
             sim.get_four_state(signal)
         })
-        .collect())
+        .collect();
+    Ok((values, sim.drain_runtime_events()))
 }
 
 fn backends() -> Vec<&'static str> {
@@ -40,6 +42,18 @@ fn simulate(
     until: u64,
     names: &[&str],
 ) -> Result<Vec<(BigUint, BigUint)>, String> {
+    simulate_run(source, four_state, forced, backend, until, names).map(|(values, _)| values)
+}
+
+/// [`simulate`], with the runtime events of the run.
+fn simulate_run(
+    source: &str,
+    four_state: bool,
+    forced: bool,
+    backend: &str,
+    until: u64,
+    names: &[&str],
+) -> Result<Run, String> {
     let builder = Simulation::from_sv_sources(vec![(source, Path::new("calls.sv"))], "Top")
         .four_state(four_state);
     let builder = if forced {
@@ -49,11 +63,11 @@ fn simulate(
     };
     let built = |error: celox::SimulatorError| format!("build: {error}");
     match backend {
-        "interpreter" => outputs(builder.build_interpreter().map_err(built)?, until, names),
-        "cranelift" => outputs(builder.build_cranelift().map_err(built)?, until, names),
-        "wasm" => outputs(builder.build_wasm().map_err(built)?, until, names),
+        "interpreter" => run(builder.build_interpreter().map_err(built)?, until, names),
+        "cranelift" => run(builder.build_cranelift().map_err(built)?, until, names),
+        "wasm" => run(builder.build_wasm().map_err(built)?, until, names),
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-        "native" => outputs(builder.build_native().map_err(built)?, until, names),
+        "native" => run(builder.build_native().map_err(built)?, until, names),
         _ => unreachable!("backend {backend}"),
     }
 }
@@ -83,7 +97,8 @@ fn function_units(source: &str, forced: bool) -> usize {
 }
 
 /// Check that `source` goes out of line into `units` function units and
-/// gives on every backend, in both state modes, what it gives inlined.
+/// gives on every backend, in both state modes, what it gives inlined: the
+/// same outputs and the same runtime events.
 fn same_as_inlined(source: &str, units: usize, until: u64, names: &[&str]) {
     assert_eq!(
         function_units(source, false),
@@ -92,11 +107,11 @@ fn same_as_inlined(source: &str, units: usize, until: u64, names: &[&str]) {
     );
     assert_eq!(function_units(source, true), units, "function units");
     for four_state in [false, true] {
-        let inlined = simulate(source, four_state, false, "interpreter", until, names)
+        let inlined = simulate_run(source, four_state, false, "interpreter", until, names)
             .expect("the inlined design runs");
         for backend in backends() {
             assert_eq!(
-                simulate(source, four_state, true, backend, until, names),
+                simulate_run(source, four_state, true, backend, until, names),
                 Ok(inlined.clone()),
                 "{backend}, four-state {four_state}"
             );
@@ -387,8 +402,8 @@ fn ineligible_subroutines_stay_inlined() {
         v = v + 1;
     endfunction
     function automatic int shout(int v);
-        $display("shout %0d", v);
-        return v + 1;
+        string text = $sformatf("shout %0d", v);
+        return v + text.len();
     endfunction
     function automatic int via_shout(int v);
         return shout(v) * 2;
@@ -1076,4 +1091,102 @@ module Top(output int q, output int r);
 endmodule
 "#;
     same_as_inlined(source, 1, 4, &["q", "r"]);
+}
+
+#[test]
+fn reports_and_messages_go_out_of_line() {
+    // Every print and message of a unit, also of one a unit calls, reports
+    // what it reports inlined: its text, its time and its scope. `$fatal`
+    // ends the run from inside the call.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int r, output int c);
+    function automatic int checked(int x);
+        $display("checked %0d at %0t in %m", x, $time);
+        if (x > 2) $error("big %0d", x);
+        else $info("small %0d", x);
+        $write("[%0d]", x);
+        return twice(x);
+    endfunction
+    function automatic int twice(int x);
+        $display("twice %h", x);
+        if (x == 0) $warning("zero");
+        return 2 * x;
+    endfunction
+    function automatic void die(int x);
+        if (x == 7) $fatal(1, "dead %0d", x);
+    endfunction
+    int k = 1;
+    always_comb c = twice(r);
+    initial begin
+        r = checked(k);
+        #1 r = checked(k + 4) + checked(k - 1);
+        #1 die(k + 5);
+        #1 die(k + 6);
+        r = 99;
+    end
+endmodule
+"#;
+    same_as_inlined(source, 3, 2, &["r", "c"]);
+    for four_state in [false, true] {
+        let inlined = simulate_run(source, four_state, false, "interpreter", 5, &["r"]);
+        assert_eq!(inlined, Err("dead 7".to_string()));
+        for backend in backends() {
+            assert_eq!(
+                simulate_run(source, four_state, true, backend, 5, &["r"]),
+                inlined,
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+}
+
+#[test]
+fn recursive_functions_report_each_activation() {
+    // Inlined, recursion is rejected: the same reports in a loop are the
+    // reference.
+    let recursive = r#"`timescale 1ns/1ns
+module Top(output int r);
+    function automatic int count(int n);
+        $display("count %0d at %0t", n, $time);
+        if (n == 0) begin
+            $warning("bottom");
+            return 0;
+        end
+        $write("[%0d]", n);
+        return count(n - 1) + 1;
+    endfunction
+    int k = 3;
+    initial begin
+        r = count(k);
+        #1 r = count(k - 1);
+    end
+endmodule
+"#;
+    let looped = recursive.replace(
+        "        $display(\"count %0d at %0t\", n, $time);
+        if (n == 0) begin
+            $warning(\"bottom\");
+            return 0;
+        end
+        $write(\"[%0d]\", n);
+        return count(n - 1) + 1;",
+        // The warning keeps its line.
+        "        for (int m = n; m > 0; m--) begin $display(\"count %0d at %0t\", m, $time); $write(\"[%0d]\", m); end
+        $display(\"count %0d at %0t\", 0, $time);
+        $warning(\"bottom\");
+        return n;",
+    );
+    assert_ne!(looped, recursive);
+    assert_eq!(function_units(recursive, true), 1, "function units");
+    for four_state in [false, true] {
+        let expected = simulate_run(&looped, four_state, false, "interpreter", 2, &["r"])
+            .expect("the looped design runs");
+        for backend in backends() {
+            assert_eq!(
+                simulate_run(recursive, four_state, true, backend, 2, &["r"]),
+                Ok(expected.clone()),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
 }
