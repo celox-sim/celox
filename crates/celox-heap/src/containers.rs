@@ -66,6 +66,12 @@ pub const SHUFFLE: u64 = 105;
 /// its capacity (IEEE 1800-2023 7.10.5), as converting a container to one
 /// whose elements are bounded queues assigns each element.
 pub const BOUND: u64 = 106;
+/// `merge(a, b)`: the result of a conditional operator whose condition is
+/// ambiguous, of containers `a` and `b` (IEEE 1800-2023 11.4.11): `a` if the
+/// two are logically equal (11.4.5); for sequences of as many elements, their
+/// elements combined, an element that is not equal in both taking the
+/// default of the layout (Table 7-1); otherwise an empty container.
+pub const MERGE: u64 = 107;
 
 /// The operation parameter encodes the element width (bits 0..6), whether
 /// it is two-state (7), its handle kind (8..9: none/string/object), container
@@ -106,6 +112,14 @@ impl Layout {
     /// Whether the elements are string handles.
     pub(crate) fn string_elements(self) -> bool {
         (self.0 >> 8) & 3 == 1
+    }
+    /// Whether the elements are object handles, also of containers.
+    fn object_elements(self) -> bool {
+        (self.0 >> 8) & 3 == 2
+    }
+    /// Whether the elements are handles of strings or objects.
+    fn handle_elements(self) -> bool {
+        (self.0 >> 8) & 3 != 0
     }
     fn bits(self) -> u64 {
         u64::MAX >> (64 - (self.0 & 127))
@@ -458,8 +472,115 @@ impl Heap {
         out
     }
 
-    /// Execute a container helper. Indices have already undergone language
-    /// conversion; invalid four-state indices use an out-of-range sentinel.
+    /// The equality of elements `x` and `y` of `layout`: 0 if they differ,
+    /// 1 if they are equal and 2 if X or Z bits leave it unknown; with
+    /// `case`, X and Z bits compare as values (IEEE 1800-2023 11.4.5,
+    /// 11.4.6). Elements that are containers compare by their elements
+    /// (7.6), not by their handles; a null handle is an empty container.
+    fn element_equality(&self, x: Element, y: Element, case: bool, layout: Layout) -> u8 {
+        // Also one handle on both sides, whose elements may be unknown.
+        let nested = layout.object_elements() && x.mask == 0 && y.mask == 0;
+        if nested
+            && let Some(inner) = [x.value, y.value]
+                .into_iter()
+                .find_map(|handle| self.containers.get(&(handle as Handle)))
+        {
+            return self.equality(
+                x.value as Handle,
+                y.value as Handle,
+                case,
+                Layout(inner.layout),
+            );
+        }
+        if case {
+            u8::from(x == y)
+        } else if (x.value ^ y.value) & !(x.mask | y.mask) != 0 {
+            0
+        } else if x.mask | y.mask != 0 {
+            2
+        } else {
+            1
+        }
+    }
+
+    /// The equality of containers `a` and `b` of `layout`, as
+    /// [`Self::element_equality`] gives it: two containers are equal if they
+    /// have the same keys or as many elements, each pair of them equal.
+    fn equality(&self, a: Handle, b: Handle, case: bool, layout: Layout) -> u8 {
+        let empty = Container::empty(layout);
+        let left = self.containers.get(&a).map_or(&empty, |entry| &**entry);
+        let right = self.containers.get(&b).map_or(&empty, |entry| &**entry);
+        let mut unknown = false;
+        let mut compare = |x: Element, y: Element| match self.element_equality(x, y, case, layout) {
+            0 => false,
+            1 => true,
+            _ => {
+                unknown = true;
+                true
+            }
+        };
+        let equal = match (&left.contents, &right.contents) {
+            (Contents::Sequence(x), Contents::Sequence(y)) => {
+                x.len() == y.len() && x.iter().zip(y).all(|(&x, &y)| compare(x, y))
+            }
+            (Contents::Associative(x), Contents::Associative(y)) => {
+                x.len() == y.len()
+                    && x.iter()
+                        .zip(y)
+                        .all(|((xk, &x), (yk, &y))| xk == yk && compare(x, y))
+            }
+            _ => false,
+        };
+        if !equal {
+            0
+        } else if unknown {
+            2
+        } else {
+            1
+        }
+    }
+
+    /// The [`MERGE`] of containers `a` and `b`.
+    fn merge(&mut self, a: Handle, b: Handle, layout: Layout) -> Handle {
+        let [left, right] = [a, b].map(|handle| {
+            self.containers
+                .get(&handle)
+                .map(|entry| (**entry).clone())
+                .unwrap_or_else(|| Container::empty(layout))
+        });
+        // Logically equivalent operands give the first (11.4.11); an
+        // associative array also has its default.
+        if self.equality(a, b, false, layout) == 1 && left.default == right.default {
+            return a;
+        }
+        match (&left.contents, &right.contents) {
+            (Contents::Sequence(x), Contents::Sequence(y)) if x.len() == y.len() => {
+                // A handle's default is null: an empty container, or no
+                // object or string (Table 7-1).
+                let default = if layout.handle_elements() {
+                    Element { value: 0, mask: 0 }
+                } else {
+                    layout.default()
+                };
+                let elements = x
+                    .iter()
+                    .zip(y)
+                    .map(|(&x, &y)| {
+                        if self.element_equality(x, y, false, layout) == 1 {
+                            x
+                        } else {
+                            default
+                        }
+                    })
+                    .collect();
+                let mut result = left.clone();
+                result.contents = Contents::Sequence(elements);
+                self.publish_container(result, true)
+            }
+            _ => 0,
+        }
+    }
+
     /// The [`BOUND`] of container `handle` at nesting depth `depth`.
     fn bound(&mut self, handle: Handle, depth: u64, layout: Layout) -> Handle {
         let Some(container) = self.containers.get(&handle).cloned() else {
@@ -500,6 +621,8 @@ impl Heap {
         self.publish_container(result, true)
     }
 
+    /// Execute a container helper. Indices have already undergone language
+    /// conversion; invalid four-state indices use an out-of-range sentinel.
     pub(crate) fn container_call(
         &mut self,
         op: u64,
@@ -510,6 +633,9 @@ impl Heap {
     ) -> u64 {
         if op == BOUND {
             return self.bound(a as Handle, b, Layout(parameter)) as u64;
+        }
+        if op == MERGE {
+            return self.merge(a as Handle, b as Handle, Layout(parameter)) as u64;
         }
         let layout = Layout(parameter);
         let key = layout.key(self, b);
@@ -528,48 +654,10 @@ impl Heap {
         };
         match op {
             EQUAL | CASE_EQUAL => {
-                let other = self.containers.get(&(b as Handle));
-                let equal_element = |left: Element, right: Element| {
-                    if op == CASE_EQUAL {
-                        if left == right { 1 } else { 0 }
-                    } else if (left.value ^ right.value) & !(left.mask | right.mask) != 0 {
-                        0
-                    } else if left.mask | right.mask != 0 {
-                        2
-                    } else {
-                        1
-                    }
-                };
-                let mut unknown = false;
-                let mut compare = |left: Element, right: Element| {
-                    let equal = equal_element(left, right);
-                    unknown |= equal == 2;
-                    equal != 0
-                };
-                let left = existing
-                    .map(|entry| (**entry).clone())
-                    .unwrap_or_else(|| Container::empty(layout));
-                let right = other
-                    .map(|entry| (**entry).clone())
-                    .unwrap_or_else(|| Container::empty(layout));
-                let equal = match (&left.contents, &right.contents) {
-                    (Contents::Sequence(a), Contents::Sequence(b)) => {
-                        a.len() == b.len() && a.iter().zip(b).all(|(&a, &b)| compare(a, b))
-                    }
-                    (Contents::Associative(a), Contents::Associative(b)) => {
-                        a.len() == b.len()
-                            && a.iter()
-                                .zip(b)
-                                .all(|((ak, &a), (bk, &b))| ak == bk && compare(a, b))
-                    }
-                    _ => false,
-                };
-                return if !equal {
-                    0
-                } else if unknown {
-                    3
-                } else {
-                    1
+                return match self.equality(a as Handle, b as Handle, op == CASE_EQUAL, layout) {
+                    0 => 0,
+                    1 => 1,
+                    _ => 3,
                 };
             }
             LEN => return existing.map_or(0, |v| v.len() as u64),
@@ -860,6 +948,67 @@ mod tests {
         let rebound = call(&mut heap, BOUND, bounded, with_default, 1, 0);
         let default = call(&mut heap, GET, map, rebound, 7, 0);
         assert_eq!(call(&mut heap, LEN, bounded, default, 0, 0), 2);
+    }
+
+    #[test]
+    fn merge_takes_equal_operands_and_combines_sequences_of_one_size() {
+        let mut heap = Heap::new();
+        let four = parameter(4, false, 0, 1, 0, false, false, false);
+        let queue = |heap: &mut Heap, values: &[u64]| {
+            let mut handle = call(heap, NEW, four, values.len() as u64, 0, 0);
+            for (index, value) in values.iter().enumerate() {
+                handle = call(heap, SET, four, handle, index as u64, *value);
+                handle = call(heap, SET_MASK, four, handle, index as u64, 0);
+            }
+            handle
+        };
+        let a = queue(&mut heap, &[1, 2]);
+        let b = queue(&mut heap, &[1, 3]);
+        assert_eq!(call(&mut heap, MERGE, four, a, a, 0), a);
+        let merged = call(&mut heap, MERGE, four, a, b, 0);
+        assert_eq!(call(&mut heap, GET, four, merged, 0, 0), 1);
+        assert_eq!(call(&mut heap, GET_MASK, four, merged, 0, 0), 0);
+        // A four-state element that differs takes X (Table 7-1).
+        assert_eq!(call(&mut heap, GET_MASK, four, merged, 1, 0), 0b1111);
+        let short = queue(&mut heap, &[1]);
+        assert_eq!(call(&mut heap, MERGE, four, a, short, 0), 0);
+    }
+
+    #[test]
+    fn nested_containers_compare_and_merge_by_their_elements() {
+        let mut heap = Heap::new();
+        let inner = parameter(4, false, 0, 1, 0, false, false, false);
+        let outer = parameter(32, true, 2, 1, 0, false, false, false);
+        let queue = |heap: &mut Heap, layout: u64, values: &[(u64, u64)]| {
+            let mut handle = call(heap, NEW, layout, values.len() as u64, 0, 0);
+            for (index, &(value, mask)) in values.iter().enumerate() {
+                handle = call(heap, SET, layout, handle, index as u64, value);
+                handle = call(heap, SET_MASK, layout, handle, index as u64, mask);
+            }
+            handle
+        };
+        // 4'b1x00 in one inner queue, which both outer queues hold.
+        let unknown = queue(&mut heap, inner, &[(0b1000, 0b0100)]);
+        let a = queue(&mut heap, outer, &[(unknown, 0)]);
+        let b = queue(&mut heap, outer, &[(unknown, 0)]);
+        assert_eq!(call(&mut heap, EQUAL, outer, a, b, 0), 3);
+        assert_eq!(call(&mut heap, CASE_EQUAL, outer, a, b, 0), 1);
+        // The inner queues are not logically equal: the merged element is
+        // the default of a queue, an empty one (11.4.11, Table 7-1).
+        let merged = call(&mut heap, MERGE, outer, a, b, 0);
+        assert_ne!(merged, a);
+        assert_eq!(call(&mut heap, LEN, outer, merged, 0, 0), 1);
+        assert_eq!(call(&mut heap, GET, outer, merged, 0, 0), 0);
+        // Known inner queues compare by value, not by handle.
+        let one = queue(&mut heap, inner, &[(1, 0)]);
+        let other = queue(&mut heap, inner, &[(1, 0), (2, 0)]);
+        let c = queue(&mut heap, outer, &[(one, 0)]);
+        let d = queue(&mut heap, outer, &[(other, 0)]);
+        assert_eq!(call(&mut heap, EQUAL, outer, c, c, 0), 1);
+        assert_eq!(call(&mut heap, EQUAL, outer, c, d, 0), 0);
+        assert_eq!(call(&mut heap, MERGE, outer, c, c, 0), c);
+        let empty = queue(&mut heap, outer, &[(0, 0)]);
+        assert_eq!(call(&mut heap, EQUAL, outer, empty, c, 0), 0);
     }
 
     #[test]

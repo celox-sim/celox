@@ -98,6 +98,9 @@ impl Ff<'_, '_> {
         args: &[Option<sv::ir::Expr>],
     ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
         use ContainerOp::*;
+        if op == Conditional {
+            return self.container_conditional(layout, args);
+        }
         let mut args = args
             .iter()
             .map(|arg| {
@@ -116,17 +119,10 @@ impl Ff<'_, '_> {
             .get(1)
             .and_then(|key| self.m.comparison_width(key, key));
         if op.reduction().is_none() && args.iter().any(|arg| self.m.calls(arg)) {
-            let value_receiver = matches!(
-                op,
-                New | Literal
-                    | WithDefault
-                    | Convert
-                    | Concat
-                    | Slice
-                    | Bound { .. }
-                    | Equal
-                    | CaseEqual
-            );
+            let count = args.len();
+            // An operation that makes a value reads its operands as values; any
+            // other updates or reads the container of its first operand in place.
+            let value_receiver = operand(op, 0, count) != Operand::Receiver;
             if !value_receiver {
                 // Preserve the receiver's location, not an old immutable copy
                 // of its contents: arguments may mutate this same container.
@@ -157,29 +153,22 @@ impl Ff<'_, '_> {
                     Some(celox_design::ValueKind::ObjRef),
                 )?;
             }
-            let count = args.len();
             for (index, arg) in args.iter_mut().enumerate() {
-                if !value_receiver && (index == 0 || matches!(op, First | Last | Next | Prev)) {
-                    continue;
-                }
-                let element = matches!(op, Literal | WithDefault)
-                    || (matches!(op, Set | Insert | PushFront | PushBack) && index + 1 == count);
-                let (context, kind) = if element {
-                    (
+                let (context, kind) = match operand(op, index, count) {
+                    Operand::Receiver => continue,
+                    Operand::Element => (
                         Some((layout.width as usize, layout.signed)),
                         layout.handle.map(|h| match h {
                             HandleProperty::String => celox_design::ValueKind::StrRef,
                             HandleProperty::Object => celox_design::ValueKind::ObjRef,
                         }),
-                    )
-                } else if op == New && index == 0 {
-                    (Some((64, true)), None)
-                } else if op == Slice && index != 0 {
-                    (None, None)
-                } else if value_receiver {
-                    (Some((32, false)), Some(celox_design::ValueKind::ObjRef))
-                } else {
-                    match layout.kind {
+                    ),
+                    Operand::Container => {
+                        (Some((32, false)), Some(celox_design::ValueKind::ObjRef))
+                    }
+                    Operand::Size => (Some((64, true)), None),
+                    Operand::Bound => (None, None),
+                    Operand::Key => match layout.kind {
                         ContainerKind::Associative { string: true, .. } => {
                             (Some((32, false)), Some(celox_design::ValueKind::StrRef))
                         }
@@ -188,7 +177,7 @@ impl Ff<'_, '_> {
                         } => (Some((key_width as usize, signed)), None),
                         _ if matches!(op, Get | Set) => (Some((64, true)), None),
                         _ => (Some((32, true)), None),
-                    }
+                    },
                 };
                 *arg = self.heap_operand(arg, context, kind)?;
             }
@@ -232,11 +221,22 @@ impl Ff<'_, '_> {
         let zero = self.constant64(0);
         let (width, signed) = op.result_type(layout);
         let element_result = matches!(op, Get | PopFront | PopBack);
-        let four_state = (element_result || op == Equal) && !layout.two_state && self.m.four_state;
+        // Elements that are handles may be inner containers, whose own
+        // elements can make an equality unknown (IEEE 1800-2023 11.4.5).
+        let four_state = (element_result && !layout.two_state
+            || op == Equal && (!layout.two_state || layout.handle == Some(HandleProperty::Object)))
+            && self.m.four_state;
         let (temp, name) = self.m.temp("container", width, signed, four_state);
         if matches!(
             op,
-            New | Literal | WithDefault | Convert | Concat | Slice | Bound { .. }
+            New | Literal
+                | Keyed { .. }
+                | WithDefault
+                | Convert
+                | Concat
+                | Slice
+                | Bound { .. }
+                | Merge
         ) || element_result && layout.handle == Some(HandleProperty::Object)
         {
             self.m.variables.get_mut(&temp).unwrap().value_kind = celox_design::ValueKind::ObjRef;
@@ -277,6 +277,43 @@ impl Ff<'_, '_> {
                 let hi = self.queue_slice_bound(&args[2], false)?;
                 self.heap_call(code(heap::SLICE), &[source, lo, hi])
             }
+            Keyed { default } => {
+                // An associative array pattern: its default, then each key
+                // with its value, a later key replacing an earlier one
+                // (IEEE 1800-2023 10.9.1). A key with X or Z bits names no
+                // entry, so its write is ignored (7.8.6).
+                let (pairs, mut handle) = if default {
+                    let (value, mask) = self.container_element(&args[0], layout)?;
+                    (
+                        &args[1..],
+                        self.heap_call(code(heap::WITH_DEFAULT), &[zero, value, mask]),
+                    )
+                } else {
+                    (&args[..], zero)
+                };
+                for pair in pairs.chunks(2) {
+                    let (index, index_mask) = self.container_index(&pair[0], layout, Set)?;
+                    let (value, mask) = self.container_element(&pair[1], layout)?;
+                    let set = self.heap_call(code(heap::SET), &[handle, index, value]);
+                    let set = self.heap_call(code(heap::SET_MASK), &[set, index, mask]);
+                    let valid = self.b.alloc_bit(1, false);
+                    self.b.emit(SIRInstruction::Binary(
+                        valid,
+                        index_mask,
+                        BinaryOp::Eq,
+                        zero,
+                    ));
+                    let next = self.b.alloc_bit(64, false);
+                    self.b.emit(SIRInstruction::Mux(next, valid, set, handle));
+                    handle = next;
+                }
+                handle
+            }
+            Merge => {
+                let first = self.handle(&args[0])?;
+                let second = self.handle(&args[1])?;
+                self.heap_call(code(heap::MERGE), &[first, second])
+            }
             Bound { depth } => {
                 let source = self.handle(&args[0])?;
                 let depth = self.constant64(u64::from(depth));
@@ -316,49 +353,10 @@ impl Ff<'_, '_> {
                         self.integer_of_width(&seed, 64, false)?
                     }
                     Sort | Rsort => self.constant64(u64::from(layout.signed)),
-                    _ if string_key => self.handle(&args[1])?,
-                    _ if let Some((width, signed)) = wide => {
-                        let (key, mask) = self.wide_key(&args[1], width, signed)?;
-                        index_mask = mask;
-                        key
-                    }
                     _ => {
-                        let (width, signed) = match layout.kind {
-                            ContainerKind::Associative {
-                                key_width, signed, ..
-                            } => (key_width as usize, signed),
-                            _ if matches!(op, Get | Set) => (64, true),
-                            _ => (32, true),
-                        };
-                        let value = self.hoist(&args[1])?;
-                        let reg = self.eval(&value, Some((width, signed)))?;
-                        let (raw, mask) = self.container_split(reg);
+                        let (index, mask) = self.container_index(&args[1], layout, op)?;
                         index_mask = mask;
-                        let narrow = self.b.alloc_bit(width, signed);
-                        self.b.emit(SIRInstruction::Slice(narrow, raw, 0, width));
-                        let index = self.b.alloc_bit(64, false);
-                        self.b
-                            .emit(SIRInstruction::Unary(index, UnaryOp::Ident, narrow));
-                        if signed && width < 64 {
-                            let shift = self.constant64((64 - width) as u64);
-                            let shifted = self.b.alloc_bit(64, false);
-                            self.b.emit(SIRInstruction::Binary(
-                                shifted,
-                                index,
-                                BinaryOp::Shl,
-                                shift,
-                            ));
-                            let extended = self.b.alloc_bit(64, false);
-                            self.b.emit(SIRInstruction::Binary(
-                                extended,
-                                shifted,
-                                BinaryOp::Sar,
-                                shift,
-                            ));
-                            extended
-                        } else {
-                            index
-                        }
+                        index
                     }
                 };
                 let (value, mask) = if matches!(op, Set | Insert | PushFront | PushBack) {
@@ -736,6 +734,111 @@ impl Ff<'_, '_> {
     /// The [`heap::WIDE_KEY`] key of index `expr` of a `width`-bit index
     /// type, and whether it has unknown bits, which make it invalid (IEEE
     /// 1800-2023 7.8.4).
+    /// A conditional operator of container operands, [`ContainerOp::Conditional`]:
+    /// a known condition selects the operand it evaluates; an ambiguous one
+    /// evaluates both and takes their merge (IEEE 1800-2023 11.4.11).
+    fn container_conditional(
+        &mut self,
+        layout: ContainerLayout,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        let [
+            Some(sv::ir::Expr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            }),
+        ] = args
+        else {
+            return Err(unsupported("container conditional operand"));
+        };
+        let condition = self.hoist(condition)?;
+        let (then_value, else_value) = self.mux_arms(
+            &condition,
+            &mut (),
+            |this, ()| this.hoist(then_expr),
+            |this, ()| this.hoist(else_expr),
+        )?;
+        let (temp, name) = self.m.temp("container", 32, false, false);
+        self.m.variables.get_mut(&temp).unwrap().value_kind = celox_design::ValueKind::ObjRef;
+        let (truth, unknown) = if self.m.four_state {
+            let mut arena = SLTNodeArena::new();
+            let mut consts = ConstCache::default();
+            let node = self.expr_slt(&condition, None, &mut arena)?;
+            let truth = slt_truth(&mut arena, node)?;
+            let unknown = slt_truth_unknown(&mut arena, &mut consts, node)?;
+            (
+                self.lower_slt(&arena, truth)?,
+                Some(self.lower_slt(&arena, unknown)?),
+            )
+        } else {
+            (self.eval_truth(&condition)?.0, None)
+        };
+        let then_handle = self.handle(&then_value)?;
+        let else_handle = self.handle(&else_value)?;
+        let picked = self.b.alloc_bit(64, false);
+        self.b
+            .emit(SIRInstruction::Mux(picked, truth, then_handle, else_handle));
+        self.store(temp, SIROffset::Static(0), 32, picked);
+        if let Some(unknown) = unknown {
+            let code = encode(heap::MERGE, self.container_parameter(layout));
+            self.when(unknown, |this| {
+                let merged = this.heap_call(code, &[then_handle, else_handle]);
+                this.store(temp, SIROffset::Static(0), 32, merged);
+                Ok(())
+            })?;
+        }
+        Ok(sv::ir::Expr::Ident(name))
+    }
+
+    /// The heap index of key or position `key` of container `layout` for
+    /// operation `op`, with the X/Z mask of its value.
+    fn container_index(
+        &mut self,
+        key: &sv::ir::Expr,
+        layout: ContainerLayout,
+        op: ContainerOp,
+    ) -> Result<(RegisterId, RegisterId), sv::AnalyzerError> {
+        use ContainerOp::*;
+        let zero = self.constant64(0);
+        if let ContainerKind::Associative { string: true, .. } = layout.kind {
+            return Ok((self.handle(key)?, zero));
+        }
+        if let Some((width, signed)) = wide_key(layout) {
+            return self.wide_key(key, width, signed);
+        }
+        let (width, signed) = match layout.kind {
+            ContainerKind::Associative {
+                key_width, signed, ..
+            } => (key_width as usize, signed),
+            _ if matches!(op, Get | Set) => (64, true),
+            _ => (32, true),
+        };
+        let value = self.hoist(key)?;
+        let reg = self.eval(&value, Some((width, signed)))?;
+        let (raw, mask) = self.container_split(reg);
+        let narrow = self.b.alloc_bit(width, signed);
+        self.b.emit(SIRInstruction::Slice(narrow, raw, 0, width));
+        let index = self.b.alloc_bit(64, false);
+        self.b
+            .emit(SIRInstruction::Unary(index, UnaryOp::Ident, narrow));
+        if signed && width < 64 {
+            let shift = self.constant64((64 - width) as u64);
+            let shifted = self.b.alloc_bit(64, false);
+            self.b
+                .emit(SIRInstruction::Binary(shifted, index, BinaryOp::Shl, shift));
+            let extended = self.b.alloc_bit(64, false);
+            self.b.emit(SIRInstruction::Binary(
+                extended,
+                shifted,
+                BinaryOp::Sar,
+                shift,
+            ));
+            return Ok((extended, mask));
+        }
+        Ok((index, mask))
+    }
+
     fn wide_key(
         &mut self,
         expr: &sv::ir::Expr,
@@ -941,6 +1044,56 @@ impl Ff<'_, '_> {
 
 /// The index type of an associative array of `layout` that is integral and
 /// wider than 64 bits: its width and signedness.
+/// How a container operation reads its operand `index` of `count`, for the
+/// hoisting of calls in its operands: every operation is classified here, so
+/// that a new one states how it reads each operand.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Operand {
+    /// The container the operation updates or reads in place, or an output.
+    Receiver,
+    /// A container value.
+    Container,
+    /// An element value.
+    Element,
+    /// A key or a position.
+    Key,
+    /// The size of a new dynamic array.
+    Size,
+    /// A bound of a slice, in its own context.
+    Bound,
+}
+
+fn operand(op: ContainerOp, index: usize, count: usize) -> Operand {
+    use ContainerOp::*;
+    match op {
+        Literal | WithDefault => Operand::Element,
+        // A keyed pattern's default comes first, then its keys and their
+        // values in turn.
+        Keyed { default } => {
+            if default && index == 0 || (index + usize::from(default)) % 2 == 1 {
+                Operand::Element
+            } else {
+                Operand::Key
+            }
+        }
+        Merge | Conditional | Convert | Concat | Bound { .. } | Equal | CaseEqual => {
+            Operand::Container
+        }
+        New if index == 0 => Operand::Size,
+        New => Operand::Container,
+        Slice if index == 0 => Operand::Container,
+        Slice => Operand::Bound,
+        First | Last | Next | Prev => Operand::Receiver,
+        _ if index == 0 => Operand::Receiver,
+        Set | Insert | PushFront | PushBack if index + 1 == count => Operand::Element,
+        Shuffle | Reverse | Sort | Rsort | ReduceSum | ReduceProduct | ReduceAnd
+        | LegacyReduceProduct | LegacyReduceAnd | ReduceOr | ReduceXor | Size | Get | Set
+        | Clear | Delete | Insert | PushFront | PushBack | PopFront | PopBack | Exists => {
+            Operand::Key
+        }
+    }
+}
+
 fn wide_key(layout: ContainerLayout) -> Option<(usize, bool)> {
     match layout.kind {
         ContainerKind::Associative {
