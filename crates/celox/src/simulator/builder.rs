@@ -2308,6 +2308,25 @@ mod host {
             self
         }
 
+        /// Show a slot observer that watches every update each blocking
+        /// update a process makes of the signals at these hierarchical paths,
+        /// right after it is made, as VPI value change callbacks see them
+        /// (IEEE 1800-2023 38.36.1). Other updates of them are shown when the
+        /// unit that makes them ends. Only processes that write such a signal
+        /// change, and only around those writes. Needs the native backend
+        /// and [`Self::observable_updates`]; elsewhere the points are dropped.
+        pub fn value_change_signals<S: Into<String>>(
+            mut self,
+            paths: impl IntoIterator<Item = S>,
+        ) -> Self {
+            self.options.optimize_options = self
+                .options
+                .optimize_options
+                .clone()
+                .with_value_change_objects(paths.into_iter().map(Into::into).collect());
+            self
+        }
+
         fn enforce_native_force_optimizer(&mut self) {
             if !self.options.native_force_support {
                 return;
@@ -2324,10 +2343,16 @@ mod host {
             let lanes = self.options.optimize_options.parallel_lanes();
             let partition = self.options.optimize_options.parallel_partition();
             let settle = self.options.optimize_options.settle_partition();
+            let watched = self
+                .options
+                .optimize_options
+                .value_change_objects()
+                .to_vec();
             self.options.optimize_options = crate::optimizer::OptimizeOptions::new(level)
                 .with_parallel_lanes(lanes)
                 .with_parallel_partition(partition)
-                .with_settle_partition(settle);
+                .with_settle_partition(settle)
+                .with_value_change_objects(watched);
             self.options.cranelift_options =
                 crate::backend::CraneliftOptions::for_speed_optimization(
                     level != crate::optimizer::OptLevel::O0,
@@ -3109,6 +3134,7 @@ mod host {
             }
 
             validate_signal_access(&laid_out, &self.options.signal_access)?;
+            validate_value_change_signals(&laid_out, &self.options.optimize_options)?;
             if self.options.dead_store_policy != DeadStorePolicy::Off {
                 let dse_start = phase_timing.then(crate::timing::now);
                 run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
@@ -3119,6 +3145,8 @@ mod host {
                     );
                 }
             }
+            #[cfg(feature = "host-runtime")]
+            crate::value_change::lower(&mut laid_out, self.native_file_calls);
 
             // Units generated from here on write state the settle may read.
             let first_generated_process = laid_out.sir.processes.len();
@@ -3829,9 +3857,11 @@ mod host {
                 }
 
                 validate_signal_access(&laid_out, &self.options.signal_access)?;
+                validate_value_change_signals(&laid_out, &self.options.optimize_options)?;
                 if self.options.dead_store_policy != DeadStorePolicy::Off {
                     run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
                 }
+                crate::value_change::lower(&mut laid_out, false);
 
                 #[cfg(any(
                     all(target_arch = "x86_64", not(feature = "arm64-codegen")),
@@ -4604,6 +4634,21 @@ endmodule"#;
                 }
             }
         }
+    }
+
+    fn validate_value_change_signals(
+        program: &LaidOutProgram,
+        options: &crate::optimizer::OptimizeOptions,
+    ) -> Result<(), SimulatorError> {
+        for path in options.value_change_objects() {
+            if program.hierarchical_signal_addr(path).is_none() {
+                return Err(crate::CodegenError::message(format!(
+                    "unknown or ambiguous signal `{path}`"
+                ))
+                .into());
+            }
+        }
+        Ok(())
     }
 
     fn validate_signal_access(

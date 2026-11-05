@@ -90,6 +90,18 @@ fn changes_of(
     write: Option<(&str, u64, &str, u64)>,
     run: impl Fn(&mut Simulation),
 ) -> Vec<(u64, Vec<u64>)> {
+    changes_at_points(source, watched, &[], write, run)
+}
+
+/// [`changes_of`] with value change points after the blocking updates of
+/// `points`.
+fn changes_at_points(
+    source: &str,
+    watched: &[&str],
+    points: &[&str],
+    write: Option<(&str, u64, &str, u64)>,
+    run: impl Fn(&mut Simulation),
+) -> Vec<(u64, Vec<u64>)> {
     let mut seen = Vec::new();
     for mode in [
         celox::SchedulerMode::Reference,
@@ -98,6 +110,7 @@ fn changes_of(
         let mut sim = Simulation::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top")
             .scheduler_mode(mode)
             .observable_updates(true)
+            .value_change_signals(points.iter().map(|name| format!("Top.{name}")))
             .build()
             .unwrap();
         let received = observe(&mut sim, watched, write);
@@ -322,6 +335,75 @@ endmodule
     assert_eq!(changes(source, &["x"], 20), vec![(5, vec![1])]);
 }
 
+#[test]
+fn a_pulse_inside_one_process_run_is_seen_at_its_points() {
+    let source = r#"`timescale 1ns/1ns
+module Top;
+    logic x = 0;
+    initial begin
+        #5 x = 1;
+        x = 0;
+    end
+endmodule
+"#;
+    let run = |sim: &mut Simulation| sim.run_until(10).unwrap();
+    // Without points the run shows only the value it ends with.
+    assert_eq!(changes_of(source, &["x"], None, run), vec![]);
+    assert_eq!(
+        changes_at_points(source, &["x"], &["x"], None, run),
+        vec![(5, vec![1]), (5, vec![0])]
+    );
+}
+
+#[test]
+fn a_point_shows_the_state_before_the_rest_of_the_run() {
+    let source = r#"`timescale 1ns/1ns
+module Top;
+    logic [7:0] x = 0;
+    logic [7:0] y = 0;
+    initial begin
+        #5 x = 1;
+        y = 2;
+    end
+endmodule
+"#;
+    let run = |sim: &mut Simulation| sim.run_until(10).unwrap();
+    assert_eq!(
+        changes_of(source, &["x", "y"], None, run),
+        vec![(5, vec![1, 2])]
+    );
+    assert_eq!(
+        changes_at_points(source, &["x", "y"], &["x", "y"], None, run),
+        vec![(5, vec![1, 0]), (5, vec![1, 2])]
+    );
+}
+
+#[test]
+fn the_rest_of_the_run_reads_what_a_callback_wrote() {
+    let source = r#"`timescale 1ns/1ns
+module Top;
+    logic x = 0;
+    logic en = 0;
+    logic seen = 0;
+    initial begin
+        // The load of `en` follows a store of it in the same run: only
+        // the point keeps it from reading the stored value.
+        #5 en = 0;
+        x = 1;
+        seen = en;
+    end
+endmodule
+"#;
+    let seen = changes_at_points(
+        source,
+        &["x", "seen"],
+        &["x"],
+        Some(("x", 1, "en", 1)),
+        |sim| sim.run_until(10).unwrap(),
+    );
+    assert_eq!(seen, vec![(5, vec![1, 0]), (5, vec![1, 1])]);
+}
+
 #[cfg(feature = "cranelift")]
 #[test]
 fn a_build_without_native_services_shows_every_update_from_the_reference_loop() {
@@ -492,4 +574,46 @@ endmodule
         sim.run_until(6).unwrap();
     });
     assert_eq!(seen, vec![(5, vec![1, 0]), (5, vec![1, 1])]);
+}
+
+#[test]
+fn a_build_with_points_continues_from_the_state_of_one_without() {
+    let source = r#"`timescale 1ns/1ns
+module Top;
+    logic clk = 0;
+    logic [7:0] count = 0;
+    logic x = 0;
+    always #5 clk = ~clk;
+    always_ff @(posedge clk) count <= count + 1;
+    initial forever begin
+        #10 x = 1;
+        x = 0;
+    end
+endmodule
+"#;
+    let build = |points: &[&str]| {
+        Simulation::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top")
+            .observable_updates(true)
+            .value_change_signals(points.iter().map(|name| format!("Top.{name}")))
+            .build()
+            .unwrap()
+    };
+    let mut plain = build(&[]);
+    plain.run_until(12).unwrap();
+    let state = plain.save_state().unwrap();
+    let mut pointed = build(&["x"]);
+    assert_eq!(pointed.signal("x"), plain.signal("x"));
+    assert_eq!(pointed.signal("count"), plain.signal("count"));
+    pointed.load_state(&state).unwrap();
+    let received = observe(&mut pointed, &["x"], None);
+    pointed.run_until(30).unwrap();
+    plain.run_until(30).unwrap();
+    assert_eq!(
+        pointed.get(pointed.signal("count")),
+        plain.get(plain.signal("count"))
+    );
+    assert_eq!(
+        received.try_iter().collect::<Vec<_>>(),
+        vec![(20, vec![1]), (20, vec![0]), (30, vec![1]), (30, vec![0])]
+    );
 }

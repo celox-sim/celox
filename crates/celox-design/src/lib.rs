@@ -1762,6 +1762,10 @@ pub struct SchedulerSchema<A> {
     /// each of them: after each kernel run, after the host clocks of a slot
     /// apply, and before and after each settle.
     pub update_points: bool,
+    /// The process kernels with value change points: they show the host
+    /// each blocking update of a watched object as they make it, through
+    /// the host context slot, so the host runs them with that context.
+    pub value_change_kernels: Vec<usize>,
 }
 
 impl<A> SchedulerSchema<A> {
@@ -1776,6 +1780,7 @@ impl<A> SchedulerSchema<A> {
             kernel_events: self.kernel_events,
             domain_waits: self.domain_waits,
             update_points: self.update_points,
+            value_change_kernels: self.value_change_kernels,
         }
     }
 }

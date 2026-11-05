@@ -233,6 +233,15 @@ mod host {
         /// The slot observer watches every update of a slot
         /// ([`crate::SlotObserver::observes_updates`]).
         pub(crate) observes_updates: bool,
+        /// Per process kernel, whether it has value change points; empty
+        /// when none has.
+        pub(crate) value_change_kernels: Vec<bool>,
+        /// The first process unit that runs with the host context: the first
+        /// generated one, or the first kernel when kernels have points.
+        pub(crate) scoped_from: usize,
+        /// What the observer did at value change points since the last
+        /// update point, encoded as `native_io::VALUE_CHANGE` results are.
+        pub(crate) value_changed: u64,
         /// The slot observer wrote at the end of the last time slot.
         pub(crate) slot_writes: bool,
         /// Runtime-event sequence up to which a timed simulation looked for
@@ -1376,6 +1385,18 @@ mod host {
             let runtime_event_handles =
                 sites_record_handles(&program.runtime_schema.runtime_event_sites);
             let native_file_io = native_io::Metadata::new(&backend, &program);
+            let mut scoped_from = program.runtime_schema.processes.len();
+            // Empty without points.
+            let mut value_change_kernels = Vec::new();
+            if let Some(scheduler) = &program.runtime_schema.scheduler
+                && !scheduler.value_change_kernels.is_empty()
+            {
+                value_change_kernels = vec![false; program.runtime_schema.processes.len()];
+                for &kernel in &scheduler.value_change_kernels {
+                    value_change_kernels[kernel] = true;
+                }
+                scoped_from = 0;
+            }
             let postponed_output = program
                 .runtime_schema
                 .host_request_sites
@@ -1452,6 +1473,9 @@ mod host {
                 host_watch: Default::default(),
                 slot_observer: None,
                 observes_updates: false,
+                scoped_from,
+                value_change_kernels,
+                value_changed: 0,
                 slot_writes: false,
                 finish_scan_seq: 0,
                 finish_sites: false,
@@ -2657,12 +2681,7 @@ mod host {
 
         pub(crate) fn run_process_checked(&mut self, index: usize) -> Result<(), RuntimeErrorCode> {
             let start = self.runtime_event_write_seq();
-            let scheduler = self
-                .program
-                .runtime_schema
-                .scheduler
-                .as_ref()
-                .and_then(|scheduler| scheduler.unit);
+            // The scheduler is a generated unit (`scheduler::attach`).
             let generated = index >= self.program.runtime_schema.processes.len();
             let native_observers = self.native_file_io.is_some()
                 && generated
@@ -2677,55 +2696,59 @@ mod host {
                     u64::from(self.comb_observer_initial_eval);
                 self.native_arena.header.observer_evaluating = 0;
             }
-            let result = if scheduler == Some(index) || generated {
-                if let Some(metadata) = &self.native_file_io {
-                    let prepared = self
-                        .slot_observer
-                        .as_ref()
-                        .and_then(|_| self.backend.prepare_process(index));
-                    let (state, state_size) = self.backend.memory_as_ptr();
-                    let mut observer = native_io::SlotService {
-                        backend: &mut self.backend,
-                        observer: self.slot_observer.as_deref_mut(),
-                        watch: &mut self.host_watch,
-                        dirty: &mut self.dirty,
-                    };
-                    let mut scope = native_io::Scope {
-                        arena: &mut self.native_arena,
-                        metadata,
-                        state,
-                        state_size,
-                        files: &mut self.file_io,
-                        pending: &self.pending_host_events,
-                        read_seq: &self.runtime_event_read_seq,
-                        error: None,
-                        calls: 0,
-                        return_budget: self.native_host_return_budget,
-                        round_budget: self.native_host_round_budget,
-                        nbas: &mut self.native_nba_queue,
-                        delayed: &mut self.native_delayed_nbas,
-                        pending_scan: 0,
-                        comb_before: Vec::new(),
-                        observer: None,
-                        updates: self.observes_updates,
-                    };
-                    let ((result, error), elapsed) = match prepared {
-                        Some(call) => {
-                            scope.observer = Some(&mut observer);
-                            scope.run_prepared(call)
-                        }
-                        None => (scope.run(observer.backend, index), None),
-                    };
-                    self.native_service_calls =
-                        self.native_service_calls.saturating_add(scope.calls);
-                    observer.backend.complete_process(elapsed);
-                    error.map_or(result, Err)
+            // A kernel with value change points shows its updates to the
+            // observer through the host context, outside compiled runs too.
+            let result =
+                if generated || (index >= self.scoped_from && self.value_change_kernels[index]) {
+                    if let Some(metadata) = &self.native_file_io {
+                        let prepared = self
+                            .slot_observer
+                            .as_ref()
+                            .and_then(|_| self.backend.prepare_process(index));
+                        let (state, state_size) = self.backend.memory_as_ptr();
+                        let mut observer = native_io::SlotService {
+                            backend: &mut self.backend,
+                            observer: self.slot_observer.as_deref_mut(),
+                            watch: &mut self.host_watch,
+                            dirty: &mut self.dirty,
+                            changed: &mut self.value_changed,
+                        };
+                        let mut scope = native_io::Scope {
+                            arena: &mut self.native_arena,
+                            metadata,
+                            state,
+                            state_size,
+                            files: &mut self.file_io,
+                            pending: &self.pending_host_events,
+                            read_seq: &self.runtime_event_read_seq,
+                            error: None,
+                            calls: 0,
+                            return_budget: self.native_host_return_budget,
+                            round_budget: self.native_host_round_budget,
+                            nbas: &mut self.native_nba_queue,
+                            delayed: &mut self.native_delayed_nbas,
+                            pending_scan: 0,
+                            comb_before: Vec::new(),
+                            observer: None,
+                            updates: self.observes_updates,
+                        };
+                        let ((result, error), elapsed) = match prepared {
+                            Some(call) => {
+                                scope.observer = Some(&mut observer);
+                                scope.run_prepared(call)
+                            }
+                            None => (scope.run(observer.backend, index), None),
+                        };
+                        self.native_service_calls =
+                            self.native_service_calls.saturating_add(scope.calls);
+                        observer.backend.complete_process(elapsed);
+                        error.map_or(result, Err)
+                    } else {
+                        self.backend.run_process(index)
+                    }
                 } else {
                     self.backend.run_process(index)
-                }
-            } else {
-                self.backend.run_process(index)
-            };
+                };
             if native_observers {
                 if self.native_arena.header.observer_evaluating != 0 {
                     // A finish or fault can leave the generated settle early.

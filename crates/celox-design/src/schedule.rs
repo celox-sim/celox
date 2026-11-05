@@ -222,7 +222,20 @@ impl<A: Copy + Eq + std::hash::Hash> ScheduleModel<A> {
                 .iter()
                 .any(|site| matches!(site.kind, RuntimeEventKind::Finish)),
             active_commits: schema.active_commits.clone(),
-            time_slots: schema.time_slots.clone(),
+            // Kernels with value change points read the time of their slot
+            // from the scheduler's `now` slot, outside compiled runs too.
+            time_slots: schema
+                .time_slots
+                .iter()
+                .copied()
+                .chain(
+                    schema
+                        .scheduler
+                        .as_ref()
+                        .filter(|scheduler| !scheduler.value_change_kernels.is_empty())
+                        .map(|scheduler| scheduler.slots.now),
+                )
+                .collect(),
             sample_shadows: schema.sample_shadows.clone(),
             scheduler: schema.scheduler.clone(),
         }
