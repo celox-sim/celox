@@ -409,3 +409,138 @@ endmodule
         }
     }
 }
+
+/// Kernels that wait for an edge, delay, and stage nonblocking updates, a
+/// host clock, and an asynchronous reset the host schedules: one-slot runs
+/// of the compiled scheduler with work of the reference loop between them.
+const RESIDENT: &str = r#"`timescale 1ns/1ns
+module Top(input logic hclk, input logic rst);
+    logic clk = 0;
+    logic [7:0] stim = 0;
+    logic [7:0] ticks = 0;
+    logic [7:0] late = 0;
+    logic [7:0] q = 0;
+    logic [7:0] h = 0;
+    always #5 clk = ~clk;
+    always #7 ticks = ticks + 1;
+    initial forever @(posedge hclk) stim = stim + 3;
+    initial forever begin
+        #3 late <= late + ticks;
+    end
+    always_ff @(posedge clk or posedge rst)
+        if (rst) q <= 0; else q <= q + stim + late;
+    always_ff @(posedge hclk) h <= h + q;
+endmodule
+"#;
+
+const RESIDENT_SIGNALS: [&str; 5] = ["q", "h", "stim", "ticks", "late"];
+
+/// Runs `RESIDENT` in `mode`, with the changes of `q` watched at the end of
+/// every slot if `observe`, through runs that end between slots or at their
+/// budget, a reset the reference loop applies, and a checkpoint restored
+/// mid-run. Returns what the observer saw, the final values and the compiled
+/// slots.
+fn resident_run(mode: celox::SchedulerMode, observe: bool) -> (Vec<(u64, u64)>, Vec<u64>, u64) {
+    let mut sim = Simulation::from_sv_sources(vec![(RESIDENT, Path::new("top.sv"))], "Top")
+        .scheduler_mode(mode)
+        .build()
+        .unwrap();
+    let values = |sim: &mut Simulation| -> Vec<u64> {
+        RESIDENT_SIGNALS
+            .iter()
+            .map(|name| u64::try_from(sim.get(sim.signal(name))).unwrap())
+            .collect()
+    };
+    sim.add_clock("hclk", 4, 1);
+    let (seen, received) = mpsc::channel();
+    if observe {
+        let q = sim.signal("q");
+        let observer = Settled {
+            watched: q,
+            flag: sim.signal("stim"),
+            at: u64::MAX,
+            last: 0,
+            seen,
+        };
+        sim.observe_slots(Box::new(observer), &[q, sim.signal("h")]);
+    }
+    sim.schedule("rst", 63, 1).unwrap();
+    sim.schedule("rst", 64, 0).unwrap();
+    for end in [11, 12, 40, 62, 63, 90] {
+        sim.run_until(end).unwrap();
+    }
+    let checkpoint = sim.checkpoint().unwrap();
+    sim.run_until(150).unwrap();
+    let ahead = values(&mut sim);
+    sim.restore(&checkpoint).unwrap();
+    while sim.time() < 150 {
+        sim.step().unwrap();
+    }
+    assert_eq!(
+        values(&mut sim),
+        ahead,
+        "{mode:?}: stepping after the restore"
+    );
+    // Runs that end at their budget, between slots of one time or not.
+    while sim.time() < 200 {
+        sim.run_slots(3, || false).unwrap();
+    }
+    sim.run_until(300).unwrap();
+    let compiled = sim.scheduler_stats().compiled_slots;
+    (received.try_iter().collect(), values(&mut sim), compiled)
+}
+
+#[test]
+fn consecutive_compiled_runs_match_the_reference_loop() {
+    for observe in [true, false] {
+        let (seen, values, compiled) = resident_run(celox::SchedulerMode::Compiled, observe);
+        let (reference_seen, reference_values, _) =
+            resident_run(celox::SchedulerMode::Reference, observe);
+        assert!(compiled > 0, "observe {observe}");
+        assert_eq!(values, reference_values, "observe {observe}");
+        assert_eq!(seen, reference_seen, "observe {observe}");
+    }
+}
+
+/// Runs `source` to 3000 in `mode` with a host clock on `hclk`, draining
+/// its runtime events every 400 time units. Returns the events, `q` and the
+/// compiled slots.
+fn displayed_run(source: &str, mode: celox::SchedulerMode) -> (Vec<celox::RuntimeEvent>, u64, u64) {
+    let mut sim = Simulation::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top")
+        .scheduler_mode(mode)
+        .build()
+        .unwrap();
+    sim.add_clock("hclk", 4, 1);
+    let mut events = Vec::new();
+    for end in (400..=3000).step_by(400).chain([3000]) {
+        sim.run_until(end).unwrap();
+        events.extend(sim.drain_runtime_events());
+    }
+    let q = u64::try_from(sim.get(sim.signal("q"))).unwrap();
+    let compiled = sim.scheduler_stats().compiled_slots;
+    (events, q, compiled)
+}
+
+#[test]
+fn compiled_runs_that_return_to_drain_events_continue_resident() {
+    // A run returns whenever its events fill an eighth of the ring buffer,
+    // 128 of them, several times in each run to the next drain; the loop
+    // goes on from the kernels and clock it left in the slots.
+    let source = r#"`timescale 1ns/1ns
+module Top(input logic hclk);
+    logic [15:0] ticks = 0;
+    logic [15:0] q = 0;
+    always #2 begin
+        ticks = ticks + 1;
+        $display("tick %0d", ticks);
+    end
+    always_ff @(posedge hclk) q <= q + ticks;
+endmodule
+"#;
+    let (events, q, compiled) = displayed_run(source, celox::SchedulerMode::Compiled);
+    let (reference_events, reference_q, _) = displayed_run(source, celox::SchedulerMode::Reference);
+    assert!(compiled > 0);
+    assert_eq!(events.len(), 1500);
+    assert_eq!(events, reference_events);
+    assert_eq!(q, reference_q);
+}
