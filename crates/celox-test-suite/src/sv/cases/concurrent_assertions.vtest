@@ -274,3 +274,50 @@ endmodule"#)
  (assert_eq passed 2) (assert_eq failed 1) (assert_eq noted 5)
  (assert_eq logged 2) (assert_eq seen 3) (assert_eq traced 1212)
  (assert_eq sampled 1))
+
+; IEEE 1800-2023 16.8, 16.12: instances of named sequences and properties
+; take the clock and disable condition of their declaration, or the
+; assertion's clock; a declaration may follow its instances.
+(case named_sequences_and_properties
+ (source "named.sv" #"module Top(output int passed, failed, chain_failed);
+ bit clk, rst;
+ int cnt;
+ always @(posedge clk) cnt <= cnt + 1;
+ even_check: assert property (even) passed++; else failed++;
+ property even;
+  @(posedge clk) disable iff (rst) cnt[0] == 0;
+ endproperty : even
+ sequence odd; cnt[0]; endsequence
+ property big; cnt > 1; endproperty
+ property chain; odd |-> big; endproperty
+ assert property (@(posedge clk) chain) else chain_failed++;
+ initial begin
+  #1 clk = 1; #1 clk = 0; #1 clk = 1; #1 clk = 0; #1 clk = 1; #1 clk = 0;
+  rst = 1; #1 clk = 1;
+ end
+endmodule"#)
+ (top Top) (run_until 8)
+ (assert_eq passed 2) (assert_eq failed 1) (assert_eq chain_failed 1))
+
+; IEEE 1800-2023 16.16.1: the semantic leading clock of @(c) m is that of
+; m when m has an explicit one, so the sequence's negedge clocks the check;
+; that of m |-> p is that of m, so a clocked antecedent clocks it.
+(case named_sequence_leading_clock
+ (source "leading.sv" #"module Top(output int low_passed, low_failed, tick_failed);
+ bit clk;
+ int cnt;
+ always @(posedge clk) cnt <= cnt + 1;
+ sequence low;
+  @(negedge clk) cnt < 2;
+ endsequence
+ assert property (@(posedge clk) low) low_passed++; else low_failed++;
+ sequence tick; @(posedge clk) cnt == 2; endsequence
+ sequence zero; cnt == 0; endsequence
+ assert property (tick |-> zero) else tick_failed++;
+ initial begin
+  #1 clk = 1; #1 clk = 0; #1 clk = 1; #1 clk = 0; #1 clk = 1; #1 clk = 0;
+  #1 clk = 1;
+ end
+endmodule"#)
+ (top Top) (run_until 8)
+ (assert_eq low_passed 1) (assert_eq low_failed 2) (assert_eq tick_failed 1))

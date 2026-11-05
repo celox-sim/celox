@@ -696,6 +696,7 @@ pub enum BodyItemKind {
     Modport(ModportDeclarationId),
     Time(TimeDeclarationId),
     Unit(UnitId),
+    Assertion(AssertionDeclarationId),
     Region(Vec<BodyItemId>),
     Block {
         leading_label: Option<Name>,
@@ -1138,11 +1139,10 @@ pub enum AssertionHeader {
         tokens: TokenRange,
     },
     Concurrent {
-        clock: TimingControlId,
-        disable: Option<ExprId>,
-        /// A single-cycle antecedent for overlapped implication (`|->`).
-        antecedent: Option<ExprId>,
-        condition: ExprId,
+        /// The asserted property. In a module item, instances of named
+        /// sequences and properties declared in the same scope are
+        /// substituted (IEEE 1800-2023 16.8, 16.12).
+        property: PropertySpec,
         module_item: bool,
         tokens: TokenRange,
     },
@@ -1159,6 +1159,43 @@ impl AssertionHeader {
             | Self::Unconverted(tokens) => *tokens,
         }
     }
+}
+
+/// A property specification (IEEE 1800-2023 16.12, Syntax 16-16) in the
+/// supported subset: an optional leading clocking event and `disable iff`
+/// condition, then a Boolean condition, optionally behind one single-cycle
+/// overlapped implication (`|->`). An instance of a named sequence or
+/// property is a `condition` or `antecedent` naming the declaration; with
+/// formal arguments it will be a call.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PropertySpec {
+    pub clock: Option<TimingControlId>,
+    pub disable: Option<ExprId>,
+    /// A single-cycle antecedent for overlapped implication (`|->`).
+    pub antecedent: Option<ExprId>,
+    pub condition: ExprId,
+}
+
+/// Named sequence or property declaration handle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct AssertionDeclarationId(pub(crate) usize);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AssertionDeclarationKind {
+    Sequence,
+    Property,
+}
+
+/// A named sequence (IEEE 1800-2023 16.8) or property (16.12) without formal
+/// arguments or assertion variables. A sequence body has no `disable iff` or
+/// implication.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssertionDeclaration {
+    pub kind: AssertionDeclarationKind,
+    pub name: Name,
+    pub body: PropertySpec,
+    pub end_label: Option<Name>,
+    pub tokens: TokenRange,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

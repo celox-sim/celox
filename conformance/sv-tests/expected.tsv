@@ -339,8 +339,8 @@ chapter-16/16.14--assume-property.sv	2state	pass
 chapter-16/16.14--assume-property.sv	4state	pass
 chapter-16/16.15--property-disable-iff-fail.sv	2state	pass
 chapter-16/16.15--property-disable-iff-fail.sv	4state	pass
-chapter-16/16.15--property-disable-iff.sv	2state	fail
-chapter-16/16.15--property-disable-iff.sv	4state	fail
+chapter-16/16.15--property-disable-iff.sv	2state	pass
+chapter-16/16.15--property-disable-iff.sv	4state	pass
 chapter-16/16.15--property-iff-uvm.sv	2state	fail
 chapter-16/16.15--property-iff-uvm.sv	4state	fail
 chapter-16/16.17--expect-uvm.sv	2state	fail

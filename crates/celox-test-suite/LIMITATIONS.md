@@ -1505,6 +1505,18 @@ package subroutines and class methods from pass and fail actions (16.14.1).
 Verilator 5.052 reads `data` in the pass action before its NBA (0 instead of 1),
 and Icarus 13.0 rejects the action blocks. Pinned xezim 0.11.4 passes the case.
 
+`concurrent_assertions::named_sequences_and_properties` instantiates named
+properties and sequences, one declared after its assertion, with their own
+clock and `disable iff` or the assertion's clock (16.8, 16.12). Pinned xezim
+0.11.4 passes it; Verilator 5.052 aborts on a named sequence as an
+antecedent and faults on a named property as a consequent, and Icarus 13.0
+does not support the assertions. `named_sequence_leading_clock` checks the
+semantic leading clock of 16.16.1: the explicit clock of an instantiated
+sequence overrides the assertion's, and a clocked antecedent clocks the
+implication. xezim 0.11.4 keeps the assertion's posedge (low_passed=2 instead
+of 1) and does not evaluate the implication; Verilator 5.052 reports a
+multiclocked property and Icarus 13.0 rejects the declarations.
+
 ### Sampled history in assertions
 
 The five `concurrent_assertions::sampled_history_*` cases check IEEE 1800-2023
