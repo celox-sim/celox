@@ -1071,7 +1071,18 @@ impl<B: SimBackend> Simulator<B> {
                 resume: saved.resume,
                 stack: saved.stack.clone(),
             };
-            if self.saved_frame_handles(kernel(index), &calls).is_none() {
+            // As on capture, no class handle is saved in a frame.
+            let valid = self
+                .saved_frame_handles(kernel(index), &calls)
+                .is_some_and(|handles| {
+                    handles.iter().all(|&(offset, kind)| {
+                        kind != celox_design::ValueKind::ObjRef
+                            || calls.stack[offset..offset + celox_heap::HANDLE_BYTES]
+                                .iter()
+                                .all(|&byte| byte == 0)
+                    })
+                });
+            if !valid {
                 unknown.push(format!("call stack of {}", saved.process));
                 continue;
             }

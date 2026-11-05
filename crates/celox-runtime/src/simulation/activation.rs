@@ -80,12 +80,21 @@ impl<B: SimBackend> SimulationState<B> {
 
     /// Keep the frames of the calls `process` suspended inside until it
     /// runs again, and clear its [`celox_design::ProcessSlots::call_top`].
+    /// A process that finished the simulation inside a call never resumes,
+    /// so its frames are dropped.
     pub(super) fn save_call_stack(&mut self, backend: &mut B, process: usize) {
         let Some(slot) = self.model.processes[process].call_top else {
             return;
         };
         let top: u32 = backend.get_as(slot);
         if top == 0 {
+            return;
+        }
+        let status: u8 = backend.get_as(self.model.processes[process].status);
+        if celox_design::ProcessStatus::from_code(status)
+            == Some(celox_design::ProcessStatus::Finish)
+        {
+            backend.set(slot, 0u32);
             return;
         }
         let mut stack = Vec::with_capacity(top as usize);

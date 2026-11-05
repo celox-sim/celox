@@ -1692,3 +1692,151 @@ endmodule
         assert_eq!(stops(build(true).build_native().expect("builds")), expected);
     }
 }
+
+#[test]
+fn final_procedures_keep_their_frames_across_a_stop() {
+    // A final procedure stops inside its function; while it is stopped,
+    // the combinational process calls a unit at the bottom of the stack.
+    // The function continues with its own frame.
+    let source = r#"`timescale 1ns/1ns
+module Top(input int x, output int c, output int got);
+    function automatic int scramble(int v);
+        int t = v * 7;
+        int u = t + 3;
+        int w = u ^ 5;
+        return w + t + u;
+    endfunction
+    always_comb c = scramble(x);
+    function automatic void fin(input int n, output int r);
+        int keep = n * 11;
+        int more = keep + 2;
+        $stop;
+        r = keep * 100 + more;
+    endfunction
+    int seed = 4;
+    final fin(seed, got);
+endmodule
+"#;
+    fn stopped<B: SimBackend>(mut sim: Simulation<B>) -> (bool, BigUint, BigUint) {
+        sim.run_until(0).expect("the design runs");
+        sim.finish().expect("finalization starts");
+        let stopped = sim.is_stopped();
+        let x = sim.signal("x");
+        sim.modify(|io| io.set(x, 9u32)).expect("the write settles");
+        let c = sim.get(sim.signal("c"));
+        sim.step().expect("finalization continues");
+        (stopped, c, sim.get(sim.signal("got")))
+    }
+    assert_eq!(function_units(source, true), 2, "function units");
+    for four_state in [false, true] {
+        let build = |forced: bool| {
+            let builder = Simulation::from_sv_sources(vec![(source, Path::new("calls.sv"))], "Top")
+                .four_state(four_state);
+            if forced {
+                builder.force_out_of_line_calls()
+            } else {
+                builder
+            }
+        };
+        let expected = stopped(build(false).build_interpreter().expect("builds"));
+        assert!(expected.0, "the final procedure stops: {expected:?}");
+        assert_eq!(
+            stopped(build(true).build_interpreter().expect("builds")),
+            expected
+        );
+        assert_eq!(
+            stopped(build(true).build_cranelift().expect("builds")),
+            expected
+        );
+        assert_eq!(stopped(build(true).build_wasm().expect("builds")), expected);
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        assert_eq!(
+            stopped(build(true).build_native().expect("builds")),
+            expected
+        );
+    }
+}
+
+#[test]
+fn finishing_inside_a_task_leaves_no_frames() {
+    // The process never resumes after `$finish`, so the frame holding a
+    // class object is not kept, and the finished simulation saves. The
+    // output formal is never copied back: the task does not return.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a);
+    class Box;
+        int v = 3;
+    endclass
+    task automatic end_with(output int r);
+        Box box = new;
+        r = box.v;
+        #1 $finish;
+    endtask
+    initial end_with(a);
+endmodule
+"#;
+    let mut sim = Simulation::from_sv_sources(vec![(source, Path::new("calls.sv"))], "Top")
+        .force_out_of_line_calls()
+        .build_interpreter()
+        .expect("builds");
+    sim.run_until(5).expect("the design runs");
+    assert_eq!(sim.get(sim.signal("a")), 0u8.into());
+    assert!(sim.save_state().is_ok(), "{:?}", sim.save_state().err());
+}
+
+#[test]
+fn loads_refuse_class_handles_in_saved_frames() {
+    // A null handle in a saved frame saves; a file that puts any other
+    // value in that slot does not load, as a state object holding a class
+    // handle does not.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a);
+    class Box;
+        int v;
+    endclass
+    task automatic hold(output int r);
+        Box box;
+        #5 r = box == null ? 7 : box.v;
+    endtask
+    initial hold(a);
+endmodule
+"#;
+    let build = || {
+        Simulation::from_sv_sources(vec![(source, Path::new("calls.sv"))], "Top")
+            .force_out_of_line_calls()
+            .build_interpreter()
+            .expect("builds")
+    };
+    let mut origin = build();
+    origin.run_until(1).expect("the design runs");
+    let file = origin.save_state().expect("a null handle saves");
+    let stack = &file
+        .schedule
+        .as_ref()
+        .expect("a schedule")
+        .processes
+        .call_stacks[0]
+        .stack;
+    // Set each zero word of the stack in turn. The load refuses the
+    // handle's; any other word the task overwrites or does not read.
+    let mut refused = 0;
+    for word in (0..stack.len() / 4).filter(|&w| stack[w * 4..w * 4 + 4] == [0; 4]) {
+        let mut changed = file.clone();
+        changed
+            .schedule
+            .as_mut()
+            .expect("a schedule")
+            .processes
+            .call_stacks[0]
+            .stack[word * 4] = 1;
+        let mut target = build();
+        match target.load_state(&changed) {
+            Err(_) => refused += 1,
+            Ok(()) => {
+                target.run_until(10).expect("the loaded design runs");
+                assert_eq!(target.get(target.signal("a")), 7u8.into(), "word {word}");
+            }
+        }
+    }
+    assert_eq!(refused, 1, "only the handle's word is refused");
+}
