@@ -957,6 +957,77 @@ endmodule
 }
 
 #[test]
+fn event_triggers_in_function_units() {
+    // Units trigger events, blocking and nonblocking, and read whether one
+    // was triggered: each is a host request that wakes the waiting
+    // processes and lets the caller continue at once. A class's event is
+    // triggered through its object, as UVM's objections trigger theirs.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c, output int d, output int e);
+    class Box;
+        event dropped;
+        function void drop(int n);
+            if (n > 0) -> dropped;
+        endfunction
+    endclass
+    event done, late;
+    function automatic void fire(int n);
+        if (n > 0) -> done;
+        ->> late;
+    endfunction
+    function automatic bit seen();
+        return done.triggered;
+    endfunction
+    function automatic int check(int n);
+        fire(n);
+        return seen() + 10;
+    endfunction
+    Box box = new;
+    int one = 1;
+    initial begin
+        #1 a = check(one);
+        #1 box.drop(one);
+    end
+    initial begin
+        @(done) b = $time;
+        @(late) c = $time;
+    end
+    initial begin
+        wait (done.triggered) d = 5;
+    end
+    initial begin
+        @(box.dropped) e = $time;
+    end
+endmodule
+"#;
+    same_as_inlined(source, 5, 3, &["a", "b", "c", "d", "e"]);
+    assert_eq!(
+        simulate(
+            source,
+            false,
+            true,
+            "interpreter",
+            3,
+            &["a", "b", "c", "d", "e"]
+        ),
+        Ok(vec![value(11), value(1), value(1), value(5), value(2)])
+    );
+    // A level wait's predicate that reads `triggered` through a call
+    // observes the event, which a unit cannot tell the host: the call stays
+    // inlined, where it is rejected as before.
+    let predicate = source.replace("wait (done.triggered)", "wait (seen())");
+    for forced in [false, true] {
+        let built = simulate(&predicate, false, forced, "interpreter", 3, &["d"]);
+        assert!(
+            built
+                .as_ref()
+                .is_err_and(|error| error.contains("read by a function called in a wait condition")),
+            "forced {forced}: {built:?}"
+        );
+    }
+}
+
+#[test]
 fn heap_operations_go_out_of_line() {
     // Queue concatenation, array locators, streaming of dynamically sized
     // data, new events, the random and constraint modes and the constraint
