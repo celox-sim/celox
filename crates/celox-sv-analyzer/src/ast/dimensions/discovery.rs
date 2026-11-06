@@ -1553,14 +1553,17 @@ pub(in crate::ast) fn query_operand_dimensions_id(
 
 /// The inputs of a query that its scope's declarations are discovered from:
 /// `input` without the locals and their signedness that the query's own
-/// scope adds to the shared tables, and without the operand values of the
-/// statement it is in.
+/// scope adds to the shared tables, without the operand values of the
+/// statement it is in, and without the method it is in.
 fn scope_inputs(input: &PackedDimensions) -> PackedDimensions {
     let mut own = PackedDimensions {
         variables: input.variables.shared(),
         expression_signedness: input.expression_signedness.shared(),
         effect_values: Default::default(),
         last_indices: Default::default(),
+        // The method a query is in only tells its own calls from its result
+        // variable, which the scope does not declare (13.4.1).
+        method_name: None,
         ..input.clone()
     };
     // In a class specialization, the tables of the scope around the class,
@@ -1581,6 +1584,7 @@ fn scope_inputs(input: &PackedDimensions) -> PackedDimensions {
 /// of `input` that [`scope_inputs`] leaves out. The query's locals follow
 /// from [`overlay`], which gives the query's tables precedence.
 fn with_query_context(context: &mut PackedDimensions, input: &PackedDimensions) {
+    context.method_name = input.method_name.clone();
     context.effect_values = input.effect_values.clone();
     context.last_indices = input.last_indices.clone();
     context.expression_signedness.extend(
