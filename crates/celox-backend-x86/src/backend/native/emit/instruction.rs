@@ -441,6 +441,20 @@ pub(super) fn emit_inst(
                 OpSize::S64 => asm.or(qword_ptr(mem), *imm as i32)?,
             }
         }
+        MInst::StoreImm {
+            base,
+            offset,
+            size,
+            imm,
+        } => {
+            let mem = mem_operand(&context, *base, *offset);
+            match size {
+                OpSize::S8 => asm.mov(byte_ptr(mem), *imm as i32)?,
+                OpSize::S16 => asm.mov(word_ptr(mem), *imm as i32)?,
+                OpSize::S32 => asm.mov(dword_ptr(mem), *imm as i32)?,
+                OpSize::S64 => asm.mov(qword_ptr(mem), *imm as i32)?,
+            }
+        }
 
         MInst::MemCopy {
             src_offset,

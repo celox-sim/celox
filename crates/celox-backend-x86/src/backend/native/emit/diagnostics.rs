@@ -57,7 +57,7 @@ pub(super) fn log_mir_stats(label: &str, stage: &str, func: &crate::native::mir:
                     BaseReg::SimState => load_sim += 1,
                     BaseReg::StackFrame => load_stack += 1,
                 },
-                MInst::Store { base, .. } => match base {
+                MInst::Store { base, .. } | MInst::StoreImm { base, .. } => match base {
                     BaseReg::SimState => store_sim += 1,
                     BaseReg::StackFrame => store_stack += 1,
                 },

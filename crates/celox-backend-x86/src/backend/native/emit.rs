@@ -355,6 +355,12 @@ fn select_spill_register_cache(
                     offset,
                     size,
                     ..
+                }
+                | MInst::StoreImm {
+                    base: BaseReg::StackFrame,
+                    offset,
+                    size,
+                    ..
                 } => incompatible_ranges.push((*offset, size.bytes())),
                 MInst::BranchPred {
                     predicate:
@@ -1090,6 +1096,7 @@ fn verify_function_unit(func: &MFunction, tick_loop: bool) -> Result<(), EmitErr
                     | MInst::Store { .. }
                     | MInst::AndStoreImm { .. }
                     | MInst::OrStoreImm { .. }
+                    | MInst::StoreImm { .. }
                     | MInst::LoadIndexed { .. }
                     | MInst::StoreIndexed { .. }
                     | MInst::OrStoreIndexed { .. }
