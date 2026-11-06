@@ -324,8 +324,8 @@ unpacked・非整数型の遅延ネット、動的な代入先選択による駆
   `wait` 条件の中の `triggered`、`wait` 条件が呼ぶ関数が読む `triggered`、`wait_order`。
 - プロセス内のタイミング制御：イベント式と `iff` 条件内の impure な関数呼び出し、
   static task 引数を読む `wait` 条件、イベント式、`iff` 条件。クラスのプロパティを（直接、ハンドルや関数を通じて、
-  またはプロパティが持つコンテナとして）読む `wait` 条件とイベント式。プロパティへの書き込みで待機中のプロセスが
-  起きないためです。static プロパティはモジュールの変数なので待機できます。
+  またはプロパティが持つコンテナとして）読むイベント式と、プロパティのランダムモード（`rand_mode()`、
+  `constraint_mode()`）を読む `wait` 条件。static プロパティはモジュールの変数なので、どちらでも待機できます。
 - `always_latch` 内のノンブロッキング代入（[#431](https://github.com/celox-sim/celox/issues/431)）。対応するラッチではブロッキング代入を使用してください。
 - `always_comb` の暗黙のラッチ推論はデフォルトで拒否します。`celox.toml` の `[diagnostics]` で `inferred_latch = "warn"` または `"allow"` を指定すると許可できます。通常の `always @*` と明示的な `always_latch` にはこの設定は不要です。
 - ポートとインスタンス：non-ANSI 形式のポート式（`module m({a, b}, c[3:0], .p(d))` など、[#1953](https://github.com/celox-sim/celox/issues/1953)）、`ref` ポート（[#427](https://github.com/celox-sim/celox/issues/427)）、
@@ -572,6 +572,11 @@ Rust の `.allow_inferred_latches(true)` と JavaScript の `allowInferredLatche
   `a = 1; @(a ^ b);` の `a` への書き込みはこの待ちのイベントにならず、
   その後に `a` か `b` が変化したときに再開します。
   Icarus 13.0 は先の書き込みで起床し、Verilator 5.052 は Celox と同じ結果になります。
+- `wait` 条件はクラスのプロパティを、直接、ハンドル・`this`・呼び出す関数を通じて、またはプロパティが持つ
+  コンテナとして（`wait (obj.q.size() > 0)`）読めます。条件は、読むプロパティへのいずれかのハンドル・プロセス・
+  モジュールからの書き込みの後と、`randomize()` の呼び出しの後に再び判定します（9.4.3）。別のオブジェクトの
+  同じプロパティや、プロパティが持つのと同じ値の書き込みでも再判定するため、このような条件は読む値だけで
+  決まる必要があります。task や副作用を持つ関数を呼ぶ条件、時刻・乱数・mailbox・プロセスを読む条件は拒否します。
 - 複数ビットの式の `posedge` / `negedge` は最下位ビットで判定します（Table 9-2）。
   `@(posedge v)` は `v[3]` を無視し、`@(posedge v[3])` は `v[3]` に従います。
   X / Z を経由する遷移も同表に従い、`0` から `x` は `posedge` です。
