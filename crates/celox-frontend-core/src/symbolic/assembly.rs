@@ -1514,9 +1514,9 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         None
     };
 
-    // Stores to event signals update shared trigger bytes; their writers stay
-    // in one lane of a partitioned schedule.
-    let lane0_objects = parallel.enabled().then(|| {
+    // The event signals and their aliases: a partitioned settle keeps their
+    // paths apart from the rest.
+    let clock_nets: HashSet<AbsoluteAddr> = {
         let events = topological_clocks.iter().copied().collect::<HashSet<_>>();
         events
             .iter()
@@ -1527,8 +1527,11 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                     .filter(|(_, canonical)| events.contains(canonical))
                     .map(|(alias, _)| *alias),
             )
-            .collect::<HashSet<_>>()
-    });
+            .collect()
+    };
+    // Stores to event signals update shared trigger bytes; their writers stay
+    // in one lane of a partitioned schedule.
+    let lane0_objects = parallel.enabled().then(|| clock_nets.clone());
     let mut persistent_comb_state = HashSet::default();
     let mut comb_startups = BTreeMap::new();
     for path in &comb_blocks {
@@ -1637,6 +1640,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                     },
                     target_cost,
                     external_readers,
+                    clock_nets: clock_nets.clone(),
                 }
             },
         );

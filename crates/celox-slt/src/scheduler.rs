@@ -2460,6 +2460,10 @@ pub struct SettlePartitioning<Addr> {
     /// state set those flags as they set the flags of the partitions reading
     /// it.
     pub external_readers: HashMap<Addr, Vec<usize>>,
+    /// The event signals and their aliases. A path reading or writing one
+    /// changes on every edge, so such paths get partitions of their own: the
+    /// logic sharing a partition with them would run on every edge too.
+    pub clock_nets: HashSet<Addr>,
 }
 
 /// One partition of a partitioned settle.
@@ -3701,16 +3705,34 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
             skipped_work.insert(index);
         }
     }
+    // Whether a piece of work reads or writes a clock net.
+    let clocked = |work: &ScheduledWork| {
+        work_paths(work).iter().any(|&path| {
+            let path = &input[path];
+            path.target
+                .var()
+                .is_some_and(|target| partitioning.clock_nets.contains(&target.id))
+                || path
+                    .sources
+                    .iter()
+                    .chain(&path.address_sources)
+                    .any(|atom| partitioning.clock_nets.contains(&atom.id))
+        })
+    };
     let mut first_work = Vec::new();
     let mut cost = 0;
+    let mut previous_clocked = false;
     for (index, work) in prepared.scheduled_work.iter().enumerate() {
         if skipped_work.contains(&index) {
             continue;
         }
-        if first_work.is_empty() || cost >= partitioning.target_cost {
+        let clocked = clocked(work);
+        if first_work.is_empty() || cost >= partitioning.target_cost || clocked != previous_clocked
+        {
             first_work.push(index);
             cost = 0;
         }
+        previous_clocked = clocked;
         cost += work_paths(work)
             .iter()
             .map(|&path| path_cost(arena, &input[path]))
@@ -5634,6 +5656,7 @@ mod tests {
                 flags: 99,
                 target_cost: 1,
                 external_readers: crate::HashMap::default(),
+                clock_nets: crate::HashSet::default(),
             }),
         )
         .unwrap()
@@ -5721,6 +5744,7 @@ mod tests {
                     flags: 99,
                     target_cost: 1,
                     external_readers: crate::HashMap::default(),
+                    clock_nets: crate::HashSet::default(),
                 }),
             )
             .unwrap();
@@ -5783,6 +5807,7 @@ mod tests {
                 flags: 99,
                 target_cost: 1,
                 external_readers: [(11, vec![1])].into_iter().collect(),
+                clock_nets: crate::HashSet::default(),
             }),
         )
         .unwrap();
@@ -6718,6 +6743,7 @@ mod tests {
                 flags: 99,
                 target_cost: 1,
                 external_readers: crate::HashMap::default(),
+                clock_nets: crate::HashSet::default(),
             }),
         ] {
             let result = super::sort_with_unpacked_element_widths(
