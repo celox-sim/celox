@@ -6476,18 +6476,31 @@ fn analyzes_real_parameter_arithmetic() {
 }
 
 #[test]
-fn analyzes_sized_cast_of_negated_real_local() {
+fn sized_casts_of_real_locals_need_an_integral_conversion() {
+    // IEEE 1800-2023 6.24.1: the operand of a size cast is integral, so a
+    // real is converted first, as `int'(r)` does.
+    let source = |cast: &str| {
+        format!(
+            "module Top(input logic signed [31:0] a, output logic signed [31:0] result);
+            always_comb begin
+                real value;
+                value = a;
+                result = $signed({cast});
+            end
+        endmodule"
+        )
+    };
+    let error = analyze_source(&source("32'(-value)"), Path::new("real_local_cast.sv"))
+        .expect_err("a size cast of a real is no cast of an integral value");
+    assert!(
+        error.to_string().contains("not an integral value"),
+        "{error}"
+    );
     analyze_source(
-        r#"module Top(input logic signed [31:0] a, output logic signed [31:0] result);
-        always_comb begin
-            real value;
-            value = a;
-            result = $signed(32'(-value));
-        end
-    endmodule"#,
+        &source("32'(int'(-value))"),
         Path::new("real_local_cast.sv"),
     )
-    .expect("real local signedness remains available in sized casts");
+    .expect("a real converted to an integral value is sized");
 }
 
 #[test]
@@ -6575,7 +6588,7 @@ fn real_constant_casts_preserve_precision_and_integral_rounding() {
         localparam int POS_HALF = int'(shortreal'(1.5));
         localparam int NEG_HALF = int'(real'(-1.5));
         localparam int NARROW_ROUND = int'(shortreal'(16777217.0));
-        localparam int UNSIGNED_BITS = 8'(real'(-1.5));
+        localparam int UNSIGNED_BITS = 8'(int'(real'(-1.5)));
     endmodule"#,
         Path::new("real_constant_casts.sv"),
     )
@@ -6595,6 +6608,16 @@ fn real_constant_casts_preserve_precision_and_integral_rounding() {
             .unwrap();
         assert_eq!(parameter.resolved_value(), Some(expected), "{name}");
     }
+    // A size cast of a real itself is no cast of an integral value (6.24.1).
+    let error = analyze_source(
+        "module Top; localparam int BITS = 8'(real'(-1.5)); endmodule",
+        Path::new("real_constant_casts.sv"),
+    )
+    .expect_err("a size cast of a real constant");
+    assert!(
+        error.to_string().contains("not an integral value"),
+        "{error}"
+    );
 }
 
 #[test]

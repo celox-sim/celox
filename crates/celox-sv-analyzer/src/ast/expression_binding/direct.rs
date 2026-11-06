@@ -374,9 +374,27 @@ pub(in crate::ast) fn cast_target_native(
             short: ty.kind() == TypeKind::Shortreal,
         });
     }
+    // The operand of a size or signing cast is integral (6.24.1).
+    let check_integral = |session: &mut Session, cast: &str| {
+        let Ok(operand) = expression_types::type_of(tree, session, operand, native, dimensions)
+        else {
+            return Ok(());
+        };
+        if matches!(
+            session.types.data(operand),
+            semantic_types::TyData::Packed(_)
+        ) {
+            return Ok(());
+        }
+        Err(AnalyzerError::InvalidCast(format!(
+            "the operand of a {cast} cast is `{}`, not an integral value",
+            session.types.spell(operand)
+        )))
+    };
     if let ExprKind::Name(name) = &native.expression(target).kind
         && matches!(name.spelling.as_str(), "signed" | "unsigned")
     {
+        check_integral(session, "signing")?;
         return Ok(casts::RuntimeCastTarget::Signing(name.spelling == "signed"));
     }
     let named = call_name(tree, target, native);
@@ -423,6 +441,7 @@ pub(in crate::ast) fn cast_target_native(
             .and_then(|value| usize::try_from(value).ok())
             .filter(|width| *width > 0)
             .ok_or_else(|| unsupported("cast target type"))?;
+        check_integral(session, "size")?;
         (
             ExprType {
                 width: value,

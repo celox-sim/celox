@@ -420,6 +420,58 @@ fn dynamic_casts_assign_cast_compatible_values_of_any_singular_type() {
 }
 
 #[test]
+fn size_and_signing_casts_take_only_integral_operands() {
+    // IEEE 1800-2023 6.24.1: the expression inside the cast shall be an
+    // integral value when changing the size or signing.
+    for (cast, operand) in [
+        ("16'(s)", "string"),
+        ("signed'(s)", "string"),
+        ("16'(r)", "real"),
+        ("unsigned'(r)", "real"),
+    ] {
+        let source = format!(
+            "module Top(output int out); string s = \"AB\"; real r = 2.5;
+                 initial out = {cast}; endmodule"
+        );
+        let Err(error) = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("casts.sv"))],
+            "Top",
+        )
+        .build() else {
+            panic!("`{cast}` of a {operand} was accepted");
+        };
+        // The report wraps its lines inside a frame.
+        let error = error
+            .to_string()
+            .replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            error.contains("not an integral value") && error.contains(operand),
+            "{error}"
+        );
+    }
+    let source = "module Top(output int sized, output int signing, output int named);
+        typedef enum logic [3:0] {A = 4'd9} e_t;
+        typedef struct packed { bit [3:0] hi, lo; } p_t;
+        e_t e = A; p_t p = 8'hF5; int i = 300;
+        initial begin
+            sized = 8'(i);
+            signing = signed'(e);
+            named = 4'(p);
+        end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("casts.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("sized")), 44u32.into());
+    assert_eq!(sim.get(sim.signal("signing")), 0xFFFF_FFF9u32.into());
+    assert_eq!(sim.get(sim.signal("named")), 5u32.into());
+}
+
+#[test]
 fn bit_stream_casts_lay_out_both_sides_by_their_types() {
     // IEEE 1800-2023 6.24.3: a structure streams its members in order and an
     // array its elements, a string its bytes. A layout the lowering cannot
