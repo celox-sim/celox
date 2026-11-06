@@ -958,6 +958,18 @@ fn validate_scope(
                         native,
                     )
                 })
+            // A cast to a type that is not integral packs its operand as a
+            // stream does instead (6.24.3).
+            && !super::expression_types::cast_type(
+                syntax_tree,
+                session,
+                target,
+                native,
+                indexed_dimensions,
+            )
+            .is_some_and(|ty| {
+                !matches!(session.types.data(ty), super::semantic_types::TyData::Packed(_))
+            })
         {
             expression_binding::cast_target_native(
                 target,

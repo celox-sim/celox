@@ -143,6 +143,28 @@ pub(in crate::ast) enum Receiver {
     /// A fixed-size unpacked array assigned a dynamically sized one, whose
     /// elements shall fill it exactly (7.6).
     Assignment(StreamArg),
+    /// A fixed-size unpacked type of a bit-stream cast, which takes only a
+    /// stream of its own width (6.24.3).
+    CastFixed(StreamArg),
+}
+
+/// The receiver of a bit-stream cast to a type of `shape` that is not
+/// integral: a fixed-size one takes exactly its own width (6.24.3).
+pub(in crate::ast) fn cast_receiver(
+    shape: &VariableDimensions,
+    functions: &const_functions::ConstantFunctions,
+    dims: &PackedDimensions,
+) -> Converted<Receiver> {
+    Ok(match receiver(shape, functions, dims)? {
+        Receiver::Fixed(target) => Receiver::CastFixed(target),
+        receiver => receiver,
+    })
+}
+
+fn sizes_differ(width: usize, target: usize) -> AnalyzerError {
+    AnalyzerError::InvalidCast(format!(
+        "a bit-stream cast of {width} bits to a type of {target} bits"
+    ))
 }
 
 /// The layout of a container that a stream can fill: a queue or dynamic
@@ -599,7 +621,8 @@ fn heap_stream(
     )
 }
 
-/// The stream of streaming concatenation `id`.
+/// The stream of streaming concatenation `id`, or of any other value `id`
+/// as a bit-stream cast packs it: as `{>>{id}}` would (6.24.3).
 fn packed(
     id: ExprId,
     native: &Declarations,
@@ -607,7 +630,11 @@ fn packed(
     session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Packed> {
-    let (slice, expressions) = parts(id, native, tree, session, dims)?;
+    let (slice, expressions) = if is_stream(id, native) {
+        parts(id, native, tree, session, dims)?
+    } else {
+        (None, vec![id])
+    };
     let mut items = Vec::new();
     for expression in expressions {
         items.extend(operand(expression, native, tree, session, dims)?);
@@ -647,7 +674,19 @@ pub(in crate::ast) fn pack(
     session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Expr> {
+    // A value that is no stream converts in a cast only from its own size
+    // (6.24.3); a stream of fixed-size data is an integral value.
+    let stream = is_stream(id, native);
     Ok(match (packed(id, native, tree, session, dims)?, receiver) {
+        (Packed::Fixed(_, width), Some(Receiver::Cast(target))) if !stream && width != target => {
+            return Err(sizes_differ(width, target));
+        }
+        (Packed::Fixed(_, width), Some(Receiver::CastFixed(target))) if width != target.width => {
+            return Err(sizes_differ(width, target.width));
+        }
+        (Packed::Fixed(value, width), Some(Receiver::CastFixed(target))) => {
+            return pack_fixed(value, width, target);
+        }
         (Packed::Fixed(value, _), None | Some(Receiver::Cast(_))) => value,
         (Packed::Fixed(_, width), Some(Receiver::Fixed(target))) if target.width < width => {
             return Err(invalid(format!(
@@ -655,15 +694,8 @@ pub(in crate::ast) fn pack(
                 target.width
             )));
         }
-        (Packed::Fixed(mut value, _), Some(Receiver::Fixed(target))) => {
-            if let Expr::Call {
-                callee: Callee::Stream(stream),
-                ..
-            } = &mut value
-            {
-                stream.targets = vec![target];
-            }
-            value
+        (Packed::Fixed(value, width), Some(Receiver::Fixed(target))) => {
+            return pack_fixed(value, width, target);
         }
         (Packed::Fixed(value, width), Some(receiver)) => convert(
             heap_stream(
@@ -721,35 +753,26 @@ pub(in crate::ast) fn assign_to_fixed(
     ))
 }
 
+/// The stream `value` of fixed-size data `width` bits wide, which fits
+/// `target`, in the layout of `target`.
+fn pack_fixed(mut value: Expr, width: usize, target: StreamArg) -> Converted<Expr> {
+    debug_assert!(width <= target.width);
+    if let Expr::Call {
+        callee: Callee::Stream(stream),
+        ..
+    } = &mut value
+    {
+        stream.targets = vec![target];
+    }
+    Ok(value)
+}
+
 /// Heap stream `stream` converted to `receiver` (11.4.14).
 fn convert(stream: Expr, receiver: Receiver) -> Expr {
     match receiver {
-        Receiver::Fixed(target) | Receiver::Assignment(target) => {
-            let size = match receiver {
-                Receiver::Assignment(_) => StreamSize::Assignment,
-                _ => StreamSize::Fits,
-            };
-            let bits = stream_op(
-                StreamOp::ToBits {
-                    width: target.width,
-                    size,
-                },
-                vec![stream],
-            );
-            if target.element.is_none() {
-                return bits;
-            }
-            // An unpacked array receives the stream in its layout.
-            call(
-                Stream {
-                    args: vec![StreamArg::packed(target.width)],
-                    slice: None,
-                    unpack: false,
-                    targets: vec![target],
-                },
-                vec![bits],
-            )
-        }
+        Receiver::Fixed(target) => fixed(stream, target, StreamSize::Fits),
+        Receiver::Assignment(target) => fixed(stream, target, StreamSize::Assignment),
+        Receiver::CastFixed(target) => fixed(stream, target, StreamSize::Cast),
         Receiver::Cast(width) => stream_op(
             StreamOp::ToBits {
                 width,
@@ -760,6 +783,31 @@ fn convert(stream: Expr, receiver: Receiver) -> Expr {
         Receiver::Container(layout) => stream_op(StreamOp::ToContainer(layout), vec![stream]),
         Receiver::String => stream_op(StreamOp::ToString, vec![stream]),
     }
+}
+
+/// Heap stream `stream` converted to fixed-size `target`, whose width the
+/// stream's size is checked against as `size` says.
+fn fixed(stream: Expr, target: StreamArg, size: StreamSize) -> Expr {
+    let bits = stream_op(
+        StreamOp::ToBits {
+            width: target.width,
+            size,
+        },
+        vec![stream],
+    );
+    if target.element.is_none() {
+        return bits;
+    }
+    // An unpacked array receives the stream in its layout.
+    call(
+        Stream {
+            args: vec![StreamArg::packed(target.width)],
+            slice: None,
+            unpack: false,
+            targets: vec![target],
+        },
+        vec![bits],
+    )
 }
 
 /// How one variable of an unpack target takes its bits from the stream.
