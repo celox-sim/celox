@@ -1,0 +1,1 @@
+Fold type comparisons in constant expressions, type size/signing casts through their result type, name ports and generate variables in the type-operator diagnostic, and record the 18.5.14.1 flip.
