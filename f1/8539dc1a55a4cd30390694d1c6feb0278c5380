@@ -1,0 +1,1 @@
+A wait condition that reads a class property must be a value of what it reads (no effects, no time, random, mailbox or process reads), so re-checks after no-op stores, stores to other objects and randomize are invisible; tests
