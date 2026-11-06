@@ -282,6 +282,12 @@ pub(super) struct Function {
     /// The calls at which the unit can be suspended inside the callee, once
     /// the body is lowered.
     pub calls: Vec<celox_design::CallResume>,
+    /// The slot whose bit `p` says that a call omits argument `p`, and the
+    /// positions of the formals whose defaults the unit evaluates then (IEEE
+    /// 1800-2023 13.5.3), in its own frame, where the calls of a default are
+    /// calls of the unit: defaults that call each other then recurse at run
+    /// time, as any recursion, instead of expanding at the call forever.
+    pub omitted: Option<(usize, Vec<usize>)>,
 }
 
 impl Function {
@@ -1026,12 +1032,9 @@ impl ProcModule<'_> {
     /// on a cycle of the module's call graph: those whose bodies, the
     /// argument defaults of their calls included, may call themselves
     /// again (see [`ProcModule::single_activation`]).
-    pub(super) fn mark_recursive(
-        &mut self,
-        module: &sv::ir::Module,
-    ) -> Result<(), sv::AnalyzerError> {
+    pub(super) fn mark_recursive(&mut self, module: &sv::ir::Module) {
         if self.out_of_line().is_none() {
-            return Ok(());
+            return;
         }
         let mut names: Vec<&String> = self.subroutines.keys().collect();
         names.sort_unstable();
@@ -1050,12 +1053,9 @@ impl ProcModule<'_> {
         // omitted arguments, which run at every call; each with the defaults
         // it is made in, which a default calling back into itself would
         // repeat forever.
-        // A default whose calls reach a call omitting it again, which would
-        // run forever wherever that call is made (IEEE 1800-2023 13.5.3).
-        let mut endless = None;
-        let mut expand = |calls: Vec<(sv::ir::Callee, Vec<Option<sv::ir::Expr>>)>,
-                          node: Option<usize>,
-                          edges: &mut Vec<Vec<usize>>|
+        let expand = |calls: Vec<(sv::ir::Callee, Vec<Option<sv::ir::Expr>>)>,
+                      node: Option<usize>,
+                      edges: &mut Vec<Vec<usize>>|
          -> Vec<usize> {
             let mut work: Vec<_> = calls
                 .into_iter()
@@ -1075,8 +1075,10 @@ impl ProcModule<'_> {
                 }
                 let omitted: Vec<bool> = args.iter().map(Option::is_none).collect();
                 let site = (target, omitted);
+                // A default whose calls reach a call omitting it again closes
+                // a cycle, which the edges have; the unit evaluates such
+                // defaults, so the cycle recurses at run time.
                 if within.contains(&site) {
-                    endless.get_or_insert(target);
                     continue;
                 }
                 let mut defaults = Vec::new();
@@ -1148,12 +1150,6 @@ impl ProcModule<'_> {
             }
         }
         expand(roots, None, &mut edges);
-        if let Some(node) = endless {
-            return Err(sv::AnalyzerError::Unsupported(format!(
-                "recursive call of `{}` through the defaults of its arguments",
-                names[node]
-            )));
-        }
         let calls: Vec<Vec<usize>> = edges
             .into_iter()
             .map(|mut callees| {
@@ -1177,7 +1173,6 @@ impl ProcModule<'_> {
             functions.recursive = recursive;
             functions.inlined_sizes = inlined_sizes;
         }
-        Ok(())
     }
 
     /// Whether a call of subroutine `name` may go out of line: always when
@@ -1189,18 +1184,21 @@ impl ProcModule<'_> {
     /// The size is measured on the IR before anything is lowered (see
     /// [`Self::mark_recursive`]), so the choice does not depend on the order
     /// of lowering.
-    /// Whether a call of subroutine `name` goes out of line for its size
-    /// alone (see [`Self::out_of_line_policy`]): one whose constant arguments
-    /// fold no smaller, so that even such a call does not inline it.
-    pub(super) fn out_of_line_for_size(&self, name: &str) -> bool {
+    /// Whether a call of subroutine `name` goes out of line whatever its
+    /// arguments (see [`Self::out_of_line_policy`]), even constant ones,
+    /// which would otherwise keep it inlined to fold: when `name` is on a
+    /// cycle of the call graph, whose calls inlining cannot expand, or over
+    /// the size threshold, whose body does not fold smaller.
+    pub(super) fn out_of_line_whatever_arguments(&self, name: &str) -> bool {
         self.calls
             .as_deref()
             .and_then(|graph| graph.out_of_line.as_ref())
             .is_some_and(|functions| {
-                !functions.forced
-                    && functions
-                        .inlined_size(name)
-                        .is_some_and(|size| size > OUT_OF_LINE_STATEMENTS)
+                functions.recursive.contains(name)
+                    || (!functions.forced
+                        && functions
+                            .inlined_size(name)
+                            .is_some_and(|size| size > OUT_OF_LINE_STATEMENTS))
             })
     }
 
@@ -1554,7 +1552,7 @@ impl ProcModule<'_> {
             if subroutine.automatic
                 && self.out_of_line_policy(&name)
                 && self.out_of_line_reason(&name).is_none()
-                && (self.out_of_line_for_size(&name)
+                && (self.out_of_line_whatever_arguments(&name)
                     || !self.constant_arguments(&subroutine, &args))
             {
                 return true;

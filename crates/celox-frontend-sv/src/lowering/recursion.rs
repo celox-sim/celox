@@ -571,8 +571,9 @@ mod tests {
         let (lines, error) = record(
             "ignores",
             "module Top(input clk, input int a, output int r);
-               function automatic int f(int n, int x = g()); if (0) return f(n); return n + x; endfunction
-               function automatic int g(); return f(1, 2); endfunction
+               function automatic int f(int n, int x = g()); if (0) return h(n); return n + x; endfunction
+               function automatic int g(); return 2; endfunction
+               function automatic int h(int n); return n + 1; endfunction
                always_ff @(posedge clk) r <= f(a, 4);
              endmodule",
         );

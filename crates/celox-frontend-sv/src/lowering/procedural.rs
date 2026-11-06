@@ -701,9 +701,23 @@ impl<'a> ProcModule<'a> {
                     if let sv::ir::Callee::Subroutine(name) = callee
                         && let Some(subroutine) = m.subroutine(name)
                     {
-                        for (i, param) in subroutine.params.iter().enumerate() {
-                            if args.get(i).and_then(Option::as_ref).is_none() {
-                                exprs.extend(param.default.clone());
+                        // The defaults of the omitted arguments, once for
+                        // each pattern: defaults that call each other would
+                        // otherwise be read forever.
+                        let omitted: String = (0..subroutine.params.len())
+                            .map(|i| {
+                                if args.get(i).and_then(Option::as_ref).is_none() {
+                                    '1'
+                                } else {
+                                    '0'
+                                }
+                            })
+                            .collect();
+                        if visited.insert(format!("{name}\0defaults {omitted}")) {
+                            for (i, param) in subroutine.params.iter().enumerate() {
+                                if args.get(i).and_then(Option::as_ref).is_none() {
+                                    exprs.extend(param.default.clone());
+                                }
                             }
                         }
                         // IEEE 1800-2023 9.2.2.2.1 includes function bodies,
@@ -3339,6 +3353,15 @@ pub(super) fn stmt_calls(
                 }
             }
         }
+        // Timing controls evaluate their expressions too.
+        sv::ir::Stmt::Wait(condition) => exprs.push(condition),
+        sv::ir::Stmt::WaitEvent(items) => {
+            for item in items {
+                exprs.push(&item.expr);
+                exprs.extend(&item.iff);
+            }
+        }
+        sv::ir::Stmt::Delay { amount, .. } => exprs.push(amount),
         _ => {}
     }
     for expr in exprs {

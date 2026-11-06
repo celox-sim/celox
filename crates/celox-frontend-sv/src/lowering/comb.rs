@@ -39,6 +39,9 @@ pub(super) struct Comb<'p, 'a> {
     /// Constant values of `arena` nodes.
     consts: ConstCache,
     active_calls: Vec<String>,
+    /// The subroutines whose calls are binding a default argument that
+    /// calls (see `Ff::binding_defaults`).
+    binding_defaults: Vec<String>,
     unrolled: usize,
     /// Whether nonblocking assignments are allowed (they are not in
     /// combinational processes).
@@ -84,6 +87,7 @@ impl<'p, 'a> Comb<'p, 'a> {
             arena,
             consts: ConstCache::default(),
             active_calls: Vec::new(),
+            binding_defaults: Vec::new(),
             unrolled: 0,
             allow_nonblocking: false,
             facts: Vec::new(),
@@ -3517,8 +3521,19 @@ impl<'p, 'a> Comb<'p, 'a> {
                         param.source_name
                     ))
                 })?;
+                let defaulted = matches!(args.get(position), None | Some(None));
                 let actual = if self.m.calls(&actual) {
-                    self.hoist(store, frames, &actual)?
+                    if defaulted {
+                        if self.binding_defaults.iter().any(|active| active == name) {
+                            return Err(unsupported(format!("recursive call of `{name}`")));
+                        }
+                        self.binding_defaults.push(name.to_string());
+                    }
+                    let hoisted = self.hoist(store, frames, &actual);
+                    if defaulted {
+                        self.binding_defaults.pop();
+                    }
+                    hoisted?
                 } else {
                     actual
                 };

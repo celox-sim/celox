@@ -4877,9 +4877,7 @@ fn lower_module_with_overrides(
             .out_of_line()
             .map(|functions| std::mem::take(&mut functions.foreign))
             .unwrap_or_default();
-        // First, since the walks of calls below take the defaults they
-        // use, which an endless chain of defaults would keep them in.
-        pm.mark_recursive(module)?;
+        pm.mark_recursive(module);
         pm.observe_storage(module, &foreign);
         let blocks = lower_ff_processes(
             module,

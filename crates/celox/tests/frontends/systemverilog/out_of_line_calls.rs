@@ -1439,11 +1439,11 @@ fn constant_arguments_do_not_keep_large_calls_inlined() {
 }
 
 #[test]
-fn defaults_that_call_each_other_are_rejected() {
-    // `f()` takes the default `g()`, which takes the default `f()`: the call
-    // of the `always_comb` process would never end (IEEE 1800-2023 13.5.3).
-    // Every walk of the calls stops, and the module is rejected, with or
-    // without the switch.
+fn defaults_that_call_each_other_recurse_at_run_time() {
+    // `f()` takes the default `g()`, which takes the default `f()`. The units
+    // evaluate the defaults of the arguments their calls omit, so this is a
+    // recursion like any other: the call of the `always_comb` process never
+    // ends, and the call depth guard stops the run (IEEE 1800-2023 13.5.3).
     let source = r#"module Top(input int i, output int r);
     function automatic int f(int a = g());
         return a + i;
@@ -1455,14 +1455,79 @@ fn defaults_that_call_each_other_are_rejected() {
 endmodule
 "#;
     for forced in [false, true] {
-        let built = simulate(source, false, forced, "interpreter", 0, &["r"]);
+        let run = simulate(source, false, forced, "interpreter", 0, &["r"]);
         assert!(
-            built
-                .as_ref()
-                .is_err_and(|error| error.contains("recursive call of `f` through the defaults")),
-            "forced {forced}: {built:?}"
+            run.as_ref()
+                .is_err_and(|error| error.contains("call depth exceeds")),
+            "forced {forced}: {run:?}"
         );
     }
+}
+
+#[test]
+fn defaults_that_may_call_each_other_end_when_a_branch_does() {
+    // The default of `f` calls `g` only when `c` is clear, and that of `g`
+    // calls `f`: a cycle through the defaults that ends when `c` is set.
+    let source = r#"module Top(input bit c, output int r);
+    function automatic int f(int a = c ? 0 : g());
+        return a + 1;
+    endfunction
+    function automatic int g(int b = f());
+        return b + 10;
+    endfunction
+    always_comb r = g();
+endmodule
+"#;
+    for forced in [false, true] {
+        let mut sim = Simulation::from_sv_sources(vec![(source, Path::new("calls.sv"))], "Top");
+        if forced {
+            sim = sim.force_out_of_line_calls();
+        }
+        let mut sim = sim.build_interpreter().expect("the design builds");
+        let c = sim.signal("c");
+        sim.modify(|io| io.set(c, 1u8)).unwrap();
+        sim.run_until(0).unwrap();
+        let r = sim.signal("r");
+        assert_eq!(sim.get(r), BigUint::from(11u8), "forced {forced}");
+    }
+}
+
+#[test]
+fn recursive_calls_with_constant_arguments_go_out_of_line() {
+    // `down(3)` has constant arguments, but `down` recurses, which inlining
+    // cannot expand nor fold: the continuous assignment, like the
+    // `always_comb` process, calls it out of line.
+    let source = r#"module Top(input int i, output int r, output int s);
+    function automatic int down(int n);
+        return n <= 0 ? 0 : down(n - 1) + 1;
+    endfunction
+    assign r = down(3);
+    always_comb s = down(i);
+endmodule
+"#;
+    assert_eq!(function_units(source, false), 1);
+    for forced in [false, true] {
+        assert_eq!(
+            simulate(source, false, forced, "interpreter", 0, &["r", "s"]),
+            Ok(vec![value(3), value(0)]),
+            "forced {forced}"
+        );
+    }
+}
+
+#[test]
+fn calls_in_timing_controls_count_for_the_size_policy() {
+    // The delays of `pause` call `cost`, whose 200 statements run at each:
+    // inlined, `pause` is twice `cost`, over the threshold.
+    let body: String = (0..200).map(|_| "        t = t ^ 1;\n").collect();
+    let source = format!(
+        "`timescale 1ns/1ns\nmodule Top(input int i, output int a);\n    function automatic int cost(int v);\n        int t = v;\n{body}        return t;\n    endfunction\n    task automatic pause(int v);\n        #(cost(v));\n        #(cost(v + 1));\n    endtask\n    initial begin\n        pause(i + 1);\n        a = $time;\n    end\nendmodule\n"
+    );
+    assert_eq!(function_units(&source, false), 1, "pause");
+    assert_eq!(
+        simulate(&source, false, false, "interpreter", 5, &["a"]),
+        Ok(vec![value(3)])
+    );
 }
 
 #[test]
