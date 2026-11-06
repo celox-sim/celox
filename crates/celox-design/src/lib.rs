@@ -1758,6 +1758,10 @@ pub struct SchedulerSchema<A> {
     /// judged only after settling. The reference loop resumes such a kernel
     /// a round after the wave, which a host observing data sees in between.
     pub domain_waits: Vec<bool>,
+    /// The scheduler shows a host that watches every update of a slot
+    /// each of them: after each kernel run, after the host clocks of a slot
+    /// apply, and before and after each settle.
+    pub update_points: bool,
 }
 
 impl<A> SchedulerSchema<A> {
@@ -1771,6 +1775,7 @@ impl<A> SchedulerSchema<A> {
             clocks: self.clocks.into_iter().map(map).collect(),
             kernel_events: self.kernel_events,
             domain_waits: self.domain_waits,
+            update_points: self.update_points,
         }
     }
 }

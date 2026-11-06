@@ -10,6 +10,8 @@ use celox_design::{HostRequestKind, HostRequestSite};
 pub(crate) const SYMBOL: &str = "__celox_native_services_v11";
 
 pub(crate) const BEFORE_DOMAINS: u64 = u64::MAX - 14;
+/// A watched value may have changed (`SlotObserver::after_update`).
+pub(crate) const AFTER_UPDATE: u64 = u64::MAX - 15;
 
 pub(crate) const CHECKPOINT: u64 = u64::MAX;
 pub(crate) const SCHEDULER_RUN: u64 = u64::MAX - 1;
@@ -231,6 +233,13 @@ pub(super) trait ObserverService {
         metadata: &Metadata,
         arena: &mut super::native_arena::Arena,
     ) -> u64;
+
+    fn after_update(
+        &mut self,
+        time: u64,
+        metadata: &Metadata,
+        arena: &mut super::native_arena::Arena,
+    ) -> u64;
 }
 
 pub(super) struct SlotService<'a, B: SimBackend> {
@@ -247,12 +256,39 @@ impl<B: SimBackend> ObserverService for SlotService<'_, B> {
         metadata: &Metadata,
         arena: &mut super::native_arena::Arena,
     ) -> u64 {
+        self.show(time, metadata, arena, |observer, io, time| {
+            observer.before_domains(io, time)
+        })
+    }
+
+    fn after_update(
+        &mut self,
+        time: u64,
+        metadata: &Metadata,
+        arena: &mut super::native_arena::Arena,
+    ) -> u64 {
+        self.show(time, metadata, arena, |observer, io, time| {
+            observer.after_update(io, time)
+        })
+    }
+}
+
+impl<B: SimBackend> SlotService<'_, B> {
+    /// Show the observer the state at `time`; the result encodes whether it
+    /// wrote (bit 1) and requested a finish (bit 2).
+    fn show(
+        &mut self,
+        time: u64,
+        metadata: &Metadata,
+        arena: &mut super::native_arena::Arena,
+        show: impl FnOnce(&mut dyn crate::SlotObserver<B>, &mut crate::SlotIo<'_, B>, u64),
+    ) -> u64 {
         let mut io = crate::SlotIo::new(crate::IOContext {
             backend: self.backend,
             watch: self.watch,
         });
         if let Some(observer) = self.observer.as_deref_mut() {
-            observer.before_domains(&mut io, time);
+            show(observer, &mut io, time);
         }
         let wrote = io.wrote();
         let finish = io.finish_requested();
@@ -320,6 +356,8 @@ pub(super) struct Scope<'a> {
     pub pending_scan: usize,
     pub comb_before: Vec<bool>,
     pub observer: Option<&'a mut dyn ObserverService>,
+    /// The observer watches every update (`AFTER_UPDATE`).
+    pub updates: bool,
 }
 
 impl Scope<'_> {
@@ -365,6 +403,7 @@ impl Scope<'_> {
             return ((Err(error), self.error.take()), None);
         }
         self.arena.header.slot_observer = u64::from(self.observer.is_some());
+        self.arena.header.observes_updates = u64::from(self.observer.is_some() && self.updates);
         let pointer = std::ptr::from_mut(self) as u64;
         let offset = self.metadata.context.offset;
         if offset
@@ -387,6 +426,7 @@ impl Scope<'_> {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
         unsafe { slot.write_unaligned(previous) };
         self.arena.header.slot_observer = 0;
+        self.arena.header.observes_updates = 0;
         let (result, elapsed) = match result {
             Ok(result) => result,
             Err(panic) => std::panic::resume_unwind(panic),
@@ -960,6 +1000,11 @@ pub(crate) extern "C" fn call(
                 }
                 None => Ok(0),
             };
+        } else if encoded == AFTER_UPDATE {
+            return match scope.observer.as_deref_mut() {
+                Some(observer) => Ok(observer.after_update(timestamp, scope.metadata, scope.arena)),
+                None => Ok(0),
+            };
         } else if matches!(encoded, ARENA_RESERVE_RECORDS | ARENA_RESERVE_IMAGES) {
             scope
                 .arena
@@ -1105,6 +1150,7 @@ mod tests {
             pending_scan: 0,
             comb_before: Vec::new(),
             observer: None,
+            updates: false,
         };
         let value = |bits: u8, mask: u8| (BigUint::from(bits), BigUint::from(mask));
         let update = |target, lsb, width, bits, mask| celox_runtime::NbaUpdate {

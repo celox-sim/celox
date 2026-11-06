@@ -215,6 +215,9 @@ pub struct SimulationState<B: SimBackend> {
     /// Set between two runs of the compiled scheduler in one run loop that
     /// left its kernels and clocks in its slots instead of the queues above.
     native: Option<NativeResidency<B>>,
+    /// The host watches every update of the current round
+    /// ([`HostBoundary::observes_updates`]).
+    shows_updates: bool,
 }
 
 /// What the runtime keeps of the compiled scheduler's kernels and host
@@ -302,6 +305,7 @@ impl<B: SimBackend> SimulationState<B> {
             observed_events: Default::default(),
             observed_data: false,
             native: None,
+            shows_updates: false,
         };
         state.stats.kernels = (0..state.model.processes.len())
             .map(|index| match state.model.kernel_fallback.get(index) {

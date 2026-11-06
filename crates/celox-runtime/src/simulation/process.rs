@@ -342,6 +342,11 @@ impl<B: SimBackend> SimulationState<B> {
                 if matches!(again, Ok(_) | Err(Halt::Stop)) {
                     self.record_transitions(executor.backend(), round);
                 }
+                // A run that stops or finishes the simulation made its
+                // updates all the same.
+                if matches!(again, Ok(_) | Err(Halt::Stop | Halt::Finish)) {
+                    self.report_update(executor)?;
+                }
                 let again = again?;
                 // Before the next run, its edges must be seen. After the last
                 // one, the check following the settle sees them: a settle
