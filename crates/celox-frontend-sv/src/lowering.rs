@@ -12935,6 +12935,32 @@ endmodule
         );
     }
 
+    /// A level list naming the bits of the implicit event expression in
+    /// other pieces is that expression, whatever the body does with its
+    /// targets; a list of more bits than the body reads is not, once the
+    /// body reads a variable it writes.
+    #[test]
+    fn level_lists_equal_to_the_implicit_reads_bitwise_are_combinational() {
+        let same_bits = "module Top(input bit [31:0] w, input bit [1:0] a, output bit [7:0] y);
+               always @(w[7:0] or w[31:8] or a) begin
+                 y = 8'd0;
+                 case (a)
+                   2'd0: y = w[7:0];
+                   2'd1: y = w[15:8];
+                   2'd2: y = w[23:16];
+                   2'd3: y = w[31:24];
+                 endcase
+               end
+               initial begin #1; end
+             endmodule";
+        assert_eq!(procedure_kernels(same_bits), 1);
+        let more_bits = "module Top(input bit [31:0] w, input bit [1:0] a, output bit [7:0] y);
+               always @(w[7:0] or w[31:8] or a) y = y ^ w[15:8] ^ {6'd0, a};
+               initial begin #1; end
+             endmodule";
+        assert_eq!(procedure_kernels(more_bits), 2);
+    }
+
     /// Only the `always @(list)` processes of a combinational loop stay
     /// processes; one `initial` block drives each design.
     #[test]
