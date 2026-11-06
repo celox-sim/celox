@@ -384,6 +384,16 @@ pub struct Source {
     diagnostics: Vec<warnings::AnalyzerWarning>,
 }
 
+/// The executable bodies of a module, moved out of it (see
+/// [`Module::take_bodies`]).
+pub(crate) struct ModuleBodies {
+    pub assignments: Vec<Assignment>,
+    pub comb_processes: Vec<CombProcess>,
+    pub ff_processes: Vec<FfProcess>,
+    pub initial_processes: Vec<InitialProcess>,
+    pub subroutines: Vec<Subroutine>,
+}
+
 /// Overrides supplied by one instantiation. Types have been resolved in its scope.
 pub(crate) struct ModuleParameterBindings<'a> {
     pub declarations_only: bool,
@@ -703,6 +713,11 @@ impl Source {
 
     pub fn modules(&self) -> &[Module] {
         &self.modules
+    }
+
+    /// The modules, to analyze them from their own bodies.
+    pub(crate) fn into_modules(self) -> Vec<Module> {
+        self.modules
     }
 
     pub(crate) fn warnings(&self) -> Vec<warnings::AnalyzerWarning> {
@@ -1994,6 +2009,18 @@ impl Module {
 
     pub fn subroutines(&self) -> &[Subroutine] {
         &self.subroutines
+    }
+
+    /// Move the executable bodies out of the module, which keeps its
+    /// declarations.
+    pub(crate) fn take_bodies(&mut self) -> ModuleBodies {
+        ModuleBodies {
+            assignments: std::mem::take(&mut self.assignments),
+            comb_processes: std::mem::take(&mut self.comb_processes),
+            ff_processes: std::mem::take(&mut self.ff_processes),
+            initial_processes: std::mem::take(&mut self.initial_processes),
+            subroutines: std::mem::take(&mut self.subroutines),
+        }
     }
 
     pub fn dpi_imports(&self) -> &[crate::ir::DpiImport] {
