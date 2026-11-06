@@ -51,7 +51,7 @@ use celox_design::{
     SCHEDULER_FLAG_WIDTH, SCHEDULER_TIME_WIDTH, STABLE_REGION, SchedulerExit, SchedulerSlots,
     TIME_SLOT_WIDTH, edges::LEVEL_UNKNOWN, schedule::ScheduleModel,
 };
-use celox_sir::{BinaryOp, SIRBuilder, SIRSwitchCase, SIRValue, StateAccess};
+use celox_sir::{BinaryOp, SIRBuilder, SIRSwitchCase, SIRValue, StateAccess, UnaryOp};
 use num_bigint::BigUint;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -3013,22 +3013,52 @@ impl Plan {
         }
         g.b.switch_to_block(chosen);
         let mut runs = Vec::new();
-        for (index, kernel) in self.kernels.iter().enumerate() {
-            if kernel.is_none() {
-                continue;
+        if g.ready_bits <= 64 {
+            // The lowest ready bit names the kernel: one dispatch instead
+            // of a test per kernel. The mask is not zero here.
+            let lowest = g.b.alloc_bit(g.ready_bits, false);
+            g.b.emit(SIRInstruction::Unary(
+                lowest,
+                UnaryOp::CountTrailingZeros,
+                ready,
+            ));
+            let selector = g.b.alloc_bit(8, false);
+            g.b.emit(SIRInstruction::Slice(selector, lowest, 0, 8));
+            let mut cases = Vec::new();
+            for (index, kernel) in self.kernels.iter().enumerate() {
+                if kernel.is_none() {
+                    continue;
+                }
+                let run = g.b.new_block();
+                cases.push(SIRSwitchCase {
+                    value: ordinals[index].into(),
+                    target: run,
+                });
+                runs.push((index, run));
             }
-            let this = g.mask_bit(ready, ordinals[index]);
-            let run = g.b.new_block();
-            let next = g.b.new_block();
-            g.b.seal_block(SIRTerminator::Branch {
-                cond: this,
-                true_block: (run, Vec::new()),
-                false_block: (next, Vec::new()),
+            g.b.seal_block(SIRTerminator::Switch {
+                selector,
+                cases,
+                default: internal_exit,
             });
-            runs.push((index, run));
-            g.b.switch_to_block(next);
+        } else {
+            for (index, kernel) in self.kernels.iter().enumerate() {
+                if kernel.is_none() {
+                    continue;
+                }
+                let this = g.mask_bit(ready, ordinals[index]);
+                let run = g.b.new_block();
+                let next = g.b.new_block();
+                g.b.seal_block(SIRTerminator::Branch {
+                    cond: this,
+                    true_block: (run, Vec::new()),
+                    false_block: (next, Vec::new()),
+                });
+                runs.push((index, run));
+                g.b.switch_to_block(next);
+            }
+            g.b.seal_block(SIRTerminator::Jump(internal_exit, Vec::new()));
         }
-        g.b.seal_block(SIRTerminator::Jump(internal_exit, Vec::new()));
 
         let mut full_wait_check = None;
         let mut wait_continuations = vec![pick];
