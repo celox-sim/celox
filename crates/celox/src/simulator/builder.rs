@@ -2103,6 +2103,10 @@ mod host {
         frontend_artifact: Option<celox_frontend_sdk::FrontendArtifact>,
         file_dependencies: celox_frontend_veryl::FileDependencyCollector,
         native_file_calls: bool,
+        /// Whether the build keeps the value change points of
+        /// [`Self::value_change_signals`]: not one that starts interpreted,
+        /// whose units have no host context until compiled.
+        value_change_points: bool,
         _marker: std::marker::PhantomData<Target>,
     }
 
@@ -2308,12 +2312,44 @@ mod host {
             self
         }
 
+        /// Show a slot observer that watches every update each blocking
+        /// update a process makes of the signals at these hierarchical paths,
+        /// right after it is made, as VPI value change callbacks see them
+        /// (IEEE 1800-2023 38.36.1). Other updates of them are shown when the
+        /// unit that makes them ends. Only processes that write such a signal
+        /// change, and only around those writes. Needs the native backend
+        /// and [`Self::observable_updates`]; elsewhere, and in a tiered
+        /// build, whose interpreted tier has no host context in its units,
+        /// the points are dropped.
+        pub fn value_change_signals<S: Into<String>>(
+            mut self,
+            paths: impl IntoIterator<Item = S>,
+        ) -> Self {
+            self.options.optimize_options = self
+                .options
+                .optimize_options
+                .clone()
+                .with_value_change_objects(paths.into_iter().map(Into::into).collect());
+            self
+        }
+
+        /// The paths given to [`Self::value_change_signals`], which a new
+        /// optimizer profile keeps.
+        fn watched_objects(&self) -> Vec<String> {
+            self.options
+                .optimize_options
+                .value_change_objects()
+                .to_vec()
+        }
+
         fn enforce_native_force_optimizer(&mut self) {
             if !self.options.native_force_support {
                 return;
             }
             let diagnostics = self.options.optimize_options.diagnostics.clone();
-            self.options.optimize_options = crate::optimizer::OptimizeOptions::none();
+            let watched = self.watched_objects();
+            self.options.optimize_options =
+                crate::optimizer::OptimizeOptions::none().with_value_change_objects(watched);
             self.options.optimize_options.diagnostics = diagnostics;
             self.options.dead_store_policy = DeadStorePolicy::Off;
         }
@@ -2324,10 +2360,12 @@ mod host {
             let lanes = self.options.optimize_options.parallel_lanes();
             let partition = self.options.optimize_options.parallel_partition();
             let settle = self.options.optimize_options.settle_partition();
+            let watched = self.watched_objects();
             self.options.optimize_options = crate::optimizer::OptimizeOptions::new(level)
                 .with_parallel_lanes(lanes)
                 .with_parallel_partition(partition)
-                .with_settle_partition(settle);
+                .with_settle_partition(settle)
+                .with_value_change_objects(watched);
             self.options.cranelift_options =
                 crate::backend::CraneliftOptions::for_speed_optimization(
                     level != crate::optimizer::OptLevel::O0,
@@ -2363,6 +2401,7 @@ mod host {
             let lanes = self.options.optimize_options.parallel_lanes();
             let partition = self.options.optimize_options.parallel_partition();
             let settle = self.options.optimize_options.settle_partition();
+            let watched = self.watched_objects();
             self.options.optimize_options = if enable {
                 crate::optimizer::OptimizeOptions::all()
             } else {
@@ -2370,7 +2409,8 @@ mod host {
             }
             .with_parallel_lanes(lanes)
             .with_parallel_partition(partition)
-            .with_settle_partition(settle);
+            .with_settle_partition(settle)
+            .with_value_change_objects(watched);
             self
         }
 
@@ -2405,10 +2445,16 @@ mod host {
             } else {
                 self.options.optimize_options.settle_partition()
             };
+            let watched = if options.value_change_objects().is_empty() {
+                self.watched_objects()
+            } else {
+                options.value_change_objects().to_vec()
+            };
             self.options.optimize_options = options
                 .with_parallel_lanes(lanes)
                 .with_parallel_partition(partition)
-                .with_settle_partition(settle);
+                .with_settle_partition(settle)
+                .with_value_change_objects(watched);
             self
         }
 
@@ -2808,6 +2854,7 @@ mod host {
                 frontend_artifact: None,
                 file_dependencies: Default::default(),
                 native_file_calls: false,
+                value_change_points: true,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2831,6 +2878,7 @@ mod host {
                 frontend_artifact: None,
                 file_dependencies: Default::default(),
                 native_file_calls: false,
+                value_change_points: true,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2855,6 +2903,7 @@ mod host {
                 frontend_artifact: None,
                 file_dependencies: Default::default(),
                 native_file_calls: false,
+                value_change_points: true,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2884,6 +2933,7 @@ mod host {
                 frontend_artifact: None,
                 file_dependencies: Default::default(),
                 native_file_calls: false,
+                value_change_points: true,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2912,6 +2962,7 @@ mod host {
                 frontend_artifact: Some(artifact),
                 file_dependencies: Default::default(),
                 native_file_calls: false,
+                value_change_points: true,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2941,6 +2992,7 @@ mod host {
                 frontend_artifact: Some(artifact),
                 file_dependencies: Default::default(),
                 native_file_calls: false,
+                value_change_points: true,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -3109,6 +3161,7 @@ mod host {
             }
 
             validate_signal_access(&laid_out, &self.options.signal_access)?;
+            validate_value_change_signals(&laid_out, &self.options.optimize_options)?;
             if self.options.dead_store_policy != DeadStorePolicy::Off {
                 let dse_start = phase_timing.then(crate::timing::now);
                 run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
@@ -3119,6 +3172,11 @@ mod host {
                     );
                 }
             }
+            #[cfg(feature = "host-runtime")]
+            crate::value_change::lower(
+                &mut laid_out,
+                self.native_file_calls && self.value_change_points,
+            );
 
             // Units generated from here on write state the settle may read.
             let first_generated_process = laid_out.sir.processes.len();
@@ -3829,9 +3887,11 @@ mod host {
                 }
 
                 validate_signal_access(&laid_out, &self.options.signal_access)?;
+                validate_value_change_signals(&laid_out, &self.options.optimize_options)?;
                 if self.options.dead_store_policy != DeadStorePolicy::Off {
                     run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
                 }
+                crate::value_change::lower(&mut laid_out, false);
 
                 #[cfg(any(
                     all(target_arch = "x86_64", not(feature = "arm64-codegen")),
@@ -3934,6 +3994,7 @@ mod host {
                 frontend_artifact: None,
                 file_dependencies: Default::default(),
                 native_file_calls: false,
+                value_change_points: true,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -3957,6 +4018,7 @@ mod host {
                 frontend_artifact: None,
                 file_dependencies: Default::default(),
                 native_file_calls: false,
+                value_change_points: true,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -3982,6 +4044,7 @@ mod host {
                 frontend_artifact: Some(artifact),
                 file_dependencies: Default::default(),
                 native_file_calls: false,
+                value_change_points: true,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -4137,6 +4200,9 @@ mod host {
         ) -> Result<crate::Simulation<crate::backend::TieredBackend>, SimulatorError> {
             let layout = crate::backend::tiered::tiered_layout_mode(self.vcd_path.is_some());
             self.native_file_calls = true;
+            // The interpreted tier shows the updates of its units when they
+            // end; the compiled one does too, so that both show the same.
+            self.value_change_points = false;
             // The interpreter and hotspot tiers walk derived-tick plans, and
             // only a native image runs derived-edge units; it expands deferred
             // ones itself. Expanding every unit here copies the comb settle
@@ -4604,6 +4670,21 @@ endmodule"#;
                 }
             }
         }
+    }
+
+    fn validate_value_change_signals(
+        program: &LaidOutProgram,
+        options: &crate::optimizer::OptimizeOptions,
+    ) -> Result<(), SimulatorError> {
+        for path in options.value_change_objects() {
+            if program.hierarchical_signal_addr(path).is_none() {
+                return Err(crate::CodegenError::message(format!(
+                    "unknown or ambiguous signal `{path}`"
+                ))
+                .into());
+            }
+        }
+        Ok(())
     }
 
     fn validate_signal_access(
@@ -5104,6 +5185,7 @@ endmodule"#;
             .live_signals
             .iter()
             .chain(&options.signal_access.force_signals)
+            .chain(options.optimize_options.value_change_objects())
         {
             let addr = program
                 .hierarchical_signal_addr(path)

@@ -47,6 +47,8 @@ mod simulator;
 pub mod testbench;
 mod testbench_compile;
 pub(crate) mod timing;
+#[cfg(feature = "host-runtime")]
+mod value_change;
 pub use backend::SimulatorErrorCode as RuntimeErrorCode;
 pub use backend::{
     EventHandle, LayoutRequirements, MemoryLayout, MemoryLayoutMode, SimBackend, get_byte_size,

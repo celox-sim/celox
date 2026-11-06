@@ -198,8 +198,7 @@ const MIXED_STATUSES: [ProcessStatus; 12] = [
 /// The normal C ABI supplies native file writes without suspending into the
 /// host scheduler. Register the symbol only for native-target compilation.
 pub(crate) fn enable_native_services(program: &mut LaidOutProgram) {
-    let schema = &mut program.runtime.runtime_schema;
-    let name = crate::simulator::native_io::SYMBOL;
+    let schema = &program.runtime.runtime_schema;
     let needs_service = schema.scheduler.is_some()
         || !schema.processes.is_empty()
         || !schema.comb_observers.is_empty()
@@ -212,11 +211,19 @@ pub(crate) fn enable_native_services(program: &mut LaidOutProgram) {
             .iter()
             .zip(&program.sir.processes)
             .any(|(slots, unit)| returns_status(unit, slots.status, ProcessStatus::Yield));
-    if !needs_service
-        || schema
-            .extern_functions
-            .iter()
-            .any(|function| function.name == name)
+    if needs_service {
+        require_native_services(program);
+    }
+}
+
+/// Declare the native services of `program`, unless it already does.
+pub(crate) fn require_native_services(program: &mut LaidOutProgram) {
+    let schema = &mut program.runtime.runtime_schema;
+    let name = crate::simulator::native_io::SYMBOL;
+    if schema
+        .extern_functions
+        .iter()
+        .any(|function| function.name == name)
     {
         return;
     }

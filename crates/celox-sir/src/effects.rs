@@ -498,6 +498,7 @@ impl<A> SIRInstruction<A> {
             SIRInstruction::Call { effects, .. } => effects.kernel,
             SIRInstruction::ExternCall { func, .. } => {
                 crate::extern_abi::native_kernel_index(*func).is_some()
+                    || *func == crate::extern_abi::VALUE_CHANGE_ID
                     || matches!(
                         crate::native_memory::NativeMemoryOp::decode(*func),
                         Some(
