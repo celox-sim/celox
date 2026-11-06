@@ -1523,6 +1523,11 @@ pub struct SettlePartitions<A> {
     /// flag (`partitions + 2 + process`) for the signals and counters the
     /// wait watches. Zero when the flags have no such bytes.
     pub waits: u32,
+    /// The whole-variable copies of the settle, target then source: the plan
+    /// counts a reader of the target as a reader of the source, so an
+    /// identity-store alias may merge their homes (nothing else marks the
+    /// target's readers once its store is gone).
+    pub copies: Vec<(A, A)>,
 }
 
 /// The process units that run the edges of one event together with its

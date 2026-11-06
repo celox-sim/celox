@@ -2432,6 +2432,10 @@ pub struct ScheduleResult<Addr> {
     /// known per path: capture events, and partitioned settles, whose flags
     /// keep what changed since the last one.
     pub stateful_targets: Option<Vec<VarAtomBase<Addr>>>,
+    /// The whole-variable copies of a partitioned settle, target then
+    /// source: a reader of the target counts as a reader of the source in
+    /// [`SettlePartition::reads`], so an alias may replace the copy.
+    pub copies: Vec<(Addr, Addr)>,
 }
 
 /// Request to split a combinational schedule into partitions that run only
@@ -3543,6 +3547,8 @@ struct PartitionPlan<Addr> {
     /// The first scheduled work of each partition.
     first_work: Vec<usize>,
     partitions: Vec<PlannedPartition<Addr>>,
+    /// The whole-variable copies, target then source.
+    copies: Vec<(Addr, Addr)>,
 }
 
 /// The paths of one piece of scheduled combinational work.
@@ -3857,11 +3863,44 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
             }
         }
     }
+    // A whole-variable copy's target changes only when its source does,
+    // whose writer marks the target's readers as readers of the source
+    // (above): the copy need not compare what it wrote, when nothing else
+    // writes its target.
+    let mut writers: HashMap<Addr, usize> = HashMap::default();
+    for path in input {
+        if let Some(target) = path.target.var() {
+            *writers.entry(target.id).or_default() += 1;
+        }
+        if let LogicPathTarget::Process { unit, .. } = &path.target {
+            for block in unit.blocks.values() {
+                for instruction in &block.instructions {
+                    match instruction {
+                        SIRInstruction::Store(address, ..) => {
+                            *writers.entry(*address).or_default() += 1;
+                        }
+                        SIRInstruction::Commit(_, target, ..) => {
+                            *writers.entry(*target).or_default() += 1;
+                        }
+                        _ => {}
+                    }
+                    if let Some(effects) = instruction.call_effects() {
+                        for address in &effects.writes {
+                            *writers.entry(*address).or_default() += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
     let partitions = (0..count)
         .map(|partition| {
             let mut marks = BTreeSet::new();
             let mut watched = Vec::new();
             for addr in &writes[partition] {
+                if copy_source.contains_key(addr) && writers.get(addr) == Some(&1) {
+                    continue;
+                }
                 let targets: Vec<usize> = readers
                     .get(addr)
                     .into_iter()
@@ -3914,10 +3953,13 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
             }
         })
         .collect();
+    let mut copies: Vec<(Addr, Addr)> = copy_source.into_iter().collect();
+    copies.sort_unstable();
     Some((
         PartitionPlan {
             first_work,
             partitions,
+            copies,
         },
         partitioning.flags,
     ))
@@ -4932,12 +4974,9 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
     }
     // Partition flags carry what changed from one settle to the next.
     let stateful_targets = stateful_targets.filter(|_| plan.is_none());
-    Ok(ScheduleResult {
-        execution_units: lowering.finish(),
-        runtime_errors,
-        direct_ff_writes,
-        partitions: plan
-            .map(|(plan, _)| {
+    let (partitions, copies) = plan
+        .map(|(plan, _)| {
+            (
                 plan.partitions
                     .into_iter()
                     .map(|partition| SettlePartition {
@@ -4945,10 +4984,18 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
                         writes: partition.writes,
                         pinned: partition.pinned,
                     })
-                    .collect()
-            })
-            .unwrap_or_default(),
+                    .collect(),
+                plan.copies,
+            )
+        })
+        .unwrap_or_default();
+    Ok(ScheduleResult {
+        execution_units: lowering.finish(),
+        runtime_errors,
+        direct_ff_writes,
+        partitions,
         stateful_targets,
+        copies,
     })
 }
 

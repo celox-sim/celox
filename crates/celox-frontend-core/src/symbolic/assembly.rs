@@ -1692,6 +1692,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         }
     };
     let settle_partitions = schedule.partitions.clone();
+    let settle_copies = schedule.copies.clone();
 
     let settle_flags = settle_flags.filter(|_| !settle_partitions.is_empty());
     if let Some(settle) = &settle_flags {
@@ -2709,6 +2710,12 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             partitions: settle_partitions.len() as u32,
             marks,
             waits: process_count as u32,
+            copies: settle_copies
+                .iter()
+                .filter_map(|(target, source)| {
+                    Some((*source_to_state.get(target)?, *source_to_state.get(source)?))
+                })
+                .collect(),
         }
     });
     let scheduler = scheduler_slots.map(|slots| celox_design::SchedulerSchema {
