@@ -468,6 +468,7 @@ impl Class {
                 .iter()
                 .map(|name| handle_type_id(table, name))
                 .collect(),
+            interface: self.is_interface,
         }
     }
 
