@@ -5043,15 +5043,6 @@ impl<'p, 'a> Ff<'p, 'a> {
             .cloned()
             .ok_or_else(|| unsupported(format!("call of `{name}`")))?;
         self.m.record_call(&self.active_calls, name);
-        let out_of_line = self.out_of_line_callee(name, &subroutine, args)?;
-        if out_of_line.is_none() && self.active_calls.iter().any(|active| active == name) {
-            self.m
-                .record_argument_calls(&self.active_calls, &subroutine, args);
-            return Err(unsupported(format!("recursive call of `{name}`")));
-        }
-        if out_of_line.is_none() && self.active_calls.len() >= MAX_CALL_DEPTH {
-            return Err(unsupported("subroutine call depth limit exceeded"));
-        }
         if args.len() > subroutine.params.len() {
             return Err(unsupported(format!(
                 "function call `{name}` with too many arguments"
@@ -5080,6 +5071,97 @@ impl<'p, 'a> Ff<'p, 'a> {
             }
             _ => args,
         };
+        // Evaluate every input before any formal is written: an argument may
+        // read a formal of an enclosing call of another subroutine.
+        let mut outputs = Vec::new();
+        let mut inputs = Vec::new();
+        let mut references = Vec::new();
+        let mut aliases = Vec::new();
+        // The name of each `ref` formal's actual that is a variable.
+        let mut actual_names: HashMap<String, String> = HashMap::default();
+        let mut property_outputs = Vec::new();
+        let mut place_outputs = Vec::new();
+        // The formals an out-of-line call copies back, each with the
+        // temporary that receives it from the callee's frame.
+        let mut copies = Vec::new();
+        let positions: Vec<_> = if arg_order.is_empty() {
+            (0..subroutine.params.len()).collect()
+        } else {
+            arg_order.to_vec()
+        };
+        // The objects and positions that references capture come first (the
+        // order of evaluation of arguments is undefined, IEEE 1800-2023
+        // 13.5): keeping one in a forked activation's frame starts a new
+        // resume point, which no evaluated input may span.
+        for &position in &positions {
+            let Some(param) = subroutine
+                .params
+                .get(position)
+                .filter(|param| param.direction.is_reference())
+            else {
+                continue;
+            };
+            let id = self
+                .m
+                .id(&param.name)
+                .ok_or_else(|| unsupported(format!("argument `{}`", param.source_name)))?;
+            let actual = subroutine
+                .actual(position, args, receiver_kept)
+                .map_err(unsupported)?;
+            if param.leaves.is_empty() {
+                if let Some(sv::ir::Expr::Ident(actual)) = &actual {
+                    actual_names.insert(param.name.clone(), actual.clone());
+                }
+                match self.reference(name, param, actual)? {
+                    Reference::Variable(target) => {
+                        references.push((param.name.clone(), id, target));
+                    }
+                    Reference::Alias(alias) => aliases.push(*alias),
+                }
+                continue;
+            }
+            // Each member of a formal of unpacked structure type refers to
+            // the matching member of the actual, which the analyzer binds as
+            // the concatenation of its members.
+            let parts = match actual {
+                Some(sv::ir::Expr::Concat(parts)) if parts.len() == param.leaves.len() => parts,
+                _ => {
+                    return Err(unsupported(format!(
+                        "ref argument `{}` of `{name}`",
+                        param.source_name
+                    )));
+                }
+            };
+            for (leaf, part) in param.leaves.iter().zip(parts) {
+                let id = self
+                    .m
+                    .id(leaf)
+                    .ok_or_else(|| unsupported(format!("argument `{}`", param.source_name)))?;
+                let member = sv::ir::SubroutineParam {
+                    name: leaf.clone(),
+                    leaves: Vec::new(),
+                    default: None,
+                    ..param.clone()
+                };
+                match self.reference(name, &member, Some(part))? {
+                    Reference::Variable(target) => references.push((leaf.clone(), id, target)),
+                    Reference::Alias(alias) => aliases.push(*alias),
+                }
+            }
+        }
+        // An out-of-line call passes what each `ref` formal refers to as a
+        // place (see `out_of_line::Place`), whose static part selects the
+        // function.
+        let places = self.ref_places(&subroutine, &references, &aliases, &actual_names);
+        let out_of_line = self.out_of_line_callee(name, &subroutine, args, places.as_deref())?;
+        if out_of_line.is_none() && self.active_calls.iter().any(|active| active == name) {
+            self.m
+                .record_argument_calls(&self.active_calls, &subroutine, args);
+            return Err(unsupported(format!("recursive call of `{name}`")));
+        }
+        if out_of_line.is_none() && self.active_calls.len() >= MAX_CALL_DEPTH {
+            return Err(unsupported("subroutine call depth limit exceeded"));
+        }
         // Each inlined automatic task activation owns persistent storage, so
         // another process can enter the same task while this one is suspended.
         // Static formals/locals deliberately keep their module-wide addresses.
@@ -5129,79 +5211,6 @@ impl<'p, 'a> Ff<'p, 'a> {
                         .map_err(kernel_error)?;
                 }
                 activation.push((name.clone(), original));
-            }
-        }
-        // Evaluate every input before any formal is written: an argument may
-        // read a formal of an enclosing call of another subroutine.
-        let mut outputs = Vec::new();
-        let mut inputs = Vec::new();
-        let mut references = Vec::new();
-        let mut aliases = Vec::new();
-        let mut property_outputs = Vec::new();
-        let mut place_outputs = Vec::new();
-        // The formals an out-of-line call copies back, each with the
-        // temporary that receives it from the callee's frame.
-        let mut copies = Vec::new();
-        let positions: Vec<_> = if arg_order.is_empty() {
-            (0..subroutine.params.len()).collect()
-        } else {
-            arg_order.to_vec()
-        };
-        // The objects and positions that references capture come first (the
-        // order of evaluation of arguments is undefined, IEEE 1800-2023
-        // 13.5): keeping one in a forked activation's frame starts a new
-        // resume point, which no evaluated input may span.
-        for &position in &positions {
-            let Some(param) = subroutine
-                .params
-                .get(position)
-                .filter(|param| param.direction.is_reference())
-            else {
-                continue;
-            };
-            let id = self
-                .m
-                .id(&param.name)
-                .ok_or_else(|| unsupported(format!("argument `{}`", param.source_name)))?;
-            let actual = subroutine
-                .actual(position, args, receiver_kept)
-                .map_err(unsupported)?;
-            if param.leaves.is_empty() {
-                match self.reference(name, param, actual)? {
-                    Reference::Variable(target) => {
-                        references.push((param.name.clone(), id, target));
-                    }
-                    Reference::Alias(alias) => aliases.push(*alias),
-                }
-                continue;
-            }
-            // Each member of a formal of unpacked structure type refers to
-            // the matching member of the actual, which the analyzer binds as
-            // the concatenation of its members.
-            let parts = match actual {
-                Some(sv::ir::Expr::Concat(parts)) if parts.len() == param.leaves.len() => parts,
-                _ => {
-                    return Err(unsupported(format!(
-                        "ref argument `{}` of `{name}`",
-                        param.source_name
-                    )));
-                }
-            };
-            for (leaf, part) in param.leaves.iter().zip(parts) {
-                let id = self
-                    .m
-                    .id(leaf)
-                    .ok_or_else(|| unsupported(format!("argument `{}`", param.source_name)))?;
-                let member = sv::ir::SubroutineParam {
-                    name: leaf.clone(),
-                    leaves: Vec::new(),
-                    default: None,
-                    ..param.clone()
-                };
-                match self.reference(name, &member, Some(part))? {
-                    Reference::Variable(target) => references.push((leaf.clone(), id, target)),
-                    Reference::Alias(alias) => aliases.push(*alias),
-                }
             }
         }
         // An input evaluates into a register, which a host request in a later
@@ -5342,6 +5351,34 @@ impl<'p, 'a> Ff<'p, 'a> {
             {
                 let value = self.default_reg(id);
                 inputs.push((id, self.kept_input(id, value, keep)));
+            }
+        }
+        // The dynamic parts of the places pass through the frame: the
+        // handle of a property, the positions of an element, and the value
+        // of an automatic of the calling unit, which also comes back.
+        if let (Some(index), Some(places)) = (out_of_line, &places) {
+            let functions = self.m.out_of_line().expect("calling out of line");
+            let function = &functions.functions[index];
+            let slots: Vec<Vec<SourceVarId>> = function
+                .places
+                .iter()
+                .map(|own| own.iter().map(|&slot| function.slots[slot].id).collect())
+                .collect();
+            for (place, ids) in places.iter().zip(slots) {
+                use super::out_of_line::Place;
+                match place {
+                    Place::Variable(_) => {}
+                    Place::Property { handle, .. } => inputs.push((ids[0], Err(handle.clone()))),
+                    Place::Element { positions, .. } => {
+                        for (&id, position) in ids.iter().zip(positions) {
+                            inputs.push((id, Err(position.clone())));
+                        }
+                    }
+                    Place::Frame { id, name } => {
+                        inputs.push((ids[0], Err(name.clone())));
+                        copies.push((ids[0], *id));
+                    }
+                }
             }
         }
         let called = match out_of_line {
