@@ -25,6 +25,12 @@ impl Ff<'_, '_> {
                     | ProcessOp::Trigger
                     | ProcessOp::TriggerNonblocking
                     | ProcessOp::Triggered
+                    | ProcessOp::Kill
+                    | ProcessOp::Status
+                    | ProcessOp::Resume
+                    | ProcessOp::Suspend
+                    | ProcessOp::SemaphorePut
+                    | ProcessOp::SemaphoreTryGet
             ))
         {
             // A function unit suspends the process for the methods that
