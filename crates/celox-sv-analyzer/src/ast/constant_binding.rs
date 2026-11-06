@@ -93,6 +93,16 @@ fn bind_in_context(
                     ),
                 ));
             }
+            // A comparison of type references is a constant (6.23).
+            Job::Enter(id) if expression_binding::type_references::compares(id, native) => {
+                let Expr::Literal(value) = expression_binding::type_references::comparison(
+                    tree, session, id, native, dimensions,
+                )?
+                else {
+                    unreachable!("a type comparison folds to a literal")
+                };
+                values.push(ConstExpr::Literal(value));
+            }
             Job::Enter(id) if dimensions.effect_values.contains_key(&id) => {
                 let Some(value) = selects::indexed_expression_value(
                     tree,

@@ -6565,13 +6565,13 @@ fn rejects_unsupported_internal_data_types() {
     let error = cranelift_build_error(
         r#"
         module Top(output logic y);
-            type(y) value;
+            var type(y) value;
             assign y = 1'b0;
         endmodule
         "#,
     );
     assert!(
-        error.contains("unsupported internal data type"),
+        error.contains("type operator applied to an expression whose type is not known"),
         "unexpected error: {error}"
     );
 }

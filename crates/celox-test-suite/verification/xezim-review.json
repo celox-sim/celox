@@ -1058,6 +1058,10 @@
     "sv_semantic_leading_clock": {
       "title": "An instantiated sequence's explicit clock does not override the assertion's, and a clocked antecedent does not clock an implication",
       "standard": "IEEE 1800-2023 16.16.1"
+    },
+    "sv_type_operator": {
+      "title": "Type references are compared and sized wrongly: `logic` and `bit` vectors of one width match, `type(4'(x))` is one bit wide, and a case on a type reference selects a nonmatching arm",
+      "standard": "IEEE 1800-2023 6.22.1, 6.23"
     }
   },
   "cases": [
@@ -5467,6 +5471,14 @@
       "classification": "xezim_bug",
       "bug": "sv_conditional_unpacked_arrays",
       "note": "h = s ? c : d with s = 1 and c = '{4, 3} must copy c (11.4.11), so h[0] = 4 and the sum is 18324313; the pinned xezim leaves h = '{0, 0} and returns 18330343. The other assignments of the case (slices, results, defaults, enum arrays, hierarchical names) agree; see verification/repros/sv_conditional_unpacked_arrays_xezim.sv. Verilator 5.052 and Celox print h='{4, 3}."
+    },
+    {
+      "suite": "sv",
+      "name": "types::type_operator",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_type_operator",
+      "note": "xezim runs the case but gets hits 0x4be instead of 0xff. With T = logic [11:0], `case (type(T))` selects the `type(logic [12:0])` arm, `type(T) != type(bit [11:0])` is false although logic and bit vectors do not match (6.22.1), `type(e) === type(bit [12:0])` is false for `bit [12:0] e`, and `var type(4'(bus)) f` declares a 1-bit variable instead of 4 bits (6.23: the self-determined type of the cast). Celox passes; Verilator differs only by treating `int` and `bit signed [31:0]` as nonmatching, which 6.22.1 e) makes matching."
     },
     {
       "suite": "sv",
