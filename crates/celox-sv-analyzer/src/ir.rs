@@ -318,6 +318,44 @@ impl Module {
         }
     }
 
+    /// The state module of a package named `package` that no source
+    /// declares, holding the variables `names` of `width` bits each, which
+    /// [`Self::with_shared_variables`] lets modules share.
+    pub fn shared_variables(package: &str, names: &[String], width: usize) -> Self {
+        Self::new(
+            ModuleId::synthetic(),
+            package.to_string(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .with_signals(names, width, None)
+    }
+
+    /// The module with signals `names` of `width` bits each, which denote
+    /// the variables of package `package` that
+    /// [`Self::shared_variables`] holds.
+    pub fn with_shared_variables(self, package: &str, names: &[String], width: usize) -> Self {
+        self.with_signals(names, width, Some(package))
+    }
+
+    /// The module with signals `names` of `width` bits each, which denote
+    /// the variables of `package` of the same names, if any.
+    fn with_signals(mut self, names: &[String], width: usize, package: Option<&str>) -> Self {
+        self.signals.extend(names.iter().map(|name| {
+            Signal::new(name.clone(), Type::bits(width), false)
+                .with_package_variable(package.map(|package| (package, name.as_str())))
+        }));
+        self
+    }
+
     /// Elaborated interface instance and port scopes, including empty interfaces.
     pub fn interface_scope_names(&self) -> &[String] {
         &self.interface_scope_names
@@ -996,6 +1034,25 @@ pub enum TypeKind {
 }
 
 impl Type {
+    /// `bit [width - 1:0]`.
+    fn bits(width: usize) -> Self {
+        Self {
+            structure: None,
+            tagged_identity: None,
+            kind: TypeKind::Bit,
+            is_signed: false,
+            packed_ranges: vec![PackedRange::new(
+                ConstExpr::Literal((width - 1).to_string()),
+                ConstExpr::Literal("0".to_string()),
+            )],
+            unpacked_ranges: Vec::new(),
+            resolved_width: Some(width),
+            signed_element_depth: None,
+            class: None,
+            chandle: false,
+        }
+    }
+
     pub(crate) fn from_ast(
         r#type: ast::Type,
         constants: &dyn typecheck::ConstantEnvironment,

@@ -1251,6 +1251,21 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "compile",
                             "Assignment between 2-state and 4-state types requires equivalent element types",
                         ),
+                        ("verilator", "class::waits_on_instance_properties") => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq t_func: expected 0x6, got 0x0",
+                        ),
+                        ("icarus", "class::waits_on_instance_properties") => (
+                            "compile_error",
+                            "compile",
+                            "source_0.sv:22: sorry: Constraint declarations not supported.",
+                        ),
+                        ("icarus", "class::waits_on_properties_in_package_subroutines") => (
+                            "compile_error",
+                            "compile",
+                            "internal error: Empty NexusSet from wait expression.",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

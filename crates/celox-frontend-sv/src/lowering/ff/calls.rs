@@ -253,7 +253,16 @@ impl Ff<'_, '_> {
             let alias = aliases.iter().find(|alias| alias.formal == param.name)?;
             places.push(match &alias.target {
                 super::references::Target::Property { handle, field } => Place::Property {
-                    field: *field,
+                    // Places of properties that no wait watches share a
+                    // function whichever property they are.
+                    field: sv::ir::ObjectField {
+                        key: if self.m.id(&property_changes(field.key)).is_some() {
+                            field.key
+                        } else {
+                            0
+                        },
+                        ..*field
+                    },
                     handle: handle.clone(),
                 },
                 super::references::Target::Element {

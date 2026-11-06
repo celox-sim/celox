@@ -949,6 +949,11 @@ pub struct ObjectField {
     /// A `real` (64 bits) or `shortreal` (32 bits) value, as its IEEE 754
     /// bits (IEEE 1800-2023 6.12).
     pub real: bool,
+    /// Which class property this is, the same in every class that inherits
+    /// it: a hash of the declaring class and the property name, never 0. A
+    /// record member, and any other field that is no property, has 0. Two
+    /// properties may share a key.
+    pub key: u32,
 }
 
 /// The layout of an immutable heap record that holds the value of an
