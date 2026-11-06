@@ -2737,3 +2737,60 @@ fn conditional_handles_of_sibling_classes_take_their_common_base() {
         "{error}"
     );
 }
+
+#[test]
+fn class_handle_actuals_are_assigned_to_their_formals() {
+    // IEEE 1800-2023 13.5: an input or inout actual is assigned to its
+    // formal, so a handle of a class not deriving from the formal's is
+    // rejected as an assignment is (8.16); a derived class's handle passes.
+    let calls = [
+        (
+            "f",
+            "function void f(A x); endfunction initial begin b = new; f(b); end",
+        ),
+        ("t", "task t(A x); endtask initial begin b = new; t(b); end"),
+        (
+            "t",
+            "task t(inout A x); endtask initial begin b = new; t(b); end",
+        ),
+        (
+            "H::f",
+            "class H; function void f(A x); endfunction endclass
+             H h; initial begin h = new; b = new; h.f(b); end",
+        ),
+        (
+            "H::new",
+            "class H; function new(A x); endfunction endclass
+             H h; initial begin b = new; h = new(b); end",
+        ),
+    ];
+    for (callee, body) in calls {
+        let source =
+            format!("module Top; class A; endclass class B; endclass B b; {body} endmodule");
+        let Err(error) = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build() else {
+            panic!("an unrelated class's handle was passed to a formal of class `A`: {body}");
+        };
+        let error = error.to_string();
+        assert!(
+            error.contains(&format!("argument 1 of `{callee}`"))
+                && error.contains("a handle of class `B` is not"),
+            "{error}"
+        );
+    }
+    let source = "module Top;
+        class A; virtual function int id(); return 1; endfunction endclass
+        class B extends A; virtual function int id(); return 2; endfunction endclass
+        int seen;
+        function int f(A x); return x.id(); endfunction
+        initial begin B b; b = new; seen = f(b); end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 2u32.into());
+}
