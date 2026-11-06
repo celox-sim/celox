@@ -7,14 +7,28 @@ impl Ff<'_, '_> {
         op: ProcessOp,
         args: &[Option<sv::ir::Expr>],
     ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
-        if self.kernel.is_none() {
+        if self.kernel.is_some() {
+            // The pre-scan classifies earlier waits. Keep the frame invariant
+            // here too, including calls materialized while binding argument
+            // defaults.
+            self.process_control = true;
+            self.forked = true;
+            self.urandom_state();
+        } else if !(self.can_request()
+            && matches!(
+                op,
+                ProcessOp::SelfHandle
+                    | ProcessOp::Srandom
+                    | ProcessOp::GetRandstate
+                    | ProcessOp::SetRandstate
+                    | ProcessOp::SemaphoreNew
+            ))
+        {
+            // A function unit suspends the process for the methods that
+            // neither park it nor control it (see `out_of_line`); the kernel
+            // that calls it keeps the frame these need.
             return Err(unsupported("process method outside a process kernel"));
         }
-        // The pre-scan classifies earlier waits. Keep the frame invariant here
-        // too, including calls materialized while binding argument defaults.
-        self.process_control = true;
-        self.forked = true;
-        self.urandom_state();
         let function = self
             .active_calls
             .iter()
@@ -96,8 +110,7 @@ impl Ff<'_, '_> {
             }],
             strings: Vec::new(),
         });
-        self.with_kernel(|k| k.host_request(HostRequestKind::Process, index))
-            .map_err(kernel_error)?;
+        self.request_host(HostRequestKind::Process, index)?;
         // `triggered` is a one-bit value in its expression (IEEE 1800-2023
         // 15.5.3), whatever the width of the result the scheduler writes.
         if op == ProcessOp::Triggered {

@@ -9,8 +9,11 @@
 //! transitively (see [`Reason`]; its prints and messages are runtime
 //! events, which a unit raises), has no `ref`
 //! formal (the callees inlined into its unit may), and its unit touches no
-//! state but its frame, the variables it reads, and the static storage of
-//! subroutines. Nor may it make a store that assembly instruments per store
+//! state but its frame, the variables it reads, and the module variables
+//! it writes that the lowering does not keep hidden for a process, such as
+//! the static storage of subroutines and static class properties; a
+//! combinational process calls it only if it writes nothing but that static
+//! storage. Nor may it make a store that assembly instruments per store
 //! (a nonblocking one, or one into what a wait, an event control or
 //! combinational logic observes), since assembly sees only the stores of
 //! the units the runtime runs: the frontend keeps out the stores into what
@@ -18,7 +21,9 @@
 //! rejects a function that makes one all the same.
 //!
 //! A unit whose body suspends the process, for a host request (`$sformatf`,
-//! file I/O, `$sscanf`, plusargs, `$system`, the distribution functions), a
+//! file I/O, `$sscanf`, plusargs, `$system`, the distribution functions,
+//! `process::self()`, `srandom`, `get_randstate`, `set_randstate` and a
+//! semaphore's `new`), a
 //! `#` delay, `$stop` or `$finish`, is resumable (see [`Function::resume`]):
 //! a suspension stores the unit's resume point and returns with the status,
 //! and each caller up the chain does the same at its call, down to the
@@ -79,8 +84,9 @@ pub(super) enum Reason {
     /// fork.
     MaySuspend,
     /// It, or a subroutine it calls, makes a host request a unit cannot
-    /// make: `$exit`, monitors, strobes, VCD tasks, process and mailbox
-    /// methods, or a DPI-C import; or a caller that cannot suspend calls a
+    /// make: `$exit`, monitors, strobes, VCD tasks, mailbox methods and
+    /// the process methods but `self`, `srandom`, `get_randstate`,
+    /// `set_randstate` and a semaphore's `new`, or a DPI-C import; or a caller that cannot suspend calls a
     /// unit that can suspend.
     HostRequest,
     /// Anything else, described.
@@ -677,8 +683,8 @@ impl ProcModule<'_> {
     /// stores assembly may instrument (`SimModule::instrumented_storage`),
     /// as far as a function unit can store them.
     ///
-    /// A function unit stores no module state but the static storage of
-    /// subroutines. Assembly instruments the stores into what a wait or an
+    /// A function unit stores no hidden module state but the static storage
+    /// of subroutines. Assembly instruments the stores into what a wait or an
     /// event control watches, what combinational logic is sensitive to, and
     /// the targets of nonblocking assignments. Each construct is walked by
     /// the walk its lowering derives that instrumentation from, so the two
@@ -914,8 +920,20 @@ impl ProcModule<'_> {
                     sv::ir::Callee::System(function) => {
                         use sv::ir::SystemFunction;
                         match function {
-                            // A process method acts on the calling process,
-                            // and some park it.
+                            // `process::self()`, the RNG state of a process
+                            // and a new semaphore are host requests a unit
+                            // makes by suspending. The calling process holds
+                            // its RNG state while the call is suspended: the
+                            // frames that hold it give it back first. The
+                            // other process methods act on the calling
+                            // process, and some park it.
+                            SystemFunction::Process(
+                                celox_design::ProcessOp::SelfHandle
+                                | celox_design::ProcessOp::Srandom
+                                | celox_design::ProcessOp::GetRandstate
+                                | celox_design::ProcessOp::SetRandstate
+                                | celox_design::ProcessOp::SemaphoreNew,
+                            ) => state.suspends = true,
                             SystemFunction::Process(_) => note(Reason::HostRequest),
                             _ if function.is_host_request() => state.suspends = true,
                             SystemFunction::Urandom
