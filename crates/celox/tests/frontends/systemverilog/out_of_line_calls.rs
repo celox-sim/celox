@@ -625,10 +625,10 @@ endmodule
 }
 
 #[test]
-fn stores_a_wait_observes_stay_inlined() {
+fn stores_a_wait_observes_are_counted_in_units() {
     // A level wait reads the static `count`, so its stores are instrumented:
-    // `counter`, which stores it, stays inlined, and `twice`, which stores
-    // nothing a wait observes, still goes out of line.
+    // `counter`, which stores it, goes out of line with its stores counted
+    // as a process's, and the wait sees the store that `advance` makes.
     let source = r#"`timescale 1ns/1ns
 module Top(output int done_at, output int r, output int d);
     function int counter(bit advance);
@@ -651,7 +651,7 @@ module Top(output int done_at, output int r, output int d);
     end
 endmodule
 "#;
-    same_as_inlined(source, 1, 3, &["done_at", "r", "d"]);
+    same_as_inlined(source, 2, 3, &["done_at", "r", "d"]);
     assert_eq!(
         simulate(
             source,
@@ -696,7 +696,9 @@ endmodule
 fn calls_kept_only_for_sensitivity_count_as_observing() {
     // The branch that never runs still makes `always_comb` sensitive to
     // what `counter` reads (IEEE 1800-2023 9.2.2.2.1), the static `total`
-    // among it, so `counter`, which stores `total`, stays inlined.
+    // among it, so the combinational process keeps its call of `counter`,
+    // which stores `total`, inlined; the initial process calls it out of
+    // line.
     let source = r#"module Top(input int i, output int y, output int r);
     function int counter(int v);
         static int total = 0;
@@ -711,7 +713,7 @@ fn calls_kept_only_for_sensitivity_count_as_observing() {
     initial r = counter(i + 2);
 endmodule
 "#;
-    same_as_inlined(source, 1, 0, &["y", "r"]);
+    same_as_inlined(source, 2, 0, &["y", "r"]);
     assert_eq!(
         simulate(source, false, true, "interpreter", 0, &["y", "r"]),
         Ok(vec![value(1), value(2)])
@@ -722,8 +724,9 @@ endmodule
 fn defaults_a_level_wait_watches_count_as_observing() {
     // A level wait watches what the defaults of the formals of the
     // functions it calls read, supplied or not, the static `total` of
-    // `counter` among it, so `counter`, which stores `total`, stays inlined.
-    // `ready`, whose call supplies `v`, still goes out of line.
+    // `counter` among it, so the stores of `counter` into `total` are
+    // counted, also out of line. `ready`, whose call supplies `v`, goes out
+    // of line too.
     let source = r#"`timescale 1ns/1ns
 module Top(input int i, output int done_at, output int r);
     function int counter(int v);
@@ -741,7 +744,7 @@ module Top(input int i, output int done_at, output int r);
     initial #1 r = counter(i + 1);
 endmodule
 "#;
-    same_as_inlined(source, 1, 2, &["done_at", "r"]);
+    same_as_inlined(source, 2, 2, &["done_at", "r"]);
     assert_eq!(
         simulate(source, false, true, "interpreter", 2, &["done_at", "r"]),
         Ok(vec![value(1), value(1)])
@@ -880,9 +883,8 @@ endmodule
 #[test]
 fn ref_places_a_call_cannot_pass_stay_inlined() {
     // One automatic bound to two `ref` formals would be two copies, so
-    // `add_both` stays inlined into `aliased`; `bump(watched, ..)` stores
-    // into what a continuous assignment reads, which assembly instruments,
-    // so that call stays inlined too.
+    // `add_both` stays inlined into `aliased`; `bump(watched, ..)`, which
+    // stores into what a continuous assignment reads, goes out of line.
     let source = r#"module Top(output int a, output int b, output int w);
     function automatic void add_both(ref int x, ref int y);
         x = x + 1;
@@ -906,7 +908,7 @@ fn ref_places_a_call_cannot_pass_stay_inlined() {
     end
 endmodule
 "#;
-    same_as_inlined(source, 1, 0, &["a", "b", "w"]);
+    same_as_inlined(source, 2, 0, &["a", "b", "w"]);
 }
 
 #[test]
@@ -1092,6 +1094,104 @@ endmodule
             &["a", "b", "c", "d", "e"]
         ),
         Ok(vec![value(2), value(503), value(24), value(2), value(3)])
+    );
+}
+
+#[test]
+fn units_store_into_what_waits_and_logic_observe() {
+    // As UVM's objections push to a static queue that a task waits on,
+    // `schedule` pushes to `Sched::pending`, which `drain` (inlined, since it
+    // waits) waits for with a level wait; `note` stores `last`, which an event control waits on and
+    // a continuous assignment reads. `pulse` changes `blip` and changes it
+    // back, which an event control on it sees only as the stores' own
+    // changes (IEEE 1800-2023 9.4.2). Assembly counts these stores in the
+    // units as a process's, so every waiter wakes. `mirror` stores what the
+    // `always_comb` process that calls it observes, so that call stays
+    // inlined.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int got, output int seen_at, output int follow, output int y, output int z,
+           output int pulsed_at);
+    class Sched;
+        static int pending[$];
+        static function void schedule(int n);
+            pending.push_back(n);
+        endfunction
+        static task drain(output int v);
+            wait (pending.size() != 0);
+            v = pending.pop_front();
+        endtask
+    endclass
+    int last;
+    function automatic void note(int n);
+        last = n;
+    endfunction
+    int blip;
+    function automatic void pulse();
+        blip = blip + 1;
+        blip = blip - 1;
+    endfunction
+    assign follow = last + 1;
+    int shadow;
+    function automatic int mirror(int n);
+        shadow = n;
+        return n + 1;
+    endfunction
+    int one = 1;
+    always_comb y = mirror(one) + shadow;
+    initial Sched::drain(got);
+    initial begin
+        @(last);
+        seen_at = $time;
+    end
+    initial begin
+        @(blip);
+        pulsed_at = $time;
+    end
+    initial begin
+        #2 Sched::schedule(one + 6);
+        #1 note(one + 2);
+        #1 z = mirror(one + 3);
+        pulse();
+    end
+endmodule
+"#;
+    let names = ["got", "seen_at", "follow", "y", "z", "pulsed_at"];
+    same_as_inlined(source, 4, 5, &names);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 5, &names),
+        Ok(vec![
+            value(7),
+            value(3),
+            value(4),
+            value(3),
+            value(5),
+            value(4)
+        ])
+    );
+}
+
+#[test]
+fn units_never_store_the_events_of_flip_flops() {
+    // `tick` drives the clock of an `always_ff` process, whose stores
+    // assembly gives the triggers of the flip-flop's domain, which only a
+    // process kernel carries: the task stays inlined.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int count);
+    logic clk = 0;
+    task automatic tick(int n);
+        clk = 1;
+        #1 clk = 0;
+        #1;
+    endtask
+    always_ff @(posedge clk) count <= count + 1;
+    int one = 1;
+    initial repeat (3) tick(one);
+endmodule
+"#;
+    same_as_inlined(source, 0, 7, &["count"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 7, &["count"]),
+        Ok(vec![value(3)])
     );
 }
 
@@ -1652,10 +1752,9 @@ endmodule
 fn functions_write_static_class_properties_and_module_variables() {
     // UVM's constructors count their instances in a static property and
     // its singletons keep theirs in one: writes no other process observes
-    // go out of line. `touch` writes what a continuous assignment reads,
-    // which assembly instruments, and stays inlined; `logged` writes a
-    // variable that the `always_comb` process calling it owns as an output,
-    // so it stays inlined too.
+    // go out of line, and so does `touch`, which writes what a continuous
+    // assignment reads; `logged` writes a variable that the `always_comb`
+    // process calling it owns as an output, so it stays inlined.
     let source = r#"module Top(output int a, output int b, output int c, output int d, output int f);
     class Counter;
         static int count = 0;
@@ -1703,7 +1802,7 @@ fn functions_write_static_class_properties_and_module_variables() {
     end
 endmodule
 "#;
-    same_as_inlined(source, 4, 0, &["a", "b", "c", "d", "f"]);
+    same_as_inlined(source, 5, 0, &["a", "b", "c", "d", "f"]);
 }
 
 #[test]

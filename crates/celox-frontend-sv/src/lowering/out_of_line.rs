@@ -310,9 +310,13 @@ pub(crate) struct OutOfLine {
     /// The number of frame slots of the module so far, which numbers their
     /// addresses.
     pub(super) slots: u32,
-    /// The variables whose stores a function unit must not make (see
-    /// [`ProcModule::observe_storage`]).
+    /// The variables whose stores assembly instruments (see
+    /// [`ProcModule::observe_storage`]): a combinational process does not
+    /// call a function unit that stores into them.
     pub(super) observed: HashSet<SourceVarId>,
+    /// Those of them whose instrumentation assembly makes in process and
+    /// flip-flop units only, which a function unit must not store into.
+    pub(super) excluded: HashSet<SourceVarId>,
     /// The module's names that hierarchical names of other modules reach.
     pub(super) foreign: HashSet<String>,
     /// The subroutines that may call themselves, through any chain of
@@ -557,6 +561,25 @@ pub(super) fn attach_functions(
             }
         }
     }
+    // A store of a function unit repeats at every call, so each signal a
+    // unit stores gets counters, as one a kernel may store twice between
+    // two checks does: assembly counts the stores of a signal a wait or an
+    // event domain watches, in the units as in the kernels.
+    let counted: HashSet<SourceVarId> = module
+        .counter_slots
+        .iter()
+        .map(|slots| slots.signal)
+        .collect();
+    let stored: Vec<SourceVarId> = functions
+        .iter()
+        .flat_map(|function| function.unit.blocks.values())
+        .flat_map(|block| &block.instructions)
+        .filter_map(celox_frontend_core::watch::write_destination)
+        .filter(|address| address.region == STABLE_REGION && !counted.contains(&address.var_id))
+        .map(|address| address.var_id)
+        .collect();
+    let slots = celox_frontend_core::watch::declare_counter_slots(&mut module.variables, stored);
+    module.counter_slots.extend(slots);
     let mut work = Vec::new();
     module_units(module).for_each(|unit| calls(unit, &mut work));
     for path in &module.comb_blocks {
@@ -761,12 +784,23 @@ impl ProcModule<'_> {
     }
 
     /// Whether assembly may instrument the stores into `id` (see
-    /// [`Self::observe_storage`]), which a function unit must not make.
+    /// [`Self::observe_storage`]).
     pub(super) fn is_observed(&self, id: SourceVarId) -> bool {
         self.calls
             .as_deref()
             .and_then(|graph| graph.out_of_line.as_ref())
             .is_some_and(|functions| functions.observed.contains(&id))
+    }
+
+    /// Whether assembly instruments the stores into `id` in ways only the
+    /// units of processes and flip-flops carry (see
+    /// [`Self::observe_storage`]), so that a function unit must not make
+    /// them.
+    pub(super) fn is_excluded(&self, id: SourceVarId) -> bool {
+        self.calls
+            .as_deref()
+            .and_then(|graph| graph.out_of_line.as_ref())
+            .is_some_and(|functions| functions.excluded.contains(&id))
     }
 
     /// Record, before `module`'s processes are lowered, the variables whose
@@ -786,8 +820,22 @@ impl ProcModule<'_> {
     /// nonblocking assignments and `foreign`, the names that hierarchical
     /// names of other modules reach. The set may be more than assembly
     /// instruments, which only keeps a subroutine inlined that could have
-    /// gone out of line; assembly rejects a function unit that stores into
-    /// instrumented storage all the same.
+    /// gone out of line.
+    ///
+    /// Assembly instruments a function unit's stores as a process kernel's
+    /// for the counters of waits and event controls, which are kept for the
+    /// stored variable, whatever process stores it. Its other
+    /// instrumentation is for process and flip-flop units only: the
+    /// triggers of flip-flop events, the staging of nonblocking
+    /// assignments, the counting of what flip-flops write, and the
+    /// captures of combinational observers in combinational processes. So a
+    /// function unit stores into none of the `excluded` storage: the events
+    /// and the writes of flip-flops, what instance ports connect (an
+    /// event of the instance, as far as this module can tell), the targets
+    /// of nonblocking assignments and `foreign`; and a combinational process
+    /// calls no function unit that stores into `observed` storage. Assembly
+    /// rejects a function unit that stores into storage it cannot
+    /// instrument all the same.
     pub(super) fn observe_storage(&mut self, module: &sv::ir::Module, foreign: &HashSet<String>) {
         if self.out_of_line().is_none() {
             return;
@@ -798,6 +846,24 @@ impl ProcModule<'_> {
             nonblocking: false,
         };
         let mut observers: Vec<sv::ir::Stmt> = Vec::new();
+        // What a function unit must not store into: the events of
+        // flip-flops, whose stores assembly gives their triggers, what
+        // flip-flops write, what instance ports connect (a clock of the
+        // instance, as far as this module can tell), and below the targets
+        // of nonblocking assignments and the names of other modules.
+        let mut hard: Vec<sv::ir::Stmt> = Vec::new();
+        let mut hard_names: Vec<String> = Vec::new();
+        for process in module.ff_processes() {
+            hard_names.extend(
+                process
+                    .events()
+                    .iter()
+                    .map(|event| event.signal().to_string()),
+            );
+            let mut written = HashSet::default();
+            super::procedural::written_names(process.body(), &mut written);
+            hard_names.extend(written);
+        }
         for assignment in module.assignments() {
             observers.push(assign(assignment.lhs_value(), assignment.rhs()));
         }
@@ -812,6 +878,7 @@ impl ProcModule<'_> {
             for connection in instance.port_connections() {
                 if let Some(actual) = connection.actual_expr() {
                     observers.push(sv::ir::Stmt::Eval(actual.clone()));
+                    hard.push(sv::ir::Stmt::Eval(actual.clone()));
                 }
             }
         }
@@ -867,6 +934,19 @@ impl ProcModule<'_> {
             .into_iter()
             .flat_map(|expr| super::ff::level_reads(self, expr))
             .collect();
+        let mut excluded: HashSet<SourceVarId> = self
+            .implicit_reads(&hard, true)
+            .into_iter()
+            .map(|atom| atom.id)
+            .collect();
+        excluded.extend(
+            targets
+                .iter()
+                .copied()
+                .chain(foreign.iter().map(String::as_str))
+                .chain(hard_names.iter().map(String::as_str))
+                .filter_map(|name| self.id(name)),
+        );
         observed.extend(
             targets
                 .into_iter()
@@ -874,8 +954,10 @@ impl ProcModule<'_> {
                 .chain(foreign.iter().map(String::as_str))
                 .filter_map(|name| self.id(name)),
         );
+        observed.extend(excluded.iter().copied());
         if let Some(functions) = self.out_of_line() {
             functions.observed = observed;
+            functions.excluded = excluded;
         }
     }
 

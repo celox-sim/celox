@@ -178,9 +178,15 @@ impl Ff<'_, '_> {
             }
             // The process's outputs are the variables its own statements
             // assign: a function may write only the static storage of
-            // subroutines, which the process does not own.
+            // subroutines, which the process does not own, and none that
+            // assembly instruments, which it does in the process's own
+            // stores only (comb-observer captures).
             let persistent = self.m.static_storage();
-            if touched.is_some_and(|(_, writes)| writes.iter().any(|id| !persistent.contains(id))) {
+            if touched.is_some_and(|(_, writes)| {
+                writes
+                    .iter()
+                    .any(|id| !persistent.contains(id) || self.m.is_observed(*id))
+            }) {
                 self.record_outcome(
                     name,
                     Outcome::Inlined(Reason::Other(
@@ -1053,7 +1059,7 @@ impl Ff<'_, '_> {
                     {
                         return Err(other("writes hidden module state"));
                     }
-                    if self.m.is_observed(addr.var_id) {
+                    if self.m.is_excluded(addr.var_id) {
                         return Err(other("stores into observed storage"));
                     }
                     writes.insert(addr.var_id);
