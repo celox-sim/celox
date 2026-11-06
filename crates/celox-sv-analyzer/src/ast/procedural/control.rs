@@ -316,6 +316,24 @@ impl BodyBuilder<'_, '_, '_> {
                         });
                         jobs.push(Job::Enter(*body));
                     }
+                    // A case statement on a type reference selects its arm
+                    // at elaboration: the first whose type matches, else the
+                    // default one (IEEE 1800-2023 6.23).
+                    StatementKind::Case {
+                        keyword,
+                        mode: None,
+                        expression: Some(value),
+                        arms,
+                        ..
+                    } if keyword == "case"
+                        && expression_binding::type_references::reference(*value, native)
+                            .is_some() =>
+                    {
+                        let selected = self.type_case_arm(*value, arms)?;
+                        if let Some(body) = selected {
+                            jobs.push(Job::Enter(body));
+                        }
+                    }
                     StatementKind::Case {
                         keyword,
                         mode,
@@ -973,6 +991,37 @@ pub(super) fn mark_breaks(body: Vec<Stmt>, stop: &str) -> Vec<Stmt> {
         }
     }
     marked
+}
+
+impl BodyBuilder<'_, '_, '_> {
+    /// The body of the arm that a case statement on type reference `value`
+    /// selects: the first whose type matches, else the default one (IEEE
+    /// 1800-2023 6.23).
+    fn type_case_arm(
+        &mut self,
+        value: celox_sv_syntax::ExprId,
+        arms: &[celox_sv_syntax::CaseArm],
+    ) -> Converted<Option<StatementId>> {
+        let native = self.tree.declarations();
+        for arm in arms {
+            for case_match in &arm.matches {
+                let celox_sv_syntax::CaseMatch::Expression(label) = case_match else {
+                    return Err(unsupported("range item of a case on a type"));
+                };
+                if expression_binding::type_references::matching(
+                    self.tree,
+                    self.session,
+                    value,
+                    *label,
+                    native,
+                    &self.dims,
+                )? {
+                    return Ok(Some(arm.body));
+                }
+            }
+        }
+        Ok(arms.iter().find(|arm| arm.default).map(|arm| arm.body))
+    }
 }
 
 #[cfg(test)]

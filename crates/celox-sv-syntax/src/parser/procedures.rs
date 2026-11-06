@@ -810,11 +810,13 @@ impl Parser<'_> {
     }
 
     pub(super) fn declaration_name_cursor(&self) -> Option<usize> {
+        // A keyword names no type, module or interface, such as the `var`
+        // of `var type(e) v;` (IEEE 1800-2023 6.23, A.9.3).
         if !self.token().is_some_and(|token| {
             matches!(
                 token.kind,
                 TokenKind::Identifier | TokenKind::EscapedIdentifier
-            )
+            ) && !self.reserved_identifier(token)
         }) {
             return None;
         }
