@@ -81,6 +81,16 @@ impl Ff<'_, '_> {
             );
             return Ok(None);
         }
+        // A level wait's predicate observes the events whose `triggered` it
+        // reads, which the inlined body tells the host (see
+        // `ProcessState::observes_events`).
+        if self.process_predicate && self.m.process_state(name).observes_events {
+            self.record_outcome(
+                name,
+                Outcome::Inlined(Reason::Other("level wait observes its events".to_string())),
+            );
+            return Ok(None);
+        }
         if !recursive && self.m.constant_arguments(subroutine, args) {
             self.record_outcome(
                 name,
