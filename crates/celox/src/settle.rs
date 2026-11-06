@@ -16,7 +16,10 @@ use celox_sir::{BinaryOp, BlockId, SIRTerminator, SIRValue};
 use celox_state_layout::{SettleLayout, SettleObject};
 use std::collections::BTreeMap;
 
+mod cone;
 mod prune;
+
+pub(crate) use cone::clock_cone;
 pub(crate) use prune::prune_stale_marks;
 
 /// The flag layout of `program`'s partitioned settle, if it has one.
@@ -186,10 +189,19 @@ pub(crate) fn instrument_ff_units(program: &mut LaidOutProgram, wide_commits: bo
 }
 
 fn instrument_units(program: &mut LaidOutProgram, first: usize, all: bool, wide_commits: bool) {
+    // The scheduler schema lists its events only once the scheduler is
+    // attached, after the kernels are instrumented: take them from the
+    // design's event topology, as the scheduler's plan does.
+    let events = crate::edge_plans::event_addresses(program);
     let (sir, layout, runtime) = program.split_mut();
-    let Some(marker) = Marker::new(layout, runtime) else {
+    let Some(mut marker) = Marker::new(layout, runtime) else {
         return;
     };
+    marker.clock_homes.extend(
+        events
+            .iter()
+            .filter_map(|address| layout.offsets.get(address).copied()),
+    );
     debug_assert!(
         !wide_commits,
         "wide commits are the FF units' (instrument_ff_units)"
@@ -385,6 +397,10 @@ struct Marker<'a> {
     /// Reuse each state-change predicate for the timed scheduler's settle
     /// guard, instead of comparing the instrumented writer a second time.
     scheduler_dirty: Option<RegionedAbsoluteAddr>,
+    /// The homes of the event signals and the time slots: a write of one
+    /// marks the scheduler's settle dirty with 2, "only clocks changed",
+    /// which runs the clock cone instead of the whole settle.
+    clock_homes: crate::HashSet<usize>,
     /// Commit contiguous registers word by word ([`Self::wide_run`]).
     wide: bool,
     /// The bytes of every object in the stable and the working region,
@@ -413,6 +429,8 @@ struct Segment {
     current: BlockId,
     /// The byte 1 of the segment chain's marks, once defined.
     one: Option<RegisterId>,
+    /// The byte 2 of the chain's clock-only dirty marks, once defined.
+    two: Option<RegisterId>,
     instructions: Vec<SIRInstruction<RegionedAbsoluteAddr>>,
 }
 
@@ -426,6 +444,19 @@ impl Segment {
             let register = alloc.register(unit, byte_type());
             self.instructions
                 .push(SIRInstruction::Imm(register, SIRValue::new(1u64)));
+            register
+        })
+    }
+
+    fn two(
+        &mut self,
+        unit: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+        alloc: &mut Allocator,
+    ) -> RegisterId {
+        *self.two.get_or_insert_with(|| {
+            let register = alloc.register(unit, byte_type());
+            self.instructions
+                .push(SIRInstruction::Imm(register, SIRValue::new(2u64)));
             register
         })
     }
@@ -579,6 +610,14 @@ impl<'a> Marker<'a> {
             scheduler_dirty: runtime.runtime_schema.scheduler.as_ref().map(|scheduler| {
                 RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, scheduler.slots.dirty)
             }),
+            clock_homes: runtime
+                .runtime_schema
+                .scheduler
+                .iter()
+                .flat_map(|scheduler| scheduler.events.iter())
+                .chain(runtime.runtime_schema.time_slots.iter())
+                .filter_map(|address| layout.offsets.get(address).copied())
+                .collect(),
             wide: false,
             homes: Vec::new(),
         })
@@ -674,12 +713,14 @@ impl<'a> Marker<'a> {
         }
     }
 
-    /// Mark `readers`, and the scheduler's settle as dirty, with the byte
-    /// `one`, whatever the write before changed.
+    /// Mark `readers` with the byte `one`, and the scheduler's settle as
+    /// dirty with `dirty_value` (1, or 2 when only a clock changed),
+    /// whatever the write before changed.
     fn mark_unconditionally(
         &self,
         instructions: &mut Vec<SIRInstruction<RegionedAbsoluteAddr>>,
         one: RegisterId,
+        dirty_value: RegisterId,
         readers: Vec<u32>,
     ) {
         if let Some(dirty) = self.scheduler_dirty {
@@ -687,7 +728,7 @@ impl<'a> Marker<'a> {
                 dirty,
                 SIROffset::Static(0),
                 8,
-                one,
+                dirty_value,
                 Vec::new(),
                 Vec::new(),
             ));
@@ -721,6 +762,7 @@ impl<'a> Marker<'a> {
             let mut segment = Segment {
                 current: block_id,
                 one: None,
+                two: None,
                 instructions: Vec::with_capacity(old_instructions.len()),
             };
             let mut index = 0;
@@ -801,7 +843,7 @@ impl<'a> Marker<'a> {
                 return;
             }
             let one = segment.one(unit, alloc);
-            self.mark_unconditionally(&mut segment.instructions, one, readers);
+            self.mark_unconditionally(&mut segment.instructions, one, one, readers);
             return;
         }
         let target = match &instruction {
@@ -821,9 +863,14 @@ impl<'a> Marker<'a> {
             return;
         }
         let one = segment.one(unit, alloc);
+        let dirty_value = if self.is_clock_home(&address) {
+            segment.two(unit, alloc)
+        } else {
+            one
+        };
         if width > MAX_COMPARED_WIDTH || self.spans_padded_elements(&address, &offset, width) {
             segment.instructions.push(instruction);
-            self.mark_unconditionally(&mut segment.instructions, one, readers);
+            self.mark_unconditionally(&mut segment.instructions, one, dirty_value, readers);
             return;
         }
         // Set the readers' flags only when the store changes the state, both
@@ -846,8 +893,19 @@ impl<'a> Marker<'a> {
         let mark = alloc.block();
         let rest = segment.split(unit, alloc, changed, mark);
         let mut marks = Vec::new();
-        self.mark_unconditionally(&mut marks, one, readers);
+        self.mark_unconditionally(&mut marks, one, dirty_value, readers);
         insert_block(unit, mark, marks, SIRTerminator::Jump(rest, Vec::new()));
+    }
+
+    /// Whether a write of `address` is a write of an event signal or of the
+    /// slot time.
+    fn is_clock_home(&self, address: &RegionedAbsoluteAddr) -> bool {
+        address.region == STABLE_REGION
+            && self
+                .layout
+                .offsets
+                .get(&address.absolute_addr())
+                .is_some_and(|home| self.clock_homes.contains(home))
     }
 
     /// The run of whole-object commits `instructions` starts with whose
@@ -1200,6 +1258,7 @@ mod tests {
             layout,
             flags,
             scheduler_dirty: None,
+            clock_homes: crate::HashSet::default(),
             wide: false,
             homes: Vec::new(),
         };

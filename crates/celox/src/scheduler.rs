@@ -506,6 +506,10 @@ struct Incremental {
     source: AbsoluteAddr,
     sources: HashSet<AbsoluteAddr>,
     units: Vec<Unit>,
+    /// The flags of a partitioned settle and its partition count: the cone
+    /// runs only when the untracked byte is clear, as a raw view of the
+    /// state dirties every partition.
+    untracked: Option<(AbsoluteAddr, usize)>,
 }
 
 struct CountedEvent {
@@ -1715,48 +1719,100 @@ impl Plan {
             && sir.eval_comb.iter().all(|unit| {
                 celox_sir::cfg::SirCfg::analyze(unit).is_ok_and(|cfg| cfg.loops.is_empty())
             }) {
-            kernels
-                .iter()
-                .enumerate()
-                .filter_map(|(index, kernel)| kernel.as_ref().map(|kernel| (index, kernel)))
-                .find(|(_, kernel)| kernel.delays && kernel.writes.len() == 1)
-                .and_then(|(index, kernel)| {
-                    let source = storage(events[kernel.writes[0]].signal);
-                    if !settle_reads.as_ref()?.contains(&source) {
-                        return None;
-                    }
-                    let sources: HashSet<_> = instructions(&sir.processes[index])
-                        .flat_map(written_storage)
-                        .filter(|write| write.region == STABLE_REGION)
-                        .map(|write| storage(write.absolute_addr()))
-                        .filter(|address| settle_reads.as_ref().unwrap().contains(address))
-                        .collect();
-                    // Read-before-write activations retain their existing
-                    // per-settle semantics, including their downstream effects.
-                    let stateful: Vec<_> = sir.eval_comb_stateful.as_ref().map_or_else(
-                        || retained.iter().copied().collect(),
-                        |targets| {
-                            targets
-                                .iter()
-                                .map(|target| storage(target.absolute_addr()))
-                                .filter(|target| retained.contains(target))
-                                .collect()
-                        },
-                    );
-                    let slicer = &*comb_slicer;
-                    let inputs = sources
-                        .iter()
-                        .copied()
-                        .chain(schema.time_slots.iter().copied().map(&storage))
-                        .chain(stateful);
-                    let units = slicer.affected_slice(inputs);
-                    let size = |units: &[Unit]| units.iter().flat_map(instructions).count();
-                    (size(&units) * 4 < size(&sir.eval_comb) * 3).then_some(Incremental {
-                        source,
-                        sources,
-                        units,
+            // A partitioned settle has a cone of its own: the partitions the
+            // kernels' event writes dirty and those they publish to.
+            let partition_cone = || -> Option<Incremental> {
+                let partitioning = schema.settle_partitions.as_ref()?;
+                let settle = program.layout().settle.as_ref()?;
+                let sources: HashSet<AbsoluteAddr> = kernels
+                    .iter()
+                    .flatten()
+                    .flat_map(|kernel| kernel.writes.iter())
+                    .map(|&event| storage(events[event].signal))
+                    .collect();
+                let source = *sources.iter().min()?;
+                let offsets = &program.layout().offsets;
+                let seeds: Vec<usize> = sources
+                    .iter()
+                    .copied()
+                    .chain(schema.time_slots.iter().copied().map(&storage))
+                    .filter_map(|address| offsets.get(&address).copied())
+                    .flat_map(|home| {
+                        settle
+                            .objects
+                            .iter()
+                            .filter(move |object| object.start <= home && home < object.end)
+                            .flat_map(|object| object.partitions.iter().map(|&p| p as usize))
                     })
+                    .collect();
+                let flags =
+                    RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, partitioning.flags);
+                let (units, cone_partitions) = crate::settle::clock_cone(
+                    &sir.eval_comb,
+                    &flags,
+                    settle.partitions,
+                    offsets,
+                    seeds,
+                )?;
+                let size = |units: &[Unit]| units.iter().flat_map(instructions).count();
+                tracing::debug!(
+                    "[settle-cone] {cone_partitions} of {} partitions, {} of {} instructions",
+                    settle.partitions,
+                    size(&units),
+                    size(&sir.eval_comb)
+                );
+                (size(&units) * 4 < size(&sir.eval_comb) * 3).then_some(Incremental {
+                    source,
+                    sources,
+                    units,
+                    untracked: Some((partitioning.flags, settle.partitions)),
                 })
+            };
+            partition_cone().or_else(|| {
+                kernels
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, kernel)| kernel.as_ref().map(|kernel| (index, kernel)))
+                    .find(|(_, kernel)| kernel.delays && kernel.writes.len() == 1)
+                    .and_then(|(index, kernel)| {
+                        let source = storage(events[kernel.writes[0]].signal);
+                        if !settle_reads.as_ref()?.contains(&source) {
+                            return None;
+                        }
+                        let sources: HashSet<_> = instructions(&sir.processes[index])
+                            .flat_map(written_storage)
+                            .filter(|write| write.region == STABLE_REGION)
+                            .map(|write| storage(write.absolute_addr()))
+                            .filter(|address| settle_reads.as_ref().unwrap().contains(address))
+                            .collect();
+                        // Read-before-write activations retain their existing
+                        // per-settle semantics, including their downstream effects.
+                        let stateful: Vec<_> = sir.eval_comb_stateful.as_ref().map_or_else(
+                            || retained.iter().copied().collect(),
+                            |targets| {
+                                targets
+                                    .iter()
+                                    .map(|target| storage(target.absolute_addr()))
+                                    .filter(|target| retained.contains(target))
+                                    .collect()
+                            },
+                        );
+                        let slicer = &*comb_slicer;
+                        let inputs = sources
+                            .iter()
+                            .copied()
+                            .chain(schema.time_slots.iter().copied().map(&storage))
+                            .chain(stateful);
+                        let units = slicer.affected_slice(inputs);
+                        let size = |units: &[Unit]| units.iter().flat_map(instructions).count();
+                        (size(&units) * 4 < size(&sir.eval_comb) * 3).then_some(Incremental {
+                            source,
+                            sources,
+                            units,
+                            untracked: None,
+                        })
+                    })
+            })
         } else {
             None
         };
@@ -6225,7 +6281,16 @@ impl Generator<'_> {
                 let partial = self.b.new_block();
                 let full = self.b.new_block();
                 let done = self.b.new_block();
-                let only_clock = self.equals(dirty, 2);
+                let mut only_clock = self.equals(dirty, 2);
+                if let Some((flags, partitions)) = cone.untracked {
+                    let untracked = self.load_at(
+                        flags,
+                        celox_design::settle_untracked_flag(partitions) * 8,
+                        SCHEDULER_FLAG_WIDTH,
+                    );
+                    let tracked = self.equals(untracked, 0);
+                    only_clock = self.binary(1, only_clock, BinaryOp::And, tracked);
+                }
                 self.b.seal_block(SIRTerminator::Branch {
                     cond: only_clock,
                     true_block: (partial, Vec::new()),

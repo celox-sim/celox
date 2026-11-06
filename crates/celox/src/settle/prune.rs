@@ -156,12 +156,12 @@ enum Home {
     Unknown,
 }
 
-struct Analysis<'a> {
-    unit: &'a Unit,
-    flags: &'a RegionedAbsoluteAddr,
-    partitions: usize,
+pub(super) struct Analysis<'a> {
+    pub(super) unit: &'a Unit,
+    pub(super) flags: &'a RegionedAbsoluteAddr,
+    pub(super) partitions: usize,
     offsets: &'a crate::HashMap<AbsoluteAddr, usize>,
-    defs: crate::HashMap<RegisterId, &'a Instruction>,
+    pub(super) defs: crate::HashMap<RegisterId, &'a Instruction>,
     /// The block declaring each parameter, and its position.
     params: crate::HashMap<RegisterId, (BlockId, usize)>,
     /// The argument lists passed to each block.
@@ -171,7 +171,7 @@ struct Analysis<'a> {
 }
 
 impl<'a> Analysis<'a> {
-    fn new(
+    pub(super) fn new(
         unit: &'a Unit,
         flags: &'a RegionedAbsoluteAddr,
         partitions: usize,
@@ -277,7 +277,7 @@ impl<'a> Analysis<'a> {
 
     /// The partition a load of `register` guards: a byte of the flags below
     /// the untracked byte.
-    fn flag_load(&self, register: RegisterId) -> Option<usize> {
+    pub(super) fn flag_load(&self, register: RegisterId) -> Option<usize> {
         match self.defs.get(&register)? {
             SIRInstruction::Load(_, address, SIROffset::Static(offset), 8)
                 if address == self.flags
@@ -290,7 +290,7 @@ impl<'a> Analysis<'a> {
         }
     }
 
-    fn is_zero(&self, register: RegisterId) -> bool {
+    pub(super) fn is_zero(&self, register: RegisterId) -> bool {
         matches!(
             self.defs.get(&register),
             Some(SIRInstruction::Imm(_, value)) if *value == SIRValue::new(0u32)
@@ -299,7 +299,7 @@ impl<'a> Analysis<'a> {
 
     /// The partition `block` guards (`Load own flag; Ne 0; Branch`), with
     /// the first block of its body and the block that skips it.
-    fn guard(&self, block: BlockId) -> Option<(usize, BlockId, BlockId)> {
+    pub(super) fn guard(&self, block: BlockId) -> Option<(usize, BlockId, BlockId)> {
         let SIRTerminator::Branch {
             cond,
             true_block: (body, body_args),
@@ -323,7 +323,7 @@ impl<'a> Analysis<'a> {
     }
 
     /// The blocks reachable from `body` without passing `merge`.
-    fn body(&self, body: BlockId, merge: BlockId) -> Vec<BlockId> {
+    pub(super) fn body(&self, body: BlockId, merge: BlockId) -> Vec<BlockId> {
         let mut seen = crate::HashSet::from_iter([body]);
         let mut stack = vec![body];
         let mut blocks = Vec::new();
@@ -467,7 +467,11 @@ impl<'a> Analysis<'a> {
     /// The flag stores of a publish block (`Store(flags, ..)` of byte 1, or
     /// of one or more words ORed with byte masks), as `(instruction index,
     /// readers)`; `None` unless the block only publishes.
-    fn publish_stores(&self, block: BlockId, done: BlockId) -> Option<Vec<(usize, Vec<usize>)>> {
+    pub(super) fn publish_stores(
+        &self,
+        block: BlockId,
+        done: BlockId,
+    ) -> Option<Vec<(usize, Vec<usize>)>> {
         let block = self.unit.blocks.get(&block)?;
         if !block.params.is_empty()
             || !matches!(&block.terminator, SIRTerminator::Jump(target, args) if *target == done && args.is_empty())
@@ -513,7 +517,7 @@ impl<'a> Analysis<'a> {
         Some(stores)
     }
 
-    fn is_one(&self, register: RegisterId) -> bool {
+    pub(super) fn is_one(&self, register: RegisterId) -> bool {
         matches!(
             self.defs.get(&register),
             Some(SIRInstruction::Imm(_, value)) if *value == SIRValue::new(1u32)
@@ -523,7 +527,7 @@ impl<'a> Analysis<'a> {
     /// The bytes a word store of `width` bits publishes, lowest first: an
     /// immediate of bytes 0 or 1, alone or ORed into the flags word, or a
     /// concatenation of such words.
-    fn published_bytes(&self, source: RegisterId, width: usize) -> Option<Vec<bool>> {
+    pub(super) fn published_bytes(&self, source: RegisterId, width: usize) -> Option<Vec<bool>> {
         let immediate = |register: RegisterId| -> Option<Vec<bool>> {
             let SIRInstruction::Imm(_, value) = self.defs.get(&register)? else {
                 return None;

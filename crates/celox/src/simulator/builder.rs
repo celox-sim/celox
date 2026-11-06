@@ -6995,6 +6995,101 @@ endmodule"#;
         }
     }
 
+    /// A partitioned settle has a clock cone of its own: the partitions
+    /// the kernels' clock writes dirty and those they publish to. The slot
+    /// after a clock toggle runs only the cone; a kernel writing data as
+    /// well runs the whole settle.
+    #[cfg(all(
+        feature = "systemverilog",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn partitioned_clock_cone_matches_the_single_pass_settle() {
+        let source = r#"`timescale 1ns/1ns
+module Top(output logic [7:0] fast, output logic [7:0] slow, output logic [7:0] jcount, output wire [7:0] view, output wire tick, output wire [7:0] mix);
+    bit clk = 0;
+    bit jclk = 0;
+    logic en = 0;
+    logic [7:0] din = 0;
+    always #5 clk = ~clk;
+    always #7 jclk = ~jclk;
+    always #11 en = ~en;
+    always #3 din = din + 8'd29;
+    logic en_l;
+    always_latch if (!clk) en_l = en;
+    wire gclk = clk & en_l;
+    assign tick = clk ^ jclk;
+    initial begin fast = 0; slow = 0; jcount = 0; end
+    always @(posedge clk) fast <= fast + din;
+    always @(posedge gclk) slow <= slow ^ fast;
+    always @(posedge jclk) jcount <= jcount + 8'd1;
+    assign view = slow + fast + jcount + {7'd0, tick};
+    // Data logic outside the clock cone.
+    logic [31:0] d0, d1, d2, d3, d4, d5, d6, d7;
+    assign d0 = {din, fast, slow, jcount} * 32'd2654435761;
+    assign d1 = d0 ^ (d0 >> 7);
+    assign d2 = d1 + {jcount, din, fast, slow};
+    assign d3 = d2 ^ (d2 << 3);
+    assign d4 = d3 * 32'd40503;
+    assign d5 = d4 ^ (d4 >> 11);
+    assign d6 = d5 + d1;
+    assign d7 = d6 ^ d3;
+    assign mix = d7[7:0] ^ d7[15:8] ^ d7[23:16] ^ d7[31:24];
+    // A kernel waiting on the data outputs keeps their logic eager: the
+    // settle is not deferred.
+    integer hits = 0;
+    always @(mix or view) hits = hits + 1;
+endmodule"#;
+        let builder = || {
+            crate::Simulation::from_sv_sources(
+                vec![(source, std::path::Path::new("clock-cone.sv"))],
+                "Top",
+            )
+            .settle_partition(crate::SettlePartition::Always)
+        };
+        let (program, _, _, _, _) = builder()
+            .emit_triggers()
+            .into_laid_out_program(crate::MemoryLayoutMode::Packed, false, false)
+            .unwrap();
+        assert!(
+            crate::scheduler::incremental_inputs_for_test(&program)
+                .is_some_and(|inputs| inputs >= 2),
+            "the clock writes must use the partition cone"
+        );
+        let trace = |mut simulation: crate::Simulation| {
+            let outputs =
+                ["fast", "slow", "jcount", "view", "tick"].map(|name| simulation.signal(name));
+            let mut trace = Vec::new();
+            for time in 0..120 {
+                simulation.run_until(time).unwrap();
+                trace.push(outputs.map(|signal| simulation.get(signal)));
+            }
+            (trace, simulation.scheduler_stats())
+        };
+        let (cone, stats) = trace(
+            builder()
+                .settle_check(true)
+                .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+                .build_native()
+                .unwrap(),
+        );
+        assert!(
+            stats.compiled_slots > 0 && stats.checked_steps > 0,
+            "{stats:?}"
+        );
+        let (single, _) = trace(
+            crate::Simulation::from_sv_sources(
+                vec![(source, std::path::Path::new("clock-cone.sv"))],
+                "Top",
+            )
+            .disable_pass(crate::optimizer::SirPass::PartitionedSettle)
+            .build_native()
+            .unwrap(),
+        );
+        assert_eq!(cone, single);
+        assert_ne!(single[119][1], 0u8.into(), "the gated domain must have run");
+    }
+
     #[cfg(all(
         feature = "systemverilog",
         any(target_arch = "x86_64", target_arch = "aarch64")
