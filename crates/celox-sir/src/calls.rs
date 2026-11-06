@@ -268,6 +268,7 @@ mod tests {
                     width: 32,
                     four_state: false,
                     handle: false,
+                    element_width: None,
                 }],
             },
             effects: Default::default(),

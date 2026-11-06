@@ -918,7 +918,8 @@ fn automatic_arrays_of_units_with_one_live_activation() {
     // host serves the request before the other process runs, so neither
     // sees the other's elements. Each activation of `fresh` starts with its
     // array cleared. `slow` waits with its array live, so a second process
-    // could enter it meanwhile: it stays inlined, each call with its own.
+    // enters it meanwhile: its array is a slot of its frame, one for each
+    // call.
     let source = r#"`timescale 1ns/1ns
 module Top(output int a, output int b, output int c, output int d, output int e, output int f);
     function automatic int tabulate(int n);
@@ -952,7 +953,114 @@ module Top(output int a, output int b, output int c, output int d, output int e,
     end
 endmodule
 "#;
-    same_as_inlined(source, 2, 4, &["a", "b", "c", "d", "e", "f"]);
+    same_as_inlined(source, 3, 4, &["a", "b", "c", "d", "e", "f"]);
+}
+
+#[test]
+fn recursive_functions_keep_their_arrays_in_their_frames() {
+    // Each activation of `digits` has its own arrays, slots of its frame,
+    // which it writes and reads at positions computed at run time, also
+    // after the recursive call returns.
+    let source = r#"module Top(output int a, output int b);
+    function automatic int digits(int n, int depth);
+        int q[4];
+        logic [7:0] w[3];
+        int k;
+        foreach (q[i]) q[i] = n * 10 + i + depth;
+        w[depth % 3] = 8'(n);
+        if (depth < 3) k = digits(n + 1, depth + 1);
+        else k = 0;
+        return q[n % 4] + q[3] + k + w[depth % 3];
+    endfunction
+    int one = 1;
+    initial begin
+        a = digits(one, 0);
+        b = digits(one + 4, 1);
+    end
+endmodule
+"#;
+    assert_eq!(function_units(source, true), 1);
+    for four_state in [false, true] {
+        for backend in backends() {
+            assert_eq!(
+                simulate(source, four_state, true, backend, 0, &["a", "b"]),
+                Ok(vec![value(240), value(405)]),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+}
+
+#[test]
+fn wide_elements_of_frame_arrays() {
+    // Elements of 65 and 100 bits, at positions computed at run time, start
+    // at bit offsets that are not byte aligned (the second element of a
+    // 65-bit array starts at bit 65): every backend reads and writes them
+    // in place, and the neighbouring elements keep their bits. `wide` waits
+    // with its arrays live, so they are slots of its frame, one per call.
+    let source = r#"`timescale 1ns/1ns
+module Top(output logic [64:0] a, output logic [99:0] b, output logic [64:0] c, output logic [99:0] d);
+    task automatic wide(input int n, output logic [64:0] x, output logic [99:0] y);
+        logic [64:0] q[3];
+        logic [99:0] r[3];
+        foreach (q[i]) begin
+            q[i] = {1'b1, 64'(n) << (i * 7)} ^ 65'(i);
+            r[i] = (100'(n) << (30 + i * 11)) | 100'(i + 1);
+        end
+        #1;
+        x = q[n % 3] ^ q[(n + 1) % 3];
+        y = r[n % 3] + r[(n + 2) % 3];
+        q[(n + 1) % 3] = x;
+        r[n % 3] = y;
+        x = x ^ q[(n + 1) % 3] ^ q[(n + 2) % 3] ^ q[n % 3];
+        y = y ^ r[n % 3] ^ r[(n + 1) % 3] ^ r[(n + 2) % 3];
+    endtask
+    int one = 1;
+    initial wide(one, a, b);
+    initial wide(one + 4, c, d);
+endmodule
+"#;
+    same_as_inlined(source, 1, 2, &["a", "b", "c", "d"]);
+}
+
+#[test]
+fn frame_arrays_passed_by_ref_stay_in_their_frames() {
+    // `walk` recurses, so its array is a slot of each activation's frame.
+    // Passed by `ref`, it has no place a call can pass, so the calls of
+    // `fill` and `total`, which only reads it, stay inlined into `walk`'s
+    // unit and name the slot: each activation keeps its own elements across
+    // the recursive call.
+    let source = r#"module Top(output int a, output int b);
+    function automatic void fill(ref int target[3], input int n);
+        foreach (target[i]) target[i] = n * 10 + i;
+    endfunction
+    function automatic int total(ref int target[3]);
+        return target[0] + target[1] + target[2];
+    endfunction
+    function automatic int walk(int n);
+        int q[3];
+        int k;
+        fill(q, n);
+        k = n > 0 ? walk(n - 1) : 0;
+        return total(q) + k;
+    endfunction
+    int one = 1;
+    initial begin
+        a = walk(one + 1);
+        b = walk(one + 2);
+    end
+endmodule
+"#;
+    assert_eq!(function_units(source, true), 1);
+    for four_state in [false, true] {
+        for backend in backends() {
+            assert_eq!(
+                simulate(source, four_state, true, backend, 0, &["a", "b"]),
+                Ok(vec![value(99), value(192)]),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
 }
 
 #[test]

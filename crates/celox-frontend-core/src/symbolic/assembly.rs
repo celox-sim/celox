@@ -4211,6 +4211,7 @@ fn relocate_units(
                             width: slot.width,
                             four_state: slot.four_state,
                             handle: slot.handle,
+                            element_width: slot.element_width,
                         })
                         .collect(),
                 },

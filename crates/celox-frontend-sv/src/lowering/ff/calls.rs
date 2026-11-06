@@ -33,6 +33,9 @@ pub(super) struct FrameContext {
     /// The first variable the lowering of the unit created: those from it
     /// on that the unit touches are slots of its frame.
     start: SourceVarId,
+    /// Whether its automatic unpacked arrays stay module variables (see
+    /// `ProcModule::single_activation`); otherwise they are slots.
+    single: bool,
 }
 
 /// The resume slots of a resumable unit being lowered, and its resume
@@ -222,6 +225,12 @@ impl Ff<'_, '_> {
                 .find(|(formal, _, _)| *formal == param.name)
             {
                 let name = actual_names.get(&param.name)?;
+                // An array in the frame of this activation has no place a
+                // call can pass: the call stays inlined, where the formal
+                // names the slot.
+                if self.frame_array(target, name) {
+                    return None;
+                }
                 if self.frame_variable(target, name) {
                     if !copied.insert(target) {
                         return None;
@@ -292,18 +301,30 @@ impl Ff<'_, '_> {
     }
 
     /// Whether variable `id`, named `name`, is an automatic of the unit
-    /// being lowered, which is a slot of its frame: an automatic of a
-    /// subroutine whose body it expands, or a variable its lowering
-    /// created.
+    /// being lowered that a call copies into a callee's frame and back (see
+    /// [`Place::Frame`]): one that is not an unpacked array, which is a
+    /// module variable that a callee names, or a slot (see
+    /// [`Self::frame_array`]).
     fn frame_variable(&self, id: SourceVarId, name: &str) -> bool {
+        self.m.var(id).array_dims.is_empty() && self.automatic_of_unit(id, name)
+    }
+
+    /// Whether variable `id`, named `name`, is an automatic unpacked array
+    /// that is a slot of the frame of the unit being lowered: one of a unit
+    /// that can have several live activations.
+    fn frame_array(&self, id: SourceVarId, name: &str) -> bool {
+        !self.m.var(id).array_dims.is_empty()
+            && self.frame.as_ref().is_some_and(|frame| !frame.single)
+            && self.automatic_of_unit(id, name)
+    }
+
+    /// Whether variable `id`, named `name`, is an automatic of the unit
+    /// being lowered: a slot of its own, an automatic of a subroutine whose
+    /// body it expands, or a variable its lowering created.
+    fn automatic_of_unit(&self, id: SourceVarId, name: &str) -> bool {
         let Some(frame) = &self.frame else {
             return false;
         };
-        // An automatic unpacked array of the unit stays a module variable
-        // (see `ProcModule::single_activation`), which a callee names.
-        if !self.m.var(id).array_dims.is_empty() {
-            return false;
-        }
         let own = self
             .m
             .calls
@@ -525,7 +546,7 @@ impl Ff<'_, '_> {
                 if single {
                     continue;
                 }
-                return Err(Reason::Other("unpacked array in the frame".to_string()));
+                array_slot(self.m.var(id))?;
             }
             slots.push(self.slot_of(id));
         }
@@ -560,6 +581,7 @@ impl Ff<'_, '_> {
             renames,
             aliases,
             start,
+            single,
         };
         let lowered = Ff::new(&mut *self.m, 0).lower_function_unit(subroutine, frame);
         let functions = self.m.out_of_line().expect("lowering out of line");
@@ -594,6 +616,7 @@ impl Ff<'_, '_> {
             width: variable.width,
             four_state: variable.is_4state && self.m.four_state,
             kind: variable.value_kind,
+            element_width: super::super::unpacked_element_width(variable),
         }
     }
 
@@ -988,7 +1011,7 @@ impl Ff<'_, '_> {
                     in_place.insert(id);
                     continue;
                 }
-                return Err(Reason::Other("unpacked array in the frame".to_string()));
+                array_slot(variable)?;
             }
             slots.push(self.slot_of(id));
         }
@@ -999,9 +1022,9 @@ impl Ff<'_, '_> {
         // the stores into that, which only the stores of the units the
         // runtime runs can be.
         let persistent = self.m.static_storage();
-        let frame: HashMap<SourceVarId, (usize, SourceVarId)> = slots
+        let frame: HashMap<SourceVarId, (usize, SourceVarId, Option<usize>)> = slots
             .iter()
-            .map(|slot| (slot.id, (slot.width, slot.address)))
+            .map(|slot| (slot.id, (slot.width, slot.address, slot.element_width)))
             .collect();
         let mut reads = HashSet::default();
         let mut writes = HashSet::default();
@@ -1037,9 +1060,30 @@ impl Ff<'_, '_> {
                     }
                     _ => continue,
                 };
-                if let Some(&(slot_width, address)) = frame.get(&addr.var_id) {
-                    match offset {
-                        SIROffset::Static(offset) if offset + width <= slot_width => {}
+                if let Some(&(slot_width, address, element)) = frame.get(&addr.var_id) {
+                    // A slot holding an array is also accessed at positions
+                    // computed at run time, within one element, as the
+                    // lowering accesses an array of the state.
+                    match (offset, element) {
+                        (SIROffset::Static(offset), _)
+                        | (
+                            SIROffset::PackedElements {
+                                bit_offset: offset, ..
+                            },
+                            Some(_),
+                        ) if offset + width <= slot_width => {}
+                        (
+                            SIROffset::Element {
+                                element_width,
+                                bit_offset,
+                                dynamic_bit_offset,
+                                ..
+                            },
+                            Some(element),
+                        ) if *element_width == element
+                            && width <= element
+                            && (dynamic_bit_offset.is_some() || bit_offset + width <= element) => {}
+                        (SIROffset::Dynamic(_), Some(element)) if width <= element => {}
                         _ => return Err(other("dynamic frame access")),
                     }
                     *addr = frame_addr(address);
@@ -1425,4 +1469,15 @@ impl Ff<'_, '_> {
         self.b.seal_block(SIRTerminator::Error(code));
         self.b.switch_to_block(next);
     }
+}
+
+/// Check that unpacked array `variable` can be a slot of a frame: one of
+/// bits, which the collector need not scan element by element.
+fn array_slot(variable: &SvVariable) -> Result<(), Reason> {
+    if variable.value_kind != celox_design::ValueKind::Bits {
+        return Err(Reason::Other(
+            "unpacked array of handles in the frame".to_string(),
+        ));
+    }
+    Ok(())
 }

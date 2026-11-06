@@ -164,6 +164,7 @@ fn words(count: u32) -> FrameLayout<RegionedAbsoluteAddr> {
                 width: 32,
                 four_state: false,
                 handle: false,
+                element_width: None,
             })
             .collect(),
     }
@@ -297,6 +298,7 @@ fn identity() -> FunctionUnit<RegionedAbsoluteAddr> {
                     width: 100,
                     four_state: true,
                     handle: false,
+                    element_width: None,
                 })
                 .collect(),
         },
@@ -845,6 +847,7 @@ fn reads_a_slot_at_the_end_of_the_stack_within_the_image() {
                     width: 99,
                     four_state: false,
                     handle: false,
+                    element_width: None,
                 },
                 FrameSlot {
                     addr: slot(1),
@@ -852,6 +855,7 @@ fn reads_a_slot_at_the_end_of_the_stack_within_the_image() {
                     width: 100,
                     four_state: false,
                     handle: false,
+                    element_width: None,
                 },
             ],
         },
@@ -1048,6 +1052,7 @@ fn clearing(width: usize) -> FunctionUnit<RegionedAbsoluteAddr> {
                 width,
                 four_state: true,
                 handle: false,
+                element_width: None,
             }],
         },
     }
