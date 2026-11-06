@@ -101,6 +101,75 @@ fn integral_casts_to_string_zero_fill_whole_characters() {
 }
 
 #[test]
+fn casts_of_dynamic_arrays_to_fixed_size_ones_check_the_size() {
+    // IEEE 1800-2023 6.24.2, 7.6: `$cast` assigns a dynamically sized array
+    // to a fixed-size one only when it has as many elements; to a subarray
+    // and with elements wider than 64 bits too (the shared case
+    // `containers::casts_of_dynamic_arrays_to_fixed_size_ones_check_the_size`
+    // covers whole variables).
+    let source = r#"module Top(output int nested, output int other, output int index,
+                          output int snapshot, output int wide);
+        int d []; int q [$]; int g [3][2];
+        // An index that resizes the source after the source is read.
+        function int shrink(); d = new[1]; return 2; endfunction
+        logic [129:0] w []; logic [129:0] h [2];
+        int k;
+        initial begin
+            d = new[3];
+            q.push_back(11); q.push_back(13);
+            k = 1;
+            nested = $cast(g[k], q);
+            if ($cast(g[k + 1], q)) nested++;
+            other = $cast(g[0], d);
+            index = g[0][0] + g[1][0] + g[1][1] + g[2][1];
+            d = new[2]; d[0] = 21; d[1] = 23;
+            snapshot = $cast(g[shrink()], d) && g[2][0] == 21 && g[2][1] == 23 && d.size() == 1;
+            w = new[2]; w[0] = {2'b10, 128'h1}; w[1] = 130'h3;
+            wide = $cast(h, w) && h[0] == {2'b10, 128'h1} && h[1] == 130'h3;
+        end
+    endmodule"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("casts.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("nested")), 2u32.into());
+    assert_eq!(sim.get(sim.signal("other")), 0u32.into());
+    assert_eq!(sim.get(sim.signal("index")), 37u32.into());
+    assert_eq!(sim.get(sim.signal("snapshot")), 1u32.into());
+    assert_eq!(sim.get(sim.signal("wide")), 1u32.into());
+    // As a task, a size that does not match is a run-time error, and one
+    // that matches assigns.
+    let source = r#"module Top(output int value);
+        int d []; int f [2];
+        initial begin
+            d = new[2]; d[1] = 9;
+            $cast(f, d);
+            value = f[1];
+            d = new[1];
+            $cast(f, d);
+        end
+    endmodule"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("casts.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("value")), 9u32.into());
+    let events = sim.drain_runtime_events();
+    let errors = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                celox::RuntimeEvent::Report(report)
+                    if report.severity == celox::Severity::Error
+                        && String::from_utf8_lossy(&report.message).contains("not cast compatible")
+            )
+        })
+        .count();
+    assert_eq!(errors, 1, "{events:?}");
+}
+
+#[test]
 fn streams_cast_only_to_bit_stream_types() {
     // IEEE 1800-2023 11.4.14: a streaming concatenation is the operand only
     // of a cast to a bit-stream type (6.24.3), which `real` and `shortreal`
@@ -379,26 +448,6 @@ fn dynamic_casts_assign_cast_compatible_values_of_any_singular_type() {
     assert_eq!(sim.get(sim.signal("from_property")), 0u32.into());
     assert_eq!(sim.get(sim.signal("from_member")), 0u32.into());
     assert_eq!(sim.get(sim.signal("calls")), 6u32.into());
-    // A dynamically sized array is assigned to a fixed-size one only when
-    // its size matches at run time, which the lowering does not check yet.
-    let source = "module Top(output int out);
-        int d []; int f [2]; initial begin d = new[2]; out = $cast(f, d); end
-    endmodule";
-    let Err(error) =
-        celox::Simulation::from_sv_sources(vec![(source, Path::new("casts.sv"))], "Top").build()
-    else {
-        panic!("a cast of a dynamic array to a fixed-size one was lowered");
-    };
-    let error = error
-        .to_string()
-        .replace('│', " ")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    assert!(
-        error.contains("dynamically sized array to a fixed-size one"),
-        "{error}"
-    );
     // As a task, a cast that is not valid is a run-time error.
     let source = r#"module Top;
         initial begin real r; string s; s = "x"; $cast(r, s); end

@@ -49,8 +49,8 @@ pub(super) use objects::{
     static_property_declaration as object_static_property_declaration, this as object_this,
 };
 pub(super) use streams::{
-    Receiver as StreamReceiver, Unpack as StreamUnpack, free as stream_free, is_stream,
-    pack as pack_stream, take as stream_take, unpack as stream_unpack,
+    Receiver as StreamReceiver, Unpack as StreamUnpack, fixed_from_container, free as stream_free,
+    is_stream, pack as pack_stream, take as stream_take, unpack as stream_unpack,
 };
 pub(super) use strings::{
     call as string_call, fixed_array_element as fixed_string_array_element,

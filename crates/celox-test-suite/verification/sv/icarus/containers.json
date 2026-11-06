@@ -656,6 +656,17 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:16: Sorry: Dynamic array of type `class Cell{}` is not yet supported.\n<case>/source_0.sv:42: Error: Class/null r-value not allowed in this context.\n<case>/source_0.sv:43: Error: Class/null r-value not allowed in this context.\n<case>/source_0.sv:44: error: Both arguments (class, logic) must be class/null for '==' operator.\n4 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "containers::casts_of_dynamic_arrays_to_fixed_size_ones_check_the_size",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

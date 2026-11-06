@@ -21,6 +21,7 @@ sv_backends! {
     fn fixed_size_arrays_take_dynamic_array_elements(sim) { @case "containers::fixed_size_arrays_take_dynamic_array_elements"; }
     fn fixed_size_arrays_take_wide_dynamic_array_elements(sim) { @case "containers::fixed_size_arrays_take_wide_dynamic_array_elements"; }
     fn fixed_size_arrays_take_dynamic_arrays_of_any_element_type(sim) { @case "containers::fixed_size_arrays_take_dynamic_arrays_of_any_element_type"; }
+    fn casts_of_dynamic_arrays_to_fixed_size_ones_check_the_size(sim) { @case "containers::casts_of_dynamic_arrays_to_fixed_size_ones_check_the_size"; }
     fn associative_default_copy(sim) { @case "containers::associative_default_copy"; }
     fn associative_default_four_state(sim) { @case "containers::associative_default_four_state"; }
     fn associative_default_wide(sim) { @case "containers::associative_default_wide"; }
