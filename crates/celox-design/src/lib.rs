@@ -1504,10 +1504,10 @@ pub struct RuntimeSchema<A> {
 /// they read changed since they last ran.
 ///
 /// Byte `p` of `flags` is partition `p`'s dirty flag. The byte after the
-/// last partition's is the untracked byte, set once state may change
-/// without anyone setting flags (a retained raw view), after which every
-/// partition always runs. The next one says whether the current settle runs
-/// every partition, decided at its start.
+/// last partition's is the untracked byte ([`settle_untracked_flag`]), set
+/// once state may change without anyone setting flags (a retained raw
+/// view), after which every partition always runs; the wait flags follow
+/// it ([`settle_wait_flag`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SettlePartitions<A> {
     pub flags: A,
@@ -1517,17 +1517,36 @@ pub struct SettlePartitions<A> {
     /// its writers as well, so that, as in a single pass, the settle
     /// recomputes it.
     pub marks: Vec<(A, Vec<u32>)>,
-    /// After the full byte, one flag byte per process of
+    /// After the untracked byte, one flag byte per process of
     /// [`RuntimeSchema::processes`]: the compiled scheduler checks a
     /// process's edge wait only when its flag is set, and `marks` list the
-    /// flag (`partitions + 2 + process`) for the signals and counters the
-    /// wait watches. Zero when the flags have no such bytes.
+    /// flag ([`settle_wait_flag`]) for the signals and counters the wait
+    /// watches. Zero when the flags have no such bytes.
     pub waits: u32,
     /// The whole-variable copies of the settle, target then source: the plan
     /// counts a reader of the target as a reader of the source, so an
     /// identity-store alias may merge their homes (nothing else marks the
     /// target's readers once its store is gone).
     pub copies: Vec<(A, A)>,
+}
+
+/// The index of the untracked byte among the flags of a partitioned settle
+/// of `partitions` partitions: it follows the partitions' bytes.
+pub const fn settle_untracked_flag(partitions: usize) -> usize {
+    partitions
+}
+
+/// The index of the wait flag of `process` among the flags of a partitioned
+/// settle of `partitions` partitions: the wait flags follow the untracked
+/// byte.
+pub const fn settle_wait_flag(partitions: usize, process: usize) -> usize {
+    partitions + 1 + process
+}
+
+/// The number of flag bytes of a partitioned settle of `partitions`
+/// partitions and `waits` wait flags.
+pub const fn settle_flag_count(partitions: usize, waits: usize) -> usize {
+    partitions + 1 + waits
 }
 
 /// The process units that run the edges of one event together with its

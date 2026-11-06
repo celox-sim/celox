@@ -5571,7 +5571,11 @@ impl Generator<'_> {
                 )
             });
         let untracked = gate.map(|(flags, partitions, _)| {
-            let byte = self.load_at(flags, partitions * 8, SCHEDULER_FLAG_WIDTH);
+            let byte = self.load_at(
+                flags,
+                celox_design::settle_untracked_flag(partitions) * 8,
+                SCHEDULER_FLAG_WIDTH,
+            );
             let zero = self.constant(0, SCHEDULER_FLAG_WIDTH);
             self.binary(1, byte, BinaryOp::Ne, zero)
         });
@@ -5597,7 +5601,11 @@ impl Generator<'_> {
                 let first = word * 8;
                 let count = (waits - first).min(8);
                 let width = count * SCHEDULER_FLAG_WIDTH;
-                let bytes = self.load_at(flags, (partitions + 2 + first) * 8, width);
+                let bytes = self.load_at(
+                    flags,
+                    celox_design::settle_wait_flag(partitions, first) * 8,
+                    width,
+                );
                 let zero = self.constant(0, width);
                 let any = self.binary(1, bytes, BinaryOp::Ne, zero);
                 let dirty = self.binary(1, any, BinaryOp::Or, untracked);
@@ -5613,7 +5621,7 @@ impl Generator<'_> {
                 self.b.switch_to_block(run);
                 let mut partial = self.constant(0, self.ready_bits);
                 for check in checks {
-                    let offset = (partitions + 2 + check.index) * 8;
+                    let offset = celox_design::settle_wait_flag(partitions, check.index) * 8;
                     let byte = self.b.alloc_bit(SCHEDULER_FLAG_WIDTH, false);
                     self.b.emit(SIRInstruction::Slice(
                         byte,

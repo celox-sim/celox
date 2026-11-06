@@ -17,8 +17,8 @@ pub struct SettleObject {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettleLayout {
-    /// One byte per partition, then the untracked byte and the byte saying
-    /// whether the current settle runs every partition.
+    /// One byte per partition, then the untracked byte and the wait flags
+    /// (`celox_design::settle_untracked_flag`, `settle_wait_flag`).
     pub flags_offset: usize,
     pub partitions: usize,
     /// Sorted by `start`, disjoint.
@@ -27,8 +27,9 @@ pub struct SettleLayout {
     /// partition flagged and panic where the results differ.
     #[serde(default)]
     pub check: bool,
-    /// Flag bytes after the full byte: one per process, set when a signal
-    /// its edge wait watches changes, cleared when the wait is checked.
+    /// Flag bytes after the untracked byte: one per process, set when a
+    /// signal its edge wait watches changes, cleared when the wait is
+    /// checked.
     #[serde(default)]
     pub wait_flags: usize,
 }
@@ -63,10 +64,11 @@ impl SettleLayout {
         }
     }
 
-    /// The bytes of the flags: the untracked byte, the full byte and the
-    /// wait flags included.
+    /// The bytes of the flags: the untracked byte and the wait flags
+    /// included.
     pub fn flags(&self) -> std::ops::Range<usize> {
-        self.flags_offset..self.flags_offset + self.partitions + 2 + self.wait_flags
+        self.flags_offset
+            ..self.flags_offset + celox_design::settle_flag_count(self.partitions, self.wait_flags)
     }
 
     /// Run every partition on every settle from now on: a raw view of the
@@ -76,6 +78,9 @@ impl SettleLayout {
     /// `memory` must point to the writable state image this layout describes.
     pub unsafe fn mark_untracked(&self, memory: *mut u8) {
         // SAFETY: the untracked byte follows the flags (caller contract).
-        unsafe { *memory.add(self.flags_offset + self.partitions) = 1 };
+        unsafe {
+            *memory.add(self.flags_offset + celox_design::settle_untracked_flag(self.partitions)) =
+                1
+        };
     }
 }

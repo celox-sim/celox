@@ -1707,7 +1707,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             &mut modules,
             root_id,
             settle.flags.var_id,
-            settle_partitions.len() + 2 + process_count,
+            celox_design::settle_flag_count(settle_partitions.len(), process_count),
         );
     }
     let object_sizes = super::parallel::ObjectSizes {
@@ -2159,8 +2159,9 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         // Every partition runs at the first settle, and every wait is
         // checked at the first check.
         let partitions = settle_partitions.len();
-        let flags =
-            (0..partitions).chain((0..process_count).map(|process| partitions + 2 + process));
+        let flags = (0..partitions).chain(
+            (0..process_count).map(|process| celox_design::settle_wait_flag(partitions, process)),
+        );
         let value = flags.fold(BigUint::default(), |value, flag| {
             value | (BigUint::from(1u8) << (flag * 8))
         });
@@ -2169,7 +2170,9 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             data: InitialStateData::Packed {
                 value,
                 mask: BigUint::default(),
-                written_mask: (BigUint::from(1u8) << ((partitions + 2 + process_count) * 8)) - 1u8,
+                written_mask: (BigUint::from(1u8)
+                    << (celox_design::settle_flag_count(partitions, process_count) * 8))
+                    - 1u8,
             },
         });
     }
@@ -2690,7 +2693,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         // A process's wait flag, for the signals its waits watch and the
         // counters of their occurrences.
         for site in &wait_sites {
-            let flag = (settle_partitions.len() + 2 + site.process) as u32;
+            let flag = celox_design::settle_wait_flag(settle_partitions.len(), site.process) as u32;
             for &(signal, _) in &site.terms {
                 marks.entry(signal).or_default().insert(flag);
                 for watch in watches.iter().filter(|watch| watch.signal == signal) {
@@ -2943,8 +2946,8 @@ fn settle_partitioning(
 }
 
 /// Declare the `bytes` flags of a partitioned settle, one per partition,
-/// the untracked byte, the full byte and one per process for its edge wait,
-/// as a hidden variable of the top module.
+/// the untracked byte and one per process for its edge wait, as a hidden
+/// variable of the top module.
 fn declare_settle_flags(
     modules: &mut HashMap<ModuleId, SimModule>,
     root: ModuleId,
