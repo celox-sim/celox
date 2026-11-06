@@ -301,6 +301,75 @@ sv_backends! {
     }
 }
 
+/// The members of an enumeration type that a property declares in place are
+/// constants of the class scope, as those of a typedef in the class are
+/// (IEEE 1800-2023 6.19, 8.3): the class's methods and a derived class's name
+/// them, and `C::NAME` reads them outside, as UVM's `uvm_cmdline_verbosity`
+/// does with `enum {STANDARD, NON_STANDARD, ILLEGAL} src`.
+#[test]
+fn members_of_enumerations_declared_by_properties() {
+    let source = r#"
+    module Top(output int non_standard, output int illegal, output int marked, output bit [1:0] mode_bits);
+        class Setting;
+            enum {STANDARD, NON_STANDARD, ILLEGAL} src;
+            enum bit [1:0] {OFF = 1, ON = 2} mode;
+            static Setting settings[$];
+            function void mark(bit legal);
+                src = legal ? NON_STANDARD : ILLEGAL;
+                mode = ON;
+            endfunction
+            static function int count(int which);
+                int n = 0;
+                foreach (settings[i])
+                    if (which == 0 ? settings[i].src == NON_STANDARD : settings[i].src == ILLEGAL)
+                        n++;
+                return n;
+            endfunction
+        endclass
+        class Marked extends Setting;
+            function bit standard();
+                return src == STANDARD && mode != OFF;
+            endfunction
+        endclass
+        initial begin
+            Setting a = new;
+            Setting b = new;
+            Marked c = new;
+            a.mark(1);
+            b.mark(0);
+            c.mode = Setting::ON;
+            Setting::settings.push_back(a);
+            Setting::settings.push_back(b);
+            Setting::settings.push_back(c);
+            non_standard = Setting::count(0);
+            illegal = Setting::count(1);
+            marked = c.standard();
+            mode_bits = a.mode;
+        end
+    endmodule"#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        sim.run_until(0).unwrap();
+        for (name, expected) in [
+            ("non_standard", 1u8),
+            ("illegal", 1),
+            ("marked", 1),
+            ("mode_bits", 2),
+        ] {
+            let signal = sim.signal(name);
+            assert_eq!(
+                sim.get(signal),
+                BigUint::from(expected),
+                "{name}, four-state {four_state}"
+            );
+        }
+    }
+}
+
 /// A static method called without its empty parentheses may be the receiver
 /// of a member, and a method that returns a chandle so called gives a chandle
 /// (IEEE 1800-2023 13.5.5).
