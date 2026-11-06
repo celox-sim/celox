@@ -7,7 +7,7 @@ use super::*;
 use celox_sv_syntax::{Dimension, DimensionKind, ExprId, ExprKind};
 use system_functions::{
     ContainerKind, ContainerLayout, HandleProperty, Stream, StreamArg, StreamItem, StreamOp,
-    StreamPack, StreamRange,
+    StreamPack, StreamRange, StreamSize,
 };
 
 /// A heap stream operation.
@@ -140,6 +140,9 @@ pub(in crate::ast) enum Receiver {
     /// keeps its own width for the cast to convert; a dynamically sized one
     /// shall have the type's width (6.24.3).
     Cast(usize),
+    /// A fixed-size unpacked array assigned a dynamically sized one, whose
+    /// elements shall fill it exactly (7.6).
+    Assignment(StreamArg),
 }
 
 /// The layout of a container that a stream can fill: a queue or dynamic
@@ -364,12 +367,42 @@ fn operand(
         if chandles::type_holds_chandle(&container.element) {
             return Err(chandle());
         }
-        if layout.handle == Some(HandleProperty::Object) {
+        // An integral element wider than 64 bits is held in a record of one
+        // field, which the stream reads as the element's bits.
+        let wide = match &container.record {
+            Some(record)
+                if container.element.unpacked_struct().is_none()
+                    && container.element.class.is_none()
+                    && container.element.container.is_none()
+                    && record.fields.len() == 1
+                    && record.fields[0].offset == 0
+                    && record.fields[0].handle.is_none()
+                    && !record.fields[0].real =>
+            {
+                Some(record.fields[0])
+            }
+            _ => None,
+        };
+        if layout.handle == Some(HandleProperty::Object) && wide.is_none() {
             return Err(unsupported(
                 "streaming concatenation of class handles or structures in a container",
             ));
         }
         let value = bind_value(id, native, tree, session, dims, None)?;
+        if let Some(field) = wide {
+            if range.is_some() {
+                return Err(unsupported(
+                    "streaming concatenation with range of elements wider than 64 bits",
+                ));
+            }
+            return Ok(vec![Item::Dynamic(
+                StreamItem::WideContainer {
+                    width: field.width,
+                    four_state: field.four_state,
+                },
+                vec![value],
+            )]);
+        }
         let Some(range) = range else {
             return Ok(vec![Item::Dynamic(
                 StreamItem::Container {
@@ -650,14 +683,56 @@ pub(in crate::ast) fn pack(
     })
 }
 
+/// Container value `id` of a dynamically sized array, assigned to the
+/// fixed-size unpacked array `target` of equivalent elements: element `i`
+/// of the container is the target's element at the `i`th index from the
+/// left, and a container of another number of elements is a run-time error
+/// (IEEE 1800-2023 7.6). The elements travel as the stream `{>>{id}}`, which
+/// keeps that order (11.4.14.2).
+pub(in crate::ast) fn assign_to_fixed(
+    id: ExprId,
+    target: &VariableDimensions,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<Expr> {
+    let elements = || {
+        unsupported("assignment of a dynamically sized array to a fixed-size one of these elements")
+    };
+    if target.string
+        || target.real
+        || target.class.is_some()
+        || target.unpacked_struct.is_some()
+        || target.virtual_interface.is_some()
+        || chandles::holds_chandle(target)
+    {
+        return Err(elements());
+    }
+    let (element, count) = fixed_array(target, &tree.functions, dims)?.ok_or_else(elements)?;
+    let items = operand(id, native, tree, session, dims)?;
+    Ok(convert(
+        heap_stream(items, None, false, None),
+        Receiver::Assignment(StreamArg {
+            width: element * count,
+            bits: None,
+            element: Some(element),
+        }),
+    ))
+}
+
 /// Heap stream `stream` converted to `receiver` (11.4.14).
 fn convert(stream: Expr, receiver: Receiver) -> Expr {
     match receiver {
-        Receiver::Fixed(target) => {
+        Receiver::Fixed(target) | Receiver::Assignment(target) => {
+            let size = match receiver {
+                Receiver::Assignment(_) => StreamSize::Assignment,
+                _ => StreamSize::Fits,
+            };
             let bits = stream_op(
                 StreamOp::ToBits {
                     width: target.width,
-                    exact: false,
+                    size,
                 },
                 vec![stream],
             );
@@ -675,7 +750,13 @@ fn convert(stream: Expr, receiver: Receiver) -> Expr {
                 vec![bits],
             )
         }
-        Receiver::Cast(width) => stream_op(StreamOp::ToBits { width, exact: true }, vec![stream]),
+        Receiver::Cast(width) => stream_op(
+            StreamOp::ToBits {
+                width,
+                size: StreamSize::Cast,
+            },
+            vec![stream],
+        ),
         Receiver::Container(layout) => stream_op(StreamOp::ToContainer(layout), vec![stream]),
         Receiver::String => stream_op(StreamOp::ToString, vec![stream]),
     }

@@ -1092,6 +1092,33 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 Some(&shape),
             )?
         } else if op == "="
+            && let Some(target) = array_compatibility::native_unpacked_shape(
+                left,
+                self.tree,
+                self.session,
+                &self.dims,
+            )
+            && containers::native_type(
+                right,
+                self.tree.declarations(),
+                self.tree,
+                self.session,
+                &self.dims,
+            )?
+            .is_some()
+        {
+            // A fixed-size unpacked array, also a selected element of an
+            // array of them, takes the elements of a dynamically sized one
+            // (IEEE 1800-2023 7.6).
+            expression_binding::bind_value(
+                right,
+                self.tree.declarations(),
+                self.tree,
+                self.session,
+                &self.dims,
+                Some(&target),
+            )?
+        } else if op == "="
             && let Some(value) = expression_binding::selected_pattern(
                 left,
                 right,

@@ -17,7 +17,8 @@ pub use crate::system_functions::{
     AccessCheck, AggregatePattern, ArrayQuery, Callee, ContainerConcat, ContainerKind,
     ContainerLayout, ContainerOp, HandleProperty, Locator, LocatorKey, LocatorMethod,
     LocatorSource, MemoryFormat, ObjectField, ObjectOp, Radix, Record, Severity, Stream, StreamArg,
-    StreamItem, StreamOp, StreamPack, StreamRange, StringOp, SystemFunction, SystemTask, VcdTask,
+    StreamItem, StreamOp, StreamPack, StreamRange, StreamSize, StringOp, SystemFunction,
+    SystemTask, VcdTask,
 };
 
 /// A procedural statement of the analyzed IR.

@@ -190,9 +190,8 @@ impl Heap {
             | crate::containers::SHUFFLE
             | crate::containers::BOUND
             | crate::containers::MERGE) => self.container_call(op, parameter, a, b, c),
-            op @ crate::streams::NEW..=crate::streams::TRUNCATE => {
-                self.stream_call(op, parameter, a, b, c)
-            }
+            op @ (crate::streams::NEW..=crate::streams::TRUNCATE
+            | crate::streams::WIDE_CONTAINER) => self.stream_call(op, parameter, a, b, c),
             crate::containers::PATTERN => {
                 let bytes = self.container_pattern(a as Handle, parameter);
                 self.new_buffer(bytes)
