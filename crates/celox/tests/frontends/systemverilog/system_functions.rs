@@ -2167,6 +2167,41 @@ fn initial_blocks_run_their_system_tasks_at_time_zero() {
     assert_eq!(sim.step().unwrap(), None);
 }
 
+/// A severity task's message has the syntax of `$display` (IEEE 1800-2023
+/// 20.10): a message that does not start with a string literal, and
+/// arguments after the template's conversions, are displayed in decimal,
+/// or as text when they are strings.
+#[test]
+fn severity_messages_convert_arguments_like_display() {
+    let source = r#"
+        module Top(output logic y);
+            logic [7:0] v = 8'd10;
+            string s = "str";
+            initial begin
+                $error($sformatf("e%0d :assert:", 3));
+                $warning("w=", v);
+                $info(s, v);
+                $fatal(1, v);
+            end
+            assign y = 1'b0;
+        endmodule
+    "#;
+    let mut sim = initial_simulation(source);
+    sim.step().unwrap_err();
+    let report = |severity, message: &[u8]| {
+        celox::RuntimeEvent::Report(celox::Report::new(severity, message.to_vec()))
+    };
+    assert_eq!(
+        bare(sim.drain_runtime_events()),
+        vec![
+            report(celox::Severity::Error, b"e3 :assert:"),
+            report(celox::Severity::Warning, b"w= 10"),
+            report(celox::Severity::Info, b"str 10"),
+            report(celox::Severity::Fatal, b" 10"),
+        ],
+    );
+}
+
 #[test]
 fn finish_in_an_initial_block_ends_the_simulation() {
     let source = r#"

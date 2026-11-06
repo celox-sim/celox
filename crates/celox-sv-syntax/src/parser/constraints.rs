@@ -13,6 +13,11 @@ enum Job {
         negate: bool,
         has_else: bool,
     },
+    Foreach {
+        header: ForeachHeader,
+        first: usize,
+        start: usize,
+    },
 }
 
 impl Parser<'_> {
@@ -142,6 +147,23 @@ impl Parser<'_> {
                         jobs.push(Job::Set);
                     }
                 }
+                Job::Foreach {
+                    header,
+                    first,
+                    start,
+                } => {
+                    let body: Vec<_> = expressions.drain(first..).collect();
+                    for body in body {
+                        expressions.push(self.node(
+                            start,
+                            ExprKind::ConstraintForeach {
+                                array: header.array,
+                                variables: header.variables.clone(),
+                                body,
+                            },
+                        )?);
+                    }
+                }
                 Job::Expression => {
                     let start = self.at;
                     if self.eat("if") {
@@ -157,8 +179,12 @@ impl Parser<'_> {
                         });
                         jobs.push(Job::Set);
                     } else if self.eat("foreach") {
-                        supported = false;
-                        self.foreach_header()?;
+                        let header = self.foreach_header()?;
+                        jobs.push(Job::Foreach {
+                            header,
+                            first: expressions.len(),
+                            start,
+                        });
                         jobs.push(Job::Set);
                     } else if self.eat("disable") {
                         supported = false;

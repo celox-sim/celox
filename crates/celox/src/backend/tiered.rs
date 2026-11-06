@@ -22,8 +22,9 @@
 //! until the interpreter has executed a minimum number of evaluation steps,
 //! protecting short simulations from the promotion cost.
 //!
-//! The experimental `SimulatorOptions::hotspot_jit` option instead retains a
-//! mixed interpreter/native executor on supported single-lane x86-64 builds.
+//! `SimulatorOptions::hotspot_jit`, on by default, instead retains a mixed
+//! interpreter/native executor on supported single-lane native x86-64 and
+//! AArch64 builds.
 //! Its independently published entries are reported by `hotspot_stats`; they
 //! do not change the whole-image meaning of `is_compiled`.
 //!
@@ -729,6 +730,19 @@ impl TieredBackend {
         assert!(!self.is_compiled(), "must not use whole-image promotion");
     }
 
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    pub(crate) fn interp_for_test(&mut self) -> &mut crate::backend::InterpBackend {
+        let Phase::Interpreting(Some(interp)) = &mut self.phase else {
+            panic!("scheduler test requires the mixed executor");
+        };
+        interp
+    }
+
     /// Build a tiered simulation targeting this host's default compiled
     /// tier: ready to run immediately on the interpreter while the compiled
     /// tier is prepared in the background.
@@ -737,7 +751,7 @@ impl TieredBackend {
     /// [`TieredBackend::cancel_background_compilation`]); the Cranelift tier
     /// runs to completion once started.
     pub fn new(laid_out: &LaidOutProgram, options: &SimulatorOptions) -> Self {
-        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        #[cfg(hotspot_jit)]
         if options.hotspot_jit
             && matches!(options.tier_promotion, crate::TierPromotion::Always)
             && !options.trace.native
@@ -1228,7 +1242,7 @@ impl TieredBackend {
 
     /// Incremental entry counts. Whole-image promotion statistics describe the
     /// owning interpreter and do not count native calls inside mixed execution.
-    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    #[cfg(hotspot_jit)]
     pub fn hotspot_stats(&self) -> Option<super::HotspotStats> {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.hotspot_stats(),
@@ -1329,7 +1343,7 @@ impl TieredBackend {
     /// compilation was still pending, so callers that only want to reclaim
     /// a finished worker can ignore the call cheaply.
     pub fn cancel_background_compilation(&mut self) -> bool {
-        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        #[cfg(hotspot_jit)]
         if let Phase::Interpreting(Some(interp)) = &mut self.phase {
             if interp.cancel_hotspots() {
                 return true;
@@ -1924,6 +1938,23 @@ impl SimBackend for TieredBackend {
         }
     }
 
+    fn set_scheduler_slot<T: Copy>(&mut self, signal: SignalRef, value: T) {
+        match &mut self.phase {
+            Phase::Interpreting(Some(interp)) => interp.set_scheduler_slot(signal, value),
+            #[cfg(feature = "cranelift")]
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.set_scheduler_slot(signal, value),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => {
+                native.set_scheduler_slot(signal, value)
+            }
+            Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
+        }
+    }
+
     fn set_wide(&mut self, signal: SignalRef, value: BigUint) {
         match &mut self.phase {
             Phase::Interpreting(Some(interp)) => interp.set_wide(signal, value),
@@ -1986,6 +2017,21 @@ impl SimBackend for TieredBackend {
         }
     }
 
+    fn get_scheduler_slot<T: Default + Copy>(&self, signal: SignalRef) -> T {
+        match &self.phase {
+            Phase::Interpreting(Some(interp)) => interp.get_scheduler_slot(signal),
+            #[cfg(feature = "cranelift")]
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.get_scheduler_slot(signal),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.get_scheduler_slot(signal),
+            Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
+        }
+    }
+
     fn get_four_state(&self, signal: SignalRef) -> (BigUint, BigUint) {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.get_four_state(signal),
@@ -2042,6 +2088,36 @@ impl SimBackend for TieredBackend {
                 target_arch = "aarch64"
             ))]
             Phase::Compiled(CompiledTier::Native(native)) => native.memory_owner(),
+            Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
+        }
+    }
+
+    fn save_call_stack(&self, len: usize, into: &mut Vec<u8>) {
+        match &self.phase {
+            Phase::Interpreting(Some(interp)) => interp.save_call_stack(len, into),
+            #[cfg(feature = "cranelift")]
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.save_call_stack(len, into),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.save_call_stack(len, into),
+            Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
+        }
+    }
+
+    fn restore_call_stack(&mut self, bytes: &[u8]) {
+        match &mut self.phase {
+            Phase::Interpreting(Some(interp)) => interp.restore_call_stack(bytes),
+            #[cfg(feature = "cranelift")]
+            Phase::Compiled(CompiledTier::Jit(jit)) => jit.restore_call_stack(bytes),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => native.restore_call_stack(bytes),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
         }
     }
@@ -3301,6 +3377,11 @@ module Top (
             .recv_timeout(Duration::from_secs(60))
             .unwrap();
         assert!(!laid_out.runtime.runtime_schema.derived_edges.is_empty());
+        // The derived-edge image expands its units from deferred recipes.
+        assert_eq!(
+            laid_out.deferred_derived_edges.len(),
+            2 * laid_out.runtime.runtime_schema.derived_edges.len()
+        );
         let mut optimizing_options = baseline_options.clone();
         baseline_options.x86_options.baseline = true;
         optimizing_options.x86_options.baseline = false;

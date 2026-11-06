@@ -50,6 +50,13 @@ enum Frame {
     },
 }
 impl Builder {
+    /// Whether an item here is in the design element's own scope: in no
+    /// generate block, conditional, case or loop (IEEE 1800-2023 27.3).
+    pub(super) fn element_scope(&self) -> bool {
+        self.frames
+            .iter()
+            .all(|frame| matches!(frame, Frame::Region { .. }))
+    }
     pub(super) fn node(
         parser: &mut Parser<'_>,
         start: usize,

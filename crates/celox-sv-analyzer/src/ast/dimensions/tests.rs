@@ -800,6 +800,86 @@ fn discovery_settles_a_scope_once_for_its_queries() {
 }
 
 #[test]
+fn discovery_settles_the_scope_of_a_class_once_for_its_specializations() {
+    // The methods of each specialization query the scope around the class
+    // with the tables of the specialization: its declarations are discovered
+    // from the tables around the class, the same for every specialization.
+    let settles = |specializations: usize| {
+        let properties = (0..specializations)
+            .map(|i| format!("C#({}) c{i};", i + 1))
+            .collect::<String>();
+        let source = format!(
+            "package p;
+                class C #(int N = 2);
+                    typedef bit [N-1:0] word_t;
+                    function int g(); word_t v; return $bits(v); endfunction
+                endclass
+                class D; {properties} endclass
+            endpackage
+            module Top; endmodule"
+        );
+        SCOPE_SETTLES.with(|count| count.set(0));
+        crate::analyze_source(&source, Path::new("class-scope-settles.sv"))
+            .expect("the package analyzes");
+        SCOPE_SETTLES.with(|count| count.get())
+    };
+    assert_eq!(settles(2), settles(16));
+}
+
+#[test]
+fn discovery_settles_the_scope_of_a_class_once_for_its_methods() {
+    // The queries of each method of a class share the scope around it:
+    // which method a query is in does not change the declarations of the
+    // scope, so they are discovered once however many methods there are.
+    let settles = |methods: usize| {
+        let functions = (0..methods)
+            .map(|i| {
+                format!(
+                    "function int f{i}(); bit [{i}:0] a; bit [3:0] b; return $bits(a) + $bits(b); endfunction\n"
+                )
+            })
+            .collect::<String>();
+        let source = format!(
+            "package p;
+                class A; {functions} endclass
+            endpackage
+            module Top; endmodule"
+        );
+        SCOPE_SETTLES.with(|count| count.set(0));
+        crate::analyze_source(&source, Path::new("method-scope-settles.sv"))
+            .expect("the package analyzes");
+        SCOPE_SETTLES.with(|count| count.get())
+    };
+    assert_eq!(settles(2), settles(16));
+}
+
+#[test]
+fn constant_sizes_read_the_settled_scope() {
+    // The size of each cast and the count of each replication is bound in
+    // a disposable session, which reads the scope its caller settled
+    // instead of discovering it again.
+    let settles = |constants: usize| {
+        let uses = (0..constants)
+            .map(|i| format!("$bits(($bits(v) + {i})'(x)) + $bits({{($bits(v) + {i}){{x}}}})"))
+            .collect::<Vec<_>>()
+            .join(" + ");
+        let source = format!(
+            "package p;
+                parameter int W = 3;
+                class A; function int g(); return 1; endfunction endclass
+                function int f(); bit x; bit [W-1:0] v; return {uses}; endfunction
+            endpackage
+            module Top; endmodule"
+        );
+        SCOPE_SETTLES.with(|count| count.set(0));
+        crate::analyze_source(&source, Path::new("constant-settles.sv"))
+            .expect("the package analyzes");
+        SCOPE_SETTLES.with(|count| count.get())
+    };
+    assert_eq!(settles(2), settles(16));
+}
+
+#[test]
 fn class_references_prepare_each_specialization_once() {
     // Classes naming the same specializations, which each discovery pass
     // collects again, copy the scope tables to prepare each specialization

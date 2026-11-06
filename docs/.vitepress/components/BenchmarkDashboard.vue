@@ -308,7 +308,7 @@ const RUNTIME_COLORS: Record<string, string> = {
 };
 
 const RUNTIME_LABELS: Record<string, string> = {
-  "rtlmeter-celox": "Celox native O2",
+  "rtlmeter-celox": "Celox tiered (hotspot JIT) O2",
   "rtlmeter-verilator": "Verilator (4-state experimental)",
   "rtlmeter-xezim": "xezim release VM",
   "taxi-celox": "Celox native O1 · SV / cocotb",

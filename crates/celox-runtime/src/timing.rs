@@ -251,6 +251,8 @@ pub struct ProcessRefs {
     pub starts_with_event_wait: bool,
     pub status: SignalRef,
     pub delay: SignalRef,
+    /// See [`celox_design::ProcessSlots::call_top`].
+    pub call_top: Option<SignalRef>,
     /// Wait sites by local index: their terms.
     pub wait_sites: Vec<Vec<TermRefs>>,
     /// Nonblocking sites by local index.
@@ -269,6 +271,7 @@ impl ProcessRefs {
             starts_with_event_wait: false,
             status,
             delay,
+            call_top: None,
             wait_sites: Vec::new(),
             nba_sites: Vec::new(),
             host_requests: Vec::new(),
@@ -432,6 +435,11 @@ pub fn planes_occur(kind: CounterKind, old: &[u8], new: &[u8], width: usize) -> 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProcessState {
     pub activations: Vec<crate::simulation::Activation>,
+    /// The call stack below [`celox_design::ProcessSlots::call_top`] of
+    /// each activation suspended inside a call, by activation, kept while
+    /// other code runs on the one stack.
+    #[serde(default)]
+    pub call_stacks: std::collections::BTreeMap<usize, crate::simulation::SavedCalls>,
     pub cells: Vec<Value>,
     /// Processes suspended at a wait.
     pub waiters: Waiters,

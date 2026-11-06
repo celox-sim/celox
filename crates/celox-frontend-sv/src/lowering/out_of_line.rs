@@ -4,8 +4,10 @@
 //!
 //! Only a test switch turns this on (`AnalysisOptions::force_out_of_line_calls`):
 //! every subroutine that can be lowered so is, and every other one stays
-//! inlined. A subroutine qualifies when it cannot suspend its caller and
-//! makes no host request, both transitively (see [`Reason`]), has no `ref`
+//! inlined. A subroutine qualifies when it cannot suspend its caller other
+//! than for a host request, nor make one a unit cannot make, both
+//! transitively (see [`Reason`]; its prints and messages are runtime
+//! events, which a unit raises), has no `ref`
 //! formal (the callees inlined into its unit may), and its unit touches no
 //! state but its frame, the variables it reads, and the static storage of
 //! subroutines. Nor may it make a store that assembly instruments per store
@@ -13,15 +15,37 @@
 //! combinational logic observes), since assembly sees only the stores of
 //! the units the runtime runs: the frontend keeps out the stores into what
 //! the module's source may observe ([`ProcModule::observe_storage`]), and assembly
-//! rejects a function that makes one all the same. Calls inside a function
-//! unit cannot suspend either, so every frame lives only while the unit run
-//! that entered it.
+//! rejects a function that makes one all the same.
+//!
+//! A unit whose body suspends the process, for a host request (`$sformatf`,
+//! file I/O, `$sscanf`, plusargs, `$system`, the distribution functions), a
+//! `#` delay, `$stop` or `$finish`, is resumable (see [`Function::resume`]):
+//! a suspension stores the unit's resume point and returns with the status,
+//! and each caller up the chain does the same at its call, down to the
+//! process kernel, which suspends. The kernel resumes
+//! at its call and calls again; each frame continues where it stopped. A
+//! request's values pass through staging module variables, its site is one
+//! of the module's function sites, which every kernel that calls such units
+//! lists after its own, and the runtime keeps the stack below the innermost
+//! live frame with the activation until it runs again
+//! ([`celox_design::ProcessSlots::call_top`]). Only processes can suspend,
+//! so a call from anything else to such a unit stays inlined. A delay or a
+//! stop keeps the frames past the time slot: the collector finds the
+//! handles in the saved frames through the module's resume table
+//! ([`celox_design::CallResume`]), and checkpoints keep the saved stack.
 //!
 //! The frame of a function holds its own frame base and call depth first
 //! (the caller passes both: a unit run by the runtime starts with an empty
-//! stack at offset zero and depth zero), then its automatic formals, its
-//! result and its locals, then the temporaries the lowering of its body
-//! created, which a recursive activation must not share. Static storage
+//! stack at offset zero and depth zero), then the resume slots of a
+//! resumable unit, then the state of the calling
+//! process that its body and the bodies it reaches use ([`ProcessState`]),
+//! then its automatic formals, its result and its locals, then the
+//! temporaries the lowering of its body created, which a recursive
+//! activation must not share. The process state is the RNG state and seed
+//! of `$urandom` and the seed of `$random`: the caller passes its own and
+//! takes the states back whenever the call returns, also when it suspends,
+//! and passes them again when it continues the call, which is drawing on
+//! them in place. A unit thereby serves every process. Static storage
 //! that the analyzer found observable (`persistent_locals`, IEEE 1800-2023
 //! 13.4.2) stays a module variable shared by every activation.
 //!
@@ -35,7 +59,10 @@
 //! out of line only if the function writes no module variable and reads
 //! none the process writes, so both see the same values.
 
-use super::procedural::{ProcModule, collect_calls, default_calls, expr_idents, stmt_calls};
+use super::procedural::{
+    ProcModule, SystemTaskKind, collect_calls, default_calls, expr_idents, stmt_calls,
+    system_task_kind,
+};
 use super::*;
 use celox_sir::{FrameLayout, FrameSlot, FunctionUnit, RegisterId};
 use std::collections::BTreeMap;
@@ -48,10 +75,13 @@ type Addr = RegionedVarAddr;
 pub(super) enum Reason {
     /// It, or a subroutine it calls, has a `ref` formal.
     RefFormal,
-    /// It, or a subroutine it calls, has a timing control, a fork or a wait.
+    /// It, or a subroutine it calls, has an event control, a wait or a
+    /// fork.
     MaySuspend,
-    /// It, or a subroutine it calls, makes a host request: a system task,
-    /// `$sformatf`, file I/O, plusargs, `$system`, or a DPI-C import.
+    /// It, or a subroutine it calls, makes a host request a unit cannot
+    /// make: `$exit`, monitors, strobes, VCD tasks, process and mailbox
+    /// methods, or a DPI-C import; or a caller that cannot suspend calls a
+    /// unit that can suspend.
     HostRequest,
     /// Anything else, described.
     Other(String),
@@ -77,6 +107,24 @@ impl std::fmt::Display for Reason {
     }
 }
 
+/// The state of the calling process that a subroutine's body and the bodies
+/// it reaches use, which a unit of it receives through its frame: the
+/// caller passes its own and takes the RNG states back after the call.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct ProcessState {
+    /// The process RNG of `$urandom`, `std::randomize`, object seeding and
+    /// `shuffle` (IEEE 1800-2023 18.13, 18.14).
+    pub random: bool,
+    /// The seed of `$random` without a seed argument.
+    pub dist_seed: bool,
+    /// The simulation time, which `$time` and its kin read.
+    pub time: bool,
+    /// Whether the body suspends the calling process: for a host request,
+    /// a delay, `$stop` or `$finish`. A unit of it is resumable (see
+    /// [`Function::resume`]).
+    pub suspends: bool,
+}
+
 /// What became of the calls of one subroutine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Outcome {
@@ -96,16 +144,18 @@ pub(super) struct Slot {
     pub address: SourceVarId,
     pub width: usize,
     pub four_state: bool,
-    pub handle: bool,
+    /// What the slot holds: a heap handle, which the collector scans, or
+    /// bits.
+    pub kind: celox_design::ValueKind,
 }
 
 /// A subroutine lowered out of line, or being lowered.
 #[derive(Debug, Clone)]
 pub(super) struct Function {
     pub name: String,
-    /// The frame's slots: the frame base, the call depth, then the formals,
-    /// result and locals, all known before the body is lowered, then the
-    /// temporaries of the body.
+    /// The frame's slots: the frame base, the call depth, the calling
+    /// process's state, then the formals, result and locals, all known
+    /// before the body is lowered, then the temporaries of the body.
     pub slots: Vec<Slot>,
     /// `None` while the body is being lowered.
     pub unit: Option<ExecutionUnit<Addr>>,
@@ -122,6 +172,22 @@ pub(super) struct Function {
     /// that was still being lowered when the call was built (a recursive
     /// call), set once every size is known.
     pub size_patches: Vec<(RegisterId, usize)>,
+    /// The slots of the calling process's state (see [`ProcessState`]):
+    /// those of the RNG state and the process seed, and that of the seed
+    /// of `$random`.
+    pub random: Option<(usize, usize)>,
+    pub dist_seed: Option<usize>,
+    /// For a unit that can suspend the calling process (see
+    /// [`ProcessState::suspends`]), the slot of its resume point, which a
+    /// call passes as zero to start the body and leaves as it is to
+    /// continue it. The three slots after it are outputs the unit leaves at
+    /// each return: the status, zero once the body completed or the
+    /// [`celox_design::ProcessStatus`] it suspends with; the delay word of
+    /// the suspension; and the end of the innermost live frame.
+    pub resume: Option<usize>,
+    /// The calls at which the unit can be suspended inside the callee, once
+    /// the body is lowered.
+    pub calls: Vec<celox_design::CallResume>,
 }
 
 impl Function {
@@ -142,6 +208,8 @@ pub(crate) struct OutOfLine {
     /// Why each subroutine asked about cannot go out of line wherever it is
     /// called, if it cannot.
     intrinsic: HashMap<String, Option<Reason>>,
+    /// The process state each subroutine asked about uses.
+    process_state: HashMap<String, ProcessState>,
     /// The outcome of the calls of each called subroutine, for the report.
     outcomes: BTreeMap<String, Outcome>,
     /// How many function bodies are being lowered, nested.
@@ -255,11 +323,37 @@ impl OutOfLine {
                             offset,
                             width: slot.width,
                             four_state: slot.four_state,
-                            handle: slot.handle,
+                            handle: slot.kind != celox_design::ValueKind::Bits,
                         })
                         .collect(),
                 },
                 effects: Default::default(),
+            })
+            .collect()
+    }
+
+    /// What the runtime reads in a saved frame of each function, in the
+    /// order of [`Self::units`] (see [`celox_design::FunctionFrame`]); the
+    /// callees are module-local function indices.
+    pub(super) fn frames(&self) -> Vec<celox_design::FunctionFrame> {
+        self.functions
+            .iter()
+            .map(|function| celox_design::FunctionFrame {
+                size: function.size,
+                resume: function.resume.map(|slot| {
+                    (
+                        function.offsets[slot],
+                        celox_frontend_core::process::PROCESS_RESUME_WIDTH,
+                    )
+                }),
+                calls: function.calls.clone(),
+                handles: function
+                    .slots
+                    .iter()
+                    .zip(&function.offsets)
+                    .filter(|(slot, _)| slot.kind != celox_design::ValueKind::Bits)
+                    .map(|(slot, &offset)| (offset, slot.kind))
+                    .collect(),
             })
             .collect()
     }
@@ -344,7 +438,11 @@ fn static_names(subroutine: &sv::ir::Subroutine) -> Vec<&String> {
 /// functions, in `module.functions` with the calls renumbered: a function
 /// lowered for a call that then stayed inlined (from an `always_ff`
 /// process, say) is dropped.
-pub(super) fn attach_functions(module: &mut SimModule, mut functions: Vec<FunctionUnit<Addr>>) {
+pub(super) fn attach_functions(
+    module: &mut SimModule,
+    mut functions: Vec<FunctionUnit<Addr>>,
+    mut frames: Vec<celox_design::FunctionFrame>,
+) {
     fn calls<A>(unit: &ExecutionUnit<A>, called: &mut Vec<usize>) {
         for block in unit.blocks.values() {
             for instruction in &block.instructions {
@@ -378,6 +476,7 @@ pub(super) fn attach_functions(module: &mut SimModule, mut functions: Vec<Functi
     }
     if reached.iter().all(|&reached| reached) {
         module.functions = functions;
+        module.function_frames = frames;
         return;
     }
     let mut next = 0;
@@ -395,11 +494,27 @@ pub(super) fn attach_functions(module: &mut SimModule, mut functions: Vec<Functi
         position += 1;
         reached[position - 1]
     });
+    let mut position = 0;
+    frames.retain(|_| {
+        position += 1;
+        reached[position - 1]
+    });
     for function in &mut functions {
         renumber(&mut function.unit, &kept);
     }
+    // A call that can suspend inside its callee calls a kept function.
+    let resumes = frames.iter_mut().flat_map(|frame| &mut frame.calls).chain(
+        module
+            .processes
+            .iter_mut()
+            .flat_map(|process| &mut process.call_resumes),
+    );
+    for call in resumes {
+        call.function = kept[call.function as usize].expect("a called function is kept");
+    }
     for_each_unit_mut(module, &kept);
     module.functions = functions;
+    module.function_frames = frames;
 
     fn for_each_unit_mut(module: &mut SimModule, kept: &[Option<u32>]) {
         let units = module
@@ -677,23 +792,31 @@ impl ProcModule<'_> {
         {
             return known.clone();
         }
-        let reason = self.find_out_of_line_reason(name);
+        let (reason, state) = self.find_out_of_line_reason(name);
         if let Some(functions) = self.out_of_line() {
             functions.intrinsic.insert(name.to_string(), reason.clone());
+            functions.process_state.insert(name.to_string(), state);
         }
         reason
     }
 
-    fn find_out_of_line_reason(&mut self, name: &str) -> Option<Reason> {
+    /// The process state that subroutine `name` and the bodies it reaches
+    /// use (see [`ProcessState`]).
+    pub(super) fn process_state(&mut self, name: &str) -> ProcessState {
+        self.out_of_line_reason(name);
+        self.out_of_line()
+            .and_then(|functions| functions.process_state.get(name).copied())
+            .unwrap_or_default()
+    }
+
+    fn find_out_of_line_reason(&mut self, name: &str) -> (Option<Reason>, ProcessState) {
+        let mut state = ProcessState::default();
         let mut found: Option<Reason> = None;
         let mut note = |reason: Reason| {
             if found.as_ref().is_none_or(|known| reason < *known) {
                 found = Some(reason);
             }
         };
-        if self.subroutine_makes_host_request(name) {
-            note(Reason::HostRequest);
-        }
         // The formals are the function's interface: a callee whose formals
         // a unit cannot pass stays inlined, and its body is then part of
         // the caller's unit, which binds them as any inlined call does.
@@ -724,8 +847,11 @@ impl ProcModule<'_> {
             for stmt in &subroutine.body {
                 stmt.walk(&mut |stmt| {
                     match stmt {
-                        sv::ir::Stmt::Delay { .. }
-                        | sv::ir::Stmt::WaitEvent(_)
+                        // A delay suspends the process with the unit's
+                        // frames, which the runtime keeps with the
+                        // activation until the delay ends.
+                        sv::ir::Stmt::Delay { .. } => state.suspends = true,
+                        sv::ir::Stmt::WaitEvent(_)
                         | sv::ir::Stmt::WaitImplicit { .. }
                         | sv::ir::Stmt::Wait(_)
                         | sv::ir::Stmt::WaitFork
@@ -740,7 +866,44 @@ impl ProcModule<'_> {
                         | sv::ir::Stmt::AssignConcat {
                             nonblocking: true, ..
                         } => note(Reason::Other("instrumented store".to_string())),
-                        sv::ir::Stmt::SystemTask { .. } => note(Reason::HostRequest),
+                        // Prints, messages and Veryl's assertion calls are
+                        // runtime events, which a unit raises as an inlined
+                        // body does; a message carries the time. `$finish`
+                        // and `$stop` end or suspend the process, a deferred
+                        // action waits in the process's queue (IEEE 1800-2023
+                        // 16.4.1), and the other tasks are host requests;
+                        // `$exit` depends on the program it runs in.
+                        sv::ir::Stmt::SystemTask {
+                            task, assertion, ..
+                        } => match system_task_kind(*task) {
+                            _ if assertion.as_ref().is_some_and(|assertion| {
+                                assertion.deferral != celox_design::AssertionDeferral::None
+                            }) =>
+                            {
+                                note(Reason::HostRequest);
+                            }
+                            Some(SystemTaskKind::Print(..) | SystemTaskKind::Assertion(_)) => {}
+                            Some(SystemTaskKind::Message(_) | SystemTaskKind::Fatal) => {
+                                state.time = true;
+                            }
+                            // File output suspends for its host request.
+                            None if matches!(
+                                task,
+                                sv::ir::SystemTask::Fdisplay(_)
+                                    | sv::ir::SystemTask::Fwrite(_)
+                                    | sv::ir::SystemTask::Fclose
+                                    | sv::ir::SystemTask::Fflush
+                            ) =>
+                            {
+                                state.suspends = true;
+                            }
+                            // `$finish` ends and `$stop` suspends the
+                            // process, the unit's frames with it.
+                            Some(SystemTaskKind::Control(
+                                RuntimeEventKind::Finish | RuntimeEventKind::Stop,
+                            )) => state.suspends = true,
+                            Some(SystemTaskKind::Control(_)) | None => note(Reason::HostRequest),
+                        },
                         _ => {}
                     }
                     stmt_calls(stmt, &mut calls);
@@ -749,53 +912,46 @@ impl ProcModule<'_> {
             while let Some((callee, args)) = calls.pop() {
                 match callee {
                     sv::ir::Callee::System(function) => {
-                        if function.is_host_request() {
-                            note(Reason::HostRequest);
-                        } else if function.reads_simulation_state() {
-                            // `$time`, `$urandom` and the like read the
-                            // process or the simulation, not the frame.
-                            note(Reason::Other("reads simulation state".to_string()));
+                        use sv::ir::SystemFunction;
+                        match function {
+                            // A process method acts on the calling process,
+                            // and some park it.
+                            SystemFunction::Process(_) => note(Reason::HostRequest),
+                            _ if function.is_host_request() => state.suspends = true,
+                            SystemFunction::Urandom
+                            | SystemFunction::UrandomRange
+                            | SystemFunction::ScopeRandomize
+                            | SystemFunction::ScopeRandomizeEnum => state.random = true,
+                            SystemFunction::Random if args.is_empty() => state.dist_seed = true,
+                            // They advance the seed in their argument.
+                            SystemFunction::Random | SystemFunction::DistUniform => {}
+                            SystemFunction::Time
+                            | SystemFunction::Stime
+                            | SystemFunction::Realtime => state.time = true,
+                            // The sampled values are those of the calling
+                            // process's site (IEEE 1800-2023 16.9.3).
+                            _ if function.reads_simulation_state() => {
+                                note(Reason::Other("reads simulation state".to_string()));
+                            }
+                            _ => {}
                         }
                     }
                     sv::ir::Callee::String(sv::ir::StringOp::Format { .. }) => {
-                        note(Reason::HostRequest);
+                        state.suspends = true;
                     }
                     sv::ir::Callee::Object(op) => match &*op {
-                        // Heap and container calls, which need nothing
-                        // but the heap.
-                        sv::ir::ObjectOp::Load(_)
-                        | sv::ir::ObjectOp::Store(_)
-                        | sv::ir::ObjectOp::ClassOf
-                        | sv::ir::ObjectOp::Check(_)
-                        | sv::ir::ObjectOp::Box(_)
-                        | sv::ir::ObjectOp::Unbox(_)
-                        | sv::ir::ObjectOp::NewEvent
-                        | sv::ir::ObjectOp::Concat(_)
-                        | sv::ir::ObjectOp::Locator(_)
-                        | sv::ir::ObjectOp::Pattern(_)
-                        | sv::ir::ObjectOp::Stream(_)
-                        | sv::ir::ObjectOp::ConstraintModeGet(_)
-                        | sv::ir::ObjectOp::ConstraintModeSet(_)
-                        | sv::ir::ObjectOp::ModeGet(..)
-                        | sv::ir::ObjectOp::ModeSet(_)
-                        | sv::ir::ObjectOp::RegisterProgram(..)
-                        | sv::ir::ObjectOp::ProgramRegistered(_) => {}
-                        sv::ir::ObjectOp::Container {
+                        // Construction seeds the object from the process
+                        // RNG (IEEE 1800-2023 18.14.3), and `shuffle` draws
+                        // on it.
+                        sv::ir::ObjectOp::New { .. }
+                        | sv::ir::ObjectOp::Container {
                             op: sv::ir::ContainerOp::Shuffle,
                             ..
-                        } => note(Reason::Other("process random state".to_string())),
-                        sv::ir::ObjectOp::Container { .. } => {}
-                        // Construction draws on the process RNG (IEEE
-                        // 1800-2023 18.14), and so do randomization and the
-                        // object RNG.
-                        op => {
-                            let debug = format!("{op:?}");
-                            let variant = debug
-                                .split(|c: char| !c.is_alphanumeric())
-                                .next()
-                                .unwrap_or_default();
-                            note(Reason::Other(format!("object operation {variant}")));
-                        }
+                        } => state.random = true,
+                        // The rest are heap calls, which need nothing but
+                        // the heap: randomization and the object RNG draw
+                        // on the object's own RNG, which is in it.
+                        _ => {}
                     },
                     sv::ir::Callee::String(_)
                     | sv::ir::Callee::Checked { .. }
@@ -814,7 +970,7 @@ impl ProcModule<'_> {
                 }
             }
         }
-        found
+        (found, state)
     }
 
     /// Whether a call of `subroutine` with `args` has only constant

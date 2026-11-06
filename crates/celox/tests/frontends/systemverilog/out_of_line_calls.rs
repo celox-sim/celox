@@ -6,21 +6,23 @@
 use super::*;
 use celox::{SimBackend, Simulation, SimulatorBuilder};
 
-/// The four-state value of each of `outputs` at time `until`, or the
-/// runtime error that stopped the run.
-fn outputs<B: SimBackend>(
-    mut sim: Simulation<B>,
-    until: u64,
-    outputs: &[&str],
-) -> Result<Vec<(BigUint, BigUint)>, String> {
+/// What a run gives: the four-state value of each output, and the runtime
+/// events it raised.
+type Run = (Vec<(BigUint, BigUint)>, Vec<celox::RuntimeEvent>);
+
+/// The four-state value of each of `outputs` at time `until` and the
+/// runtime events raised until then, or the runtime error that stopped the
+/// run.
+fn run<B: SimBackend>(mut sim: Simulation<B>, until: u64, outputs: &[&str]) -> Result<Run, String> {
     sim.run_until(until).map_err(|error| error.to_string())?;
-    Ok(outputs
+    let values = outputs
         .iter()
         .map(|name| {
             let signal = sim.signal(name);
             sim.get_four_state(signal)
         })
-        .collect())
+        .collect();
+    Ok((values, sim.drain_runtime_events()))
 }
 
 fn backends() -> Vec<&'static str> {
@@ -40,6 +42,18 @@ fn simulate(
     until: u64,
     names: &[&str],
 ) -> Result<Vec<(BigUint, BigUint)>, String> {
+    simulate_run(source, four_state, forced, backend, until, names).map(|(values, _)| values)
+}
+
+/// [`simulate`], with the runtime events of the run.
+fn simulate_run(
+    source: &str,
+    four_state: bool,
+    forced: bool,
+    backend: &str,
+    until: u64,
+    names: &[&str],
+) -> Result<Run, String> {
     let builder = Simulation::from_sv_sources(vec![(source, Path::new("calls.sv"))], "Top")
         .four_state(four_state);
     let builder = if forced {
@@ -49,11 +63,11 @@ fn simulate(
     };
     let built = |error: celox::SimulatorError| format!("build: {error}");
     match backend {
-        "interpreter" => outputs(builder.build_interpreter().map_err(built)?, until, names),
-        "cranelift" => outputs(builder.build_cranelift().map_err(built)?, until, names),
-        "wasm" => outputs(builder.build_wasm().map_err(built)?, until, names),
+        "interpreter" => run(builder.build_interpreter().map_err(built)?, until, names),
+        "cranelift" => run(builder.build_cranelift().map_err(built)?, until, names),
+        "wasm" => run(builder.build_wasm().map_err(built)?, until, names),
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-        "native" => outputs(builder.build_native().map_err(built)?, until, names),
+        "native" => run(builder.build_native().map_err(built)?, until, names),
         _ => unreachable!("backend {backend}"),
     }
 }
@@ -83,7 +97,8 @@ fn function_units(source: &str, forced: bool) -> usize {
 }
 
 /// Check that `source` goes out of line into `units` function units and
-/// gives on every backend, in both state modes, what it gives inlined.
+/// gives on every backend, in both state modes, what it gives inlined: the
+/// same outputs and the same runtime events.
 fn same_as_inlined(source: &str, units: usize, until: u64, names: &[&str]) {
     assert_eq!(
         function_units(source, false),
@@ -92,11 +107,11 @@ fn same_as_inlined(source: &str, units: usize, until: u64, names: &[&str]) {
     );
     assert_eq!(function_units(source, true), units, "function units");
     for four_state in [false, true] {
-        let inlined = simulate(source, four_state, false, "interpreter", until, names)
+        let inlined = simulate_run(source, four_state, false, "interpreter", until, names)
             .expect("the inlined design runs");
         for backend in backends() {
             assert_eq!(
-                simulate(source, four_state, true, backend, until, names),
+                simulate_run(source, four_state, true, backend, until, names),
                 Ok(inlined.clone()),
                 "{backend}, four-state {four_state}"
             );
@@ -379,16 +394,17 @@ endmodule
 
 #[test]
 fn ineligible_subroutines_stay_inlined() {
-    // A `ref` formal keeps a subroutine inlined, and a host request keeps
-    // it inlined with every subroutine that calls it; `plain` still goes
-    // out of line.
+    // A `ref` formal keeps a subroutine inlined, and a host request that a
+    // unit cannot make (a process method, which acts on the calling
+    // process) keeps it inlined with every subroutine that calls it;
+    // `plain` still goes out of line.
     let source = r#"module Top(output int a, output int b, output int c);
     function automatic void bump(ref int v);
         v = v + 1;
     endfunction
     function automatic int shout(int v);
-        $display("shout %0d", v);
-        return v + 1;
+        process p = process::self();
+        return v + (p == null ? 0 : 1);
     endfunction
     function automatic int via_shout(int v);
         return shout(v) * 2;
@@ -933,4 +949,1026 @@ endmodule
             );
         }
     }
+}
+
+#[test]
+fn process_random_state_in_function_units() {
+    // A unit draws on the RNG of the process that calls it, which the call
+    // passes in its frame and takes back: object seeding, `shuffle`,
+    // `$urandom`, `std::randomize` and `$random` give each process the
+    // sequence they give it inlined, through a unit calling a unit and two
+    // processes calling the same units in turn. `$time` is the simulation
+    // time.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c, output int d, output int e,
+           output longint t);
+    class Obj;
+        rand int x;
+        constraint bounded { x inside {[0:99]}; }
+    endclass
+    function automatic int one();
+        return $urandom % 1000;
+    endfunction
+    function automatic int draw(int n);
+        int sum = 0;
+        for (int k = 0; k < n; k++) sum = sum * 3 + one();
+        return sum;
+    endfunction
+    function automatic int ranged();
+        return $urandom_range(10, 20) + draw(1);
+    endfunction
+    function automatic int made();
+        Obj o = new;
+        void'(o.randomize());
+        return o.x;
+    endfunction
+    function automatic int shuffled();
+        int q[$] = '{1, 2, 3, 4, 5};
+        q.shuffle();
+        return q[0] * 10000 + q[1] * 1000 + q[2] * 100 + q[3] * 10 + q[4];
+    endfunction
+    function automatic int scoped();
+        int v;
+        void'(std::randomize(v));
+        return v;
+    endfunction
+    function automatic int legacy();
+        return $random;
+    endfunction
+    function automatic longint now();
+        return $time;
+    endfunction
+    initial begin
+        a = draw(3);
+        #1 b = ranged() ^ made();
+        #2 a = a ^ draw(2);
+    end
+    initial begin
+        c = draw(2);
+        #1 d = shuffled() ^ scoped();
+        #2 c = c ^ ranged() ^ $urandom;
+    end
+    initial begin
+        e = legacy();
+        #3 e = e ^ legacy() ^ $random;
+        t = now();
+    end
+endmodule
+"#;
+    same_as_inlined(source, 9, 4, &["a", "b", "c", "d", "e", "t"]);
+}
+
+#[test]
+fn recursive_functions_draw_on_the_process_rng() {
+    // A recursive function passes the RNG down its activations and back:
+    // two processes calling it in turn get the sequences a loop gives them
+    // inlined.
+    let design = |draw: &str| {
+        format!(
+            r#"`timescale 1ns/1ns
+module Top(output int a, output int b);
+{draw}
+    initial begin
+        a = draw(3);
+        #2 a = a ^ draw(2);
+    end
+    initial begin
+        #1 b = draw(4);
+        #2 b = b ^ draw(1) ^ $urandom;
+    end
+endmodule
+"#
+        )
+    };
+    let recursive = design(
+        "    function automatic int draw(int n);
+        if (n == 0) return 0;
+        return $urandom % 1000 + draw(n - 1) * 3;
+    endfunction",
+    );
+    // The same draws, in the order the recursion makes them.
+    let looped = design(
+        "    function automatic int draw(int n);
+        int parts[8];
+        int sum = 0;
+        for (int k = 0; k < n; k++) parts[k] = $urandom % 1000;
+        for (int k = n - 1; k >= 0; k--) sum = parts[k] + sum * 3;
+        return sum;
+    endfunction",
+    );
+    assert_eq!(function_units(&recursive, true), 1, "function units");
+    for four_state in [false, true] {
+        let expected = simulate(&looped, four_state, false, "interpreter", 4, &["a", "b"])
+            .expect("the looped design runs");
+        for backend in backends() {
+            assert_eq!(
+                simulate(&recursive, four_state, true, backend, 4, &["a", "b"]),
+                Ok(expected.clone()),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+}
+
+#[test]
+fn always_ff_processes_pass_their_rng() {
+    // An always_ff process keeps its RNG state among its writes, which the
+    // call passes and takes back as it does any other process's.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int q, output int r);
+    logic clk = 0;
+    function automatic int one(int bias);
+        return $urandom % 1000 + bias;
+    endfunction
+    always_ff @(posedge clk) begin
+        q <= one(q) ^ $urandom;
+        r <= one(r + 1);
+    end
+    initial begin
+        #1 clk = 1;
+        #1 clk = 0;
+        #1 clk = 1;
+    end
+endmodule
+"#;
+    same_as_inlined(source, 1, 4, &["q", "r"]);
+}
+
+#[test]
+fn reports_and_messages_go_out_of_line() {
+    // Every print and message of a unit, also of one a unit calls, reports
+    // what it reports inlined: its text, its time and its scope. `$fatal`
+    // ends the run from inside the call.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int r, output int c);
+    function automatic int checked(int x);
+        $display("checked %0d at %0t in %m", x, $time);
+        if (x > 2) $error("big %0d", x);
+        else $info("small %0d", x);
+        $write("[%0d]", x);
+        return twice(x);
+    endfunction
+    function automatic int twice(int x);
+        $display("twice %h", x);
+        if (x == 0) $warning("zero");
+        return 2 * x;
+    endfunction
+    function automatic void die(int x);
+        if (x == 7) $fatal(1, "dead %0d", x);
+    endfunction
+    int k = 1;
+    always_comb c = twice(r);
+    initial begin
+        r = checked(k);
+        #1 r = checked(k + 4) + checked(k - 1);
+        #1 die(k + 5);
+        #1 die(k + 6);
+        r = 99;
+    end
+endmodule
+"#;
+    same_as_inlined(source, 3, 2, &["r", "c"]);
+    for four_state in [false, true] {
+        let inlined = simulate_run(source, four_state, false, "interpreter", 5, &["r"]);
+        assert_eq!(inlined, Err("dead 7".to_string()));
+        for backend in backends() {
+            assert_eq!(
+                simulate_run(source, four_state, true, backend, 5, &["r"]),
+                inlined,
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+}
+
+#[test]
+fn recursive_functions_report_each_activation() {
+    // Inlined, recursion is rejected: the same reports in a loop are the
+    // reference.
+    let recursive = r#"`timescale 1ns/1ns
+module Top(output int r);
+    function automatic int count(int n);
+        $display("count %0d at %0t", n, $time);
+        if (n == 0) begin
+            $warning("bottom");
+            return 0;
+        end
+        $write("[%0d]", n);
+        return count(n - 1) + 1;
+    endfunction
+    int k = 3;
+    initial begin
+        r = count(k);
+        #1 r = count(k - 1);
+    end
+endmodule
+"#;
+    let looped = recursive.replace(
+        "        $display(\"count %0d at %0t\", n, $time);
+        if (n == 0) begin
+            $warning(\"bottom\");
+            return 0;
+        end
+        $write(\"[%0d]\", n);
+        return count(n - 1) + 1;",
+        // The warning keeps its line.
+        "        for (int m = n; m > 0; m--) begin $display(\"count %0d at %0t\", m, $time); $write(\"[%0d]\", m); end
+        $display(\"count %0d at %0t\", 0, $time);
+        $warning(\"bottom\");
+        return n;",
+    );
+    assert_ne!(looped, recursive);
+    assert_eq!(function_units(recursive, true), 1, "function units");
+    for four_state in [false, true] {
+        let expected = simulate_run(&looped, four_state, false, "interpreter", 2, &["r"])
+            .expect("the looped design runs");
+        for backend in backends() {
+            assert_eq!(
+                simulate_run(recursive, four_state, true, backend, 2, &["r"]),
+                Ok(expected.clone()),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+}
+
+#[test]
+fn host_requests_suspend_through_function_units() {
+    // Each unit of the chain makes host requests before and after its call,
+    // drawing on the process RNG around them; two processes call it in
+    // turn. Each request suspends the process inside the calls, which
+    // continue where they stopped.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c, output int d);
+    function automatic string inner(int n);
+        string text = $sformatf("inner %0d %0d", n, $urandom % 100);
+        int parsed;
+        void'($sscanf(text, "inner %d", parsed));
+        return $sformatf("%s/%0d", text, parsed + 1);
+    endfunction
+    function automatic int middle(int n);
+        string first = $sformatf("m%0d", n);
+        string got = inner(n + 1);
+        int x = $urandom_range(9);
+        $display("%s %s %0d", first, got, x);
+        return got.len() + x;
+    endfunction
+    function automatic int outer(int n);
+        int sum = 0;
+        for (int k = 0; k < n; k++) begin
+            sum += middle(k);
+            if ($test$plusargs("never")) sum = 0;
+        end
+        $display("outer %0d", $sformatf("%0d", sum).len());
+        return sum;
+    endfunction
+    int one = 1;
+    initial begin
+        a = outer(one + 2);
+        #2 c = outer(one);
+        fork
+            d = outer(one + 1);
+        join
+    end
+    initial begin
+        #1 b = outer(one + 1);
+    end
+endmodule
+"#;
+    same_as_inlined(source, 3, 4, &["a", "b", "c", "d"]);
+}
+
+#[test]
+fn recursive_functions_make_host_requests() {
+    // A format result made before a recursive call is kept across it: the
+    // call reaches the same request site again.
+    let recursive = r#"`timescale 1ns/1ns
+module Top(output int a, output int b);
+    function automatic string path(int n);
+        string head;
+        if (n == 0) return $sformatf("[%0d]", $urandom % 10);
+        head = $sformatf("<%0d", n);
+        return {head, path(n - 1), $sformatf("%0d>", n)};
+    endfunction
+    int k = 3;
+    initial begin
+        $display("%s", path(k));
+        a = path(k - 1).len();
+    end
+    initial begin
+        #1 $display("%s", path(k + 1));
+        b = $urandom % 1000;
+    end
+endmodule
+"#;
+    let looped = recursive.replace(
+        "        string head;
+        if (n == 0) return $sformatf(\"[%0d]\", $urandom % 10);
+        head = $sformatf(\"<%0d\", n);
+        return {head, path(n - 1), $sformatf(\"%0d>\", n)};",
+        "        string head = \"\";
+        string tail = \"\";
+        for (int m = n; m > 0; m--) begin
+            head = {head, $sformatf(\"<%0d\", m)};
+            tail = {$sformatf(\"%0d>\", m), tail};
+        end
+        return {head, $sformatf(\"[%0d]\", $urandom % 10), tail};",
+    );
+    assert_ne!(looped, recursive);
+    assert_eq!(function_units(recursive, true), 1, "function units");
+    for four_state in [false, true] {
+        let expected = simulate_run(&looped, four_state, false, "interpreter", 2, &["a", "b"])
+            .expect("the looped design runs");
+        for backend in backends() {
+            assert_eq!(
+                simulate_run(recursive, four_state, true, backend, 2, &["a", "b"]),
+                Ok(expected.clone()),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+    // Every request inside the calls kept the live frames, and gave them back.
+    let mut sim = Simulation::from_sv_sources(vec![(recursive, Path::new("calls.sv"))], "Top")
+        .force_out_of_line_calls()
+        .build_interpreter()
+        .expect("the design builds");
+    sim.run_until(2).expect("the design runs");
+    let stats = sim.scheduler_stats();
+    assert!(stats.call_stack_saves > 0);
+    assert!(stats.call_stack_saved_bytes > 0);
+    assert_eq!(
+        stats.call_stack_saved_bytes,
+        stats.call_stack_restored_bytes
+    );
+}
+
+#[test]
+fn errors_after_a_host_request_in_a_function_unit() {
+    // The callee raises an error once it continues after its request.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int r);
+    function automatic int check(int x);
+        string text = $sformatf("x=%0d", x);
+        if (x == 3) $fatal(1, "%s", text);
+        return text.len();
+    endfunction
+    function automatic int twice(int x);
+        return check(x) + check(x + 1);
+    endfunction
+    int k = 1;
+    initial begin
+        r = twice(k);
+        #1 r = twice(k + 1);
+    end
+endmodule
+"#;
+    same_as_inlined(source, 2, 0, &["r"]);
+    for four_state in [false, true] {
+        let inlined = simulate_run(source, four_state, false, "interpreter", 2, &["r"]);
+        assert!(inlined.is_err(), "{inlined:?}");
+        for backend in backends() {
+            assert_eq!(
+                simulate_run(source, four_state, true, backend, 2, &["r"]),
+                inlined,
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+}
+
+#[test]
+fn file_output_in_function_units_with_native_services() {
+    // The native backend serves file output of compiled kernels itself:
+    // the edge process's `$fwrite` goes there, while the initial process's
+    // calls into units that write files suspend through the reference loop.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int r);
+    bit clk = 0;
+    int count = 0;
+    function automatic int report(int n);
+        $fdisplay(1, "report %0d", n);
+        if (n > 0) $fwrite(1, "[%0d]", nested(n - 1));
+        return n * 2;
+    endfunction
+    function automatic int nested(int n);
+        $fwrite(1, "nested %0d;", n);
+        return n + 1;
+    endfunction
+    always #1 clk = ~clk;
+    always @(posedge clk) begin
+        count <= count + 1;
+        $fwrite(1, "edge %0d;", count);
+    end
+    initial begin
+        r = report(count + 2);
+        #3 r = report(count);
+    end
+endmodule
+"#;
+    same_as_inlined(source, 2, 6, &["r"]);
+}
+
+#[test]
+fn delays_suspend_through_task_units() {
+    // Each task of the chain waits before and after its call, so the
+    // process sits inside the calls across time slots while the other
+    // process runs the same tasks. `#0` resumes in the inactive region,
+    // before the nonblocking assignment of the time is published.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c);
+    int seen = 0;
+    task automatic inner(input int n, output int r);
+        int x = n * 3;
+        #(n) x += $urandom % 7;
+        $display("inner %0d at %0t", n, $time);
+        #0 r = x + seen;
+    endtask
+    task automatic middle(input int n, output int r);
+        int got;
+        #1 inner(n + 1, got);
+        $display("middle %0d got %0d at %0t", n, got, $time);
+        r = got + 1;
+    endtask
+    task automatic outer(input int n, output int r);
+        int sum = 0;
+        for (int k = 0; k < n; k++) begin
+            int part;
+            middle(k, part);
+            sum += part;
+        end
+        #2 r = sum;
+    endtask
+    int two = 2;
+    initial begin
+        outer(two + 1, a);
+        seen <= 100;
+        #0 c = seen;
+    end
+    initial begin
+        #1 outer(two, b);
+    end
+endmodule
+"#;
+    same_as_inlined(source, 3, 40, &["a", "b", "c"]);
+}
+
+#[test]
+fn saved_frames_keep_their_heap_handles_across_collections() {
+    // Only the frames of the suspended tasks hold the objects and strings
+    // they made. While they wait, the other process allocates enough for
+    // the heap to collect between the time slots: the collector finds the
+    // handles in the saved frames, walking the chain from the kernel's call.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int n);
+    class Box;
+        int v;
+        function new(int x);
+            v = x;
+        endfunction
+    endclass
+    task automatic hold(input int k, output int r);
+        Box box = new(k);
+        string s = "held";
+        s = {s, "-", s};
+        #5;
+        r = box.v * 100 + s.len();
+    endtask
+    task automatic deep(input int k, output int r);
+        Box mine = new(k + 1);
+        string tag = "d";
+        int got;
+        tag = {tag, tag, tag};
+        #1 hold(k, got);
+        r = got + mine.v * 10000 + tag.len() * 1000000;
+    endtask
+    int seven = 7;
+    int count = 2000;
+    initial deep(seven, a);
+    initial begin
+        Box t;
+        string u;
+        #2;
+        for (int i = 0; i < count; i++) begin
+            t = new(i);
+            u = {u, "x"};
+            if (u.len() > 8) u = "";
+            n += t.v % 2;
+        end
+    end
+endmodule
+"#;
+    same_as_inlined(source, 3, 10, &["a", "n"]);
+}
+
+#[test]
+fn state_files_keep_the_frames_of_suspended_calls() {
+    // A state file saved while both processes wait inside their calls holds
+    // the saved frames, strings by contents; a load on any backend resumes
+    // them where they stopped. A frame holding a class object cannot be
+    // saved, as a state object holding one cannot.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b);
+    task automatic step(input int n, output int r);
+        string s = "s";
+        int x = n;
+        repeat (n) s = {s, "+"};
+        #(n) x += s.len();
+        s = {s, "!"};
+        #1 r = x * 10 + s.len();
+    endtask
+    task automatic chain(input int n, output int r);
+        int first;
+        int second;
+        step(n, first);
+        step(n + 1, second);
+        r = first * 1000 + second;
+    endtask
+    int two = 2;
+    initial chain(two, a);
+    initial #1 chain(two + 1, b);
+endmodule
+"#;
+    let build = |forced: bool| {
+        let builder = Simulation::from_sv_sources(vec![(source, Path::new("calls.sv"))], "Top");
+        if forced {
+            builder.force_out_of_line_calls()
+        } else {
+            builder
+        }
+    };
+    fn outputs<B: SimBackend>(sim: &mut Simulation<B>) -> (BigUint, BigUint) {
+        sim.run_until(20).expect("the design runs");
+        (sim.get(sim.signal("a")), sim.get(sim.signal("b")))
+    }
+    let expected = outputs(&mut build(false).build_interpreter().expect("builds"));
+    let mut origin = build(true).build_interpreter().expect("builds");
+    origin.run_until(3).expect("the design runs");
+    assert!(origin.scheduler_stats().call_stack_saves > 0);
+    let mut bytes = Vec::new();
+    origin
+        .save_state()
+        .expect("the frames save")
+        .write_to(&mut bytes)
+        .expect("the file writes");
+    let file = celox::StateFile::read_from(bytes.as_slice()).expect("the file reads");
+    assert_eq!(outputs(&mut origin), expected, "the saved run continues");
+    macro_rules! resumes {
+        ($build:ident) => {{
+            let mut target = build(true).$build().expect("builds");
+            target.load_state(&file).expect("the frames load");
+            assert_eq!(outputs(&mut target), expected, stringify!($build));
+        }};
+    }
+    resumes!(build_interpreter);
+    resumes!(build_cranelift);
+    resumes!(build_wasm);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    resumes!(build_native);
+
+    let objects = r#"`timescale 1ns/1ns
+module Top(output int a);
+    class Box;
+        int v;
+    endclass
+    task automatic hold(output int r);
+        Box box = new;
+        #5 r = box.v;
+    endtask
+    initial hold(a);
+endmodule
+"#;
+    let mut sim = Simulation::from_sv_sources(vec![(objects, Path::new("calls.sv"))], "Top")
+        .force_out_of_line_calls()
+        .build_interpreter()
+        .expect("builds");
+    sim.run_until(1).expect("the design runs");
+    assert!(sim.save_state().is_err(), "a class object in a frame");
+}
+
+#[test]
+fn recursive_tasks_wait_at_every_level() {
+    // Each activation waits before and after its recursive call, while a
+    // second process runs the same task: both chains stay suspended inside
+    // their calls across many time slots.
+    let recursive = r#"`timescale 1ns/1ns
+module Top(output int a, output int b);
+    task automatic down(input int n, output int r);
+        int below;
+        int mine = n * 3;
+        if (n == 0) begin
+            #1 r = 1;
+            return;
+        end
+        #(n) down(n - 1, below);
+        #1 r = below * 2 + mine;
+    endtask
+    int k = 3;
+    initial down(k, a);
+    initial #2 down(k - 1, b);
+endmodule
+"#;
+    let looped = recursive.replace(
+        "        int below;
+        int mine = n * 3;
+        if (n == 0) begin
+            #1 r = 1;
+            return;
+        end
+        #(n) down(n - 1, below);
+        #1 r = below * 2 + mine;",
+        "        int below;
+        for (int m = n; m > 0; m--) #(m);
+        #1 below = 1;
+        for (int m = 1; m <= n; m++) #1 below = below * 2 + m * 3;
+        r = below;",
+    );
+    assert_ne!(looped, recursive);
+    assert_eq!(function_units(recursive, true), 1, "function units");
+    for four_state in [false, true] {
+        let expected = simulate_run(&looped, four_state, false, "interpreter", 30, &["a", "b"])
+            .expect("the looped design runs");
+        for backend in backends() {
+            assert_eq!(
+                simulate_run(recursive, four_state, true, backend, 30, &["a", "b"]),
+                Ok(expected.clone()),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+}
+
+#[test]
+fn timed_tasks_in_fork_children() {
+    // A task waits a real amount in a scope whose precision is finer than
+    // its unit; fork children and their parent call it and a task that
+    // calls it at once.
+    let source = r#"`timescale 1ns/10ps
+module Top(output int a, output int b, output int c, output int d);
+    task automatic settle(input real d, output int r);
+        #(d) r = int'($realtime * 100);
+    endtask
+    task automatic twice(input int n, output int r);
+        int got;
+        settle(n * 0.75, got);
+        #1 r = got + n;
+    endtask
+    int one = 1;
+    initial begin
+        fork
+            begin
+                twice(one, a);
+            end
+            begin
+                settle(one * 1.5, b);
+            end
+        join_none
+        twice(one + 2, c);
+        wait fork;
+        settle(0.25, d);
+    end
+endmodule
+"#;
+    same_as_inlined(source, 2, 20, &["a", "b", "c", "d"]);
+}
+
+#[test]
+fn stops_inside_task_units() {
+    // `$stop` inside a task suspends the process with its frames; the run
+    // continues from there, and `$finish` inside a task ends it.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b);
+    task automatic halt(input int n, output int r);
+        int x = n * 2;
+        #1 $stop;
+        r = x + 1;
+        if (n > 2) begin
+            #1 $finish;
+            r = 0;
+        end
+    endtask
+    int two = 2;
+    initial begin
+        halt(two, a);
+        halt(two + 1, b);
+    end
+endmodule
+"#;
+    fn stops<B: SimBackend>(mut sim: Simulation<B>) -> Vec<(bool, u64, BigUint, BigUint)> {
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            sim.run_until(10).expect("the design runs");
+            seen.push((
+                sim.is_stopped(),
+                sim.time(),
+                sim.get(sim.signal("a")),
+                sim.get(sim.signal("b")),
+            ));
+        }
+        seen
+    }
+    assert_eq!(function_units(source, true), 1, "function units");
+    for four_state in [false, true] {
+        let build = |forced: bool| {
+            let builder = Simulation::from_sv_sources(vec![(source, Path::new("calls.sv"))], "Top")
+                .four_state(four_state);
+            if forced {
+                builder.force_out_of_line_calls()
+            } else {
+                builder
+            }
+        };
+        let expected = stops(build(false).build_interpreter().expect("builds"));
+        assert!(expected[0].0, "the run stops: {expected:?}");
+        assert_eq!(
+            stops(build(true).build_interpreter().expect("builds")),
+            expected
+        );
+        assert_eq!(
+            stops(build(true).build_cranelift().expect("builds")),
+            expected
+        );
+        assert_eq!(stops(build(true).build_wasm().expect("builds")), expected);
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        assert_eq!(stops(build(true).build_native().expect("builds")), expected);
+    }
+}
+
+#[test]
+fn final_procedures_keep_their_frames_across_a_stop() {
+    // A final procedure stops inside its function; while it is stopped,
+    // the combinational process calls a unit at the bottom of the stack.
+    // The function continues with its own frame.
+    let source = r#"`timescale 1ns/1ns
+module Top(input int x, output int c, output int got);
+    function automatic int scramble(int v);
+        int t = v * 7;
+        int u = t + 3;
+        int w = u ^ 5;
+        return w + t + u;
+    endfunction
+    always_comb c = scramble(x);
+    function automatic void fin(input int n, output int r);
+        int keep = n * 11;
+        int more = keep + 2;
+        $stop;
+        r = keep * 100 + more;
+    endfunction
+    int seed = 4;
+    final fin(seed, got);
+endmodule
+"#;
+    fn stopped<B: SimBackend>(mut sim: Simulation<B>) -> (bool, BigUint, BigUint) {
+        sim.run_until(0).expect("the design runs");
+        sim.finish().expect("finalization starts");
+        let stopped = sim.is_stopped();
+        let x = sim.signal("x");
+        sim.modify(|io| io.set(x, 9u32)).expect("the write settles");
+        let c = sim.get(sim.signal("c"));
+        sim.step().expect("finalization continues");
+        (stopped, c, sim.get(sim.signal("got")))
+    }
+    assert_eq!(function_units(source, true), 2, "function units");
+    for four_state in [false, true] {
+        let build = |forced: bool| {
+            let builder = Simulation::from_sv_sources(vec![(source, Path::new("calls.sv"))], "Top")
+                .four_state(four_state);
+            if forced {
+                builder.force_out_of_line_calls()
+            } else {
+                builder
+            }
+        };
+        let expected = stopped(build(false).build_interpreter().expect("builds"));
+        assert!(expected.0, "the final procedure stops: {expected:?}");
+        assert_eq!(
+            stopped(build(true).build_interpreter().expect("builds")),
+            expected
+        );
+        assert_eq!(
+            stopped(build(true).build_cranelift().expect("builds")),
+            expected
+        );
+        assert_eq!(stopped(build(true).build_wasm().expect("builds")), expected);
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        assert_eq!(
+            stopped(build(true).build_native().expect("builds")),
+            expected
+        );
+    }
+}
+
+#[test]
+fn finishing_inside_a_task_leaves_no_frames() {
+    // The process never resumes after `$finish`, so the frame holding a
+    // class object is not kept, and the finished simulation saves. The
+    // output formal is never copied back: the task does not return.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a);
+    class Box;
+        int v = 3;
+    endclass
+    task automatic end_with(output int r);
+        Box box = new;
+        r = box.v;
+        #1 $finish;
+    endtask
+    initial end_with(a);
+endmodule
+"#;
+    let mut sim = Simulation::from_sv_sources(vec![(source, Path::new("calls.sv"))], "Top")
+        .force_out_of_line_calls()
+        .build_interpreter()
+        .expect("builds");
+    sim.run_until(5).expect("the design runs");
+    assert_eq!(sim.get(sim.signal("a")), 0u8.into());
+    assert!(sim.save_state().is_ok(), "{:?}", sim.save_state().err());
+}
+
+#[test]
+fn loads_refuse_class_handles_in_saved_frames() {
+    // A null handle in a saved frame saves; a file that puts any other
+    // value in that slot does not load, as a state object holding a class
+    // handle does not.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a);
+    class Box;
+        int v;
+    endclass
+    task automatic hold(output int r);
+        Box box;
+        #5 r = box == null ? 7 : box.v;
+    endtask
+    initial hold(a);
+endmodule
+"#;
+    let build = || {
+        Simulation::from_sv_sources(vec![(source, Path::new("calls.sv"))], "Top")
+            .force_out_of_line_calls()
+            .build_interpreter()
+            .expect("builds")
+    };
+    let mut origin = build();
+    origin.run_until(1).expect("the design runs");
+    let file = origin.save_state().expect("a null handle saves");
+    let stack = &file
+        .schedule
+        .as_ref()
+        .expect("a schedule")
+        .processes
+        .call_stacks[0]
+        .stack;
+    // Set each zero word of the stack in turn. The load refuses the
+    // handle's; any other word the task overwrites or does not read.
+    let mut refused = 0;
+    for word in (0..stack.len() / 4).filter(|&w| stack[w * 4..w * 4 + 4] == [0; 4]) {
+        let mut changed = file.clone();
+        changed
+            .schedule
+            .as_mut()
+            .expect("a schedule")
+            .processes
+            .call_stacks[0]
+            .stack[word * 4] = 1;
+        let mut target = build();
+        match target.load_state(&changed) {
+            Err(_) => refused += 1,
+            Ok(()) => {
+                target.run_until(10).expect("the loaded design runs");
+                assert_eq!(target.get(target.signal("a")), 7u8.into(), "word {word}");
+            }
+        }
+    }
+    assert_eq!(refused, 1, "only the handle's word is refused");
+}
+
+#[test]
+fn loads_refuse_saved_frames_that_do_not_fit() {
+    // A saved stack holds the whole chain, its strings are the file's, and
+    // it continues where its process does: a stack cut anywhere, a string
+    // ID past the file's strings, a second stack for the process or another
+    // resume point does not load.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a);
+    task automatic hold(output int r);
+        string s = "abc";
+        #5 r = s.len();
+    endtask
+    task automatic outer(output int r);
+        int got;
+        hold(got);
+        r = got + 10;
+    endtask
+    initial outer(a);
+endmodule
+"#;
+    let build = || {
+        Simulation::from_sv_sources(vec![(source, Path::new("calls.sv"))], "Top")
+            .force_out_of_line_calls()
+            .build_interpreter()
+            .expect("builds")
+    };
+    let mut origin = build();
+    origin.run_until(1).expect("the design runs");
+    let file = origin.save_state().expect("the frames save");
+    fn stack(file: &mut celox::StateFile) -> &mut Vec<u8> {
+        &mut file
+            .schedule
+            .as_mut()
+            .expect("a schedule")
+            .processes
+            .call_stacks[0]
+            .stack
+    }
+    let len = stack(&mut file.clone()).len();
+    for cut in 0..len {
+        let mut changed = file.clone();
+        stack(&mut changed).truncate(cut);
+        assert!(build().load_state(&changed).is_err(), "cut at {cut}");
+    }
+    // The string's ID is 1; so may other words be: ones the task
+    // overwrites or does not read, resume points of call sites, whose chain
+    // no longer fits, and the innermost resume point, which the unit checks
+    // when it continues.
+    let mut refused = 0;
+    let words = stack(&mut file.clone()).clone();
+    for word in (0..len / 4).filter(|&w| words[w * 4..w * 4 + 4] == 1u32.to_le_bytes()) {
+        let mut changed = file.clone();
+        stack(&mut changed)[word * 4..word * 4 + 4].copy_from_slice(&99u32.to_le_bytes());
+        let mut target = build();
+        match target.load_state(&changed) {
+            Err(_) => refused += 1,
+            Ok(()) => match target.run_until(10) {
+                Ok(()) => {
+                    assert_eq!(target.get(target.signal("a")), 13u8.into(), "word {word}");
+                }
+                Err(error) => assert!(
+                    error.to_string().contains("invalid resume point"),
+                    "word {word}: {error}"
+                ),
+            },
+        }
+    }
+    // The string's word is among them, with the call sites' resume points,
+    // which no longer name the chain.
+    assert!(refused >= 1, "the string's word is refused");
+    // One stack per process, at the resume point the process continues at.
+    let mut changed = file.clone();
+    let processes = &mut changed.schedule.as_mut().expect("a schedule").processes;
+    processes.call_stacks.push(processes.call_stacks[0].clone());
+    assert!(build().load_state(&changed).is_err(), "a second stack");
+    let resume = file
+        .schedule
+        .as_ref()
+        .expect("a schedule")
+        .processes
+        .call_stacks[0]
+        .resume;
+    for other in (0..8).filter(|&point| point != resume) {
+        let mut changed = file.clone();
+        changed
+            .schedule
+            .as_mut()
+            .expect("a schedule")
+            .processes
+            .call_stacks[0]
+            .resume = other;
+        assert!(
+            build().load_state(&changed).is_err(),
+            "resume point {other}"
+        );
+    }
+}
+
+#[test]
+fn finishing_drops_the_frames_of_every_suspended_call() {
+    // Another process, or the host, ends the simulation while a task waits
+    // with a class object in its frame: nothing resumes, so the finished
+    // simulation saves.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a);
+    class Box;
+        int v = 3;
+    endclass
+    task automatic hold(output int r);
+        Box box = new;
+        #10 r = box.v;
+    endtask
+    initial hold(a);
+    initial #2 $finish;
+endmodule
+"#;
+    let build = |source: &str| {
+        Simulation::from_sv_sources(vec![(source, Path::new("calls.sv"))], "Top")
+            .force_out_of_line_calls()
+            .build_interpreter()
+            .expect("builds")
+    };
+    let mut sim = build(source);
+    sim.run_until(5).expect("the design runs");
+    assert!(sim.save_state().is_ok(), "{:?}", sim.save_state().err());
+    let hosted = source.replace("    initial #2 $finish;\n", "");
+    let mut sim = build(&hosted);
+    sim.run_until(2).expect("the design runs");
+    sim.finish().expect("the host finishes");
+    assert!(sim.save_state().is_ok(), "{:?}", sim.save_state().err());
 }

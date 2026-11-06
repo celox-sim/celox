@@ -10,6 +10,14 @@ use celox_design::{HostRequestKind, HostRequestSite};
 pub(crate) const SYMBOL: &str = "__celox_native_services_v11";
 
 pub(crate) const BEFORE_DOMAINS: u64 = u64::MAX - 14;
+/// A watched value may have changed (`SlotObserver::after_update`).
+pub(crate) const AFTER_UPDATE: u64 = u64::MAX - 15;
+/// A unit wrote a watched object (`celox_sir::extern_abi::VALUE_CHANGE_ID`):
+/// show the observer the update now. What it does in return takes effect at
+/// the next `AFTER_UPDATE`, which follows the unit.
+pub(crate) const VALUE_CHANGE: u64 = u64::MAX - 16;
+/// The bit of an `AFTER_UPDATE` result that requests a finish.
+pub(crate) const FINISHED: u64 = 4;
 
 pub(crate) const CHECKPOINT: u64 = u64::MAX;
 pub(crate) const SCHEDULER_RUN: u64 = u64::MAX - 1;
@@ -50,6 +58,9 @@ pub(super) struct Metadata {
     pub events: SignalRef,
     /// Per process, indexed by that process's FileIo request index.
     pub sites: Vec<Vec<Option<WriteSite>>>,
+    /// Per process, the FileIo sites of the function units it calls, by
+    /// their index among those (see [`celox_design::SiteProcess`]).
+    pub function_sites: Vec<Vec<Option<WriteSite>>>,
     pub runtime_sites: Vec<RuntimeEventSite>,
     pub process_names: Vec<String>,
     pub nbas: Vec<Vec<celox_design::NbaSite<SignalRef>>>,
@@ -82,6 +93,8 @@ impl Metadata {
             .iter()
             .map(|_| Vec::new())
             .collect();
+        let mut function_sites: Vec<Vec<Option<WriteSite>>> =
+            sites.iter().map(|_| Vec::new()).collect();
         for request in &program.runtime_schema.host_request_sites {
             if request.kind != HostRequestKind::FileIo {
                 continue;
@@ -93,7 +106,7 @@ impl Metadata {
                     .iter()
                     .all(|arg| arg.id.array_layout.is_none());
             let site = if supported {
-                let process = &program.runtime_schema.processes[request.process];
+                let process = &program.runtime_schema.processes[request.process.index()];
                 let scope = program
                     .design
                     .instance(process.status.instance_id)
@@ -131,7 +144,12 @@ impl Metadata {
             } else {
                 None
             };
-            sites[request.process].push(site);
+            let listed = if request.process.is_function_site() {
+                &mut function_sites
+            } else {
+                &mut sites
+            };
+            listed[request.process.index()].push(site);
         }
         let scheduler = program.runtime_schema.scheduler.as_ref()?;
         let mut nbas: Vec<Vec<_>> = program
@@ -202,6 +220,7 @@ impl Metadata {
             },
             events: backend.resolve_signal(&scheduler.slots.events),
             sites,
+            function_sites,
             runtime_sites: program.runtime_schema.runtime_event_sites.clone(),
             process_names: program
                 .runtime_schema
@@ -220,6 +239,18 @@ pub(super) trait ObserverService {
         metadata: &Metadata,
         arena: &mut super::native_arena::Arena,
     ) -> u64;
+
+    fn after_update(
+        &mut self,
+        time: u64,
+        metadata: &Metadata,
+        arena: &mut super::native_arena::Arena,
+    ) -> u64;
+
+    /// [`Self::after_update`] inside a unit: what the observer does takes
+    /// effect at the next update point, and the host inputs it writes stay
+    /// logged until then.
+    fn value_change(&mut self, time: u64);
 }
 
 pub(super) struct SlotService<'a, B: SimBackend> {
@@ -227,6 +258,9 @@ pub(super) struct SlotService<'a, B: SimBackend> {
     pub observer: Option<&'a mut (dyn crate::SlotObserver<B> + 'static)>,
     pub watch: &'a mut celox_runtime::HostWatch,
     pub dirty: &'a mut bool,
+    /// What the observer did at value change points since the last update
+    /// point, encoded as the result of `AFTER_UPDATE`.
+    pub changed: &'a mut u64,
 }
 
 impl<B: SimBackend> ObserverService for SlotService<'_, B> {
@@ -236,22 +270,64 @@ impl<B: SimBackend> ObserverService for SlotService<'_, B> {
         metadata: &Metadata,
         arena: &mut super::native_arena::Arena,
     ) -> u64 {
+        self.show(time, Some((metadata, arena)), |observer, io, time| {
+            observer.before_domains(io, time)
+        })
+    }
+
+    fn after_update(
+        &mut self,
+        time: u64,
+        metadata: &Metadata,
+        arena: &mut super::native_arena::Arena,
+    ) -> u64 {
+        let changed = std::mem::take(self.changed);
+        // A finish requested at a value change point ends the run before
+        // the observer sees another update, as in the reference loop.
+        if changed & FINISHED != 0 {
+            return changed;
+        }
+        self.show(time, Some((metadata, arena)), |observer, io, time| {
+            observer.after_update(io, time)
+        }) | changed
+    }
+
+    fn value_change(&mut self, time: u64) {
+        if *self.changed & FINISHED != 0 {
+            return;
+        }
+        *self.changed |= self.show(time, None, |observer, io, time| {
+            observer.after_update(io, time)
+        });
+    }
+}
+
+impl<B: SimBackend> SlotService<'_, B> {
+    /// Show the observer the state at `time`; the result encodes whether it
+    /// wrote (bit 1) and requested a finish (bit 2). The host inputs it
+    /// writes are packed into `inputs`, or stay logged without one.
+    fn show(
+        &mut self,
+        time: u64,
+        inputs: Option<(&Metadata, &mut super::native_arena::Arena)>,
+        show: impl FnOnce(&mut dyn crate::SlotObserver<B>, &mut crate::SlotIo<'_, B>, u64),
+    ) -> u64 {
         let mut io = crate::SlotIo::new(crate::IOContext {
             backend: self.backend,
             watch: self.watch,
         });
         if let Some(observer) = self.observer.as_deref_mut() {
-            observer.before_domains(&mut io, time);
+            show(observer, &mut io, time);
         }
         let wrote = io.wrote();
         let finish = io.finish_requested();
         *self.dirty |= wrote;
-        if !finish {
+        if !finish && let Some((metadata, arena)) = inputs {
             pack_host_inputs(self.backend, metadata, arena, self.watch.take_log());
         }
         // A finish precedes host-write observation in the reference round.
         // Keep its pending log in the saved state rather than a transient arena.
-        (u64::from(wrote) * 2) | (u64::from(finish) * 4)
+        (u64::from(wrote) * 2) | (u64::from(finish) * FINISHED)
     }
 }
 
@@ -309,6 +385,8 @@ pub(super) struct Scope<'a> {
     pub pending_scan: usize,
     pub comb_before: Vec<bool>,
     pub observer: Option<&'a mut dyn ObserverService>,
+    /// The observer watches every update (`AFTER_UPDATE`).
+    pub updates: bool,
 }
 
 impl Scope<'_> {
@@ -354,6 +432,7 @@ impl Scope<'_> {
             return ((Err(error), self.error.take()), None);
         }
         self.arena.header.slot_observer = u64::from(self.observer.is_some());
+        self.arena.header.observes_updates = u64::from(self.observer.is_some() && self.updates);
         let pointer = std::ptr::from_mut(self) as u64;
         let offset = self.metadata.context.offset;
         if offset
@@ -376,6 +455,7 @@ impl Scope<'_> {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
         unsafe { slot.write_unaligned(previous) };
         self.arena.header.slot_observer = 0;
+        self.arena.header.observes_updates = 0;
         let (result, elapsed) = match result {
             Ok(result) => result,
             Err(panic) => std::panic::resume_unwind(panic),
@@ -863,11 +943,14 @@ impl Scope<'_> {
                 "native file-write request has another service kind",
             ));
         };
-        let site = self
-            .metadata
-            .sites
+        let listed = if index & celox_design::FUNCTION_SITE_NUMBER != 0 {
+            &self.metadata.function_sites
+        } else {
+            &self.metadata.sites
+        };
+        let site = listed
             .get(usize::try_from(process).unwrap_or(usize::MAX))
-            .and_then(|sites| sites.get(index as usize))
+            .and_then(|sites| sites.get((index & !celox_design::FUNCTION_SITE_NUMBER) as usize))
             .and_then(Option::as_ref)
             .ok_or_else(|| Self::fault("native file-write request is not registered"))?;
         let values = site
@@ -931,7 +1014,9 @@ pub(crate) extern "C" fn call(
     detail: u64,
 ) -> u64 {
     if context == 0 {
-        return 1;
+        // A kernel run outside a scope has no observer to show its value
+        // changes to.
+        return u64::from(encoded != VALUE_CHANGE);
     }
     // SAFETY: Scope::run passes its exclusively borrowed scope through the
     // private context slot for this synchronous call and restores the slot
@@ -946,6 +1031,18 @@ pub(crate) extern "C" fn call(
                 }
                 None => Ok(0),
             };
+        } else if encoded == AFTER_UPDATE {
+            return match scope.observer.as_deref_mut() {
+                Some(observer) => Ok(observer.after_update(timestamp, scope.metadata, scope.arena)),
+                None => Ok(0),
+            };
+        } else if encoded == VALUE_CHANGE {
+            if scope.updates
+                && let Some(observer) = scope.observer.as_deref_mut()
+            {
+                observer.value_change(timestamp);
+            }
+            return Ok(0);
         } else if matches!(encoded, ARENA_RESERVE_RECORDS | ARENA_RESERVE_IMAGES) {
             scope
                 .arena
@@ -1044,6 +1141,7 @@ mod tests {
             context: target,
             events: signal(0, 64, false),
             sites: vec![],
+            function_sites: vec![],
             runtime_sites: vec![],
             process_names: vec![],
             flagged: vec![(0, 0), (0, 1)],
@@ -1090,6 +1188,7 @@ mod tests {
             pending_scan: 0,
             comb_before: Vec::new(),
             observer: None,
+            updates: false,
         };
         let value = |bits: u8, mask: u8| (BigUint::from(bits), BigUint::from(mask));
         let update = |target, lsb, width, bits, mask| celox_runtime::NbaUpdate {

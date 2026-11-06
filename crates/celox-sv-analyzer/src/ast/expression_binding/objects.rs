@@ -917,11 +917,30 @@ pub(in crate::ast) fn check_assignment(
     target: &str,
     context: impl FnOnce() -> String,
 ) -> Converted<()> {
-    let Some(source) = native_class(tree, session, id, native, dimensions) else {
+    let Ok(source_type) = expression_types::type_of(tree, session, id, native, dimensions) else {
         return Ok(());
     };
-    if derives_from(tree, session, dimensions, &source, target)? {
+    let Some(source) = expression_types::class_name(&session.types, source_type) else {
         return Ok(());
+    };
+    if source == target {
+        return Ok(());
+    }
+    if !classes::builtin(&source) && !classes::builtin(target) {
+        class(tree, session, dimensions, &source)?.record_lineage(
+            tree,
+            session,
+            &dimensions.const_env,
+            &dimensions.type_aliases,
+        );
+        let target_type = classes::handle_type_id(&mut session.types, target);
+        if session
+            .types
+            .assignable_handle(source_type, target_type)
+            .is_ok()
+        {
+            return Ok(());
+        }
     }
     Err(AnalyzerError::IncompatibleClassHandle {
         context: context(),
@@ -1224,7 +1243,12 @@ pub(super) fn random_selection(
                 }
                 // A selected array is random for the call, as a rand one
                 // (18.11).
-                let array = classes::constraints::random_array(property);
+                let array = classes::constraints::random_array(
+                    property,
+                    tree,
+                    session,
+                    &dimensions.const_env,
+                );
                 if (property.field.handle.is_some() && !array)
                     || property.r#type.holds_chandle()
                     || (property.r#type.is_enum && property.r#type.enum_domain.is_none())
@@ -1544,12 +1568,16 @@ pub(super) fn randomize_with(
     let mut inputs = HashMap::default();
     let mut input_types = Vec::new();
     let mut input_values = Vec::new();
-    let mut pending = constraint_ids.to_vec();
-    while let Some(id) = pending.pop() {
+    // The caller's variables the constraints name, each with the variables
+    // of the constraint loops around it, which are not the caller's. Every
+    // node kind is listed, so that a new one has to say what it holds.
+    let mut pending: Vec<(ExprId, Vec<String>)> =
+        constraint_ids.iter().map(|&id| (id, Vec::new())).collect();
+    while let Some((id, loops)) = pending.pop() {
         let candidate = match &native.expression(id).kind {
             ExprKind::Name(name) => {
                 let name = instances::normalize_identifier(&name.spelling);
-                if class.properties.iter().any(|p| p.name == name) {
+                if loops.contains(&name) || class.properties.iter().any(|p| p.name == name) {
                     None
                 } else if class.statics.iter().any(|p| p.name == name) {
                     return Err(unsupported("static properties in inline constraints"));
@@ -1568,26 +1596,66 @@ pub(super) fn randomize_with(
                 Some((format!("local::{name}"), name))
             }
             ExprKind::Group(id) | ExprKind::Unary { expression: id, .. } => {
-                pending.push(*id);
+                pending.push((*id, loops));
                 None
             }
             ExprKind::Binary { left, right, .. } => {
-                pending.extend([*right, *left]);
+                pending.extend([(*right, loops.clone()), (*left, loops)]);
                 None
             }
             ExprKind::Set(items) => {
                 for item in items {
                     match item.kind {
-                        celox_sv_syntax::DimensionKind::Index(id) => pending.push(id),
-                        celox_sv_syntax::DimensionKind::Range { left, right } => {
-                            pending.extend([right, left])
+                        celox_sv_syntax::DimensionKind::Index(id) => {
+                            pending.push((id, loops.clone()))
                         }
-                        _ => {}
+                        celox_sv_syntax::DimensionKind::Range { left, right } => {
+                            pending.extend([(right, loops.clone()), (left, loops.clone())])
+                        }
+                        celox_sv_syntax::DimensionKind::Unsized
+                        | celox_sv_syntax::DimensionKind::Indexed { .. }
+                        | celox_sv_syntax::DimensionKind::Queue(_)
+                        | celox_sv_syntax::DimensionKind::Wildcard => {}
                     }
                 }
                 None
             }
-            _ => None,
+            // A loop's body sees its variables (18.5.8.1).
+            ExprKind::ConstraintForeach {
+                variables, body, ..
+            } => {
+                let mut inner = loops;
+                inner.extend(
+                    variables
+                        .iter()
+                        .flatten()
+                        .map(|variable| instances::normalize_identifier(&variable.spelling)),
+                );
+                pending.push((*body, inner));
+                None
+            }
+            // An element of a loop's array, a member of it or an array size
+            // names properties; the forms constraints do not take name
+            // nothing the call supplies, and their binding rejects them.
+            ExprKind::Member { .. }
+            | ExprKind::Select { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Literal(_)
+            | ExprKind::MinTypMax { .. }
+            | ExprKind::Type(_)
+            | ExprKind::Conditional { .. }
+            | ExprKind::Assignment { .. }
+            | ExprKind::Tagged { .. }
+            | ExprKind::Copy(_)
+            | ExprKind::ArrayMethodWith { .. }
+            | ExprKind::RandomizeWith { .. }
+            | ExprKind::Parameterized { .. }
+            | ExprKind::Cast { .. }
+            | ExprKind::Concatenation(_)
+            | ExprKind::Replication { .. }
+            | ExprKind::Pattern { .. }
+            | ExprKind::Streaming { .. }
+            | ExprKind::StreamSelect { .. } => None,
         };
         let Some((key, name)) = candidate else {
             continue;
@@ -1624,6 +1692,11 @@ pub(super) fn randomize_with(
         input_types.push(ty);
         input_values.push(Some(value));
     }
+    // Inline constraints access members as the caller's class does (18.7).
+    let scope = scope_class(dimensions);
+    session
+        .constraint_scopes
+        .push((scope.clone().unwrap_or_default(), scope));
     let constraints = constraint_ids
         .iter()
         .map(|&id| {
@@ -1637,7 +1710,36 @@ pub(super) fn randomize_with(
             )
             .map_err(|reason| unsupported(format!("inline constraints: {reason}")))
         })
-        .collect::<Converted<Vec<_>>>()?;
+        .collect::<Converted<Vec<_>>>();
+    session.constraint_scopes.pop();
+    let constraints = constraints?;
+    // An inline loop cannot be disabled (18.9), so one over an array the call
+    // selects, which is random for the call (18.11), would always constrain
+    // its elements; a loop of a class block is checked when the call runs,
+    // with its constraint mode.
+    let mut looped = Vec::new();
+    for constraint in &constraints {
+        classes::constraints::looped_arrays(constraint, &mut looped);
+    }
+    for argument in arguments {
+        if let Some(id) = argument.value
+            && let ExprKind::Name(name) = &native.expression(ungroup(id, native)).kind
+            && let Some(index) = class.properties.iter().rposition(|property| {
+                property.name == instances::normalize_identifier(&name.spelling)
+            })
+            && class.properties[index].sequence()
+            && looped.contains(
+                &class.properties[..index]
+                    .iter()
+                    .filter(|property| property.sequence())
+                    .count(),
+            )
+        {
+            return Err(unsupported(
+                "an inline constraint foreach over an array the call randomizes",
+            ));
+        }
+    }
     let selection = random_selection(
         tree,
         session,

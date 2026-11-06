@@ -173,10 +173,19 @@ pub trait SimBackend {
 
     // ── get / set ───────────────────────────────────────────────
     fn set<T: Copy>(&mut self, signal: SignalRef, val: T);
+    /// Write a slot of the compiled scheduler, which no waveform traces and
+    /// no settle partition reads, so the write marks neither.
+    fn set_scheduler_slot<T: Copy>(&mut self, signal: SignalRef, val: T) {
+        self.set(signal, val);
+    }
     fn set_wide(&mut self, signal: SignalRef, val: BigUint);
     fn set_four_state(&mut self, signal: SignalRef, val: BigUint, mask: BigUint);
     fn get(&self, signal: SignalRef) -> BigUint;
     fn get_as<T: Default + Copy>(&self, signal: SignalRef) -> T;
+    /// Read a slot of the compiled scheduler ([`Self::set_scheduler_slot`]).
+    fn get_scheduler_slot<T: Default + Copy>(&self, signal: SignalRef) -> T {
+        self.get_as(signal)
+    }
     fn get_four_state(&self, signal: SignalRef) -> (BigUint, BigUint);
 
     // ── memory / layout ─────────────────────────────────────────
@@ -195,6 +204,35 @@ pub trait SimBackend {
         // Safety: the backend exposes `len` writable bytes at `ptr`.
         unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(offset), bytes.len()) };
         self.mark_settle_range(offset, bytes.len());
+    }
+
+    /// Append the first `len` bytes of the call stack to `into`: the frames
+    /// of the calls a process suspended inside (see
+    /// [`celox_design::ProcessSlots::call_top`]).
+    fn save_call_stack(&self, len: usize, into: &mut Vec<u8>) {
+        let stack = self
+            .layout()
+            .call_stack
+            .expect("a program with function units");
+        assert!(len <= stack.size, "a frame past the call stack");
+        let (ptr, size) = self.memory_as_ptr();
+        assert!(
+            stack.base_offset + len <= size,
+            "a call stack past the image"
+        );
+        // Safety: the backend exposes `size` readable bytes at `ptr`.
+        into.extend_from_slice(unsafe {
+            std::slice::from_raw_parts(ptr.add(stack.base_offset), len)
+        });
+    }
+
+    /// Put back the frames [`Self::save_call_stack`] saved.
+    fn restore_call_stack(&mut self, bytes: &[u8]) {
+        let stack = self
+            .layout()
+            .call_stack
+            .expect("a program with function units");
+        self.write_memory(stack.base_offset, bytes);
     }
 
     /// Set the flags of the settle partitions reading `offset..offset + len`,

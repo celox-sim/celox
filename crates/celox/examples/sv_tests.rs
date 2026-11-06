@@ -256,13 +256,24 @@ fn run(options: &Options) -> Result<(), String> {
     }
 }
 
-/// Runs the simulation until `$finish` or until no event is left.
+/// Runs the simulation until `$finish` or until no event is left. A run
+/// that issued a run-time error (`$error`, or a failed assertion's default
+/// action) still runs to its end, then fails, as a Verilator model does: the
+/// exit status of a simulation is tool-specific (IEEE 1800-2023 20.10).
 fn simulate(mut sim: celox::Simulation) -> Result<(), String> {
     use std::io::Write as _;
     let mut stdout = std::io::stdout().lock();
+    let mut errors = 0usize;
     let mut output = |sim: &mut celox::Simulation| -> Result<(), String> {
         let mut fatal = None;
         for event in sim.drain_runtime_events() {
+            if let celox::RuntimeEvent::Report(celox::Report {
+                severity: celox::Severity::Error,
+                ..
+            }) = event
+            {
+                errors += 1;
+            }
             match event {
                 celox::RuntimeEvent::Report(celox::Report {
                     severity: celox::Severity::Fatal,
@@ -311,7 +322,10 @@ fn simulate(mut sim: celox::Simulation) -> Result<(), String> {
         output(&mut sim)?;
         finished?;
     }
-    Ok(())
+    match errors {
+        0 => Ok(()),
+        count => Err(format!("run-time errors reported: {count}")),
+    }
 }
 
 #[allow(clippy::disallowed_macros)] // CLI diagnostics intentionally use stderr.
@@ -508,6 +522,24 @@ mod tests {
         run(&fixture_options(vec![path.clone()], Mode::Elaboration)).unwrap();
         let error = run(&fixture_options(vec![path], Mode::Simulation)).unwrap_err();
         assert!(error.contains("from final"), "{error}");
+    }
+
+    #[test]
+    fn simulation_that_reports_an_error_runs_to_its_end_then_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture(
+            dir.path(),
+            "error.sv",
+            "module Top; initial begin $warning(\"w\"); $error(\"e\"); #1 $error(\"late\"); end endmodule",
+        );
+        let error = run(&fixture_options(vec![path], Mode::Simulation)).unwrap_err();
+        assert_eq!(error, "run-time errors reported: 2");
+        let path = fixture(
+            dir.path(),
+            "warning.sv",
+            "module Top; initial begin $warning(\"w\"); $info(\"i\"); end endmodule",
+        );
+        run(&fixture_options(vec![path], Mode::Simulation)).unwrap();
     }
 
     #[test]

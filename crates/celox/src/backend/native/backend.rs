@@ -506,6 +506,8 @@ pub(crate) struct NativeRuntimeSchema {
     pub(crate) processes: Vec<celox_design::ProcessSlots<AbsoluteAddr>>,
     pub(crate) process_origins: Vec<celox_design::ProcessOrigin>,
     pub(crate) process_frames: Vec<Option<celox_design::ProcessFrame<AbsoluteAddr>>>,
+    pub(crate) process_call_resumes: Vec<Vec<celox_design::CallResume>>,
+    pub(crate) function_frames: Vec<celox_design::FunctionFrame>,
     pub(crate) watches: Vec<celox_design::EventWatch<AbsoluteAddr>>,
     pub(crate) occurrence_probes: Vec<(celox_design::VarAtomBase<AbsoluteAddr>, AbsoluteAddr)>,
     pub(crate) wait_sites: Vec<celox_design::WaitSite<AbsoluteAddr>>,
@@ -774,6 +776,8 @@ impl NativeProgramImage {
                 processes: self.runtime_schema.processes.clone(),
                 process_origins: self.runtime_schema.process_origins.clone(),
                 process_frames: self.runtime_schema.process_frames.clone(),
+                process_call_resumes: self.runtime_schema.process_call_resumes.clone(),
+                function_frames: self.runtime_schema.function_frames.clone(),
                 watches: self.runtime_schema.watches.clone(),
                 occurrence_probes: self.runtime_schema.occurrence_probes.clone(),
                 wait_sites: self.runtime_schema.wait_sites.clone(),
@@ -1176,16 +1180,18 @@ pub(super) struct CompiledNativeFunction {
 }
 
 /// Allocated scheduler MIR without a guessed native callee scratch extent.
-#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[cfg(hotspot_jit)]
 pub(crate) struct PreparedHotspotScheduler {
     program: Arc<LaidOutProgram>,
+    /// Its inline budget outlined units a later stage can inline.
+    pub(crate) budgeted: bool,
     allocated: emit::AllocatedFunction,
     // Only the shared Comb entry is unresolved. All other outlined kernels
     // can compile independently while that entry is still on the worker.
     callees: Vec<Option<Arc<HotspotCode>>>,
 }
 
-#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[cfg(hotspot_jit)]
 impl PreparedHotspotScheduler {
     /// Optimize, allocate and compile independent callees while Comb compiles.
     /// Only linking and emission wait for its actual scratch extent.
@@ -1193,9 +1199,21 @@ impl PreparedHotspotScheduler {
         program: Arc<LaidOutProgram>,
         options: &SimulatorOptions,
         cancel: &CompileCancel,
+        inline_budget: Option<usize>,
     ) -> Result<Self, SimulatorError> {
-        let (unit, outlined) =
-            crate::scheduler::hotspot_scheduler(&program).map_err(codegen_message)?;
+        let crate::scheduler::HotspotScheduler {
+            unit,
+            callees: outlined,
+            budgeted,
+        } = crate::scheduler::hotspot_scheduler(&program, inline_budget, Some(cancel)).map_err(
+            |error| {
+                if cancel.is_cancelled() {
+                    crate::backend::compile_cancel::cancelled_error()
+                } else {
+                    codegen_message(error)
+                }
+            },
+        )?;
         HotspotCode::validate_units(std::slice::from_ref(&unit))?;
         let mut native = options.x86_options.clone();
         native.baseline = false;
@@ -1212,12 +1230,26 @@ impl PreparedHotspotScheduler {
             native.baseline,
             native.function.is_some(),
         )?;
+        #[cfg(target_arch = "x86_64")]
         let allocated = emit::allocate_owned_prepared_eu(
             unit,
             program.layout(),
             options.four_state,
             "hotspot",
             &native,
+            None,
+            || cancel.is_cancelled(),
+        )
+        .map_err(hotspot_pipeline_error)?;
+        // No tick loop and no function units: `validate_units` rejects calls.
+        #[cfg(target_arch = "aarch64")]
+        let allocated = emit::allocate_prepared_eu_with_functions(
+            &unit,
+            program.layout(),
+            options.four_state,
+            "hotspot",
+            native.native_tick_loop,
+            None,
             None,
             || cancel.is_cancelled(),
         )
@@ -1241,13 +1273,14 @@ impl PreparedHotspotScheduler {
         }
         Ok(Self {
             program,
+            budgeted,
             allocated,
             callees,
         })
     }
 }
 
-#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[cfg(hotspot_jit)]
 fn hotspot_pipeline_error(source: emit::ChainedEmitError) -> SimulatorError {
     if matches!(source, emit::ChainedEmitError::Cancelled) {
         codegen_err(CodegenError::Cancelled)
@@ -1257,7 +1290,7 @@ fn hotspot_pipeline_error(source: emit::ChainedEmitError) -> SimulatorError {
 }
 
 /// An independently owned complete entry using the program's existing state ABI.
-#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[cfg(hotspot_jit)]
 pub(crate) struct HotspotCode {
     code: jit_mem::JitCode,
     // Keep every linked mapping and its immutable address table alive until
@@ -1268,7 +1301,7 @@ pub(crate) struct HotspotCode {
     pub(crate) code_size: usize,
 }
 
-#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[cfg(hotspot_jit)]
 impl HotspotCode {
     pub(crate) fn compile(
         units: &[crate::ir::ExecutionUnit<RegionedAbsoluteAddr>],
@@ -1347,6 +1380,7 @@ impl HotspotCode {
             program,
             allocated,
             callees: prepared_callees,
+            ..
         } = prepared;
         let mut callees = Vec::with_capacity(prepared_callees.len());
         let mut additional_bytes = 0usize;
@@ -1378,7 +1412,10 @@ impl HotspotCode {
                 symbols,
                 trace: None,
                 required_state_size: emitted.required_state_size as usize,
+                #[cfg(target_arch = "x86_64")]
                 required_native_features: emitted.required_image_features,
+                #[cfg(target_arch = "aarch64")]
+                required_native_features: 0,
             },
             caller_options.x86_options.diagnostics.perf_map,
         )?;
@@ -1419,7 +1456,7 @@ impl HotspotCode {
     }
 }
 
-#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[cfg(hotspot_jit)]
 impl celox_runtime::backend::NativeProcessCode for HotspotCode {
     unsafe fn invoke(
         &self,
@@ -3609,6 +3646,8 @@ fn compile_program_with_outlining_threshold(
                 processes: sir.runtime().runtime_schema.processes.clone(),
                 process_origins: sir.runtime().runtime_schema.process_origins.clone(),
                 process_frames: sir.runtime().runtime_schema.process_frames.clone(),
+                process_call_resumes: sir.runtime().runtime_schema.process_call_resumes.clone(),
+                function_frames: sir.runtime().runtime_schema.function_frames.clone(),
                 watches: sir.runtime().runtime_schema.watches.clone(),
                 occurrence_probes: sir.runtime().runtime_schema.occurrence_probes.clone(),
                 wait_sites: sir.runtime().runtime_schema.wait_sites.clone(),
@@ -3731,6 +3770,64 @@ fn write_initial_run_to_plane(
 }
 
 impl NativeBackend {
+    /// Whether `signal` is a scalar of exactly `T`'s bytes.
+    #[inline]
+    fn exact_scalar<T>(signal: SignalRef) -> bool {
+        signal.width == std::mem::size_of::<T>() * 8 && signal.array_layout.is_none()
+    }
+
+    /// Write `val` to the scalar or array `signal` without marking it for
+    /// waveforms or settle partitions.
+    fn store_scalar<T: Copy>(&mut self, signal: SignalRef, val: T) {
+        let allocated_size = get_byte_size(signal.width);
+        let provided_size = std::mem::size_of::<T>();
+        let clear_mask = self.compiled.options.four_state && signal.is_4state;
+
+        let copy_size = provided_size.min(allocated_size);
+
+        if signal.array_layout.is_some() {
+            let value_bytes =
+                unsafe { std::slice::from_raw_parts(&val as *const T as *const u8, copy_size) };
+            self.write_signal_plane(signal, false, &BigUint::from_bytes_le(value_bytes));
+            if clear_mask {
+                self.write_signal_plane(signal, true, &BigUint::from(0u8));
+            }
+            return;
+        }
+
+        unsafe {
+            let base_ptr = (self.memory.as_mut_ptr() as *mut u8).add(signal.offset);
+            if !clear_mask && allocated_size == 1 {
+                let raw = if copy_size == 0 {
+                    0
+                } else {
+                    *(&val as *const T as *const u8)
+                };
+                let byte = if signal.width < 8 {
+                    raw & ((1u8 << signal.width) - 1)
+                } else {
+                    raw
+                };
+                *base_ptr = byte;
+                return;
+            }
+
+            if copy_size < allocated_size {
+                std::ptr::write_bytes(base_ptr, 0, allocated_size);
+            }
+            std::ptr::copy_nonoverlapping(&val as *const T as *const u8, base_ptr, copy_size);
+
+            if !signal.width.is_multiple_of(8) && allocated_size != 0 {
+                *base_ptr.add(allocated_size - 1) &= (1u8 << (signal.width % 8)) - 1;
+            }
+
+            if clear_mask {
+                let mask_ptr = base_ptr.add(allocated_size);
+                std::ptr::write_bytes(mask_ptr, 0, allocated_size);
+            }
+        }
+    }
+
     #[cfg(all(
         test,
         feature = "systemverilog",
@@ -4578,52 +4675,24 @@ impl super::super::SimBackend for NativeBackend {
 
     fn set<T: Copy>(&mut self, signal: SignalRef, val: T) {
         celox_runtime::backend::SimBackend::mark_vcd_signal(self, signal);
-        let allocated_size = get_byte_size(signal.width);
-        let provided_size = std::mem::size_of::<T>();
-        let clear_mask = self.compiled.options.four_state && signal.is_4state;
+        self.store_scalar(signal, val);
+    }
 
-        let copy_size = provided_size.min(allocated_size);
-
-        if signal.array_layout.is_some() {
-            let value_bytes =
-                unsafe { std::slice::from_raw_parts(&val as *const T as *const u8, copy_size) };
-            self.write_signal_plane(signal, false, &BigUint::from_bytes_le(value_bytes));
-            if clear_mask {
-                self.write_signal_plane(signal, true, &BigUint::from(0u8));
+    #[inline]
+    fn set_scheduler_slot<T: Copy>(&mut self, signal: SignalRef, val: T) {
+        if Self::exact_scalar::<T>(signal)
+            && !(self.compiled.options.four_state && signal.is_4state)
+        {
+            // SAFETY: the slot is a scalar of exactly `T`'s bytes inside the
+            // state image, without a mask plane to clear.
+            unsafe {
+                (self.memory.as_mut_ptr() as *mut u8)
+                    .add(signal.offset)
+                    .cast::<T>()
+                    .write_unaligned(val);
             }
-            return;
-        }
-
-        unsafe {
-            let base_ptr = (self.memory.as_mut_ptr() as *mut u8).add(signal.offset);
-            if !clear_mask && allocated_size == 1 {
-                let raw = if copy_size == 0 {
-                    0
-                } else {
-                    *(&val as *const T as *const u8)
-                };
-                let byte = if signal.width < 8 {
-                    raw & ((1u8 << signal.width) - 1)
-                } else {
-                    raw
-                };
-                *base_ptr = byte;
-                return;
-            }
-
-            if copy_size < allocated_size {
-                std::ptr::write_bytes(base_ptr, 0, allocated_size);
-            }
-            std::ptr::copy_nonoverlapping(&val as *const T as *const u8, base_ptr, copy_size);
-
-            if !signal.width.is_multiple_of(8) && allocated_size != 0 {
-                *base_ptr.add(allocated_size - 1) &= (1u8 << (signal.width % 8)) - 1;
-            }
-
-            if clear_mask {
-                let mask_ptr = base_ptr.add(allocated_size);
-                std::ptr::write_bytes(mask_ptr, 0, allocated_size);
-            }
+        } else {
+            self.store_scalar(signal, val);
         }
     }
 
@@ -4647,6 +4716,22 @@ impl super::super::SimBackend for NativeBackend {
 
     fn get(&self, signal: SignalRef) -> BigUint {
         self.read_signal_plane(signal, false)
+    }
+
+    #[inline]
+    fn get_scheduler_slot<T: Default + Copy>(&self, signal: SignalRef) -> T {
+        if Self::exact_scalar::<T>(signal) {
+            // SAFETY: the slot is a scalar of exactly `T`'s bytes inside the
+            // state image.
+            unsafe {
+                (self.memory.as_ptr() as *const u8)
+                    .add(signal.offset)
+                    .cast::<T>()
+                    .read_unaligned()
+            }
+        } else {
+            self.get_as(signal)
+        }
     }
 
     fn get_as<T: Default + Copy>(&self, signal: SignalRef) -> T {

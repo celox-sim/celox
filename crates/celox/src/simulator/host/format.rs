@@ -52,7 +52,7 @@ impl<B: SimBackend> Simulator<B> {
             kind: RuntimeEventKind::Write,
             template: None,
             sizing: DisplaySizing::Ieee,
-            scope: self.process_scope(site.process),
+            scope: self.process_scope(site.process.index()),
             location: None,
             assertion: None,
             deferred: None,

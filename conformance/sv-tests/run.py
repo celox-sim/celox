@@ -87,7 +87,7 @@ def preflight(root, driver):
                 raise ValueError(f"missing sv-tests library include directory: {directory}")
 
 
-def run_case(root, driver, out_dir, test, state_mode):
+def run_case(root, driver, out_dir, test, state_mode, case_timeout=None):
     case_dir = out_dir / state_mode / test
     case_dir.mkdir(parents=True, exist_ok=True)
     log_path = case_dir / "official.log"
@@ -104,6 +104,11 @@ def run_case(root, driver, out_dir, test, state_mode):
         "CELOX_SV_STATE_MODE": state_mode,
         "CELOX_SV_TESTS_CASE": test,
     })
+    # The official runner kills a case after its `:timeout:`; a cap replaces
+    # it for every case (BaseRunner's OVERRIDE_TEST_TIMEOUTS), and a case
+    # that reaches it fails with the runner's timeout diagnostic.
+    if case_timeout is not None:
+        environment["OVERRIDE_TEST_TIMEOUTS"] = str(case_timeout)
     result = subprocess.run(
         [sys.executable, str(root / "tools/runner"), "--runner", "celox",
          "--test", test, "--out", str(log_path)],
@@ -220,12 +225,12 @@ class CollectionError(ValueError):
         self.errors = sorted(errors, key=lambda error: (error["test"], error["state_mode"]))
 
 
-def collect_cases(root, driver, out_dir, tests, modes, jobs):
+def collect_cases(root, driver, out_dir, tests, modes, jobs, case_timeout=None):
     # Preserve completed evidence, but never update a baseline after an error.
     rows, errors = [], []
     executor = ThreadPoolExecutor(max_workers=jobs)
     try:
-        futures = {executor.submit(run_case, root, driver, out_dir, test, mode): (test, mode)
+        futures = {executor.submit(run_case, root, driver, out_dir, test, mode, case_timeout): (test, mode)
                    for test in tests for mode in modes}
         for future in as_completed(futures):
             test, mode = futures[future]
@@ -273,6 +278,9 @@ def main(argv=None):
     parser.add_argument("--expected", type=Path)
     parser.add_argument("--update", action="store_true")
     parser.add_argument("--report", type=Path)
+    parser.add_argument("--case-timeout", type=positive_int,
+                        help="seconds after which the official runner stops each case, instead of the "
+                             "case's own :timeout: (default: the case's)")
     parser.add_argument("--shard", type=shard,
                         help="INDEX/COUNT: run and compare only that shard of the tests and expectations")
     options = parser.parse_args(argv)
@@ -308,7 +316,7 @@ def main(argv=None):
         expected = {key: value for key, value in expected.items() if key[0] in members}
         requested = len(tests) * len(modes)
         stage = "collection"
-        rows = collect_cases(root, driver, out_dir, tests, modes, options.jobs)
+        rows = collect_cases(root, driver, out_dir, tests, modes, options.jobs, options.case_timeout)
         results = {(row["test"], row["state_mode"]): row["result"] for row in rows}
         stage = "report"
         groups = summarize(rows, meta_tags)

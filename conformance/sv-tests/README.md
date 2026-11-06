@@ -422,12 +422,20 @@ work directories. Reports and expectations are sorted regardless of completion
 order. A runner infrastructure error cancels pending work and cannot update
 expectations.
 
+`--case-timeout SECONDS` replaces each case's own `:timeout:` with one
+limit, through upstream `BaseRunner`'s `OVERRIDE_TEST_TIMEOUTS`; a case that
+reaches it fails with the runner's timeout diagnostic (`runner_timeout`). PR CI
+uses 78 seconds, three times the longest passing case of the main corpus with
+the CI driver (25.8 seconds), so that a change which lets a UVM testbench
+elaborate further cannot run each one to its own 300 or 900 seconds. The daily
+workflow keeps the upstream limits.
+
 `--shard INDEX/COUNT` runs and compares only one of COUNT disjoint shards
 (1-based). Tests are dealt round-robin from their sorted names, so that
 neighbouring tests, such as the UVM testbenches, spread over the shards; a test
 that `expected.tsv` lists but the corpus lost belongs to one shard, which
 reports it missing. With `--update`, a shard replaces only its own rows. CI
-builds the driver once and runs three shards (`sv-tests conformance (N/3)`),
+builds the driver once and runs five shards (`sv-tests conformance (N/5)`),
 each with 4 jobs, and retains one report per shard.
 
 Both state modes run by default. Use `--state-mode 2state` or
