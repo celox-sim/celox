@@ -2945,3 +2945,42 @@ fn class_handle_defaults_take_handles_of_their_formals_class() {
     assert_eq!(sim.get(sim.signal("seen")), 2u32.into());
     assert_eq!(sim.get(sim.signal("none")), 7u32.into());
 }
+
+#[test]
+fn class_handle_outputs_are_assigned_back_to_their_actuals() {
+    // IEEE 1800-2023 13.5.1: an output or inout formal is assigned to its
+    // actual when the call returns, so the actual's class must take a handle
+    // of the formal's (8.16).
+    for body in [
+        "task t(output A x); x = null; endtask initial begin B y; t(y); end",
+        "task t(inout A x); endtask initial begin B y; t(y); end",
+        "class H; task t(output A x); x = null; endtask endclass
+         initial begin H h; B y; h = new; h.t(y); end",
+    ] {
+        let source =
+            format!("module Top; class A; endclass class B extends A; endclass {body} endmodule");
+        let Err(error) = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build() else {
+            panic!("an output of a base class was copied to a derived class's variable: {body}");
+        };
+        assert!(
+            error.to_string().contains("a handle of class `A` is not"),
+            "{error}"
+        );
+    }
+    let source = "module Top;
+        class A; virtual function int id(); return 1; endfunction endclass
+        class B extends A; virtual function int id(); return 2; endfunction endclass
+        int seen;
+        task t(output B x); x = new; endtask
+        initial begin A a; t(a); seen = a.id(); end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 2u32.into());
+}

@@ -936,29 +936,20 @@ pub(in crate::ast) fn check_assignment(
         let Some(source) = expression_types::class_name(&session.types, source_type) else {
             continue;
         };
-        check_handle_class(
-            tree,
-            session,
-            dimensions,
-            source_type,
-            &source,
-            target,
-            &context,
-        )?;
+        check_class_assignment(tree, session, dimensions, &source, target, &context)?;
     }
     Ok(())
 }
 
-/// Check that the handle of type `source_type`, of class `source`, may be
-/// assigned to a variable of class `target`.
-fn check_handle_class(
+/// Check that a handle of class `source` may be assigned to a variable of
+/// class `target` (IEEE 1800-2023 8.16, 8.26.5).
+pub(in crate::ast) fn check_class_assignment(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     dimensions: &PackedDimensions,
-    source_type: semantic_types::TyId,
     source: &str,
     target: &str,
-    context: &impl Fn() -> String,
+    context: impl FnOnce() -> String,
 ) -> Converted<()> {
     if source == target {
         return Ok(());
@@ -970,6 +961,7 @@ fn check_handle_class(
             &dimensions.const_env,
             &dimensions.type_aliases,
         );
+        let source_type = classes::handle_type_id(&mut session.types, source);
         let target_type = classes::handle_type_id(&mut session.types, target);
         if session
             .types
