@@ -21,7 +21,7 @@ mod tests;
 
 pub(super) use bindings::ConstantType;
 pub(super) use conversion::{of_shape, of_type};
-pub(super) use relations::{Castable, Mismatch};
+pub(super) use relations::{Assignable, Castable, Mismatch};
 pub(super) use streams::{StreamLayout, StreamRole};
 
 /// An interned semantic type of a [`TyTable`].

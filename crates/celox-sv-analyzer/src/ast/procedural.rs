@@ -2980,10 +2980,30 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 }],
             }]);
         }
-        // A cast between numeric types is always valid; the effects of the
-        // statement made it (6.24.2).
-        if name == "$cast" && self.numeric_cast(root)?.is_some() {
-            return Ok(Vec::new());
+        // The effects of the statement made the cast, and `root` is bound to
+        // whether it was valid (6.24.2): an assignment or a pack always is.
+        if name == "$cast"
+            && let Some((_, _, plan)) = self.cast_plan(root)?
+            && !matches!(plan, effects::CastPlan::Object)
+        {
+            if let effects::CastPlan::Unsupported(reason) = plan {
+                return Err(unsupported(reason));
+            }
+            if discarded || matches!(plan, effects::CastPlan::Assign | effects::CastPlan::Pack) {
+                return Ok(Vec::new());
+            }
+            return Ok(vec![Stmt::If {
+                condition: self.native_value(root)?,
+                then_body: Vec::new(),
+                else_body: vec![Stmt::SystemTask {
+                    task: SystemTask::Severity(system_functions::Severity::Error),
+                    site: source_span(declarations.expression(root).tokens, self.tree),
+                    assertion: None,
+                    args: vec![SystemTaskArg::Str(
+                        "$cast of a value that is not cast compatible with its destination".into(),
+                    )],
+                }],
+            }]);
         }
         if name == "$cast"
             && let [destination, source] = arguments
