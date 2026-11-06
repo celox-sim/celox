@@ -915,19 +915,56 @@ pub(in crate::ast) fn check_assignment(
     native: &Declarations,
     dimensions: &PackedDimensions,
     target: &str,
-    context: impl FnOnce() -> String,
+    context: impl Fn() -> String,
 ) -> Converted<()> {
-    let Ok(source_type) = expression_types::type_of(tree, session, id, native, dimensions) else {
-        return Ok(());
-    };
-    let Some(source) = expression_types::class_name(&session.types, source_type) else {
-        return Ok(());
-    };
+    let mut pending = vec![id];
+    while let Some(id) = pending.pop() {
+        let Ok(source_type) = expression_types::type_of(tree, session, id, native, dimensions)
+        else {
+            // A conditional whose arms have no common class (11.4.11) is
+            // judged by its arms, either of which may be the value.
+            if let ExprKind::Conditional {
+                then_expression,
+                else_expression,
+                ..
+            } = &native.expression(ungroup(id, native)).kind
+            {
+                pending.extend([*else_expression, *then_expression]);
+            }
+            continue;
+        };
+        let Some(source) = expression_types::class_name(&session.types, source_type) else {
+            continue;
+        };
+        check_handle_class(
+            tree,
+            session,
+            dimensions,
+            source_type,
+            &source,
+            target,
+            &context,
+        )?;
+    }
+    Ok(())
+}
+
+/// Check that the handle of type `source_type`, of class `source`, may be
+/// assigned to a variable of class `target`.
+fn check_handle_class(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+    source_type: semantic_types::TyId,
+    source: &str,
+    target: &str,
+    context: &impl Fn() -> String,
+) -> Converted<()> {
     if source == target {
         return Ok(());
     }
-    if !classes::builtin(&source) && !classes::builtin(target) {
-        class(tree, session, dimensions, &source)?.record_lineage(
+    if !classes::builtin(source) && !classes::builtin(target) {
+        class(tree, session, dimensions, source)?.record_lineage(
             tree,
             session,
             &dimensions.const_env,
@@ -944,7 +981,7 @@ pub(in crate::ast) fn check_assignment(
     }
     Err(AnalyzerError::IncompatibleClassHandle {
         context: context(),
-        actual: source,
+        actual: source.to_owned(),
         target: target.to_owned(),
     })
 }

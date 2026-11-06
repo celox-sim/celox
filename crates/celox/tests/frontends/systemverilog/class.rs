@@ -2863,3 +2863,45 @@ fn class_handle_actuals_are_assigned_to_their_formals() {
     sim.run_until(0).unwrap();
     assert_eq!(sim.get(sim.signal("seen")), 2u32.into());
 }
+
+#[test]
+fn class_handle_results_take_handles_of_their_class() {
+    // IEEE 1800-2023 13.4.1: a returned value is assigned to the function's
+    // result, as assigning to the function's name is (8.16).
+    for body in [
+        "function A f(); B x; x = new; return x; endfunction initial begin A y; y = f(); end",
+        "function A f(); B x; x = new; f = x; endfunction initial begin A y; y = f(); end",
+        "class H; function A f(); B x; x = new; return x; endfunction endclass
+         initial begin H h; A y; h = new; y = h.f(); end",
+        // Arms of unrelated classes have no common type (11.4.11); each
+        // arm is the value, and one is no `A`.
+        "bit s; function A f(); A a; B x; a = new; x = new; return s ? a : x; endfunction
+         initial begin A y; y = f(); end",
+        "bit s; initial begin A a, y; B x; a = new; x = new; y = s ? a : (s ? x : a); end",
+    ] {
+        let source = format!("module Top; class A; endclass class B; endclass {body} endmodule");
+        let Err(error) = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build() else {
+            panic!("a function of class `A` returned an unrelated class's handle: {body}");
+        };
+        assert!(
+            error.to_string().contains("a handle of class `B` is not"),
+            "{error}"
+        );
+    }
+    let source = "module Top;
+        class A; virtual function int id(); return 1; endfunction endclass
+        class B extends A; virtual function int id(); return 2; endfunction endclass
+        int seen;
+        function A f(); B x; x = new; return x; endfunction
+        initial begin A a; a = f(); seen = a.id(); end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 2u32.into());
+}

@@ -625,6 +625,24 @@ impl BodyBuilder<'_, '_, '_> {
                                     &self.dims,
                                 )?;
                             }
+                            // A class handle result takes a handle its class
+                            // takes (8.16, 13.4.1).
+                            if let Some(class) = self
+                                .return_shape
+                                .as_ref()
+                                .filter(|shape| shape.unpacked.is_empty())
+                                .and_then(|shape| shape.class.clone())
+                            {
+                                expression_binding::check_handle_assignment(
+                                    self.tree,
+                                    self.session,
+                                    *id,
+                                    native,
+                                    &self.dims,
+                                    &class,
+                                    || "return value".into(),
+                                )?;
+                            }
                         }
                         let value = value
                             .map(|id| {
