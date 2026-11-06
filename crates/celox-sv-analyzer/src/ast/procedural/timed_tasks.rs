@@ -432,20 +432,63 @@ fn subroutine_effects(
         .iter()
         .map(|subroutine| own_effects(&subroutine.body, definitions))
         .collect::<Vec<_>>();
-    let mut known = HashMap::default();
-    loop {
-        let mut changed = false;
-        for (subroutine, (effects, calls)) in subroutines.iter().zip(&own) {
-            let effects = with_callees(*effects, calls, &known);
-            if known.get(&subroutine.name) != Some(&effects) {
-                known.insert(subroutine.name.clone(), effects);
-                changed = true;
-            }
-        }
-        if !changed {
-            return known;
+    // Effects only grow, so the least fixpoint is reached by revisiting the
+    // callers of a subroutine whose effects grew, each at most once per
+    // effect, instead of every subroutine on every pass.
+    let mut indices = HashMap::<&str, Vec<usize>>::default();
+    for (index, subroutine) in subroutines.iter().enumerate() {
+        indices
+            .entry(subroutine.name.as_str())
+            .or_default()
+            .push(index);
+    }
+    let callees = own
+        .iter()
+        .map(|(_, calls)| {
+            calls
+                .iter()
+                .filter_map(|name| indices.get(name.as_str()))
+                .flatten()
+                .copied()
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let mut callers = vec![Vec::new(); subroutines.len()];
+    for (caller, callees) in callees.iter().enumerate() {
+        for &callee in callees {
+            callers[callee].push(caller);
         }
     }
+    let mut effects = own.iter().map(|(effects, _)| *effects).collect::<Vec<_>>();
+    let mut pending = (0..subroutines.len()).rev().collect::<Vec<_>>();
+    let mut queued = vec![true; subroutines.len()];
+    while let Some(index) = pending.pop() {
+        queued[index] = false;
+        #[cfg(test)]
+        CALLEE_FOLDS.with(|count| count.set(count.get() + 1));
+        let grown = callees[index]
+            .iter()
+            .fold(effects[index], |grown, &callee| {
+                grown.union(effects[callee])
+            });
+        if grown != effects[index] {
+            effects[index] = grown;
+            for &caller in &callers[index] {
+                if !queued[caller] {
+                    queued[caller] = true;
+                    pending.push(caller);
+                }
+            }
+        }
+    }
+    // Subroutines of one name share their effects, as calls by name reach
+    // any of them.
+    let mut known = HashMap::<String, Effects>::default();
+    for (subroutine, effects) in subroutines.iter().zip(effects) {
+        let entry = known.entry(subroutine.name.clone()).or_default();
+        *entry = entry.union(effects);
+    }
+    known
 }
 
 /// A concurrent assertion action runs in the Reactive region of the
@@ -558,6 +601,8 @@ fn assigns_nonblocking(body: &[Stmt]) -> bool {
 thread_local! {
     /// Walks of a body for its own effects.
     static OWN_EFFECT_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Folds of a subroutine's callees' effects into its own.
+    static CALLEE_FOLDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -585,5 +630,30 @@ mod tests {
         };
         let step = walks(3) - walks(2);
         assert_eq!(walks(18) - walks(2), 16 * step);
+    }
+
+    #[test]
+    fn subroutine_effects_fold_callees_linearly_in_call_depth() {
+        // The suspension of the last task of a chain reaches the first one
+        // through the callers of each task, not through a pass over every
+        // task per call.
+        let folds = |chain: usize| {
+            let tasks = (0..chain)
+                .map(|i| {
+                    if i + 1 < chain {
+                        format!("task automatic t{i}(); t{}(); endtask\n", i + 1)
+                    } else {
+                        format!("task automatic t{i}(); #1; endtask\n")
+                    }
+                })
+                .collect::<String>();
+            let source = format!("module Top;\n{tasks}initial t0();\nendmodule\n");
+            super::CALLEE_FOLDS.with(|count| count.set(0));
+            crate::analyze_source(&source, std::path::Path::new("effect-folds.sv"))
+                .expect("the module analyzes");
+            super::CALLEE_FOLDS.with(|count| count.get())
+        };
+        let step = folds(3) - folds(2);
+        assert_eq!(folds(18) - folds(2), 16 * step);
     }
 }
