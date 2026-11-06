@@ -15,6 +15,7 @@ mod references;
 mod selected;
 mod streams;
 mod strings;
+pub(super) mod type_references;
 pub(super) mod value_selects;
 pub(super) use calls::{statement as call_statement, statement_root as call_statement_root};
 pub(super) use chandles::{

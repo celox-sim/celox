@@ -3466,3 +3466,25 @@ fn pure_virtual_methods_need_an_abstract_class() {
         parse(&format!("{class} module M; endmodule"));
     }
 }
+
+/// `var` before a data type declares a variable at module level as it does
+/// in a procedure, also with a type operator (IEEE 1800-2023 6.8, 6.23); a
+/// keyword never names the module of an instance.
+#[test]
+fn var_declarations_with_type_operators_are_no_instances() {
+    for item in [
+        "var type(a + b) d;",
+        "var type(real) d;",
+        "var logic [3:0] d;",
+    ] {
+        let syntax = parse(&format!("module top(); real a, b; {item} endmodule"));
+        assert!(syntax.instantiations.is_empty(), "{item}");
+        assert!(
+            syntax.data_declarations.iter().any(|declaration| matches!(
+                declaration,
+                DataDeclaration::Variables(variables) if variables.var
+            )),
+            "{item}"
+        );
+    }
+}

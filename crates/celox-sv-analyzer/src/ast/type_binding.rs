@@ -135,6 +135,9 @@ pub(super) fn implicit_subroutine_type(
     ty.packed_ranges = binding::packed_ranges(&data.packed_dimensions, tree, session, &context)?;
     Ok(ty)
 }
+/// The signals that `declaration` declares. A type operator applied to an
+/// expression names variables of `scope`, the declarations before it
+/// (IEEE 1800-2023 6.23).
 pub(super) fn local_signals(
     declaration: &celox_sv_syntax::VariableDeclaration,
     tree: &AnalysisContext<'_>,
@@ -142,9 +145,40 @@ pub(super) fn local_signals(
     env: &ConstEnv,
     aliases: &HashMap<String, Type>,
     selected_name: Option<&str>,
+    scope: Option<&PackedDimensions>,
 ) -> Converted<Vec<Signal>> {
-    let context = PackedDimensions::new(HashMap::default(), env, aliases);
+    // A type reference declares a variable only after `var` (6.23).
+    if matches!(
+        tree.declarations().data_type(declaration.data_type).kind,
+        DataTypeKind::TypeOf(_)
+    ) && !declaration.var
+    {
+        return Err(unsupported(
+            "variable declaration with a type reference but without `var` (IEEE 1800-2023 6.23)",
+        ));
+    }
+    let context = match scope {
+        Some(scope)
+            if matches!(
+                tree.declarations().data_type(declaration.data_type).kind,
+                DataTypeKind::TypeOf(_)
+            ) =>
+        {
+            scope.clone()
+        }
+        _ => PackedDimensions::new(HashMap::default(), env, aliases),
+    };
     let Some(base) = bind(declaration.data_type, tree, session, &context)? else {
+        // Ports, and variables of a generate block, are not in the scope of
+        // a type operator.
+        if matches!(
+            tree.declarations().data_type(declaration.data_type).kind,
+            DataTypeKind::TypeOf(_)
+        ) {
+            return Err(unsupported(
+                "type operator applied to an expression whose type is not known at its declaration (one reading a port, or any expression in a generate block)",
+            ));
+        }
         return Err(unsupported("unsupported internal data type"));
     };
     let mut signals = Vec::new();

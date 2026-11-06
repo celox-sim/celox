@@ -855,3 +855,58 @@ endmodule"#)
     endmodule
   "#)
   (four_state) (top Top) (run_until 0) (assert_eq ok 1))
+
+; The type operator (IEEE 1800-2023 6.23) declares variables of an
+; expression's or a type's type, and compares types at elaboration, also as
+; the expression of a case statement or a case generate construct, a
+; parameter or a generate condition.
+(case type_operator
+  (source "type_operator.sv" #"
+    module Top #(parameter type T = type(logic [11:0]))(output int hits, sum, product, narrow);
+      localparam bit SAME = type(T) == type(logic [11:0]);
+      real a = 4.75, b = 0.5;
+      bit [12:0] bus;
+      var type(4'(bus)) f;
+      var type(a + b) c;
+      typedef enum {E0, E1} e_t;
+      e_t ev;
+      var type(a * b) d;
+      var type(bus) e;
+      initial begin
+        c = a + b;
+        d = a * b;
+        e = 13'h1fff;
+        sum = int'(c * 100);
+        product = int'(d * 1000);
+        case (type(T))
+          type(logic [12:0]): hits += 100;
+          type(logic [11:0]): hits += 1;
+          default: hits += 1000;
+        endcase
+        if (type(T) == type(logic [11:0])) hits += 2;
+        if (type(T) != type(bit [11:0])) hits += 4;
+        if (type(e) === type(bit [12:0]) && e == 13'h1fff) hits += 8;
+        if (type(c) !== type(real)) hits += 1000;
+        if (type(int) == type(bit signed [31:0])) hits += 16;
+        f = 5'h1f;
+        narrow = f;
+        if (type(ev) == type(e_t)) hits += 64;
+      end
+      case (type(T))
+        type(logic [12:0]): begin : wide
+          initial hits += 1000;
+        end
+        type(logic [11:0]): begin : matched
+          initial hits += 128;
+        end
+        default: begin : other
+          initial hits += 1000;
+        end
+      endcase
+      if (type(T) == type(logic [11:0])) begin : same
+        initial hits += SAME ? 32 : 1000;
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 0)
+  (assert_eq hits 255) (assert_eq sum 525) (assert_eq product 2375) (assert_eq narrow 15))

@@ -401,24 +401,43 @@ fn bind_in_mode(
                         }
                     }
                     DataTypeKind::TypeOf(expression) => {
-                        // The existing query kernel recognizes an explicit
-                        // nested datatype; it does not infer arbitrary values.
-                        let inner = match native.expression(*expression).kind {
-                            ExprKind::Type(inner) => inner,
-                            ExprKind::Cast { target, .. } => match native.expression(target).kind {
-                                ExprKind::Type(inner)
-                                    if matches!(
-                                        native.data_type(inner).kind,
-                                        DataTypeKind::Builtin(_) | DataTypeKind::Struct { .. }
-                                    ) =>
-                                {
-                                    inner
+                        let inner = match &native.expression(*expression).kind {
+                            ExprKind::Type(inner) => Some(*inner),
+                            ExprKind::Cast { target, .. }
+                                if matches!(
+                                    native.expression(*target).kind,
+                                    ExprKind::Type(inner)
+                                        if matches!(
+                                            native.data_type(inner).kind,
+                                            DataTypeKind::Builtin(_) | DataTypeKind::Struct { .. }
+                                        )
+                                ) =>
+                            {
+                                let ExprKind::Type(inner) = native.expression(*target).kind else {
+                                    unreachable!("a cast to a data type")
+                                };
+                                Some(inner)
+                            }
+                            // A type alias `type(T)`, or an expression,
+                            // including a size or signing cast.
+                            _ => {
+                                if !push_operand_type(
+                                    &mut values,
+                                    ranges,
+                                    *expression,
+                                    native,
+                                    tree,
+                                    session,
+                                    context,
+                                ) {
+                                    return Ok(None);
                                 }
-                                _ => return Ok(None),
-                            },
-                            _ => return Ok(None),
+                                continue;
+                            }
                         };
-                        jobs.push(Job::Enter(inner));
+                        if let Some(inner) = inner {
+                            jobs.push(Job::Enter(inner));
+                        }
                     }
                     DataTypeKind::VirtualInterface {
                         name,
@@ -967,4 +986,88 @@ fn unpacked_member_defaults(
         bound.push((name, ty, default));
     }
     Ok(Some(bound))
+}
+
+/// Push to `values` the type, packed in `ranges`, that a type operator
+/// applied to `id` names: that of a type parameter or type alias, `type(T)`,
+/// or the self-determined type of an expression, which is not evaluated
+/// (IEEE 1800-2023 6.23). Returns whether `id` names one. Kept out of
+/// [`bind_in_mode`], whose frame the recursion of class specializations
+/// repeats.
+#[allow(clippy::too_many_arguments)]
+fn push_operand_type(
+    values: &mut Vec<Type>,
+    ranges: Vec<PackedRange>,
+    id: ExprId,
+    native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    context: &PackedDimensions,
+) -> bool {
+    let ty = match &native.expression(id).kind {
+        ExprKind::Name(name)
+            if context
+                .type_aliases
+                .contains_key(&normalize_identifier(&name.spelling)) =>
+        {
+            context.type_aliases[&normalize_identifier(&name.spelling)].clone()
+        }
+        // A variable keeps its declared type, an enumeration or a struct
+        // among them (6.23).
+        ExprKind::Name(name)
+            if context
+                .get(&normalize_identifier(&name.spelling))
+                .and_then(super::super::type_names::declared_type)
+                .is_some() =>
+        {
+            super::super::type_names::declared_type(
+                context
+                    .get(&normalize_identifier(&name.spelling))
+                    .expect("a declared variable"),
+            )
+            .expect("a declared type")
+            .clone()
+        }
+        _ => match type_of_expression(id, native, tree, session, context) {
+            Some(ty) => ty,
+            None => return false,
+        },
+    };
+    values.push(types::enclose_aliased_packed_type(ty, ranges));
+    true
+}
+
+/// The data type of the self-determined type of value expression `id`, for
+/// a type operator applied to it (IEEE 1800-2023 6.23): an integral vector
+/// of its width and signing, a real, a shortreal or a string.
+fn type_of_expression(
+    id: ExprId,
+    native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    context: &PackedDimensions,
+) -> Option<Type> {
+    let ty = super::super::expression_types::type_of(tree, session, id, native, context).ok()?;
+    Some(match session.types.data(ty) {
+        semantic_types::TyData::Packed(packed) => {
+            let mut ty = Type::new(if packed.four_state {
+                TypeKind::Logic
+            } else {
+                TypeKind::Bit
+            });
+            ty.is_signed = packed.signed;
+            let bits = packed.bits();
+            if bits > 1 {
+                ty.packed_ranges = vec![PackedRange::new(
+                    ConstExpr::Literal((bits - 1).to_string()),
+                    ConstExpr::Literal("0".into()),
+                )];
+            }
+            ty
+        }
+        semantic_types::TyData::Real => builtin_type("real", None)?,
+        semantic_types::TyData::Shortreal => builtin_type("shortreal", None)?,
+        semantic_types::TyData::String => builtin_type("string", None)?,
+        _ => return None,
+    })
 }
