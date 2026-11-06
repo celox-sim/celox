@@ -184,58 +184,65 @@ impl CallGraph {
                 calls[index[caller.as_str()]].push(index[callee.as_str()]);
             }
         }
-        let count = names.len();
-        let mut order = vec![usize::MAX; count];
-        let mut low = vec![0; count];
-        let mut on_stack = vec![false; count];
-        let mut members: Vec<Vec<usize>> = Vec::new();
-        let mut stack = Vec::new();
-        let mut next = 0;
-        for root in 0..count {
-            if order[root] != usize::MAX {
-                continue;
-            }
-            let mut work = vec![(root, 0)];
-            while let Some((node, edge)) = work.pop() {
-                if edge == 0 {
-                    order[node] = next;
-                    low[node] = next;
-                    next += 1;
-                    stack.push(node);
-                    on_stack[node] = true;
-                }
-                if let Some(&callee) = calls[node].get(edge) {
-                    work.push((node, edge + 1));
-                    if order[callee] == usize::MAX {
-                        work.push((callee, 0));
-                    } else if on_stack[callee] {
-                        low[node] = low[node].min(order[callee]);
-                    }
-                    continue;
-                }
-                if low[node] == order[node] {
-                    let mut nodes = Vec::new();
-                    loop {
-                        let member = stack.pop().expect("a component member");
-                        on_stack[member] = false;
-                        nodes.push(member);
-                        if member == node {
-                            break;
-                        }
-                    }
-                    members.push(nodes);
-                }
-                if let Some(&(caller, _)) = work.last() {
-                    low[caller] = low[caller].min(low[node]);
-                }
-            }
-        }
-        let recursive = members
-            .into_iter()
-            .filter(|nodes| nodes.len() > 1 || calls[nodes[0]].contains(&nodes[0]))
-            .collect();
+        let recursive = recursive_components(&calls);
         (names, recursive)
     }
+}
+
+/// The recursive strongly connected components of the graph whose node
+/// `n` calls `calls[n]`: those of more than one node, or of one that calls
+/// itself (Tarjan, iterative).
+pub(super) fn recursive_components(calls: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    let count = calls.len();
+    let mut order = vec![usize::MAX; count];
+    let mut low = vec![0; count];
+    let mut on_stack = vec![false; count];
+    let mut members: Vec<Vec<usize>> = Vec::new();
+    let mut stack = Vec::new();
+    let mut next = 0;
+    for root in 0..count {
+        if order[root] != usize::MAX {
+            continue;
+        }
+        let mut work = vec![(root, 0)];
+        while let Some((node, edge)) = work.pop() {
+            if edge == 0 {
+                order[node] = next;
+                low[node] = next;
+                next += 1;
+                stack.push(node);
+                on_stack[node] = true;
+            }
+            if let Some(&callee) = calls[node].get(edge) {
+                work.push((node, edge + 1));
+                if order[callee] == usize::MAX {
+                    work.push((callee, 0));
+                } else if on_stack[callee] {
+                    low[node] = low[node].min(order[callee]);
+                }
+                continue;
+            }
+            if low[node] == order[node] {
+                let mut nodes = Vec::new();
+                loop {
+                    let member = stack.pop().expect("a component member");
+                    on_stack[member] = false;
+                    nodes.push(member);
+                    if member == node {
+                        break;
+                    }
+                }
+                members.push(nodes);
+            }
+            if let Some(&(caller, _)) = work.last() {
+                low[caller] = low[caller].min(low[node]);
+            }
+        }
+    }
+    members
+        .into_iter()
+        .filter(|nodes| nodes.len() > 1 || calls[nodes[0]].contains(&nodes[0]))
+        .collect()
 }
 
 fn statements(body: &[sv::ir::Stmt]) -> u64 {

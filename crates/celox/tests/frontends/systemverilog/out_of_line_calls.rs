@@ -911,6 +911,52 @@ endmodule
 }
 
 #[test]
+fn automatic_arrays_of_units_with_one_live_activation() {
+    // `tabulate` and `fresh` keep their local arrays as module variables: no
+    // call cycle reaches them and they do not wait, so one activation at a
+    // time is live. Two processes call `tabulate` in the same time slot, each
+    // across a host request between writing and reading its array; the
+    // host serves the request before the other process runs, so neither
+    // sees the other's elements. Each activation of `fresh` starts with its
+    // array cleared. `slow` waits with its array live, so a second process
+    // could enter it meanwhile: it stays inlined, each call with its own.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c, output int d, output int e, output int f);
+    function automatic int tabulate(int n);
+        int q[4];
+        string text;
+        foreach (q[k]) q[k] = n * 10 + k;
+        text = $sformatf("%0d", q[n % 4]);
+        return q[0] + q[3] + text.len() * 1000;
+    endfunction
+    function automatic int fresh(int n);
+        int q[3];
+        q[n % 3] = n;
+        return q[0] + q[1] * 10 + q[2] * 100;
+    endfunction
+    task automatic slow(input int n, output int r);
+        int q[2];
+        q[0] = n;
+        #1 q[1] = n + 1;
+        r = q[0] * 100 + q[1];
+    endtask
+    int one = 1;
+    initial begin
+        a = tabulate(one + 1);
+        #1 c = fresh(one);
+        slow(one + 2, e);
+    end
+    initial begin
+        b = tabulate(one + 4);
+        #1 d = fresh(one + 1);
+        slow(one + 6, f);
+    end
+endmodule
+"#;
+    same_as_inlined(source, 2, 4, &["a", "b", "c", "d", "e", "f"]);
+}
+
+#[test]
 fn heap_operations_go_out_of_line() {
     // Queue concatenation, array locators, streaming of dynamically sized
     // data, new events, the random and constraint modes and the constraint

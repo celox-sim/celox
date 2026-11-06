@@ -289,6 +289,11 @@ impl Ff<'_, '_> {
         let Some(frame) = &self.frame else {
             return false;
         };
+        // An automatic unpacked array of the unit stays a module variable
+        // (see `ProcModule::single_activation`), which a callee names.
+        if !self.m.var(id).array_dims.is_empty() {
+            return false;
+        }
         let own = self
             .m
             .calls
@@ -495,6 +500,10 @@ impl Ff<'_, '_> {
             }
             place_slots.push(own);
         }
+        // An automatic unpacked array has no frame slot: it stays a module
+        // variable when no two activations of the unit can be live at once
+        // (see `ProcModule::single_activation`).
+        let single = self.m.single_activation(&subroutine.name);
         for name in automatic_names(subroutine) {
             let Some(id) = self.m.id(name) else {
                 continue;
@@ -503,6 +512,9 @@ impl Ff<'_, '_> {
                 continue;
             }
             if !self.m.var(id).array_dims.is_empty() {
+                if single {
+                    continue;
+                }
                 return Err(Reason::Other("unpacked array in the frame".to_string()));
             }
             slots.push(self.slot_of(id));
@@ -544,7 +556,15 @@ impl Ff<'_, '_> {
         functions.lowering -= 1;
         let (unit, size_patches, staging, calls) =
             lowered.map_err(|error| Reason::Other(error.to_string()))?;
-        self.finish_function(index, unit, size_patches, start, &staging, &referents)?;
+        self.finish_function(
+            index,
+            unit,
+            size_patches,
+            start,
+            &staging,
+            &referents,
+            single,
+        )?;
         let functions = self.m.out_of_line().expect("lowering out of line");
         functions.functions[index].calls = calls;
         Ok(index)
@@ -914,6 +934,7 @@ impl Ff<'_, '_> {
         start: SourceVarId,
         staging: &HashSet<SourceVarId>,
         referents: &HashSet<SourceVarId>,
+        single: bool,
     ) -> Result<(), Reason> {
         let end = self.m.next_id;
         let functions = self.m.out_of_line().expect("lowering out of line");
@@ -930,6 +951,8 @@ impl Ff<'_, '_> {
         // The automatic storage of the subroutines inlined into the body:
         // each activation needs its own as much as the function's.
         let automatic = self.m.automatic_storage();
+        // The automatic arrays that stay module variables.
+        let mut in_place = HashSet::default();
         for id in accessed {
             // The variable a `ref` formal names is the caller's.
             if slots.iter().any(|slot| slot.id == id)
@@ -949,6 +972,12 @@ impl Ff<'_, '_> {
                 ));
             }
             if !variable.array_dims.is_empty() {
+                // The automatic arrays of the bodies the unit inlines too:
+                // they are live only within an activation of the unit.
+                if single && !created {
+                    in_place.insert(id);
+                    continue;
+                }
                 return Err(Reason::Other("unpacked array in the frame".to_string()));
             }
             slots.push(self.slot_of(id));
@@ -1010,6 +1039,7 @@ impl Ff<'_, '_> {
                     if self.m.is_hidden(addr.var_id)
                         && !persistent.contains(&addr.var_id)
                         && !staging.contains(&addr.var_id)
+                        && !in_place.contains(&addr.var_id)
                     {
                         return Err(other("writes hidden module state"));
                     }
