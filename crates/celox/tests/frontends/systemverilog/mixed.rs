@@ -1845,3 +1845,35 @@ fn review_warnings_follow_instantiated_interface_parameters() {
         );
     }
 }
+
+/// Under a Veryl top, an SV child's wait on a class property wakes on a
+/// store of it (IEEE 1800-2023 9.4.3), through the mixed hierarchy's
+/// lowering as through an SV top.
+#[test]
+fn sv_children_wait_on_class_properties_under_a_veryl_top() {
+    let veryl = "module Top(t: output logic<32>) { inst child: $sv::Child(t); }";
+    let sv = "`timescale 1ns/1ns
+        package p;
+            class Box; int level; endclass
+            function automatic void raise(Box b); b.level = b.level + 1; endfunction
+        endpackage
+        module Child(output int t);
+            p::Box b = new;
+            initial begin
+                fork
+                    begin wait (b.level == 2); t = $time; end
+                    begin #1 p::raise(b); #1 p::raise(b); end
+                join
+            end
+        endmodule";
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sources(vec![(veryl, Path::new("top.veryl"))], "Top")
+            .with_sv_sources(vec![(sv, Path::new("child.sv"))])
+            .four_state(four_state)
+            .build()
+            .unwrap();
+        sim.run_until(5).unwrap();
+        let t = sim.signal("t");
+        assert_eq!(sim.get(t), BigUint::from(2u8), "four-state {four_state}");
+    }
+}

@@ -433,11 +433,11 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   edges (`@(e or posedge clk)`), `triggered` in a `wait` condition with other
   operands or read by a function that the condition calls, and `wait_order`.
 - Timing controls in processes: impure function calls in event expressions,
-  `wait` or event expressions reading a static task argument, and `wait`
-  conditions or event expressions reading a class property (directly, through
-  a handle or a function, or a container held in one), since a write of the
-  property does not wake the waiting process. Static class properties are
-  module variables and may be waited on.
+  `wait` or event expressions reading a static task argument, event
+  expressions reading a class property (directly, through a handle or a
+  function, or a container held in one), and `wait` conditions reading the
+  random mode of a property (`rand_mode()`, `constraint_mode()`). Static class
+  properties are module variables and may be waited on in both.
 - Nonblocking assignments inside `always_latch` ([#431](https://github.com/celox-sim/celox/issues/431)); use blocking assignments for the supported latch subset.
 - Inferred latches inside `always_comb` are rejected by default. Set `inferred_latch = "warn"` or `"allow"` in `celox.toml` under `[diagnostics]` to permit retained blocking assignments. Ordinary `always @*` and explicit `always_latch` do not require this option.
 - Ports and instances: non-ANSI port expressions such as `module m({a, b}, c[3:0], .p(d))` ([#1953](https://github.com/celox-sim/celox/issues/1953)), `ref` ports
@@ -1038,6 +1038,15 @@ unsupported, including when the inference option is enabled.
   (IEEE 1800-2023 9.4.2). In `a = 1; @(a ^ b);` the write to `a` is not an
   event of the wait; the process resumes when `a` or `b` changes later.
   Icarus 13.0 wakes on the earlier write; Verilator 5.052 agrees with Celox.
+- A `wait` condition may read class properties, directly, through a handle,
+  `this` or a function it calls, or as a container held in one
+  (`wait (obj.q.size() > 0)`). The condition is checked again after any store
+  of a property it reads, through any handle, in any process or module, and
+  after every `randomize()` call (9.4.3). A store of the same property of
+  another object, or of the value the property holds, also makes it check
+  again. So such a condition must be a value of what it reads: one that
+  calls a task or a function with an effect, or that reads the time, a random
+  number, a mailbox or a process, is rejected.
 - `posedge` and `negedge` of a multi-bit expression follow its least
   significant bit (Table 9-2): `@(posedge v)` ignores `v[3]`, and
   `@(posedge v[3])` follows it. Transitions through X and Z count as in that

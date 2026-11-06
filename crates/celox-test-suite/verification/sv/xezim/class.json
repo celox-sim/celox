@@ -884,6 +884,28 @@
       "category": "Types",
       "detail": "",
       "expectation": "Simulation",
+      "name": "class::waits_on_instance_properties",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::waits_on_properties_in_package_subroutines",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
       "name": "class::waits_on_static_properties",
       "phase": "execute",
       "status": "passed",

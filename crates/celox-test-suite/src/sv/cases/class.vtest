@@ -3578,6 +3578,111 @@ endmodule
 "#)
   (top Top) (run_until 5)
   (expect_output "reached 2 at 2\n"))
+(case waits_on_instance_properties
+  ; A level wait checks its condition again whenever a property it reads
+  ; is stored, by any process and through any handle (IEEE 1800-2023 9.4.3):
+  ; through `this` of a base class after a store through a derived handle,
+  ; through an alias written by a task, through a queue and an associative
+  ; array held in properties, through a function after `randomize`, and on
+  ; a package object that another module instance writes.
+  (source "class.sv" #"
+package p;
+    class Shared;
+        int count;
+    endclass
+    Shared shared;
+endpackage
+class Base;
+    int m_state;
+    task wait_for(int s);
+        wait ((s & m_state) != 0);
+    endtask
+endclass
+class Derived extends Base;
+    int extra;
+endclass
+class Holder;
+    int q[$];
+    int counts[int];
+    bit flag;
+    rand bit [3:0] r;
+    constraint seven { r == 7; }
+    function bit drawn();
+        return r != 0;
+    endfunction
+endclass
+module Writer;
+    initial #7 p::shared.count = 3;
+endmodule
+module Top(output int t_this, t_alias, t_queue, t_exists, t_func, t_pkg, t_now,
+           output int r);
+    Writer writer();
+    Holder a = new, other = new, b;
+    Derived d = new;
+    Base base;
+    task automatic raise(Holder h);
+        #1 h.flag = 1;
+    endtask
+    initial begin
+        b = a;
+        base = d;
+        p::shared = new;
+        a.counts[1] = 1;
+        fork
+            begin wait (base != null); base.wait_for(2); t_this = int'($time); end
+            begin wait (b != null && b.flag); t_alias = int'($time); end
+            begin wait (a.q.size() > 0); t_queue = int'($time); end
+            begin wait (!a.counts.exists(1) && a.flag); t_exists = int'($time); end
+            begin wait (a.drawn()); t_func = int'($time); end
+            begin wait (p::shared != null && p::shared.count == 3); t_pkg = int'($time); end
+            begin #8 wait (a.flag); t_now = int'($time); end
+            begin
+                #1 d.m_state = 1;
+                other.flag = 1;
+                #1 d.m_state = 3;
+                raise(a);
+                #1 a.q.push_back(5);
+                #1 a.counts.delete(1);
+                #1 void'(a.randomize());
+                r = a.r;
+            end
+        join
+    end
+endmodule
+"#)
+  (top Top) (run_until 10)
+  (assert_eq t_this 2) (assert_eq t_alias 3) (assert_eq t_queue 4)
+  (assert_eq t_exists 5) (assert_eq t_func 6) (assert_eq t_pkg 7)
+  (assert_eq t_now 8) (assert_eq r 7))
+(case waits_on_properties_in_package_subroutines
+  ; A wait in a package task wakes on a store in a module, and a wait in a
+  ; module on a store in a package function (IEEE 1800-2023 9.4.3, 26.2).
+  (source "class.sv" #"
+package boxes;
+    class Box;
+        int level;
+    endclass
+    task automatic wait_level(Box b, int n);
+        wait (b != null && b.level >= n);
+    endtask
+    function automatic void raise(Box b);
+        b.level = b.level + 1;
+    endfunction
+endpackage
+module Top(output int t_task, t_func);
+    import boxes::*;
+    Box a = new, c = new;
+    initial begin
+        fork
+            begin wait_level(a, 2); t_task = int'($time); end
+            begin wait (c.level == 1); t_func = int'($time); end
+            begin #1 a.level = 1; #1 a.level = 2; #1 raise(c); end
+        join
+    end
+endmodule
+"#)
+  (top Top) (run_until 5)
+  (assert_eq t_task 2) (assert_eq t_func 3))
 ; Package generic requests are bound where used and share static state across
 ; importing module scopes. Matching aliases select the same specialization (8.25).
 (case foreign_generic_static_state_across_modules
