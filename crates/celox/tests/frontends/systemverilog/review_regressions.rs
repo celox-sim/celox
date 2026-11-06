@@ -5615,7 +5615,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             "concurrent assertion",
             r#"
             module Top(input logic clk, valid);
-                assert property (@(posedge clk) valid |=> valid);
+                assert property (@(posedge clk) valid |=> valid[*2]);
             endmodule
         "#,
         ),

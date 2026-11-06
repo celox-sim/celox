@@ -1174,6 +1174,57 @@ pub struct PropertySpec {
     /// A single-cycle antecedent for overlapped implication (`|->`).
     pub antecedent: Option<ExprId>,
     pub condition: ExprId,
+    /// A property over cycles: a linear sequence of fixed delays, or an
+    /// implication of two, which `antecedent` and `condition` do not
+    /// describe. `condition` is then its last step's expression.
+    pub sequence: Option<SequenceId>,
+}
+
+/// Linear sequence handle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct SequenceId(pub(crate) usize);
+
+/// A sequence of steps a fixed number of clock ticks apart (IEEE 1800-2023
+/// 16.7), or an implication with such an antecedent and consequent
+/// (16.12.7): `|=>` is `|->` with the consequent one tick later. The local
+/// variables are those its declaration declares (16.10).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Sequence {
+    pub antecedent: Option<Vec<SequenceStep>>,
+    pub consequent: Vec<SequenceStep>,
+    pub locals: Vec<SequenceLocal>,
+}
+
+/// A Boolean expression `delay` ticks after the previous step (after the
+/// match of the antecedent for the first step of a consequent), and the
+/// match items run when it matches (16.10, 16.11).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SequenceStep {
+    pub delay: u32,
+    pub expression: ExprId,
+    pub items: Vec<SequenceMatchItem>,
+    pub tokens: TokenRange,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SequenceMatchItem {
+    /// An assignment to a local variable (16.10): `target operator value`
+    /// with `=` or an assignment operator such as `+=`, or `target++` and
+    /// `target--` (also prefix), which have no value.
+    Assign {
+        target: ExprId,
+        operator: String,
+        value: Option<ExprId>,
+    },
+    /// A subroutine call.
+    Call(ExprId),
+}
+
+/// Local variables of a named sequence or property, of one data type.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SequenceLocal {
+    pub data_type: TypeId,
+    pub names: Vec<Name>,
 }
 
 /// Named sequence or property declaration handle.

@@ -13,6 +13,8 @@ fn assume_cover_and_generate(_sim) { @case "concurrent_assertions::assume_cover_
 fn subroutine_calls_in_actions(_sim) { @case "concurrent_assertions::subroutine_calls_in_actions"; }
 fn named_sequences_and_properties(_sim) { @case "concurrent_assertions::named_sequences_and_properties"; }
 fn named_sequence_leading_clock(_sim) { @case "concurrent_assertions::named_sequence_leading_clock"; }
+fn sequences_over_cycles(_sim) { @case "concurrent_assertions::sequences_over_cycles"; }
+fn sequence_values_over_sampled_ticks(_sim) { @case "concurrent_assertions::sequence_values_over_sampled_ticks"; }
 }
 sv_backends! {
 fn unknown_predicates_and_disable_conditions(_sim) { @case "concurrent_assertions::unknown_predicates_and_disable_conditions"; }
