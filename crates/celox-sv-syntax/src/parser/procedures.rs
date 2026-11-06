@@ -156,8 +156,8 @@ impl Parser<'_> {
                         return true;
                     }
                 }
-                "|->" if depth == 1 && !implication => implication = true,
-                "|->" => return false,
+                "|->" | "|=>" if depth == 1 && !implication => implication = true,
+                "|->" | "|=>" => return false,
                 word if self.temporal(word, offset) => return false,
                 _ => {}
             }
@@ -1178,7 +1178,7 @@ impl Parser<'_> {
                                 property && self.peek() == "(" && self.boolean_property_header();
                             let property_header = if typed_property {
                                 self.expect("(")?;
-                                let property = self.property_spec(false)?;
+                                let property = self.property_spec(false, Vec::new())?;
                                 self.expect(")")?;
                                 Some(AssertionHeader::Concurrent {
                                     property,

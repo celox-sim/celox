@@ -288,6 +288,28 @@
     },
     {
       "category": "Sequential",
+      "detail": "Icarus build exit status: 23; see <case>/build.log\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:14: error: Invalid module item.\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:14: error: Invalid module item.\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:15: error: Invalid module item.\n<case>/source_0.sv:15: syntax error\n<case>/source_0.sv:15: error: Invalid module instantiation\n<case>/source_0.sv:15: error: generate else is missing matching if.\n<case>/source_0.sv:18: error: Invalid module item.\n<case>/source_0.sv:18: syntax error\n<case>/source_0.sv:18: error: Invalid module item.\n<case>/source_0.sv:18: syntax error\n<case>/source_0.sv:19: error: Invalid module item.\n<case>/source_0.sv:21: syntax error\n<case>/source_0.sv:21: error: Malformed statement\n<case>/source_0.sv:21: error: Error in property_spec of concurrent assertion item.\n<case>/source_0.sv:23: syntax error\n<case>/source_0.sv:23: error: Error in property_spec of concurrent assertion item.\n<case>/source_0.sv:24: syntax error\n<case>/source_0.sv:24: error: Error in property_spec of concurrent assertion item.\n<case>/source_0.sv:25: syntax error\n<case>/source_0.sv:25: error: Error in property_spec of concurrent assertion item.\n",
+      "expectation": "Simulation",
+      "name": "concurrent_assertions::sequence_values_over_sampled_ticks",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 48; see <case>/build.log\n<case>/source_0.sv:22: syntax error\n<case>/source_0.sv:22: error: Invalid module item.\n<case>/source_0.sv:22: syntax error\n<case>/source_0.sv:22: error: Invalid module item.\n<case>/source_0.sv:22: syntax error\n<case>/source_0.sv:23: error: Invalid module item.\n<case>/source_0.sv:23: syntax error\n<case>/source_0.sv:23: error: Invalid module instantiation\n<case>/source_0.sv:23: error: generate else is missing matching if.\n<case>/source_0.sv:24: syntax error\n<case>/source_0.sv:24: error: Malformed statement\n<case>/source_0.sv:24: error: Error in property_spec of concurrent assertion item.\n<case>/source_0.sv:25: sorry: \"inside\" expressions not supported yet.\n<case>/source_0.sv:25: syntax error\n<case>/source_0.sv:25: error: Error in property_spec of concurrent assertion item.\n<case>/source_0.sv:27: syntax error\n<case>/source_0.sv:27: error: Malformed statement\n<case>/source_0.sv:27: error: Error in property_spec of concurrent assertion item.\n<case>/source_0.sv:29: syntax error\n<case>/source_0.sv:29: error: Invalid module item.\n<case>/source_0.sv:29: syntax error\n<case>/source_0.sv:29: error: Invalid module item.\n<case>/source_0.sv:29: syntax error\n<case>/source_0.sv:30: error: Invalid module item.\n<case>/source_0.sv:31: syntax error\n<case>/source_0.sv:31: error: Invalid module item.\n<case>/source_0.sv:33: syntax error\n<case>/source_0.sv:33: error: Invalid module item.\n<case>/source_0.sv:34: syntax error\n<case>/source_0.sv:35: error: Invalid module item.\n<case>/source_0.sv:36: syntax error\n<case>/source_0.sv:36: error: Error in property_spec of concurrent assertion item.\n<case>/source_0.sv:38: syntax error\n<case>/source_0.sv:38: error: Invalid module item.\n<case>/source_0.sv:38: error: 'y' has already been declared in this scope.\n<case>/source_0.sv:29:      : It was declared here as a variable.\n<case>/source_0.sv:38: syntax error\n<case>/source_0.sv:38: error: Invalid module item.\n<case>/source_0.sv:38: syntax error\n<case>/source_0.sv:39: error: Invalid module item.\n<case>/source_0.sv:41: syntax error\n<case>/source_0.sv:41: error: Invalid module item.\n<case>/source_0.sv:41: syntax error\n<case>/source_0.sv:41: error: Invalid module item.\n<case>/source_0.sv:41: syntax error\n<case>/source_0.sv:42: error: Invalid module item.\n<case>/source_0.sv:42: syntax error\n<case>/source_0.sv:42: error: Invalid module instantiation\n<case>/source_0.sv:42: error: generate else is missing matching if.\n",
+      "expectation": "Simulation",
+      "name": "concurrent_assertions::sequences_over_cycles",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "Icarus build exit status: 7; see <case>/build.log\n<case>/source_0.sv:22: syntax error\n<case>/source_0.sv:22: error: Malformed statement\n<case>/source_0.sv:24: syntax error\n<case>/source_0.sv:24: error: Malformed statement\n<case>/source_0.sv:19: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<case>/source_0.sv:29: syntax error\n<case>/source_0.sv:29: error: Syntax error in continuous assignment\n",
       "expectation": "Simulation",
       "name": "concurrent_assertions::subroutine_calls_in_actions",

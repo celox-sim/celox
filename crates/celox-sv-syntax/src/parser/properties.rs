@@ -78,12 +78,31 @@ impl Parser<'_> {
     /// Whether the word at `offset` of a property, after its leading clock,
     /// is outside the Boolean subset; `iff` of `disable iff` is not.
     pub(super) fn temporal(&self, word: &str, offset: usize) -> bool {
-        TEMPORAL.contains(&word) && !(word == "iff" && self.nth(offset - 1) == "disable")
+        // Repetition `[*`, `[=`, `[->` and `[+]` (16.9.2) arrives as
+        // separate tokens.
+        if word == "[" {
+            return match self.nth(offset + 1) {
+                "*" | "=" | "->" => true,
+                "+" => self.nth(offset + 2) == "]",
+                _ => false,
+            };
+        }
+        TEMPORAL.contains(&word)
+            && !(word == "iff" && self.nth(offset - 1) == "disable")
+            // A fixed cycle delay `##n` (16.7), and `|=>` (16.12.7).
+            && !(word == "##" && self.nth(offset + 1).starts_with(|c: char| c.is_ascii_digit()))
+            && word != "|=>"
     }
 
-    /// `[clocking_event] [disable iff (expression)] expression [|-> expression]`.
-    /// A sequence has neither `disable iff` nor an implication.
-    pub(super) fn property_spec(&mut self, sequence: bool) -> Result<PropertySpec> {
+    /// `[clocking_event] [disable iff (expression)] sequence [|-> sequence]`,
+    /// where a sequence is steps a fixed number of ticks apart. A sequence
+    /// declaration has neither `disable iff` nor an implication. A Boolean
+    /// property of one step, also behind `|->`, has no `sequence`.
+    pub(super) fn property_spec(
+        &mut self,
+        sequence: bool,
+        locals: Vec<SequenceLocal>,
+    ) -> Result<PropertySpec> {
         let clock = if self.peek() == "@" {
             Some(self.typed_timing_control()?)
         } else {
@@ -95,18 +114,195 @@ impl Parser<'_> {
         } else {
             None
         };
-        let first = self.expression(0)?;
-        let (antecedent, condition) = if !sequence && self.eat("|->") {
-            (Some(first), self.expression(0)?)
+        let first = self.sequence_steps()?;
+        let (antecedent, mut consequent) = if !sequence && matches!(self.peek(), "|->" | "|=>") {
+            let delay = u32::from(self.peek() == "|=>");
+            self.at += 1;
+            let mut consequent = self.sequence_steps()?;
+            consequent[0].delay = consequent[0]
+                .delay
+                .checked_add(delay)
+                .ok_or_else(|| self.unsupported("cycle delay longer than 2^32 - 1 ticks"))?;
+            (Some(first), consequent)
         } else {
             (None, first)
         };
+        let boolean = |steps: &[SequenceStep]| matches!(steps, [step] if step.delay == 0 && step.items.is_empty());
+        if locals.is_empty() && boolean(&consequent) && antecedent.as_deref().is_none_or(boolean) {
+            return Ok(PropertySpec {
+                clock,
+                disable,
+                antecedent: antecedent.map(|steps| steps[0].expression),
+                condition: consequent[0].expression,
+                sequence: None,
+            });
+        }
+        let condition = consequent
+            .last_mut()
+            .expect("a sequence has a step")
+            .expression;
+        let id = SequenceId(self.sequences.len());
+        self.sequences.push(Sequence {
+            antecedent,
+            consequent,
+            locals,
+        });
         Ok(PropertySpec {
             clock,
             disable,
-            antecedent,
+            antecedent: None,
             condition,
+            sequence: Some(id),
         })
+    }
+
+    /// Steps `[##n] step {##n step}`, a step being a Boolean expression or
+    /// `(expression, match_item {, match_item})` (IEEE 1800-2023 16.7, 16.10).
+    fn sequence_steps(&mut self) -> Result<Vec<SequenceStep>> {
+        let mut steps = Vec::new();
+        loop {
+            let delay = if self.eat("##") {
+                self.cycle_delay()?
+            } else {
+                0
+            };
+            // A parenthesized sequence `(a ##1 b)` (16.7).
+            if self.peek() == "(" && self.group_holds_delay() {
+                self.at += 1;
+                let mut group = self.sequence_steps()?;
+                self.expect(")")?;
+                group[0].delay = group[0]
+                    .delay
+                    .checked_add(delay)
+                    .ok_or_else(|| self.unsupported("cycle delay longer than 2^32 - 1 ticks"))?;
+                steps.extend(group);
+                if self.peek() != "##" {
+                    return Ok(steps);
+                }
+                continue;
+            }
+            let start = self.at;
+            let (expression, items) = if self.peek() == "(" && self.match_items_follow() {
+                self.at += 1;
+                let expression = self.expression(0)?;
+                let mut items = Vec::new();
+                while self.eat(",") {
+                    items.push(self.match_item()?);
+                }
+                self.expect(")")?;
+                (expression, items)
+            } else {
+                (self.expression(0)?, Vec::new())
+            };
+            steps.push(SequenceStep {
+                delay,
+                expression,
+                items,
+                tokens: self.range(start),
+            });
+            if self.peek() != "##" {
+                return Ok(steps);
+            }
+        }
+    }
+
+    /// The number of ticks of `##n`, a decimal number.
+    fn cycle_delay(&mut self) -> Result<u32> {
+        let value = self
+            .peek()
+            .replace('_', "")
+            .parse::<u32>()
+            .map_err(|_| self.unsupported("cycle delay other than a decimal number"))?;
+        self.at += 1;
+        Ok(value)
+    }
+
+    /// Whether the parenthesis at the cursor holds a cycle delay `##n` at
+    /// its own level, as a parenthesized sequence does.
+    fn group_holds_delay(&self) -> bool {
+        let mut depth = 0usize;
+        let mut offset = 0;
+        loop {
+            match self.nth(offset) {
+                "" => return false,
+                "(" | "[" | "{" => depth += 1,
+                ")" | "]" | "}" => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return false;
+                    }
+                }
+                "##" if depth == 1 => return true,
+                _ => {}
+            }
+            offset += 1;
+        }
+    }
+
+    /// Whether the parenthesis at the cursor holds a comma at its own level,
+    /// which a step with match items has and an expression does not.
+    fn match_items_follow(&self) -> bool {
+        let mut depth = 0usize;
+        let mut offset = 0;
+        loop {
+            match self.nth(offset) {
+                "" => return false,
+                "(" | "[" | "{" => depth += 1,
+                ")" | "]" | "}" => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return false;
+                    }
+                }
+                "," if depth == 1 => return true,
+                _ => {}
+            }
+            offset += 1;
+        }
+    }
+
+    /// An operator assignment, an increment or decrement, or a subroutine
+    /// call (16.10, 16.11).
+    fn match_item(&mut self) -> Result<SequenceMatchItem> {
+        let expression = self.expression(0)?;
+        let operator = self.peek().to_owned();
+        if matches!(
+            operator.as_str(),
+            "=" | "+="
+                | "-="
+                | "*="
+                | "/="
+                | "%="
+                | "&="
+                | "|="
+                | "^="
+                | "<<="
+                | ">>="
+                | "<<<="
+                | ">>>="
+        ) {
+            self.at += 1;
+            return Ok(SequenceMatchItem::Assign {
+                target: expression,
+                operator,
+                value: Some(self.expression(0)?),
+            });
+        }
+        // As a match item, a prefix and a postfix update have one effect.
+        if let ExprKind::Unary {
+            operator,
+            expression: target,
+            ..
+        } = &self.expressions[expression.0].kind
+            && matches!(operator.as_str(), "++" | "--")
+        {
+            return Ok(SequenceMatchItem::Assign {
+                target: *target,
+                operator: operator.clone(),
+                value: None,
+            });
+        }
+        Ok(SequenceMatchItem::Call(expression))
     }
 
     /// A named sequence or property declaration without formal arguments or
@@ -120,8 +316,15 @@ impl Parser<'_> {
         } else {
             "endproperty"
         };
-        // `sequence name ;`, then the body.
-        let mut offset = self.past_clocking_event(3);
+        // `sequence name ;`, local variables of builtin types, then the body.
+        let mut offset = 3;
+        while super::expressions::builtin(self.nth(offset)) {
+            while !matches!(self.nth(offset), ";" | "") {
+                offset += 1;
+            }
+            offset += 1;
+        }
+        let mut offset = self.past_clocking_event(offset);
         loop {
             match self.nth(offset) {
                 "" | "endproperty" | "endsequence" if self.nth(offset) != end => return Ok(None),
@@ -139,6 +342,7 @@ impl Parser<'_> {
             self.expressions.len(),
             self.types.len(),
             self.timing_controls.len(),
+            self.sequences.len(),
         );
         match self.typed_assertion_declaration(start, end) {
             Ok(Some(declaration)) => {
@@ -151,6 +355,7 @@ impl Parser<'_> {
                 self.expressions.truncate(lengths.0);
                 self.types.truncate(lengths.1);
                 self.timing_controls.truncate(lengths.2);
+                self.sequences.truncate(lengths.3);
                 Ok(None)
             }
         }
@@ -171,7 +376,18 @@ impl Parser<'_> {
         if !self.eat(";") {
             return Ok(None);
         }
-        let body = self.property_spec(kind == AssertionDeclarationKind::Sequence)?;
+        let mut locals = Vec::new();
+        // A local declaration, not a leading cast such as `int'(a)`.
+        while super::expressions::builtin(self.peek()) && !self.nth(1).starts_with('\'') {
+            let data_type = self.data_type()?;
+            let mut names = vec![self.name()?];
+            while self.eat(",") {
+                names.push(self.name()?);
+            }
+            self.expect(";")?;
+            locals.push(SequenceLocal { data_type, names });
+        }
+        let body = self.property_spec(kind == AssertionDeclarationKind::Sequence, locals)?;
         self.eat(";");
         if !self.eat(end) {
             return Ok(None);
@@ -260,9 +476,11 @@ impl Parser<'_> {
         spec: PropertySpec,
         names: &HashMap<String, AssertionDeclarationId>,
     ) -> impl Iterator<Item = (ExprId, AssertionDeclarationId)> {
+        // The steps of a sequence over cycles are not substituted.
         [spec.antecedent, Some(spec.condition)]
             .into_iter()
             .flatten()
+            .filter(move |_| spec.sequence.is_none())
             .filter_map(move |expr| self.instance(expr, names).map(|id| (expr, id)))
     }
 
@@ -271,7 +489,7 @@ impl Parser<'_> {
     /// declaration resolves once, after those it instantiates, on an explicit
     /// stack, so a long chain of declarations does not grow the call stack.
     fn resolve_declarations(
-        &self,
+        &mut self,
         spec: PropertySpec,
         names: &HashMap<String, AssertionDeclarationId>,
         resolved: &mut HashMap<AssertionDeclarationId, PropertySpec>,
@@ -313,11 +531,27 @@ impl Parser<'_> {
 
     /// `spec` with the resolved bodies of the declarations it instantiates.
     fn substitute_instances(
-        &self,
+        &mut self,
         spec: PropertySpec,
         names: &HashMap<String, AssertionDeclarationId>,
         resolved: &HashMap<AssertionDeclarationId, PropertySpec>,
     ) -> Result<PropertySpec> {
+        if let Some(sequence) = spec.sequence {
+            let sequence = &self.sequences[sequence.0];
+            if let Some(step) = sequence
+                .antecedent
+                .iter()
+                .flatten()
+                .chain(&sequence.consequent)
+                .find(|step| self.instance(step.expression, names).is_some())
+            {
+                return Err(self.unsupported_at(
+                    step.tokens,
+                    "instance of a named sequence or property in a sequence over cycles",
+                ));
+            }
+            return Ok(spec);
+        }
         let mut result = spec;
         if let Some(antecedent) = spec.antecedent
             && let Some(id) = self.instance(antecedent, names)
@@ -333,6 +567,40 @@ impl Parser<'_> {
                 ));
             }
             let inner = resolved[&id];
+            if let Some(sequence) = inner.sequence {
+                // The implication of the sequence's steps and the consequent,
+                // which starts at the tick of the antecedent's match
+                // (16.12.7): a sequence of one tick with match items, or one
+                // over cycles.
+                let body = self.sequences[sequence.0].clone();
+                if body.antecedent.is_some() {
+                    return Err(self.unsupported_at(
+                        self.expressions[antecedent.0].tokens,
+                        "implication as the antecedent of an implication",
+                    ));
+                }
+                if self.instance(spec.condition, names).is_some() {
+                    return Err(self.unsupported_at(
+                        self.expressions[spec.condition.0].tokens,
+                        "instance of a named sequence or property as the consequent of a named sequence",
+                    ));
+                }
+                let id = SequenceId(self.sequences.len());
+                self.sequences.push(Sequence {
+                    antecedent: Some(body.consequent),
+                    consequent: vec![SequenceStep {
+                        delay: 0,
+                        expression: spec.condition,
+                        items: Vec::new(),
+                        tokens: self.expressions[spec.condition.0].tokens,
+                    }],
+                    locals: body.locals,
+                });
+                result.antecedent = None;
+                result.sequence = Some(id);
+                result.clock = inner.clock.or(result.clock);
+                return Ok(result);
+            }
             result.antecedent = Some(inner.condition);
             // The leading clock of `m |-> p` is that of `m` (16.16.1).
             result.clock = inner.clock.or(result.clock);
@@ -359,15 +627,16 @@ impl Parser<'_> {
             result.disable = inner.disable.or(spec.disable);
             result.antecedent = inner.antecedent;
             result.condition = inner.condition;
+            result.sequence = inner.sequence;
             // An explicit leading clock of the instance overrides the
             // incoming one (16.16.1).
             result.clock = inner.clock.or(spec.clock);
             return Ok(result);
         }
-        if inner.antecedent.is_some() {
+        if inner.antecedent.is_some() || inner.sequence.is_some() {
             return Err(self.unsupported_at(
                 tokens,
-                format!("implication `{name}` as the consequent of an implication"),
+                format!("implication or sequence over cycles `{name}` as the consequent of an implication"),
             ));
         }
         if let Some(clock) = inner.clock
