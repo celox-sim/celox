@@ -394,17 +394,16 @@ endmodule
 
 #[test]
 fn ineligible_subroutines_stay_inlined() {
-    // A host request that a unit cannot make (`status`, a process method
-    // that a level wait may observe) keeps a subroutine inlined with every
-    // subroutine that calls it; `plain` and `bump`, whose `ref` formal
+    // A host request that a unit cannot make (a mailbox method) keeps a
+    // subroutine inlined with every subroutine that calls it; `plain` and `bump`, whose `ref` formal
     // names `a`, still go out of line.
     let source = r#"module Top(output int a, output int b, output int c);
     function automatic void bump(ref int v);
         v = v + 1;
     endfunction
     function automatic int shout(int v);
-        process p = process::self();
-        return v + (p.status() == process::RUNNING ? 1 : 0);
+        mailbox #(int) box = new();
+        return v + box.num();
     endfunction
     function automatic int via_shout(int v);
         return shout(v) * 2;
@@ -1025,6 +1024,75 @@ endmodule
             "forced {forced}: {built:?}"
         );
     }
+}
+
+#[test]
+fn process_control_in_function_units() {
+    // Units read a process's status, kill another process, resume one and
+    // put and take semaphore keys without waiting: host requests after
+    // which the caller continues. `nap` suspends its own process inside the
+    // unit, with its frames kept until `wake` resumes it. UVM's objections
+    // kill their drain processes this way.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c, output int d, output int e);
+    process worker, sleeper;
+    semaphore keys = new(0);
+    function automatic int state_of(process p);
+        return p == null ? -1 : int'(p.status());
+    endfunction
+    function automatic void stop(process p);
+        if (p != null) p.kill();
+    endfunction
+    function automatic void wake(process p);
+        if (p != null) p.resume();
+    endfunction
+    task automatic nap(int n);
+        int start = n;
+        process::self().suspend();
+        b = start * 100 + $time;
+    endtask
+    function automatic void give(int n);
+        keys.put(n);
+    endfunction
+    function automatic bit take(int n);
+        return keys.try_get(n);
+    endfunction
+    int one = 1;
+    initial begin
+        worker = process::self();
+        #1;
+        forever begin
+            a = a + 1;
+            #2;
+        end
+    end
+    initial begin
+        sleeper = process::self();
+        nap(one + 4);
+    end
+    initial begin
+        #3 wake(sleeper);
+        #1 c = state_of(worker) * 10;
+        stop(worker);
+        c = c + state_of(worker);
+        give(one + 1);
+        e = take(one) + take(one) * 2 + take(one) * 4;
+        #3 d = a;
+    end
+endmodule
+"#;
+    same_as_inlined(source, 6, 8, &["a", "b", "c", "d", "e"]);
+    assert_eq!(
+        simulate(
+            source,
+            false,
+            true,
+            "interpreter",
+            8,
+            &["a", "b", "c", "d", "e"]
+        ),
+        Ok(vec![value(2), value(503), value(24), value(2), value(3)])
+    );
 }
 
 #[test]

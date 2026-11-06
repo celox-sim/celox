@@ -98,9 +98,8 @@ pub(super) enum Reason {
     MaySuspend,
     /// It, or a subroutine it calls, makes a host request a unit cannot
     /// make: `$exit`, monitors, strobes, VCD tasks, mailbox methods and
-    /// the process methods but `self`, `srandom`, `get_randstate`,
-    /// `set_randstate`, a semaphore's `new` and the triggers of events and
-    /// `triggered`, or a DPI-C import; or a caller that cannot suspend calls a
+    /// `await` and a semaphore's `get`, which park the calling process for
+    /// another, or a DPI-C import; or a caller that cannot suspend calls a
     /// unit that can suspend.
     HostRequest,
     /// Anything else, described.
@@ -148,9 +147,10 @@ pub(super) struct ProcessState {
     /// A host request does not: the host serves it before anything else
     /// runs.
     pub yields: bool,
-    /// Whether it reads `e.triggered` (IEEE 1800-2023 15.5.3), which a level
-    /// wait's predicate reads as an observation of the event, so that a
-    /// predicate's call of it stays inlined.
+    /// Whether it reads `e.triggered` (IEEE 1800-2023 15.5.3) or a process's
+    /// `status()` (9.7), which a level wait's predicate reads as an
+    /// observation of the event or process, so that a predicate's call of
+    /// it stays inlined.
     pub observes_events: bool,
 }
 
@@ -1109,13 +1109,27 @@ impl ProcModule<'_> {
                                 | celox_design::ProcessOp::SetRandstate
                                 | celox_design::ProcessOp::SemaphoreNew
                                 | celox_design::ProcessOp::Trigger
-                                | celox_design::ProcessOp::TriggerNonblocking,
+                                | celox_design::ProcessOp::TriggerNonblocking
+                                | celox_design::ProcessOp::Kill
+                                | celox_design::ProcessOp::Resume
+                                | celox_design::ProcessOp::SemaphorePut
+                                | celox_design::ProcessOp::SemaphoreTryGet,
                             ) => state.suspends = true,
-                            // A level wait whose predicate reads it is
-                            // waiting on the event too, which only the
-                            // predicate's own code can tell the host; a
-                            // unit's code serves every caller.
-                            SystemFunction::Process(celox_design::ProcessOp::Triggered) => {
+                            // `suspend()` of the calling process parks it
+                            // until another process resumes it; the frames
+                            // stay with the activation meanwhile.
+                            SystemFunction::Process(celox_design::ProcessOp::Suspend) => {
+                                state.suspends = true;
+                                state.yields = true;
+                            }
+                            // A level wait whose predicate reads them is
+                            // waiting on the event or process too, which
+                            // only the predicate's own code can tell the
+                            // host; a unit's code serves every caller.
+                            SystemFunction::Process(
+                                celox_design::ProcessOp::Triggered
+                                | celox_design::ProcessOp::Status,
+                            ) => {
                                 state.suspends = true;
                                 state.observes_events = true;
                             }
