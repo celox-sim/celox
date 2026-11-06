@@ -53,7 +53,7 @@ use celox_design::{
 };
 use celox_sir::{BinaryOp, SIRBuilder, SIRSwitchCase, SIRValue, StateAccess};
 use num_bigint::BigUint;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     HashMap, HashSet,
@@ -5406,11 +5406,51 @@ impl Generator<'_> {
             self.binary(1, byte, BinaryOp::Ne, zero)
         });
         let mut woken = self.constant(0, self.ready_bits);
+        // The flagged checks, by the word of up to eight flag bytes holding
+        // theirs: one load tells whether any of them is set, and a clear
+        // word skips its checks together.
+        let mut words: BTreeMap<usize, Vec<&WaitCheck>> = BTreeMap::new();
         for check in waits {
-            let wake = match (gate, untracked) {
-                (Some((flags, partitions, waits)), Some(untracked)) if check.index < waits => {
+            match gate {
+                Some((_, _, waits)) if check.index < waits => {
+                    words.entry(check.index / 8).or_default().push(check);
+                }
+                _ => {
+                    let wake = self.check_wait(check, settled);
+                    let bit = self.bit(wake, check.ordinal);
+                    woken = self.binary(self.ready_bits, woken, BinaryOp::Or, bit);
+                }
+            }
+        }
+        if let (Some((flags, partitions, waits)), Some(untracked)) = (gate, untracked) {
+            for (word, checks) in words {
+                let first = word * 8;
+                let count = (waits - first).min(8);
+                let width = count * SCHEDULER_FLAG_WIDTH;
+                let bytes = self.load_at(flags, (partitions + 2 + first) * 8, width);
+                let zero = self.constant(0, width);
+                let any = self.binary(1, bytes, BinaryOp::Ne, zero);
+                let dirty = self.binary(1, any, BinaryOp::Or, untracked);
+                let group = self.b.alloc_bit(self.ready_bits, false);
+                let join = self.b.new_block_with(vec![group]);
+                let run = self.b.new_block();
+                let none = self.constant(0, self.ready_bits);
+                self.b.seal_block(SIRTerminator::Branch {
+                    cond: dirty,
+                    true_block: (run, Vec::new()),
+                    false_block: (join, vec![none]),
+                });
+                self.b.switch_to_block(run);
+                let mut partial = self.constant(0, self.ready_bits);
+                for check in checks {
                     let offset = (partitions + 2 + check.index) * 8;
-                    let byte = self.load_at(flags, offset, SCHEDULER_FLAG_WIDTH);
+                    let byte = self.b.alloc_bit(SCHEDULER_FLAG_WIDTH, false);
+                    self.b.emit(SIRInstruction::Slice(
+                        byte,
+                        bytes,
+                        (check.index - first) * SCHEDULER_FLAG_WIDTH,
+                        SCHEDULER_FLAG_WIDTH,
+                    ));
                     let zero = self.constant(0, SCHEDULER_FLAG_WIDTH);
                     let dirty = self.binary(1, byte, BinaryOp::Ne, zero);
                     let dirty = self.binary(1, dirty, BinaryOp::Or, untracked);
@@ -5428,12 +5468,13 @@ impl Generator<'_> {
                     let woke = self.check_wait(check, settled);
                     self.b.seal_block(SIRTerminator::Jump(join, vec![woke]));
                     self.b.switch_to_block(join);
-                    wake
+                    let bit = self.bit(wake, check.ordinal);
+                    partial = self.binary(self.ready_bits, partial, BinaryOp::Or, bit);
                 }
-                _ => self.check_wait(check, settled),
-            };
-            let bit = self.bit(wake, check.ordinal);
-            woken = self.binary(self.ready_bits, woken, BinaryOp::Or, bit);
+                self.b.seal_block(SIRTerminator::Jump(join, vec![partial]));
+                self.b.switch_to_block(join);
+                woken = self.binary(self.ready_bits, woken, BinaryOp::Or, group);
+            }
         }
         let ready = self.load(self.slots.ready, self.ready_bits);
         let ready = self.binary(self.ready_bits, ready, BinaryOp::Or, woken);
