@@ -233,6 +233,193 @@ fn bit_stream_casts_of_strings_and_containers_pack_index_zero_first() {
 }
 
 #[test]
+fn dynamic_casts_assign_cast_compatible_values_of_any_singular_type() {
+    // IEEE 1800-2023 6.24.2: `$cast` assigns a source that is cast
+    // compatible with its singular destination and returns 1; otherwise it
+    // leaves the destination unchanged and returns 0, or, as a task, reports
+    // a run-time error.
+    let source = r#"module Top(output int rounded, output int to_int, output int text,
+                          output int length, output int from_string, output int kept,
+                          output int from_handle);
+        class C; endclass
+        initial begin
+            int i;
+            real r;
+            string t, s;
+            C c;
+            r = 2.5;
+            to_int = $cast(i, r);
+            rounded = i;
+            text = $cast(t, 16'h4142);
+            length = t.len();
+            s = "x";
+            r = 7.0;
+            from_string = $cast(r, s);
+            kept = int'(r);
+            c = new;
+            from_handle = $cast(i, c);
+        end
+    endmodule"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("casts.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("to_int")), 1u32.into());
+    assert_eq!(sim.get(sim.signal("rounded")), 3u32.into());
+    assert_eq!(sim.get(sim.signal("text")), 1u32.into());
+    assert_eq!(sim.get(sim.signal("length")), 2u32.into());
+    assert_eq!(sim.get(sim.signal("from_string")), 0u32.into());
+    assert_eq!(sim.get(sim.signal("kept")), 7u32.into());
+    assert_eq!(sim.get(sim.signal("from_handle")), 0u32.into());
+    // A destination is any place: a class property or a container element
+    // takes the bits in its own declared type.
+    let source = r#"module Top(output int text, output int element);
+        class H; string s; endclass
+        initial begin
+            H h;
+            string names[$];
+            h = new;
+            names = {"", ""};
+            text = $cast(h.s, 16'h4142) ? h.s.len() : -1;
+            element = $cast(names[1], 8'h43) ? names[1].len() : -1;
+        end
+    endmodule"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("casts.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("text")), 2u32.into());
+    assert_eq!(sim.get(sim.signal("element")), 1u32.into());
+    // Arguments that are not singular must be assignment compatible: a bit
+    // stream is no valid source of an unpacked array, nor one of them of an
+    // integral destination; the destination keeps its value.
+    let source = r#"module Top(output int pair, output int last, output int queue,
+                          output int queue_size, output int names_cast, output int from_array);
+        initial begin
+            byte b [2];
+            byte q [$];
+            string s;
+            string names [2];
+            int i;
+            b = '{8'h05, 8'h06};
+            pair = $cast(b, 16'h0102);
+            last = b[1];
+            s = "AB";
+            queue = $cast(q, s);
+            queue_size = q.size();
+            names_cast = $cast(names, 16'h4142);
+            i = 9;
+            from_array = $cast(i, b) ? -1 : i;
+        end
+    endmodule"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("casts.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("pair")), 0u32.into());
+    assert_eq!(sim.get(sim.signal("last")), 6u32.into());
+    assert_eq!(sim.get(sim.signal("queue")), 0u32.into());
+    assert_eq!(sim.get(sim.signal("queue_size")), 0u32.into());
+    assert_eq!(sim.get(sim.signal("names_cast")), 0u32.into());
+    assert_eq!(sim.get(sim.signal("from_array")), 9u32.into());
+    // Assignment compatible handles are assigned: a chandle of a chandle, a
+    // class handle of a derived class's. A chandle is no value of an int,
+    // and a source that is not assigned is still evaluated, for its calls.
+    let source = r#"module Top(output int chandles, output int upcast, output int from_chandle,
+                          output int kept, output int to_queue, output int to_enum,
+                          output int from_array, output int from_handle,
+                          output int from_property, output int from_member, output int calls);
+        typedef enum {A, B} E;
+        class C; endclass
+        class D extends C; endclass
+        int n;
+        function int f(); n++; return 7; endfunction
+        function D g(); n++; g = new; endfunction
+        typedef int pair_t [2];
+        function pair_t pair(); n++; return '{1, 2}; endfunction
+        function chandle none(); n++; return null; endfunction
+        class Owner; chandle handle; int arr [$]; endclass
+        Owner o = new;
+        function Owner owner(); n++; return o; endfunction
+        initial begin
+            chandle x, y;
+            C c;
+            D d;
+            int i;
+            byte q [$];
+            E e;
+            chandles = $cast(x, y);
+            d = new;
+            upcast = $cast(c, d) && c == d;
+            i = 3;
+            from_chandle = $cast(i, x);
+            kept = i;
+            to_queue = $cast(q, f());
+            e = B;
+            to_enum = $cast(e, g()) || e != B;
+            from_array = $cast(i, pair()) || i != 3;
+            from_handle = $cast(i, none()) || i != 3;
+            from_property = $cast(i, owner().handle) || i != 3;
+            from_member = $cast(i, owner().arr) || i != 3;
+            calls = n;
+        end
+    endmodule"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("casts.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("chandles")), 1u32.into());
+    assert_eq!(sim.get(sim.signal("upcast")), 1u32.into());
+    assert_eq!(sim.get(sim.signal("from_chandle")), 0u32.into());
+    assert_eq!(sim.get(sim.signal("kept")), 3u32.into());
+    assert_eq!(sim.get(sim.signal("to_queue")), 0u32.into());
+    assert_eq!(sim.get(sim.signal("to_enum")), 0u32.into());
+    assert_eq!(sim.get(sim.signal("from_array")), 0u32.into());
+    assert_eq!(sim.get(sim.signal("from_handle")), 0u32.into());
+    assert_eq!(sim.get(sim.signal("from_property")), 0u32.into());
+    assert_eq!(sim.get(sim.signal("from_member")), 0u32.into());
+    assert_eq!(sim.get(sim.signal("calls")), 6u32.into());
+    // A dynamically sized array is assigned to a fixed-size one only when
+    // its size matches at run time, which the lowering does not check yet.
+    let source = "module Top(output int out);
+        int d []; int f [2]; initial begin d = new[2]; out = $cast(f, d); end
+    endmodule";
+    let Err(error) =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("casts.sv"))], "Top").build()
+    else {
+        panic!("a cast of a dynamic array to a fixed-size one was lowered");
+    };
+    let error = error
+        .to_string()
+        .replace('│', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        error.contains("dynamically sized array to a fixed-size one"),
+        "{error}"
+    );
+    // As a task, a cast that is not valid is a run-time error.
+    let source = r#"module Top;
+        initial begin real r; string s; s = "x"; $cast(r, s); end
+    endmodule"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("casts.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(1).unwrap();
+    let events = sim.drain_runtime_events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            celox::RuntimeEvent::Report(report)
+                if report.severity == celox::Severity::Error
+                    && String::from_utf8_lossy(&report.message).contains("not cast compatible")
+        )),
+        "{events:?}"
+    );
+}
+
+#[test]
 fn bit_stream_casts_lay_out_both_sides_by_their_types() {
     // IEEE 1800-2023 6.24.3: a structure streams its members in order and an
     // array its elements, a string its bytes. A layout the lowering cannot
