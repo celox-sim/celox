@@ -295,7 +295,12 @@ pub fn inline_single_predecessor_jumps<A: Clone>(
             replace_sir_terminator_uses(&mut block.terminator, &flattened);
         }
     }
-    if let Err(mut error) = eu.verify_result() {
+    // The callers verify the unit at their pass boundaries (in debug builds
+    // and with verification enabled); the whole-unit check here is the
+    // debug build's.
+    if cfg!(debug_assertions)
+        && let Err(mut error) = eu.verify_result()
+    {
         error.message = format!("after single-predecessor inlining: {}", error.message);
         return Err(error);
     }
