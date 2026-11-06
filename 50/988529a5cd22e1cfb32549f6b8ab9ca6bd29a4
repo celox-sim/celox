@@ -1,1 +1,6 @@
-Lint: expect_err instead of err().expect() in the random-mode rejection test
+Revision history for #3284:
+
+rev 2 (content) 2026-11-06 19:51 UTC — Lint: expect_err instead of err().expect() in the random-mode rejection test
+rev 1 (initial) 2026-11-06 19:51 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3284,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"62e7a00953c9af9bfa40a946d744861bc959cfae","timestamp_iso":"2026-11-06T19:51:14Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"62e7a00953c9af9bfa40a946d744861bc959cfae","new_sha":"50988529a5cd22e1cfb32549f6b8ab9ca6bd29a4","timestamp_iso":"2026-11-06T19:51:14Z","reason":"Lint: expect_err instead of err().expect() in the random-mode rejection test","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/62e7a00953c9af9bfa40a946d744861bc959cfae...50988529a5cd22e1cfb32549f6b8ab9ca6bd29a4"}]} -->
