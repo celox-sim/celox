@@ -345,7 +345,8 @@ pub(crate) fn finalize_scheduled_rtl(
     component_libraries: Vec<celox_testbench::ComponentLibrary>,
     component_file_base: Option<std::path::PathBuf>,
 ) -> Result<crate::ir::OptimizedSir, ParserError> {
-    project_scheduled_rtl(
+    let project_start = diagnostics.phase_timing.then(crate::timing::now);
+    let projected = project_scheduled_rtl(
         scheduled,
         testbench_source.as_mut(),
         component_libraries,
@@ -353,8 +354,11 @@ pub(crate) fn finalize_scheduled_rtl(
         testbench_random_seed,
         four_state,
         diagnostics,
-    )
-    .and_then(|(sir, runtime)| {
+    );
+    if let Some(start) = project_start {
+        tracing::debug!("[phase-timing] project: {:?}", start.elapsed());
+    }
+    projected.and_then(|(sir, runtime)| {
         optimize_scheduled_program(
             sir,
             runtime,
@@ -504,6 +508,13 @@ pub(crate) fn optimize_scheduled_program(
             verify_program_sir(&program.sir, &program.runtime, "before optimization")
         )?;
     }
+    // Phase timing also reports the optimizer's internal phases.
+    let timed_options = (phase_timing && !optimize_options.diagnostics.pass_timing).then(|| {
+        let mut options = optimize_options.clone();
+        options.diagnostics.pass_timing = true;
+        options
+    });
+    let optimize_options = timed_options.as_ref().unwrap_or(optimize_options);
     timed_phase!("optimize", {
         if preserve_element_storage_layout {
             crate::optimizer::optimize_preserving_element_storage(
@@ -671,6 +682,7 @@ pub fn parse_sv(
         // folded, outside any partition's dependencies.
         schedule_options.settle = celox_frontend_core::SettlePartitionMode::Off;
     }
+    let frontend_start = diagnostics.phase_timing.then(crate::timing::now);
     let scheduled =
         celox_frontend_sv::schedule_sources_with_parameter_expressions_and_latch_policy(
             sources,
@@ -698,6 +710,9 @@ pub fn parse_sv(
             celox_frontend_sv::FrontendError::Lowering(error) => error.into(),
             celox_frontend_sv::FrontendError::Analyzer(error) => sv_analysis_error(error),
         })?;
+    if let Some(start) = frontend_start {
+        tracing::debug!("[phase-timing] sv_frontend: {:?}", start.elapsed());
+    }
     if let Some(trace) = trace.as_deref_mut() {
         trace.absorb_frontend(frontend_trace);
     }

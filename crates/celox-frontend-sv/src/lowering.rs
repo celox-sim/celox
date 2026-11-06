@@ -3410,7 +3410,18 @@ fn schedule_sources_collecting(
     force_signals: &[String],
 ) -> Result<ScheduledRtlOutput, FrontendError> {
     let found_warnings = warnings.len();
+    let frontend_timing = trace_options.phase_timing;
+    let mut checkpoint = std::time::Instant::now();
+    macro_rules! checkpoint {
+        ($label:expr) => {
+            if frontend_timing {
+                tracing::debug!("[sv-frontend] {}: {:?}", $label, checkpoint.elapsed());
+                checkpoint = std::time::Instant::now();
+            }
+        };
+    }
     let analyzed = analyze_sources(sources, &[top], analysis_options.clone())?;
+    checkpoint!("analyze_sources");
     package_warnings(&analyzed, warnings);
     // The specializations that the modules request of package class
     // templates, shared by all of their analyses.
@@ -3515,6 +3526,7 @@ fn schedule_sources_collecting(
 
     // The ids of interface instances depend on the elaborated hierarchy, which
     // the virtual interface accesses do not change: analyze again with them.
+    checkpoint!("discovery");
     let virtual_instances = match &virtual_interfaces {
         Some(declarations) => {
             let instances = virtual_interfaces::Instances::elaborate(
@@ -3642,6 +3654,7 @@ fn schedule_sources_collecting(
         }
     }
     drop(virtual_sources);
+    checkpoint!("hierarchy");
 
     // A store of a class property that a level wait reads, in any module,
     // wakes the wait (see `ff::property_changes`).
@@ -3725,6 +3738,7 @@ fn schedule_sources_collecting(
                 entry.insert(specialize(key, module_id)?);
             }
         }
+        checkpoint!("specialize_modules");
         resolve_inout_drivers(&module_ids, &mut lowered_modules);
         validate_specialized_instance_net_drivers(&module_ids, &lowered_modules)?;
         let root = &lowered_modules[&root_id];
@@ -3746,6 +3760,7 @@ fn schedule_sources_collecting(
 
         // Waits and flip-flop domains of other modules may watch the
         // signals that hierarchical names reach.
+        checkpoint!("validate_graph");
         let mut hierarchical_targets: HashMap<ModuleId, HashSet<String>> = HashMap::default();
         for reference in references
             .values()
@@ -3814,6 +3829,7 @@ fn schedule_sources_collecting(
             modules.insert(module_id, sim_module);
         }
 
+        checkpoint!("instance_glue");
         let package_states = lower_package_states(
             &analyzed[&top].packages,
             &design,
@@ -3847,6 +3863,7 @@ fn schedule_sources_collecting(
             packages,
             instance_values,
         };
+        checkpoint!("packages");
         let mut loop_members = Vec::new();
         let scheduled =
             celox_frontend_core::symbolic::assembly::schedule_symbolic_rtl_reporting_loops(
@@ -3860,6 +3877,7 @@ fn schedule_sources_collecting(
                 trace.as_deref_mut(),
                 &mut loop_members,
             );
+        checkpoint!("schedule_symbolic_rtl");
         let error = match scheduled {
             Ok(scheduled) => return Ok(scheduled),
             Err(error) => error,

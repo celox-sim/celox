@@ -1793,6 +1793,12 @@ pub(super) fn compile_unit_refs_inspected(
         );
     }
     let start = timing.then(crate::timing::now);
+    // Phase timing also reports the merged-SIR phases.
+    let timed_diagnostics = (timing && !diagnostics.pass_timing).then(|| {
+        let mut diagnostics = diagnostics.clone();
+        diagnostics.pass_timing = true;
+        diagnostics
+    });
     let sir_eu = prepare_merged_sir(
         units,
         layout,
@@ -1800,7 +1806,7 @@ pub(super) fn compile_unit_refs_inspected(
         label,
         merge_kind,
         first_ff_unit,
-        diagnostics,
+        timed_diagnostics.as_ref().unwrap_or(diagnostics),
         cancel,
         x86_options.baseline,
         // A function unit, or a unit that calls one.
