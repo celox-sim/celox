@@ -336,6 +336,45 @@ endmodule
 }
 
 #[test]
+fn updates_inside_function_units_are_seen_at_their_points() {
+    // `pulse` raises and lowers `x` inside a function unit that the process
+    // calls out of line: its stores have points of their own, which show
+    // the host each update, as the process's stores do inline.
+    let source = r#"`timescale 1ns/1ns
+module Top;
+    logic x = 0;
+    function automatic void pulse(logic v);
+        x = v;
+        x = !v;
+    endfunction
+    logic one = 1;
+    initial begin
+        #5 pulse(one);
+    end
+endmodule
+"#;
+    for mode in [
+        celox::SchedulerMode::Reference,
+        celox::SchedulerMode::Compiled,
+    ] {
+        let mut sim = Simulation::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top")
+            .scheduler_mode(mode)
+            .observable_updates(true)
+            .value_change_signals(["Top.x"])
+            .force_out_of_line_calls()
+            .build()
+            .unwrap();
+        let received = observe(&mut sim, &["x"], None);
+        sim.run_until(10).unwrap();
+        assert_eq!(
+            received.try_iter().collect::<Vec<_>>(),
+            vec![(5, vec![1]), (5, vec![0])],
+            "{mode:?}"
+        );
+    }
+}
+
+#[test]
 fn a_pulse_inside_one_process_run_is_seen_at_its_points() {
     let source = r#"`timescale 1ns/1ns
 module Top;

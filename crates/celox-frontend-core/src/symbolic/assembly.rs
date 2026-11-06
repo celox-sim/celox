@@ -991,7 +991,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         extern_functions,
         next_runtime_error_code,
         mut processes,
-        (functions, function_frames),
+        (mut functions, function_frames),
     ) = timed_sub!(
         "relocate_units",
         relocate_units(
@@ -1171,6 +1171,10 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         for process in &mut processes {
             crate::watch::instrument_writes_in_passes(&mut process.kernel, stable_code);
         }
+        // A function unit's stores are a process's, whichever calls it.
+        for function in &mut functions {
+            crate::watch::instrument_writes_in_passes(&mut function.unit, stable_code);
+        }
         for units in eval_apply_ffs
             .values_mut()
             .chain(eval_only_ffs.values_mut())
@@ -1251,6 +1255,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             &variables,
             four_state,
             &mut processes,
+            &mut functions,
             &mut comb_blocks,
             ff_units,
         );
@@ -2296,18 +2301,19 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         );
         select_nba_paths(&mut timing, &staged, &mut processes);
     }
-    // The per-store instrumentation above (watch and occurrence counters,
-    // comb-observer captures, nonblocking staging, triggers) rewrites the
-    // stores of the units it sees, not those of function bodies, which a
-    // frontend therefore keeps clear of instrumented storage
-    // (`SimModule::instrumented_storage`). A body that stores there anyway
-    // is rejected rather than miscompiled.
+    // The per-store instrumentation above rewrites the stores of function
+    // bodies for the watch and occurrence counters, as those of process
+    // kernels. The rest (flip-flop pending counts, nonblocking staging,
+    // the triggers of events, comb-observer captures) is for the units of
+    // processes and flip-flops, so a frontend keeps function bodies clear of
+    // that storage (`SimModule::function_excluded_storage`). A body that
+    // stores there anyway is rejected rather than miscompiled.
     if !functions.is_empty() {
         let instrumented: HashSet<AbsoluteAddr> = instance_modules
             .iter()
             .flat_map(|(&instance, module)| {
                 modules[module]
-                    .instrumented_storage()
+                    .function_excluded_storage()
                     .into_iter()
                     .map(move |var_id| bindings.locate(instance, var_id))
             })
@@ -5209,10 +5215,10 @@ fn watch_code<A>(
     })
 }
 
-/// Instrument the process kernels, combinational process units and
-/// flip-flop units that write a `counted` signal, and the process kernels
-/// and combinational process units that write the signal of a `gated` term,
-/// and return `counted`; no other unit changes.
+/// Instrument the process kernels, function units, combinational process
+/// units and flip-flop units that write a `counted` signal, and the process
+/// kernels, function units and combinational process units that write the
+/// signal of a `gated` term, and return `counted`; no other unit changes.
 fn instrument_counted_signals<'u>(
     timing: &TimingMetadata,
     counted: BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>>,
@@ -5220,6 +5226,7 @@ fn instrument_counted_signals<'u>(
     variables: &HashMap<AbsoluteAddr, (usize, bool)>,
     four_state: bool,
     processes: &mut [RelocatedProcess],
+    functions: &mut [celox_sir::FunctionUnit<RegionedAbsoluteAddr>],
     comb_blocks: &mut [LogicPath<AbsoluteAddr>],
     ff_units: impl Iterator<Item = &'u mut ExecutionUnit<RegionedAbsoluteAddr>>,
 ) -> BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>> {
@@ -5233,8 +5240,14 @@ fn instrument_counted_signals<'u>(
         watch_code(signal, &counted, gated, variables, four_state, |var| var)
     };
     let stable = |var: AbsoluteAddr| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, var);
-    for process in processes {
-        crate::watch::instrument_unit(&mut process.kernel, |address| {
+    // A function unit's stores are those of the process that calls it,
+    // and the counters are the stored signal's, whichever process that is.
+    let kernels = processes
+        .iter_mut()
+        .map(|process| &mut process.kernel)
+        .chain(functions.iter_mut().map(|function| &mut function.unit));
+    for unit in kernels {
+        crate::watch::instrument_unit(unit, |address| {
             if address.region != STABLE_REGION {
                 return None;
             }
