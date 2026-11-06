@@ -97,9 +97,7 @@ pub(super) enum Reason {
     /// fork.
     MaySuspend,
     /// It, or a subroutine it calls, makes a host request a unit cannot
-    /// make: `$exit`, monitors, strobes, VCD tasks, mailbox methods and
-    /// `await` and a semaphore's `get`, which park the calling process for
-    /// another, or a DPI-C import; or a caller that cannot suspend calls a
+    /// make: `$exit`, monitors, strobes, VCD tasks, or a DPI-C import; or a caller that cannot suspend calls a
     /// unit that can suspend.
     HostRequest,
     /// Anything else, described.
@@ -1202,12 +1200,30 @@ impl ProcModule<'_> {
                                 | celox_design::ProcessOp::SemaphoreTryGet,
                             ) => state.suspends = true,
                             // `suspend()` of the calling process parks it
-                            // until another process resumes it; the frames
-                            // stay with the activation meanwhile.
-                            SystemFunction::Process(celox_design::ProcessOp::Suspend) => {
+                            // until another process resumes it, `await()`
+                            // until another ends, and the blocking methods of
+                            // semaphores and mailboxes until they can be
+                            // served; the frames stay with the activation
+                            // meanwhile, and a mailbox method retries when the
+                            // process is woken.
+                            SystemFunction::Process(
+                                celox_design::ProcessOp::Suspend
+                                | celox_design::ProcessOp::Await
+                                | celox_design::ProcessOp::SemaphoreGet
+                                | celox_design::ProcessOp::MailboxPut
+                                | celox_design::ProcessOp::MailboxGet
+                                | celox_design::ProcessOp::MailboxPeek,
+                            ) => {
                                 state.suspends = true;
                                 state.yields = true;
                             }
+                            SystemFunction::Process(
+                                celox_design::ProcessOp::MailboxNew
+                                | celox_design::ProcessOp::MailboxNum
+                                | celox_design::ProcessOp::MailboxTryPut
+                                | celox_design::ProcessOp::MailboxTryGet
+                                | celox_design::ProcessOp::MailboxTryPeek,
+                            ) => state.suspends = true,
                             // A level wait whose predicate reads them is
                             // waiting on the event or process too, which
                             // only the predicate's own code can tell the
