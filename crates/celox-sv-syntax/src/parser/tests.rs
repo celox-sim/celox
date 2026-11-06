@@ -1767,7 +1767,7 @@ fn deep_foreach_statements_and_long_slot_lists_parse_clone_and_drop_on_default_s
 #[test]
 fn assertion_headers_distinguish_typed_immediate_predicates_from_property_boundaries() {
     let syntax = parse(
-        "module M;initial begin assert(a+1);assume #0(b);cover final(c);assert property(@(posedge clk)a|=>b);cover sequence(a##1b);expect(a);end endmodule",
+        "module M;initial begin assert(a+1);assume #0(b);cover final(c);assert property(@(posedge clk)a|->b|->c);cover sequence(a##1b);expect(a);end endmodule",
     );
     let headers = syntax
         .statements
@@ -3202,10 +3202,13 @@ fn clocked_overlapped_implication_retains_both_boolean_operands() {
         .unwrap();
     assert!(syntax.expression(antecedent).tokens.end < syntax.expression(condition).tokens.start);
     for property in [
-        "a |=> b",
-        "a ##1 b |-> c",
         "a |-> b |-> c",
-        "a |-> b ##1 c",
+        "a ##[1:2] b |-> c",
+        "a |=> b[*2]",
+        "a |-> b[*2]",
+        "a[->1] ##1 b",
+        "a ##1 b[=2]",
+        "a ##1 b[+]",
         "(a |-> b)",
     ] {
         let syntax = parse(&format!(
@@ -3339,10 +3342,10 @@ fn named_sequence_and_property_instances_are_substituted() {
 #[test]
 fn named_assertion_declarations_outside_the_subset_keep_their_boundary() {
     for declaration in [
-        "sequence s; @(posedge clk) a ##1 b; endsequence",
+        "sequence s; @(posedge clk) a ##[1:2] b; endsequence",
+        "sequence s; a ##1 b[*2]; endsequence",
         "sequence s(x); x; endsequence",
-        "property p; a |=> b; endproperty",
-        "property p; int v; a; endproperty",
+        "property p; a |-> b ##[0:$] c; endproperty",
         "sequence s; disable iff (r) a; endsequence",
         "sequence s; a |-> b; endsequence",
         "property p; a and b; endproperty",
@@ -3382,6 +3385,136 @@ fn named_assertion_declarations_outside_the_subset_keep_their_boundary() {
     };
     assert_eq!(declaration.kind, AssertionDeclarationKind::Property);
     assert_eq!(declaration.name.value(), "p");
+}
+
+/// A sequence over cycles keeps its steps, their delays and match items,
+/// and the local variables of its declaration (IEEE 1800-2023 16.7, 16.10).
+#[test]
+fn sequences_over_cycles_keep_steps_and_local_variables() {
+    let sequence = |source: &str| {
+        let syntax = parse(source);
+        let property = syntax
+            .statements
+            .iter()
+            .find_map(|stmt| match &stmt.kind {
+                StatementKind::Assertion {
+                    header: AssertionHeader::Concurrent { property, .. },
+                    ..
+                } => Some(*property),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{source}"));
+        let id = property.sequence.unwrap_or_else(|| panic!("{source}"));
+        let sequence = syntax.sequence(id).clone();
+        let steps = |steps: &[SequenceStep]| {
+            steps
+                .iter()
+                .map(|step| {
+                    let items = step
+                        .items
+                        .iter()
+                        .map(|item| match item {
+                            SequenceMatchItem::Assign {
+                                target,
+                                operator,
+                                value,
+                            } => format!(
+                                "{}{}{}",
+                                syntax.token_text(syntax.expression(*target).tokens),
+                                operator,
+                                value.map_or(String::new(), |value| syntax
+                                    .token_text(syntax.expression(value).tokens)
+                                    .to_owned())
+                            ),
+                            SequenceMatchItem::Call(call) => syntax
+                                .token_text(syntax.expression(*call).tokens)
+                                .to_owned(),
+                        })
+                        .collect::<Vec<_>>();
+                    format!(
+                        "{}:{}{}",
+                        step.delay,
+                        syntax.token_text(syntax.expression(step.expression).tokens),
+                        items
+                            .iter()
+                            .map(|item| format!(",{item}"))
+                            .collect::<String>()
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let locals = sequence
+            .locals
+            .iter()
+            .flat_map(|local| local.names.iter().map(|name| name.spelling.clone()))
+            .collect::<Vec<_>>();
+        (
+            sequence.antecedent.as_deref().map(steps),
+            steps(&sequence.consequent),
+            locals,
+        )
+    };
+    let strings = |values: &[&str]| {
+        values
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        sequence(
+            "module M; sequence s; int x, y; @(posedge clk) (v, x = in, $display(x)) ##4 (out == x + 4); endsequence assert property (s); endmodule"
+        ),
+        (
+            None,
+            strings(&["0:v,x=in,$display(x)", "4:(out == x + 4)"]),
+            strings(&["x", "y"])
+        )
+    );
+    // Operator assignments, increments and selects of locals (16.10).
+    assert_eq!(
+        sequence(
+            "module M; sequence s; int x; @(posedge clk) (v, x &= in, x++, --x, x[0] = 1) ##1 x; endsequence assert property (s); endmodule"
+        ),
+        (
+            None,
+            strings(&["0:v,x&=in,x++,x--,x[0]=1", "1:x"]),
+            strings(&["x"])
+        )
+    );
+    // `|=>` is `|-> ##1` (16.12.7).
+    assert_eq!(
+        sequence("module M; assert property (@(posedge clk) a ##2 b |=> c ##1 d); endmodule"),
+        (
+            Some(strings(&["0:a", "2:b"])),
+            strings(&["1:c", "1:d"]),
+            Vec::new()
+        )
+    );
+    assert_eq!(
+        sequence("module M; assert property (@(posedge clk) ##3 a); endmodule"),
+        (None, strings(&["3:a"]), Vec::new())
+    );
+    // A parenthesized sequence, also after a delay.
+    assert_eq!(
+        sequence(
+            "module M; assert property (@(posedge clk) (a ##1 b) |-> ##2 (c ##1 d)); endmodule"
+        ),
+        (
+            Some(strings(&["0:a", "1:b"])),
+            strings(&["2:c", "1:d"]),
+            Vec::new()
+        )
+    );
+    // The tick `|=>` adds may not overflow the first delay.
+    let error = Declarations::parse(
+        "module M; assert property (@(posedge clk) a |=> ##4294967295 b); endmodule",
+        Path::new("overflow.sv"),
+    )
+    .unwrap_err();
+    assert!(
+        format!("{error:?}").contains("cycle delay longer"),
+        "{error:?}"
+    );
 }
 
 /// Substitution follows a chain of declarations on an explicit stack, and

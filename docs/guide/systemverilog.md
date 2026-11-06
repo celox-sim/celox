@@ -102,7 +102,7 @@ ports, types, statements or system functions before porting a design.
 
 Common reasons a design needs changes are:
 
-- Class-based verification beyond [simple classes](./systemverilog-reference#classes) and concurrent assertions beyond the [single-cycle Boolean subset](./systemverilog-reference#concurrent-assertions).
+- Class-based verification beyond [simple classes](./systemverilog-reference#classes) and concurrent assertions beyond the [Boolean and fixed-delay sequence subset](./systemverilog-reference#concurrent-assertions).
 - `fork` / `join`, nonblocking intra-assignment event controls and nonconstant delays
   and `iff` in `always_ff` event controls ([#452](https://github.com/celox-sim/celox/issues/452)).
 - Nonblocking latch assignments, multiple drivers and tri-state buses. Inferred latches in `always_comb` require `inferred_latch = "warn"` or `"allow"` in the common `[diagnostics]` configuration.
