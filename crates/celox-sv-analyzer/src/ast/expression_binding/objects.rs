@@ -1030,16 +1030,24 @@ pub(in crate::ast) fn cast_to(
     let Some(target) = native_class(tree, session, destination, native, dimensions) else {
         return Ok(None);
     };
-    class(tree, session, dimensions, &target)?;
+    let target_class = class(tree, session, dimensions, &target)?;
     // The source's class may be a base of the destination's, or an interface
     // class, whose object the call checks; any other class's cannot be
     // assigned (8.16).
     if let Some(source_class) = native_class(tree, session, source, native, dimensions)
-        && !derives_from(tree, session, dimensions, &source_class, &target)?
-        && !derives_from(tree, session, dimensions, &target, &source_class)?
-        && !class(tree, session, dimensions, &source_class)?.is_interface
+        && source_class != target
     {
-        return Ok(Some(Cast::Fails));
+        // A process or event handle casts only to its own class.
+        let castable = !classes::builtin(&source_class) && !classes::builtin(&target) && {
+            let (env, aliases) = (&dimensions.const_env, &dimensions.type_aliases);
+            let source_type = class(tree, session, dimensions, &source_class)?
+                .record_lineage(tree, session, env, aliases);
+            let target_type = target_class.record_lineage(tree, session, env, aliases);
+            session.types.castable(source_type, target_type).is_ok()
+        };
+        if !castable {
+            return Ok(Some(Cast::Fails));
+        }
     }
     Ok(Some(Cast::Call {
         name: Class::cast_name(&target),

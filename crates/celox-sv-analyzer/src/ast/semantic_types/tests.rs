@@ -1,7 +1,7 @@
 use super::*;
 use super::{
     conversion::of_type,
-    relations::{Assignable, Mismatch},
+    relations::{Assignable, Castable, Mismatch},
 };
 use crate::ast::ConstEnv;
 use crate::ast::Session;
@@ -297,6 +297,7 @@ fn class_handles_assign_to_their_classes_bases_and_interfaces() {
     let supertypes = |base: Option<TyId>, interfaces: &[TyId]| Supertypes {
         base,
         interfaces: interfaces.into(),
+        interface: false,
     };
     table.record_supertypes(e, supertypes(Some(c), &[]));
     table.record_supertypes(c, supertypes(None, &[]));
@@ -327,4 +328,132 @@ fn class_handles_assign_to_their_classes_bases_and_interfaces() {
     assert_eq!(table.lineage(fifo), vec![fifo, base, put]);
     assert_eq!(table.base_classes(fifo), vec![fifo, base]);
     assert_eq!(table.base_classes(e), vec![e, c]);
+}
+
+#[test]
+fn casts_assign_convert_enums_and_reinterpret_bit_streams() {
+    // IEEE 1800-2023 6.19.4, 6.24.1 and 6.24.3, with their examples.
+    let (table, ids) = typedefs(
+        "typedef enum {Red, Green, Blue} Colors; typedef int int_t; typedef real real_t;
+         typedef shortint short_t; typedef string string_t; typedef byte bytes_t[$];
+         typedef struct { shortint address; logic [3:0] code; byte command [2]; } Control;
+         typedef bit Bits [36:1]; typedef bit Short [35:1]; typedef int map_t[int];",
+    );
+    let cast = |source: &str, target: &str| table.castable(ids[source], ids[target]);
+    let assign = |source: &str, target: &str| table.assignable(ids[source], ids[target]);
+    // 6.19.4: `C = I` needs a cast; `I = C` does not.
+    assert_eq!(assign("int_t", "Colors"), Err(Mismatch::Enum));
+    assert_eq!(cast("int_t", "Colors"), Ok(Castable::Enum));
+    assert_eq!(assign("Colors", "int_t"), Ok(Assignable::Always));
+    // 6.24.1: `int'(2.0 * 3.0)` and `shortint'({8'hFA, 8'hCE})` assign.
+    assert_eq!(
+        cast("real_t", "int_t"),
+        Ok(Castable::Assign(Assignable::Always))
+    );
+    assert_eq!(
+        cast("int_t", "short_t"),
+        Ok(Castable::Assign(Assignable::Always))
+    );
+    // 6.24.3: `Control` and `Bits` are bit-stream types of 36 bits.
+    assert_eq!(assign("Control", "Bits"), Err(Mismatch::NotAssignable));
+    assert_eq!(
+        cast("Control", "Bits"),
+        Ok(Castable::BitStream {
+            source_bits: Some(36),
+            target_bits: Some(36)
+        })
+    );
+    assert_eq!(
+        cast("Control", "Short"),
+        Err(Mismatch::Size {
+            actual: 36,
+            target: 35
+        })
+    );
+    // A string is a dynamic array of bytes, whose size a fixed-size target
+    // checks at run time; an integral value goes into a string by a cast
+    // (6.16).
+    assert_eq!(assign("short_t", "string_t"), Err(Mismatch::NotAssignable));
+    assert_eq!(
+        cast("string_t", "short_t"),
+        Ok(Castable::BitStream {
+            source_bits: None,
+            target_bits: Some(16)
+        })
+    );
+    assert_eq!(
+        cast("bytes_t", "short_t"),
+        Ok(Castable::BitStream {
+            source_bits: None,
+            target_bits: Some(16)
+        })
+    );
+    assert_eq!(
+        cast("short_t", "string_t"),
+        Ok(Castable::BitStream {
+            source_bits: Some(16),
+            target_bits: None
+        })
+    );
+    // An associative array is no destination of a bit-stream cast, and a
+    // real is no bit-stream type.
+    assert_eq!(cast("int_t", "map_t"), Err(Mismatch::NotCastable));
+    assert_eq!(cast("real_t", "string_t"), Err(Mismatch::NotCastable));
+    assert_eq!(cast("real_t", "Colors"), Ok(Castable::Enum));
+}
+
+#[test]
+fn class_casts_check_derived_targets_at_run_time() {
+    // IEEE 1800-2023 8.16: `$cast` to a derived class's handle checks the
+    // object; to an unrelated class it cannot succeed.
+    let mut table = TyTable::default();
+    let mut class = |name: &str| table.intern(TyData::Class(Decl::Class(name.into())));
+    let (base, derived, other, interface) = (class("B"), class("D"), class("O"), class("I"));
+    let supertypes = |base: Option<TyId>, interface: bool| Supertypes {
+        base,
+        interfaces: Arc::new([]),
+        interface,
+    };
+    table.record_supertypes(base, supertypes(None, false));
+    table.record_supertypes(derived, supertypes(Some(base), false));
+    table.record_supertypes(other, supertypes(None, false));
+    table.record_supertypes(interface, supertypes(None, true));
+    assert_eq!(
+        table.castable(derived, base),
+        Ok(Castable::Assign(Assignable::Always))
+    );
+    assert_eq!(table.castable(base, derived), Ok(Castable::Dynamic));
+    assert_eq!(table.castable(interface, other), Ok(Castable::Dynamic));
+    assert_eq!(table.castable(other, derived), Err(Mismatch::ClassHandle));
+}
+
+#[test]
+fn bit_stream_casts_reject_destinations_holding_associative_arrays() {
+    // IEEE 1800-2023 6.24.3: an associative array is illegal as a
+    // destination type, also as an element or a member of one.
+    let (mut table, ids) = typedefs("typedef int map_t[int]; typedef string string_t;");
+    let int = table.intern(TyData::Packed(Packed {
+        element: PackedElement::Bits,
+        four_state: false,
+        signed: true,
+        signed_element_depth: None,
+        dims: Box::new([Range { left: 31, right: 0 }]),
+        keyword: Some("int"),
+    }));
+    let maps = table.intern(TyData::Array {
+        kind: ArrayKind::Fixed(Range { left: 0, right: 1 }),
+        element: ids["map_t"],
+    });
+    let holder = table.intern(TyData::UnpackedStruct(Decl::Aggregate {
+        name: "holder_t".into(),
+        members: Arc::new([("i".into(), int), ("m".into(), ids["map_t"])]),
+    }));
+    for target in [ids["map_t"], maps, holder] {
+        assert_eq!(
+            table.castable(ids["string_t"], target),
+            Err(Mismatch::NotCastable),
+            "{}",
+            table.spell(target)
+        );
+    }
 }
