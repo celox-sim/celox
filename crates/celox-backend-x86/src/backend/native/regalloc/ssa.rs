@@ -98,7 +98,7 @@ pub(super) fn allocate(
     checkpoint()?;
 
     let phase = timing.then(crate::timing::now);
-    super::ssa_state_home::select(func, cfg, &mut plan).map_err(|error| {
+    super::ssa_state_home::select(func, cfg, &mut plan, verify).map_err(|error| {
         super::RegallocError::new(
             "packed state-home selection",
             error.rule,
@@ -136,10 +136,10 @@ pub(super) fn allocate(
     // complete plan is available.
     let phase = timing.then(crate::timing::now);
     let requested_points = planner_reload_queries(func, cfg, &plan)?;
-    let reload_recipes = super::reload::analyze_with_queries(func, cfg, &requested_points)
-        .map_err(|error| {
-            super::reload_recipe_error("spill-planner reload-recipe analysis", error)
-        })?;
+    let reload_recipes =
+        super::reload::analyze_with_queries_checked(func, cfg, &requested_points, verify).map_err(
+            |error| super::reload_recipe_error("spill-planner reload-recipe analysis", error),
+        )?;
     plan.select_recipe_homes(func, cfg, &reload_recipes)
         .map_err(|error| {
             super::RegallocError::new(
