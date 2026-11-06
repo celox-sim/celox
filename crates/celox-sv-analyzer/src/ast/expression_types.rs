@@ -471,6 +471,18 @@ fn property_type(
     semantic_types::of_type(&mut session.types, &tree.functions, &ty, &dims.const_env)
 }
 
+/// The type that cast target `target` names when it names one, as in
+/// `T'(x)`; none for a size, signing or const cast.
+pub(super) fn cast_type(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    target: ExprId,
+    native: &Declarations,
+    dims: &PackedDimensions,
+) -> Option<TyId> {
+    values::pattern_type(tree, session, target, native, dims)
+}
+
 /// The class of a handle of type `id`.
 pub(super) fn class_name(table: &semantic_types::TyTable, id: TyId) -> Option<String> {
     match table.data(id) {

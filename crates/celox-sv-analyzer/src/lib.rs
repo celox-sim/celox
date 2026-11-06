@@ -274,6 +274,10 @@ pub enum AnalyzerError {
     /// as one wider than its fixed-size target.
     #[error("streaming concatenation: {0} (IEEE 1800-2023 11.4.14)")]
     InvalidStream(String),
+    /// A cast that IEEE 1800-2023 6.24 forbids, such as a bit-stream cast
+    /// between types of different sizes.
+    #[error("cast: {0} (IEEE 1800-2023 6.24)")]
+    InvalidCast(String),
 }
 
 impl miette::Diagnostic for AnalyzerError {}
