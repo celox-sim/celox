@@ -4101,7 +4101,24 @@ mod host {
             self.build_with_backend(
                 crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
                 true,
-                crate::backend::native::NativeBackend::new,
+                |program, options| {
+                    if !(options.trace.mir || options.trace.native) {
+                        return crate::backend::native::NativeBackend::new(program, options);
+                    }
+                    let (backend, native_trace) =
+                        crate::backend::native::NativeBackend::new_with_codegen_trace(
+                            program, options,
+                        )?;
+                    if options.trace.output_to_stdout {
+                        crate::debug::CompilationTrace {
+                            native_optimized_sir: Some(native_trace.optimized_sir),
+                            mir: options.trace.mir.then_some(native_trace.mir),
+                            ..crate::debug::CompilationTrace::default()
+                        }
+                        .print();
+                    }
+                    Ok(backend)
+                },
             )
         }
 
