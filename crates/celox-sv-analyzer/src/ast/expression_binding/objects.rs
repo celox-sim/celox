@@ -919,6 +919,11 @@ pub(in crate::ast) fn check_assignment(
 ) -> Converted<()> {
     let mut pending = vec![id];
     while let Some(id) = pending.pop() {
+        // A value an effect bound in its place, such as the handle a `$cast`
+        // to a property writes, is checked where it was made.
+        if dimensions.effect_values.contains_key(&id) {
+            continue;
+        }
         let Ok(source_type) = expression_types::type_of(tree, session, id, native, dimensions)
         else {
             // A conditional whose arms have no common class (11.4.11) is
@@ -933,6 +938,19 @@ pub(in crate::ast) fn check_assignment(
             }
             continue;
         };
+        // Each value is a handle of a class or `null`, also an arm of
+        // another type (8.16).
+        match session.types.data(source_type) {
+            semantic_types::TyData::Null => continue,
+            semantic_types::TyData::Class(_) => {}
+            _ => {
+                return Err(AnalyzerError::NotClassHandle {
+                    context: context(),
+                    actual: session.types.spell(source_type),
+                    target: target.to_owned(),
+                });
+            }
+        }
         let Some(source) = expression_types::class_name(&session.types, source_type) else {
             continue;
         };
