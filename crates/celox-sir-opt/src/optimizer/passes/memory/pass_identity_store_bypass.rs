@@ -45,6 +45,8 @@ struct StoreCandidate {
 struct GlobalIdentityFacts {
     accesses: HashMap<AbsoluteAddr, AddressFacts>,
     stores: Vec<StoreCandidate>,
+    /// The indices in `stores` of the stores of each address, in order.
+    stores_by_address: HashMap<AbsoluteAddr, Vec<usize>>,
     /// In a partitioned settle, where each address is loaded and the
     /// immediate dominators of every unit (see [`reads_follow_store`]).
     settle_loads: Option<SettleLoads>,
@@ -60,6 +62,17 @@ struct GlobalIdentityFacts {
     /// In a partitioned settle, the copies its plan treats as aliases,
     /// source by target.
     copies: Option<HashMap<AbsoluteAddr, AbsoluteAddr>>,
+}
+
+impl GlobalIdentityFacts {
+    /// The stores of `address`, in the order of `stores`.
+    fn stores_of(&self, address: AbsoluteAddr) -> impl Iterator<Item = &StoreCandidate> {
+        self.stores_by_address
+            .get(&address)
+            .into_iter()
+            .flatten()
+            .map(|&index| &self.stores[index])
+    }
 }
 
 struct SettleLoads {
@@ -424,11 +437,7 @@ fn proven_alias_store(
         _ => return None,
     }
 
-    let store = facts
-        .stores
-        .iter()
-        .copied()
-        .find(|store| store.address.absolute_addr() == alias)?;
+    let store = facts.stores_of(alias).next().copied()?;
     if !store.shape_is_aliasable || !store.effects_are_removable {
         return None;
     }
@@ -446,9 +455,8 @@ fn proven_alias_store(
             source.region == STABLE_REGION && source.absolute_addr() == canonical
         });
     let duplicate_store = canonical_writes == 1
-        && facts.stores.iter().any(|other| {
-            other.address.absolute_addr() == canonical
-                && other.eu_index == store.eu_index
+        && facts.stores_of(canonical).any(|other| {
+            other.eu_index == store.eu_index
                 && other.block == store.block
                 && other.source == store.source
                 && other.width == store.width
@@ -735,9 +743,17 @@ fn collect_global_facts(
             store.address,
         )
     });
+    let mut stores_by_address = HashMap::<AbsoluteAddr, Vec<usize>>::default();
+    for (index, store) in stores.iter().enumerate() {
+        stores_by_address
+            .entry(store.address.absolute_addr())
+            .or_default()
+            .push(index);
+    }
     GlobalIdentityFacts {
         accesses,
         stores,
+        stores_by_address,
         settle_loads,
         unknown_accesses,
         orders,
@@ -784,9 +800,9 @@ fn canonical_fixed_before(
         .map_or(0, |access| access.writes)
     {
         0 => true,
-        1 => facts.stores.iter().any(|writer| {
-            writer.address.absolute_addr() == canonical && store_precedes(facts, writer, store)
-        }),
+        1 => facts
+            .stores_of(canonical)
+            .any(|writer| store_precedes(facts, writer, store)),
         _ => false,
     }
 }
