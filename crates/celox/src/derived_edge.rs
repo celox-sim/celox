@@ -807,14 +807,49 @@ impl EdgePlan {
 /// Generate the edge units of every event whose plan this module emits and
 /// record them in [`celox_design::RuntimeSchema::derived_edges`]. A unit
 /// reads the scheduler's dirty flag to know whether to settle first.
-pub(crate) fn attach(program: &mut LaidOutProgram) {
-    attach_with_mode(program, false);
+///
+/// The units run edges the host moves. Without `host_edges` (a timed
+/// simulation, which has no such API), only the events a kernel the compiled
+/// scheduler does not run writes get units: the host runs those kernels and
+/// moves what they write; the scheduler moves every other event signal in
+/// its slots, and a slot it hands back walks the plans.
+pub(crate) fn attach(program: &mut LaidOutProgram, host_edges: bool) {
+    attach_with_mode(program, false, host_edges);
 }
 
 /// Reserve native entry indices without retaining a copy of the full circuit
 /// for both polarities of every derived-clock event.
-pub(crate) fn attach_deferred(program: &mut LaidOutProgram) {
-    attach_with_mode(program, true);
+pub(crate) fn attach_deferred(program: &mut LaidOutProgram, host_edges: bool) {
+    attach_with_mode(program, true, host_edges);
+}
+
+/// The event signals the host may move in a timed simulation: those a
+/// kernel the compiled scheduler does not run stores, or `None` when no
+/// compiled scheduler runs the slots and the host moves every one.
+fn host_moved_events(program: &LaidOutProgram) -> Option<crate::HashSet<AbsoluteAddr>> {
+    let scheduler = program.runtime.runtime_schema.scheduler.as_ref()?;
+    scheduler.unit?;
+    let mut written = crate::HashSet::default();
+    for (index, reason) in scheduler.fallback.iter().enumerate() {
+        if reason.is_none() {
+            continue;
+        }
+        let Some(unit) = program.sir.processes.get(index) else {
+            continue;
+        };
+        for instruction in unit.blocks.values().flat_map(|block| &block.instructions) {
+            match instruction {
+                SIRInstruction::Store(address, ..) | SIRInstruction::Commit(_, address, ..) => {
+                    written.insert(address.absolute_addr());
+                }
+                _ => {}
+            }
+            if let Some(effects) = instruction.call_effects() {
+                written.extend(effects.writes.iter().map(|address| address.absolute_addr()));
+            }
+        }
+    }
+    Some(written)
 }
 
 #[derive(Clone, Debug)]
@@ -850,7 +885,7 @@ impl DeferredEdge {
     }
 }
 
-fn attach_with_mode(program: &mut LaidOutProgram, deferred: bool) {
+fn attach_with_mode(program: &mut LaidOutProgram, deferred: bool, host_edges: bool) {
     let schema = &program.runtime.runtime_schema;
     let Some(flag) = schema
         .scheduler
@@ -859,9 +894,20 @@ fn attach_with_mode(program: &mut LaidOutProgram, deferred: bool) {
     else {
         return;
     };
+    let host_moved = if host_edges {
+        None
+    } else {
+        host_moved_events(program)
+    };
     let model = ScheduleModel::derive(&program.design, schema);
     let mut edges = Vec::new();
     for event in crate::edge_plans::event_addresses(program) {
+        if host_moved
+            .as_ref()
+            .is_some_and(|host_moved| !host_moved.contains(&event))
+        {
+            continue;
+        }
         let Ok(Some(plan)) = EdgePlan::new(program, &model, event) else {
             continue;
         };

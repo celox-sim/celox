@@ -1713,6 +1713,12 @@ mod host {
         /// When true, JIT-compiled functions emit trigger detection code for
         /// edge-based event discovery. Only needed by [`crate::Simulation`].
         pub emit_triggers: bool,
+        /// Whether the host may move event signals ([`crate::Simulator::tick`]).
+        /// A timed [`crate::Simulation`] has no such API: its compiled
+        /// scheduler moves them, so the generated derived-edge units, which
+        /// only host-moved edges run, are built only for the events of the
+        /// kernels the scheduler leaves to the host.
+        pub(crate) host_edges: bool,
         /// Generated derived-edge units the tests run, recorded here.
         #[cfg(all(test, feature = "cranelift", feature = "systemverilog"))]
         pub(crate) derived_edge_units: Option<crate::derived_edge::TestEdgeUnits>,
@@ -2050,6 +2056,7 @@ mod host {
                 sv_timescale: None,
                 legacy_empty_reductions: false,
                 emit_triggers: false,
+                host_edges: true,
                 #[cfg(all(test, feature = "cranelift", feature = "systemverilog"))]
                 derived_edge_units: None,
                 #[cfg(test)]
@@ -3205,9 +3212,9 @@ mod host {
                 .is_enabled(crate::optimizer::SirPass::DerivedEdgeUnits)
             {
                 if defer_derived_edges {
-                    crate::derived_edge::attach_deferred(&mut laid_out);
+                    crate::derived_edge::attach_deferred(&mut laid_out, self.options.host_edges);
                 } else {
-                    crate::derived_edge::attach(&mut laid_out);
+                    crate::derived_edge::attach(&mut laid_out, self.options.host_edges);
                 }
             }
             #[cfg(all(test, feature = "cranelift", feature = "systemverilog"))]
@@ -4136,6 +4143,7 @@ mod host {
         ) -> Result<NativeCompilation<crate::Simulation>, SimulatorError> {
             self.native_file_calls = true;
             self.options.emit_triggers = true;
+            self.options.host_edges = false;
             let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(
                     crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
@@ -4260,6 +4268,7 @@ mod host {
             compile: impl Fn(&crate::ir::LaidOutProgram, &SimulatorOptions) -> Result<B, SimulatorError>,
         ) -> Result<crate::Simulation<B>, SimulatorError> {
             self.options.emit_triggers = true;
+            self.options.host_edges = false;
             let (laid_out, mut warnings, options, vcd_path, injected_components) =
                 self.into_laid_out_program(layout_mode, defer_derived_edges)?;
             let backend = compile(&laid_out, &options)
@@ -4759,10 +4768,10 @@ endmodule"#;
                 .unwrap();
             let first = base.sir.processes.len();
             let mut expanded = base.clone();
-            crate::derived_edge::attach(&mut expanded);
+            crate::derived_edge::attach(&mut expanded, true);
             crate::settle::instrument_processes_from(&mut expanded, first, false);
             let mut deferred = base;
-            crate::derived_edge::attach_deferred(&mut deferred);
+            crate::derived_edge::attach_deferred(&mut deferred, true);
             crate::settle::instrument_processes_from(&mut deferred, first, false);
             assert!(deferred.deferred_derived_edges.len() >= 4);
             assert_eq!(expanded.sir.processes.len(), deferred.sir.processes.len());
