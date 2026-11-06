@@ -4175,7 +4175,8 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
 
     /// Compare each chunk with its value before the partition ran (`old`),
     /// and set the flags of its `readers` when it changed. Readers with the
-    /// same dependencies share a change test and packed flag stores.
+    /// same dependencies share a change test; adjacent readers share a
+    /// constant flag store.
     fn mark_changed_readers(
         &mut self,
         flags: Addr,
@@ -4214,46 +4215,48 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
                 false_block: (done, Vec::new()),
             });
             self.builder.switch_to_block(publish);
-            let mut words = BTreeMap::<usize, u64>::new();
-            for &reader in readers {
-                *words.entry(reader / 8).or_default() |= 1u64 << ((reader % 8) * 8);
-            }
-            for (word, mask) in words {
-                if mask.count_ones() == 1 {
+            // Adjacent flags are set by one constant store of 1, 2, 4 or 8
+            // bytes; a run of another length splits into those. Flags are
+            // never read back and ORed in: a word of another width costs the
+            // backend a masked read-modify-write for every flag it sets.
+            let mut bytes: Vec<usize> = readers.to_vec();
+            bytes.sort_unstable();
+            bytes.dedup();
+            let mut index = 0;
+            while index < bytes.len() {
+                let first = bytes[index];
+                let mut run = 1;
+                while index + run < bytes.len() && bytes[index + run] == first + run {
+                    run += 1;
+                }
+                index += run;
+                let mut at = first;
+                let mut left = run;
+                while left > 0 {
+                    let piece = [8, 4, 2, 1]
+                        .into_iter()
+                        .find(|&piece| piece <= left)
+                        .unwrap();
+                    let marked = if piece == 1 {
+                        one
+                    } else {
+                        let constant = self.builder.alloc_bit(piece * 8, false);
+                        let ones = 0x0101_0101_0101_0101u64 & (u64::MAX >> (64 - piece * 8));
+                        self.builder
+                            .emit(SIRInstruction::Imm(constant, SIRValue::new(ones)));
+                        constant
+                    };
                     self.builder.emit(SIRInstruction::Store(
                         flags,
-                        SIROffset::Static(word * 64 + mask.trailing_zeros() as usize),
-                        8,
-                        one,
+                        SIROffset::Static(at * 8),
+                        piece * 8,
+                        marked,
                         Vec::new(),
                         Vec::new(),
                     ));
-                    continue;
+                    at += piece;
+                    left -= piece;
                 }
-                let width = (64 - mask.leading_zeros() as usize).div_ceil(8) * 8;
-                let offset = SIROffset::Static(word * 64);
-                let constant = self.builder.alloc_bit(width, false);
-                self.builder
-                    .emit(SIRInstruction::Imm(constant, SIRValue::new(mask)));
-                let marked = if mask.count_ones() as usize == width / 8 {
-                    constant
-                } else {
-                    let old = self.builder.alloc_bit(width, false);
-                    self.builder
-                        .emit(SIRInstruction::Load(old, flags, offset.clone(), width));
-                    let marked = self.builder.alloc_bit(width, false);
-                    self.builder
-                        .emit(SIRInstruction::Binary(marked, old, BinaryOp::Or, constant));
-                    marked
-                };
-                self.builder.emit(SIRInstruction::Store(
-                    flags,
-                    offset,
-                    width,
-                    marked,
-                    Vec::new(),
-                    Vec::new(),
-                ));
             }
             self.builder
                 .seal_block(SIRTerminator::Jump(done, Vec::new()));
@@ -5826,11 +5829,11 @@ mod tests {
         }
         stored.sort_unstable();
         // The three clears, the untracked fill, the mark of partition 2,
-        // and one packed store of partition 1's flag with external flag 1 at
-        // byte 3 + 1 + 1, both set when 11 changed.
+        // and the byte stores of partition 1's flag and of external flag 1
+        // at byte 3 + 1 + 1, both set when 11 changed.
         assert_eq!(
             stored,
-            vec![(0, 8), (0, 24), (0, 48), (8, 8), (16, 8), (16, 8)]
+            vec![(0, 8), (0, 24), (8, 8), (8, 8), (16, 8), (16, 8), (40, 8)]
         );
     }
 
