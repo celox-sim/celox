@@ -6761,6 +6761,36 @@ fn lower_comb_processes(
     let redundant = redundant_net_drivers(module);
     let watchable =
         watch_seeds.map(|seeds| watchable_variables(&pm, module, port_assignments, seeds));
+    // In two-state mode an `always @*` runs once at time zero like an
+    // `always_comb` (#2021), and its sensitivity is its implicit reads. One
+    // whose written variables have no other driver therefore defines the same
+    // function as an `always_comb`: it gets the symbolic form, and the guarded
+    // unit only when the symbolic lowering refuses it.
+    let mut drivers = None;
+    let mut symbolic_star = |index: usize, process: &sv::ir::CombProcess| {
+        if four_state || process.kind() != sv::ir::CombProcessKind::AlwaysStar {
+            return false;
+        }
+        let drivers =
+            drivers.get_or_insert_with(|| ModuleDrivers::new(module, constants, parameter_types));
+        let mut names = HashSet::default();
+        procedural::written_names_with_calls(module, process.body(), &mut names);
+        // Another process or a continuous assignment may drive other bits of
+        // the same variable, as of any symbolic definition.
+        names.iter().all(|name| {
+            drivers.writes.get(name.as_str()).is_none_or(|writes| {
+                let bits = |write: &DriverWrite| write.range.or(write.element);
+                let (own, others): (Vec<_>, Vec<_>) =
+                    writes.iter().partition(|write| write.local == Some(index));
+                others.iter().all(|other| {
+                    (other.local.is_none() && other.continuous.is_none())
+                        || own
+                            .iter()
+                            .all(|mine| !net_driver_ranges_overlap(bits(mine), bits(other)))
+                })
+            })
+        })
+    };
     for (index, process) in module.comb_processes().iter().enumerate() {
         if redundant.contains(&index) {
             continue;
@@ -6781,7 +6811,8 @@ fn lower_comb_processes(
         // A wildcard control waits for its first source event even when
         // every output is assigned. A symbolic combinational definition
         // would instead execute during the initial fixed-point evaluation.
-        if process.kind() == sv::ir::CombProcessKind::AlwaysStar
+        let symbolic_star = symbolic_star(index, process);
+        if (process.kind() == sv::ir::CombProcessKind::AlwaysStar && !symbolic_star)
             || pm.reads_simulation_state(process.body())
             // The symbolic form would expand every call.
             || pm.calls_out_of_line(process.body())
@@ -6809,18 +6840,21 @@ fn lower_comb_processes(
         comb.site_base = sites.len() as u32;
         comb.continuous = process.kind() == sv::ir::CombProcessKind::ContinuousAssign;
         let lowered = comb.lower_process(process.body());
-        let fallback = matches!(
-            &lowered,
-            Err(sv::AnalyzerError::Unsupported(reason))
-                if reason.starts_with("latch inference inside always_comb")
-                    && process.kind() != sv::ir::CombProcessKind::ContinuousAssign
-                    && (allow_inferred_latches
-                        || matches!(
-                            process.kind(),
-                            sv::ir::CombProcessKind::AlwaysLatch
-                                | sv::ir::CombProcessKind::AlwaysStar
-                        ))
-        );
+        // The guarded unit accepts whatever the symbolic form refuses of an
+        // `always @*`, as it did before the symbolic attempt.
+        let fallback = (symbolic_star && lowered.is_err())
+            || matches!(
+                &lowered,
+                Err(sv::AnalyzerError::Unsupported(reason))
+                    if reason.starts_with("latch inference inside always_comb")
+                        && process.kind() != sv::ir::CombProcessKind::ContinuousAssign
+                        && (allow_inferred_latches
+                            || matches!(
+                                process.kind(),
+                                sv::ir::CombProcessKind::AlwaysLatch
+                                    | sv::ir::CombProcessKind::AlwaysStar
+                            ))
+            );
         comb.m.end_attempt_calls(!fallback);
         match lowered {
             // In a design with a wait, a variable the process stores twice
@@ -6828,7 +6862,7 @@ fn lower_comb_processes(
             // A process with runtime events keeps only its symbolic form.
             Ok(paths)
                 if waits
-                    && process.kind() == sv::ir::CombProcessKind::AlwaysComb
+                    && (process.kind() == sv::ir::CombProcessKind::AlwaysComb || symbolic_star)
                     && comb.observers.is_empty()
                     && comb.sites.is_empty() =>
             {
@@ -12719,10 +12753,13 @@ endmodule
     /// The targets of the `always_comb` alternatives the modules of `source`
     /// lowered, by name.
     fn comb_alternatives(source: &str) -> BTreeSet<String> {
-        try_comb_alternatives(source).unwrap_or_else(|error| panic!("{error}"))
+        try_comb_alternatives(source, false).unwrap_or_else(|error| panic!("{error}"))
     }
 
-    fn try_comb_alternatives(source: &str) -> Result<BTreeSet<String>, FrontendError> {
+    fn try_comb_alternatives(
+        source: &str,
+        four_state: bool,
+    ) -> Result<BTreeSet<String>, FrontendError> {
         let mut trace = FrontendTrace::default();
         schedule_sources(
             &[(source, Path::new("top.sv"))],
@@ -12730,7 +12767,7 @@ endmodule
             &[],
             &[],
             &[],
-            false,
+            four_state,
             &celox_frontend_core::ParallelScheduleOptions::default(),
             &FrontendTraceOptions {
                 sim_modules: true,
@@ -12752,6 +12789,56 @@ endmodule
                 })
             })
             .collect())
+    }
+
+    /// In two-state mode an `always @*` whose variables it alone drives is
+    /// lowered symbolically like an `always_comb`, with the imperative
+    /// alternative for a watched target; in four-state mode, where it waits
+    /// for its first source event, and where it refuses the symbolic form,
+    /// it stays the guarded unit, which has no alternative.
+    #[test]
+    fn wildcard_always_is_combinational_in_two_state() {
+        let watched = |process: &str| {
+            format!(
+                "module Top(input bit [7:0] s);
+                   bit [7:0] y;
+                   {process}
+                   initial forever @(y) ;
+                 endmodule"
+            )
+        };
+        let wildcard = watched("always @* begin y = 0; if (s[0]) y = s; end");
+        assert!(
+            try_comb_alternatives(&wildcard, false)
+                .unwrap()
+                .contains("y")
+        );
+        assert!(
+            !try_comb_alternatives(&wildcard, true)
+                .unwrap()
+                .contains("y")
+        );
+        let list = watched("always @(s) begin y = 0; if (s[0]) y = s; end");
+        assert!(try_comb_alternatives(&list, false).unwrap().contains("y"));
+        let latching = watched("always @* if (s[0]) y = s;");
+        assert!(
+            !try_comb_alternatives(&latching, false)
+                .unwrap()
+                .contains("y")
+        );
+        let wildcard_labels = watched(
+            "always @* begin y = 0; casez (s) 8'b1???????: y = 1; 8'b01??????: y = 2; endcase end",
+        );
+        assert!(
+            try_comb_alternatives(&wildcard_labels, false)
+                .unwrap()
+                .contains("y")
+        );
+        let parts = watched(
+            "always @* begin y[3:0] = 0; if (s[0]) y[3:0] = s[3:0]; end
+             always @(s) y[7:4] = s[7:4];",
+        );
+        assert!(try_comb_alternatives(&parts, false).unwrap().contains("y"));
     }
 
     /// An `always_comb` that stores a variable twice gets its imperative
