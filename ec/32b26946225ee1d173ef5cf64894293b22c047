@@ -1,6 +1,1 @@
-Revision history for #3249:
-
-rev 2 (content) 2026-11-06 02:57 UTC — Fold type comparisons in constant expressions, type size/signing casts through their result type, name ports and generate variables in the type-operator diagnostic, and record the 18.5.14.1 flip.
-rev 1 (initial) 2026-11-06 02:57 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":3249,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"9513190b5b5367d330459dee28cd689a69b2ee13","timestamp_iso":"2026-11-06T02:57:54Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"9513190b5b5367d330459dee28cd689a69b2ee13","new_sha":"d7a3bcb69a966ac1cfe4df5710984a8eacbbde92","timestamp_iso":"2026-11-06T02:57:54Z","reason":"Fold type comparisons in constant expressions, type size/signing casts through their result type, name ports and generate variables in the type-operator diagnostic, and record the 18.5.14.1 flip.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/9513190b5b5367d330459dee28cd689a69b2ee13...d7a3bcb69a966ac1cfe4df5710984a8eacbbde92"}]} -->
+Require var for type-reference variables, keep declared types of variable operands, select case generate arms by type, and scope out expression operands in generate blocks.
