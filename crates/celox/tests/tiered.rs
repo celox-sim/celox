@@ -3,6 +3,8 @@
 //! These tests drive `build_tiered` through enough ticks that background
 //! compilation finishes mid-simulation, then verify the results and runtime
 //! events match the compiled backends bit-for-bit across the promotion.
+//! They select whole-image tiering: the default hotspot JIT never adopts an
+//! image, and has its own tests.
 
 use celox::{Simulator, SimulatorBuilder, TieredBackend};
 
@@ -38,6 +40,7 @@ type TieredSimulator = Simulator<TieredBackend>;
 
 fn build_tiered_counter() -> TieredSimulator {
     SimulatorBuilder::new(COUNTER, "Top")
+        .hotspot_jit(false)
         .build_tiered()
         .unwrap()
 }
@@ -123,8 +126,10 @@ module Top (
     assign cnt = c;
 }
 "#;
-    let mut sim: Simulator<TieredBackend> =
-        SimulatorBuilder::new(code, "Top").build_tiered().unwrap();
+    let mut sim: Simulator<TieredBackend> = SimulatorBuilder::new(code, "Top")
+        .hotspot_jit(false)
+        .build_tiered()
+        .unwrap();
     let clk = sim.event("clk");
 
     const TICKS: u32 = 16;
@@ -207,6 +212,7 @@ module Top (
 "#;
     let mut sim = SimulatorBuilder::new(code, "Top")
         .four_state(true)
+        .hotspot_jit(false)
         .build_tiered()
         .unwrap();
     let clk = sim.event("clk");
@@ -333,6 +339,7 @@ fn tiered_promotion_with_lane_partitioned_kernels() {
     let mut sim = SimulatorBuilder::new(LANES, "Top")
         .threads(4)
         .parallel_partition(celox::ParallelPartition::Always)
+        .hotspot_jit(false)
         .build_tiered()
         .unwrap();
     let mut reference = SimulatorBuilder::new(LANES, "Top").build().unwrap();
@@ -366,6 +373,7 @@ endmodule
         celox::Simulator::from_sv_sources(vec![(code, std::path::Path::new("wildcard.sv"))], "Top")
             .four_state(true)
             .tier_promotion(celox::TierPromotion::AfterSteps(32))
+            .hotspot_jit(false)
             .build_tiered()
             .unwrap();
     let x = sim.signal("x");
@@ -438,6 +446,7 @@ module Top (
 fn tiered_derived_edges_switch_to_generated_units() {
     use celox::SimBackend as _;
     let mut tiered: Simulator<TieredBackend> = SimulatorBuilder::new(DERIVED, "Top")
+        .hotspot_jit(false)
         .build_tiered()
         .unwrap();
     let mut walked = Simulator::builder(DERIVED, "Top")

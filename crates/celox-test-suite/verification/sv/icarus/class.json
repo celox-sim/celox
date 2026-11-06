@@ -236,6 +236,17 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 3; see <case>/build.log\n<case>/source_0.sv:15: sorry: Constraint declarations not supported.\n<case>/source_0.sv:19: sorry: Constraint declarations not supported.\n<case>/source_0.sv:30: sorry: Constraint declarations not supported.\n",
+      "expectation": "Simulation",
+      "name": "class::constrained_randomize_foreach",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
       "expectation": "Simulation",
       "known_issue": {

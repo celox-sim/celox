@@ -542,13 +542,22 @@ fn locator_selection_keeps_the_original_enum_declaration() {
 
 #[test]
 fn conditional_handles_take_the_class_both_arms_assign_to() {
-    // IEEE 1800-2023 11.4.11: matching arms give their type and `null` takes
-    // the other arm's class; arms of different classes await the assignment
-    // relation.
+    // IEEE 1800-2023 11.4.11: matching arms give their type, `null` takes
+    // the other arm's class (b), an arm of a derived class takes the other's
+    // (c, d), and arms of sibling classes their closest common base (e).
+    let classes = "interface class I; endclass
+        class A; endclass class B extends A; endclass
+        class C extends B implements I; endclass class D extends B; endclass
+        class E extends A; endclass class F implements I; endclass bit s;";
     for (decl, expr, expected) in [
         ("class C; endclass bit s; C a, b;", "s ? a : b", "C"),
         ("class C; endclass bit s; C a;", "s ? a : null", "C"),
         ("class C; endclass bit s; C a;", "s ? null : a", "C"),
+        (&format!("{classes} B b; C c;"), "s ? b : c", "B"),
+        (&format!("{classes} B b; C c;"), "s ? c : b", "B"),
+        (&format!("{classes} C c; D d;"), "s ? c : d", "B"),
+        (&format!("{classes} C c; E e;"), "s ? c : e", "A"),
+        (&format!("{classes} C c; I i;"), "s ? c : i", "I"),
         ("bit s; int a, b;", "s ? a : b", "int"),
     ] {
         let (session, ty) = query(decl, expr);
@@ -564,4 +573,16 @@ fn conditional_handles_take_the_class_both_arms_assign_to() {
             ),
         }
     }
+}
+
+#[test]
+#[should_panic(expected = "type query for `s ? e : f` failed")]
+fn conditional_handles_of_unrelated_classes_have_no_type() {
+    // IEEE 1800-2023 11.4.11: arms of classes neither assigning to the other
+    // nor sharing a base class are no legal conditional.
+    query(
+        "interface class I; endclass class A; endclass class E extends A; endclass
+         class F implements I; endclass bit s; E e; F f;",
+        "s ? e : f",
+    );
 }

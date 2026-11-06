@@ -274,7 +274,9 @@ enum Finish {
     Tagged(packed_structs::Construction),
     Unary(String),
     Binary(String),
-    Mux,
+    /// A conditional; with the layout of the container that receives it
+    /// when its condition may be ambiguous, see [`containers::conditional`].
+    Mux(Option<crate::system_functions::ContainerLayout>),
     Bits,
     Concat,
     Call {
@@ -759,27 +761,42 @@ fn bind_value_in(
                         condition,
                         then_expression,
                         else_expression,
-                    } => (
-                        {
-                            // The condition is a Boolean test; the branches
-                            // are values where the conditional is one.
-                            permits.grant(*condition);
-                            permits.conditional(
-                                session,
-                                permitted,
-                                [*then_expression, *else_expression],
+                    } => {
+                        // The condition is a Boolean test; the branches are
+                        // values where the conditional is one.
+                        permits.grant(*condition);
+                        permits.conditional(
+                            session,
+                            permitted,
+                            [*then_expression, *else_expression],
+                            tree,
+                            native,
+                            dimensions,
+                        )?;
+                        // Without a target, a conditional of containers has
+                        // the type of its operands (IEEE 1800-2023 11.4.11),
+                        // which receives them as a target would.
+                        let target = match target.clone() {
+                            Some(target) => Some(target),
+                            None => containers::native_type(id, native, tree, session, dimensions)?
+                                .map(|container| Rc::new(containers::shape(&container))),
+                        };
+                        (
+                            Finish::Mux(containers::conditional(
+                                *condition,
+                                target.as_deref(),
                                 tree,
+                                session,
                                 native,
                                 dimensions,
-                            )?;
-                            Finish::Mux
-                        },
-                        vec![
-                            (*condition, None),
-                            (*then_expression, target.clone()),
-                            (*else_expression, target.clone()),
-                        ],
-                    ),
+                            )),
+                            vec![
+                                (*condition, None),
+                                (*then_expression, target.clone()),
+                                (*else_expression, target),
+                            ],
+                        )
+                    }
                     ExprKind::Concatenation(parts) if !parts.is_empty() => {
                         (Finish::Concat, parts.iter().map(|id| (*id, None)).collect())
                     }
@@ -1667,7 +1684,7 @@ fn bind_value_in(
                             .ok_or_else(|| unsupported("operand of `$bits`"))?;
                         Expr::Literal(ty.width.to_string())
                     }
-                    Finish::Mux => {
+                    Finish::Mux(container) => {
                         let mut else_expr = operands.pop().ok_or_else(disagreement)?;
                         let mut then_expr = operands.pop().ok_or_else(disagreement)?;
                         let condition = operands.pop().ok_or_else(disagreement)?;
@@ -1677,10 +1694,16 @@ fn bind_value_in(
                             then_expr = strings::to_string(then_expr, dimensions);
                             else_expr = strings::to_string(else_expr, dimensions);
                         }
-                        Expr::Mux {
+                        let value = Expr::Mux {
                             condition: Box::new(condition),
                             then_expr: Box::new(then_expr),
                             else_expr: Box::new(else_expr),
+                        };
+                        match container {
+                            Some(layout) => {
+                                containers::call(ContainerOp::Conditional, layout, vec![value])
+                            }
+                            None => value,
                         }
                     }
                     Finish::Concat
@@ -3617,9 +3640,10 @@ fn check_chandle_argument(
 
 /// Check actual `actual` of formal `position` of subroutine `name`, which
 /// the call assigns to the formal (IEEE 1800-2023 13.5): a chandle formal
-/// takes only a chandle or `null`, and an unpacked array formal an array of
-/// its type. Every call binds its actuals after this check; `ordinal`
-/// numbers the argument in diagnostics.
+/// takes only a chandle or `null`, an unpacked array formal an array of its
+/// type, and a class handle input or inout a handle its class takes (8.16).
+/// Every call binds its actuals after this check; `ordinal` numbers the
+/// argument in diagnostics.
 pub(in crate::ast) fn check_argument(
     name: &str,
     position: usize,
@@ -3644,8 +3668,26 @@ pub(in crate::ast) fn check_argument(
             || format!("argument {ordinal} of `{name}`"),
             dimensions,
         )?;
+        if let Some(class) = shape.class.as_deref().filter(|_| shape.unpacked.is_empty())
+            && copies_actual_in(dimensions, name, position)
+        {
+            objects::check_assignment(tree, session, actual, native, dimensions, class, || {
+                format!("argument {ordinal} of `{name}`")
+            })?;
+        }
     }
     Ok(())
+}
+
+/// Whether the call copies actual `position` of subroutine `name` into its
+/// formal: an input or inout (13.5.1).
+fn copies_actual_in(dimensions: &PackedDimensions, name: &str, position: usize) -> bool {
+    use crate::procedural::ParamDirection;
+    dimensions
+        .subroutine_directions
+        .get(name)
+        .and_then(|directions| directions.get(position))
+        .is_some_and(|direction| matches!(direction, ParamDirection::Input | ParamDirection::Inout))
 }
 
 /// Bind actual `actual` of formal `position` of subroutine `name`, which

@@ -1115,6 +1115,68 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                         ("icarus", "class::virtual_interface_property_waits") => {
                             ("compile_error", "compile", "Invalid class item")
                         }
+                        ("icarus", "class::constrained_randomize_foreach") => (
+                            "compile_error",
+                            "compile",
+                            "Constraint declarations not supported",
+                        ),
+                        ("icarus", "containers::associative_patterns_with_keys") => {
+                            ("compile_error", "compile", "source_0.sv:5: syntax error")
+                        }
+                        ("icarus", "containers::ambiguous_conditions_of_containers") => (
+                            "compile_error",
+                            "compile",
+                            "Type names are not valid expressions here.",
+                        ),
+                        ("xezim", "containers::associative_patterns_with_keys") => {
+                            ("mismatch", "execute", "50, 32, 53, 10, 50, 32, 53, 10]")
+                        }
+                        ("xezim", "containers::ambiguous_conditions_of_containers") => {
+                            ("mismatch", "execute", "49, 32, 49, 10, 49, 10]")
+                        }
+                        ("icarus", "containers::conversions_before_ambiguous_merges") => {
+                            ("compile_error", "compile", "source_0.sv:13: syntax error")
+                        }
+                        ("xezim", "containers::conversions_before_ambiguous_merges") => {
+                            ("mismatch", "execute", "48, 32, 48, 32, 48, 10]")
+                        }
+                        ("icarus", "containers::untargeted_and_nested_container_merges") => (
+                            "compile_error",
+                            "compile",
+                            "source_0.sv:17: error: The expression 'row' cannot be implicitly cast",
+                        ),
+                        ("xezim", "containers::untargeted_and_nested_container_merges") => {
+                            ("mismatch", "execute", "49, 32, 48, 10, 120, 10]")
+                        }
+                        ("icarus", "concurrent_assertions::subroutine_calls_in_actions") => {
+                            ("compile_error", "compile", "source_0.sv:22: syntax error")
+                        }
+                        ("verilator", "concurrent_assertions::subroutine_calls_in_actions") => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq sampled: expected 0x1, got 0x0",
+                        ),
+                        ("verilator", "concurrent_assertions::named_sequences_and_properties") => {
+                            ("compile_error", "compile", "Verilator internal fault")
+                        }
+                        ("verilator", "concurrent_assertions::named_sequence_leading_clock") => (
+                            "compile_error",
+                            "compile",
+                            "Unsupported: multiclocked sequence or property",
+                        ),
+                        ("icarus", "concurrent_assertions::named_sequences_and_properties") => (
+                            "compile_error",
+                            "compile",
+                            "source_0.sv:5: sorry: concurrent_assertion_item not supported",
+                        ),
+                        ("icarus", "concurrent_assertions::named_sequence_leading_clock") => {
+                            ("compile_error", "compile", "source_0.sv:5: syntax error")
+                        }
+                        ("xezim", "concurrent_assertions::named_sequence_leading_clock") => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq low_passed: expected 0x1, got 0x2",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

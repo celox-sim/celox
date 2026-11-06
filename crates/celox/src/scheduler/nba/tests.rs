@@ -522,3 +522,70 @@ endmodule"#;
         );
     }
 }
+
+#[test]
+fn hotspot_scheduler_replaces_its_budgeted_stage_with_inlined_kernels() {
+    // Kernels large enough for a budgeted first stage to call them.
+    let mut source = String::from(
+        "`timescale 1ns/1ns\nmodule Top;\n    bit clk = 0;\n    always #1 clk = !clk;\n",
+    );
+    for index in 0..6 {
+        let previous = (index + 5) % 6;
+        source += &format!(
+            "    logic [63:0] r{index} = {index};\n    initial forever begin\n        @(posedge clk);\n"
+        );
+        for step in 0..40 {
+            source += &format!(
+                "        if (r{index}[{bit}]) r{index} = r{index} * 3 + {step}; else r{index} = r{index} ^ (r{index} >> 3);\n",
+                bit = step % 64
+            );
+        }
+        source += &format!("        r{index} <= #1 r{index} + r{previous};\n    end\n");
+    }
+    source += "endmodule\n";
+    let names: Vec<_> = (0..6).map(|index| format!("r{index}")).collect();
+    for four_state in [false, true] {
+        let make = |mode| {
+            Simulation::from_sv_sources(
+                vec![(source.as_str(), std::path::Path::new("staged-scheduler.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+            .hotspot_jit(true)
+            .scheduler_mode(mode)
+            .build_tiered()
+            .unwrap()
+        };
+        let mut reference = make(SchedulerMode::Reference);
+        let mut staged = make(SchedulerMode::Compiled);
+        staged
+            .simulator
+            .backend
+            .interp_for_test()
+            .set_hotspot_inline_budget_for_test(0);
+        staged.simulator.backend.publish_scheduler_for_test();
+        let compare = |reference: &mut Simulation<_>, staged: &mut Simulation<_>, end| {
+            reference.run_until(end).unwrap();
+            staged.run_until(end).unwrap();
+            for name in &names {
+                assert_eq!(
+                    staged.get_four_state(staged.signal(name)),
+                    reference.get_four_state(reference.signal(name)),
+                    "{name} at {end}, four_state={four_state}"
+                );
+            }
+        };
+        compare(&mut reference, &mut staged, 21);
+        let first = staged.scheduler_stats();
+        assert!(first.compiled_slots > 0, "{first:?}");
+        staged
+            .simulator
+            .backend
+            .interp_for_test()
+            .wait_for_scheduler_stages_for_test(2);
+        compare(&mut reference, &mut staged, 64);
+        let last = staged.scheduler_stats();
+        assert!(last.compiled_slots > first.compiled_slots, "{last:?}");
+        assert_eq!(last.reference_steps, first.reference_steps, "{last:?}");
+    }
+}

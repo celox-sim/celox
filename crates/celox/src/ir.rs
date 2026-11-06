@@ -1630,12 +1630,13 @@ impl OptimizedSir {
 
 /// The objects `access` may touch. Layout and the inventories it is built
 /// from see units before any native kernel exists (the backends and the
-/// compiled scheduler generate them later), and only a native kernel may
-/// touch state no list names.
+/// compiled scheduler generate them later). Only a value change point may
+/// touch state no list names there: it stands for the host, whose writes
+/// are not the program's.
 fn known_objects(
     access: celox_sir::StateAccess<'_, RegionedAbsoluteAddr>,
 ) -> impl Iterator<Item = &RegionedAbsoluteAddr> {
-    access.objects().expect("layout sees no native kernels")
+    access.objects().into_iter().flatten()
 }
 
 /// Whether `inst` may raise a fatal comb-capture assertion: one that does,

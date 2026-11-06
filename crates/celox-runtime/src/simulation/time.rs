@@ -370,9 +370,24 @@ impl<B: SimBackend> SimulationState<B> {
             (Some(process), Some(nba)) => Some(process.min(nba)),
             (process, nba) => process.or(nba),
         };
-        match (self.scheduler.next_event_time(), process) {
+        let time = match (self.scheduler.next_event_time(), process) {
             (Some(event), Some(process)) => Some(event.min(process)),
             (event, process) => event.or(process),
+        };
+        match &self.native {
+            None => time,
+            Some(native) => Self::with_native(time, native.next),
+        }
+    }
+
+    /// `time` or, if earlier, the next slot `next` of the work a resident
+    /// run loop keeps in the compiled scheduler.
+    #[cold]
+    #[inline(never)]
+    fn with_native(time: Option<u64>, next: u64) -> Option<u64> {
+        match (time, (next != u64::MAX).then_some(next)) {
+            (Some(time), Some(next)) => Some(time.min(next)),
+            (time, next) => time.or(next),
         }
     }
 }

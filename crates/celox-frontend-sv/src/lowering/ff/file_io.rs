@@ -66,7 +66,7 @@ impl Ff<'_, '_> {
         results: Vec<HostRequestValue<SourceVarId>>,
         strings: Vec<String>,
     ) -> Result<(), sv::AnalyzerError> {
-        if self.kernel.is_none() {
+        if !self.can_request() {
             return Err(unsupported("file I/O outside a scheduled process"));
         }
         let site = self
@@ -75,15 +75,14 @@ impl Ff<'_, '_> {
             .filter(|site| site.kind == HostRequestKind::FileIo)
             .count() as u32;
         self.host_request_sites.push(HostRequestSite {
-            process: 0,
+            process: celox_design::SiteProcess::own(0),
             kind: HostRequestKind::FileIo,
             operation,
             args,
             results,
             strings,
         });
-        self.with_kernel(|kernel| kernel.host_request(HostRequestKind::FileIo, site))
-            .map_err(|error| unsupported(error.to_string()))
+        self.request_host(HostRequestKind::FileIo, site)
     }
 
     pub(super) fn fopen(
@@ -124,7 +123,7 @@ impl Ff<'_, '_> {
         use sv::ir::{BinaryOp, Expr};
         let error_status = function == sv::ir::SystemFunction::Ferror;
         let name = function.name();
-        if self.kernel.is_none() {
+        if !self.can_request() {
             return Err(unsupported(format!("{name} outside a scheduled process")));
         }
         let destination = args[usize::from(error_status)]
@@ -247,7 +246,7 @@ impl Ff<'_, '_> {
         args: &[Option<sv::ir::Expr>],
     ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
         use sv::ir::SystemFunction;
-        if self.kernel.is_none() {
+        if !self.can_request() {
             return Err(unsupported(format!(
                 "system function `{function}` requires a scheduled process"
             )));
@@ -298,7 +297,7 @@ impl Ff<'_, '_> {
         args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
     ) -> Result<bool, sv::AnalyzerError> {
         use sv::ir::SystemTask;
-        if self.kernel.is_none() {
+        if !self.can_request() {
             return Err(unsupported(format!("`{task}` outside a scheduled process")));
         }
         match task {

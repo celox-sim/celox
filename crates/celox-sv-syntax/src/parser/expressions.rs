@@ -385,6 +385,9 @@ impl Parser<'_> {
                 } => {
                     pending.extend([*expression, *predicate]);
                 }
+                ExprKind::ConstraintForeach { array, body, .. } => {
+                    pending.extend([*array, *body]);
+                }
                 ExprKind::Call { .. }
                 | ExprKind::Parameterized { .. }
                 | ExprKind::Type(_)

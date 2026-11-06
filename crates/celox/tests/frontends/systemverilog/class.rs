@@ -851,6 +851,87 @@ fn constraints_on_handle_and_string_properties_are_rejected() {
             "c.randomize()",
             "a randc dynamic array or queue",
         ),
+        // A loop over a rand array would constrain its elements, which the
+        // solver does not take yet.
+        (
+            "class C; rand int x; rand int a[]; constraint k { foreach (a[i]) x != a[i]; } endclass",
+            "c.randomize()",
+            "constraint foreach over a rand array",
+        ),
+        (
+            "class C; rand int x; int a[]; constraint k { foreach (a[i]) x != a[i + 1]; } endclass",
+            "c.randomize()",
+            "constraint array element other than its loop's",
+        ),
+        // A member of a loop element is subject to its visibility (8.18).
+        (
+            "class R; local int m; endclass \
+             class C; rand int x; R rs[$]; constraint k { foreach (rs[i]) x != rs[i].m; } endclass",
+            "c.randomize()",
+            "local member `m` of class",
+        ),
+        (
+            "class R; protected int m; endclass \
+             class C; rand int x; R rs[$]; constraint k { foreach (rs[i]) x != rs[i].m; } endclass",
+            "c.randomize()",
+            "protected member `m` of class",
+        ),
+        // An inline constraint accesses members as the caller does (18.7).
+        (
+            "class R; local int m; endclass \
+             class C; rand int x; R rs[$]; endclass",
+            "c.randomize() with { foreach (rs[i]) x != rs[i].m; }",
+            "local member `m` of class",
+        ),
+        // A chandle has no value a constraint takes (6.14).
+        (
+            "class R; chandle h; endclass \
+             class C; rand int x; R rs[$]; constraint k { foreach (rs[i]) x != rs[i].h; } endclass",
+            "c.randomize()",
+            "a chandle in a constraint",
+        ),
+        // A process reference is no value either (9.7).
+        (
+            "class C; rand int x; process ps[$]; constraint k { foreach (ps[i]) x != ps[i]; } endclass",
+            "c.randomize()",
+            "a constraint array element other than 2-state integral",
+        ),
+        (
+            "class C; rand int x; chandle hs[$]; constraint k { foreach (hs[i]) x != hs[i]; } endclass",
+            "c.randomize()",
+            "a constraint array element other than 2-state integral",
+        ),
+        // The array of a loop is subject to its visibility too (8.18).
+        (
+            "class C; rand int x; local int a[]; endclass",
+            "c.randomize() with { foreach (a[i]) x != a[i]; }",
+            "local member `a` of class",
+        ),
+        (
+            "class B; local int a[]; endclass \
+             class C extends B; rand int x; constraint k { foreach (a[i]) x != a[i]; } endclass",
+            "c.randomize()",
+            "local member `a` of class",
+        ),
+        // A real has no integral value a constraint takes (18.3).
+        (
+            "class C; rand int x; real t; constraint k { x < t; } endclass",
+            "c.randomize()",
+            "a real in a constraint",
+        ),
+        (
+            "class R; real t; endclass \
+             class C; rand int x; R rs[$]; constraint k { foreach (rs[i]) x < rs[i].t; } endclass",
+            "c.randomize()",
+            "a real in a constraint",
+        ),
+        // An inline loop cannot be disabled: one over an array the call
+        // selects would constrain its elements.
+        (
+            "class C; rand int x; int a[]; endclass",
+            "c.randomize(a) with { foreach (a[i]) x != a[i]; }",
+            "an inline constraint foreach over an array the call randomizes",
+        ),
         // The size and indices of an associative array are not random (18.4).
         (
             "class C; rand bit [3:0] x; rand int a[int]; constraint k { x < 5; } endclass",
@@ -1185,6 +1266,189 @@ endmodule
     sim.run_until(0).unwrap();
     assert_eq!(sim.get(done), BigUint::from(1u8));
     assert_eq!(sim.get(bad), BigUint::from(0u8));
+}
+
+/// A loop over a state array whose elements leave no solution fails the
+/// call and changes nothing (IEEE 1800-2023 18.5.8.1, 18.6.1). Verilator
+/// 5.052 prints the unsatisfied constraints.
+#[test]
+fn constraint_loops_without_a_solution() {
+    let source = r#"module Top(output int bad, output bit done);
+    class Region;
+        bit [7:0] first, last;
+    endclass
+    class Policy;
+        rand bit [7:0] start;
+        Region in_use[$];
+        constraint c { foreach (in_use[i]) !(start >= in_use[i].first && start <= in_use[i].last); }
+    endclass
+    Policy p;
+    Region r;
+    initial begin
+        p = new;
+        r = new;
+        r.first = 0;
+        r.last = 255;
+        p.in_use.push_back(r);
+        p.start = 9;
+        if (p.randomize() != 0 || p.start != 9) bad++;
+        done = 1;
+    end
+endmodule
+"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("loops.sv"))], "Top")
+        .build()
+        .unwrap();
+    let (bad, done) = (sim.signal("bad"), sim.signal("done"));
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(done), BigUint::from(1u8));
+    assert_eq!(sim.get(bad), BigUint::from(0u8));
+}
+
+/// An element of nested loops over one array is the element of the loop
+/// whose variable subscripts it (IEEE 1800-2023 18.5.8.1), and a class
+/// derived from the class of the elements sees its protected members (8.18);
+/// an inline constraint sees the members its caller's class sees and the
+/// caller's variables inside a loop (18.7). A member of an element that the
+/// call solves through a rand handle is its solver variable (18.4).
+#[test]
+fn constraint_loops_by_their_variables() {
+    let source = r#"module Top(output int bad, output bit done);
+    class Region;
+        protected bit [7:0] m;
+        local bit [7:0] secret;
+        rand bit [7:0] pick;
+        Region kids[$];
+        function new(bit [7:0] value); m = value; secret = value; endfunction
+        function int choose();
+            return randomize() with { foreach (kids[i]) pick != kids[i].secret; pick < 2; };
+        endfunction
+    endclass
+    class Pairs extends Region;
+        rand bit [7:0] v, w;
+        bit [7:0] vals[];
+        Region rs[$];
+        constraint c {
+            foreach (vals[i])
+                foreach (vals[j])
+                    (i == 0 && j == 1) -> v == vals[i] + vals[j];
+            foreach (rs[i]) w != rs[i].m;
+            w < 3;
+        }
+        function new(); super.new(0); endfunction
+    endclass
+    class Child;
+        rand bit [3:0] m;
+    endclass
+    class Holder;
+        rand Child child;
+        Child items[$];
+        constraint c { foreach (items[i]) items[i].m == 5; }
+    endclass
+    Pairs p;
+    Region r;
+    Holder h;
+    initial begin
+        p = new;
+        p.vals = '{8'd5, 8'd7};
+        r = new(0);
+        p.rs.push_back(r);
+        r = new(2);
+        p.rs.push_back(r);
+        for (int i = 0; i < 5; i++)
+            if (p.randomize() == 0 || p.v != 12 || p.w != 1) bad++;
+        // A loop in a class's own inline constraint reads its local member.
+        r.kids.push_back(p.rs[0]);
+        for (int i = 0; i < 5; i++)
+            if (r.choose() == 0 || r.pick != 1) bad++;
+        // An element that is also the rand handle's object: its rand m is
+        // solved; another element's m is state.
+        h = new;
+        h.child = new;
+        h.items.push_back(h.child);
+        begin
+            Child other = new;
+            other.m = 5;
+            h.items.push_back(other);
+            for (int i = 0; i < 5; i++)
+                if (h.randomize() == 0 || h.child.m != 5 || other.m != 5) bad++;
+            other.m = 4;
+            if (h.randomize() != 0 || other.m != 4) bad++;
+        end
+        // The caller's variable in an inline loop body.
+        begin
+            bit [7:0] limit = 3;
+            for (int i = 0; i < 5; i++)
+                if ((p.randomize() with { foreach (vals[i]) w != vals[i] - limit; }) == 0
+                    || p.w != 1) bad++;
+        end
+        done = 1;
+    end
+endmodule
+"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("pairs.sv"))], "Top")
+        .build()
+        .unwrap();
+    let (bad, done) = (sim.signal("bad"), sim.signal("done"));
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(done), BigUint::from(1u8));
+    assert_eq!(sim.get(bad), BigUint::from(0u8));
+}
+
+/// A call whose random set includes the array of an enabled constraint loop
+/// (IEEE 1800-2023 18.11), as `randomize(a)` directly or through a base
+/// handle to a derived class with the loop, would constrain its elements,
+/// which the solver does not take: the call faults. With the block disabled
+/// (18.9), the loop takes no part and the call randomizes the array.
+#[test]
+fn constraint_loops_over_selected_arrays_fault() {
+    let base = r#"module Top(output int done);
+    class B;
+        rand bit [3:0] x;
+        bit [3:0] a[];
+    endclass
+    class C extends B;
+        constraint k { foreach (a[i]) x != a[i]; }
+    endclass
+    B b;
+    C c;
+    initial begin
+        c = new;
+        c.a = new[2];
+        void'(c.randomize());
+        CALL;
+        done = 1;
+    end
+endmodule
+"#;
+    for call in [
+        "void'(c.randomize(a))",
+        "begin b = c; void'(b.randomize(a)); end",
+    ] {
+        let source = base.replace("CALL", call);
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("select.sv"))],
+            "Top",
+        )
+        .build()
+        .unwrap();
+        let error = sim.run_until(0).unwrap_err().to_string();
+        assert!(
+            error.contains("a constraint loop over an array the call randomizes"),
+            "{call}: {error}"
+        );
+    }
+    let source = base.replace(
+        "CALL",
+        "begin c.k.constraint_mode(0); void'(c.randomize(a)); end",
+    );
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source.as_str(), Path::new("select.sv"))], "Top")
+            .build()
+            .unwrap();
+    let done = sim.signal("done");
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(done), BigUint::from(1u8));
 }
 
 #[test]
@@ -2066,6 +2330,7 @@ sv_backends! {
     fn virtual_interface_property_waits(sim) { @case "class::virtual_interface_property_waits"; }
     fn constrained_randomize_rand_arrays(sim) { @case "class::constrained_randomize_rand_arrays"; }
     fn constrained_randomize_shifts(sim) { @case "class::constrained_randomize_shifts"; }
+    fn constrained_randomize_foreach(sim) { @case "class::constrained_randomize_foreach"; }
 }
 
 sv_backends! {
@@ -2419,4 +2684,113 @@ endmodule
     assert_eq!(sim.get(done), BigUint::from(1u8));
     assert_eq!(sim.get(widened), BigUint::from(u32::MAX));
     assert_eq!(sim.get(seen), BigUint::from(1u8));
+}
+
+#[test]
+fn conditional_handles_of_sibling_classes_take_their_common_base() {
+    // IEEE 1800-2023 11.4.11 c to e: a derived arm takes the other arm's
+    // class, and arms of sibling classes their closest common base class.
+    let source = "module Top;
+        class A; virtual function int id(); return 1; endfunction endclass
+        class B extends A; virtual function int id(); return 2; endfunction endclass
+        class C extends B; virtual function int id(); return 3; endfunction endclass
+        class D extends B; virtual function int id(); return 4; endfunction endclass
+        bit s;
+        int sibling, derived, method;
+        initial begin
+            C c; D d; B b; A a;
+            c = new; d = new;
+            s = 1;
+            b = s ? c : d;
+            sibling = b.id();
+            a = s ? d : b;
+            derived = a.id();
+            method = (s ? d : c).id();
+        end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("sibling")), 3u32.into());
+    assert_eq!(sim.get(sim.signal("derived")), 4u32.into());
+    assert_eq!(sim.get(sim.signal("method")), 4u32.into());
+    // The result has the common base class, which a derived class's
+    // variable does not take without `$cast` (8.16).
+    let source = "module Top;
+        class A; endclass
+        class B extends A; endclass
+        class C extends B; endclass
+        class D extends B; endclass
+        bit s;
+        initial begin C c; D d; c = new; d = new; c = s ? c : d; end
+    endmodule";
+    let Err(error) =
+        Simulator::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top").build_cranelift()
+    else {
+        panic!("a handle of the common base class was assigned to a derived class's variable");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("a handle of class `B` is not assignment compatible"),
+        "{error}"
+    );
+}
+
+#[test]
+fn class_handle_actuals_are_assigned_to_their_formals() {
+    // IEEE 1800-2023 13.5: an input or inout actual is assigned to its
+    // formal, so a handle of a class not deriving from the formal's is
+    // rejected as an assignment is (8.16); a derived class's handle passes.
+    let calls = [
+        (
+            "f",
+            "function void f(A x); endfunction initial begin b = new; f(b); end",
+        ),
+        ("t", "task t(A x); endtask initial begin b = new; t(b); end"),
+        (
+            "t",
+            "task t(inout A x); endtask initial begin b = new; t(b); end",
+        ),
+        (
+            "H::f",
+            "class H; function void f(A x); endfunction endclass
+             H h; initial begin h = new; b = new; h.f(b); end",
+        ),
+        (
+            "H::new",
+            "class H; function new(A x); endfunction endclass
+             H h; initial begin b = new; h = new(b); end",
+        ),
+    ];
+    for (callee, body) in calls {
+        let source =
+            format!("module Top; class A; endclass class B; endclass B b; {body} endmodule");
+        let Err(error) = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build() else {
+            panic!("an unrelated class's handle was passed to a formal of class `A`: {body}");
+        };
+        let error = error.to_string();
+        assert!(
+            error.contains(&format!("argument 1 of `{callee}`"))
+                && error.contains("a handle of class `B` is not"),
+            "{error}"
+        );
+    }
+    let source = "module Top;
+        class A; virtual function int id(); return 1; endfunction endclass
+        class B extends A; virtual function int id(); return 2; endfunction endclass
+        int seen;
+        function int f(A x); return x.id(); endfunction
+        initial begin B b; b = new; seen = f(b); end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 2u32.into());
 }

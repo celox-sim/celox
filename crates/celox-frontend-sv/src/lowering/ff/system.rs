@@ -6,7 +6,7 @@ impl Ff<'_, '_> {
         &mut self,
         args: &[Option<sv::ir::Expr>],
     ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
-        if self.kernel.is_none() {
+        if !self.can_request() {
             return Err(unsupported("`$system` outside a scheduled process"));
         }
         let mut inputs = Vec::new();
@@ -23,7 +23,7 @@ impl Ff<'_, '_> {
             .filter(|site| site.kind == HostRequestKind::System)
             .count() as u32;
         self.host_request_sites.push(HostRequestSite {
-            process: 0,
+            process: celox_design::SiteProcess::own(0),
             kind: HostRequestKind::System,
             operation: 0,
             args: inputs,
@@ -37,8 +37,7 @@ impl Ff<'_, '_> {
             }],
             strings: Vec::new(),
         });
-        self.with_kernel(|kernel| kernel.host_request(HostRequestKind::System, site))
-            .map_err(kernel_error)?;
+        self.request_host(HostRequestKind::System, site)?;
         Ok(sv::ir::Expr::Ident(name))
     }
 }

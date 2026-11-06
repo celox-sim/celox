@@ -132,6 +132,13 @@ pub(super) struct Ff<'p, 'a> {
     history: Vec<History>,
     /// The function whose unit this lowers, if it lowers one.
     frame: Option<calls::FrameContext>,
+    /// The slot where a process kernel leaves the end of the live frames
+    /// when it suspends inside a call ([`ProcessSlots::call_top`]), once
+    /// it calls a function that can suspend it.
+    call_top: Option<SourceVarId>,
+    /// The calls at which the process kernel can be suspended inside the
+    /// callee.
+    call_resumes: Vec<celox_design::CallResume>,
     /// Whether every call is inlined, in code that must not call.
     inline_calls: bool,
 }
@@ -227,6 +234,8 @@ impl<'p, 'a> Ff<'p, 'a> {
             inferred_clock: None,
             history: Vec::new(),
             frame: None,
+            call_top: None,
+            call_resumes: Vec::new(),
             inline_calls: false,
         }
     }
@@ -2155,6 +2164,15 @@ impl<'p, 'a> Ff<'p, 'a> {
 
     // ---------------------------------------------------------------- stores
 
+    /// The seed of this process's `$urandom` stream before it is seeded: a
+    /// function unit has the calling process's in its frame.
+    fn process_seed(&self) -> sv::ir::Expr {
+        match self.frame.as_ref().and_then(|frame| frame.random.as_ref()) {
+            Some((_, seed)) => sv::ir::Expr::Ident(seed.clone()),
+            None => sv::ir::Expr::Literal(format!("32'd{}", self.random_seed)),
+        }
+    }
+
     /// The state of this process's `$urandom` stream.
     fn urandom_state(&mut self) -> (SourceVarId, String) {
         if self.random.is_none() {
@@ -2231,7 +2249,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             .filter(|site| site.kind == HostRequestKind::Vcd)
             .count() as u32;
         self.host_request_sites.push(HostRequestSite {
-            process: self.process,
+            process: celox_design::SiteProcess::own(self.process),
             kind: HostRequestKind::Vcd,
             operation: operation as u32,
             args: values,
@@ -2294,7 +2312,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     op: BinaryOp::Eq,
                     right: Box::new(Expr::Literal("33'd0".into())),
                 }),
-                then_expr: Box::new(Expr::Literal(format!("32'd{}", self.random_seed))),
+                then_expr: Box::new(self.process_seed()),
                 else_expr: Box::new(Expr::Ident(name.clone())),
             },
         };
@@ -3157,7 +3175,7 @@ impl<'p, 'a> Ff<'p, 'a> {
     ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
         use celox_design::{HostRequestKind, HostRequestSite, HostRequestValue};
         use sv::ir::{Expr, SystemFunction as F};
-        if self.kernel.is_none() {
+        if !self.can_request() {
             return Err(unsupported(format!(
                 "{} outside a timed process",
                 function.name()
@@ -3207,15 +3225,14 @@ impl<'p, 'a> Ff<'p, 'a> {
             .filter(|site| site.kind == HostRequestKind::Distribution)
             .count() as u32;
         self.host_request_sites.push(HostRequestSite {
-            process: 0,
+            process: celox_design::SiteProcess::own(0),
             kind: HostRequestKind::Distribution,
             operation,
             args: operands,
             results: vec![value(ret_id), value(seed_id)],
             strings: Vec::new(),
         });
-        self.with_kernel(|kernel| kernel.host_request(HostRequestKind::Distribution, site))
-            .map_err(kernel_error)?;
+        self.request_host(HostRequestKind::Distribution, site)?;
         self.check_tagged_guards(&guards)?;
         self.write_system_actual(&lvalues, &seed_result)?;
         Ok(Expr::Ident(ret_name))
@@ -3309,7 +3326,7 @@ impl<'p, 'a> Ff<'p, 'a> {
     ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
         use celox_design::{HostRequestKind, HostRequestSite, HostRequestValue};
         use sv::ir::Expr;
-        if self.kernel.is_none() {
+        if !self.can_request() {
             return Err(unsupported(format!(
                 "{} outside a timed process",
                 function.name()
@@ -3365,7 +3382,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             .filter(|site| site.kind == HostRequestKind::Plusargs)
             .count() as u32;
         self.host_request_sites.push(HostRequestSite {
-            process: 0,
+            process: celox_design::SiteProcess::own(0),
             kind: HostRequestKind::Plusargs,
             operation: u32::from(value_query),
             args: vec![HostRequestValue {
@@ -3379,8 +3396,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             results,
             strings: Vec::new(),
         });
-        self.with_kernel(|kernel| kernel.host_request(HostRequestKind::Plusargs, site))
-            .map_err(kernel_error)?;
+        self.request_host(HostRequestKind::Plusargs, site)?;
         if let Some((lvalues, result, guards)) = target {
             self.check_tagged_guards(&guards)?;
             self.write_system_actual(&lvalues, &result)?;
@@ -4029,6 +4045,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 | sv::ir::Stmt::WaitImplicit { .. }
                 | sv::ir::Stmt::Wait(_)
         ) && (self.kernel.is_none()
+            && !(matches!(stmt, sv::ir::Stmt::Delay { .. }) && self.can_request())
             || self
                 .active_calls
                 .iter()
@@ -4423,6 +4440,23 @@ impl<'p, 'a> Ff<'p, 'a> {
             SystemTaskKind::Control(RuntimeEventKind::Stop) if self.kernel.is_some() => {
                 self.with_kernel(ProcessKernelBuilder::stop)
                     .map_err(|error| unsupported(error.to_string()))?;
+                return Ok(true);
+            }
+            // A unit suspends the process with its frames. After `$finish`
+            // the process never resumes, so the code after its resume point
+            // is dead.
+            SystemTaskKind::Control(
+                event @ (RuntimeEventKind::Finish | RuntimeEventKind::Stop),
+            ) if self.can_request() => {
+                let status = if event == RuntimeEventKind::Finish {
+                    celox_design::ProcessStatus::Finish
+                } else {
+                    celox_design::ProcessStatus::Stop
+                };
+                let request = self.b.alloc_bit(celox_design::PROCESS_DELAY_WIDTH, false);
+                self.b
+                    .emit(SIRInstruction::Imm(request, SIRValue::new(0u64)));
+                self.suspend_unit_with(status, request)?;
                 return Ok(true);
             }
             _ => {}
@@ -7101,6 +7135,7 @@ impl Ff<'_, '_> {
             nba_sites: self.nba_sites,
             host_request_sites: self.host_request_sites,
             nba_switches: self.nba_switches,
+            call_resumes: self.call_resumes,
         })
     }
 
@@ -7584,6 +7619,9 @@ impl Ff<'_, '_> {
                 factor,
             ));
             delay = product;
+        }
+        if self.kernel.is_none() {
+            return self.suspend_unit_with(celox_design::ProcessStatus::InactiveDelay, delay);
         }
         self.with_kernel(|kernel| kernel.inactive_delay(delay, constant))
             .map_err(kernel_error)
@@ -8390,6 +8428,9 @@ pub(super) struct KernelUnit {
     pub nba_sites: Vec<NbaSite<SourceVarId>>,
     pub host_request_sites: Vec<celox_design::HostRequestSite<SourceVarId>>,
     pub nba_switches: Vec<NbaSwitch<SourceVarId>>,
+    /// The calls at which the kernel can be suspended inside the callee,
+    /// naming module-local functions.
+    pub call_resumes: Vec<celox_design::CallResume>,
 }
 
 /// Iterations, as a power of two, between the yields of a kernel loop that
@@ -8932,10 +8973,15 @@ fn kernel_error(error: ProcessKernelError) -> sv::AnalyzerError {
     unsupported(error.to_string())
 }
 
-fn seal_drained(mut builder: SIRBuilder<Addr>) -> ExecutionUnit<Addr> {
+fn seal_drained(builder: SIRBuilder<Addr>) -> ExecutionUnit<Addr> {
+    seal_drained_from(builder, BlockId(0))
+}
+
+/// [`seal_drained`] for a unit entered at `entry`.
+fn seal_drained_from(mut builder: SIRBuilder<Addr>, entry: BlockId) -> ExecutionUnit<Addr> {
     let (blocks, register_map, _) = builder.drain();
     let mut unit = ExecutionUnit {
-        entry_block_id: BlockId(0),
+        entry_block_id: entry,
         blocks,
         register_map,
     };

@@ -395,20 +395,9 @@ impl Class {
         env: &ConstEnv,
         aliases: &HashMap<String, Type>,
     ) -> bool {
-        let mut pending = vec![self.name.clone()];
-        let mut seen = HashSet::default();
-        while let Some(name) = pending.pop() {
-            if name == ancestor {
-                return true;
-            }
-            if !seen.insert(name.clone()) {
-                continue;
-            }
-            if let Ok(class) = self::class(tree, session, &name, env, aliases) {
-                pending.extend(class.base.iter().chain(&class.interfaces).cloned());
-            }
-        }
-        false
+        let class = self.record_lineage(tree, session, env, aliases);
+        let ancestor = handle_type_id(&mut session.types, ancestor);
+        session.types.lineage(class).contains(&ancestor)
     }
 
     /// The classes that [`Self::derives_from`] is true of.
@@ -419,18 +408,67 @@ impl Class {
         env: &ConstEnv,
         aliases: &HashMap<String, Type>,
     ) -> HashSet<String> {
-        let mut pending = vec![self.name.clone()];
-        let mut seen = HashSet::default();
-        while let Some(name) = pending.pop() {
-            if seen.contains(&name) {
-                continue;
-            }
-            if let Ok(class) = self::class(tree, session, &name, env, aliases) {
-                pending.extend(class.base.iter().chain(&class.interfaces).cloned());
-            }
-            seen.insert(name);
+        let class = self.record_lineage(tree, session, env, aliases);
+        session
+            .types
+            .lineage(class)
+            .into_iter()
+            .filter_map(|class| expression_types::class_name(&session.types, class))
+            .collect()
+    }
+
+    /// Records in the semantic types the supertypes of the class and of the
+    /// classes it derives from or implements, as far as they resolve, and
+    /// returns the type of a handle of the class.
+    pub fn record_lineage(
+        &self,
+        tree: &AnalysisContext<'_>,
+        session: &mut Session,
+        env: &ConstEnv,
+        aliases: &HashMap<String, Type>,
+    ) -> semantic_types::TyId {
+        let class = handle_type_id(&mut session.types, &self.name);
+        if session.types.supertypes(class).is_none() {
+            let supertypes = self.supertype_ids(&mut session.types);
+            session.types.record_supertypes(class, supertypes);
         }
-        seen
+        // A class that does not resolve is retried by the next query, as its
+        // own supertypes stay unknown.
+        let mut tried = HashSet::default();
+        loop {
+            let missing = session
+                .types
+                .lineage(class)
+                .into_iter()
+                .filter(|&ancestor| {
+                    session.types.supertypes(ancestor).is_none() && tried.insert(ancestor)
+                })
+                .collect::<Vec<_>>();
+            if missing.is_empty() {
+                return class;
+            }
+            for ancestor in missing {
+                let Some(name) = expression_types::class_name(&session.types, ancestor) else {
+                    continue;
+                };
+                if let Ok(resolved) = self::class(tree, session, &name, env, aliases) {
+                    let supertypes = resolved.supertype_ids(&mut session.types);
+                    session.types.record_supertypes(ancestor, supertypes);
+                }
+            }
+        }
+    }
+
+    /// The types of handles of the base class and the interface classes.
+    fn supertype_ids(&self, table: &mut semantic_types::TyTable) -> semantic_types::Supertypes {
+        semantic_types::Supertypes {
+            base: self.base.as_deref().map(|name| handle_type_id(table, name)),
+            interfaces: self
+                .interfaces
+                .iter()
+                .map(|name| handle_type_id(table, name))
+                .collect(),
+        }
     }
 
     /// The subroutine that `$cast` to a variable of `class` calls (IEEE
@@ -803,6 +841,16 @@ pub(super) fn builtin(name: &str) -> bool {
     ) || super::mailboxes::is_class(name)
 }
 
+/// The semantic type of a handle of class `name`.
+pub(super) fn handle_type_id(
+    table: &mut semantic_types::TyTable,
+    name: &str,
+) -> semantic_types::TyId {
+    table.intern(semantic_types::TyData::Class(semantic_types::Decl::Class(
+        name.into(),
+    )))
+}
+
 /// The handle type of class `name`, if it is a class.
 pub(super) fn handle_type(
     tree: &AnalysisContext<'_>,
@@ -902,10 +950,17 @@ pub(super) fn shared_class(
         return Ok(class);
     };
     let (scope_env, scope_aliases) = specializations::shared_scope(session, name, env, aliases);
-    // The types of the class are bound in one context of its scope.
+    // The types of the class are bound in one context of its scope, which
+    // the declarations of the scope around it are discovered without.
+    let outer = PackedDimensions {
+        const_env: env.clone(),
+        type_aliases: aliases.clone(),
+        ..PackedDimensions::default()
+    };
     let context = PackedDimensions {
         const_env: scope_env.clone(),
         type_aliases: scope_aliases.clone(),
+        class_base: Some(specializations::class_base(session, name, &outer)),
         ..PackedDimensions::default()
     };
     let (env, aliases) = (&*scope_env, &*scope_aliases);
@@ -1188,6 +1243,9 @@ pub(super) fn shared_class(
         .as_ref()
         .map(|base| base.constraints.clone())
         .unwrap_or_default();
+    let scope = (name.to_owned(), base.as_ref().map(|base| base.name.clone()));
+    session.constraint_owners.push(scope.clone());
+    session.constraint_scopes.push(scope);
     for block in &declaration.constraints {
         let block_name = block.name.spelling.clone();
 
@@ -1208,6 +1266,8 @@ pub(super) fn shared_class(
             constraints.push((block_name, expressions));
         }
     }
+    session.constraint_owners.pop();
+    session.constraint_scopes.pop();
     let mut class = Class {
         name: name.to_owned(),
         id: class_id(name),
@@ -1227,7 +1287,7 @@ pub(super) fn shared_class(
         declarations: Vec::new(),
         size: size.max(1),
     };
-    class.program = class.build_constraint_program();
+    class.program = class.build_constraint_program(tree, session, env);
     let class = Rc::new(class);
     session.classes.insert(name.to_owned(), class.clone());
     Ok(class)

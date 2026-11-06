@@ -745,14 +745,73 @@ impl<A: Copy> HostRequestValue<A> {
     }
 }
 
+/// The process a host request site is listed for, and whether the site is
+/// one of the process's own or of a function unit the process may call:
+/// the module's function sites are listed for each of its processes after
+/// the process's own. Kept as one word, as before function sites.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SiteProcess(usize);
+
+impl SiteProcess {
+    const FUNCTION: usize = 1 << (usize::BITS - 1);
+
+    /// A site of process `index` itself.
+    pub const fn own(index: usize) -> Self {
+        Self(index)
+    }
+
+    /// A site of a function unit, listed for process `index`.
+    pub const fn function(index: usize) -> Self {
+        Self(index | Self::FUNCTION)
+    }
+
+    /// The index of the process the site is listed for.
+    pub const fn index(self) -> usize {
+        self.0 & !Self::FUNCTION
+    }
+
+    /// Whether the site is in a function unit.
+    pub const fn is_function_site(self) -> bool {
+        self.0 & Self::FUNCTION != 0
+    }
+
+    /// The same kind of site, listed for process `index`.
+    pub const fn with_index(self, index: usize) -> Self {
+        Self(index | (self.0 & Self::FUNCTION))
+    }
+}
+
+/// Marks, in the site number of an encoded request
+/// ([`HostRequestKind::encode`]), a function site: the number counts the
+/// function sites of the family instead of the process's own.
+pub const FUNCTION_SITE_NUMBER: u32 = 1 << 31;
+
+/// The site of a process's request for site number `site` of family `kind`
+/// (see [`FUNCTION_SITE_NUMBER`]), among the process's `sites`.
+pub fn host_request_site<'a, A: 'a>(
+    sites: impl IntoIterator<Item = &'a HostRequestSite<A>>,
+    kind: HostRequestKind,
+    site: u32,
+) -> Option<&'a HostRequestSite<A>> {
+    let function = site & FUNCTION_SITE_NUMBER != 0;
+    sites
+        .into_iter()
+        .filter(|candidate| {
+            candidate.kind == kind && candidate.process.is_function_site() == function
+        })
+        .nth((site & !FUNCTION_SITE_NUMBER) as usize)
+}
+
 /// One synchronous host request of a process. Sites are numbered within
-/// each process and family in their declaration order. Argument slots are
+/// each process and family in their declaration order; the sites of
+/// function units are numbered apart (see [`SiteProcess`]). Argument slots are
 /// evaluated by the kernel before it suspends; result slots are written by
 /// the host before the kernel resumes. `operation` and `strings` are the
 /// operation family's stable, backend-independent descriptor.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostRequestSite<A> {
-    pub process: usize,
+    pub process: SiteProcess,
     pub kind: HostRequestKind,
     pub operation: u32,
     pub args: Vec<HostRequestValue<A>>,
@@ -891,6 +950,47 @@ pub struct ProcessSlots<A> {
     pub resume: A,
     pub status: A,
     pub delay: A,
+    /// For a kernel that calls functions which can suspend it, where it
+    /// leaves the end of the innermost live frame when it suspends inside
+    /// a call (32 bits; zero otherwise). The runtime keeps the stack below
+    /// it with the activation until it runs again, and clears the slot.
+    pub call_top: Option<A>,
+}
+
+/// Width of [`ProcessSlots::call_top`].
+pub const PROCESS_CALL_TOP_WIDTH: usize = 32;
+
+/// A call at which a process kernel or a function unit can be suspended
+/// inside the callee: the resume point the caller stores there, and the
+/// function it calls. A suspended chain of frames is walked through these
+/// (see [`FunctionFrame`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CallResume {
+    pub point: u32,
+    /// The index of the callee among the program's functions.
+    pub function: u32,
+}
+
+/// What the runtime needs to read the frame of a function unit that a
+/// process is suspended inside: the collector finds the heap handles of a
+/// saved call stack through it.
+///
+/// The first frame of a chain starts at offset zero of the stack and each
+/// callee's frame right after its caller's, so the frames are walked from
+/// the kernel's resume point down: the [`CallResume`] of that point names
+/// the first function, whose `resume` slot names the call it is suspended
+/// in, and so on.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FunctionFrame {
+    /// The bytes of the frame.
+    pub size: usize,
+    /// For a resumable unit, the byte offset and the width in bits of its
+    /// resume slot.
+    pub resume: Option<(usize, usize)>,
+    /// The calls at which it can be suspended inside the callee.
+    pub calls: Vec<CallResume>,
+    /// The byte offset and kind of each heap handle slot.
+    pub handles: Vec<(usize, ValueKind)>,
 }
 
 impl<A> ProcessSlots<A> {
@@ -903,6 +1003,7 @@ impl<A> ProcessSlots<A> {
             resume: map(self.resume),
             status: map(self.status),
             delay: map(self.delay),
+            call_top: self.call_top.map(&mut map),
         }
     }
 
@@ -1349,6 +1450,12 @@ pub struct RuntimeSchema<A> {
     /// Source procedures of the process kernels, in kernel order.
     pub process_origins: Vec<ProcessOrigin>,
     pub process_frames: Vec<Option<ProcessFrame<A>>>,
+    /// For each kernel, in kernel order, the calls at which it can be
+    /// suspended inside the callee (see [`FunctionFrame`]); a missing entry
+    /// is none.
+    pub process_call_resumes: Vec<Vec<CallResume>>,
+    /// The frame of each function unit of the program, by function index.
+    pub function_frames: Vec<FunctionFrame>,
     /// Counted signals and their occurrence counters.
     pub watches: Vec<EventWatch<A>>,
     /// Bit ranges whose changes bump an occurrence counter: the sensitivity
@@ -1426,6 +1533,7 @@ pub struct DerivedEdgeUnits<A> {
 }
 
 /// Width of [`SchedulerSlots::limit`], [`SchedulerSlots::now`],
+/// [`SchedulerSlots::next`],
 /// [`SchedulerSlots::exit_arg`], [`SchedulerSlots::count`],
 /// [`SchedulerSlots::current`], [`SchedulerSlots::cont`] and every
 /// [`SchedulerSlots::wake`] object, and of each element of
@@ -1435,6 +1543,10 @@ pub const SCHEDULER_TIME_WIDTH: usize = 64;
 /// [`SchedulerSlots::clock_next`] and [`SchedulerSlots::clock_period`], and
 /// one bit of the clock masks, per entry of [`SchedulerSchema::clocks`].
 pub const SCHEDULER_CLOCKS: usize = 64;
+/// [`SchedulerSlots::next`] of a run that returned without judging its next
+/// slot. A judged next slot comes after the run's limit, so it is never at
+/// time zero.
+pub const SCHEDULER_NEXT_UNJUDGED: u64 = 0;
 /// Width of [`SchedulerSlots::exit`], [`SchedulerSlots::finish`],
 /// [`SchedulerSlots::dirty`] and every [`SchedulerSlots::waiting`] object.
 /// Wait baselines use at least this width; masks scale with the design.
@@ -1450,15 +1562,21 @@ pub const SCHEDULER_ASSERTION_PHASE_BIT: usize = 16;
 pub const SCHEDULER_HOST_CONTEXT_BIT: usize = 64;
 
 /// Hidden state objects through which a compiled scheduler and the runtime
-/// exchange a run of time slots. Between runs they hold no state: the
-/// runtime's scheduling state is the source of truth, so state files leave
-/// them out.
+/// exchange a run of time slots. Between the runs of one run loop of the
+/// runtime they may keep the state of the scheduler's kernels and clocks;
+/// outside it they hold no state: the runtime's scheduling state is the
+/// source of truth, so state files leave them out.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SchedulerSlots<A> {
     /// The last time the run may reach.
     pub limit: A,
     /// The time of the last slot the run reached.
     pub now: A,
+    /// After a [`SchedulerExit::Limit`] exit, the time of the next slot of
+    /// the scheduler's own work, `u64::MAX` for none, or
+    /// [`SCHEDULER_NEXT_UNJUDGED`] when the run returned at its budget or
+    /// event batch without judging it, or when that slot is at `u64::MAX`.
+    pub next: A,
     /// Why the run returned, a [`SchedulerExit`] code.
     pub exit: A,
     /// The process an exit concerns.
@@ -1528,6 +1646,7 @@ impl<A> SchedulerSlots<A> {
         SchedulerSlots {
             limit: map(self.limit),
             now: map(self.now),
+            next: map(self.next),
             exit: map(self.exit),
             exit_arg: map(self.exit_arg),
             finish: map(self.finish),
@@ -1556,6 +1675,7 @@ impl<A> SchedulerSlots<A> {
         [
             &self.limit,
             &self.now,
+            &self.next,
             &self.exit,
             &self.exit_arg,
             &self.finish,
@@ -1632,6 +1752,20 @@ pub struct SchedulerSchema<A> {
     /// Per process kernel, the event signals it writes, as indices into
     /// [`Self::events`]; empty for a kernel the scheduler does not run.
     pub kernel_events: Vec<Vec<usize>>,
+    /// Per process kernel, whether a domain may change what one of its
+    /// waits waits for: a combinational or sequential unit or a
+    /// nonblocking assignment may write its signal, or a gate or probe is
+    /// judged only after settling. The reference loop resumes such a kernel
+    /// a round after the wave, which a host observing data sees in between.
+    pub domain_waits: Vec<bool>,
+    /// The scheduler shows a host that watches every update of a slot
+    /// each of them: after each kernel run, after the host clocks of a slot
+    /// apply, and before and after each settle.
+    pub update_points: bool,
+    /// The process kernels with value change points: they show the host
+    /// each blocking update of a watched object as they make it, through
+    /// the host context slot, so the host runs them with that context.
+    pub value_change_kernels: Vec<usize>,
 }
 
 impl<A> SchedulerSchema<A> {
@@ -1644,6 +1778,9 @@ impl<A> SchedulerSchema<A> {
             events: self.events.into_iter().map(&mut map).collect(),
             clocks: self.clocks.into_iter().map(map).collect(),
             kernel_events: self.kernel_events,
+            domain_waits: self.domain_waits,
+            update_points: self.update_points,
+            value_change_kernels: self.value_change_kernels,
         }
     }
 }
@@ -1668,6 +1805,8 @@ impl<A> Default for RuntimeSchema<A> {
             processes: Vec::new(),
             process_origins: Vec::new(),
             process_frames: Vec::new(),
+            process_call_resumes: Vec::new(),
+            function_frames: Vec::new(),
             watches: Vec::new(),
             occurrence_probes: Vec::new(),
             wait_sites: Vec::new(),
@@ -2473,7 +2612,7 @@ mod tests {
             float_precision: None,
         };
         let site = HostRequestSite {
-            process: 2,
+            process: SiteProcess::own(2),
             kind: HostRequestKind::Plusargs,
             operation: 1,
             args: vec![value(3u32)],
@@ -2482,7 +2621,7 @@ mod tests {
         };
         let relocated = site.map(|id| id + 10);
         assert_eq!(relocated.slots().collect::<Vec<_>>(), vec![13, 15]);
-        assert_eq!(relocated.process, 2);
+        assert_eq!(relocated.process, SiteProcess::own(2));
         assert_eq!(relocated.args[0].width, 17);
         assert!(relocated.results[0].signed);
         assert_eq!(relocated.args[0].value_kind, ValueKind::StrRef);

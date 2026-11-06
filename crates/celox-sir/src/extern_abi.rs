@@ -17,6 +17,14 @@ use crate::RegisterType;
 /// user extern function table.
 pub const HEAP_HELPER_ID: u32 = u32::MAX - 1;
 
+/// The `func` of a value change point: the host is told, right after a
+/// write of a watched object, that the object may have changed (IEEE
+/// 1800-2023 38.36.1). Its one argument is the site index. The call stands
+/// for a host that may read and write any state, so no store moves across it
+/// and every store before it is in memory. It never reaches a backend: the
+/// build replaces it with a call to its native services, or removes it.
+pub const VALUE_CHANGE_ID: u32 = u32::MAX - 6;
+
 /// Native-only call to another compiled function in the same image. The low
 /// 30 bits index the extern address table. It takes the implicit state pointer,
 /// no explicit arguments or result, and propagates a nonzero status to its

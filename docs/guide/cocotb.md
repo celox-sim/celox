@@ -77,14 +77,15 @@ languages. Both languages support `--backend native|tiered|interpreter|cranelift
 (default: tiered; native when `--compile-only`, a native image, `--build-cache-dir` or an
 IR dump is requested). Tiered starts interpreted and adopts compiled code at a scheduler
 safe point while preserving pending events. The default `--jit auto` selects
-hotspot JIT for x86-64 tiered runs with one simulation thread and no force targets
+hotspot JIT for native x86-64 and AArch64 tiered runs with one simulation thread and no force targets
 or native block profiling. It compiles frequently executed groups and keeps cold
 work interpreted. Other configurations retain whole-image tiering.
 
 Use `--jit whole-image` to select the previous compilation strategy, or
 `--jit hotspot` to require a supported hotspot configuration. The existing
-`--hotspot-jit` flag is an alias for `--jit hotspot`. Rust builders retain their
-existing backend and tiering defaults; this automatic selection applies to the CLI.
+`--hotspot-jit` flag is an alias for `--jit hotspot`. Rust builders also default to
+hotspot JIT on the tiered backend (`SimulatorBuilder::hotspot_jit(false)` selects
+whole-image tiering).
 For example:
 
 ```sh
@@ -360,21 +361,22 @@ Within one time step, the VPI callbacks cocotb waits on run at these points:
 | cocotb trigger (VPI callback) | Runs |
 |---|---|
 | `Timer` (`cbAfterDelay`), `NextTimeStep` (`cbNextSimTime`) | at the start of the time step, before the design's processes |
-| `RisingEdge`, `FallingEdge`, `Edge` (`cbValueChange`) | at the next boundary after the change: when a round's processes have run, before its flip-flops make their nonblocking updates; after each wave of nonblocking updates and the combinational logic that follows it; or when the time step has settled |
+| `RisingEdge`, `FallingEdge`, `Edge` (`cbValueChange`) | right after the update that changed the value: a process run, a clock edge cocotb or the design drives, a flip-flop commit, a nonblocking update, or the settle of the combinational logic that reads them |
 | `ReadWrite` (`cbReadWriteSynch`) | when the time step has settled; writes there settle again at the same time |
 | `ReadOnly` (`cbReadOnlySynch`) | at the end of the time step; writes there are rejected |
 
-So the edge of a clock or reset is reported before the flip-flops it triggers
-commit, whether cocotb or the design drives it. A change is reported at the
-boundary of the wave that made it: after that wave's combinational settle, so
-a register's combinational readers already show its new value, and before the
-processes the change wakes have run. Where a callback runs relative to the
-design's own events within the time step is a choice of this implementation:
-IEEE 1800-2023 4.7 lets a simulator process those events in any order, and
-Icarus Verilog, for example, reports a register's change before its
-combinational readers follow it. For the same reason, a pulse within one wave,
-such as `x = 1; x = 0;` in one process, is not reported: a callback sees the
-value at a boundary.
+A value change callback runs after each change, before the simulation goes
+on (IEEE 1800-2023 38.36.1, 4.10). So the edge of a clock or reset is
+reported before the flip-flops it triggers commit, whether cocotb or the
+design drives it; a register's change is reported before its combinational
+readers follow it, and they are reported in turn once they do; and a change
+is reported before the processes it wakes run. A pulse is reported as two
+changes when its updates are separate: in different processes, across a
+delay or a `#0`, or across the nonblocking region.
+
+A process's run is one update here: consecutive assignments a process makes
+before it suspends, such as `x = 1; x = 0;`, are reported once with the value
+the run left.
 
 A write from cocotb is a blocking assignment at the current time. Outside the
 regions of a time step, in a `Timer` callback for example, a read returns the

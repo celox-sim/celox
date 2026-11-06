@@ -3723,7 +3723,11 @@ fn schedule_sources_collecting(
             // included: the glue lowered with the graph the module's
             // processes left.
             if let Some(functions) = calls.as_ref().and_then(|graph| graph.out_of_line.as_ref()) {
-                out_of_line::attach_functions(&mut sim_module, functions.units());
+                out_of_line::attach_functions(
+                    &mut sim_module,
+                    functions.units(),
+                    functions.frames(),
+                );
             }
             module_names.insert(module_id, key.name.clone());
             modules.insert(module_id, sim_module);
@@ -4838,6 +4842,7 @@ fn lower_module_with_overrides(
             reset_clock_map,
             processes,
             functions: Vec::new(),
+            function_frames: Vec::new(),
             package_bindings: HashMap::default(),
             hierarchical_bindings: HashMap::default(),
             counter_slots: Vec::new(),
@@ -6459,6 +6464,7 @@ fn lower_initial_processes(
                 resume: declare("resume", PROCESS_RESUME_WIDTH),
                 status: declare("status", PROCESS_STATUS_WIDTH),
                 delay: declare("delay", PROCESS_DELAY_WIDTH),
+                call_top: None,
             }
         })
         .collect();
@@ -6553,17 +6559,32 @@ fn lower_initial_processes(
             nba_sites.extend(kernel.nba_sites);
             nba_switches.extend(kernel.nba_switches);
             host_request_sites.extend(kernel.host_request_sites.into_iter().map(|mut site| {
-                site.process = index;
+                site.process = celox_design::SiteProcess::own(index);
                 site
             }));
             Ok(SymbolicProcess {
                 kernel: kernel.unit,
                 frame: kernel.frame,
                 slots: kernel.slots,
+                call_resumes: kernel.call_resumes,
                 origin: process_origin(process),
             })
         })
         .collect::<Result<Vec<_>, sv::AnalyzerError>>();
+    // A kernel that can suspend inside a call lists the requests of the
+    // module's function units after its own.
+    if let Ok(processes) = &processes {
+        for (index, process) in processes.iter().enumerate() {
+            if process.slots.call_top.is_some() {
+                host_request_sites.extend(pm.function_host_request_sites.iter().map(|site| {
+                    celox_design::HostRequestSite {
+                        process: celox_design::SiteProcess::function(index),
+                        ..site.clone()
+                    }
+                }));
+            }
+        }
+    }
     *runtime_event_sites = std::mem::take(&mut pm.runtime_event_sites);
     *runtime_errors = std::mem::take(&mut pm.runtime_errors);
     *extern_functions = std::mem::take(&mut pm.extern_functions);

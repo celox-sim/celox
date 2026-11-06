@@ -49,6 +49,13 @@ pub(crate) struct Session {
     /// The class specializations being made, which their own declarations
     /// may name before they are complete.
     class_specializations_building: Vec<String>,
+    /// The classes whose constraints are being bound, one inside another,
+    /// each with its base.
+    constraint_owners: Vec<(String, Option<String>)>,
+    /// The lexical class of the constraint being bound, whose members it
+    /// may access (IEEE 1800-2023 8.18), with a laid out class that it is
+    /// or derives from: its base while it is laid out, or itself.
+    constraint_scopes: Vec<(String, Option<String>)>,
     /// How many class specializations are being made, one inside another.
     class_specialization_depth: usize,
     /// The specializations of classes made so far, in order.
@@ -3657,6 +3664,48 @@ struct PackedDimensions {
     /// The frozen declaration types of visible enumerators and scalar
     /// parameters, independent of their numeric values.
     constant_types: Arc<HashMap<String, semantic_types::ConstantType>>,
+    /// Inside a class specialization, the tables of the scope around the
+    /// class, before the specialization's parameters were added.
+    class_base: Option<ClassBase>,
+}
+
+/// The tables of the scope that declares a class, which
+/// [`classes::specializations::body_scope`] adds the parameters of one of
+/// its specializations to. The scope's declarations are discovered from
+/// these, the same for all specializations, and each query in the class
+/// adds the specialization back. Two are equal when they are the same.
+#[derive(Debug, Clone)]
+struct ClassBase(Arc<ClassTables>);
+
+#[derive(Debug)]
+struct ClassTables {
+    const_env: SharedEnv,
+    type_aliases: SharedMap<Type>,
+    parameter_values: SharedMap<Expr>,
+    constant_types: Arc<HashMap<String, semantic_types::ConstantType>>,
+}
+
+impl PartialEq for ClassBase {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ClassBase {}
+
+impl ClassBase {
+    /// The base of a class scope added to the tables of `outer`. A base
+    /// `outer` already carries is not reused: `outer` may hold more than
+    /// that base and its class, as the constants of a package analyzed for
+    /// one of its specializations.
+    fn of(outer: &PackedDimensions) -> Self {
+        Self(Arc::new(ClassTables {
+            const_env: outer.const_env.clone(),
+            type_aliases: outer.type_aliases.clone(),
+            parameter_values: outer.parameter_values.clone(),
+            constant_types: outer.constant_types.clone(),
+        }))
+    }
 }
 
 impl PackedDimensions {
@@ -3699,6 +3748,7 @@ impl PackedDimensions {
             effect_values: Arc::default(),
             last_indices: Arc::default(),
             constant_types: Arc::default(),
+            class_base: None,
         }
     }
 }

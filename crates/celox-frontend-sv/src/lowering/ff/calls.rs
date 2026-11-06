@@ -14,9 +14,34 @@ pub(super) struct FrameContext {
     /// depth of the activation.
     base: SourceVarId,
     depth: SourceVarId,
+    /// The variables of the slots of the calling process's state that the
+    /// body uses (see [`super::super::out_of_line::ProcessState`]): the RNG
+    /// state and the name of the process seed, and the seed of `$random`.
+    pub(super) random: Option<((SourceVarId, String), String)>,
+    pub(super) dist_seed: Option<(SourceVarId, String)>,
+    /// For a resumable unit (see [`Function::resume`]), its resume slots.
+    resume: Option<ResumeFrame>,
     /// Registers holding a frame size not known yet (see
     /// [`Function::size_patches`]).
     size_patches: Vec<(RegisterId, usize)>,
+}
+
+/// The resume slots of a resumable unit being lowered, and its resume
+/// points.
+struct ResumeFrame {
+    resume: SourceVarId,
+    status: SourceVarId,
+    request: SourceVarId,
+    top: SourceVarId,
+    /// The block each resume point continues in; point 0 is the start.
+    blocks: Vec<BlockId>,
+    /// The module variables through which its host requests pass their
+    /// values: the host reads and writes them while the unit is suspended,
+    /// which only its innermost activation can be, and the unit copies them
+    /// from and into its frame right before and after.
+    staging: HashSet<SourceVarId>,
+    /// The calls at which it can be suspended inside the callee.
+    calls: Vec<celox_design::CallResume>,
 }
 
 impl Ff<'_, '_> {
@@ -69,6 +94,13 @@ impl Ff<'_, '_> {
                 }
             },
         };
+        // A unit that can suspend needs a caller that can: a process, or a
+        // unit that can itself.
+        let functions = self.m.out_of_line().expect("checked above");
+        if functions.functions[index].resume.is_some() && !self.can_request() {
+            self.record_outcome(name, Outcome::Inlined(Reason::HostRequest));
+            return Ok(None);
+        }
         // An always_ff process keeps its writes in the working region,
         // which the function, reading stable state, would not see.
         if self.kernel.is_none() && !self.direct {
@@ -159,12 +191,65 @@ impl Ff<'_, '_> {
     }
 
     fn lower_function_from(&mut self, subroutine: &sv::ir::Subroutine) -> Result<usize, Reason> {
+        let process = self.m.process_state(&subroutine.name);
+        // The simulation time is a module variable, which the unit reads.
+        if process.time {
+            self.m.time_slot();
+        }
         let start = self.m.next_id;
         let (base, _) = self.m.temp("call_frame", 32, false, false);
         let (depth, _) = self.m.temp("call_depth", 32, false, false);
         // Only the automatic storage of the subroutine lives in its frame;
         // its static storage stays module variables (IEEE 1800-2023 13.4.2).
         let mut slots = vec![self.slot_of(base), self.slot_of(depth)];
+        // The resume point and what a suspension leaves.
+        let mut resume = None;
+        let mut resume_slot = None;
+        if process.suspends {
+            resume_slot = Some(slots.len());
+            let mut var = |purpose, width| {
+                let (id, _) = self.m.temp(purpose, width, false, false);
+                slots.push(self.slot_of(id));
+                id
+            };
+            let ids = [
+                var(
+                    "call_resume",
+                    celox_frontend_core::process::PROCESS_RESUME_WIDTH,
+                ),
+                var("call_status", celox_design::PROCESS_STATUS_WIDTH),
+                var("call_request", celox_design::PROCESS_DELAY_WIDTH),
+                var("call_top", celox_design::PROCESS_CALL_TOP_WIDTH),
+            ];
+            resume = Some(ResumeFrame {
+                resume: ids[0],
+                status: ids[1],
+                request: ids[2],
+                top: ids[3],
+                blocks: Vec::new(),
+                staging: HashSet::default(),
+                calls: Vec::new(),
+            });
+        }
+        // The calling process's state, which the caller passes in and,
+        // for the RNG states, takes back.
+        let mut random = None;
+        let mut process_slots = (None, None);
+        if process.random {
+            process_slots.0 = Some((slots.len(), slots.len() + 1));
+            let state = self.m.temp("call_random", 33, false, false);
+            let (seed, seed_name) = self.m.temp("call_random_seed", 32, false, false);
+            slots.push(self.slot_of(state.0));
+            slots.push(self.slot_of(seed));
+            random = Some((state, seed_name));
+        }
+        let mut dist_seed = None;
+        if process.dist_seed {
+            process_slots.1 = Some(slots.len());
+            let seed = self.m.temp("call_dist_seed", 32, false, false);
+            slots.push(self.slot_of(seed.0));
+            dist_seed = Some(seed);
+        }
         for name in automatic_names(subroutine) {
             let Some(id) = self.m.id(name) else {
                 continue;
@@ -189,14 +274,30 @@ impl Ff<'_, '_> {
             writes: HashSet::default(),
             callees: Vec::new(),
             size_patches: Vec::new(),
+            random: process_slots.0,
+            dist_seed: process_slots.1,
+            resume: resume_slot,
+            calls: Vec::new(),
         });
         functions.by_name.insert(subroutine.name.clone(), index);
         functions.lowering += 1;
-        let lowered = Ff::new(&mut *self.m, 0).lower_function_unit(index, subroutine, base, depth);
+        let frame = FrameContext {
+            function: index,
+            base,
+            depth,
+            random,
+            dist_seed,
+            resume,
+            size_patches: Vec::new(),
+        };
+        let lowered = Ff::new(&mut *self.m, 0).lower_function_unit(subroutine, frame);
         let functions = self.m.out_of_line().expect("lowering out of line");
         functions.lowering -= 1;
-        let (unit, size_patches) = lowered.map_err(|error| Reason::Other(error.to_string()))?;
-        self.finish_function(index, unit, size_patches, start)?;
+        let (unit, size_patches, staging, calls) =
+            lowered.map_err(|error| Reason::Other(error.to_string()))?;
+        self.finish_function(index, unit, size_patches, start, &staging)?;
+        let functions = self.m.out_of_line().expect("lowering out of line");
+        functions.functions[index].calls = calls;
         Ok(index)
     }
 
@@ -213,7 +314,7 @@ impl Ff<'_, '_> {
             address,
             width: variable.width,
             four_state: variable.is_4state && self.m.four_state,
-            handle: variable.value_kind != celox_design::ValueKind::Bits,
+            kind: variable.value_kind,
         }
     }
 
@@ -221,18 +322,28 @@ impl Ff<'_, '_> {
     /// a fresh [`Ff`].
     fn lower_function_unit(
         mut self,
-        index: usize,
         subroutine: &sv::ir::Subroutine,
-        base: SourceVarId,
-        depth: SourceVarId,
-    ) -> Result<(ExecutionUnit<Addr>, Vec<(RegisterId, usize)>), sv::AnalyzerError> {
+        frame: FrameContext,
+    ) -> Result<
+        (
+            ExecutionUnit<Addr>,
+            Vec<(RegisterId, usize)>,
+            HashSet<SourceVarId>,
+            Vec<celox_design::CallResume>,
+        ),
+        sv::AnalyzerError,
+    > {
         self.direct = true;
-        self.frame = Some(FrameContext {
-            function: index,
-            base,
-            depth,
-            size_patches: Vec::new(),
-        });
+        // The body draws on the RNG states in the frame, which the caller
+        // passes.
+        let (random, dist_seed) = (frame.random.is_some(), frame.dist_seed.is_some());
+        self.random = frame.random.as_ref().map(|(state, _)| state.clone());
+        self.dist_seed = frame.dist_seed.clone();
+        self.frame = Some(frame);
+        let start = self.b.current_block();
+        if let Some(resume) = self.resume_frame() {
+            resume.blocks.push(start);
+        }
         let return_block = self.b.new_block();
         self.functions.push(FunctionBlocks {
             return_block,
@@ -253,21 +364,256 @@ impl Ff<'_, '_> {
             self.jump(return_block);
         }
         self.b.switch_to_block(return_block);
+        if let Some(status) = self.resume_frame().map(|resume| resume.status) {
+            let done = self.b.alloc_bit(celox_design::PROCESS_STATUS_WIDTH, false);
+            self.b.emit(SIRInstruction::Imm(done, SIRValue::new(0u8)));
+            self.store(
+                status,
+                SIROffset::Static(0),
+                celox_design::PROCESS_STATUS_WIDTH,
+                done,
+            );
+        }
         self.b.seal_block(SIRTerminator::Return);
+        // The entry continues the body where the activation last suspended.
+        let mut entry = start;
+        if let Some((resume, blocks)) = self
+            .resume_frame()
+            .map(|resume| (resume.resume, resume.blocks.clone()))
+        {
+            let invalid = self.b.new_block();
+            self.b.switch_to_block(invalid);
+            let code = self
+                .m
+                .runtime_error(format!("invalid resume point of `{}`", subroutine.name));
+            self.b.seal_block(SIRTerminator::Error(code));
+            entry = self.b.new_block();
+            self.b.switch_to_block(entry);
+            let point = self
+                .b
+                .alloc_bit(celox_frontend_core::process::PROCESS_RESUME_WIDTH, false);
+            self.b.emit(SIRInstruction::Load(
+                point,
+                stable(resume),
+                SIROffset::Static(0),
+                celox_frontend_core::process::PROCESS_RESUME_WIDTH,
+            ));
+            celox_frontend_core::process::resume_dispatch(&mut self.b, point, &blocks, invalid);
+        }
         // The eligibility check keeps out what needs the state of a process;
         // this is the net under it.
         if !self.host_request_sites.is_empty()
             || !self.wait_sites.is_empty()
             || !self.nba_sites.is_empty()
             || !self.event_probes.is_empty()
-            || self.random.is_some()
-            || self.dist_seed.is_some()
+            || (self.random.is_some() && !random)
+            || (self.dist_seed.is_some() && !dist_seed)
         {
             return Err(unsupported("process state in a function unit"));
         }
-        let unit = seal_drained(std::mem::take(&mut self.b));
+        let unit = seal_drained_from(std::mem::take(&mut self.b), entry);
         let frame = self.frame.take().expect("lowering a function unit");
-        Ok((unit, frame.size_patches))
+        let (staging, calls) = frame
+            .resume
+            .map(|resume| (resume.staging, resume.calls))
+            .unwrap_or_default();
+        Ok((unit, frame.size_patches, staging, calls))
+    }
+
+    fn resume_frame(&mut self) -> Option<&mut ResumeFrame> {
+        self.frame.as_mut().and_then(|frame| frame.resume.as_mut())
+    }
+
+    /// Whether the code being lowered may make a host request: a process
+    /// kernel, or a unit that suspends the process for it.
+    pub(super) fn can_request(&self) -> bool {
+        self.kernel.is_some()
+            || self
+                .frame
+                .as_ref()
+                .is_some_and(|frame| frame.resume.is_some())
+    }
+
+    /// Make host request `site` of family `kind`, which the lowering just
+    /// added to [`Self::host_request_sites`]: suspend the process with it,
+    /// and continue when the host has served it.
+    pub(super) fn request_host(
+        &mut self,
+        kind: celox_design::HostRequestKind,
+        site: u32,
+    ) -> Result<(), sv::AnalyzerError> {
+        if self.kernel.is_some() {
+            return self
+                .with_kernel(|kernel| kernel.host_request(kind, site))
+                .map_err(kernel_error);
+        }
+        // In a unit, the site is one of the module's function sites, and
+        // its values pass through staging variables (see
+        // [`ResumeFrame::staging`]).
+        let mut request = self
+            .host_request_sites
+            .pop()
+            .filter(|request| request.kind == kind)
+            .ok_or_else(|| unsupported("a host request without its site"))?;
+        let mut staged = Vec::new();
+        for value in request.args.iter_mut().chain(&mut request.results) {
+            let variable = self.m.var(value.id).clone();
+            let (stage, _) = self.m.temp(
+                "call_stage",
+                variable.width,
+                variable.signed,
+                variable.is_4state,
+            );
+            self.m
+                .variables
+                .get_mut(&stage)
+                .expect("staging")
+                .value_kind = variable.value_kind;
+            self.copy_variable(value.id, stage);
+            staged.push((value.id, stage));
+            value.id = stage;
+        }
+        let results: Vec<(SourceVarId, SourceVarId)> = staged[request.args.len()..].to_vec();
+        if let Some(resume) = self.resume_frame() {
+            resume
+                .staging
+                .extend(staged.iter().map(|&(_, stage)| stage));
+        }
+        let number = self
+            .m
+            .function_host_request_sites
+            .iter()
+            .filter(|known| known.kind == kind)
+            .count() as u32;
+        self.m.function_host_request_sites.push(request);
+        let status = self.b.alloc_bit(celox_design::PROCESS_STATUS_WIDTH, false);
+        self.b.emit(SIRInstruction::Imm(
+            status,
+            SIRValue::new(celox_design::ProcessStatus::HostRequest.code()),
+        ));
+        let word = self.b.alloc_bit(celox_design::PROCESS_DELAY_WIDTH, false);
+        self.b.emit(SIRInstruction::Imm(
+            word,
+            SIRValue::new(kind.encode(celox_design::FUNCTION_SITE_NUMBER | number)),
+        ));
+        self.suspend_unit(status, word, None)?;
+        for (id, stage) in results {
+            self.copy_variable(stage, id);
+        }
+        Ok(())
+    }
+
+    /// Suspend the unit being lowered with `status` and the delay word
+    /// `request`, as a kernel suspends itself: for a delay, `$stop` or
+    /// `$finish`. The open block afterwards is the resume point.
+    pub(super) fn suspend_unit_with(
+        &mut self,
+        status: celox_design::ProcessStatus,
+        request: RegisterId,
+    ) -> Result<(), sv::AnalyzerError> {
+        let code = self.b.alloc_bit(celox_design::PROCESS_STATUS_WIDTH, false);
+        self.b
+            .emit(SIRInstruction::Imm(code, SIRValue::new(status.code())));
+        self.suspend_unit(code, request, None).map(drop)
+    }
+
+    /// Store variable `from` into variable `to`, of the same shape.
+    fn copy_variable(&mut self, from: SourceVarId, to: SourceVarId) {
+        let variable = self.m.var(from);
+        let width = variable.width;
+        let value = if variable.is_4state && self.m.four_state {
+            self.b.alloc_logic(width)
+        } else {
+            self.b.alloc_bit(width, variable.signed)
+        };
+        self.b.emit(SIRInstruction::Load(
+            value,
+            stable(from),
+            SIROffset::Static(0),
+            width,
+        ));
+        self.store(to, SIROffset::Static(0), width, value);
+    }
+
+    /// Suspend the unit being lowered with `status` and the delay word
+    /// `request`, leaving `top` as the end of the innermost live frame, its
+    /// own when `None`. The open block afterwards is the resume point,
+    /// whose value it returns.
+    fn suspend_unit(
+        &mut self,
+        status: RegisterId,
+        request: RegisterId,
+        top: Option<RegisterId>,
+    ) -> Result<u32, sv::AnalyzerError> {
+        let frame = self.frame.as_ref().expect("lowering a function unit");
+        let (own, base) = (frame.function, frame.base);
+        let resume = frame
+            .resume
+            .as_ref()
+            .ok_or_else(|| unsupported("a suspension in a unit that cannot suspend"))?;
+        let (resume_var, status_var, request_var, top_var) =
+            (resume.resume, resume.status, resume.request, resume.top);
+        let point = resume.blocks.len();
+        if point > celox_frontend_core::process::MAX_PROCESS_SUSPENSIONS {
+            return Err(unsupported("a function with too many suspension points"));
+        }
+        let top = match top {
+            Some(top) => top,
+            None => {
+                let current = self.b.alloc_bit(32, false);
+                self.b.emit(SIRInstruction::Load(
+                    current,
+                    stable(base),
+                    SIROffset::Static(0),
+                    32,
+                ));
+                // The frame size is patched once known.
+                let size = self.b.alloc_bit(32, false);
+                self.b.emit(SIRInstruction::Imm(size, SIRValue::new(0u32)));
+                self.frame
+                    .as_mut()
+                    .expect("lowering a function unit")
+                    .size_patches
+                    .push((size, own));
+                let end = self.b.alloc_bit(32, false);
+                self.b
+                    .emit(SIRInstruction::Binary(end, current, BinaryOp::Add, size));
+                end
+            }
+        };
+        let width = celox_frontend_core::process::PROCESS_RESUME_WIDTH;
+        let point_value = self.b.alloc_bit(width, false);
+        self.b.emit(SIRInstruction::Imm(
+            point_value,
+            SIRValue::new(point as u64),
+        ));
+        self.store(resume_var, SIROffset::Static(0), width, point_value);
+        self.store(
+            status_var,
+            SIROffset::Static(0),
+            celox_design::PROCESS_STATUS_WIDTH,
+            status,
+        );
+        self.store(
+            request_var,
+            SIROffset::Static(0),
+            celox_design::PROCESS_DELAY_WIDTH,
+            request,
+        );
+        self.store(
+            top_var,
+            SIROffset::Static(0),
+            celox_design::PROCESS_CALL_TOP_WIDTH,
+            top,
+        );
+        self.b.seal_block(SIRTerminator::Return);
+        let block = self.b.new_block();
+        self.resume_frame()
+            .expect("checked above")
+            .blocks
+            .push(block);
+        self.b.switch_to_block(block);
+        Ok(point as u32)
     }
 
     /// Move the frame variables of function `index` into its frame, add
@@ -279,6 +625,7 @@ impl Ff<'_, '_> {
         mut unit: ExecutionUnit<Addr>,
         size_patches: Vec<(RegisterId, usize)>,
         start: SourceVarId,
+        staging: &HashSet<SourceVarId>,
     ) -> Result<(), Reason> {
         let end = self.m.next_id;
         let functions = self.m.out_of_line().expect("lowering out of line");
@@ -296,7 +643,7 @@ impl Ff<'_, '_> {
         // each activation needs its own as much as the function's.
         let automatic = self.m.automatic_storage();
         for id in accessed {
-            if slots.iter().any(|slot| slot.id == id) {
+            if slots.iter().any(|slot| slot.id == id) || staging.contains(&id) {
                 continue;
             }
             let created = (start.0..end.0).contains(&id.0);
@@ -338,8 +685,8 @@ impl Ff<'_, '_> {
                         (addr, &*offset, *width, true)
                     }
                     SIRInstruction::Commit(..) => return Err(other("commit")),
-                    SIRInstruction::RuntimeEvent { .. }
-                    | SIRInstruction::CombCaptureEvent { .. }
+                    SIRInstruction::RuntimeEvent { .. } => continue,
+                    SIRInstruction::CombCaptureEvent { .. }
                     | SIRInstruction::CombCaptureEnableIfChanged { .. } => {
                         return Err(Reason::HostRequest);
                     }
@@ -366,7 +713,7 @@ impl Ff<'_, '_> {
                 } else if addr.region != STABLE_REGION {
                     return Err(other("non-stable state access"));
                 } else if store {
-                    if !persistent.contains(&addr.var_id) {
+                    if !persistent.contains(&addr.var_id) && !staging.contains(&addr.var_id) {
                         return Err(other("writes module state"));
                     }
                     if self.m.is_observed(addr.var_id) {
@@ -476,6 +823,145 @@ impl Ff<'_, '_> {
                 .ok_or_else(|| unsupported("output formal without a frame slot"))?;
             outputs.push((slot, temp));
         }
+        // The calling process's RNG states come back: at the end of the
+        // call, or when it suspends the process, which then holds them
+        // until it continues the call.
+        if let Some((state_slot, _)) = function.random {
+            let (state, _) = self.urandom_state();
+            outputs.push((state_slot, state));
+        }
+        if let Some(slot) = function.dist_seed {
+            let (seed, _) = self.dist_seed();
+            outputs.push((slot, seed));
+        }
+        args.extend(self.process_args(&function)?);
+        // A resumable unit starts its body, and leaves whether it suspended.
+        let mut control = Vec::new();
+        if let Some(resume) = function.resume {
+            let width = celox_frontend_core::process::PROCESS_RESUME_WIDTH;
+            let start = self.b.alloc_bit(width, false);
+            self.b.emit(SIRInstruction::Imm(start, SIRValue::new(0u8)));
+            args.push((resume, start));
+            for (offset, purpose, width) in [
+                (1, "call_status", celox_design::PROCESS_STATUS_WIDTH),
+                (2, "call_request", celox_design::PROCESS_DELAY_WIDTH),
+                (3, "call_top", celox_design::PROCESS_CALL_TOP_WIDTH),
+            ] {
+                let (temp, _) = self.m.temp(purpose, width, false, false);
+                outputs.push((resume + offset, temp));
+                control.push((temp, width));
+            }
+        }
+        self.emit_call(index, &function, base, args, &outputs);
+        if let [status, request, top] = control[..] {
+            // A suspended call suspends the caller, which continues it by
+            // calling again: the callee's frame keeps its formals and its
+            // resume point, and only the process state goes in again.
+            let check = self.b.new_block();
+            self.jump(check);
+            self.b.switch_to_block(check);
+            let load = |b: &mut SIRBuilder<Addr>, (id, width): (SourceVarId, usize)| {
+                let register = b.alloc_bit(width, false);
+                b.emit(SIRInstruction::Load(
+                    register,
+                    stable(id),
+                    SIROffset::Static(0),
+                    width,
+                ));
+                register
+            };
+            let code = load(&mut self.b, status);
+            let zero = self.b.alloc_bit(status.1, false);
+            self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+            let suspended = self.b.alloc_bit(1, false);
+            self.b
+                .emit(SIRInstruction::Binary(suspended, code, BinaryOp::Ne, zero));
+            let suspend = self.b.new_block();
+            let done = self.b.new_block();
+            self.b.seal_block(SIRTerminator::Branch {
+                cond: suspended,
+                true_block: (suspend, Vec::new()),
+                false_block: (done, Vec::new()),
+            });
+            self.b.switch_to_block(suspend);
+            let code = load(&mut self.b, status);
+            let word = load(&mut self.b, request);
+            let end = load(&mut self.b, top);
+            if self.kernel.is_some() {
+                let call_top = match self.call_top {
+                    Some(id) => id,
+                    None => {
+                        let (id, _) = self.m.temp(
+                            "call_top",
+                            celox_design::PROCESS_CALL_TOP_WIDTH,
+                            false,
+                            false,
+                        );
+                        self.call_top = Some(id);
+                        id
+                    }
+                };
+                let point = self
+                    .with_kernel(|kernel| kernel.suspend_in_call(code, word, end, call_top))
+                    .map_err(kernel_error)?;
+                self.call_resumes.push(celox_design::CallResume {
+                    point,
+                    function: index as u32,
+                });
+            } else {
+                let point = self.suspend_unit(code, word, Some(end))?;
+                self.resume_frame()
+                    .expect("a unit that suspends is resumable")
+                    .calls
+                    .push(celox_design::CallResume {
+                        point,
+                        function: index as u32,
+                    });
+            }
+            let (base, depth) = self.call_frame(index, &subroutine.name, &function)?;
+            let mut args = vec![(0, base), (1, depth)];
+            args.extend(self.process_args(&function)?);
+            self.emit_call(index, &function, base, args, &outputs);
+            self.jump(check);
+            self.b.switch_to_block(done);
+        }
+        Ok(result_name)
+    }
+
+    /// The values of the calling process's state that a call of `function`
+    /// passes (see [`Function::random`]): its RNG states and seed, as an
+    /// inlined body would draw on them.
+    fn process_args(
+        &mut self,
+        function: &Function,
+    ) -> Result<Vec<(usize, RegisterId)>, sv::AnalyzerError> {
+        let mut args = Vec::new();
+        if let Some((state_slot, seed_slot)) = function.random {
+            let (_, name) = self.urandom_state();
+            let value = self.eval(&sv::ir::Expr::Ident(name), None)?;
+            args.push((state_slot, value));
+            let seed = self.process_seed();
+            let seed = self.eval(&seed, Some((32, false)))?;
+            args.push((seed_slot, seed));
+        }
+        if let Some(slot) = function.dist_seed {
+            let (_, name) = self.dist_seed();
+            let value = self.eval(&sv::ir::Expr::Ident(name), None)?;
+            args.push((slot, value));
+        }
+        Ok(args)
+    }
+
+    /// Call function `index` in the frame at `base` with `args`, and store
+    /// each `(slot, variable)` of `outputs` from the slot when it returns.
+    fn emit_call(
+        &mut self,
+        index: usize,
+        function: &Function,
+        base: RegisterId,
+        args: Vec<(usize, RegisterId)>,
+        outputs: &[(usize, SourceVarId)],
+    ) {
         let width: usize = outputs
             .iter()
             .map(|&(slot, _)| function.slots[slot].width)
@@ -501,7 +987,7 @@ impl Ff<'_, '_> {
         if let Some(dst) = dst {
             // The first output is the least significant part.
             let mut offset = 0;
-            for &(slot, temp) in &outputs {
+            for &(slot, temp) in outputs {
                 let slot_width = function.slots[slot].width;
                 let part = if function.slots[slot].four_state && self.m.var(temp).is_4state {
                     self.b.alloc_logic(slot_width)
@@ -516,7 +1002,6 @@ impl Ff<'_, '_> {
                 offset += slot_width;
             }
         }
-        Ok(result_name)
     }
 
     /// The frame base and call depth of a call of function `index`, and the

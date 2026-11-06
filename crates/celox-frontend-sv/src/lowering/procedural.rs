@@ -25,6 +25,7 @@ pub(super) struct Checkpoint {
     temp_counter: usize,
     capture_counter: u64,
     runtime_event_sites: usize,
+    function_host_request_sites: usize,
     runtime_errors: usize,
     extern_functions: usize,
     extern_calls: usize,
@@ -67,6 +68,10 @@ pub(super) struct ProcModule<'a> {
     /// Runtime event sites (`$display`, assertions, ...) of the module, by
     /// local site number.
     pub runtime_event_sites: Vec<RuntimeEventSite>,
+    /// The host request sites of the module's function units, which every
+    /// process of the module lists after its own (see
+    /// [`celox_design::SiteProcess`]), numbered per family.
+    pub function_host_request_sites: Vec<celox_design::HostRequestSite<SourceVarId>>,
     /// Runtime errors (fatal assertions) of the module, by local code.
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
     /// The continuous assignments `$event[k] = expr` of the event
@@ -302,6 +307,7 @@ impl<'a> ProcModule<'a> {
             temp_counter: 0,
             capture_counter: 0,
             runtime_event_sites: Vec::new(),
+            function_host_request_sites: Vec::new(),
             runtime_errors: HashMap::default(),
             event_assignments: Vec::new(),
             unpacked_bounds,
@@ -999,6 +1005,7 @@ impl<'a> ProcModule<'a> {
             temp_counter: self.temp_counter,
             capture_counter: self.capture_counter,
             runtime_event_sites: self.runtime_event_sites.len(),
+            function_host_request_sites: self.function_host_request_sites.len(),
             runtime_errors: self.runtime_errors.len(),
             extern_functions: self.extern_functions.len(),
             extern_calls: self.extern_calls,
@@ -1030,6 +1037,8 @@ impl<'a> ProcModule<'a> {
         self.capture_counter = checkpoint.capture_counter;
         self.runtime_event_sites
             .truncate(checkpoint.runtime_event_sites);
+        self.function_host_request_sites
+            .truncate(checkpoint.function_host_request_sites);
         // Codes are numbered from one in registration order.
         self.runtime_errors
             .retain(|&code, _| code <= checkpoint.runtime_errors as i64);
@@ -1707,7 +1716,8 @@ pub(super) fn prepare_time_operands(
 /// string literal is the template. `$fatal` first takes a finish number.
 /// A `$display` or `$write` argument without a conversion of its own is
 /// displayed in the task's radix, directly after the previous one (IEEE
-/// 1800-2023 21.2.1.1).
+/// 1800-2023 21.2.1.1). A severity task's message has the syntax of
+/// `$display` (20.10), so its arguments convert the same way in decimal.
 pub(super) fn system_task_template(
     module: &ProcModule<'_>,
     kind: &SystemTaskKind,
@@ -1730,7 +1740,12 @@ pub(super) fn system_task_template(
     if matches!(kind, SystemTaskKind::Assertion(_)) && template.is_none() {
         template = Some("assertion failed".to_string());
     }
-    if let SystemTaskKind::Print(_, radix) = kind {
+    let radix = match kind {
+        SystemTaskKind::Print(_, radix) => Some(*radix),
+        SystemTaskKind::Message(_) | SystemTaskKind::Fatal => Some('d'),
+        SystemTaskKind::Control(_) | SystemTaskKind::Assertion(_) => None,
+    };
+    if let Some(radix) = radix {
         let converted = template.as_deref().map_or(0, template_arguments);
         let rest = values.len().saturating_sub(converted);
         if rest > 0 {
@@ -1747,7 +1762,7 @@ pub(super) fn system_task_template(
                         sv::ir::SystemTaskArg::Expr(expr) => module.expr_is_string(expr),
                         sv::ir::SystemTaskArg::Empty => false,
                     };
-                    text.push(if string { 's' } else { *radix });
+                    text.push(if string { 's' } else { radix });
                 }
             }
             template = Some(text);

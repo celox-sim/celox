@@ -864,101 +864,15 @@ impl Renamer<'_> {
     }
 
     pub fn stmt(&self, stmt: Stmt) -> Stmt {
-        let stmt = match stmt {
-            Stmt::Call {
-                name,
-                args,
-                arg_order,
-            } => Stmt::Call {
-                arg_order: arg_order.clone(),
-                name: self.name(&name),
-                args,
-            },
-            Stmt::Local { name, init } => Stmt::Local {
-                name: self.name(&name),
-                init,
-            },
-            stmt => stmt,
-        };
-        // Nested calls and locals are renamed by `map` only through their
-        // expressions; rename them in the nested bodies as well.
-        let stmt = stmt.map(&mut |expr| self.expr(expr), &mut |lvalue| {
+        let mut stmt = stmt.map(&mut |expr| self.expr(expr), &mut |lvalue| {
             self.lvalue(lvalue)
         });
-        self.nested(stmt)
-    }
-
-    fn nested(&self, stmt: Stmt) -> Stmt {
-        let body = |stmts: Vec<Stmt>| {
-            stmts
-                .into_iter()
-                .map(|stmt| self.stmt_names(stmt))
-                .collect()
-        };
-        match stmt {
-            Stmt::If {
-                condition,
-                then_body,
-                else_body,
-            } => Stmt::If {
-                condition,
-                then_body: body(then_body),
-                else_body: body(else_body),
-            },
-            Stmt::Case {
-                kind,
-                selector,
-                items,
-                default,
-            } => Stmt::Case {
-                kind,
-                selector,
-                items: items
-                    .into_iter()
-                    .map(|item| crate::procedural::CaseItemBase {
-                        labels: item.labels,
-                        body: body(item.body),
-                    })
-                    .collect(),
-                default: default.map(body),
-            },
-            Stmt::Loop {
-                kind,
-                init,
-                condition,
-                step,
-                body: loop_body,
-            } => Stmt::Loop {
-                kind,
-                init: body(init),
-                condition,
-                step: body(step),
-                body: body(loop_body),
-            },
-            stmt => stmt,
-        }
-    }
-
-    /// Rename the call and local names of `stmt` and its nested bodies; its
-    /// expressions were renamed already.
-    fn stmt_names(&self, stmt: Stmt) -> Stmt {
-        let stmt = match stmt {
-            Stmt::Call {
-                name,
-                args,
-                arg_order,
-            } => Stmt::Call {
-                arg_order: arg_order.clone(),
-                name: self.name(&name),
-                args,
-            },
-            Stmt::Local { name, init } => Stmt::Local {
-                name: self.name(&name),
-                init,
-            },
-            stmt => stmt,
-        };
-        self.nested(stmt)
+        // `map` reaches the expressions of every nested body, fork branches
+        // included; rename the call and local names there as well.
+        stmt.visit_mut(&mut |_| {}, &mut |_| {}, &mut |name| {
+            *name = self.name(name);
+        });
+        stmt
     }
 
     pub fn parameter(&self, mut parameter: Parameter) -> Parameter {

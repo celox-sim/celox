@@ -269,3 +269,62 @@ fn diagnostics_spell_element_types_and_element_counts() {
     );
     assert!(table.spell(ids["ea_t"]).ends_with(" [2]"));
 }
+
+#[test]
+fn class_handles_assign_to_their_classes_bases_and_interfaces() {
+    // IEEE 1800-2023 8.16: `class E extends C`; 8.26.5: `class Fifo extends
+    // Base implements PutImp`; 6.11.1: `null` to any handle.
+    let mut table = TyTable::default();
+    let mut class = |name: &str| table.intern(TyData::Class(Decl::Class(name.into())));
+    let (c, e, base, fifo, put, other) = (
+        class("C"),
+        class("E"),
+        class("Base"),
+        class("Fifo"),
+        class("PutImp"),
+        class("Other"),
+    );
+    let null = table.intern(TyData::Null);
+    let chandle = table.intern(TyData::Chandle);
+    let int = table.intern(TyData::Packed(Packed {
+        element: PackedElement::Bits,
+        four_state: false,
+        signed: true,
+        signed_element_depth: None,
+        dims: Box::new([Range { left: 31, right: 0 }]),
+        keyword: Some("int"),
+    }));
+    let supertypes = |base: Option<TyId>, interfaces: &[TyId]| Supertypes {
+        base,
+        interfaces: interfaces.into(),
+    };
+    table.record_supertypes(e, supertypes(Some(c), &[]));
+    table.record_supertypes(c, supertypes(None, &[]));
+    table.record_supertypes(fifo, supertypes(Some(base), &[put]));
+    // `Base` is left unresolved: its supertypes are unknown.
+    for (source, target, expected) in [
+        (e, c, Ok(())),
+        (e, e, Ok(())),
+        (c, e, Err(Mismatch::ClassHandle)),
+        (fifo, put, Ok(())),
+        (fifo, base, Ok(())),
+        (put, fifo, Err(Mismatch::ClassHandle)),
+        (base, c, Err(Mismatch::ClassHandle)),
+        (other, c, Err(Mismatch::ClassHandle)),
+        (null, c, Ok(())),
+        (null, chandle, Ok(())),
+        (c, null, Err(Mismatch::NotHandles)),
+        (int, c, Err(Mismatch::NotHandles)),
+    ] {
+        assert_eq!(
+            table.assignable_handle(source, target),
+            expected,
+            "{} to {}",
+            table.spell(source),
+            table.spell(target)
+        );
+    }
+    assert_eq!(table.lineage(fifo), vec![fifo, base, put]);
+    assert_eq!(table.base_classes(fifo), vec![fifo, base]);
+    assert_eq!(table.base_classes(e), vec![e, c]);
+}

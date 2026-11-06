@@ -245,6 +245,9 @@ impl Parser<'_> {
                         }
                     }
                 }
+                BodyItemKind::Assertion(id) => {
+                    insert(declared, &self.assertion_declarations[id.0].name)
+                }
                 BodyItemKind::Modport(id) => {
                     self.modport_declarations[id.0]
                         .modports

@@ -487,6 +487,25 @@ compile, so the case is excluded for it; Icarus 13.0 does not support queues
 of queues, and xezim 0.11.3 drops elements below the bound
 (`sv_nested_bounded_queues`; the source and the observed failures are in
 [`sv_nested_bounded_queues.json`](verification/repros/sv_nested_bounded_queues.json)).
+An associative array pattern gives each key its value, a later key replacing
+an earlier one, and the other keys the default (10.9.1); a key with X or Z
+bits names no entry (7.8.6). A conditional whose condition is ambiguous
+evaluates both container operands and gives equal ones, the element-wise
+combination of arrays of as many elements other than associative ones, or an
+empty container (11.4.11, Table 7-1); each operand is first converted to the
+receiving container, a queue bound included, and a container formal receives
+a conditional actual the same way. A conditional without a receiver, such as
+an operand of a comparison, has the type of its operands, and inner
+containers compare and merge by their elements (7.6, 11.4.5). The four cases
+are four-state, which Verilator 5.052 does not run. Icarus 13.0 does not parse
+the first three and rejects the queues of queues of the fourth. xezim 0.11.3
+(0.11.4 for the fourth case)
+keeps the target's entries when it assigns a function's associative array
+result (`sv_associative_function_results`, see the
+[probe](verification/repros/sv_associative_function_results_xezim.json)), and
+gives its conditionals of queues one element, or none when they are
+ambiguous or passed to a container formal, and compares untargeted
+conditionals and queues of queues wrongly (`sv_container_expression_values`).
 
 The new `$dist_uniform` seed-width case is excluded for Verilator 5.052 and
 Icarus 13.0. Verilator generates an invalid C++ reference binding for converted
@@ -1480,6 +1499,23 @@ Observed predicate, suppressing the latter. Its mismatch remains executed
 evidence, not an exclusion. [Top/Wrapped reproductions](verification/repros/sv_concurrent_regions.json)
 identify the actual installed xezim binary; the current flake pin's stale dependency
 lock prevented building that pin. No current-pin conformance is claimed.
+
+`concurrent_assertions::subroutine_calls_in_actions` calls functions, tasks,
+package subroutines and class methods from pass and fail actions (16.14.1).
+Verilator 5.052 reads `data` in the pass action before its NBA (0 instead of 1),
+and Icarus 13.0 rejects the action blocks. Pinned xezim 0.11.4 passes the case.
+
+`concurrent_assertions::named_sequences_and_properties` instantiates named
+properties and sequences, one declared after its assertion, with their own
+clock and `disable iff` or the assertion's clock (16.8, 16.12). Pinned xezim
+0.11.4 passes it; Verilator 5.052 aborts on a named sequence as an
+antecedent and faults on a named property as a consequent, and Icarus 13.0
+does not support the assertions. `named_sequence_leading_clock` checks the
+semantic leading clock of 16.16.1: the explicit clock of an instantiated
+sequence overrides the assertion's, and a clocked antecedent clocks the
+implication. xezim 0.11.4 keeps the assertion's posedge (low_passed=2 instead
+of 1) and does not evaluate the implication; Verilator 5.052 reports a
+multiclocked property and Icarus 13.0 rejects the declarations.
 
 ### Sampled history in assertions
 

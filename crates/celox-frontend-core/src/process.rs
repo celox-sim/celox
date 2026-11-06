@@ -296,6 +296,36 @@ impl<A: Copy> ProcessKernelBuilder<A> {
         self.suspend(ProcessStatus::HostRequest)
     }
 
+    /// Suspend inside a call: the callee left `status`, the delay word
+    /// `request` and the end of the innermost live frame `top` (see
+    /// [`ProcessSlots::call_top`]), all registers. The open block afterwards
+    /// is the resume point, which calls again to continue the callee; its
+    /// value is returned.
+    pub fn suspend_in_call(
+        &mut self,
+        status: RegisterId,
+        request: RegisterId,
+        top: RegisterId,
+        call_top: A,
+    ) -> Result<u32, ProcessKernelError> {
+        let point = self.resume_blocks.len();
+        if point > MAX_PROCESS_SUSPENSIONS {
+            return Err(ProcessKernelError::TooManySuspensions);
+        }
+        self.slots.call_top = Some(call_top);
+        // The callee may suspend for a delay of any amount.
+        self.slots.const_delays = false;
+        self.store_constant(self.slots.resume, PROCESS_RESUME_WIDTH, point as u64);
+        self.store(self.slots.status, PROCESS_STATUS_WIDTH, status);
+        self.store(self.slots.delay, PROCESS_DELAY_WIDTH, request);
+        self.store(call_top, celox_design::PROCESS_CALL_TOP_WIDTH, top);
+        self.builder.seal_block(SIRTerminator::Return);
+        let resume = self.builder.new_block();
+        self.resume_blocks.push(resume);
+        self.builder.switch_to_block(resume);
+        Ok(point as u32)
+    }
+
     /// Suspend at wait site `site` of this process. The open block
     /// afterwards is the site's resume point: the caller lowers the wait's
     /// condition there and ends it with [`Self::wake_if`].
@@ -515,59 +545,70 @@ impl<A: Copy> ProcessKernelBuilder<A> {
             SIROffset::Static(0),
             PROCESS_RESUME_WIDTH,
         ));
-        let groups = self
-            .resume_blocks
-            .chunks(1 << SWITCH_BITS)
-            .map(<[BlockId]>::to_vec)
-            .collect::<Vec<_>>();
-        let byte = |builder: &mut SIRBuilder<RegionedSourceAddr<A>>, lsb: usize| {
-            let byte = builder.alloc_bit(SWITCH_BITS, false);
-            builder.emit(SIRInstruction::Slice(byte, resume, lsb, SWITCH_BITS));
-            byte
-        };
-        if let [targets] = groups.as_slice() {
-            let low = byte(&mut self.builder, 0);
-            let high = byte(&mut self.builder, SWITCH_BITS);
-            // Every stored resume point fits the low byte.
-            let in_range = self.builder.new_block();
-            self.builder.seal_block(SIRTerminator::Switch {
-                selector: high,
-                cases: switch_cases(&[in_range]),
-                default: invalid,
-            });
-            self.builder.switch_to_block(in_range);
-            self.builder.seal_block(SIRTerminator::Switch {
-                selector: low,
-                cases: switch_cases(targets),
-                default: invalid,
-            });
-        } else {
-            let high = byte(&mut self.builder, SWITCH_BITS);
-            let group_blocks = groups
-                .iter()
-                .map(|_| self.builder.new_block())
-                .collect::<Vec<_>>();
-            self.builder.seal_block(SIRTerminator::Switch {
-                selector: high,
-                cases: switch_cases(&group_blocks),
-                default: invalid,
-            });
-            for (block, targets) in group_blocks.into_iter().zip(&groups) {
-                self.builder.switch_to_block(block);
-                let low = byte(&mut self.builder, 0);
-                self.builder.seal_block(SIRTerminator::Switch {
-                    selector: low,
-                    cases: switch_cases(targets),
-                    default: invalid,
-                });
-            }
-        }
+        resume_dispatch(&mut self.builder, resume, &self.resume_blocks, invalid);
 
         let (blocks, register_map, _) = self.builder.drain();
         ExecutionUnit {
             entry_block_id: entry,
             blocks,
             register_map,
+        }
+    }
+}
+
+/// End the open block with the dispatch on `resume`, a
+/// [`PROCESS_RESUME_WIDTH`]-bit register, to resume point `resume` of
+/// `targets`, or to `invalid` for a value no suspension stores.
+pub fn resume_dispatch<A>(
+    builder: &mut SIRBuilder<A>,
+    resume: RegisterId,
+    targets: &[BlockId],
+    invalid: BlockId,
+) {
+    let groups = targets
+        .chunks(1 << SWITCH_BITS)
+        .map(<[BlockId]>::to_vec)
+        .collect::<Vec<_>>();
+    let byte = |builder: &mut SIRBuilder<A>, lsb: usize| {
+        let byte = builder.alloc_bit(SWITCH_BITS, false);
+        builder.emit(SIRInstruction::Slice(byte, resume, lsb, SWITCH_BITS));
+        byte
+    };
+    if let [targets] = groups.as_slice() {
+        let low = byte(builder, 0);
+        let high = byte(builder, SWITCH_BITS);
+        // Every stored resume point fits the low byte.
+        let in_range = builder.new_block();
+        builder.seal_block(SIRTerminator::Switch {
+            selector: high,
+            cases: switch_cases(&[in_range]),
+            default: invalid,
+        });
+        builder.switch_to_block(in_range);
+        builder.seal_block(SIRTerminator::Switch {
+            selector: low,
+            cases: switch_cases(targets),
+            default: invalid,
+        });
+    } else {
+        let high = byte(builder, SWITCH_BITS);
+        let group_blocks = groups
+            .iter()
+            .map(|_| builder.new_block())
+            .collect::<Vec<_>>();
+        builder.seal_block(SIRTerminator::Switch {
+            selector: high,
+            cases: switch_cases(&group_blocks),
+            default: invalid,
+        });
+        for (block, targets) in group_blocks.into_iter().zip(&groups) {
+            builder.switch_to_block(block);
+            let low = byte(builder, 0);
+            builder.seal_block(SIRTerminator::Switch {
+                selector: low,
+                cases: switch_cases(targets),
+                default: invalid,
+            });
         }
     }
 }

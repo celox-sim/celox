@@ -43,6 +43,55 @@ impl<B: SimBackend> Simulator<B> {
             .clone()
     }
 
+    /// The heap handle slots of the frames an activation of `kernel` is
+    /// suspended inside, by byte offset in `saved`'s stack, with what each
+    /// holds. The first frame is the callee of the kernel's call at its
+    /// resume point, each next one the callee of the call its caller is
+    /// suspended in (see [`celox_design::FunctionFrame`]). `None` when the
+    /// chain does not fit the stack exactly: it is not one this design
+    /// saved.
+    pub(crate) fn saved_frame_handles(
+        &self,
+        kernel: usize,
+        saved: &celox_runtime::SavedCalls,
+    ) -> Option<Vec<(usize, celox_design::ValueKind)>> {
+        let schema = &self.program.runtime_schema;
+        let stack = saved.stack.as_slice();
+        let find = |calls: &[celox_design::CallResume], point: u64| {
+            calls
+                .iter()
+                .find(|call| u64::from(call.point) == point)
+                .map(|call| call.function as usize)
+        };
+        let mut handles = Vec::new();
+        let mut next = schema
+            .process_call_resumes
+            .get(kernel)
+            .and_then(|calls| find(calls, saved.resume));
+        let mut base = 0;
+        while let Some(function) = next {
+            // A frame the chain names must be there whole.
+            let frame = schema.function_frames.get(function)?;
+            if base + frame.size > stack.len() {
+                return None;
+            }
+            handles.extend(
+                frame
+                    .handles
+                    .iter()
+                    .map(|&(offset, kind)| (base + offset, kind)),
+            );
+            next = frame.resume.and_then(|(offset, width)| {
+                let bytes = width.div_ceil(8);
+                let mut raw = [0; 8];
+                raw[..bytes].copy_from_slice(&stack[base + offset..base + offset + bytes]);
+                find(&frame.calls, u64::from_le_bytes(raw))
+            });
+            base += frame.size;
+        }
+        (base == stack.len()).then_some(handles)
+    }
+
     /// The handles held by the handle slots of state memory.
     pub(crate) fn handle_roots(&self) -> Vec<Root> {
         let (memory, len) = self.backend.memory_as_ptr();

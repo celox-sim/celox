@@ -451,14 +451,27 @@ impl BodyBuilder<'_, '_, '_> {
                                 None,
                             ),
                             celox_sv_syntax::AssertionHeader::Concurrent {
-                                condition,
-                                antecedent,
-                                disable,
+                                property:
+                                    celox_sv_syntax::PropertySpec {
+                                        clock,
+                                        disable,
+                                        antecedent,
+                                        condition,
+                                    },
                                 module_item,
                                 ..
                             } => {
                                 if !module_item {
                                     return Err(unsupported("procedural concurrent assertion"));
+                                }
+                                // Its clock is explicit or that of the named
+                                // sequence or property it instantiates (the
+                                // parser waits for it); default clocking
+                                // (IEEE 1800-2023 16.15) is not supported.
+                                if clock.is_none() {
+                                    return Err(unsupported(
+                                        "concurrent assertion without a clocking event",
+                                    ));
                                 }
                                 if !matches!(keyword.as_str(), "assert" | "assume" | "cover") {
                                     return Err(unsupported("concurrent assertion directive"));
@@ -660,8 +673,8 @@ impl BodyBuilder<'_, '_, '_> {
                         celox_design::AssertionOutcome::Fail,
                     );
                     if concurrent.is_some() {
-                        assertions::concurrent_action(&then_body)?;
-                        assertions::concurrent_action(&else_body)?;
+                        // `timed_tasks::classify` checks the actions once
+                        // every subroutine is known.
                         // Evaluate every predicate in Observed; neither action can run
                         // until all the monitors have made that decision.
                         then_body.insert(0, Stmt::AssertionRegion { reactive: true });

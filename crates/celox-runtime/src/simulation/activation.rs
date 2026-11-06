@@ -68,6 +68,46 @@ fn write<B: SimBackend>(backend: &mut B, signal: SignalRef, value: &Value) {
     backend.set_four_state(signal, value.0.clone(), value.1.clone());
 }
 impl<B: SimBackend> SimulationState<B> {
+    /// Put back the frames of the calls `process` suspended inside, which
+    /// other code may have overwritten since: a resumed chain finds each
+    /// frame where it left it.
+    pub(super) fn restore_call_stack(&mut self, backend: &mut B, process: usize) {
+        if let Some(saved) = self.process_state.call_stacks.remove(&process) {
+            backend.restore_call_stack(&saved.stack);
+            self.stats.call_stack_restored_bytes += saved.stack.len() as u64;
+        }
+    }
+
+    /// Keep the frames of the calls `process` suspended inside until it
+    /// runs again, and clear its [`celox_design::ProcessSlots::call_top`].
+    /// A process that finished the simulation inside a call never resumes,
+    /// so its frames are dropped.
+    pub(super) fn save_call_stack(&mut self, backend: &mut B, process: usize) {
+        let Some(slot) = self.model.processes[process].call_top else {
+            return;
+        };
+        let top: u32 = backend.get_as(slot);
+        if top == 0 {
+            return;
+        }
+        let status: u8 = backend.get_as(self.model.processes[process].status);
+        if celox_design::ProcessStatus::from_code(status)
+            == Some(celox_design::ProcessStatus::Finish)
+        {
+            backend.set(slot, 0u32);
+            return;
+        }
+        let mut stack = Vec::with_capacity(top as usize);
+        backend.save_call_stack(top as usize, &mut stack);
+        backend.set(slot, 0u32);
+        self.stats.call_stack_saves += 1;
+        self.stats.call_stack_saved_bytes += u64::from(top);
+        let resume = backend.get_as(self.model.processes[process].resume);
+        self.process_state
+            .call_stacks
+            .insert(process, super::SavedCalls { resume, stack });
+    }
+
     pub(super) fn restore_activation(&mut self, backend: &mut B, process: usize) -> usize {
         if self.process_state.activations.is_empty() {
             if !self.model.processes.iter().any(|p| p.frame.is_some()) {
@@ -346,6 +386,7 @@ impl<B: SimBackend> SimulationState<B> {
         {
             self.cancel_semaphore_wait(process);
             self.cancel_mailbox_wait(process);
+            self.process_state.call_stacks.remove(&process);
         }
         let mut next = Some(process);
         while let Some(id) = next {
@@ -423,6 +464,22 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
         executor.retain_process_values(&values);
+        if !self.process_state.call_stacks.is_empty() {
+            let stacks: Vec<_> = self
+                .process_state
+                .call_stacks
+                .iter()
+                .map(|(&process, saved)| {
+                    let kernel = self
+                        .process_state
+                        .activations
+                        .get(process)
+                        .map_or(process, |activation| activation.kernel);
+                    (kernel, saved)
+                })
+                .collect();
+            executor.retain_call_stacks(&stacks);
+        }
     }
 
     pub(super) fn rebuild_activation_models(&mut self) {
