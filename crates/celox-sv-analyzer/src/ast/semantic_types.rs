@@ -157,6 +157,8 @@ pub(super) struct Supertypes {
     /// The interface classes the class implements, or that an interface
     /// class extends (8.26).
     pub interfaces: Arc<[TyId]>,
+    /// Whether the class is an interface class (8.26).
+    pub interface: bool,
 }
 
 /// A declaration's ID together with its immutable interned node. A cloned
