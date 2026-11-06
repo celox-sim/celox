@@ -1630,6 +1630,11 @@ pub struct SchedulerSlots<A> {
     /// The kernels ready to run in the current slot, one bit per kernel in
     /// kernel order.
     pub ready: A,
+    /// The kernels waiting for their wake time, one bit per kernel in kernel
+    /// order: those whose [`Self::waiting`] is set with a delay status. The
+    /// scheduler recomputes it when it enters and keeps it up to date as
+    /// kernels suspend, so a slot scans only the kernels that can be due.
+    pub timed: A,
     /// The time each process kernel resumes at, in kernel order, valid
     /// where [`Self::waiting`] is set and the kernel's status is a delay.
     pub wake: Vec<A>,
@@ -1671,6 +1676,7 @@ impl<A> SchedulerSlots<A> {
             levels: map(self.levels),
             unknown_levels: map(self.unknown_levels),
             ready: map(self.ready),
+            timed: map(self.timed),
             wake: self.wake.into_iter().map(&mut map).collect(),
             waiting: self.waiting.into_iter().map(&mut map).collect(),
             baseline: self.baseline.into_iter().map(&mut map).collect(),
@@ -1700,6 +1706,7 @@ impl<A> SchedulerSlots<A> {
             &self.levels,
             &self.unknown_levels,
             &self.ready,
+            &self.timed,
             &self.clock_next,
             &self.clock_period,
             &self.clock_value,

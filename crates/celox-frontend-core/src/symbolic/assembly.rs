@@ -3042,6 +3042,10 @@ fn declare_scheduler_slots(
             "ready".into(),
             process_count.next_multiple_of(TIME).max(TIME),
         ),
+        timed: declare(
+            "timed".into(),
+            process_count.next_multiple_of(TIME).max(TIME),
+        ),
         wake: (0..process_count)
             .map(|index| declare(format!("wake[{index}]"), TIME))
             .collect(),
