@@ -39,6 +39,7 @@ mod ordered;
 mod regions;
 mod slice;
 mod slot_observers;
+use slot_observers::AfterWrites;
 mod steps;
 mod testbench;
 mod waits;
@@ -268,6 +269,8 @@ pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool) {
     instrument_recording_functions(program, &schema.slots);
     let kernels = program.runtime.runtime_schema.processes.len();
     let mut lazy = false;
+    // The points exist only in a scheduler that can call the host.
+    let mut update_points = false;
     let (fallback, unit, events, clocks, kernel_events) =
         match Plan::new(program, &schema.slots, wiring_clocks) {
             Err(reason) => (
@@ -279,6 +282,7 @@ pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool) {
             ),
             Ok(plan) => {
                 lazy = plan.lazy.is_some();
+                update_points = schema.update_points && plan.service_function.is_some();
                 let fallback = plan.fallback.clone();
                 // Without kernels, slots of host clocks alone.
                 let unit = (plan.kernels.iter().any(Option::is_some)
@@ -323,6 +327,7 @@ pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool) {
         .as_mut()
         .expect("checked above");
     scheduler.fallback = fallback;
+    scheduler.update_points = update_points;
     scheduler.events = events;
     scheduler.clocks = clocks;
     scheduler.kernel_events = kernel_events;
@@ -1563,9 +1568,14 @@ impl Plan {
         );
         let retained = retained_storage(&sir.eval_comb, &storage, &retained_candidates);
         let mut eager_candidate_instructions = None;
+        // A host watching every update sees each settle as it happens.
+        let update_points = schema
+            .scheduler
+            .as_ref()
+            .is_some_and(|scheduler| scheduler.update_points);
         let eager = settle_reads
             .as_ref()
-            .filter(|_| !sir.eval_comb.iter().any(fails))
+            .filter(|_| !update_points && !sir.eval_comb.iter().any(fails))
             .and_then(|_| {
                 let stateful = sir.eval_comb_stateful.as_ref();
                 let eager = stateful.and_then(|stateful| {
@@ -2702,6 +2712,16 @@ impl Plan {
             );
         }
         let finish_exit = g.exit_block(SchedulerExit::Finish);
+        // A host that watches every update sees each kernel run, the host
+        // clocks a slot applies and each settle (IEEE 1800-2023 38.36.1).
+        let updates = self.service_function.filter(|_| {
+            program
+                .runtime
+                .runtime_schema
+                .scheduler
+                .as_ref()
+                .is_some_and(|scheduler| scheduler.update_points)
+        });
         let pick = g.b.new_block();
         let entry_done = pick;
         if let Some((armed, clocked)) = started {
@@ -2712,6 +2732,8 @@ impl Plan {
                 false_block: (entry_done, Vec::new()),
             });
             g.b.switch_to_block(apply);
+            // With several clocks the host sees each one's update.
+            let each_clock = updates.filter(|_| self.clocks.len() > 1);
             let values = g.load(slots.clock_value, clock_bits);
             let mut fired = g.constant(0, clock_bits);
             let mut edges = g.constant(0, self.event_bits);
@@ -2802,8 +2824,29 @@ impl Plan {
                     let edge = g.event_bit(edge, index);
                     edges = g.binary(self.event_bits, edges, BinaryOp::Or, edge);
                 }
-                let bit = g.bit_of(due, bit, clock_bits);
-                fired = g.binary(clock_bits, fired, BinaryOp::Or, bit);
+                let bit_set = g.bit_of(due, bit, clock_bits);
+                fired = g.binary(clock_bits, fired, BinaryOp::Or, bit_set);
+                // Each due clock is an update of its own, which its waits
+                // see before the host does: a callback that restores the
+                // level cannot hide the edge (as `step_round`). What the
+                // host writes settles after the last clock: a settle here
+                // would leave the batch's registers behind.
+                if let Some(service) = each_clock {
+                    g.if_bit(due, 0, |g| {
+                        let enabled = g.arena_header_load(std::mem::offset_of!(
+                            crate::simulator::native_io::ArenaHeader,
+                            observes_updates
+                        ));
+                        g.if_bit(enabled, 0, |g| g.check_waits_at(&checks, false));
+                        g.report_update(
+                            service,
+                            &checks,
+                            &self.events,
+                            finish_exit,
+                            AfterWrites::Settle,
+                        );
+                    });
+                }
             }
             // Judge all domains against the completed scheduled batch;
             // otherwise a preceding alias write consumes a later domain's edge.
@@ -2817,6 +2860,9 @@ impl Plan {
                 }
             }
             g.store_levels(levels);
+            // With the edges the host's writes at the clocks' updates gave.
+            let written = g.load(slots.exit_arg, self.event_bits);
+            let edges = g.binary(self.event_bits, edges, BinaryOp::Or, written);
             g.store(slots.exit_arg, self.event_bits, edges);
             let all = g.ones(clock_bits);
             let unfired = g.binary(clock_bits, fired, BinaryOp::Xor, all);
@@ -2835,6 +2881,15 @@ impl Plan {
                 g.b.switch_to_block(check);
                 g.check_waits_at(&checks, false);
             }
+        }
+        if let Some(service) = updates {
+            g.report_update(
+                service,
+                &checks,
+                &self.events,
+                finish_exit,
+                AfterWrites::Settled,
+            );
         }
         g.b.seal_block(SIRTerminator::Jump(entry_done, Vec::new()));
 
@@ -3088,11 +3143,22 @@ impl Plan {
 
             let finished = g.equals(status, code(ProcessStatus::Finish));
             let not_finished = g.b.new_block();
+            // A run that finishes the simulation made its updates all the
+            // same.
+            let finishes = match updates {
+                Some(_) => g.b.new_block(),
+                None => finish_exit,
+            };
             g.b.seal_block(SIRTerminator::Branch {
                 cond: finished,
-                true_block: (finish_exit, Vec::new()),
+                true_block: (finishes, Vec::new()),
                 false_block: (not_finished, Vec::new()),
             });
+            if let Some(service) = updates {
+                g.b.switch_to_block(finishes);
+                g.report_update(service, &checks, &[], finish_exit, AfterWrites::Ended);
+                g.b.seal_block(SIRTerminator::Jump(finish_exit, Vec::new()));
+            }
             g.b.switch_to_block(not_finished);
             let resumed = g.b.new_block();
             let done = g.equals(status, code(ProcessStatus::Done));
@@ -3205,6 +3271,15 @@ impl Plan {
                 }
             }
             g.b.switch_to_block(resumed);
+            if let Some(service) = updates {
+                g.report_update(
+                    service,
+                    &checks,
+                    &self.events,
+                    finish_exit,
+                    AfterWrites::Settled,
+                );
+            }
             if assertions {
                 // Observed predicates all finish before any Reactive action;
                 // design work produced by actions waits for the next Active pass.
@@ -3467,6 +3542,10 @@ impl Plan {
             self.batch(&mut g, &tracked, slot_end, finish_exit, &checks);
         } else {
             let staged: Vec<&Staged> = waits.iter().flat_map(|(_, wait)| &wait.sites).collect();
+            // A host that sees the updates of the wave can write a clock
+            // after its domains ran: the edge starts another wave.
+            let rewave = updates.map(|_| g.b.new_block());
+            let wave_end = rewave.map_or(slot_end, |_| g.b.new_block());
             let mask = g.load(slots.exit_arg, self.event_bits);
             let zero = g.constant(0, self.event_bits);
             let quiet = g.binary(1, mask, BinaryOp::Eq, zero);
@@ -3509,7 +3588,7 @@ impl Plan {
                     false_block: (slot_end, Vec::new()),
                 });
                 g.b.switch_to_block(publish_settle);
-                g.settle_then(slot_end);
+                g.settle_then(wave_end);
             }
 
             g.b.switch_to_block(triggered);
@@ -3651,6 +3730,12 @@ impl Plan {
             // The domains' results and the nonblocking values publish before
             // combinational logic settles.
             g.b.switch_to_block(evaluated);
+            if rewave.is_some() {
+                // The edges are consumed: what remains at the end of the
+                // wave the host wrote after them.
+                let zero = g.constant(0, self.event_bits);
+                g.store(slots.exit_arg, self.event_bits, zero);
+            }
             g.publish(&staged);
             g.publish_service(
                 self.service_function
@@ -3658,8 +3743,29 @@ impl Plan {
                 &checks,
             );
             match &self.lazy {
-                Some(lazy) => g.eager_then(&lazy.eager, slot_end),
-                None => g.settle_then(slot_end),
+                Some(lazy) => g.eager_then(&lazy.eager, wave_end),
+                None => g.settle_then(wave_end),
+            }
+            if let Some(rewave) = rewave {
+                g.b.switch_to_block(wave_end);
+                let edges = g.load(slots.exit_arg, self.event_bits);
+                let zero = g.constant(0, self.event_bits);
+                let quiet = g.binary(1, edges, BinaryOp::Eq, zero);
+                g.b.seal_block(SIRTerminator::Branch {
+                    cond: quiet,
+                    true_block: (slot_end, Vec::new()),
+                    false_block: (rewave, Vec::new()),
+                });
+                // Another pass judges them, as after the host clocks of
+                // the slot, against the levels now.
+                g.b.switch_to_block(rewave);
+                let mut levels = g.no_levels();
+                for (bit, &event) in tracked.iter().enumerate() {
+                    let level = g.level(&self.events[event]);
+                    levels = g.with_level(levels, level, bit);
+                }
+                g.store_levels(levels);
+                g.b.seal_block(SIRTerminator::Jump(pick, Vec::new()));
             }
         }
 
@@ -3904,7 +4010,12 @@ impl Plan {
         let unknown = g.constant(celox_design::SCHEDULER_NEXT_UNJUDGED, SCHEDULER_TIME_WIDTH);
         g.store(slots.next, SCHEDULER_TIME_WIDTH, unknown);
         g.b.seal_block(SIRTerminator::Jump(stopped, Vec::new()));
-        g.emit_settle(&program.sir.eval_comb, finish_exit, internal_exit);
+        g.emit_settle(
+            &program.sir.eval_comb,
+            finish_exit,
+            internal_exit,
+            updates.map(|service| (service, &checks[..], &self.events[..])),
+        );
         if let Some(lazy) = &self.lazy {
             g.emit_eager(&lazy.eager, finish_exit, internal_exit);
         }
@@ -5697,8 +5808,13 @@ impl Generator<'_> {
         units: &[Unit],
         finish_exit: celox_sir::BlockId,
         internal_exit: celox_sir::BlockId,
+        updates: Option<(u32, &[WaitCheck<'_>], &[Event])>,
     ) {
         self.b.switch_to_block(self.comb);
+        // The updates the settle follows, then its own.
+        if let Some((service, checks, events)) = updates {
+            self.report_update(service, checks, events, finish_exit, AfterWrites::Settle);
+        }
         self.observers_before(internal_exit);
         if self.settle_reads.is_some() {
             let dirty = self.load(self.slots.dirty, SCHEDULER_FLAG_WIDTH);
@@ -5756,6 +5872,16 @@ impl Generator<'_> {
                 .is_some_and(|cone| cone.units.iter().any(|unit| self.unit_finishes(unit)))
         {
             self.check_finish(finish_exit);
+        }
+        if let Some((service, checks, events)) = updates {
+            let comb = self.comb;
+            self.report_update(
+                service,
+                checks,
+                events,
+                finish_exit,
+                AfterWrites::Again(comb),
+            );
         }
         let targets = self.continuations.clone();
         self.dispatch_continuations(&targets, internal_exit);

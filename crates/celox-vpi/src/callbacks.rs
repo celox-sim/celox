@@ -732,6 +732,18 @@ impl celox::SlotObserver<celox::NativeBackend> for TimedObserver {
             settled_regions();
         });
     }
+
+    fn observes_updates(&self) -> bool {
+        true
+    }
+
+    /// A value change callback runs after each update that may change its
+    /// object (IEEE 1800-2023 38.36.1).
+    fn after_update(&mut self, io: &mut celox::SlotIo<'_, celox::NativeBackend>, time: u64) {
+        in_slot(io, time, || {
+            dispatch_value_changes();
+        });
+    }
 }
 
 /// Run `regions` with the VPI entry points reaching the state through `io`.
