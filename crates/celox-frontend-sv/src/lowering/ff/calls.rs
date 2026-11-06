@@ -33,6 +33,9 @@ pub(super) struct FrameContext {
     /// The first variable the lowering of the unit created: those from it
     /// on that the unit touches are slots of its frame.
     start: SourceVarId,
+    /// Whether its automatic unpacked arrays stay module variables (see
+    /// `ProcModule::single_activation`); otherwise they are slots.
+    single: bool,
 }
 
 /// The resume slots of a resumable unit being lowered, and its resume
@@ -212,6 +215,12 @@ impl Ff<'_, '_> {
                 .find(|(formal, _, _)| *formal == param.name)
             {
                 let name = actual_names.get(&param.name)?;
+                // An array in the frame of this activation has no place a
+                // call can pass: the call stays inlined, where the formal
+                // names the slot.
+                if self.frame_array(target, name) {
+                    return None;
+                }
                 if self.frame_variable(target, name) {
                     if !copied.insert(target) {
                         return None;
@@ -282,18 +291,30 @@ impl Ff<'_, '_> {
     }
 
     /// Whether variable `id`, named `name`, is an automatic of the unit
-    /// being lowered, which is a slot of its frame: an automatic of a
-    /// subroutine whose body it expands, or a variable its lowering
-    /// created.
+    /// being lowered that a call copies into a callee's frame and back (see
+    /// [`Place::Frame`]): one that is not an unpacked array, which is a
+    /// module variable that a callee names, or a slot (see
+    /// [`Self::frame_array`]).
     fn frame_variable(&self, id: SourceVarId, name: &str) -> bool {
+        self.m.var(id).array_dims.is_empty() && self.automatic_of_unit(id, name)
+    }
+
+    /// Whether variable `id`, named `name`, is an automatic unpacked array
+    /// that is a slot of the frame of the unit being lowered: one of a unit
+    /// that can have several live activations.
+    fn frame_array(&self, id: SourceVarId, name: &str) -> bool {
+        !self.m.var(id).array_dims.is_empty()
+            && self.frame.as_ref().is_some_and(|frame| !frame.single)
+            && self.automatic_of_unit(id, name)
+    }
+
+    /// Whether variable `id`, named `name`, is an automatic of the unit
+    /// being lowered: a slot of its own, an automatic of a subroutine whose
+    /// body it expands, or a variable its lowering created.
+    fn automatic_of_unit(&self, id: SourceVarId, name: &str) -> bool {
         let Some(frame) = &self.frame else {
             return false;
         };
-        // An automatic unpacked array of the unit stays a module variable
-        // (see `ProcModule::single_activation`), which a callee names.
-        if !self.m.var(id).array_dims.is_empty() {
-            return false;
-        }
         let own = self
             .m
             .calls
@@ -550,6 +571,7 @@ impl Ff<'_, '_> {
             renames,
             aliases,
             start,
+            single,
         };
         let lowered = Ff::new(&mut *self.m, 0).lower_function_unit(subroutine, frame);
         let functions = self.m.out_of_line().expect("lowering out of line");

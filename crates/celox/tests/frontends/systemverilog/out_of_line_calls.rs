@@ -1025,6 +1025,46 @@ endmodule
 }
 
 #[test]
+fn frame_arrays_passed_by_ref_stay_in_their_frames() {
+    // `walk` recurses, so its array is a slot of each activation's frame.
+    // Passed by `ref`, it has no place a call can pass, so the calls of
+    // `fill` and `total`, which only reads it, stay inlined into `walk`'s
+    // unit and name the slot: each activation keeps its own elements across
+    // the recursive call.
+    let source = r#"module Top(output int a, output int b);
+    function automatic void fill(ref int target[3], input int n);
+        foreach (target[i]) target[i] = n * 10 + i;
+    endfunction
+    function automatic int total(ref int target[3]);
+        return target[0] + target[1] + target[2];
+    endfunction
+    function automatic int walk(int n);
+        int q[3];
+        int k;
+        fill(q, n);
+        k = n > 0 ? walk(n - 1) : 0;
+        return total(q) + k;
+    endfunction
+    int one = 1;
+    initial begin
+        a = walk(one + 1);
+        b = walk(one + 2);
+    end
+endmodule
+"#;
+    assert_eq!(function_units(source, true), 1);
+    for four_state in [false, true] {
+        for backend in backends() {
+            assert_eq!(
+                simulate(source, four_state, true, backend, 0, &["a", "b"]),
+                Ok(vec![value(99), value(192)]),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+}
+
+#[test]
 fn heap_operations_go_out_of_line() {
     // Queue concatenation, array locators, streaming of dynamically sized
     // data, new events, the random and constraint modes and the constraint
