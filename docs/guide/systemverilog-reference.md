@@ -1258,6 +1258,22 @@ other than names and data types, such as `$typename(a + b)`. Simulators
 differ in this spelling; Verilator, Icarus and xezim each deviate from 20.6.1
 (see the [suite limitations](https://github.com/celox-sim/celox/blob/master/crates/celox-test-suite/LIMITATIONS.md)).
 
+
+### Type operator
+
+`var type(e)` and `var type(data_type)` (IEEE 1800-2023 6.23) declare
+variables: `var type(a + b) c;` declares `c` with the self-determined type of
+`a + b`, an integral vector of its width and signing, `real`, `shortreal` or
+`string`, which is not evaluated; a variable keeps its declared type, an
+enumeration or struct among them. Without `var` the declaration is rejected.
+Comparing two type references with `==`, `!=`, `===` or `!==` is a constant
+that tells whether the types match (6.22.1), also in a parameter or a generate
+condition, and a `case` statement or case generate construct on a type
+reference selects its first matching arm at elaboration. A type reference
+compared with a value, range items in a `case` on a type, and a type operator
+applied to an expression that reads a port, or to any expression in a
+generate block, are rejected.
+
 ### System functions called as statements
 
 System functions called as statements, such as `$countones(f(a));`, are

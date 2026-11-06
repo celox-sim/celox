@@ -2423,6 +2423,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             &self.dims.const_env,
             &self.type_aliases,
             None,
+            Some(&self.dims),
         )?;
         let mut stmts = Vec::new();
         for (mut signal, assignment) in

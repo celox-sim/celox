@@ -740,6 +740,14 @@ fn bind_value_in(
                         permits.grant_if(operator == "!", *expression);
                         (Finish::Unary(operator.clone()), vec![(*expression, None)])
                     }
+                    // A comparison of type references is a constant
+                    // (IEEE 1800-2023 6.23).
+                    ExprKind::Binary { .. } if type_references::compares(id, native) => {
+                        values.push(type_references::comparison(
+                            tree, session, id, native, dimensions,
+                        )?);
+                        continue;
+                    }
                     ExprKind::Binary {
                         left,
                         operator,

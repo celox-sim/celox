@@ -166,6 +166,17 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "types::type_operator at 912:3: assert_eq hits: expected 0xff, got 0xef",
+      "expectation": "Simulation",
+      "name": "types::type_operator",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }
