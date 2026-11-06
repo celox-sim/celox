@@ -138,14 +138,27 @@ impl Ff<'_, '_> {
             let function = &functions.functions[index];
             let in_frame = storage.iter().all(|&id| function.slot(id).is_some());
             let touched = functions.transitive(index);
-            let private = touched.is_none_or(|(reads, writes)| {
-                reads.iter().chain(&writes).any(|&id| self.m.is_hidden(id))
+            let private = touched.as_ref().is_none_or(|(reads, writes)| {
+                reads.iter().chain(writes).any(|&id| self.m.is_hidden(id))
             });
             if !in_frame || private {
                 self.record_outcome(
                     name,
                     Outcome::Inlined(Reason::Other(
                         "static storage in a combinational process".to_string(),
+                    )),
+                );
+                return Ok(None);
+            }
+            // The process's outputs are the variables its own statements
+            // assign: a function may write only the static storage of
+            // subroutines, which the process does not own.
+            let persistent = self.m.static_storage();
+            if touched.is_some_and(|(_, writes)| writes.iter().any(|id| !persistent.contains(id))) {
+                self.record_outcome(
+                    name,
+                    Outcome::Inlined(Reason::Other(
+                        "module state in a combinational process".to_string(),
                     )),
                 );
                 return Ok(None);
@@ -661,10 +674,12 @@ impl Ff<'_, '_> {
             }
             slots.push(self.slot_of(id));
         }
-        // Static storage of subroutines is the only module state a function
-        // may write: it is shared by every call, inlined or not. Assembly
-        // instruments the stores into what is observed, which only the
-        // stores of the units the runtime runs can be.
+        // A function may write the module's variables, static storage of
+        // subroutines and static class properties among them, which every
+        // call shares, inlined or not; not the hidden ones the lowering
+        // keeps for a process, nor what is observed: assembly instruments
+        // the stores into that, which only the stores of the units the
+        // runtime runs can be.
         let persistent = self.m.static_storage();
         let frame: HashMap<SourceVarId, (usize, SourceVarId)> = slots
             .iter()
@@ -713,8 +728,11 @@ impl Ff<'_, '_> {
                 } else if addr.region != STABLE_REGION {
                     return Err(other("non-stable state access"));
                 } else if store {
-                    if !persistent.contains(&addr.var_id) && !staging.contains(&addr.var_id) {
-                        return Err(other("writes module state"));
+                    if self.m.is_hidden(addr.var_id)
+                        && !persistent.contains(&addr.var_id)
+                        && !staging.contains(&addr.var_id)
+                    {
+                        return Err(other("writes hidden module state"));
                     }
                     if self.m.is_observed(addr.var_id) {
                         return Err(other("stores into observed storage"));

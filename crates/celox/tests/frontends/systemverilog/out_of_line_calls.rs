@@ -395,8 +395,8 @@ endmodule
 #[test]
 fn ineligible_subroutines_stay_inlined() {
     // A `ref` formal keeps a subroutine inlined, and a host request that a
-    // unit cannot make (a process method, which acts on the calling
-    // process) keeps it inlined with every subroutine that calls it;
+    // unit cannot make (`status`, a process method that a level wait may
+    // observe) keeps it inlined with every subroutine that calls it;
     // `plain` still goes out of line.
     let source = r#"module Top(output int a, output int b, output int c);
     function automatic void bump(ref int v);
@@ -404,7 +404,7 @@ fn ineligible_subroutines_stay_inlined() {
     endfunction
     function automatic int shout(int v);
         process p = process::self();
-        return v + (p == null ? 0 : 1);
+        return v + (p.status() == process::RUNNING ? 1 : 0);
     endfunction
     function automatic int via_shout(int v);
         return shout(v) * 2;
@@ -1236,6 +1236,129 @@ module Top(output int a, output int b, output int c, output int d);
 endmodule
 "#;
     same_as_inlined(source, 3, 4, &["a", "b", "c", "d"]);
+}
+
+#[test]
+fn process_methods_suspend_through_function_units() {
+    // `process::self()`, the RNG state of a process and a new semaphore are
+    // host requests a unit makes by suspending. `keep_rng` saves the RNG
+    // state of its process around a construction that draws on it, as UVM
+    // does, and draws in between; `reseed` seeds the process; `same` gets
+    // a handle passed in; `make` returns a semaphore the process then
+    // takes keys of. Two processes and a fork call them, so each request
+    // reads the RNG of the process that made it, which a caller holds
+    // while its call is suspended.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c, output int d, output int e);
+    class Item;
+        int v;
+        function new();
+            v = $urandom % 1000;
+        endfunction
+    endclass
+    function automatic int keep_rng(int n);
+        process p = process::self();
+        string state = p.get_randstate();
+        Item item = new;
+        int first = $urandom % 1000;
+        p.set_randstate(state);
+        item = new;
+        return n + (first == $urandom % 1000 ? item.v : -1);
+    endfunction
+    function automatic int reseed(int seed);
+        process p = process::self();
+        p.srandom(seed);
+        return $urandom % 1000;
+    endfunction
+    function automatic bit same(process q);
+        return process::self() == q;
+    endfunction
+    function automatic semaphore make(int keys);
+        semaphore s = new(keys);
+        return s;
+    endfunction
+    function automatic int nested(int n);
+        process p = process::self();
+        string state = p.get_randstate();
+        int x = keep_rng(n);
+        p.set_randstate(state);
+        return x + keep_rng(n + 1) + $urandom % 10;
+    endfunction
+    int one = 1;
+    initial begin
+        process p = process::self();
+        semaphore s = make(one + 1);
+        a = keep_rng(one) + reseed(one + 4);
+        b = same(p) + 2 * s.try_get(2) + 4 * s.try_get(1);
+        #1 c = nested(one + 1);
+        fork
+            d = keep_rng(one + 2) + reseed(one + 8);
+        join
+    end
+    initial begin
+        #2 e = nested(one) + reseed(one + 4);
+    end
+endmodule
+"#;
+    same_as_inlined(source, 6, 3, &["a", "b", "c", "d", "e"]);
+}
+
+#[test]
+fn functions_write_static_class_properties_and_module_variables() {
+    // UVM's constructors count their instances in a static property and
+    // its singletons keep theirs in one: writes no other process observes
+    // go out of line. `touch` writes what a continuous assignment reads,
+    // which assembly instruments, and stays inlined; `logged` writes a
+    // variable that the `always_comb` process calling it owns as an output,
+    // so it stays inlined too.
+    let source = r#"module Top(output int a, output int b, output int c, output int d, output int f);
+    class Counter;
+        static int count = 0;
+        static Counter inst;
+        int id;
+        function new();
+            id = count++;
+        endfunction
+        static function void set(Counter c);
+            inst = c;
+        endfunction
+        static function Counter get();
+            if (inst == null) begin
+                Counter made = new;
+                set(made);
+            end
+            return inst;
+        endfunction
+    endclass
+    int log_count;
+    function automatic void note(int n);
+        log_count += n;
+    endfunction
+    int seen;
+    function automatic void touch(int n);
+        seen = n;
+    endfunction
+    assign d = seen + 1;
+    int comb_log;
+    function automatic int logged(int n);
+        comb_log = n;
+        return n + 1;
+    endfunction
+    always_comb f = logged(a);
+    initial begin
+        Counter x = Counter::get();
+        Counter y = new;
+        Counter z = Counter::get();
+        note(y.id + 2);
+        note(y.id + 3);
+        touch(y.id + 5);
+        a = y.id;
+        b = x == z ? Counter::count : -1;
+        c = log_count;
+    end
+endmodule
+"#;
+    same_as_inlined(source, 4, 0, &["a", "b", "c", "d", "f"]);
 }
 
 #[test]
