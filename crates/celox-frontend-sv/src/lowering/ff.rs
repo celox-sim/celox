@@ -8343,15 +8343,45 @@ impl Ff<'_, '_> {
         }) {
             return Err(unsupported("wait condition reading a static task argument"));
         }
-        // A write of a class property does not wake a waiting process yet, so
-        // a condition that reads one would never be checked again.
-        if let Some(op) = heap_read(self.m, condition) {
-            return Err(unsupported(format!("{op} in a wait condition")));
+        // A store of a class property bumps its change count, which the
+        // wait watches; a property without one, such as in a design whose
+        // waits were not collected, or a random mode, is never checked again.
+        let mut changes = Vec::new();
+        let reads = heap_reads(|name| self.m.subroutine(name), condition);
+        // A store of the same property of another object, or of its own
+        // value, or a `randomize` checks the condition again: it must be a
+        // value of what it reads, so that an extra evaluation is invisible.
+        if !reads.is_empty()
+            && let Some(name) = impure_call_reading(self.m, condition, |op| {
+                matches!(
+                    op,
+                    sv::ir::ObjectOp::Load(_)
+                        | sv::ir::ObjectOp::ClassOf
+                        | sv::ir::ObjectOp::Box(_)
+                        | sv::ir::ObjectOp::Locator(_)
+                        | sv::ir::ObjectOp::Concat(_)
+                ) || matches!(op, sv::ir::ObjectOp::Container { op, .. } if !op.mutates())
+            })
+        {
+            return Err(unsupported(format!(
+                "{name} in a wait condition that reads a class property"
+            )));
+        }
+        for op in reads {
+            match &op {
+                sv::ir::ObjectOp::Load(field)
+                    if let Some(id) = self.m.id(&property_changes(field.key)) =>
+                {
+                    changes.push(id);
+                }
+                _ => return Err(unsupported(format!("{op} in a wait condition"))),
+            }
         }
         let mut ids: Vec<_> = names
             .iter()
             .filter_map(|name| self.m.id(name))
             .filter(|&id| !self.m.is_hidden(id) || (self.forked && self.frame_locals.contains(&id)))
+            .chain(changes)
             .collect();
         ids.sort_unstable();
         ids.dedup();
@@ -8594,18 +8624,22 @@ fn subroutine_reads(pm: &ProcModule<'_>, expr: &sv::ir::Expr, names: &mut HashSe
     }
 }
 
-/// The name of an operation in `expr` that reads the class object heap,
-/// directly or through the functions it calls: a class property, or the
-/// random mode of one. Container contents are values of their handles. The
-/// default of an argument counts only where a call omits the argument.
-fn heap_read(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
+/// The operations in `expr` that read the class object heap, directly or
+/// through the functions it calls, which `subroutine` finds by name: class
+/// properties, and the random modes of them. Container contents are values
+/// of their handles. The default of an argument counts only where a call
+/// omits the argument.
+pub(super) fn heap_reads<'a>(
+    subroutine: impl Fn(&str) -> Option<&'a sv::ir::Subroutine>,
+    expr: &sv::ir::Expr,
+) -> Vec<sv::ir::ObjectOp> {
+    let mut reads = Vec::new();
     let mut pending = vec![expr.clone()];
     let mut calls = Vec::new();
     let mut visited = HashSet::default();
     let mut defaults = HashSet::default();
     loop {
         while let Some(expr) = pending.pop() {
-            let mut found = None;
             expr_calls(&expr, &mut |callee| {
                 if let sv::ir::Callee::Object(op) = callee
                     && matches!(
@@ -8614,21 +8648,21 @@ fn heap_read(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
                             | sv::ir::ObjectOp::ModeGet(..)
                             | sv::ir::ObjectOp::ConstraintModeGet(_)
                     )
+                    && !reads.contains(&**op)
                 {
-                    found.get_or_insert(op.to_string());
+                    reads.push((**op).clone());
                 }
                 false
             });
-            if let Some(op) = found {
-                return Some(op);
-            }
             collect_calls(&expr, &mut calls);
         }
-        let (callee, args) = calls.pop()?;
+        let Some((callee, args)) = calls.pop() else {
+            return reads;
+        };
         let sv::ir::Callee::Subroutine(name) = callee else {
             continue;
         };
-        let Some(subroutine) = pm.subroutine(&name) else {
+        let Some(subroutine) = subroutine(&name) else {
             continue;
         };
         for (position, param) in subroutine.params.iter().enumerate() {
@@ -8654,10 +8688,79 @@ fn heap_read(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
     }
 }
 
+/// The keys of the class properties that the level waits of `module` read
+/// (IEEE 1800-2023 9.4.3), in its processes and subroutines: a store of
+/// one of them must wake the waits (see [`property_changes`]).
+pub(crate) fn watched_properties(
+    module: &sv::ir::Module,
+    keys: &mut std::collections::BTreeSet<u32>,
+) {
+    let subroutine = |name: &str| {
+        module
+            .subroutines()
+            .iter()
+            .find(|subroutine| subroutine.name == name)
+    };
+    let mut conditions = Vec::new();
+    let mut visit = |stmts: &[sv::ir::Stmt]| {
+        for stmt in stmts {
+            stmt.walk(&mut |stmt| {
+                if let sv::ir::Stmt::Wait(condition) = stmt {
+                    conditions.push(condition.clone());
+                }
+            });
+        }
+    };
+    for process in module.initial_processes() {
+        visit(process.body());
+    }
+    for process in module.ff_processes() {
+        visit(process.body());
+    }
+    for process in module.comb_processes() {
+        visit(process.body());
+    }
+    for subroutine in module.subroutines() {
+        visit(&subroutine.body);
+    }
+    for condition in &conditions {
+        for op in heap_reads(subroutine, condition) {
+            if let sv::ir::ObjectOp::Load(field) = op
+                && field.key != 0
+            {
+                keys.insert(field.key);
+            }
+        }
+    }
+}
+
+/// The name of the variable that counts the stores of the class property
+/// with key `key`, which the level waits that read the property watch: a
+/// variable of the package [`PROPERTY_CHANGES`], shared by every module.
+pub(crate) fn property_changes(key: u32) -> String {
+    format!("$property_changes@{key:08x}")
+}
+
+/// The package that holds the [`property_changes`] variables.
+pub(crate) const PROPERTY_CHANGES: &str = "$property_changes";
+
+/// Bits of a [`property_changes`] variable.
+pub(crate) const PROPERTY_CHANGES_WIDTH: usize = 32;
+
 /// The name of a call in `expr` that has an effect or reads the state of the
 /// simulation, directly or through the functions it calls: an event
 /// expression must be a value of the variables it reads.
 fn impure_call(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
+    impure_call_reading(pm, expr, |_| false)
+}
+
+/// [`impure_call`], where object operation `op` is a value of what it
+/// reads when `reads(op)`, besides container element reads.
+fn impure_call_reading(
+    pm: &ProcModule<'_>,
+    expr: &sv::ir::Expr,
+    reads: impl Fn(&sv::ir::ObjectOp) -> bool,
+) -> Option<String> {
     let mut pending = vec![expr.clone()];
     let mut visited = HashSet::default();
     while let Some(expr) = pending.pop() {
@@ -8689,7 +8792,8 @@ fn impure_call(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
                             op: sv::ir::ContainerOp::Get,
                             ..
                         } | sv::ir::ObjectOp::Unbox(_)
-                    ) || matches!(*op, sv::ir::ObjectOp::Load(field) if field.nullable) =>
+                    ) || matches!(*op, sv::ir::ObjectOp::Load(field) if field.nullable)
+                        || reads(&op) =>
                 {
                     continue;
                 }

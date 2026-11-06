@@ -1093,10 +1093,12 @@ pub(super) fn shared_class(
                     });
                 }
                 for leaf in aggregate.leaves() {
-                    let field = field(&tree.functions, &leaf.r#type, env, size)?;
+                    let mut field = field(&tree.functions, &leaf.r#type, env, size)?;
                     size = field.offset + field.storage();
+                    let leaf_name = leaf.name(&property_name);
+                    field.key = property_key(name, &leaf_name);
                     properties.push(Property {
-                        name: leaf.name(&property_name),
+                        name: leaf_name,
                         owner: name.to_owned(),
                         constant: false,
                         local: property.qualifiers.local,
@@ -1125,8 +1127,9 @@ pub(super) fn shared_class(
             }
             let owner = name.to_owned();
             let name = property_name;
-            let field = field(&tree.functions, &ty, env, size)?;
+            let mut field = field(&tree.functions, &ty, env, size)?;
             size = field.offset + field.storage();
+            field.key = property_key(&owner, &name);
             properties.push(Property {
                 name,
                 owner,
@@ -1560,7 +1563,21 @@ pub(super) fn field(
             ),
         nullable: false,
         real: matches!(ty.kind(), TypeKind::Real | TypeKind::Shortreal),
+        key: 0,
     })
+}
+
+/// The [`ObjectField::key`] of property `property` that class `owner`
+/// declares: an FNV-1a hash, never 0.
+fn property_key(owner: &str, property: &str) -> u32 {
+    let hash = owner
+        .bytes()
+        .chain(std::iter::once(b'.'))
+        .chain(property.bytes())
+        .fold(0x811c_9dc5u32, |hash, byte| {
+            (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+        });
+    hash.max(1)
 }
 
 /// A run-time identifier of class `name`: an FNV-1a hash, never 0, which

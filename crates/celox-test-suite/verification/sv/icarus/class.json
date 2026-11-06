@@ -2236,6 +2236,28 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 9; see <case>/build.log\n<case>/source_0.sv:22: sorry: Constraint declarations not supported.\n<case>/source_0.sv:28: syntax error\n<case>/source_0.sv:28: Syntax in assignment statement l-value.\n<case>/source_0.sv:42: syntax error\n<case>/source_0.sv:42: error: Malformed statement\n<case>/testbench.sv:50: syntax error\n<case>/testbench.sv:50: error: Syntax error in task/function port declaration.\n<case>/testbench.sv:51: syntax error\n<case>/testbench.sv:51: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::waits_on_instance_properties",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:19: internal error: Empty NexusSet from wait expression.\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "class::waits_on_properties_in_package_subroutines",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus 13.0 compiles a `wait` on a static class property in a class task but vvp cannot load the result (\"unresolved vvp_net reference\", \"Program not runnable\"). IEEE 1800-2023 8.9 and 9.4.3 make the property one variable that the wait watches. Verilator 5.052 and xezim 0.11.3 pass the case.",
       "expectation": "Simulation",
       "known_issue": {

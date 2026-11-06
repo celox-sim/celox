@@ -4841,6 +4841,7 @@ fn dispatch_body(
             four_state: false,
             nullable: false,
             real: false,
+            key: 0,
         }),
         vec![this.clone()],
     );

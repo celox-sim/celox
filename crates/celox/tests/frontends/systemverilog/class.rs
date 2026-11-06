@@ -8,6 +8,8 @@ sv_backends! {
     fn class_imported_member_type_inheritance(sim) { @case "class::imported_member_type_inheritance"; }
     fn class_package_constant_class_defaults(sim) { @case "class::package_constant_class_defaults"; }
     fn class_waits_on_static_properties(sim) { @case "class::waits_on_static_properties"; }
+    fn class_waits_on_instance_properties(sim) { @case "class::waits_on_instance_properties"; }
+    fn class_waits_on_properties_in_package_subroutines(sim) { @case "class::waits_on_properties_in_package_subroutines"; }
     fn class_package_constant_type_arguments(sim) { @case "class::package_constant_type_arguments"; }
     fn class_named_aggregate_type_arguments(sim) { @case "class::named_aggregate_type_arguments"; }
     fn class_enumeration_constants_of_classes(sim) { @case "class::enumeration_constants_of_classes"; }
@@ -754,12 +756,42 @@ fn two_state_members_of_packed_structure_properties_drop_unknown_bits() {
     assert_eq!((value, mask), (BigUint::from(1u8), BigUint::from(0u8)));
 }
 
-/// A write of a class property does not wake a process waiting on it, so a
-/// wait whose condition reads one is rejected instead of never waking. The
-/// condition reads it in a method through `this`, through a handle, through
-/// a queue held in a property and through a function.
+/// A store of a class property wakes a process waiting on it (IEEE
+/// 1800-2023 9.4.3), whose condition reads it in a method through `this`,
+/// through a handle, through a queue held in a property and through a
+/// function. The random mode of a property has no such count, so a wait on
+/// it is rejected instead of never waking. A store of the same property of
+/// another object or of its own value checks the condition again, so a
+/// condition that reads a property must be a value of what it reads: one
+/// with an effect or reading a mailbox or the time is rejected.
 #[test]
-fn waits_on_class_properties_are_unsupported() {
+fn waits_on_class_properties_wake_on_stores() {
+    let source = |wait: &str| {
+        format!(
+            "`timescale 1ns/1ns
+            class C;
+                int m_state;
+                int q[$];
+                rand int r;
+                int calls;
+                mailbox #(int) mb = new;
+                C other;
+                function bit reached(int s); return m_state >= s; endfunction
+                function bit counted(int s); calls++; return m_state >= s; endfunction
+                task wait_for(int s); {wait} endtask
+            endclass
+            module Top(output int t);
+                initial begin
+                    automatic C c = new;
+                    c.other = c;
+                    fork
+                        begin c.wait_for(2); t = $time; end
+                        begin #1 c.m_state = 1; #1 c.m_state = 2; c.q.push_back(1); end
+                    join
+                end
+            endmodule"
+        )
+    };
     let waits = [
         "wait (m_state >= s);",
         "wait (other.m_state >= s);",
@@ -767,25 +799,7 @@ fn waits_on_class_properties_are_unsupported() {
         "wait (reached(s));",
     ];
     for wait in waits {
-        let source = format!(
-            "class C;
-                int m_state;
-                int q[$];
-                C other;
-                function bit reached(int s); return m_state >= s; endfunction
-                task wait_for(int s); {wait} $display(\"reached %0d at %0d\", s, $time); endtask
-            endclass
-            module Top;
-                initial begin
-                    automatic C c = new;
-                    c.other = c;
-                    fork
-                        c.wait_for(2);
-                        begin #1 c.m_state = 1; #1 c.m_state = 2; c.q.push_back(1); end
-                    join
-                end
-            endmodule"
-        );
+        let source = source(wait);
         for four_state in [false, true] {
             let builder = || {
                 celox::Simulation::from_sv_sources(
@@ -794,24 +808,52 @@ fn waits_on_class_properties_are_unsupported() {
                 )
                 .four_state(four_state)
             };
-            let errors = [
-                builder().build_native().err(),
-                builder().build_cranelift().err(),
-                builder().build_wasm().err(),
-                builder().build_interpreter().err(),
-            ];
-            for error in errors {
-                let error = error
-                    .unwrap_or_else(|| panic!("{wait} must be rejected"))
-                    .to_string();
-                assert!(error.contains("in a wait condition"), "{wait}: {error}");
+            fn check<B: celox::SimBackend>(
+                sim: Result<celox::Simulation<B>, celox::SimulatorError>,
+                case: &str,
+            ) {
+                let mut sim = sim.unwrap_or_else(|error| panic!("{case}: {error}"));
+                sim.run_until(5).unwrap();
+                let t = sim.signal("t");
+                assert_eq!(sim.get(t), BigUint::from(2u8), "{case}");
             }
+            let case = format!("{wait}, four-state {four_state}");
+            check(builder().build_native(), &case);
+            check(builder().build_cranelift(), &case);
+            check(builder().build_wasm(), &case);
+            check(builder().build_interpreter(), &case);
         }
+    }
+    for (wait, construct) in [
+        ("wait (r.rand_mode() == 0);", "in a wait condition"),
+        (
+            "wait (counted(s));",
+            "property write in a wait condition that reads a class property",
+        ),
+        (
+            "wait (mb.num() > 0);",
+            "in a wait condition that reads a class property",
+        ),
+        (
+            "wait (m_state >= s && $time > 0);",
+            "$time in a wait condition that reads a class property",
+        ),
+    ] {
+        let source = source(wait);
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build_interpreter()
+        .expect_err(wait)
+        .to_string();
+        assert!(error.contains(construct), "{wait}: {error}");
     }
 }
 
 /// The default of an argument is read only where a call omits the argument,
-/// so a property-reading default does not reject a wait that supplies it.
+/// so a wait that supplies it wakes on the argument, and one that omits it
+/// on stores of the property the default reads.
 #[test]
 fn waits_read_property_defaults_only_when_omitted() {
     let source = |call: &str| {
@@ -840,15 +882,15 @@ fn waits_read_property_defaults_only_when_omitted() {
     sim.run_until(5).unwrap();
     let seen = sim.signal("seen");
     assert_eq!(sim.get(seen), BigUint::from(2u8));
-    let omitted = source("ready()");
-    let Err(error) =
+    // A default that reads a property makes the wait watch the property.
+    let omitted = source("ready()").replace("#2 signal = 1;", "#3 c.state = 1;");
+    let mut sim =
         celox::Simulation::from_sv_sources(vec![(omitted.as_str(), Path::new("class.sv"))], "Top")
             .build_interpreter()
-    else {
-        panic!("a wait reading a property through a default is rejected");
-    };
-    let error = error.to_string();
-    assert!(error.contains("in a wait condition"), "{error}");
+            .unwrap();
+    sim.run_until(5).unwrap();
+    let seen = sim.signal("seen");
+    assert_eq!(sim.get(seen), BigUint::from(3u8));
 }
 
 /// The defaults of a method use the object it is called on, as the call
