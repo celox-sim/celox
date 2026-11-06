@@ -4330,6 +4330,19 @@ pub(super) fn lower_subroutine(
                         &builder.dims,
                         builder.session,
                     )?;
+                    // That of a class handle formal, a handle its class
+                    // takes (8.16).
+                    if let Some(class) = ty.class().filter(|_| ty.unpacked_ranges.is_empty()) {
+                        expression_binding::check_handle_assignment(
+                            tree,
+                            builder.session,
+                            root,
+                            tree.declarations(),
+                            &builder.dims,
+                            class,
+                            || format!("default of `{formal}`"),
+                        )?;
+                    }
                     // The default of a container input is a container value;
                     // that of a chandle, a chandle.
                     let shape = (ty.tagged_identity().is_some()
