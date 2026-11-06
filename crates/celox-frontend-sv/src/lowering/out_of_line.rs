@@ -7,8 +7,8 @@
 //! inlined. A subroutine qualifies when it cannot suspend its caller other
 //! than for a host request, nor make one a unit cannot make, both
 //! transitively (see [`Reason`]; its prints and messages are runtime
-//! events, which a unit raises), has no `ref`
-//! formal (the callees inlined into its unit may), and its unit touches no
+//! events, which a unit raises), has no `ref` formal of unpacked structure
+//! type (the callees inlined into its unit may), and its unit touches no
 //! state but its frame, the variables it reads, and the module variables
 //! it writes that the lowering does not keep hidden for a process, such as
 //! the static storage of subroutines and static class properties; a
@@ -39,12 +39,23 @@
 //! handles in the saved frames through the module's resume table
 //! ([`celox_design::CallResume`]), and checkpoints keep the saved stack.
 //!
+//! A `ref` formal is a place (see [`Place`]): the call passes its static
+//! part, which selects the function, so one subroutine has a function for
+//! each binding its calls make (a variable the unit names itself, the field
+//! of a property, the array and shape of an element, or a copy), and its
+//! dynamic part through the frame: the handle of a property, the positions
+//! of an element, or the value of an automatic of the calling unit, which
+//! comes back whenever the call returns. A recursive call that passes its
+//! own `ref` formal on binds the same place, and so enters the same
+//! function.
+//!
 //! The frame of a function holds its own frame base and call depth first
 //! (the caller passes both: a unit run by the runtime starts with an empty
 //! stack at offset zero and depth zero), then the resume slots of a
 //! resumable unit, then the state of the calling
 //! process that its body and the bodies it reaches use ([`ProcessState`]),
-//! then its automatic formals, its result and its locals, then the
+//! then the dynamic parts of the places of its `ref` formals, then its
+//! automatic formals, its result and its locals, then the
 //! temporaries the lowering of its body created, which a recursive
 //! activation must not share. The process state is the RNG state and seed
 //! of `$urandom` and the seed of `$random`: the caller passes its own and
@@ -78,7 +89,9 @@ type Addr = RegionedVarAddr;
 /// them: the first that applies.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Reason {
-    /// It, or a subroutine it calls, has a `ref` formal.
+    /// It has a `ref` formal of unpacked structure type, or the call binds
+    /// two `ref` formals to one automatic of the calling unit, which the
+    /// call copies (see [`Place::Frame`]).
     RefFormal,
     /// It, or a subroutine it calls, has an event control, a wait or a
     /// fork.
@@ -155,10 +168,74 @@ pub(super) struct Slot {
     pub kind: celox_design::ValueKind,
 }
 
+/// What a `ref` formal of a call refers to (IEEE 1800-2023 13.5.2), as an
+/// out-of-line call passes it: a static part, which selects the function
+/// (see [`Place::key`]), and a dynamic part, the variables of the caller
+/// whose values the call passes in the frame.
+#[derive(Debug, Clone)]
+pub(super) enum Place {
+    /// A variable the unit names itself, as an inlined body renames the
+    /// formal to it.
+    Variable(SourceVarId),
+    /// Property `field` of the object that the caller's variable `handle`
+    /// holds, the object the call evaluated.
+    Property {
+        field: sv::ir::ObjectField,
+        handle: String,
+    },
+    /// An element of an unpacked array whose positions the call fixed in
+    /// the caller's variables `positions`; `element` names the `k`-th of
+    /// them `#k`.
+    Element {
+        element: Box<sv::ir::LValue>,
+        signed: bool,
+        width: usize,
+        total: usize,
+        positions: Vec<String>,
+    },
+    /// An automatic variable of the calling unit, named `name` there, whose
+    /// value the call copies into the formal's slot and back whenever the
+    /// call returns: nothing else can name it while the call runs.
+    Frame { id: SourceVarId, name: String },
+}
+
+impl Place {
+    /// The static part of the place, which the unit is lowered for.
+    pub fn key(&self) -> String {
+        match self {
+            Place::Variable(id) => format!("v{}", id.0),
+            Place::Property { field, .. } => format!("p{field:?}"),
+            Place::Element {
+                element,
+                signed,
+                width,
+                total,
+                ..
+            } => format!("e{element:?}/{signed}/{width}/{total}"),
+            Place::Frame { .. } => "f".to_string(),
+        }
+    }
+}
+
+/// The key of the function of `name` for the places of its `ref` formals.
+pub(super) fn function_key(name: &str, places: &[Place]) -> String {
+    if places.is_empty() {
+        return name.to_string();
+    }
+    let keys: Vec<String> = places.iter().map(Place::key).collect();
+    format!("{name}({})", keys.join(","))
+}
+
 /// A subroutine lowered out of line, or being lowered.
 #[derive(Debug, Clone)]
 pub(super) struct Function {
-    pub name: String,
+    /// The subroutine's name with the places of its `ref` formals (see
+    /// [`function_key`]): the functions of one subroutine differ in them.
+    pub key: String,
+    /// For each `ref` formal, in order, the slots of the dynamic part of its
+    /// place: the handle of a property, the positions of an element, the
+    /// copy of an automatic; none for a variable.
+    pub places: Vec<Vec<usize>>,
     /// The frame's slots: the frame base, the call depth, the calling
     /// process's state, then the formals, result and locals, all known
     /// before the body is lowered, then the temporaries of the body.
@@ -246,7 +323,7 @@ impl OutOfLine {
     /// Forget the functions from `len` on, which a discarded lowering made.
     pub(super) fn truncate(&mut self, len: usize) {
         for function in self.functions.drain(len.min(self.functions.len())..) {
-            self.by_name.remove(&function.name);
+            self.by_name.remove(&function.key);
         }
     }
 
@@ -828,7 +905,9 @@ impl ProcModule<'_> {
         // the caller's unit, which binds them as any inlined call does.
         if let Some(subroutine) = self.subroutine(name) {
             for param in &subroutine.params {
-                if param.direction.is_reference() {
+                // A `ref` formal of unpacked structure type binds each member
+                // to a member of the actual, which a place does not express.
+                if param.direction.is_reference() && !param.leaves.is_empty() {
                     note(Reason::RefFormal);
                 }
                 if !param.leaves.is_empty() {
