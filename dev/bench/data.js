@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793921800646,
+  "lastUpdate": 1793929568351,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -435278,6 +435278,37 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-veryl-tiered-aarch64/heliodor_suite_smp_linux_boot_4hart_end_to_end",
             "unit": "ms",
             "value": 4630555.62688
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "132e54cd9c3839b7a40548eba23ca196b4aa63d9",
+          "message": "perf(scheduler): keep lazy settles and compiled kernels for units with calls (#3101)",
+          "timestamp": "2026-11-04T08:56:32Z",
+          "url": "https://github.com/celox-sim/celox/commit/132e54cd9c3839b7a40548eba23ca196b4aa63d9"
+        },
+        "date": 1793929568351,
+        "cpu": "Neoverse-N2",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-native-parallel-aarch64/heliodor_suite_smp_linux_boot_4hart_compilation",
+            "unit": "ms",
+            "value": 777446.517853
+          },
+          {
+            "name": "heliodor-native-parallel-aarch64/heliodor_suite_smp_linux_boot_4hart_execution",
+            "unit": "ms",
+            "value": 6432626.803978
           }
         ]
       }
