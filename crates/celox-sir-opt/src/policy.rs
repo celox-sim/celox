@@ -112,6 +112,9 @@ define_sir_passes! {
     PackedScatterStore => "packed_scatter_store",
     SparseCaseDispatch => "sparse_case_dispatch",
     BranchifyMux => "branchify_mux",
+    /// Replace small pure `if`/`else` diamonds of clocked processes by
+    /// `Mux`es, so reset and enable chains become straight-line code.
+    IfConversion => "if_conversion",
     SplitCoalescedStores => "split_coalesced_stores",
     PartialForward => "partial_forward",
     IdentityStoreBypass => "identity_store_bypass",

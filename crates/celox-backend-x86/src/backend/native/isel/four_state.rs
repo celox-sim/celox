@@ -1991,6 +1991,27 @@ pub(super) fn lower_mux_condition_state(
     cond: RegisterId,
 ) -> (VReg, VReg) {
     let width = ctx.sir_width(&cond);
+    // A two-state one-bit condition, the canonical `Branch` condition, is
+    // its own truth: 0 or 1 once its upper bits are known clear, with no
+    // unknown bits. Selects on it are common after if-conversion, and the
+    // general path below spends three instructions to recover that bit.
+    if !ctx.four_state && width == 1 && !ctx.wide_regs.contains_key(&cond) {
+        let value = ctx.reg_map.get(cond);
+        let is_true = if ctx.known_bits.get(&value).is_some_and(|&bits| bits <= 1) {
+            value
+        } else {
+            let masked = ctx.alloc_vreg(SpillDesc::transient());
+            ctx.emit_and_imm(block, masked, value, 1);
+            ctx.known_bits.insert(masked, 1);
+            masked
+        };
+        let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+        block.push(MInst::LoadImm {
+            dst: zero,
+            value: 0,
+        });
+        return (is_true, zero);
+    }
     let n_chunks = ISelContext::num_chunks(width).max(1);
     let value_chunks = ctx.get_wide_chunks(&cond, block);
     let mask_chunks = if ctx.four_state {
