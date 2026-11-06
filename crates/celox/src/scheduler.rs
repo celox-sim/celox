@@ -1732,11 +1732,15 @@ impl Plan {
                     .collect();
                 let source = *sources.iter().min()?;
                 let offsets = &program.layout().offsets;
-                let seeds: Vec<usize> = sources
-                    .iter()
-                    .copied()
-                    .chain(schema.time_slots.iter().copied().map(&storage))
-                    .filter_map(|address| offsets.get(&address).copied())
+                // The readers of every cone source, the kernels' data
+                // writes included: their marks say "only cone sources
+                // changed" too (settle::cone_source_homes).
+                let homes = program
+                    .cone_homes
+                    .clone()
+                    .unwrap_or_else(|| crate::settle::cone_source_homes(program));
+                let seeds: Vec<usize> = homes
+                    .into_iter()
                     .flat_map(|home| {
                         settle
                             .objects

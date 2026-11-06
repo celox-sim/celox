@@ -132,6 +132,81 @@ pub(crate) fn run_checked<B, E>(
     Ok(())
 }
 
+/// A kernel write of a data home takes the clock cone when the partitions
+/// it dirties, closed over publishing, are at most this share of all.
+const CONE_SOURCE_SHARE: usize = 8;
+
+/// The state homes whose writes by a kernel dirty only the clock cone of a
+/// partitioned settle ([`crate::settle::clock_cone`]): the event signals,
+/// the time slots, and the settle objects the kernels store to whose
+/// readers' closure under publishing is small ([`CONE_SOURCE_SHARE`]). The
+/// marks of such a write set the scheduler's dirty byte to 2, "only cone
+/// sources changed" (ORed, so that a write of anything else in the same
+/// pass keeps the whole settle); the scheduler's plan seeds the cone with
+/// the readers of the same homes. Computed once the settle is final and
+/// kept in [`LaidOutProgram::cone_homes`].
+pub(crate) fn cone_source_homes(program: &LaidOutProgram) -> crate::HashSet<usize> {
+    let layout = program.layout();
+    let schema = &program.runtime.runtime_schema;
+    let home = |address: &crate::AbsoluteAddr| layout.offsets.get(address).copied();
+    let mut homes: crate::HashSet<usize> = crate::edge_plans::event_addresses(program)
+        .iter()
+        .chain(
+            schema
+                .scheduler
+                .iter()
+                .flat_map(|scheduler| &scheduler.events),
+        )
+        .chain(&schema.time_slots)
+        .filter_map(home)
+        .collect();
+    let (Some(settle), Some(partitioning)) = (layout.settle.as_ref(), &schema.settle_partitions)
+    else {
+        return homes;
+    };
+    let flags = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, partitioning.flags);
+    let Some(marks) = cone::publish_marks(
+        &program.sir.eval_comb,
+        &flags,
+        settle.partitions,
+        &layout.offsets,
+    ) else {
+        return homes;
+    };
+    let mut written: Vec<usize> = Vec::new();
+    for unit in program.sir.processes.iter().take(schema.processes.len()) {
+        for instruction in unit.blocks.values().flat_map(|block| &block.instructions) {
+            for write in instruction.state_writes().objects().into_iter().flatten() {
+                if write.region == STABLE_REGION
+                    && let Some(home) = home(&write.absolute_addr())
+                    && !homes.contains(&home)
+                {
+                    written.push(home);
+                }
+            }
+        }
+    }
+    written.sort_unstable();
+    written.dedup();
+    for home in written {
+        let Ok(index) = settle
+            .objects
+            .binary_search_by_key(&home, |object| object.start)
+        else {
+            continue;
+        };
+        let seeds = settle.objects[index].partitions.iter().map(|&p| p as usize);
+        let reached = cone::closure(&marks, seeds)
+            .iter()
+            .filter(|&&reached| reached)
+            .count();
+        if reached * CONE_SOURCE_SHARE <= settle.partitions {
+            homes.insert(home);
+        }
+    }
+    homes
+}
+
 /// Add the flag stores to every unit outside the settle.
 pub(crate) fn instrument(program: &mut LaidOutProgram) {
     instrument_processes_from(program, 0, false);
@@ -190,18 +265,21 @@ pub(crate) fn instrument_ff_units(program: &mut LaidOutProgram, wide_commits: bo
 
 fn instrument_units(program: &mut LaidOutProgram, first: usize, all: bool, wide_commits: bool) {
     // The scheduler schema lists its events only once the scheduler is
-    // attached, after the kernels are instrumented: take them from the
-    // design's event topology, as the scheduler's plan does.
-    let events = crate::edge_plans::event_addresses(program);
+    // attached, after the kernels are instrumented: take the cone sources
+    // from the design, as the scheduler's plan does.
+    let cone_homes = match &program.cone_homes {
+        Some(homes) => homes.clone(),
+        None => {
+            let homes = cone_source_homes(program);
+            program.cone_homes = Some(homes.clone());
+            homes
+        }
+    };
     let (sir, layout, runtime) = program.split_mut();
     let Some(mut marker) = Marker::new(layout, runtime) else {
         return;
     };
-    marker.clock_homes.extend(
-        events
-            .iter()
-            .filter_map(|address| layout.offsets.get(address).copied()),
-    );
+    marker.clock_homes.extend(cone_homes);
     debug_assert!(
         !wide_commits,
         "wide commits are the FF units' (instrument_ff_units)"
@@ -397,9 +475,9 @@ struct Marker<'a> {
     /// Reuse each state-change predicate for the timed scheduler's settle
     /// guard, instead of comparing the instrumented writer a second time.
     scheduler_dirty: Option<RegionedAbsoluteAddr>,
-    /// The homes of the event signals and the time slots: a write of one
-    /// marks the scheduler's settle dirty with 2, "only clocks changed",
-    /// which runs the clock cone instead of the whole settle.
+    /// The homes of the cone sources ([`cone_source_homes`]): a write of
+    /// one marks the scheduler's settle dirty with 2, "only cone sources
+    /// changed", which runs the clock cone instead of the whole settle.
     clock_homes: crate::HashSet<usize>,
     /// Commit contiguous registers word by word ([`Self::wide_run`]).
     wide: bool,
@@ -420,6 +498,20 @@ struct WideObject {
     bytes: usize,
     /// The partitions reading it.
     readers: Vec<u32>,
+}
+
+/// How a write marks the scheduler's dirty byte
+/// ([`Marker::mark_unconditionally`]).
+#[derive(Clone, Copy)]
+enum DirtyMark {
+    /// Store 1.
+    Data,
+    /// OR 2 into the byte, through the registers `old` and `ored`.
+    Cone {
+        two: RegisterId,
+        old: RegisterId,
+        ored: RegisterId,
+    },
 }
 
 /// The open segment of a block being instrumented: the block is split at
@@ -714,26 +806,55 @@ impl<'a> Marker<'a> {
     }
 
     /// Mark `readers` with the byte `one`, and the scheduler's settle as
-    /// dirty with `dirty_value` (1, or 2 when only a clock changed),
-    /// whatever the write before changed.
+    /// dirty, whatever the write before changed: with 1, or, for a write of
+    /// a cone source, with 2 ORed into the byte, so that a pass writing
+    /// anything else as well settles the whole design.
     fn mark_unconditionally(
         &self,
         instructions: &mut Vec<SIRInstruction<RegionedAbsoluteAddr>>,
         one: RegisterId,
-        dirty_value: RegisterId,
+        dirty_value: DirtyMark,
         readers: Vec<u32>,
     ) {
         if let Some(dirty) = self.scheduler_dirty {
+            let value = match dirty_value {
+                DirtyMark::Data => one,
+                DirtyMark::Cone { two, old, ored } => {
+                    instructions.push(SIRInstruction::Load(old, dirty, SIROffset::Static(0), 8));
+                    instructions.push(SIRInstruction::Binary(ored, old, BinaryOp::Or, two));
+                    ored
+                }
+            };
             instructions.push(SIRInstruction::Store(
                 dirty,
                 SIROffset::Static(0),
                 8,
-                dirty_value,
+                value,
                 Vec::new(),
                 Vec::new(),
             ));
         }
         self.mark_flags(instructions, one, &readers);
+    }
+
+    /// The dirty mark of a write of `address`: of a cone source, with fresh
+    /// registers for the OR ([`Self::mark_unconditionally`]).
+    fn dirty_mark(
+        &self,
+        unit: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+        alloc: &mut Allocator,
+        segment: &mut Segment,
+        address: &RegionedAbsoluteAddr,
+    ) -> DirtyMark {
+        if self.is_clock_home(address) {
+            DirtyMark::Cone {
+                two: segment.two(unit, alloc),
+                old: alloc.register(unit, byte_type()),
+                ored: alloc.register(unit, byte_type()),
+            }
+        } else {
+            DirtyMark::Data
+        }
     }
 
     fn instrument(&self, unit: &mut ExecutionUnit<RegionedAbsoluteAddr>) -> WideStats {
@@ -843,7 +964,7 @@ impl<'a> Marker<'a> {
                 return;
             }
             let one = segment.one(unit, alloc);
-            self.mark_unconditionally(&mut segment.instructions, one, one, readers);
+            self.mark_unconditionally(&mut segment.instructions, one, DirtyMark::Data, readers);
             return;
         }
         let target = match &instruction {
@@ -863,11 +984,7 @@ impl<'a> Marker<'a> {
             return;
         }
         let one = segment.one(unit, alloc);
-        let dirty_value = if self.is_clock_home(&address) {
-            segment.two(unit, alloc)
-        } else {
-            one
-        };
+        let dirty_value = self.dirty_mark(unit, alloc, segment, &address);
         if width > MAX_COMPARED_WIDTH || self.spans_padded_elements(&address, &offset, width) {
             segment.instructions.push(instruction);
             self.mark_unconditionally(&mut segment.instructions, one, dirty_value, readers);
@@ -897,8 +1014,8 @@ impl<'a> Marker<'a> {
         insert_block(unit, mark, marks, SIRTerminator::Jump(rest, Vec::new()));
     }
 
-    /// Whether a write of `address` is a write of an event signal or of the
-    /// slot time.
+    /// Whether a write of `address` is a write of a cone source
+    /// ([`cone_source_homes`]).
     fn is_clock_home(&self, address: &RegionedAbsoluteAddr) -> bool {
         address.region == STABLE_REGION
             && self

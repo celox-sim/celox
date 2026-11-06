@@ -680,6 +680,9 @@ pub struct LaidOutProgram {
     /// compilation at a time; `sir.processes` reserves their stable indices.
     #[cfg(feature = "host-runtime")]
     pub(crate) deferred_derived_edges: HashMap<usize, crate::derived_edge::DeferredEdge>,
+    /// The cone sources of the settle ([`crate::settle::cone_source_homes`]),
+    /// once the kernels are instrumented with them.
+    pub(crate) cone_homes: Option<HashSet<usize>>,
 }
 
 impl LaidOutProgram {
@@ -963,6 +966,7 @@ impl OptimizedSir {
             layout,
             #[cfg(feature = "host-runtime")]
             deferred_derived_edges: HashMap::default(),
+            cone_homes: None,
         };
         if !defer_instrumentation {
             laid_out.prune_stale_marks();

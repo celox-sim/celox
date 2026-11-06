@@ -29,30 +29,8 @@ pub(crate) fn clock_cone(
     offsets: &crate::HashMap<AbsoluteAddr, usize>,
     seeds: impl IntoIterator<Item = usize>,
 ) -> Option<(Vec<Unit>, usize)> {
-    // The partitions each partition's body marks, from every unit.
-    let mut marks: Vec<Vec<usize>> = vec![Vec::new(); partitions];
-    for unit in units {
-        let analysis = Analysis::new(unit, flags, partitions, offsets);
-        for &block in unit.blocks.keys() {
-            let Some((partition, body, merge)) = analysis.guard(block) else {
-                continue;
-            };
-            for block in analysis.body(body, merge) {
-                marks[partition].extend(marked_by(&analysis, block)?);
-            }
-        }
-    }
-    let mut cone = vec![false; partitions];
-    let mut work: Vec<usize> = seeds
-        .into_iter()
-        .filter(|&seed| seed < partitions)
-        .collect();
-    while let Some(partition) = work.pop() {
-        if std::mem::replace(&mut cone[partition], true) {
-            continue;
-        }
-        work.extend(marks[partition].iter().copied());
-    }
+    let marks = publish_marks(units, flags, partitions, offsets)?;
+    let cone = closure(&marks, seeds);
     let mut restricted = Vec::with_capacity(units.len());
     for unit in units {
         let analysis = Analysis::new(unit, flags, partitions, offsets);
@@ -83,6 +61,46 @@ pub(crate) fn clock_cone(
         restricted.push(copy);
     }
     Some((restricted, cone.iter().filter(|&&in_cone| in_cone).count()))
+}
+
+/// The partitions each partition's body marks, from every unit; `None`
+/// when a partition's marks cannot be decoded.
+pub(crate) fn publish_marks(
+    units: &[Unit],
+    flags: &RegionedAbsoluteAddr,
+    partitions: usize,
+    offsets: &crate::HashMap<AbsoluteAddr, usize>,
+) -> Option<Vec<Vec<usize>>> {
+    let mut marks: Vec<Vec<usize>> = vec![Vec::new(); partitions];
+    for unit in units {
+        let analysis = Analysis::new(unit, flags, partitions, offsets);
+        for &block in unit.blocks.keys() {
+            let Some((partition, body, merge)) = analysis.guard(block) else {
+                continue;
+            };
+            for block in analysis.body(body, merge) {
+                marks[partition].extend(marked_by(&analysis, block)?);
+            }
+        }
+    }
+    Some(marks)
+}
+
+/// The partitions `seeds` reach under publishing (`marks`), by partition.
+pub(crate) fn closure(marks: &[Vec<usize>], seeds: impl IntoIterator<Item = usize>) -> Vec<bool> {
+    let partitions = marks.len();
+    let mut cone = vec![false; partitions];
+    let mut work: Vec<usize> = seeds
+        .into_iter()
+        .filter(|&seed| seed < partitions)
+        .collect();
+    while let Some(partition) = work.pop() {
+        if std::mem::replace(&mut cone[partition], true) {
+            continue;
+        }
+        work.extend(marks[partition].iter().copied());
+    }
+    cone
 }
 
 /// The partitions whose flags `block` stores; `None` for a flag store that

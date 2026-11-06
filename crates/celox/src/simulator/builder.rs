@@ -7090,6 +7090,101 @@ endmodule"#;
         assert_ne!(single[119][1], 0u8.into(), "the gated domain must have run");
     }
 
+    /// The kernels' data writes are cone sources too: the slot after a
+    /// write of `din`, declared before the clocks so that its mark comes
+    /// first in a pass that also toggles a clock, runs the cone of both,
+    /// and the data logic reading `din` is settled before anything
+    /// observes it.
+    #[cfg(all(
+        feature = "systemverilog",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn partitioned_clock_cone_covers_the_kernels_data_writes() {
+        let source = r#"`timescale 1ns/1ns
+module Top(output logic [7:0] fast, output logic [7:0] slow, output wire [7:0] view, output wire [7:0] mix, output wire [7:0] dmix);
+    logic [7:0] din = 0;
+    always #3 din = din + 8'd29;
+    bit clk = 0;
+    bit jclk = 0;
+    logic en = 0;
+    always #5 clk = ~clk;
+    always #7 jclk = ~jclk;
+    always #11 en = ~en;
+    logic en_l;
+    always_latch if (!clk) en_l = en;
+    wire gclk = clk & en_l;
+    initial begin fast = 0; slow = 0; end
+    always @(posedge clk) fast <= fast + din;
+    always @(posedge gclk) slow <= slow ^ fast;
+    assign view = slow + fast + {7'd0, clk ^ jclk};
+    // Data logic reading the kernel's write directly.
+    logic [31:0] d0, d1, d2, d3;
+    assign d0 = {din, din ^ 8'h5a, ~din, din + 8'd3} * 32'd2654435761;
+    assign d1 = d0 ^ (d0 >> 7);
+    assign d2 = d1 + {4{din}};
+    assign d3 = d2 ^ (d2 << 3);
+    assign dmix = d3[7:0] ^ d3[15:8] ^ d3[23:16] ^ d3[31:24];
+    // Data logic of the registers.
+    logic [31:0] e0, e1;
+    assign e0 = {fast, slow, fast ^ slow, din} * 32'd40503;
+    assign e1 = e0 ^ (e0 >> 11);
+    assign mix = e1[7:0] ^ e1[15:8] ^ e1[23:16] ^ e1[31:24];
+    integer hits = 0;
+    always @(mix or view or dmix) hits = hits + 1;
+endmodule"#;
+        let builder = || {
+            crate::Simulation::from_sv_sources(
+                vec![(source, std::path::Path::new("data-cone.sv"))],
+                "Top",
+            )
+            .settle_partition(crate::SettlePartition::Always)
+        };
+        let (program, _, _, _, _) = builder()
+            .emit_triggers()
+            .into_laid_out_program(crate::MemoryLayoutMode::Packed, false, false)
+            .unwrap();
+        assert!(
+            crate::scheduler::incremental_inputs_for_test(&program).is_some(),
+            "the kernel writes must use the partition cone"
+        );
+        let trace = |mut simulation: crate::Simulation| {
+            let outputs =
+                ["fast", "slow", "view", "mix", "dmix"].map(|name| simulation.signal(name));
+            let mut trace = Vec::new();
+            for time in 0..120 {
+                simulation.run_until(time).unwrap();
+                trace.push(outputs.map(|signal| simulation.get(signal)));
+            }
+            (trace, simulation.scheduler_stats())
+        };
+        let (cone, stats) = trace(
+            builder()
+                .settle_check(true)
+                .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+                .build_native()
+                .unwrap(),
+        );
+        assert!(
+            stats.compiled_slots > 0 && stats.checked_steps > 0,
+            "{stats:?}"
+        );
+        let (single, _) = trace(
+            crate::Simulation::from_sv_sources(
+                vec![(source, std::path::Path::new("data-cone.sv"))],
+                "Top",
+            )
+            .disable_pass(crate::optimizer::SirPass::PartitionedSettle)
+            .build_native()
+            .unwrap(),
+        );
+        assert_eq!(cone, single);
+        assert_ne!(
+            single[119][4], single[3][4],
+            "the data logic must follow din"
+        );
+    }
+
     #[cfg(all(
         feature = "systemverilog",
         any(target_arch = "x86_64", target_arch = "aarch64")
