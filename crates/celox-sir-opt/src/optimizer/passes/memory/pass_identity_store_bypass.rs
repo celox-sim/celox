@@ -14,6 +14,7 @@ use super::cost_model::estimate_clif_cost;
 use super::shared::{def_reg, sir_value_to_u64};
 use crate::ir::*;
 use crate::{HashMap, HashSet, OptimizationContext};
+use celox_design::InitialStateData;
 
 #[derive(Clone, Copy)]
 struct AddressMetadata {
@@ -51,10 +52,21 @@ struct GlobalIdentityFacts {
     /// address: then no access count above is complete, and nothing is
     /// proved.
     unknown_accesses: bool,
+    /// Per unit, each block's position in a reverse postorder of the unit's
+    /// blocks, and the strongly connected component of each block with
+    /// whether that component has a cycle.
+    orders: Vec<HashMap<BlockId, usize>>,
+    components: Vec<HashMap<BlockId, (usize, bool)>>,
+    /// In a partitioned settle, the copies its plan treats as aliases,
+    /// source by target.
+    copies: Option<HashMap<AbsoluteAddr, AbsoluteAddr>>,
 }
 
 struct SettleLoads {
-    sites: HashMap<AbsoluteAddr, Vec<(usize, BlockId, usize)>>,
+    /// The load sites of each address: unit, block, instruction, and
+    /// whether the loaded value only feeds change comparisons (the
+    /// snapshot a partition takes of what it writes, before it runs).
+    sites: HashMap<AbsoluteAddr, Vec<(usize, BlockId, usize, bool)>>,
     immediate_dominators: Vec<HashMap<BlockId, BlockId>>,
 }
 
@@ -71,9 +83,10 @@ pub(in crate::optimizer) fn optimize_program_identity_stores(
     // Without a phase-correct StateSSA proof, both FF reads and writes require
     // a distinct persistent home. The split FF forms contain the exact FF
     // accesses without misclassifying the fused unit's complete comb graph.
-    let Some(mut blocked_aliases) = ff_referenced_addresses(program) else {
+    let Some(external) = ff_referenced_addresses(program) else {
         return HashMap::default();
     };
+    let mut blocked_aliases = external.written.clone();
     blocked_aliases.extend(
         program
             .runtime_schema
@@ -81,27 +94,82 @@ pub(in crate::optimizer) fn optimize_program_identity_stores(
             .iter()
             .flat_map(|observer| observer.written_inputs.iter().copied()),
     );
-    blocked_aliases.extend(program.design.initial_state.iter().map(|init| init.address));
+    // Two homes merge only when they start with the same value. Two-state
+    // memory starts at zero, unknown initial bits included, so an entry is
+    // compared by its effective two-state value; four-state entries and
+    // write runs keep their own home.
+    let mut initial: HashMap<AbsoluteAddr, Option<num_bigint::BigUint>> = HashMap::default();
+    for init in &program.design.initial_state {
+        let effective = match &init.data {
+            InitialStateData::Packed {
+                value,
+                mask,
+                written_mask,
+            } if !four_state => Some(value & (written_mask ^ (written_mask & mask))),
+            _ => None,
+        };
+        initial.insert(init.address, effective);
+    }
 
-    let settle_flags = settle_flags(program);
+    let settle = settle(program);
     optimize_eval_comb_identity_stores(
         &mut program.sir.eval_comb,
         &metadata,
         &blocked_aliases,
+        &external,
+        &initial,
         program.layout_requirements.state_aliases(),
         four_state,
-        settle_flags,
+        settle.as_ref(),
     )
 }
 
-/// The flags of a partitioned settle, whose guards skip a partition only
-/// when it would store what memory already holds.
-fn settle_flags(program: &OptimizationContext) -> Option<AbsoluteAddr> {
+/// Whether `alias` and `canonical` start with the same value, so that one
+/// home may hold both (`initial`: each object's effective initial value,
+/// `None` when it cannot be compared; absent objects start at zero).
+fn initial_values_agree(
+    initial: &HashMap<AbsoluteAddr, Option<num_bigint::BigUint>>,
+    alias: AbsoluteAddr,
+    canonical: AbsoluteAddr,
+) -> bool {
+    use num_traits::Zero;
+    match (initial.get(&alias), initial.get(&canonical)) {
+        (None, None) => true,
+        (Some(Some(value)), None) | (None, Some(Some(value))) => value.is_zero(),
+        (Some(Some(alias)), Some(Some(canonical))) => alias == canonical,
+        _ => false,
+    }
+}
+
+/// The state the FF and process units access, outside the combinational
+/// schedule.
+#[derive(Default)]
+struct ExternalAccesses {
+    read: HashSet<AbsoluteAddr>,
+    written: HashSet<AbsoluteAddr>,
+}
+
+/// A partitioned settle, whose guards skip a partition only when it would
+/// store what memory already holds.
+struct Settle {
+    flags: AbsoluteAddr,
+    /// The copies the settle's plan treats as aliases, source by target: a
+    /// reader of the target is a reader of the source there, and of the
+    /// source's source, so a writer up the chain marks it once the copy's
+    /// store is gone. No other identity copy may lose its store in a
+    /// partitioned settle.
+    copies: HashMap<AbsoluteAddr, AbsoluteAddr>,
+}
+
+fn settle(program: &OptimizationContext) -> Option<Settle> {
     program
         .runtime_schema
         .settle_partitions
         .as_ref()
-        .map(|settle| settle.flags)
+        .map(|settle| Settle {
+            flags: settle.flags,
+            copies: settle.copies.iter().copied().collect(),
+        })
 }
 
 fn address_metadata(program: &OptimizationContext) -> HashMap<AbsoluteAddr, AddressMetadata> {
@@ -125,15 +193,19 @@ fn optimize_eval_comb_identity_stores(
     units: &mut [ExecutionUnit<RegionedAbsoluteAddr>],
     metadata: &HashMap<AbsoluteAddr, AddressMetadata>,
     blocked_aliases: &HashSet<AbsoluteAddr>,
+    external: &ExternalAccesses,
+    initial: &HashMap<AbsoluteAddr, Option<num_bigint::BigUint>>,
     existing_aliases: &HashMap<AbsoluteAddr, AbsoluteAddr>,
     four_state: bool,
-    settle_flags: Option<AbsoluteAddr>,
+    settle: Option<&Settle>,
 ) -> HashMap<AbsoluteAddr, AbsoluteAddr> {
-    let facts = collect_global_facts(units, metadata, four_state, settle_flags);
+    let facts = collect_global_facts(units, metadata, four_state, settle);
     let aliases = select_aliases(
         &facts,
         metadata,
         blocked_aliases,
+        external,
+        initial,
         existing_aliases,
         four_state,
     );
@@ -156,13 +228,13 @@ pub(crate) fn retain_final_identity_aliases(program: &mut OptimizationContext, f
     let aliases = program.layout_requirements.state_aliases().clone();
     let mut valid = aliases.keys().copied().collect::<HashSet<_>>();
 
-    let settle_flags = settle_flags(program);
+    let settle = settle(program);
     retain_aliases_valid_for_units(
         &program.sir.eval_comb,
         &aliases,
         &metadata,
         four_state,
-        settle_flags,
+        settle.as_ref(),
         &mut valid,
     );
     for units in program.sir.eval_comb_apply_ffs.values() {
@@ -171,7 +243,7 @@ pub(crate) fn retain_final_identity_aliases(program: &mut OptimizationContext, f
             &aliases,
             &metadata,
             four_state,
-            settle_flags,
+            settle.as_ref(),
             &mut valid,
         );
     }
@@ -183,7 +255,7 @@ pub(crate) fn retain_final_identity_aliases(program: &mut OptimizationContext, f
             &aliases,
             &metadata,
             four_state,
-            settle_flags,
+            settle.as_ref(),
             &mut valid,
         );
     });
@@ -233,13 +305,13 @@ pub(crate) fn remove_final_identity_alias_stores(
         return;
     }
     let metadata = address_metadata(program);
-    let settle_flags = settle_flags(program);
+    let settle = settle(program);
     remove_proven_alias_stores(
         &mut program.sir.eval_comb,
         validated_aliases,
         &metadata,
         four_state,
-        settle_flags,
+        settle.as_ref(),
     );
     for units in program.sir.eval_comb_apply_ffs.values_mut() {
         remove_proven_alias_stores(
@@ -247,7 +319,7 @@ pub(crate) fn remove_final_identity_alias_stores(
             validated_aliases,
             &metadata,
             four_state,
-            settle_flags,
+            settle.as_ref(),
         );
     }
     with_parallel_comb_units(program, |units| {
@@ -256,7 +328,7 @@ pub(crate) fn remove_final_identity_alias_stores(
             validated_aliases,
             &metadata,
             four_state,
-            settle_flags,
+            settle.as_ref(),
         );
     });
 }
@@ -324,10 +396,10 @@ fn retain_aliases_valid_for_units(
     aliases: &HashMap<AbsoluteAddr, AbsoluteAddr>,
     metadata: &HashMap<AbsoluteAddr, AddressMetadata>,
     four_state: bool,
-    settle_flags: Option<AbsoluteAddr>,
+    settle: Option<&Settle>,
     valid: &mut HashSet<AbsoluteAddr>,
 ) {
-    let facts = collect_global_facts(units, metadata, four_state, settle_flags);
+    let facts = collect_global_facts(units, metadata, four_state, settle);
     valid.retain(|alias| {
         aliases
             .get(alias)
@@ -368,7 +440,8 @@ fn proven_alias_store(
         .accesses
         .get(&canonical)
         .map_or(0, |access| access.writes);
-    let identity_copy = canonical_writes == 0
+    let identity_copy = canonical_fixed_before(facts, &store, canonical)
+        && plan_treats_as_copy(facts, alias, canonical)
         && store.identity_source.is_some_and(|source| {
             source.region == STABLE_REGION && source.absolute_addr() == canonical
         });
@@ -390,9 +463,9 @@ fn remove_proven_alias_stores(
     aliases: &HashMap<AbsoluteAddr, AbsoluteAddr>,
     metadata: &HashMap<AbsoluteAddr, AddressMetadata>,
     four_state: bool,
-    settle_flags: Option<AbsoluteAddr>,
+    settle: Option<&Settle>,
 ) {
-    let facts = collect_global_facts(units, metadata, four_state, settle_flags);
+    let facts = collect_global_facts(units, metadata, four_state, settle);
     let mut sites = aliases
         .iter()
         .filter_map(|(&alias, &canonical)| proven_alias_store(&facts, alias, canonical).flatten())
@@ -456,6 +529,8 @@ fn analyze_eval_comb_aliases(
         &facts,
         metadata,
         blocked_aliases,
+        &ExternalAccesses::default(),
+        &HashMap::default(),
         existing_aliases,
         four_state,
     )
@@ -465,15 +540,37 @@ fn collect_global_facts(
     units: &[ExecutionUnit<RegionedAbsoluteAddr>],
     metadata: &HashMap<AbsoluteAddr, AddressMetadata>,
     four_state: bool,
-    settle_flags: Option<AbsoluteAddr>,
+    settle: Option<&Settle>,
 ) -> GlobalIdentityFacts {
+    let settle_flags = settle.map(|settle| settle.flags);
     let mut accesses = HashMap::<AbsoluteAddr, AddressFacts>::default();
     let mut stores = Vec::new();
     let mut unknown_accesses = false;
-    let mut settle_loads = settle_flags.map(|_| SettleLoads {
+    // A partitioned settle skips a partition only when it would store what
+    // memory already holds, so dominance treats the partition guards as
+    // taken, as `must_execute_blocks` does.
+    let mut settle_loads = settle_flags.map(|flags| SettleLoads {
         sites: HashMap::default(),
-        immediate_dominators: units.iter().map(immediate_dominators).collect(),
+        immediate_dominators: units
+            .iter()
+            .map(|eu| {
+                immediate_dominators_with(eu, &|terminator| {
+                    guarded_successors(eu, Some(flags), terminator)
+                })
+            })
+            .collect(),
     });
+    let orders = units
+        .iter()
+        .map(|eu| {
+            reverse_postorder_with(eu, &terminator_successors)
+                .into_iter()
+                .enumerate()
+                .map(|(index, block)| (block, index))
+                .collect()
+        })
+        .collect();
+    let components = units.iter().map(strongly_connected_components).collect();
 
     for (eu_index, eu) in units.iter().enumerate() {
         let mut defs = HashMap::default();
@@ -490,11 +587,16 @@ fn collect_global_facts(
         // this whole table.
         let use_counts = register_use_counts(eu);
         let must_execute = must_execute_blocks(eu, settle_flags);
+        let compare_only = if settle_loads.is_some() {
+            compare_only_registers(eu)
+        } else {
+            HashSet::default()
+        };
 
         for block in eu.blocks.values() {
             for (instruction_index, inst) in block.instructions.iter().enumerate() {
                 match inst {
-                    SIRInstruction::Load(_, address, _, _) => {
+                    SIRInstruction::Load(register, address, _, _) => {
                         increment_saturating(
                             &mut accesses.entry(address.absolute_addr()).or_default().reads,
                         );
@@ -503,7 +605,12 @@ fn collect_global_facts(
                                 .sites
                                 .entry(address.absolute_addr())
                                 .or_default()
-                                .push((eu_index, block.id, instruction_index));
+                                .push((
+                                    eu_index,
+                                    block.id,
+                                    instruction_index,
+                                    compare_only.contains(register),
+                                ));
                         }
                     }
                     SIRInstruction::Store(
@@ -528,7 +635,9 @@ fn collect_global_facts(
                             && matches!(offset, SIROffset::Static(0))
                             && full_width
                             && must_execute.contains(&block.id);
-                        let identity_source = shape_is_aliasable
+                        let identity_source = (address.region == STABLE_REGION
+                            && matches!(offset, SIROffset::Static(0))
+                            && full_width)
                             .then(|| {
                                 trace_identity_source(*source, *width, &defs, &eu.register_map)
                             })
@@ -571,7 +680,7 @@ fn collect_global_facts(
                                 .sites
                                 .entry(source.absolute_addr())
                                 .or_default()
-                                .push((usize::MAX, block.id, instruction_index));
+                                .push((usize::MAX, block.id, instruction_index, false));
                         }
                         increment_saturating(
                             &mut accesses
@@ -597,7 +706,7 @@ fn collect_global_facts(
                                             .sites
                                             .entry(object.absolute_addr())
                                             .or_default()
-                                            .push((usize::MAX, block.id, instruction_index));
+                                            .push((usize::MAX, block.id, instruction_index, false));
                                     }
                                 }
                                 for object in writes {
@@ -631,13 +740,182 @@ fn collect_global_facts(
         stores,
         settle_loads,
         unknown_accesses,
+        orders,
+        components,
+        copies: settle.map(|settle| settle.copies.clone()),
     }
+}
+
+/// Whether the identity copy of `canonical` into `alias` may lose its
+/// store: in a partitioned settle only a copy its plan knows (`Settle`),
+/// directly or through a chain of copies the optimizer forwarded through.
+fn plan_treats_as_copy(
+    facts: &GlobalIdentityFacts,
+    alias: AbsoluteAddr,
+    canonical: AbsoluteAddr,
+) -> bool {
+    let Some(copies) = &facts.copies else {
+        return true;
+    };
+    let mut current = alias;
+    for _ in 0..=copies.len() {
+        match copies.get(&current) {
+            Some(&source) if source == canonical => return true,
+            Some(&source) => current = source,
+            None => return false,
+        }
+    }
+    false
+}
+
+/// Whether `canonical` holds the value the identity copy `store` of it
+/// copies for the rest of the units' run: no unit writes it, or its one
+/// write is a store that cannot run after the copy, in an earlier unit or
+/// earlier in the topological order of the copy's loop-free unit. A skipped
+/// partition leaves the copy and its source as they were.
+fn canonical_fixed_before(
+    facts: &GlobalIdentityFacts,
+    store: &StoreCandidate,
+    canonical: AbsoluteAddr,
+) -> bool {
+    match facts
+        .accesses
+        .get(&canonical)
+        .map_or(0, |access| access.writes)
+    {
+        0 => true,
+        1 => facts.stores.iter().any(|writer| {
+            writer.address.absolute_addr() == canonical && store_precedes(facts, writer, store)
+        }),
+        _ => false,
+    }
+}
+
+/// Whether `first` cannot run after `second` in one run of the units: it is
+/// in an earlier unit, earlier in the same loop-free block, or in a block of
+/// another strongly connected component that `second`'s block cannot reach
+/// (an earlier one in reverse postorder).
+fn store_precedes(
+    facts: &GlobalIdentityFacts,
+    first: &StoreCandidate,
+    second: &StoreCandidate,
+) -> bool {
+    if first.eu_index != second.eu_index {
+        return first.eu_index < second.eu_index;
+    }
+    let Some(components) = facts.components.get(first.eu_index) else {
+        return false;
+    };
+    let (Some(&(first_component, cyclic)), Some(&(second_component, _))) =
+        (components.get(&first.block), components.get(&second.block))
+    else {
+        return false;
+    };
+    if first.block == second.block {
+        return !cyclic && first.instruction_index < second.instruction_index;
+    }
+    if first_component == second_component {
+        return false;
+    }
+    facts.orders.get(first.eu_index).is_some_and(|order| {
+        matches!(
+            (order.get(&first.block), order.get(&second.block)),
+            (Some(first), Some(second)) if first < second
+        )
+    })
+}
+
+/// The strongly connected component of each reachable block of `eu`, with
+/// whether the component has a cycle: another block, or an edge to itself.
+fn strongly_connected_components(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+) -> HashMap<BlockId, (usize, bool)> {
+    struct State {
+        index: HashMap<BlockId, usize>,
+        low: HashMap<BlockId, usize>,
+        on_stack: HashSet<BlockId>,
+        stack: Vec<BlockId>,
+        next: usize,
+        components: HashMap<BlockId, (usize, bool)>,
+        count: usize,
+    }
+    let mut state = State {
+        index: HashMap::default(),
+        low: HashMap::default(),
+        on_stack: HashSet::default(),
+        stack: Vec::new(),
+        next: 0,
+        components: HashMap::default(),
+        count: 0,
+    };
+    // Iterative Tarjan: (block, next successor to visit).
+    let mut work: Vec<(BlockId, usize)> = Vec::new();
+    let roots = reverse_postorder_with(eu, &terminator_successors);
+    for root in roots {
+        if state.index.contains_key(&root) {
+            continue;
+        }
+        state.index.insert(root, state.next);
+        state.low.insert(root, state.next);
+        state.next += 1;
+        state.stack.push(root);
+        state.on_stack.insert(root);
+        work.push((root, 0));
+        while let Some(&mut (block, ref mut position)) = work.last_mut() {
+            let successors = eu
+                .blocks
+                .get(&block)
+                .map(|block| terminator_successors(&block.terminator))
+                .unwrap_or_default();
+            if let Some(&successor) = successors.get(*position) {
+                *position += 1;
+                if !state.index.contains_key(&successor) {
+                    state.index.insert(successor, state.next);
+                    state.low.insert(successor, state.next);
+                    state.next += 1;
+                    state.stack.push(successor);
+                    state.on_stack.insert(successor);
+                    work.push((successor, 0));
+                } else if state.on_stack.contains(&successor) {
+                    let low = state.low[&block].min(state.index[&successor]);
+                    state.low.insert(block, low);
+                }
+                continue;
+            }
+            work.pop();
+            if let Some(&(parent, _)) = work.last() {
+                let low = state.low[&parent].min(state.low[&block]);
+                state.low.insert(parent, low);
+            }
+            if state.low[&block] == state.index[&block] {
+                let mut members = Vec::new();
+                while let Some(member) = state.stack.pop() {
+                    state.on_stack.remove(&member);
+                    members.push(member);
+                    if member == block {
+                        break;
+                    }
+                }
+                let cyclic = members.len() > 1 || successors.contains(&block);
+                for member in members {
+                    state.components.insert(member, (state.count, cyclic));
+                }
+                state.count += 1;
+            }
+        }
+    }
+    state.components
 }
 
 /// Whether every read of `store`'s address comes after the store: later in
 /// its block, in a block it dominates, or in a later unit, which the
 /// topological order runs after it. Then an alias reads what the store
 /// would have written.
+///
+/// A read before the store in the same unit that only feeds change
+/// comparisons is the snapshot the store's partition takes of what it
+/// writes: with the alias, the partition finds the copy unchanged, and the
+/// source's writer marks the copy's readers (`Settle::copies`).
 ///
 /// Only a partitioned settle relaxes the unread rule this way: there a
 /// reader in a later partition loads a copy's target from memory, where the
@@ -650,35 +928,73 @@ fn reads_follow_store(facts: &GlobalIdentityFacts, store: &StoreCandidate) -> bo
     let Some(sites) = loads.sites.get(&address) else {
         return true;
     };
-    sites.iter().all(|&(eu_index, block, instruction_index)| {
-        if eu_index == usize::MAX {
-            return false;
-        }
-        if eu_index != store.eu_index {
-            return eu_index > store.eu_index;
-        }
-        if block == store.block {
-            return instruction_index > store.instruction_index;
-        }
-        let dominators = &loads.immediate_dominators[eu_index];
-        let mut current = block;
-        while let Some(&parent) = dominators.get(&current) {
-            if parent == store.block {
-                return true;
-            }
-            if parent == current {
+    sites
+        .iter()
+        .all(|&(eu_index, block, instruction_index, compare_only)| {
+            if eu_index == usize::MAX {
                 return false;
             }
-            current = parent;
-        }
-        false
-    })
+            if eu_index != store.eu_index {
+                return eu_index > store.eu_index;
+            }
+            if compare_only {
+                return true;
+            }
+            if block == store.block {
+                return instruction_index > store.instruction_index;
+            }
+            let dominators = &loads.immediate_dominators[eu_index];
+            let mut current = block;
+            while let Some(&parent) = dominators.get(&current) {
+                if parent == store.block {
+                    return true;
+                }
+                if parent == current {
+                    return false;
+                }
+                current = parent;
+            }
+            false
+        })
 }
 
-/// The immediate dominator of every block of `eu` reachable from its entry;
-/// the entry is its own.
-fn immediate_dominators(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> HashMap<BlockId, BlockId> {
-    let blocks = reverse_postorder_with(eu, &terminator_successors);
+/// The registers of `eu` every use of which is a case comparison
+/// (`NeCase`, `EqCase`): the values the settle compares for change.
+fn compare_only_registers(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> HashSet<RegisterId> {
+    let mut compared = HashSet::default();
+    let mut other = HashSet::default();
+    let mut uses = Vec::new();
+    for block in eu.blocks.values() {
+        for instruction in &block.instructions {
+            uses.clear();
+            instruction_uses(instruction, &mut uses);
+            let compares = matches!(
+                instruction,
+                SIRInstruction::Binary(_, _, BinaryOp::NeCase | BinaryOp::EqCase, _)
+            );
+            for &register in &uses {
+                if compares {
+                    compared.insert(register);
+                } else {
+                    other.insert(register);
+                }
+            }
+        }
+        uses.clear();
+        terminator_uses(&block.terminator, &mut uses);
+        other.extend(uses.iter().copied());
+    }
+    compared.retain(|register| !other.contains(register));
+    compared
+}
+
+/// The immediate dominator of every block of `eu` reachable from its entry
+/// through `successors_of`; the entry is its own.
+fn immediate_dominators_with(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    successors_of: &dyn Fn(&SIRTerminator) -> Vec<BlockId>,
+) -> HashMap<BlockId, BlockId> {
+    let blocks = reverse_postorder_with(eu, successors_of);
     let indices = blocks
         .iter()
         .copied()
@@ -688,7 +1004,7 @@ fn immediate_dominators(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> HashMap<Blo
     let mut predecessors = vec![Vec::new(); blocks.len()];
     for (index, block_id) in blocks.iter().enumerate() {
         if let Some(block) = eu.blocks.get(block_id) {
-            for successor in terminator_successors(&block.terminator) {
+            for successor in successors_of(&block.terminator) {
                 if let Some(&successor_index) = indices.get(&successor) {
                     predecessors[successor_index].push(index);
                 }
@@ -857,6 +1173,8 @@ fn select_aliases(
     facts: &GlobalIdentityFacts,
     metadata: &HashMap<AbsoluteAddr, AddressMetadata>,
     blocked_aliases: &HashSet<AbsoluteAddr>,
+    external: &ExternalAccesses,
+    initial: &HashMap<AbsoluteAddr, Option<num_bigint::BigUint>>,
     existing_aliases: &HashMap<AbsoluteAddr, AbsoluteAddr>,
     four_state: bool,
 ) -> HashMap<AbsoluteAddr, AbsoluteAddr> {
@@ -866,34 +1184,70 @@ fn select_aliases(
     }
 
     // Store(B, identity_copy(A)): B must be globally unread and uniquely
-    // written, while A must remain stable throughout eval_comb.
+    // written, or read only after its copy, while A must hold the copied
+    // value from the copy on (`canonical_fixed_before`).
+    let diagnostic = tracing::enabled!(target: "celox::alias", tracing::Level::DEBUG);
+    let mut rejected = HashMap::<&'static str, usize>::default();
     for store in &facts.stores {
         let alias = store.address.absolute_addr();
         let Some(canonical_address) = store.identity_source else {
             continue;
         };
         let canonical = canonical_address.absolute_addr();
-        if alias == canonical
-            || !store.shape_is_aliasable
-            || !store.effects_are_removable
-            || blocked_aliases.contains(&alias)
-            || existing_aliases.contains_key(&alias)
-            || !(is_unique_unread_alias(alias, &facts.accesses)
-                || (facts
-                    .accesses
-                    .get(&alias)
-                    .is_some_and(|access| access.writes == 1)
-                    && reads_follow_store(facts, store)))
-            || facts
+        let reason = if alias == canonical {
+            "self"
+        } else if !store.shape_is_aliasable {
+            "shape"
+        } else if !store.effects_are_removable {
+            "effects"
+        } else if blocked_aliases.contains(&alias) {
+            "blocked"
+        } else if !initial_values_agree(initial, alias, canonical) {
+            "initial"
+        } else if external.read.contains(&alias) && external.written.contains(&canonical) {
+            // An FF or process unit reading the copy expects the value the
+            // settle left there, while another of them may have moved the
+            // source since (a fused unit publishes FF values in place).
+            "read-by-ff-of-ff-value"
+        } else if existing_aliases.contains_key(&alias) {
+            "existing"
+        } else if !(is_unique_unread_alias(alias, &facts.accesses)
+            || (facts
                 .accesses
-                .get(&canonical)
-                .is_some_and(|access| access.writes != 0)
-            || canonical_address.region != STABLE_REGION
-            || !storage_is_compatible(alias, canonical, metadata, four_state)
+                .get(&alias)
+                .is_some_and(|access| access.writes == 1)
+                && reads_follow_store(facts, store)))
         {
-            continue;
+            if facts
+                .accesses
+                .get(&alias)
+                .is_some_and(|access| access.writes == 1)
+            {
+                "reads-precede"
+            } else {
+                "multi-writer"
+            }
+        } else if !canonical_fixed_before(facts, store, canonical) {
+            "canonical-written"
+        } else if !plan_treats_as_copy(facts, alias, canonical) {
+            "not-plan-copy"
+        } else if canonical_address.region != STABLE_REGION {
+            "region"
+        } else if !storage_is_compatible(alias, canonical, metadata, four_state) {
+            "storage"
+        } else {
+            aliases.insert(alias, canonical);
+            "aliased"
+        };
+        if diagnostic {
+            *rejected.entry(reason).or_default() += 1;
         }
-        aliases.insert(alias, canonical);
+    }
+    if diagnostic {
+        let mut counts: Vec<_> = rejected.into_iter().collect();
+        counts.sort_unstable();
+        let plan_copies = facts.copies.as_ref().map_or(0, |copies| copies.len());
+        tracing::debug!(target: "celox::alias", identity_stores = ?counts, plan_copies, "identity alias selection");
     }
 
     // Store(A, src), Store(B, src): RegisterIds are local to an EU, and the
@@ -943,6 +1297,7 @@ fn select_aliases(
                 || aliases.contains_key(&alias)
                 || !store.effects_are_removable
                 || blocked_aliases.contains(&alias)
+                || !initial_values_agree(initial, alias, canonical)
                 || !is_unique_unread_alias(alias, &facts.accesses)
                 || !storage_is_compatible(alias, canonical, metadata, four_state)
             {
@@ -1099,10 +1454,10 @@ fn increment_saturating(value: &mut usize) {
     *value = value.saturating_add(1);
 }
 
-/// The addresses the FF and process units access, or `None` when one of
-/// them may access any state.
-fn ff_referenced_addresses(program: &OptimizationContext) -> Option<HashSet<AbsoluteAddr>> {
-    let mut addresses = HashSet::default();
+/// The addresses the FF and process units read and write, or `None` when
+/// one of them may access any state.
+fn ff_referenced_addresses(program: &OptimizationContext) -> Option<ExternalAccesses> {
+    let mut addresses = ExternalAccesses::default();
     // Do not scan eval_comb_apply_ffs here.  Those units contain the complete
     // combinational graph as well as FF actions, so treating every address in
     // them as FF state disables identity aliasing for ordinary comb outputs.
@@ -1134,23 +1489,24 @@ fn ff_referenced_addresses(program: &OptimizationContext) -> Option<HashSet<Abso
         for block in eu.blocks.values() {
             for inst in &block.instructions {
                 match inst {
-                    SIRInstruction::Load(_, address, _, _)
-                    | SIRInstruction::Store(address, _, _, _, _, _) => {
-                        addresses.insert(address.absolute_addr());
+                    SIRInstruction::Load(_, address, _, _) => {
+                        addresses.read.insert(address.absolute_addr());
+                    }
+                    SIRInstruction::Store(address, _, _, _, _, _) => {
+                        addresses.written.insert(address.absolute_addr());
                     }
                     SIRInstruction::Commit(source, destination, _, _, _) => {
-                        addresses.insert(source.absolute_addr());
-                        addresses.insert(destination.absolute_addr());
+                        addresses.read.insert(source.absolute_addr());
+                        addresses.written.insert(destination.absolute_addr());
                     }
                     // What an FF unit's call accesses is FF state too; a
                     // native kernel there may access any state, which the
                     // caller treats as blocking every alias.
                     other => {
-                        addresses.extend(
-                            other
-                                .opaque_accessed_objects()?
-                                .map(RegionedAbsoluteAddr::absolute_addr),
-                        );
+                        for object in other.opaque_accessed_objects()? {
+                            addresses.read.insert(object.absolute_addr());
+                            addresses.written.insert(object.absolute_addr());
+                        }
                     }
                 }
             }
@@ -1161,7 +1517,7 @@ fn ff_referenced_addresses(program: &OptimizationContext) -> Option<HashSet<Abso
 
 /// Return the blocks that every terminating path from the entry executes.
 /// This is the ancestor chain of the nearest common dominator of all reachable
-/// Return/Error blocks.
+/// Return blocks.
 ///
 /// A partitioned settle skips a partition only when its stores would write
 /// what memory already holds, so for an identity copy the partition counts
@@ -1171,25 +1527,7 @@ fn must_execute_blocks(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     settle_flags: Option<AbsoluteAddr>,
 ) -> HashSet<BlockId> {
-    let successors = |terminator: &SIRTerminator| {
-        if let (
-            Some(flags),
-            SIRTerminator::Branch {
-                true_block: (body, _),
-                ..
-            },
-        ) = (settle_flags, terminator)
-            && eu.blocks.get(body).is_some_and(|block| {
-                block.instructions.iter().any(|instruction| {
-                    matches!(instruction, SIRInstruction::Store(address, ..)
-                        if address.region == STABLE_REGION && address.absolute_addr() == flags)
-                })
-            })
-        {
-            return vec![*body];
-        }
-        terminator_successors(terminator)
-    };
+    let successors = |terminator: &SIRTerminator| guarded_successors(eu, settle_flags, terminator);
     let blocks = reverse_postorder_with(eu, &successors);
     if blocks.is_empty() {
         return HashSet::default();
@@ -1207,7 +1545,8 @@ fn must_execute_blocks(
             return HashSet::default();
         };
         let successors = successors(&block.terminator);
-        if successors.is_empty() {
+        // A runtime error ends the run: what it skips is never observed.
+        if matches!(block.terminator, SIRTerminator::Return) {
             terminals.push(index);
         }
         for successor in successors {
@@ -1271,6 +1610,34 @@ fn must_execute_blocks(
         common_dominator = parent;
     }
     result
+}
+
+/// The successors of `terminator`, with the guard of a partition, or of a
+/// group of partitions, taken: a partition is skipped only when its stores
+/// would write what memory already holds. A partition's body clears its flag
+/// in `settle_flags`; a group's body tests the flag of its first partition.
+fn guarded_successors(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    settle_flags: Option<AbsoluteAddr>,
+    terminator: &SIRTerminator,
+) -> Vec<BlockId> {
+    if let (
+        Some(flags),
+        SIRTerminator::Branch {
+            true_block: (body, _),
+            ..
+        },
+    ) = (settle_flags, terminator)
+        && eu.blocks.get(body).is_some_and(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(instruction, SIRInstruction::Store(address, ..) | SIRInstruction::Load(_, address, ..)
+                    if address.region == STABLE_REGION && address.absolute_addr() == flags)
+            })
+        })
+    {
+        return vec![*body];
+    }
+    terminator_successors(terminator)
 }
 
 fn intersect_dominators(
@@ -1709,6 +2076,8 @@ mod tests {
             units,
             metadata,
             &HashSet::default(),
+            &ExternalAccesses::default(),
+            &HashMap::default(),
             existing_aliases,
             four_state,
             None,
@@ -1903,6 +2272,143 @@ mod tests {
                 .map(|block| (block.id, block))
                 .collect(),
             register_map: register_map(&[(0, 1), (1, 8)]),
+        };
+        assert!(unit.verify_result().is_ok());
+
+        assert!(aliases(&[unit], &metadata(&[(source, 8), (destination, 8)])).is_empty());
+    }
+
+    #[test]
+    fn identity_copy_of_a_value_stored_earlier_in_the_unit_is_an_alias() {
+        let source = address(0);
+        let destination = address(1);
+        let unit = single_block_unit(
+            vec![
+                SIRInstruction::Imm(RegisterId(0), SIRValue::new(5u8)),
+                store(source, 0, 8),
+                load(1, source, 8),
+                store(destination, 1, 8),
+            ],
+            &[(0, 8), (1, 8)],
+        );
+
+        assert_eq!(
+            aliases(&[unit], &metadata(&[(source, 8), (destination, 8)])),
+            HashMap::from_iter([(destination.absolute_addr(), source.absolute_addr())])
+        );
+    }
+
+    #[test]
+    fn identity_copy_of_a_value_stored_earlier_in_a_preceding_block_is_an_alias() {
+        let source = address(0);
+        let destination = address(1);
+        let entry = BasicBlock {
+            id: BlockId(0),
+            params: Vec::new(),
+            instructions: vec![
+                SIRInstruction::Imm(RegisterId(0), SIRValue::new(5u8)),
+                store(source, 0, 8),
+            ],
+            terminator: SIRTerminator::Jump(BlockId(1), Vec::new()),
+        };
+        let copy = BasicBlock {
+            id: BlockId(1),
+            params: Vec::new(),
+            instructions: vec![load(1, source, 8), store(destination, 1, 8)],
+            terminator: SIRTerminator::Return,
+        };
+        let unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [entry, copy]
+                .into_iter()
+                .map(|block| (block.id, block))
+                .collect(),
+            register_map: register_map(&[(0, 8), (1, 8)]),
+        };
+        assert!(unit.verify_result().is_ok());
+
+        assert_eq!(
+            aliases(&[unit], &metadata(&[(source, 8), (destination, 8)])),
+            HashMap::from_iter([(destination.absolute_addr(), source.absolute_addr())])
+        );
+    }
+
+    #[test]
+    fn identity_copy_taken_before_the_source_store_is_not_an_alias() {
+        let source = address(0);
+        let destination = address(1);
+        let unit = single_block_unit(
+            vec![
+                load(1, source, 8),
+                store(destination, 1, 8),
+                SIRInstruction::Imm(RegisterId(0), SIRValue::new(5u8)),
+                store(source, 0, 8),
+            ],
+            &[(0, 8), (1, 8)],
+        );
+
+        assert!(aliases(&[unit], &metadata(&[(source, 8), (destination, 8)])).is_empty());
+    }
+
+    #[test]
+    fn identity_copy_of_a_value_a_later_unit_stores_is_not_an_alias() {
+        let source = address(0);
+        let destination = address(1);
+        let copy = single_block_unit(
+            vec![load(1, source, 8), store(destination, 1, 8)],
+            &[(1, 8)],
+        );
+        let writer = single_block_unit(
+            vec![
+                SIRInstruction::Imm(RegisterId(0), SIRValue::new(5u8)),
+                store(source, 0, 8),
+            ],
+            &[(0, 8)],
+        );
+
+        assert!(aliases(&[copy, writer], &metadata(&[(source, 8), (destination, 8)])).is_empty());
+    }
+
+    #[test]
+    fn identity_copy_in_a_loop_with_its_source_store_is_not_an_alias() {
+        let source = address(0);
+        let destination = address(1);
+        let entry = BasicBlock {
+            id: BlockId(0),
+            params: Vec::new(),
+            instructions: vec![
+                SIRInstruction::Imm(RegisterId(0), SIRValue::new(5u8)),
+                store(source, 0, 8),
+            ],
+            terminator: SIRTerminator::Jump(BlockId(1), Vec::new()),
+        };
+        let copy = BasicBlock {
+            id: BlockId(1),
+            params: Vec::new(),
+            instructions: vec![
+                load(1, source, 8),
+                store(destination, 1, 8),
+                SIRInstruction::Imm(RegisterId(2), SIRValue::new(1u8)),
+            ],
+            terminator: SIRTerminator::Branch {
+                cond: RegisterId(2),
+                true_block: (BlockId(0), Vec::new()),
+                false_block: (BlockId(2), Vec::new()),
+            },
+        };
+        let exit = BasicBlock {
+            id: BlockId(2),
+            params: Vec::new(),
+            instructions: Vec::new(),
+            terminator: SIRTerminator::Return,
+        };
+        let unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [entry, copy, exit]
+                .into_iter()
+                .map(|block| (block.id, block))
+                .collect(),
+            register_map: register_map(&[(0, 8), (1, 8), (2, 1)]),
         };
         assert!(unit.verify_result().is_ok());
 
