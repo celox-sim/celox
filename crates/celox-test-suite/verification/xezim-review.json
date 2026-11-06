@@ -1062,6 +1062,10 @@
     "sv_type_operator": {
       "title": "Type references are compared and sized wrongly: `logic` and `bit` vectors of one width match, `type(4'(x))` is one bit wide, and a case on a type reference selects a nonmatching arm",
       "standard": "IEEE 1800-2023 6.22.1, 6.23"
+    },
+    "sv_real_to_integral_class_properties": {
+      "title": "A real value assigned to an integral class property is stored unconverted: with `int value`, `m.b.value = 5.5` and `$cast(m.b.value, 7.5)` leave 5.5 and 7.5 in the property instead of rounding to 6 and 8",
+      "standard": "IEEE 1800-2023 6.12.1, 6.24.2, 10.7"
     }
   },
   "cases": [
@@ -5583,6 +5587,14 @@
       "classification": "xezim_bug",
       "bug": "sv_casts_through_method_results",
       "note": "$cast evaluates its destination once whether or not it assigns it (6.24.2, 8.16), so Keys::key() in the string index of `$cast(entries[Keys::key()], 9)` runs once and creates one entry; the packed and unpacked structure members and the virtual interface member as sources agree. The pinned xezim runs the index twice and leaves three entries, as it evaluates other cast destinations the wrong number of times (see the bug's probe). Verilator 5.052 passes the shared case."
+    },
+    {
+      "suite": "sv",
+      "name": "system_functions::casts_between_numeric_types",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_real_to_integral_class_properties",
+      "note": "A $cast between numeric types assigns as the assignment of the source to the destination does (6.24.2), and a real assigned to an integral variable is rounded (6.12.1), so $cast(m.get().value, bump() + 2.5) stores 8 in the int property, runs get() once and prints 1 8 1 3. The pinned xezim prints 1 7.5 1 3: it stores the real unconverted, also for a property named directly and for a plain assignment `m.get().value = 5.5`, while it rounds a $cast to an int variable. Celox and Verilator 5.052 print 1 8 1 3."
     },
     {
       "suite": "sv",
