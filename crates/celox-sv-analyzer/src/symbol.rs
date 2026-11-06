@@ -11,6 +11,11 @@ impl ModuleId {
     pub fn index(self) -> usize {
         self.0
     }
+
+    /// The id of a module no source declares.
+    pub(crate) fn synthetic() -> Self {
+        Self(usize::MAX)
+    }
 }
 
 #[derive(Debug, Default)]

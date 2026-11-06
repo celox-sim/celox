@@ -510,6 +510,7 @@ impl Ff<'_, '_> {
                                     celox_heap::ops::OBJECT_STORE,
                                     &[owner, place, updated],
                                 );
+                                this.property_stored(&field);
                                 return Ok(());
                             }
                             let (id, updated_name) =
