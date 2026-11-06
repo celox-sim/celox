@@ -993,6 +993,38 @@ endmodule
 }
 
 #[test]
+fn wide_elements_of_frame_arrays() {
+    // Elements of 65 and 100 bits, at positions computed at run time, start
+    // at bit offsets that are not byte aligned (the second element of a
+    // 65-bit array starts at bit 65): every backend reads and writes them
+    // in place, and the neighbouring elements keep their bits. `wide` waits
+    // with its arrays live, so they are slots of its frame, one per call.
+    let source = r#"`timescale 1ns/1ns
+module Top(output logic [64:0] a, output logic [99:0] b, output logic [64:0] c, output logic [99:0] d);
+    task automatic wide(input int n, output logic [64:0] x, output logic [99:0] y);
+        logic [64:0] q[3];
+        logic [99:0] r[3];
+        foreach (q[i]) begin
+            q[i] = {1'b1, 64'(n) << (i * 7)} ^ 65'(i);
+            r[i] = (100'(n) << (30 + i * 11)) | 100'(i + 1);
+        end
+        #1;
+        x = q[n % 3] ^ q[(n + 1) % 3];
+        y = r[n % 3] + r[(n + 2) % 3];
+        q[(n + 1) % 3] = x;
+        r[n % 3] = y;
+        x = x ^ q[(n + 1) % 3] ^ q[(n + 2) % 3] ^ q[n % 3];
+        y = y ^ r[n % 3] ^ r[(n + 1) % 3] ^ r[(n + 2) % 3];
+    endtask
+    int one = 1;
+    initial wide(one, a, b);
+    initial wide(one + 4, c, d);
+endmodule
+"#;
+    same_as_inlined(source, 1, 2, &["a", "b", "c", "d"]);
+}
+
+#[test]
 fn heap_operations_go_out_of_line() {
     // Queue concatenation, array locators, streaming of dynamically sized
     // data, new events, the random and constraint modes and the constraint

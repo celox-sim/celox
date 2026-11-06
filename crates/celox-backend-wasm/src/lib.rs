@@ -919,7 +919,12 @@ fn load_slot_dynamic(
     instrs: &mut Vec<Instruction<'static>>,
 ) {
     let bits = frame_bit_address(frame_base, slot, offset, locals, instrs);
-    compile_load_dynamic(dst, 0, bits, op_width, instrs);
+    let value = RegLocal {
+        value_idx: dst.value_idx,
+        num_chunks: dst.num_chunks,
+        mask_idx: None,
+    };
+    load_frame_pieces(&value, 0, bits, op_width, locals, instrs);
     let Some(mask_idx) = dst.mask_idx.filter(|_| four_state) else {
         return;
     };
@@ -929,7 +934,7 @@ fn load_slot_dynamic(
         mask_idx: None,
     };
     if slot.four_state {
-        compile_load_dynamic(&mask, slot.plane_size(), bits, op_width, instrs);
+        load_frame_pieces(&mask, slot.plane_size(), bits, op_width, locals, instrs);
     } else {
         for c in 0..dst.num_chunks {
             instrs.push(Instruction::I64Const(0));
@@ -954,7 +959,7 @@ fn store_slot_dynamic(
         return;
     }
     let bits = frame_bit_address(frame_base, slot, offset, locals, instrs);
-    compile_store_dynamic(src, 0, bits, op_width, locals, instrs);
+    store_frame_pieces(src, 0, bits, op_width, locals, instrs);
     if !four_state || !slot.four_state {
         return;
     }
@@ -978,7 +983,132 @@ fn store_slot_dynamic(
             }
         }
     };
-    compile_store_dynamic(&mask, slot.plane_size(), bits, op_width, locals, instrs);
+    store_frame_pieces(&mask, slot.plane_size(), bits, op_width, locals, instrs);
+}
+
+/// The widest piece of a frame access at a bit address computed at run
+/// time that one word of linear memory holds whatever the address's bit
+/// shift (at most 7).
+const FRAME_PIECE_BITS: usize = 56;
+
+/// A local holding `bits + delta`.
+fn bit_address_plus(
+    bits: u32,
+    delta: usize,
+    locals: &mut LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) -> u32 {
+    if delta == 0 {
+        return bits;
+    }
+    let local = locals.alloc(1);
+    instrs.push(Instruction::LocalGet(bits));
+    instrs.push(Instruction::I64Const(delta as i64));
+    instrs.push(Instruction::I64Add);
+    instrs.push(Instruction::LocalSet(local));
+    local
+}
+
+/// Load the `op_width` bits at bit address `bits` from `base_offset` into
+/// the value plane of `dst`, a piece of at most [`FRAME_PIECE_BITS`] bits
+/// at a time, so that every piece keeps the address's bit shift.
+fn load_frame_pieces(
+    dst: &RegLocal,
+    base_offset: usize,
+    bits: u32,
+    op_width: usize,
+    locals: &mut LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    if op_width <= FRAME_PIECE_BITS {
+        compile_load_dynamic(dst, base_offset, bits, op_width, instrs);
+        return;
+    }
+    for c in 0..dst.num_chunks {
+        instrs.push(Instruction::I64Const(0));
+        instrs.push(Instruction::LocalSet(dst.value_idx + c as u32));
+    }
+    let piece = RegLocal {
+        value_idx: locals.alloc(1),
+        num_chunks: 1,
+        mask_idx: None,
+    };
+    for start in (0..op_width).step_by(FRAME_PIECE_BITS) {
+        let width = FRAME_PIECE_BITS.min(op_width - start);
+        let at = bit_address_plus(bits, start, locals, instrs);
+        compile_load_dynamic(&piece, base_offset, at, width, instrs);
+        // Keep only the piece's bits, then place them at `start`.
+        instrs.push(Instruction::LocalGet(piece.value_idx));
+        instrs.push(Instruction::I64Const(((1u64 << width) - 1) as i64));
+        instrs.push(Instruction::I64And);
+        instrs.push(Instruction::LocalSet(piece.value_idx));
+        let (chunk, shift) = (start / 64, start % 64);
+        for (into, amount, right) in [(chunk, shift, false), (chunk + 1, 64 - shift, true)] {
+            if into >= dst.num_chunks || (right && shift + width <= 64) {
+                continue;
+            }
+            let into = dst.value_idx + into as u32;
+            instrs.push(Instruction::LocalGet(into));
+            instrs.push(Instruction::LocalGet(piece.value_idx));
+            if amount != 0 {
+                instrs.push(Instruction::I64Const(amount as i64));
+                instrs.push(if right {
+                    Instruction::I64ShrU
+                } else {
+                    Instruction::I64Shl
+                });
+            }
+            instrs.push(Instruction::I64Or);
+            instrs.push(Instruction::LocalSet(into));
+        }
+    }
+}
+
+/// Store the `op_width` bits of the value plane of `src` at bit address
+/// `bits` from `base_offset`, a piece of at most [`FRAME_PIECE_BITS`] bits
+/// at a time, so that every piece keeps the address's bit shift and no
+/// bit outside the access changes.
+fn store_frame_pieces(
+    src: &RegLocal,
+    base_offset: usize,
+    bits: u32,
+    op_width: usize,
+    locals: &mut LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    let value = RegLocal {
+        value_idx: src.value_idx,
+        num_chunks: src.num_chunks,
+        mask_idx: None,
+    };
+    if op_width <= FRAME_PIECE_BITS {
+        compile_store_dynamic(&value, base_offset, bits, op_width, locals, instrs);
+        return;
+    }
+    let piece = RegLocal {
+        value_idx: locals.alloc(1),
+        num_chunks: 1,
+        mask_idx: None,
+    };
+    for start in (0..op_width).step_by(FRAME_PIECE_BITS) {
+        let width = FRAME_PIECE_BITS.min(op_width - start);
+        let (chunk, shift) = (start / 64, start % 64);
+        // The piece's bits, from one chunk or from two.
+        instrs.push(Instruction::LocalGet(src.value_idx + chunk as u32));
+        if shift != 0 {
+            instrs.push(Instruction::I64Const(shift as i64));
+            instrs.push(Instruction::I64ShrU);
+        }
+        if shift + width > 64 && chunk + 1 < src.num_chunks {
+            instrs.push(Instruction::LocalGet(src.value_idx + chunk as u32 + 1));
+            instrs.push(Instruction::I64Const((64 - shift) as i64));
+            instrs.push(Instruction::I64Shl);
+            instrs.push(Instruction::I64Or);
+        }
+        instrs.push(Instruction::LocalSet(piece.value_idx));
+        let at = bit_address_plus(bits, start, locals, instrs);
+        compile_store_dynamic(&piece, base_offset, at, width, locals, instrs);
+    }
 }
 
 /// Load `op_width` bits `bits` into `slot`, of the frame at `base`, into
