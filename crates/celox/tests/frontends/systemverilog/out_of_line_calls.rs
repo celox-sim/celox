@@ -394,10 +394,10 @@ endmodule
 
 #[test]
 fn ineligible_subroutines_stay_inlined() {
-    // A `ref` formal keeps a subroutine inlined, and a host request that a
-    // unit cannot make (`status`, a process method that a level wait may
-    // observe) keeps it inlined with every subroutine that calls it;
-    // `plain` still goes out of line.
+    // A host request that a unit cannot make (`status`, a process method
+    // that a level wait may observe) keeps a subroutine inlined with every
+    // subroutine that calls it; `plain` and `bump`, whose `ref` formal
+    // names `a`, still go out of line.
     let source = r#"module Top(output int a, output int b, output int c);
     function automatic void bump(ref int v);
         v = v + 1;
@@ -420,7 +420,7 @@ fn ineligible_subroutines_stay_inlined() {
     end
 endmodule
 "#;
-    same_as_inlined(source, 1, 0, &["a", "b", "c"]);
+    same_as_inlined(source, 2, 0, &["a", "b", "c"]);
 }
 
 #[test]
@@ -668,9 +668,8 @@ endmodule
 
 #[test]
 fn callers_of_subroutines_with_ref_formals_go_out_of_line() {
-    // `bump` passes through `ref`, so it stays inlined; `bumped_twice`,
-    // which only calls it, goes out of line with `bump` inlined into its
-    // unit, bound to the frame slot of its local.
+    // `bumped_twice` goes out of line, and so does `bump`, bound to the
+    // frame slot of its local, which each call copies in and back.
     let source = r#"module Top(input int i, output int a, output int b);
     function automatic void bump(ref int v);
         v = v + 1;
@@ -687,7 +686,7 @@ fn callers_of_subroutines_with_ref_formals_go_out_of_line() {
     end
 endmodule
 "#;
-    same_as_inlined(source, 1, 0, &["a", "b"]);
+    same_as_inlined(source, 2, 0, &["a", "b"]);
     assert_eq!(
         simulate(source, false, true, "interpreter", 0, &["a", "b"]),
         Ok(vec![value(4), value(12)])
@@ -748,6 +747,167 @@ endmodule
         simulate(source, false, true, "interpreter", 2, &["done_at", "r"]),
         Ok(vec![value(1), value(1)])
     );
+}
+
+#[test]
+fn ref_formals_pass_their_places_out_of_line() {
+    // A `ref` formal's place selects the function and passes the rest in
+    // the frame: a module queue the unit names itself (`push(q, ..)`), a
+    // class property through the handle the call evaluated, an array
+    // element at the index the call fixed (`i` changes after it), and an
+    // automatic of the calling unit, copied in and back (`twice`'s `t`,
+    // `local_queue`'s queue, also passed on to a second unit).
+    let source = r#"module Top(output int a, output int b, output int c, output int d, output int e);
+    class Node;
+        int v;
+    endclass
+    int q[$];
+    int arr[4];
+    function automatic void push(ref int target[$], input int n);
+        target.push_back(n);
+        target.push_back(target.size() + n);
+    endfunction
+    function automatic void bump(ref int v, input int by);
+        v = v + by;
+    endfunction
+    function automatic void swap_ends(ref int target[$]);
+        int t = target[0];
+        target[0] = target[target.size() - 1];
+        target[target.size() - 1] = t;
+    endfunction
+    function automatic int local_queue(int n);
+        int mine[$];
+        push(mine, n);
+        swap_ends(mine);
+        return mine[0] * 100 + mine[1];
+    endfunction
+    function automatic int twice(int start);
+        int t = start;
+        bump(t, start);
+        bump(t, 1);
+        return t;
+    endfunction
+    int one = 1;
+    initial begin
+        Node n = new;
+        int i = one;
+        push(q, one + 2);
+        bump(n.v, one + 4);
+        bump(n.v, one);
+        bump(arr[i], one + 6);
+        i = 2;
+        bump(arr[i], one + 8);
+        a = q[0] * 100 + q[1];
+        b = n.v;
+        c = arr[1] * 100 + arr[2];
+        d = twice(one + 3);
+        e = local_queue(one + 4);
+    end
+endmodule
+"#;
+    same_as_inlined(source, 9, 0, &["a", "b", "c", "d", "e"]);
+}
+
+#[test]
+fn recursive_calls_pass_their_ref_formals_on() {
+    // `collect` passes its own `ref` formal to itself: the place is the
+    // same, so the call enters the same function, for a module queue and
+    // for an automatic queue of `gather`.
+    let source = r#"module Top(output int a, output int b);
+    int q[$];
+    function automatic void collect(ref int out[$], input int depth);
+        out.push_back(depth);
+        if (depth > 0) collect(out, depth - 1);
+    endfunction
+    function automatic int gather(int depth);
+        int mine[$];
+        collect(mine, depth);
+        return mine.size() * 100 + mine[0];
+    endfunction
+    int one = 1;
+    initial begin
+        collect(q, one + 2);
+        a = q.size() * 100 + q[0] * 10 + q[3];
+        b = gather(one + 3);
+    end
+endmodule
+"#;
+    assert_eq!(function_units(source, true), 3);
+    for four_state in [false, true] {
+        for backend in backends() {
+            assert_eq!(
+                simulate(source, four_state, true, backend, 0, &["a", "b"]),
+                Ok(vec![value(430), value(504)]),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+}
+
+#[test]
+fn automatics_passed_by_ref_keep_their_copy_across_suspensions() {
+    // `slow_bump` waits twice with the copy of `run`'s automatic in its
+    // frame; meanwhile the sibling fork branch runs its own call of `run`,
+    // whose `mine` is another automatic with another copy, and the copies
+    // come back into each `mine` when each call returns.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c);
+    task automatic slow_bump(ref int v, input int by);
+        #1 v = v + by;
+        #1 v = v + by;
+    endtask
+    task automatic run(input int start, output int result);
+        int mine = start;
+        slow_bump(mine, start);
+        result = mine;
+    endtask
+    int one = 1;
+    initial begin
+        fork
+            run(one, a);
+            run(one + 9, b);
+        join
+        c = a * 100 + b;
+    end
+endmodule
+"#;
+    same_as_inlined(source, 2, 5, &["a", "b", "c"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 5, &["a", "b", "c"]),
+        Ok(vec![value(3), value(30), value(330)])
+    );
+}
+
+#[test]
+fn ref_places_a_call_cannot_pass_stay_inlined() {
+    // One automatic bound to two `ref` formals would be two copies, so
+    // `add_both` stays inlined into `aliased`; `bump(watched, ..)` stores
+    // into what a continuous assignment reads, which assembly instruments,
+    // so that call stays inlined too.
+    let source = r#"module Top(output int a, output int b, output int w);
+    function automatic void add_both(ref int x, ref int y);
+        x = x + 1;
+        y = y + 10;
+    endfunction
+    function automatic int aliased(int start);
+        int t = start;
+        add_both(t, t);
+        return t;
+    endfunction
+    function automatic void bump(ref int v, input int by);
+        v = v + by;
+    endfunction
+    int watched;
+    assign w = watched + 1;
+    int one = 1;
+    initial begin
+        a = aliased(one);
+        bump(watched, one + 1);
+        b = watched;
+    end
+endmodule
+"#;
+    same_as_inlined(source, 1, 0, &["a", "b", "w"]);
 }
 
 #[test]

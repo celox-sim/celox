@@ -2,7 +2,7 @@
 //! and the lowering of a subroutine body into its function unit.
 
 use super::super::out_of_line::{
-    Function, Outcome, Reason, Slot, automatic_names, frame_addr, layout,
+    Function, Outcome, Place, Reason, Slot, automatic_names, frame_addr, function_key, layout,
 };
 use super::*;
 
@@ -24,6 +24,15 @@ pub(super) struct FrameContext {
     /// Registers holding a frame size not known yet (see
     /// [`Function::size_patches`]).
     size_patches: Vec<(RegisterId, usize)>,
+    /// The `ref` formals the body names as variables of the module (see
+    /// [`Place::Variable`]), each with the variable.
+    renames: Vec<(String, SourceVarId)>,
+    /// The `ref` formals bound to a property or an element, whose handle
+    /// or positions are slots of the frame.
+    aliases: Vec<super::references::Alias>,
+    /// The first variable the lowering of the unit created: those from it
+    /// on that the unit touches are slots of its frame.
+    start: SourceVarId,
 }
 
 /// The resume slots of a resumable unit being lowered, and its resume
@@ -45,12 +54,14 @@ struct ResumeFrame {
 }
 
 impl Ff<'_, '_> {
-    /// The function a call of `name` enters, when the call goes out of line.
+    /// The function a call of `name` enters, when the call goes out of line,
+    /// with its `ref` formals bound to `places`.
     pub(super) fn out_of_line_callee(
         &mut self,
         name: &str,
         subroutine: &sv::ir::Subroutine,
         args: &[Option<sv::ir::Expr>],
+        places: Option<&[Place]>,
     ) -> Result<Option<usize>, sv::AnalyzerError> {
         if self.m.out_of_line().is_none() {
             return Ok(None);
@@ -77,16 +88,21 @@ impl Ff<'_, '_> {
             );
             return Ok(None);
         }
+        let Some(places) = places else {
+            self.record_outcome(name, Outcome::Inlined(Reason::RefFormal));
+            return Ok(None);
+        };
+        let key = function_key(name, places);
         let Some(functions) = self.m.out_of_line() else {
             return Ok(None);
         };
-        if let Some(reason) = functions.rejected.get(name).cloned() {
+        if let Some(reason) = functions.rejected.get(&key).cloned() {
             self.record_outcome(name, Outcome::Inlined(reason));
             return Ok(None);
         }
-        let index = match functions.by_name.get(name).copied() {
+        let index = match functions.by_name.get(&key).copied() {
             Some(index) => index,
-            None => match self.lower_function(name) {
+            None => match self.lower_function(name, &key, places) {
                 Ok(index) => index,
                 Err(reason) => {
                     self.record_outcome(name, Outcome::Inlined(reason));
@@ -168,6 +184,129 @@ impl Ff<'_, '_> {
         Ok(Some(index))
     }
 
+    /// The places of the `ref` formals of `subroutine` for a call that binds
+    /// them as `references` (the formals that name a variable, with it)
+    /// and `aliases` (the others), in the order of the formals; `None` when
+    /// one has no place an out-of-line call can pass: a formal of unpacked
+    /// structure type, or one automatic of the calling unit bound to two
+    /// formals, which the call copies.
+    pub(super) fn ref_places(
+        &self,
+        subroutine: &sv::ir::Subroutine,
+        references: &[(String, SourceVarId, SourceVarId)],
+        aliases: &[super::references::Alias],
+        actual_names: &HashMap<String, String>,
+    ) -> Option<Vec<Place>> {
+        let mut places = Vec::new();
+        let mut copied = HashSet::default();
+        for param in subroutine
+            .params
+            .iter()
+            .filter(|param| param.direction.is_reference())
+        {
+            if !param.leaves.is_empty() {
+                return None;
+            }
+            if let Some(&(_, _, target)) = references
+                .iter()
+                .find(|(formal, _, _)| *formal == param.name)
+            {
+                let name = actual_names.get(&param.name)?;
+                if self.frame_variable(target, name) {
+                    if !copied.insert(target) {
+                        return None;
+                    }
+                    places.push(Place::Frame {
+                        id: target,
+                        name: name.clone(),
+                    });
+                } else {
+                    places.push(Place::Variable(target));
+                }
+                continue;
+            }
+            let alias = aliases.iter().find(|alias| alias.formal == param.name)?;
+            places.push(match &alias.target {
+                super::references::Target::Property { handle, field } => Place::Property {
+                    field: *field,
+                    handle: handle.clone(),
+                },
+                super::references::Target::Element {
+                    element,
+                    signed,
+                    width,
+                    total,
+                } => {
+                    let sv::ir::LValue::Select { name, msb, lsb, .. } = &**element else {
+                        return None;
+                    };
+                    // The positions the call fixed are hidden variables; the
+                    // static part names them by their order.
+                    let mut names = HashSet::default();
+                    let read = sv::ir::Expr::Select {
+                        expr: Box::new(sv::ir::Expr::Literal("1'b0".into())),
+                        msb: msb.clone(),
+                        lsb: lsb.clone(),
+                        signed: false,
+                    };
+                    super::super::procedural::expr_idents(&read, &mut names);
+                    let mut positions: Vec<String> = names
+                        .into_iter()
+                        .filter(|position| position != name)
+                        .filter(|position| {
+                            self.m.id(position).is_some_and(|id| self.m.is_hidden(id))
+                        })
+                        .collect();
+                    positions.sort_unstable();
+                    let renames: HashMap<String, String> = positions
+                        .iter()
+                        .enumerate()
+                        .map(|(k, position)| (position.clone(), format!("#{k}")))
+                        .collect();
+                    let mut element = (**element).clone();
+                    if let sv::ir::LValue::Select { msb, lsb, .. } = &mut element {
+                        *msb = super::rename_const_idents(msb, &renames);
+                        *lsb = super::rename_const_idents(lsb, &renames);
+                    }
+                    Place::Element {
+                        element: Box::new(element),
+                        signed: *signed,
+                        width: *width,
+                        total: *total,
+                        positions,
+                    }
+                }
+            });
+        }
+        Some(places)
+    }
+
+    /// Whether variable `id`, named `name`, is an automatic of the unit
+    /// being lowered, which is a slot of its frame: an automatic of a
+    /// subroutine whose body it expands, or a variable its lowering
+    /// created.
+    fn frame_variable(&self, id: SourceVarId, name: &str) -> bool {
+        let Some(frame) = &self.frame else {
+            return false;
+        };
+        let own = self
+            .m
+            .calls
+            .as_deref()
+            .and_then(|graph| graph.out_of_line.as_ref())
+            .is_some_and(|functions| functions.functions[frame.function].slot(id).is_some());
+        own || id.0 >= frame.start.0
+            || self.active_calls.iter().any(|active| {
+                self.m.subroutine(active).is_some_and(|subroutine| {
+                    automatic_names(subroutine).any(|local| local == name)
+                        && !subroutine
+                            .params
+                            .iter()
+                            .any(|param| param.direction.is_reference() && param.name == name)
+                })
+            })
+    }
+
     fn record_outcome(&mut self, name: &str, outcome: Outcome) {
         if let Some(functions) = self.m.out_of_line() {
             functions.record(name, outcome);
@@ -177,7 +316,7 @@ impl Ff<'_, '_> {
     /// Lower subroutine `name` into a new function unit, or say why it
     /// cannot be. A failed lowering leaves nothing behind, so the call is
     /// inlined as if it had never been tried.
-    fn lower_function(&mut self, name: &str) -> Result<usize, Reason> {
+    fn lower_function(&mut self, name: &str, key: &str, places: &[Place]) -> Result<usize, Reason> {
         let subroutine = self
             .m
             .subroutine(name)
@@ -185,7 +324,7 @@ impl Ff<'_, '_> {
             .ok_or_else(|| Reason::Other(format!("no subroutine `{name}`")))?;
         let checkpoint = self.m.checkpoint();
         let names = self.m.declare_names();
-        let lowered = self.lower_function_from(&subroutine);
+        let lowered = self.lower_function_from(&subroutine, key, places);
         self.m.restore_names(names);
         match lowered {
             Ok(index) => {
@@ -196,14 +335,19 @@ impl Ff<'_, '_> {
             Err(reason) => {
                 self.m.rollback(checkpoint);
                 if let Some(functions) = self.m.out_of_line() {
-                    functions.rejected.insert(name.to_string(), reason.clone());
+                    functions.rejected.insert(key.to_string(), reason.clone());
                 }
                 Err(reason)
             }
         }
     }
 
-    fn lower_function_from(&mut self, subroutine: &sv::ir::Subroutine) -> Result<usize, Reason> {
+    fn lower_function_from(
+        &mut self,
+        subroutine: &sv::ir::Subroutine,
+        key: &str,
+        places: &[Place],
+    ) -> Result<usize, Reason> {
         let process = self.m.process_state(&subroutine.name);
         // The simulation time is a module variable, which the unit reads.
         if process.time {
@@ -263,6 +407,94 @@ impl Ff<'_, '_> {
             slots.push(self.slot_of(seed.0));
             dist_seed = Some(seed);
         }
+        // The dynamic parts of the places of the `ref` formals (see
+        // [`Place`]), which the caller passes.
+        let mut place_slots = Vec::new();
+        let mut renames = Vec::new();
+        let mut aliases = Vec::new();
+        let mut referents = HashSet::default();
+        let references = subroutine
+            .params
+            .iter()
+            .filter(|param| param.direction.is_reference());
+        for (param, place) in references.zip(places) {
+            let mut own = Vec::new();
+            match place {
+                Place::Variable(id) => {
+                    renames.push((param.name.clone(), *id));
+                    referents.insert(*id);
+                }
+                Place::Property { field, .. } => {
+                    let (handle, handle_name) =
+                        self.m
+                            .temp(super::references::OBJECT_TEMP, 32, false, false);
+                    self.m
+                        .variables
+                        .get_mut(&handle)
+                        .expect("a temp")
+                        .value_kind = celox_design::ValueKind::ObjRef;
+                    own.push(slots.len());
+                    slots.push(self.slot_of(handle));
+                    aliases.push(super::references::Alias {
+                        formal: param.name.clone(),
+                        source_name: param.source_name.clone(),
+                        target: super::references::Target::Property {
+                            handle: handle_name,
+                            field: *field,
+                        },
+                    });
+                }
+                Place::Element {
+                    element,
+                    signed,
+                    width,
+                    total,
+                    positions,
+                } => {
+                    let mut names = HashMap::default();
+                    for (k, caller) in positions.iter().enumerate() {
+                        let position = self
+                            .m
+                            .id(caller)
+                            .map(|id| self.m.var(id).clone())
+                            .ok_or_else(|| Reason::Other(format!("position `{caller}`")))?;
+                        let (temp, temp_name) = self.m.temp(
+                            "position",
+                            position.width,
+                            position.signed,
+                            position.is_4state,
+                        );
+                        own.push(slots.len());
+                        slots.push(self.slot_of(temp));
+                        names.insert(format!("#{k}"), temp_name);
+                    }
+                    let mut element = (**element).clone();
+                    if let sv::ir::LValue::Select { msb, lsb, .. } = &mut element {
+                        *msb = super::rename_const_idents(msb, &names);
+                        *lsb = super::rename_const_idents(lsb, &names);
+                    }
+                    aliases.push(super::references::Alias {
+                        formal: param.name.clone(),
+                        source_name: param.source_name.clone(),
+                        target: super::references::Target::Element {
+                            element: Box::new(element),
+                            signed: *signed,
+                            width: *width,
+                            total: *total,
+                        },
+                    });
+                }
+                Place::Frame { .. } => {
+                    let id = self
+                        .m
+                        .id(&param.name)
+                        .ok_or_else(|| Reason::Other(format!("formal `{}`", param.name)))?;
+                    own.push(slots.len());
+                    slots.push(self.slot_of(id));
+                }
+            }
+            place_slots.push(own);
+        }
         for name in automatic_names(subroutine) {
             let Some(id) = self.m.id(name) else {
                 continue;
@@ -278,7 +510,8 @@ impl Ff<'_, '_> {
         let functions = self.m.out_of_line().expect("lowering out of line");
         let index = functions.functions.len();
         functions.functions.push(Function {
-            name: subroutine.name.clone(),
+            key: key.to_string(),
+            places: place_slots,
             slots,
             unit: None,
             size: 0,
@@ -292,7 +525,7 @@ impl Ff<'_, '_> {
             resume: resume_slot,
             calls: Vec::new(),
         });
-        functions.by_name.insert(subroutine.name.clone(), index);
+        functions.by_name.insert(key.to_string(), index);
         functions.lowering += 1;
         let frame = FrameContext {
             function: index,
@@ -302,13 +535,16 @@ impl Ff<'_, '_> {
             dist_seed,
             resume,
             size_patches: Vec::new(),
+            renames,
+            aliases,
+            start,
         };
         let lowered = Ff::new(&mut *self.m, 0).lower_function_unit(subroutine, frame);
         let functions = self.m.out_of_line().expect("lowering out of line");
         functions.lowering -= 1;
         let (unit, size_patches, staging, calls) =
             lowered.map_err(|error| Reason::Other(error.to_string()))?;
-        self.finish_function(index, unit, size_patches, start, &staging)?;
+        self.finish_function(index, unit, size_patches, start, &staging, &referents)?;
         let functions = self.m.out_of_line().expect("lowering out of line");
         functions.functions[index].calls = calls;
         Ok(index)
@@ -372,8 +608,46 @@ impl Ff<'_, '_> {
                 .ok_or_else(|| unsupported(format!("result of `{}`", subroutine.name)))?;
             self.init_default(id);
         }
+        // The body names the variable of each `ref` formal bound to one,
+        // and reads and writes the property or element of the others
+        // through the slots of the handle and positions.
+        let (renames, aliases) = self
+            .frame
+            .as_mut()
+            .map(|frame| {
+                (
+                    std::mem::take(&mut frame.renames),
+                    std::mem::take(&mut frame.aliases),
+                )
+            })
+            .unwrap_or_default();
+        let mut body = subroutine.body.clone();
+        let (constants, parameter_types) = (self.m.constants, self.m.parameter_types);
+        let constant = |position: &sv::ir::ConstExpr| {
+            sv::typecheck::eval_const_expr_with_types(position, constants, parameter_types)
+        };
+        self.split_property_concats(&mut body, &aliases);
+        for alias in &aliases {
+            body = alias.rewrite(body, &constant)?;
+        }
+        let originals: Vec<(String, Option<SourceVarId>)> = renames
+            .iter()
+            .map(|(formal, target)| {
+                (
+                    formal.clone(),
+                    self.m.name_to_id.insert(formal.clone(), *target),
+                )
+            })
+            .collect();
         self.active_calls.push(subroutine.name.clone());
-        if self.exec_block(&subroutine.body)? {
+        let falls = self.exec_block(&body);
+        for (formal, original) in originals {
+            match original {
+                Some(id) => self.m.name_to_id.insert(formal, id),
+                None => self.m.name_to_id.remove(&formal),
+            };
+        }
+        if falls? {
             self.jump(return_block);
         }
         self.b.switch_to_block(return_block);
@@ -639,6 +913,7 @@ impl Ff<'_, '_> {
         size_patches: Vec<(RegisterId, usize)>,
         start: SourceVarId,
         staging: &HashSet<SourceVarId>,
+        referents: &HashSet<SourceVarId>,
     ) -> Result<(), Reason> {
         let end = self.m.next_id;
         let functions = self.m.out_of_line().expect("lowering out of line");
@@ -656,7 +931,11 @@ impl Ff<'_, '_> {
         // each activation needs its own as much as the function's.
         let automatic = self.m.automatic_storage();
         for id in accessed {
-            if slots.iter().any(|slot| slot.id == id) || staging.contains(&id) {
+            // The variable a `ref` formal names is the caller's.
+            if slots.iter().any(|slot| slot.id == id)
+                || staging.contains(&id)
+                || referents.contains(&id)
+            {
                 continue;
             }
             let created = (start.0..end.0).contains(&id.0);
