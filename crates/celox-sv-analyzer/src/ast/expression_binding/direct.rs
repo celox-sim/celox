@@ -3715,26 +3715,36 @@ pub(in crate::ast) fn check_argument(
             || format!("argument {ordinal} of `{name}`"),
             dimensions,
         )?;
-        if let Some(class) = shape.class.as_deref().filter(|_| shape.unpacked.is_empty())
-            && copies_actual_in(dimensions, name, position)
-        {
-            objects::check_assignment(tree, session, actual, native, dimensions, class, || {
-                format!("argument {ordinal} of `{name}`")
-            })?;
+        if let Some(class) = shape.class.as_deref().filter(|_| shape.unpacked.is_empty()) {
+            use crate::procedural::ParamDirection;
+            let direction = dimensions
+                .subroutine_directions
+                .get(name)
+                .and_then(|directions| directions.get(position));
+            let context = || format!("argument {ordinal} of `{name}`");
+            if matches!(
+                direction,
+                Some(ParamDirection::Input | ParamDirection::Inout)
+            ) {
+                objects::check_assignment(
+                    tree, session, actual, native, dimensions, class, context,
+                )?;
+            }
+            // An output or inout formal is assigned back to its actual
+            // (13.5.1).
+            if matches!(
+                direction,
+                Some(ParamDirection::Output | ParamDirection::Inout)
+            ) && let Some(target) =
+                objects::native_class(tree, session, actual, native, dimensions)
+            {
+                objects::check_class_assignment(
+                    tree, session, dimensions, class, &target, context,
+                )?;
+            }
         }
     }
     Ok(())
-}
-
-/// Whether the call copies actual `position` of subroutine `name` into its
-/// formal: an input or inout (13.5.1).
-fn copies_actual_in(dimensions: &PackedDimensions, name: &str, position: usize) -> bool {
-    use crate::procedural::ParamDirection;
-    dimensions
-        .subroutine_directions
-        .get(name)
-        .and_then(|directions| directions.get(position))
-        .is_some_and(|direction| matches!(direction, ParamDirection::Input | ParamDirection::Inout))
 }
 
 /// Bind actual `actual` of formal `position` of subroutine `name`, which
