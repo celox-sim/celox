@@ -556,15 +556,14 @@ impl Ff<'_, '_> {
             }
             place_slots.push(own);
         }
-        // The defaults of the input formals of an automatic subroutine are
-        // evaluated by the unit (see [`Function::omitted`]).
+        // The defaults of the input formals are evaluated by the unit, static
+        // or automatic (see [`Function::omitted`]).
         let defaulted: Vec<usize> = subroutine
             .params
             .iter()
             .enumerate()
             .filter(|(position, param)| {
-                subroutine.automatic
-                    && *position < 64
+                *position < 64
                     && param.default.is_some()
                     && param.direction.is_read()
                     && !param.direction.is_written()

@@ -1465,6 +1465,61 @@ endmodule
 }
 
 #[test]
+fn defaults_of_static_subroutines_that_call_each_other_recurse_at_run_time() {
+    // As `defaults_that_call_each_other_recurse_at_run_time`, with static
+    // subroutines, which go out of line from a procedural process (a
+    // combinational one cannot share their static formals with a unit):
+    // their units evaluate the defaults too.
+    let source = r#"module Top(input int i, output int r);
+    function int f(int a = g());
+        return a + i;
+    endfunction
+    function int g(int b = f());
+        return b + 1;
+    endfunction
+    initial r = f();
+endmodule
+"#;
+    for forced in [false, true] {
+        let run = simulate(source, false, forced, "interpreter", 0, &["r"]);
+        assert!(
+            run.as_ref()
+                .is_err_and(|error| error.contains("call depth exceeds")),
+            "forced {forced}: {run:?}"
+        );
+    }
+}
+
+#[test]
+fn doubling_default_chains_build_in_linear_time() {
+    // The default of each `fN` calls `fN-1` twice: 2^30 call paths, but 31
+    // pairs of a subroutine and the arguments its calls omit, which the
+    // policy sizes once each. They go out of line, and each unit evaluates
+    // its default with two calls of the next.
+    let depth = 30;
+    let mut source = String::from(
+        "module Top(input int i, output int r);\n    function automatic int f0(int a = 0);\n        return a + i;\n    endfunction\n",
+    );
+    for n in 1..=depth {
+        let p = n - 1;
+        source += &format!(
+            "    function automatic int f{n}(int a = f{p}() + f{p}());\n        return a;\n    endfunction\n"
+        );
+    }
+    source += &format!("    always_comb r = f5() + f{depth}(1);\nendmodule\n");
+    let start = std::time::Instant::now();
+    assert_eq!(
+        simulate(&source, false, false, "interpreter", 0, &["r"]),
+        Ok(vec![value(1)])
+    );
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(30),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
 fn defaults_that_may_call_each_other_end_when_a_branch_does() {
     // The default of `f` calls `g` only when `c` is clear, and that of `g`
     // calls `f`: a cycle through the defaults that ends when `c` is set.
