@@ -532,6 +532,36 @@ fn bind_value_in(
                     )?);
                     continue;
                 }
+                // A fixed-size unpacked array takes the elements of a
+                // dynamically sized one (7.6). A conditional is bound below,
+                // its operands receiving the array in turn.
+                if let Some(shape) = target
+                    .as_deref()
+                    .filter(|shape| !shape.unpacked.is_empty() && shape.container.is_none())
+                    .filter(|_| {
+                        !matches!(
+                            native.expression(ungroup(id, native)).kind,
+                            ExprKind::Conditional { .. }
+                        )
+                    })
+                    && containers::native_type(id, native, tree, session, dimensions)?.is_some()
+                {
+                    let source = expression_types::type_of(tree, session, id, native, dimensions)?;
+                    let fixed = shape
+                        .type_id(&mut session.types, &tree.functions, &dimensions.const_env)
+                        .ok_or_else(|| unsupported("type of a fixed-size unpacked array"))?;
+                    if session.types.assignable_array(source, fixed).is_err() {
+                        return Err(AnalyzerError::IncompatibleUnpackedArray {
+                            context: "assignment".into(),
+                            actual: session.types.spell(source),
+                            target: session.types.spell(fixed),
+                        });
+                    }
+                    values.push(streams::assign_to_fixed(
+                        id, shape, native, tree, session, dimensions,
+                    )?);
+                    continue;
+                }
                 if let Some(value) = locators::index(id, native, tree, session, dimensions)? {
                     values.push(value);
                     continue;

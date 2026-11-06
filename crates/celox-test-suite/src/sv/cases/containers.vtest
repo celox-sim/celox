@@ -2352,3 +2352,80 @@ endmodule
   (assert_eq fixed 2) (assert_eq bytes 0x04030201) (assert_eq low 0xef)
   (assert_eq nibble 1) (assert_eq member 0xaa) (assert_eq copied 0xbe) (assert_eq last 0x11)
   (assert_eq nested 2))
+
+; IEEE 1800-2023 7.6: a fixed-size unpacked array is assigned a dynamic
+; array or queue of equivalent elements element by element, the leftmost
+; index taking the container's element 0, wherever the ordinary assignment
+; receives it.
+(case fixed_size_arrays_take_dynamic_array_elements
+  (source "fixed.sv" #"
+module Top(output int f0, output int f1, output int g1, output int g0,
+           output int from_queue, output int element, output int argument,
+           output int returned, output int initial_value, output int chosen,
+           output int continuous);
+    typedef int pair_t [2];
+    int d [] = '{4, 5};
+    int q [$] = {7, 8};
+    int f [2];
+    int g [1:0];
+    pair_t a [3];
+    pair_t c;
+    bit s = 1;
+    assign c = d;
+    function automatic int second(int x [2]);
+        return x[1];
+    endfunction
+    function automatic pair_t get();
+        return q;
+    endfunction
+    function automatic int initialized();
+        int i [2] = d;
+        return i[1];
+    endfunction
+    initial begin
+        pair_t p, r;
+        f = d;
+        f0 = f[0];
+        f1 = f[1];
+        g = d;
+        g1 = g[1];
+        g0 = g[0];
+        f = q;
+        from_queue = f[1];
+        a[1] = d;
+        element = a[1][1];
+        argument = second(q);
+        p = get();
+        returned = p[0];
+        initial_value = initialized();
+        r = s ? q : d;
+        chosen = r[0];
+    end
+    always_comb continuous = c[1];
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq f0 4) (assert_eq f1 5) (assert_eq g1 4) (assert_eq g0 5)
+  (assert_eq from_queue 8) (assert_eq element 5) (assert_eq argument 8)
+  (assert_eq returned 7) (assert_eq initial_value 5) (assert_eq chosen 7)
+  (assert_eq continuous 5))
+
+; Elements of every integral width a container holds, also wider than 64
+; bits, are assigned whole (7.6).
+(case fixed_size_arrays_take_wide_dynamic_array_elements
+  (source "wide.sv" #"
+module Top(output logic [129:0] wide0, output logic [129:0] wide1);
+    logic [129:0] w [];
+    logic [129:0] wf [2];
+    initial begin
+        w = new[2];
+        w[0] = {2'b11, 64'h0123456789abcdef, 64'hfedcba9876543210};
+        w[1] = 130'h5;
+        wf = w;
+        wide0 = wf[0];
+        wide1 = wf[1];
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq wide0 0x30123456789abcdeffedcba9876543210) (assert_eq wide1 5))

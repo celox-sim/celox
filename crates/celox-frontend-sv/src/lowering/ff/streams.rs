@@ -2,7 +2,7 @@
 //! 11.4.14), lowered to calls of the heap helper on a heap stream.
 use super::*;
 use celox_heap::{ops::encode, streams as heap};
-use sv::ir::{StreamItem, StreamOp, StreamRange};
+use sv::ir::{StreamItem, StreamOp, StreamRange, StreamSize};
 
 /// The heap's code of range form `form`.
 fn range_form(form: StreamRange) -> u64 {
@@ -79,6 +79,15 @@ impl Ff<'_, '_> {
                                 &[stream, container, range],
                             )
                         }
+                        StreamItem::WideContainer { width, four_state } => {
+                            let container = self.handle(next()?)?;
+                            let parameter =
+                                heap::wide_parameter(width, four_state && self.m.four_state);
+                            self.heap_call(
+                                encode(heap::WIDE_CONTAINER, parameter),
+                                &[stream, container],
+                            )
+                        }
                         StreamItem::Stream => {
                             let other = self.integer_of_width(next()?, 32, false)?;
                             self.heap_call(heap::APPEND, &[stream, other])
@@ -98,10 +107,15 @@ impl Ff<'_, '_> {
                 }
                 (stream, 32, None)
             }
-            StreamOp::ToBits { width, exact } => {
+            StreamOp::ToBits { width, size } => {
                 let stream = self.integer_of_width(&args[0], 32, false)?;
+                let check = match size {
+                    StreamSize::Fits => heap::FITS,
+                    StreamSize::Cast => heap::CAST,
+                    StreamSize::Assignment => heap::ASSIGNMENT,
+                };
                 let stream = self.heap_call(
-                    encode(heap::CHECK, heap::check_parameter(*width as u64, *exact)),
+                    encode(heap::CHECK, heap::check_parameter(*width as u64, check)),
                     &[stream],
                 );
                 let zero = self.constant64(0);
@@ -237,6 +251,9 @@ impl Ff<'_, '_> {
                             types.extend([integer, integer]);
                         }
                         types
+                    }
+                    StreamItem::WideContainer { .. } => {
+                        vec![((32, Some(false)), Some(ObjRef))]
                     }
                     StreamItem::Stream => vec![((32, Some(false)), None)],
                 })

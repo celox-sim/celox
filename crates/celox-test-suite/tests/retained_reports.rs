@@ -1220,6 +1220,37 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                         ("icarus", "concurrent_assertions::sequence_values_over_sampled_ticks") => {
                             ("compile_error", "compile", "source_0.sv:14: syntax error")
                         }
+                        ("icarus", "containers::fixed_size_arrays_take_dynamic_array_elements") => {
+                            (
+                                "compile_error",
+                                "compile",
+                                "the type of the variable 'q' doesn't match the context type",
+                            )
+                        }
+                        (
+                            "icarus",
+                            "containers::fixed_size_arrays_take_wide_dynamic_array_elements",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "the type of the variable 'w' doesn't match the context type",
+                        ),
+                        (
+                            "verilator",
+                            "containers::fixed_size_arrays_take_dynamic_array_elements",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "is not an unpacked array, but is in an unpacked array context",
+                        ),
+                        (
+                            "verilator",
+                            "containers::fixed_size_arrays_take_wide_dynamic_array_elements",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "Assignment between 2-state and 4-state types requires equivalent element types",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

@@ -94,7 +94,11 @@ fn incompatible_types(
             }
         )
     };
-    (fixed(actual) && fixed(target) && table.assignable_array(actual, target).is_err())
+    // A fixed-size array takes another array of equivalent elements: a
+    // fixed-size one of as many, or a dynamically sized one, whose size is
+    // checked at run time (IEEE 1800-2023 7.6).
+    let array = |id| matches!(table.data(id), semantic_types::TyData::Array { .. });
+    (array(actual) && fixed(target) && table.assignable_array(actual, target).is_err())
         .then(|| (table.spell(actual), table.spell(target)))
 }
 
