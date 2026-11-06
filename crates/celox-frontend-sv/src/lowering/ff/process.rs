@@ -22,6 +22,9 @@ impl Ff<'_, '_> {
                     | ProcessOp::GetRandstate
                     | ProcessOp::SetRandstate
                     | ProcessOp::SemaphoreNew
+                    | ProcessOp::Trigger
+                    | ProcessOp::TriggerNonblocking
+                    | ProcessOp::Triggered
             ))
         {
             // A function unit suspends the process for the methods that

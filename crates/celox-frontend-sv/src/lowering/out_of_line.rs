@@ -99,7 +99,8 @@ pub(super) enum Reason {
     /// It, or a subroutine it calls, makes a host request a unit cannot
     /// make: `$exit`, monitors, strobes, VCD tasks, mailbox methods and
     /// the process methods but `self`, `srandom`, `get_randstate`,
-    /// `set_randstate` and a semaphore's `new`, or a DPI-C import; or a caller that cannot suspend calls a
+    /// `set_randstate`, a semaphore's `new` and the triggers of events and
+    /// `triggered`, or a DPI-C import; or a caller that cannot suspend calls a
     /// unit that can suspend.
     HostRequest,
     /// Anything else, described.
@@ -147,6 +148,10 @@ pub(super) struct ProcessState {
     /// A host request does not: the host serves it before anything else
     /// runs.
     pub yields: bool,
+    /// Whether it reads `e.triggered` (IEEE 1800-2023 15.5.3), which a level
+    /// wait's predicate reads as an observation of the event, so that a
+    /// predicate's call of it stays inlined.
+    pub observes_events: bool,
 }
 
 /// What became of the calls of one subroutine.
@@ -1088,9 +1093,11 @@ impl ProcModule<'_> {
                     sv::ir::Callee::System(function) => {
                         use sv::ir::SystemFunction;
                         match function {
-                            // `process::self()`, the RNG state of a process
-                            // and a new semaphore are host requests a unit
-                            // makes by suspending. The calling process holds
+                            // `process::self()`, the RNG state of a process,
+                            // a new semaphore and the triggers of events are
+                            // host requests a unit makes by suspending: none
+                            // parks the process, which continues as soon as
+                            // the host served it. The calling process holds
                             // its RNG state while the call is suspended: the
                             // frames that hold it give it back first. The
                             // other process methods act on the calling
@@ -1100,8 +1107,18 @@ impl ProcModule<'_> {
                                 | celox_design::ProcessOp::Srandom
                                 | celox_design::ProcessOp::GetRandstate
                                 | celox_design::ProcessOp::SetRandstate
-                                | celox_design::ProcessOp::SemaphoreNew,
+                                | celox_design::ProcessOp::SemaphoreNew
+                                | celox_design::ProcessOp::Trigger
+                                | celox_design::ProcessOp::TriggerNonblocking,
                             ) => state.suspends = true,
+                            // A level wait whose predicate reads it is
+                            // waiting on the event too, which only the
+                            // predicate's own code can tell the host; a
+                            // unit's code serves every caller.
+                            SystemFunction::Process(celox_design::ProcessOp::Triggered) => {
+                                state.suspends = true;
+                                state.observes_events = true;
+                            }
                             SystemFunction::Process(_) => note(Reason::HostRequest),
                             _ if function.is_host_request() => state.suspends = true,
                             SystemFunction::Urandom
