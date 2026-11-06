@@ -1,1 +1,6 @@
-Bring the Japanese concurrent assertion docs in line with the new subset.
+Revision history for #3245:
+
+rev 2 (content) 2026-11-06 00:43 UTC — Bring the Japanese concurrent assertion docs in line with the new subset.
+rev 1 (initial) 2026-11-06 00:43 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3245,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"9f74a1c063f09bbb4413d8d673b75aa0426dbaca","timestamp_iso":"2026-11-06T00:43:44Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"9f74a1c063f09bbb4413d8d673b75aa0426dbaca","new_sha":"950a8ba071661f5f082b0cc853bc666fdd3309d9","timestamp_iso":"2026-11-06T00:43:44Z","reason":"Bring the Japanese concurrent assertion docs in line with the new subset.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/9f74a1c063f09bbb4413d8d673b75aa0426dbaca...950a8ba071661f5f082b0cc853bc666fdd3309d9"}]} -->
