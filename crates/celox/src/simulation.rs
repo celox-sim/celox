@@ -372,9 +372,16 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
     }
 
     fn after_update(&mut self, timestamp: u64) -> Result<bool, Halt> {
-        self.show_slot(timestamp, |observer, io, time| {
+        // The value change points of the kernels since the last update
+        // point: the observer may have written there, or asked to finish.
+        let changed = std::mem::take(&mut self.value_changed);
+        if changed & 4 != 0 {
+            return Err(Halt::Finish);
+        }
+        let wrote = self.show_slot(timestamp, |observer, io, time| {
             observer.after_update(io, time)
-        })
+        })?;
+        Ok(wrote || changed & 2 != 0)
     }
 
     fn await_runtime_event_room(&mut self) {

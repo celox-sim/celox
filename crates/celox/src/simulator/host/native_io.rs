@@ -12,6 +12,12 @@ pub(crate) const SYMBOL: &str = "__celox_native_services_v11";
 pub(crate) const BEFORE_DOMAINS: u64 = u64::MAX - 14;
 /// A watched value may have changed (`SlotObserver::after_update`).
 pub(crate) const AFTER_UPDATE: u64 = u64::MAX - 15;
+/// A unit wrote a watched object (`celox_sir::extern_abi::VALUE_CHANGE_ID`):
+/// show the observer the update now. What it does in return takes effect at
+/// the next `AFTER_UPDATE`, which follows the unit.
+pub(crate) const VALUE_CHANGE: u64 = u64::MAX - 16;
+/// The bit of an `AFTER_UPDATE` result that requests a finish.
+pub(crate) const FINISHED: u64 = 4;
 
 pub(crate) const CHECKPOINT: u64 = u64::MAX;
 pub(crate) const SCHEDULER_RUN: u64 = u64::MAX - 1;
@@ -240,6 +246,11 @@ pub(super) trait ObserverService {
         metadata: &Metadata,
         arena: &mut super::native_arena::Arena,
     ) -> u64;
+
+    /// [`Self::after_update`] inside a unit: what the observer does takes
+    /// effect at the next update point, and the host inputs it writes stay
+    /// logged until then.
+    fn value_change(&mut self, time: u64);
 }
 
 pub(super) struct SlotService<'a, B: SimBackend> {
@@ -247,6 +258,9 @@ pub(super) struct SlotService<'a, B: SimBackend> {
     pub observer: Option<&'a mut (dyn crate::SlotObserver<B> + 'static)>,
     pub watch: &'a mut celox_runtime::HostWatch,
     pub dirty: &'a mut bool,
+    /// What the observer did at value change points since the last update
+    /// point, encoded as the result of `AFTER_UPDATE`.
+    pub changed: &'a mut u64,
 }
 
 impl<B: SimBackend> ObserverService for SlotService<'_, B> {
@@ -256,7 +270,7 @@ impl<B: SimBackend> ObserverService for SlotService<'_, B> {
         metadata: &Metadata,
         arena: &mut super::native_arena::Arena,
     ) -> u64 {
-        self.show(time, metadata, arena, |observer, io, time| {
+        self.show(time, Some((metadata, arena)), |observer, io, time| {
             observer.before_domains(io, time)
         })
     }
@@ -267,20 +281,35 @@ impl<B: SimBackend> ObserverService for SlotService<'_, B> {
         metadata: &Metadata,
         arena: &mut super::native_arena::Arena,
     ) -> u64 {
-        self.show(time, metadata, arena, |observer, io, time| {
+        let changed = std::mem::take(self.changed);
+        // A finish requested at a value change point ends the run before
+        // the observer sees another update, as in the reference loop.
+        if changed & FINISHED != 0 {
+            return changed;
+        }
+        self.show(time, Some((metadata, arena)), |observer, io, time| {
             observer.after_update(io, time)
-        })
+        }) | changed
+    }
+
+    fn value_change(&mut self, time: u64) {
+        if *self.changed & FINISHED != 0 {
+            return;
+        }
+        *self.changed |= self.show(time, None, |observer, io, time| {
+            observer.after_update(io, time)
+        });
     }
 }
 
 impl<B: SimBackend> SlotService<'_, B> {
     /// Show the observer the state at `time`; the result encodes whether it
-    /// wrote (bit 1) and requested a finish (bit 2).
+    /// wrote (bit 1) and requested a finish (bit 2). The host inputs it
+    /// writes are packed into `inputs`, or stay logged without one.
     fn show(
         &mut self,
         time: u64,
-        metadata: &Metadata,
-        arena: &mut super::native_arena::Arena,
+        inputs: Option<(&Metadata, &mut super::native_arena::Arena)>,
         show: impl FnOnce(&mut dyn crate::SlotObserver<B>, &mut crate::SlotIo<'_, B>, u64),
     ) -> u64 {
         let mut io = crate::SlotIo::new(crate::IOContext {
@@ -293,12 +322,12 @@ impl<B: SimBackend> SlotService<'_, B> {
         let wrote = io.wrote();
         let finish = io.finish_requested();
         *self.dirty |= wrote;
-        if !finish {
+        if !finish && let Some((metadata, arena)) = inputs {
             pack_host_inputs(self.backend, metadata, arena, self.watch.take_log());
         }
         // A finish precedes host-write observation in the reference round.
         // Keep its pending log in the saved state rather than a transient arena.
-        (u64::from(wrote) * 2) | (u64::from(finish) * 4)
+        (u64::from(wrote) * 2) | (u64::from(finish) * FINISHED)
     }
 }
 
@@ -985,7 +1014,9 @@ pub(crate) extern "C" fn call(
     detail: u64,
 ) -> u64 {
     if context == 0 {
-        return 1;
+        // A kernel run outside a scope has no observer to show its value
+        // changes to.
+        return u64::from(encoded != VALUE_CHANGE);
     }
     // SAFETY: Scope::run passes its exclusively borrowed scope through the
     // private context slot for this synchronous call and restores the slot
@@ -1005,6 +1036,13 @@ pub(crate) extern "C" fn call(
                 Some(observer) => Ok(observer.after_update(timestamp, scope.metadata, scope.arena)),
                 None => Ok(0),
             };
+        } else if encoded == VALUE_CHANGE {
+            if scope.updates
+                && let Some(observer) = scope.observer.as_deref_mut()
+            {
+                observer.value_change(timestamp);
+            }
+            return Ok(0);
         } else if matches!(encoded, ARENA_RESERVE_RECORDS | ARENA_RESERVE_IMAGES) {
             scope
                 .arena
