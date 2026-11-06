@@ -172,6 +172,106 @@ fn split_arguments(
     Ok((positional, named))
 }
 
+/// The stream layout of the target of cast `target'(operand)`, when its
+/// type is known, after checking that the stream lowering gives a layout to
+/// both the operand and the target (6.24.3): one it cannot give is an
+/// unsupported cast rather than a stream of another shape.
+fn stream_layouts(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    target: ExprId,
+    operand: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<semantic_types::StreamLayout>> {
+    use semantic_types::StreamRole;
+    // A stream operand's items are laid out where it is packed.
+    if !streams::is_stream(operand, native)
+        && let Ok(source) = expression_types::type_of(tree, session, operand, native, dimensions)
+    {
+        session
+            .types
+            .stream_layout(source, StreamRole::Operand)
+            .map_err(unsupported)?;
+    }
+    let names_type = match &native.expression(ungroup(target, native)).kind {
+        ExprKind::Type(_) => true,
+        _ => call_name(tree, target, native)
+            .is_some_and(|name| dimensions.type_aliases.contains_key(&name)),
+    };
+    if !names_type {
+        return Ok(None);
+    }
+    let Some(target) = expression_types::cast_type(tree, session, target, native, dimensions)
+    else {
+        return Ok(None);
+    };
+    // A streaming concatenation is the operand only of a cast to a
+    // bit-stream type (IEEE 1800-2023 11.4.14, 6.24.3), which a real, a
+    // chandle or a virtual interface is not.
+    if streams::is_stream(operand, native)
+        && matches!(
+            session.types.data(target),
+            semantic_types::TyData::Real
+                | semantic_types::TyData::Shortreal
+                | semantic_types::TyData::Chandle
+                | semantic_types::TyData::VirtualInterface { .. }
+        )
+    {
+        return Err(AnalyzerError::InvalidStream(format!(
+            "a streaming concatenation cast to `{}`, which is not a bit-stream type",
+            session.types.spell(target)
+        )));
+    }
+    session
+        .types
+        .stream_layout(target, StreamRole::Target)
+        .map(Some)
+        .map_err(unsupported)
+}
+
+/// Whether type cast `target'(operand)` converts between bit-stream types
+/// that are not both integral (IEEE 1800-2023 6.24.3): its operand packs
+/// into the target as the stream `{>>{operand}}` would, index 0 first.
+fn bit_stream_cast(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    target: ExprId,
+    operand: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> bool {
+    // A size or signing cast is no bit-stream cast; its size is not
+    // evaluated here.
+    let names_type = match &native.expression(ungroup(target, native)).kind {
+        ExprKind::Type(_) => true,
+        _ => call_name(tree, target, native)
+            .is_some_and(|name| dimensions.type_aliases.contains_key(&name)),
+    };
+    if !names_type {
+        return false;
+    }
+    let Some(target) = expression_types::cast_type(tree, session, target, native, dimensions)
+    else {
+        return false;
+    };
+    let Ok(source) = expression_types::type_of(tree, session, operand, native, dimensions) else {
+        return false;
+    };
+    let integral = |id| matches!(session.types.data(id), semantic_types::TyData::Packed(_));
+    // An integral value converts to a string by its own rule, zero-filled
+    // on the left to whole characters (6.16), not by the stream's
+    // right-padded bytes.
+    let string = matches!(session.types.data(target), semantic_types::TyData::String);
+    // Fixed sizes that differ are reported where the stream is packed.
+    !(integral(source) && (integral(target) || string))
+        && matches!(
+            session.types.castable(source, target),
+            Ok(semantic_types::Castable::BitStream { .. })
+                | Err(semantic_types::Mismatch::Size { .. })
+        )
+}
+
 pub(in crate::ast) fn cast_target_native(
     target: ExprId,
     operand: ExprId,
@@ -854,8 +954,27 @@ fn bind_value_in(
                         (Finish::Repeat { literals }, children)
                     }
                     ExprKind::Cast { target, expression }
-                        if streams::is_stream(*expression, native) =>
+                        if streams::is_stream(*expression, native)
+                            || bit_stream_cast(
+                                tree,
+                                session,
+                                *target,
+                                *expression,
+                                native,
+                                dimensions,
+                            ) =>
                     {
+                        // Both sides convert by their layouts in a stream
+                        // (6.24.3), which also tells which the lowering
+                        // cannot give yet.
+                        let target_layout = stream_layouts(
+                            tree,
+                            session,
+                            *target,
+                            *expression,
+                            native,
+                            dimensions,
+                        )?;
                         // A cast to a type that is not integral receives the
                         // stream as an assignment does.
                         let ty = match call_name(tree, *target, native) {
@@ -870,13 +989,20 @@ fn bind_value_in(
                         if let Some(shape) = ty
                             .as_ref()
                             .map(procedural::dimensions_from_type)
-                            .filter(|shape| {
-                                shape.container.is_some()
-                                    || shape.string
-                                    || !shape.unpacked.is_empty()
+                            .filter(|shape| match target_layout {
+                                Some(semantic_types::StreamLayout::Bits {
+                                    element: None, ..
+                                }) => false,
+                                Some(_) => true,
+                                None => {
+                                    shape.container.is_some()
+                                        || shape.string
+                                        || !shape.unpacked.is_empty()
+                                }
                             })
                         {
-                            let receiver = streams::receiver(&shape, &tree.functions, dimensions)?;
+                            let receiver =
+                                streams::cast_receiver(&shape, &tree.functions, dimensions)?;
                             values.push(streams::pack(
                                 *expression,
                                 Some(receiver),
