@@ -2537,13 +2537,18 @@ impl Plan {
                 &ordinals,
                 time,
                 SCHEDULER_TIME_WIDTH,
-                |g, index, _, on, time| {
-                    let wake = g.load(slots.wake[index], SCHEDULER_TIME_WIDTH);
-                    let earlier = g.binary(1, wake, BinaryOp::LtU, time);
-                    let earlier = g.binary(1, earlier, BinaryOp::And, on);
-                    let next = g.b.alloc_bit(SCHEDULER_TIME_WIDTH, false);
-                    g.b.emit(SIRInstruction::Mux(next, earlier, wake, time));
-                    next
+                |g, kernels, bits, mut time| {
+                    for &(index, _) in kernels {
+                        let wake = g.load(slots.wake[index], SCHEDULER_TIME_WIDTH);
+                        let on = g.b.alloc_bit(1, false);
+                        g.b.emit(SIRInstruction::Slice(on, bits, ordinals[index], 1));
+                        let earlier = g.binary(1, wake, BinaryOp::LtU, time);
+                        let earlier = g.binary(1, earlier, BinaryOp::And, on);
+                        let next = g.b.alloc_bit(SCHEDULER_TIME_WIDTH, false);
+                        g.b.emit(SIRInstruction::Mux(next, earlier, wake, time));
+                        time = next;
+                    }
+                    time
                 },
             );
         }
@@ -2674,26 +2679,33 @@ impl Plan {
                 &ordinals,
                 ready,
                 g.ready_bits,
-                |g, index, _, on, ready| {
-                    let wake = g.load(slots.wake[index], SCHEDULER_TIME_WIDTH);
-                    let due = g.binary(1, wake, BinaryOp::Eq, time);
-                    let mut due = g.binary(1, due, BinaryOp::And, on);
-                    if host_inputs && self.inactive.iter().any(|&(process, _)| process == index) {
-                        // Imported #0 work belongs to Inactive. A computed
-                        // positive delay instead resumes in Active at its
-                        // future timestamp.
-                        let process = &schema.processes[index];
-                        let status = g.load(process.status, celox_design::PROCESS_STATUS_WIDTH);
-                        let inactive =
-                            g.equals(status, u64::from(ProcessStatus::InactiveDelay.code()));
-                        let amount = g.load(process.delay, celox_design::PROCESS_DELAY_WIDTH);
-                        let zero = g.equals(amount, 0);
-                        let inactive = g.binary(1, inactive, BinaryOp::And, zero);
-                        let active = g.equals(inactive, 0);
-                        due = g.binary(1, due, BinaryOp::And, active);
+                |g, kernels, bits, ready| {
+                    // The kernels at their wake time, as a word masked by
+                    // the group's timed bits once.
+                    let mut due_bits = g.constant(0, g.ready_bits);
+                    for &(index, _) in kernels {
+                        let wake = g.load(slots.wake[index], SCHEDULER_TIME_WIDTH);
+                        let mut due = g.binary(1, wake, BinaryOp::Eq, time);
+                        if host_inputs && self.inactive.iter().any(|&(process, _)| process == index)
+                        {
+                            // Imported #0 work belongs to Inactive. A
+                            // computed positive delay instead resumes in
+                            // Active at its future timestamp.
+                            let process = &schema.processes[index];
+                            let status = g.load(process.status, celox_design::PROCESS_STATUS_WIDTH);
+                            let inactive =
+                                g.equals(status, u64::from(ProcessStatus::InactiveDelay.code()));
+                            let amount = g.load(process.delay, celox_design::PROCESS_DELAY_WIDTH);
+                            let zero = g.equals(amount, 0);
+                            let inactive = g.binary(1, inactive, BinaryOp::And, zero);
+                            let active = g.equals(inactive, 0);
+                            due = g.binary(1, due, BinaryOp::And, active);
+                        }
+                        let bit = g.bit(due, ordinals[index]);
+                        due_bits = g.binary(g.ready_bits, due_bits, BinaryOp::Or, bit);
                     }
-                    let bit = g.bit(due, ordinals[index]);
-                    g.binary(g.ready_bits, ready, BinaryOp::Or, bit)
+                    let due_bits = g.binary(g.ready_bits, due_bits, BinaryOp::And, bits);
+                    g.binary(g.ready_bits, ready, BinaryOp::Or, due_bits)
                 },
             );
         }
@@ -5187,13 +5199,14 @@ impl Generator<'_> {
         self.store_at(self.slots.timed, ordinal, 1, value);
     }
 
-    /// Fold `body` over the kernels of `kernels` whose bit of the timed mask
-    /// `timed` may be set, eight kernels (one byte of the mask) at a time: a
-    /// byte with no bit set skips its kernels. `body` gets the kernel, its
-    /// status slot, its bit of the mask and the accumulator of `width`
-    /// bits, and returns the new accumulator. The accumulator is a block
-    /// parameter of the join after each group, so callers keep it to one
-    /// word (the native backend's branch arguments are single words).
+    /// Fold `group` over the kernels of `kernels` whose bit of the timed
+    /// mask `timed` may be set, eight kernels (one byte of the mask) at a
+    /// time: a byte with no bit set skips its kernels. `group` gets a
+    /// group's kernels with their status slots, the mask restricted to the
+    /// group and the accumulator of `width` bits, and returns the new
+    /// accumulator. The accumulator is a block parameter of the join after
+    /// each group, so callers keep it to one word (the native backend's
+    /// branch arguments are single words).
     fn scan_timed(
         &mut self,
         timed: RegisterId,
@@ -5201,10 +5214,9 @@ impl Generator<'_> {
         ordinals: &[usize],
         mut acc: RegisterId,
         width: usize,
-        mut body: impl FnMut(
+        mut group: impl FnMut(
             &mut Self,
-            usize,
-            Option<AbsoluteAddr>,
+            &[(usize, Option<AbsoluteAddr>)],
             RegisterId,
             RegisterId,
         ) -> RegisterId,
@@ -5216,9 +5228,9 @@ impl Generator<'_> {
                 .or_default()
                 .push((index, status));
         }
-        for group in groups.values() {
+        for kernels in groups.values() {
             let mut mask = BigUint::default();
-            for &(index, _) in group {
+            for &(index, _) in kernels {
                 mask |= BigUint::from(1u8) << ordinals[index];
             }
             let mask = self.wide_constant(mask, self.ready_bits);
@@ -5234,10 +5246,7 @@ impl Generator<'_> {
                 false_block: (join, vec![acc]),
             });
             self.b.switch_to_block(scan);
-            for &(index, status) in group {
-                let on = self.mask_bit(timed, ordinals[index]);
-                acc = body(self, index, status, on, acc);
-            }
+            acc = group(self, kernels, bits, acc);
             self.b.seal_block(SIRTerminator::Jump(join, vec![acc]));
             self.b.switch_to_block(join);
             acc = joined;
