@@ -230,6 +230,9 @@ mod host {
         pub(crate) host_watch: celox_runtime::HostWatch,
         /// What a timed simulation's host observes inside its time slots.
         pub(crate) slot_observer: Option<Box<dyn crate::SlotObserver<B>>>,
+        /// The slot observer watches every update of a slot
+        /// ([`crate::SlotObserver::observes_updates`]).
+        pub(crate) observes_updates: bool,
         /// The slot observer wrote at the end of the last time slot.
         pub(crate) slot_writes: bool,
         /// Runtime-event sequence up to which a timed simulation looked for
@@ -1448,6 +1451,7 @@ mod host {
                 frozen: false,
                 host_watch: Default::default(),
                 slot_observer: None,
+                observes_updates: false,
                 slot_writes: false,
                 finish_scan_seq: 0,
                 finish_sites: false,
@@ -2703,6 +2707,7 @@ mod host {
                         pending_scan: 0,
                         comb_before: Vec::new(),
                         observer: None,
+                        updates: self.observes_updates,
                     };
                     let ((result, error), elapsed) = match prepared {
                         Some(call) => {

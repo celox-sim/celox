@@ -38,6 +38,7 @@ pub fn compile_native_sources(sources: &[&Path], top: &str) -> Result<NativeProg
         Simulator::from_sv_sources(source_refs, top)
             .four_state(true)
             .native_force_support(true)
+            .observable_updates(true)
             .opt_level(celox::OptLevel::O0)
             .compile_native()
             .map(|compiled| compiled.into_program_image())
@@ -152,6 +153,7 @@ fn compile_native_image_configured(
             .diagnostic_policy(policy.clone())
             .four_state(mode.four_state)
             .native_force_support(mode.legacy_force)
+            .observable_updates(true)
             .signal_access(access.clone())
             .opt_level(level);
         parameters
@@ -167,6 +169,7 @@ fn compile_native_image_configured(
             .diagnostic_policy(policy.clone())
             .four_state(mode.four_state)
             .native_force_support(mode.legacy_force)
+            .observable_updates(true)
             .signal_access(access.clone())
             .opt_level(level);
         parameters

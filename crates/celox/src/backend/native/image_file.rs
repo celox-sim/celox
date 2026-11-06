@@ -13,7 +13,8 @@ const TRAILER_MAGIC: &[u8; 8] = b"CELOXNPI";
 // Generated NBA queues access stable record pages through the private arena
 // header. Earlier runtimes use a different arena layout and service ABI.
 // Version 72 adds the frames of function units to the runtime schema.
-const CONTAINER_VERSION: u16 = 72;
+// Version 73 adds the update points of the scheduler schema.
+const CONTAINER_VERSION: u16 = 73;
 const TRAILER_SIZE: usize = 32;
 // This optional prefix descriptor does not change the Postcard payload. Older
 // readers ignore framing flags and continue to locate the payload at EOF.
