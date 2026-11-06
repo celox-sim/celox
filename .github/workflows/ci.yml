@@ -499,7 +499,7 @@ jobs:
           retention-days: 1
 
   sv-tests-shard:
-    name: sv-tests conformance (${{ matrix.shard }}/3)
+    name: sv-tests conformance (${{ matrix.shard }}/5)
     needs: [changes, sv-tests]
     if: ${{ !cancelled() && needs.sv-tests.result == 'success' }}
     runs-on: ubuntu-latest
@@ -507,7 +507,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -558,8 +558,9 @@ jobs:
           --driver "$RUNNER_TEMP/driver/sv_tests"
           --out-dir "$RUNNER_TEMP/sv-tests-results"
           --jobs 4
+          --case-timeout 78
           --state-mode both
-          --shard ${{ matrix.shard }}/3
+          --shard ${{ matrix.shard }}/5
           --expected conformance/sv-tests/expected.tsv
           --report "$RUNNER_TEMP/sv-tests-report.tsv"
 
@@ -768,6 +769,9 @@ jobs:
 
       - name: Test AArch64 facade integration
         run: cargo test --locked -p celox --lib --test native_exec
+
+      - name: Test hotspot JIT on AArch64
+        run: cargo test --locked -p celox --features systemverilog --lib hotspot
 
       - name: Test partial-word reduction AND on AArch64
         run: >-

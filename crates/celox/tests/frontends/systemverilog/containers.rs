@@ -12,6 +12,10 @@ sv_backends! {
     fn containers_received_from_any_expression(sim) { @case "containers::containers_received_from_any_expression"; }
     fn nested_bounded_queues_are_assigned_elementwise(sim) { @case "containers::nested_bounded_queues_are_assigned_elementwise"; }
     fn container_values_are_converted_on_every_path(sim) { @case "containers::container_values_are_converted_on_every_path"; }
+    fn associative_patterns_with_keys(sim) { @case "containers::associative_patterns_with_keys"; }
+    fn ambiguous_conditions_of_containers(sim) { @case "containers::ambiguous_conditions_of_containers"; }
+    fn conversions_before_ambiguous_merges(sim) { @case "containers::conversions_before_ambiguous_merges"; }
+    fn untargeted_and_nested_container_merges(sim) { @case "containers::untargeted_and_nested_container_merges"; }
     fn conditionals_received_by_containers(sim) { @case "containers::conditionals_received_by_containers"; }
     fn associative_default_strings(sim) { @case "containers::associative_default_strings"; }
     fn associative_default_copy(sim) { @case "containers::associative_default_copy"; }

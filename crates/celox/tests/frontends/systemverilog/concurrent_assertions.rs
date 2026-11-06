@@ -10,6 +10,9 @@ fn sampled_predicate_live_action(_sim) { @case "concurrent_assertions::sampled_p
 fn disable_iff_after_nba(_sim) { @case "concurrent_assertions::disable_iff_after_nba"; }
 fn predicates_before_all_actions(_sim) { @case "concurrent_assertions::predicates_before_all_actions"; }
 fn assume_cover_and_generate(_sim) { @case "concurrent_assertions::assume_cover_and_generate"; }
+fn subroutine_calls_in_actions(_sim) { @case "concurrent_assertions::subroutine_calls_in_actions"; }
+fn named_sequences_and_properties(_sim) { @case "concurrent_assertions::named_sequences_and_properties"; }
+fn named_sequence_leading_clock(_sim) { @case "concurrent_assertions::named_sequence_leading_clock"; }
 }
 sv_backends! {
 fn unknown_predicates_and_disable_conditions(_sim) { @case "concurrent_assertions::unknown_predicates_and_disable_conditions"; }

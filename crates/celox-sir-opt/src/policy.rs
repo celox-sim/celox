@@ -175,6 +175,7 @@ pub struct OptimizeOptions {
     parallel_lanes: u32,
     parallel_partition: ParallelPartition,
     settle_partition: SettlePartition,
+    value_change_objects: Vec<String>,
     pub diagnostics: SirDiagnostics,
 }
 
@@ -222,6 +223,7 @@ impl OptimizeOptions {
             parallel_lanes: 1,
             parallel_partition: ParallelPartition::Estimated,
             settle_partition: SettlePartition::Estimated,
+            value_change_objects: Vec::new(),
             diagnostics: SirDiagnostics::default(),
         }
     }
@@ -300,6 +302,20 @@ impl OptimizeOptions {
 
     pub fn settle_partition(&self) -> SettlePartition {
         self.settle_partition
+    }
+
+    /// Show the host each blocking update of the objects at these
+    /// hierarchical paths that a process makes, right after it is made: the
+    /// build puts a value change point after each such write before any pass
+    /// runs, and no pass moves a store across it.
+    pub fn with_value_change_objects(mut self, paths: Vec<String>) -> Self {
+        self.value_change_objects = paths;
+        self
+    }
+
+    /// The paths given to [`Self::with_value_change_objects`].
+    pub fn value_change_objects(&self) -> &[String] {
+        &self.value_change_objects
     }
 
     /// Query whether a specific pass is active.

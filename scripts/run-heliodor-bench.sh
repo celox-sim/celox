@@ -119,14 +119,15 @@ Environment:
   HELIODOR_REF         commit/tag/branch to checkout
   HELIODOR_TESTS       space-separated test modules
   HELIODOR_RUNNERS     space-separated runners (default: veryl-cc-sync celox)
-                       Celox runners: celox, celox-cranelift, celox-interpreter, celox-tiered,
+                       Celox runners: celox, celox-cranelift, celox-interpreter,
+                       celox-tiered (single-threaded hotspot JIT),
                        celox-parallel (native with HELIODOR_CELOX_THREADS threads)
                        Split-timing runners: veryl-cc-sync, veryl-cc-tiered
   HELIODOR_TIMEOUT_SEC absolute timeout for every runner/test
   HELIODOR_CELOX_TIMEOUT_MULTIPLIER
                        timeout Celox after N times the fastest successful Veryl baseline
   HELIODOR_CELOX_THREADS
-                       simulation threads of celox-parallel and celox-tiered (default: nproc clamped to 2..64)
+                       simulation threads of celox-parallel (default: nproc clamped to 2..64)
   CELOX_OPT_LEVEL      O0, O1, or O2 for the Celox runner (default: O2)
   CELOX_SIR_PASS_OVERRIDES
                        space-separated SIR pass overrides, e.g. "-vectorize_concat +gvn"
@@ -1603,8 +1604,8 @@ run_one() {
             run_in_heliodor "$timeout_sec" "$log" \
                 "${celox_execution_command[@]}" \
                 --project "$HELIODOR_DIR" --top "$test" \
-                "${celox_args[@]}" --require-compiled --backend tiered --opt-level "${CELOX_OPT_LEVEL,,}" \
-                --threads "$HELIODOR_CELOX_THREADS"
+                "${celox_args[@]}" --require-compiled --backend tiered --jit hotspot \
+                --opt-level "${CELOX_OPT_LEVEL,,}" --threads 1
             process_status="$?"
             ;;
         celox-interpreter)
@@ -1682,7 +1683,7 @@ run_one() {
                 result_valid=0
                 echo "error: $CELOX_RESULT_DIAGNOSTIC" >&2
             fi
-            if [[ ( "$runner" == celox-parallel || "$runner" == celox-tiered ) \
+            if [[ "$runner" == celox-parallel \
                 && "$HELIODOR_CELOX_THREADS" -gt 1 && "$semantic_status" == pass ]] \
                 && ! grep -Fxq "CELOX_TEST_THREADS test=$test threads=$HELIODOR_CELOX_THREADS" "$log"; then
                 echo "error: $runner log does not record $HELIODOR_CELOX_THREADS threads" >&2
@@ -1758,11 +1759,6 @@ publish_result() {
 run_all() {
     validate_compile_only_runners || return "$?"
     validate_native_image_mode || return "$?"
-    if runner_enabled celox-tiered \
-        && { ! is_uint "$HELIODOR_CELOX_THREADS" || ((HELIODOR_CELOX_THREADS < 1)); }; then
-        echo "error: HELIODOR_CELOX_THREADS must be at least 1 for celox-tiered" >&2
-        return 2
-    fi
     prepare
     mkdir -p "$HELIODOR_RESULTS_DIR"
     ensure_results_schema "$HELIODOR_RESULTS_DIR/results.tsv" || return "$?"

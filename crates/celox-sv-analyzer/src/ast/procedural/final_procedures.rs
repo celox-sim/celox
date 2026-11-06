@@ -15,7 +15,7 @@ pub(super) fn validate(subroutines: &[&Subroutine], processes: &[InitialProcess]
     let mut schedules = HashSet::default();
     let mut runtime_calls = Vec::new();
     for subroutine in subroutines {
-        let (invalid, _, callees) = effects(
+        let (invalid, _, callees, _) = effects(
             subroutine.body.iter().chain(&subroutine.sensitivity_body),
             &definitions,
         );
@@ -26,7 +26,7 @@ pub(super) fn validate(subroutines: &[&Subroutine], processes: &[InitialProcess]
         calls.push((&subroutine.name, callees));
         // Unlike the function-statement restrictions, 13.4.4 concerns an
         // executed event scheduling operation. A folded-away NBA is harmless.
-        let (_, schedules_events, callees) = effects(subroutine.body.iter(), &definitions);
+        let (_, schedules_events, callees, _) = effects(subroutine.body.iter(), &definitions);
         if schedules_events {
             schedules.insert(subroutine.name.clone());
         }
@@ -49,7 +49,7 @@ pub(super) fn validate(subroutines: &[&Subroutine], processes: &[InitialProcess]
         }
     }
     for process in processes.iter().filter(|process| process.is_final()) {
-        let (invalid, _, callees) = effects(
+        let (invalid, _, callees, _) = effects(
             process.body.iter().chain(&process.validation_body),
             &definitions,
         );
@@ -65,7 +65,7 @@ pub(super) fn validate(subroutines: &[&Subroutine], processes: &[InitialProcess]
                 "call to `{callee}` in a final procedure does not obey function-statement restrictions"
             )));
         }
-        let (_, _, callees) = effects(process.body.iter(), &definitions);
+        let (_, _, callees, _) = effects(process.body.iter(), &definitions);
         if let Some(callee) = callees
             .iter()
             .filter(|callee| schedules.contains(*callee))
@@ -81,10 +81,13 @@ pub(super) fn validate(subroutines: &[&Subroutine], processes: &[InitialProcess]
 
 /// Include discarded branches, expression calls and lvalue selectors: legality
 /// is a property of the authored procedure, not just the path executed now.
-pub(super) fn effects<'a>(
+/// The calls include those in the defaults of omitted arguments, which are
+/// evaluated at the call (IEEE 1800-2023 13.5.3); those defaults are
+/// returned too.
+pub(super) fn effects<'a, 'd>(
     body: impl Iterator<Item = &'a Stmt>,
-    definitions: &HashMap<&str, &Subroutine>,
-) -> (bool, bool, HashSet<String>) {
+    definitions: &HashMap<&'d str, &'d Subroutine>,
+) -> (bool, bool, HashSet<String>, Vec<&'d Expr>) {
     let mut invalid = false;
     let mut schedules_events = false;
     let mut calls = Calls {
@@ -92,6 +95,7 @@ pub(super) fn effects<'a>(
         names: HashSet::default(),
         defaults: Vec::new(),
         expanded: HashSet::default(),
+        evaluated: Vec::new(),
     };
     for statement in body {
         statement.walk_without_detached_children(&mut |statement| {
@@ -157,7 +161,7 @@ pub(super) fn effects<'a>(
         });
     }
     calls.expand_defaults();
-    (invalid, schedules_events, calls.names)
+    (invalid, schedules_events, calls.names, calls.evaluated)
 }
 
 struct Calls<'map, 'definition> {
@@ -165,6 +169,8 @@ struct Calls<'map, 'definition> {
     names: HashSet<String>,
     defaults: Vec<&'definition Expr>,
     expanded: HashSet<(String, usize)>,
+    /// The defaults of omitted arguments, once each.
+    evaluated: Vec<&'definition Expr>,
 }
 
 impl Calls<'_, '_> {
@@ -185,6 +191,7 @@ impl Calls<'_, '_> {
 
     fn expand_defaults(&mut self) {
         while let Some(default) = self.defaults.pop() {
+            self.evaluated.push(default);
             const_functions::visit_expr_calls(default, &mut |callee, args| {
                 if let Callee::Subroutine(name) = callee {
                     self.record(name, args);

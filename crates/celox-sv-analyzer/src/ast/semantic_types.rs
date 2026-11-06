@@ -144,6 +144,19 @@ pub(super) struct TyTable {
     /// Each type with the id of the type it matches in canonical form.
     types: Vec<(Arc<TyData>, TyId)>,
     ids: HashMap<Arc<TyData>, TyId>,
+    /// The base class and the interface classes of each class whose
+    /// declaration has been resolved (8.13, 8.26).
+    supertypes: HashMap<TyId, Supertypes>,
+}
+
+/// The classes a class extends and implements.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct Supertypes {
+    /// The base class (8.13).
+    pub base: Option<TyId>,
+    /// The interface classes the class implements, or that an interface
+    /// class extends (8.26).
+    pub interfaces: Arc<[TyId]>,
 }
 
 /// A declaration's ID together with its immutable interned node. A cloned
@@ -185,6 +198,49 @@ impl TyTable {
             .iter()
             .find(|(member, _)| member.as_ref() == name)
             .map(|(_, ty)| *ty)
+    }
+
+    /// Records that class `class` extends or implements `supertypes`.
+    pub fn record_supertypes(&mut self, class: TyId, supertypes: Supertypes) {
+        self.supertypes.insert(class, supertypes);
+    }
+
+    /// The base class and interface classes recorded of class `class`.
+    pub fn supertypes(&self, class: TyId) -> Option<&Supertypes> {
+        self.supertypes.get(&class)
+    }
+
+    /// Class `class` and its base classes, nearest first, as far as their
+    /// supertypes are recorded.
+    pub fn base_classes(&self, class: TyId) -> Vec<TyId> {
+        let mut classes = vec![class];
+        while let Some(base) = self
+            .supertypes(*classes.last().unwrap())
+            .and_then(|supertypes| supertypes.base)
+            && !classes.contains(&base)
+        {
+            classes.push(base);
+        }
+        classes
+    }
+
+    /// Class `class` and every class it derives from or implements as far as
+    /// their supertypes are recorded.
+    pub fn lineage(&self, class: TyId) -> Vec<TyId> {
+        let mut lineage = vec![class];
+        let mut next = 0;
+        while let Some(&class) = lineage.get(next) {
+            next += 1;
+            let Some(supertypes) = self.supertypes(class) else {
+                continue;
+            };
+            for &supertype in supertypes.base.iter().chain(supertypes.interfaces.iter()) {
+                if !lineage.contains(&supertype) {
+                    lineage.push(supertype);
+                }
+            }
+        }
+        lineage
     }
 
     pub(super) fn retain(&self, id: TyId) -> RetainedType {

@@ -19,7 +19,7 @@
 
 #![cfg(feature = "host-runtime")]
 
-#[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+#[cfg(hotspot_jit)]
 use super::hotspot::{EntryKey, HotspotRuntime, HotspotStats, RegionSource};
 
 use std::sync::Arc;
@@ -1345,7 +1345,7 @@ impl UnitGroup {
 struct PreparedUnit {
     unit: Arc<ExecutionUnit<RegionedAbsoluteAddr>>,
     registers: Registers,
-    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    #[cfg(hotspot_jit)]
     region_source: Arc<RegionSource>,
 }
 
@@ -1354,7 +1354,7 @@ impl PreparedUnit {
         let registers = Registers::new(&unit.register_map, four_state);
         let unit = Arc::new(unit);
         Self {
-            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+            #[cfg(hotspot_jit)]
             region_source: Arc::new(RegionSource::new(Arc::clone(&unit))),
             unit,
             registers,
@@ -1387,18 +1387,15 @@ fn run_units<'u>(
     trigger_snapshots: &mut Vec<((AbsoluteAddr, u32), u64)>,
     emit_triggers: bool,
     calls: &mut Calls,
-    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))] hotspots: (
-        &mut Option<HotspotRuntime>,
-        EntryKey,
-    ),
+    #[cfg(hotspot_jit)] hotspots: (&mut Option<HotspotRuntime>, EntryKey),
 ) -> Result<(), SimulatorErrorCode> {
-    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    #[cfg(hotspot_jit)]
     let (mut sample_start, mut compile_units) = if let Some(runtime) = hotspots.0 {
         runtime.begin(hotspots.1)
     } else {
         (None, None)
     };
-    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    #[cfg(hotspot_jit)]
     let mut compile_instructions = 0;
     let Calls {
         functions,
@@ -1440,7 +1437,7 @@ fn run_units<'u>(
     }
 
     for (_unit_index, prepared) in units.into_iter().enumerate() {
-        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        #[cfg(hotspot_jit)]
         if let Some(runtime) = hotspots.0 {
             runtime.collect(
                 hotspots.1,
@@ -1470,7 +1467,7 @@ fn run_units<'u>(
         // Entry blocks of top-level execution units take no parameters: the
         // compiled ABI passes only the memory pointer, so all inputs arrive
         // through loads.
-        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        #[cfg(hotspot_jit)]
         if let Some(runtime) = hotspots
             .0
             .as_mut()
@@ -1509,7 +1506,7 @@ fn run_units<'u>(
         )
         .map_err(error_code)?;
     }
-    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    #[cfg(hotspot_jit)]
     if let Some(runtime) = hotspots.0 {
         runtime.finish(hotspots.1, sample_start.take(), compile_units);
     }
@@ -1572,7 +1569,7 @@ pub struct InterpBackend {
     emit_triggers: bool,
     /// The function units the units call.
     calls: Calls,
-    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    #[cfg(hotspot_jit)]
     hotspots: Option<HotspotRuntime>,
 }
 
@@ -1752,7 +1749,7 @@ impl InterpBackend {
             trigger_snapshots: Vec::new(),
             emit_triggers: options.emit_triggers,
             calls: Calls::new(&laid_out.sir.functions),
-            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+            #[cfg(hotspot_jit)]
             hotspots: None,
             extern_functions: options
                 .dpi
@@ -1762,7 +1759,7 @@ impl InterpBackend {
         Ok(backend)
     }
 
-    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    #[cfg(hotspot_jit)]
     pub(crate) fn enable_hotspots(
         &mut self,
         options: &SimulatorOptions,
@@ -1777,24 +1774,24 @@ impl InterpBackend {
         Ok(())
     }
 
-    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    #[cfg(hotspot_jit)]
     pub(crate) fn hotspot_stats(&self) -> Option<HotspotStats> {
         self.hotspots.as_ref().map(HotspotRuntime::stats)
     }
 
-    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    #[cfg(hotspot_jit)]
     pub(crate) fn prepare_hotspot_scheduler(&mut self, program: &LaidOutProgram) {
         if let Some(runtime) = &mut self.hotspots {
             runtime.prepare_scheduler(program);
         }
     }
 
-    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    #[cfg(hotspot_jit)]
     pub(crate) fn cancel_hotspots(&mut self) -> bool {
         self.hotspots.as_mut().is_some_and(HotspotRuntime::cancel)
     }
 
-    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    #[cfg(hotspot_jit)]
     fn run_hotspot(&mut self, key: EntryKey) -> Option<Result<(), SimulatorErrorCode>> {
         // Do not borrow heap or capture storage here. Native code accesses
         // those allocations through state-header pointers; run_units borrows
@@ -1806,6 +1803,7 @@ impl InterpBackend {
 
     /// Publish the real Hotspot scheduler without executing HDL during test
     /// setup. Finite testbenches must not finish before compilation completes.
+    // Scheduler tests that publish it need x86-64-only scheduler services.
     #[cfg(all(
         test,
         feature = "systemverilog",
@@ -1837,6 +1835,46 @@ impl InterpBackend {
             assert!(
                 std::time::Instant::now() < deadline,
                 "scheduler not published: {stats:?}"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    /// Generate the first scheduler stage with this inline budget.
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    pub(crate) fn set_hotspot_inline_budget_for_test(&mut self, budget: usize) {
+        self.hotspots
+            .as_mut()
+            .expect("Hotspot must be enabled")
+            .set_inline_budget_for_test(budget);
+    }
+
+    /// Wait until `stages` scheduler stages are published, without running HDL.
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    pub(crate) fn wait_for_scheduler_stages_for_test(&mut self, stages: usize) {
+        let runtime = self.hotspots.as_mut().expect("Hotspot must be enabled");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while runtime.scheduler_stages_for_test() < stages {
+            assert!(
+                runtime
+                    .try_run(EntryKey::Process(usize::MAX), self.memory.as_mut_slice())
+                    .is_none()
+            );
+            let stats = runtime.stats();
+            assert_eq!(stats.failed_entries, 0, "{stats:?}");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "scheduler stage {stages} not published: {stats:?}"
             );
             std::thread::yield_now();
         }
@@ -1915,7 +1953,7 @@ impl SimBackend for InterpBackend {
     /// Interpreting the scheduler unit costs more than the runtime's loop
     /// (sched_bench (d): about 9% more per cycle).
     fn runs_compiled_scheduler(&self) -> bool {
-        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        #[cfg(hotspot_jit)]
         if self
             .hotspots
             .as_ref()
@@ -1929,7 +1967,7 @@ impl SimBackend for InterpBackend {
     type Event = InterpEventRef;
 
     fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode> {
-        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        #[cfg(hotspot_jit)]
         if let Some(result) = self.run_hotspot(EntryKey::Comb) {
             return result;
         }
@@ -1948,13 +1986,13 @@ impl SimBackend for InterpBackend {
             &mut self.trigger_snapshots,
             self.emit_triggers,
             &mut self.calls,
-            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+            #[cfg(hotspot_jit)]
             (&mut self.hotspots, EntryKey::Comb),
         )
     }
 
     fn eval_apply_ff_at(&mut self, event: InterpEventRef) -> Result<(), SimulatorErrorCode> {
-        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        #[cfg(hotspot_jit)]
         if let Some(result) = self.run_hotspot(EntryKey::EvalApply(event.id())) {
             return result;
         }
@@ -1980,13 +2018,13 @@ impl SimBackend for InterpBackend {
             &mut self.trigger_snapshots,
             self.emit_triggers,
             &mut self.calls,
-            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+            #[cfg(hotspot_jit)]
             (&mut self.hotspots, EntryKey::EvalApply(event.id())),
         )
     }
 
     fn eval_comb_apply_ff_at(&mut self, event: InterpEventRef) -> Result<(), SimulatorErrorCode> {
-        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        #[cfg(hotspot_jit)]
         if let Some(result) = self.run_hotspot(EntryKey::CombApply(event.id())) {
             return result;
         }
@@ -2026,13 +2064,13 @@ impl SimBackend for InterpBackend {
             &mut self.trigger_snapshots,
             self.emit_triggers,
             &mut self.calls,
-            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+            #[cfg(hotspot_jit)]
             (&mut self.hotspots, EntryKey::CombApply(event.id())),
         )
     }
 
     fn eval_only_ff_at(&mut self, event: InterpEventRef) -> Result<(), SimulatorErrorCode> {
-        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        #[cfg(hotspot_jit)]
         if let Some(result) = self.run_hotspot(EntryKey::EvalOnly(event.id())) {
             return result;
         }
@@ -2058,13 +2096,13 @@ impl SimBackend for InterpBackend {
             &mut self.trigger_snapshots,
             self.emit_triggers,
             &mut self.calls,
-            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+            #[cfg(hotspot_jit)]
             (&mut self.hotspots, EntryKey::EvalOnly(event.id())),
         )
     }
 
     fn apply_ff_at(&mut self, event: InterpEventRef) -> Result<(), SimulatorErrorCode> {
-        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        #[cfg(hotspot_jit)]
         if let Some(result) = self.run_hotspot(EntryKey::Apply(event.id())) {
             return result;
         }
@@ -2090,7 +2128,7 @@ impl SimBackend for InterpBackend {
             &mut self.trigger_snapshots,
             self.emit_triggers,
             &mut self.calls,
-            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+            #[cfg(hotspot_jit)]
             (&mut self.hotspots, EntryKey::Apply(event.id())),
         )
     }
@@ -2099,7 +2137,7 @@ impl SimBackend for InterpBackend {
         &mut self,
         _index: usize,
     ) -> Option<celox_runtime::backend::PreparedProcess> {
-        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        #[cfg(hotspot_jit)]
         {
             let size = self.memory.len_words() * 8;
             let code = self
@@ -2116,12 +2154,12 @@ impl SimBackend for InterpBackend {
                 false,
             ))
         }
-        #[cfg(not(all(target_arch = "x86_64", not(feature = "arm64-codegen"))))]
+        #[cfg(not(hotspot_jit))]
         None
     }
 
     fn run_process(&mut self, index: usize) -> Result<(), SimulatorErrorCode> {
-        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+        #[cfg(hotspot_jit)]
         if let Some(result) = self.run_hotspot(EntryKey::Process(index)) {
             return result;
         }
@@ -2143,7 +2181,7 @@ impl SimBackend for InterpBackend {
             &mut self.trigger_snapshots,
             false,
             &mut self.calls,
-            #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+            #[cfg(hotspot_jit)]
             (&mut self.hotspots, EntryKey::Process(index)),
         )
     }
@@ -2455,6 +2493,21 @@ impl SimBackend for InterpBackend {
         }
     }
 
+    // The interpreter keeps its frames apart from the memory image.
+    fn save_call_stack(&self, len: usize, into: &mut Vec<u8>) {
+        let stack = &self.calls.stack;
+        into.extend_from_slice(&stack[..len.min(stack.len())]);
+        into.resize(len, 0);
+    }
+
+    fn restore_call_stack(&mut self, bytes: &[u8]) {
+        let stack = &mut self.calls.stack;
+        if stack.len() < bytes.len() {
+            stack.resize(bytes.len(), 0);
+        }
+        stack[..bytes.len()].copy_from_slice(bytes);
+    }
+
     fn vcd_tracking_enabled(&self) -> bool {
         self.memory.vcd_tracking_enabled()
     }
@@ -2568,11 +2621,7 @@ impl SimBackend for InterpBackend {
 mod tests {
     use super::*;
 
-    #[cfg(all(
-        feature = "systemverilog",
-        target_arch = "x86_64",
-        not(feature = "arm64-codegen")
-    ))]
+    #[cfg(all(feature = "systemverilog", hotspot_jit))]
     #[test]
     fn hotspot_block_frames_preserve_values_across_native_and_interpreted_branches() {
         let mut source = String::from(
@@ -2665,11 +2714,7 @@ mod tests {
         }
     }
 
-    #[cfg(all(
-        feature = "systemverilog",
-        target_arch = "x86_64",
-        not(feature = "arm64-codegen")
-    ))]
+    #[cfg(all(feature = "systemverilog", hotspot_jit))]
     #[test]
     fn hotspot_split_groups_share_pending_writes_and_trigger_snapshots() {
         const SOURCE: &str = r#"`timescale 1ns/1ns

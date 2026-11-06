@@ -54,4 +54,9 @@ pub struct SchedulerStats {
     pub unchecked: Option<&'static str>,
     /// How each process kernel is scheduled, by process index.
     pub kernels: Vec<KernelSchedule>,
+    /// Times an activation suspended inside a call had its live frames
+    /// saved, and the bytes saved and restored.
+    pub call_stack_saves: u64,
+    pub call_stack_saved_bytes: u64,
+    pub call_stack_restored_bytes: u64,
 }

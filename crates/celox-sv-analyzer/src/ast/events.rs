@@ -100,23 +100,63 @@ pub(super) fn triggered(
     .then_some(*expression))
 }
 
+/// What a process or synchronization operation does to the scheduler.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ProcessEffect {
+    /// It may block the calling process.
+    Blocks,
+    /// It wakes, schedules or controls other processes.
+    Schedules,
+    /// It only reads or updates the state of a process or synchronization
+    /// object, which needs the calling process's kernel.
+    Reads,
+}
+
+/// The effect of `op` (IEEE 1800-2023 9.7, 15.3, 15.4, 15.5).
+pub(super) fn process_effect(op: ProcessOp) -> ProcessEffect {
+    match op {
+        ProcessOp::Await
+        | ProcessOp::WaitEvent
+        | ProcessOp::WaitTriggered
+        | ProcessOp::SemaphoreGet
+        | ProcessOp::MailboxPut
+        | ProcessOp::MailboxGet
+        | ProcessOp::MailboxPeek => ProcessEffect::Blocks,
+        // A trigger wakes the processes waiting for the event; returned
+        // keys or a placed or removed message the processes waiting for them.
+        ProcessOp::Kill
+        | ProcessOp::Suspend
+        | ProcessOp::Resume
+        | ProcessOp::Trigger
+        | ProcessOp::TriggerNonblocking
+        | ProcessOp::SemaphorePut
+        | ProcessOp::MailboxTryPut
+        | ProcessOp::MailboxTryGet => ProcessEffect::Schedules,
+        // `Observe` records what a level wait reads, for its own process.
+        ProcessOp::SelfHandle
+        | ProcessOp::Status
+        | ProcessOp::Srandom
+        | ProcessOp::GetRandstate
+        | ProcessOp::SetRandstate
+        | ProcessOp::Observe
+        | ProcessOp::Triggered
+        | ProcessOp::SemaphoreNew
+        | ProcessOp::SemaphoreTryGet
+        | ProcessOp::MailboxNew
+        | ProcessOp::MailboxNum
+        | ProcessOp::MailboxTryPeek => ProcessEffect::Reads,
+    }
+}
+
 /// Whether statement `stmt` blocks on a synchronization object the scheduler
 /// owns: an event control or wait on named events, or `process.await`.
 pub(super) fn blocks(stmt: &Stmt) -> bool {
     matches!(
         stmt,
         Stmt::Eval(Expr::Call {
-            callee: Callee::System(SystemFunction::Process(
-                ProcessOp::WaitEvent
-                    | ProcessOp::WaitTriggered
-                    | ProcessOp::Await
-                    | ProcessOp::SemaphoreGet
-                    | ProcessOp::MailboxPut
-                    | ProcessOp::MailboxGet
-                    | ProcessOp::MailboxPeek
-            )),
+            callee: Callee::System(SystemFunction::Process(op)),
             ..
-        })
+        }) if process_effect(*op) == ProcessEffect::Blocks
     )
 }
 

@@ -3186,8 +3186,12 @@ fn clocked_overlapped_implication_retains_both_boolean_operands() {
             StatementKind::Assertion {
                 header:
                     AssertionHeader::Concurrent {
-                        antecedent: Some(antecedent),
-                        condition,
+                        property:
+                            PropertySpec {
+                                antecedent: Some(antecedent),
+                                condition,
+                                ..
+                            },
                         module_item: true,
                         ..
                     },
@@ -3217,5 +3221,248 @@ fn clocked_overlapped_implication_retains_both_boolean_operands() {
             )),
             "{property}"
         );
+    }
+}
+
+/// The substituted property of the only concurrent assertion in `source`, as
+/// text: clock, disable condition, antecedent and condition.
+fn substituted(source: &str) -> [String; 4] {
+    let syntax = parse(source);
+    let property = syntax
+        .statements
+        .iter()
+        .find_map(|stmt| match &stmt.kind {
+            StatementKind::Assertion {
+                header: AssertionHeader::Concurrent { property, .. },
+                ..
+            } => Some(*property),
+            _ => None,
+        })
+        .unwrap();
+    let expression = |id: Option<ExprId>| {
+        id.map_or(String::new(), |id| {
+            syntax.token_text(syntax.expression(id).tokens).to_owned()
+        })
+    };
+    // The assertion waits for its substituted leading clock.
+    let wrapped = syntax.procedures.iter().find_map(|procedure| {
+        match syntax.statement(procedure.body).kind {
+            StatementKind::Timing { control, .. } => Some(control),
+            _ => None,
+        }
+    });
+    assert_eq!(wrapped, property.clock, "{source}");
+    [
+        property.clock.map_or(String::new(), |clock| {
+            syntax
+                .token_text(syntax.timing_control(clock).tokens)
+                .to_owned()
+        }),
+        expression(property.disable),
+        expression(property.antecedent),
+        expression(Some(property.condition)),
+    ]
+}
+
+#[test]
+fn named_sequence_and_property_instances_are_substituted() {
+    let s = |values: [&str; 4]| values.map(str::to_owned);
+    // A property, declared after the assertion (IEEE 1800-2023 16.12).
+    assert_eq!(
+        substituted(
+            "module M; assert property (p) else $error; property p; @(posedge clk) disable iff (rst) a; endproperty endmodule"
+        ),
+        s(["@(posedge clk)", "rst", "", "a"])
+    );
+    // The assertion's clock before a property with `disable iff`: the
+    // instance is still the whole property_spec (16.12.1).
+    assert_eq!(
+        substituted(
+            "module M; property p; disable iff (rst) a; endproperty assert property (@(posedge clk) p); endmodule"
+        ),
+        s(["@(posedge clk)", "rst", "", "a"])
+    );
+    assert_eq!(
+        substituted(
+            "module M; property p; @(posedge clk) disable iff (r) a; endproperty assert property (@(posedge clk) p); endmodule"
+        ),
+        s(["@(posedge clk)", "r", "", "a"])
+    );
+    // Event operators in a declaration's clock (IEEE 1800-2023 9.4.2).
+    assert_eq!(
+        substituted(
+            "module M; property p; @(posedge clk or negedge rst) disable iff (!rst) a; endproperty assert property (p); endmodule"
+        ),
+        s(["@(posedge clk or negedge rst)", "!rst", "", "a"])
+    );
+    assert_eq!(
+        substituted(
+            "module M; sequence s; @(posedge clk iff en) a; endsequence assert property (s); endmodule"
+        ),
+        s(["@(posedge clk iff en)", "", "", "a"])
+    );
+    // A clocked sequence, the assertion adding `disable iff`.
+    assert_eq!(
+        substituted(
+            "module M; sequence s; @(negedge clk) $fell(x); endsequence : s assert property (disable iff (r) s); endmodule"
+        ),
+        s(["@(negedge clk)", "r", "", "$fell(x)"])
+    );
+    // An unclocked property takes the assertion's clock; its own leading
+    // clock would override it (16.16.1).
+    assert_eq!(
+        substituted(
+            "module M; property p; a |-> b; endproperty assert property (@(posedge clk) p); endmodule"
+        ),
+        s(["@(posedge clk)", "", "a", "b"])
+    );
+    assert_eq!(
+        substituted(
+            "module M; property p; @(negedge c) a; endproperty assert property (@(posedge clk) (p)); endmodule"
+        ),
+        s(["@(negedge c)", "", "", "a"])
+    );
+    // Sequences as antecedent and consequent, through another instance.
+    assert_eq!(
+        substituted(
+            "module M; sequence go; @(posedge clk) req; endsequence sequence done; ack; endsequence property q; done; endproperty assert property (go |-> q); endmodule"
+        ),
+        s(["@(posedge clk)", "", "req", "ack"])
+    );
+    // A name that is not a declaration of the scope stays as written.
+    assert_eq!(
+        substituted("module M; logic p; assert property (@(posedge clk) p); endmodule"),
+        s(["@(posedge clk)", "", "", "p"])
+    );
+}
+
+#[test]
+fn named_assertion_declarations_outside_the_subset_keep_their_boundary() {
+    for declaration in [
+        "sequence s; @(posedge clk) a ##1 b; endsequence",
+        "sequence s(x); x; endsequence",
+        "property p; a |=> b; endproperty",
+        "property p; int v; a; endproperty",
+        "sequence s; disable iff (r) a; endsequence",
+        "sequence s; a |-> b; endsequence",
+        "property p; a and b; endproperty",
+        "property p; @(posedge clk or negedge rst) a or b; endproperty",
+        "property p; a; endproperty : q",
+    ] {
+        let syntax = parse(&format!("module M; {declaration} endmodule"));
+        assert!(syntax.assertion_declarations.is_empty(), "{declaration}");
+    }
+    // Assertions with property operators outside the subset stay opaque,
+    // also after a clock using event operators.
+    for property in [
+        "a or b",
+        "not a",
+        "@(posedge clk or negedge rst) a and b",
+        "@(posedge clk) a |-> b |-> c",
+    ] {
+        let syntax = parse(&format!(
+            "module M; assert property ({property}); endmodule"
+        ));
+        assert!(
+            syntax.statements.iter().all(|stmt| !matches!(
+                stmt.kind,
+                StatementKind::Assertion {
+                    header: AssertionHeader::Concurrent { .. },
+                    ..
+                }
+            )),
+            "{property}"
+        );
+    }
+    let syntax = parse(
+        "module M; property p; @(posedge clk) disable iff (r) a |-> b; endproperty endmodule",
+    );
+    let [declaration] = syntax.assertion_declarations.as_slice() else {
+        panic!()
+    };
+    assert_eq!(declaration.kind, AssertionDeclarationKind::Property);
+    assert_eq!(declaration.name.value(), "p");
+}
+
+/// Substitution follows a chain of declarations on an explicit stack, and
+/// resolves each declaration once.
+#[test]
+fn long_named_assertion_chains_substitute_without_recursion() {
+    let count = 100_000;
+    let mut source = String::from("module M; assert property (@(posedge clk) p0);");
+    for index in 0..count {
+        source.push_str(&format!(" property p{index}; p{}; endproperty", index + 1));
+    }
+    source.push_str(&format!(" property p{count}; a; endproperty endmodule"));
+    assert_eq!(
+        substituted(&source),
+        ["@(posedge clk)", "", "", "a"].map(str::to_owned)
+    );
+}
+
+#[test]
+fn named_assertion_instances_follow_clock_and_disable_rules() {
+    for (source, expected) in [
+        (
+            "module M; property p; disable iff (r) a; endproperty assert property (@(posedge clk) c |-> p); endmodule",
+            "has `disable iff` and is instantiated in a property expression",
+        ),
+        (
+            "module M; property p; disable iff (r) a; endproperty assert property (disable iff (q) p); endmodule",
+            "has `disable iff` and is instantiated in a property expression",
+        ),
+        (
+            "module M; property p; a; endproperty assert property (@(posedge clk) p |-> b); endmodule",
+            "is the antecedent of an implication",
+        ),
+        (
+            "module M; sequence s; @(negedge clk) b; endsequence assert property (@(posedge clk) a |-> s); endmodule",
+            "multiclocked property",
+        ),
+        (
+            "module M; property p; a |-> b; endproperty assert property (@(posedge clk) c |-> p); endmodule",
+            "as the consequent of an implication",
+        ),
+        (
+            "module M; property p; q; endproperty property q; p; endproperty assert property (@(posedge clk) p); endmodule",
+            "instantiates itself",
+        ),
+        (
+            "module M; property p; a; endproperty property p; b; endproperty endmodule",
+            "is declared twice",
+        ),
+    ] {
+        let error = Declarations::parse(source, std::path::Path::new("named.sv"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{source}: {error}");
+    }
+}
+
+/// Only an abstract or interface class declares pure virtual methods (IEEE
+/// 1800-2023 8.21, 8.26), also when nothing uses the class.
+#[test]
+fn pure_virtual_methods_need_an_abstract_class() {
+    for class in [
+        "class C; pure virtual task t; endclass",
+        "class C; int x; pure virtual function int f(int a); endclass",
+    ] {
+        let error = Declarations::parse(
+            &format!("{class} module M; endmodule"),
+            std::path::Path::new("pure.sv"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("pure virtual method in class `C`, which is not declared `virtual`"),
+            "{class}: {error}"
+        );
+    }
+    for class in [
+        "virtual class C; pure virtual task t; endclass",
+        "interface class I; pure virtual function int f(); endclass",
+        "class C; virtual task t; endtask extern virtual function int f(); endclass",
+    ] {
+        parse(&format!("{class} module M; endmodule"));
     }
 }

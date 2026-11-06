@@ -938,6 +938,43 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         "unify_clock_domains",
         unify_clock_domains(bindings, &expanded, &instance_modules, &modules)
     );
+    // Whether every automatically started process has reached its first
+    // suspension: one combinational path computes it from their statuses,
+    // and the gated `always_comb` units read only it.
+    let gates_startup = instance_modules.values().any(|module| {
+        modules[module].comb_blocks.iter().any(|path| {
+            matches!(
+                path.target,
+                celox_slt::LogicPathTarget::Process {
+                    after_initials: true,
+                    ..
+                }
+            )
+        })
+    }) && instance_modules.values().any(|module| {
+        // The same automatically started procedures the gate waits for.
+        modules[module].processes.iter().any(|process| {
+            matches!(
+                process.slots.kind,
+                celox_design::ProcessKind::Initializer | celox_design::ProcessKind::Regular
+            )
+        })
+    });
+    let startup_ready = gates_startup.then(|| {
+        let var_id = SourceVarId(
+            modules[&root_id]
+                .variables
+                .keys()
+                .map(|id| id.0 + 1)
+                .max()
+                .unwrap_or(0),
+        );
+        declare_startup_ready(&mut modules, root_id, var_id);
+        AbsoluteAddr {
+            instance_id: expanded[&InstancePath(Vec::new())],
+            var_id,
+        }
+    });
     let mut parallel_ff_units = HashMap::default();
     let mut split_commits = SplitCommits::default();
     let (
@@ -954,7 +991,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         extern_functions,
         next_runtime_error_code,
         mut processes,
-        functions,
+        (functions, function_frames),
     ) = timed_sub!(
         "relocate_units",
         relocate_units(
@@ -971,6 +1008,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             &mut split_commits,
             trace_opts,
             &mut trace,
+            startup_ready,
         )
     )?;
     let mut timing = relocate_timing(bindings, &instance_modules, &modules, &processes);
@@ -2310,11 +2348,13 @@ pub fn schedule_symbolic_rtl_reporting_loops(
     let mut process_slots = Vec::with_capacity(processes.len());
     let mut process_frames = Vec::with_capacity(processes.len());
     let mut process_origins = Vec::with_capacity(processes.len());
+    let mut process_call_resumes = Vec::with_capacity(processes.len());
     for process in processes {
         process_kernels.push(process.kernel);
         process_slots.push(process.slots);
         process_frames.push(process.frame);
         process_origins.push(process.origin);
+        process_call_resumes.push(process.call_resumes);
     }
     let TimingMetadata {
         wait_sites,
@@ -2647,6 +2687,9 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         events: Vec::new(),
         clocks: Vec::new(),
         kernel_events: Vec::new(),
+        domain_waits: Vec::new(),
+        update_points: false,
+        value_change_kernels: Vec::new(),
     });
     // The runtime reads counters, the signals waits watch and staged
     // nonblocking values directly; no unit loads a wait's signal.
@@ -2777,6 +2820,8 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             dead_store_policy: Default::default(),
             live_signals: Default::default(),
             process_frames,
+            process_call_resumes,
+            function_frames,
             processes: process_slots,
             process_origins,
             watches,
@@ -2934,6 +2979,7 @@ fn declare_scheduler_slots(
     Some(celox_design::SchedulerSlots {
         limit: declare("limit".into(), TIME),
         now: declare("now".into(), TIME),
+        next: declare("next".into(), TIME),
         exit: declare("exit".into(), FLAG),
         exit_arg: declare("exit_arg".into(), events * 2),
         finish: declare("finish".into(), FLAG),
@@ -3817,43 +3863,25 @@ fn build_fused_ff_actions(
 }
 
 /// always_comb starts after every initial and always procedure has reached its
-/// first suspension or completion (IEEE 1800-2023 9.2.2.2). Initial status is zero
-/// until that happens; all control slots are ordinary checkpointed state.
+/// first suspension or completion (IEEE 1800-2023 9.2.2.2). The unit runs once
+/// `ready` ([`startup_ready_path`]) is set.
 fn after_initial_processes(
     unit: &ExecutionUnit<AbsoluteAddr>,
-    statuses: &[AbsoluteAddr],
+    ready: AbsoluteAddr,
 ) -> ExecutionUnit<AbsoluteAddr> {
-    use celox_sir::{SIRBuilder, SIROffset, SIRValue};
+    use celox_sir::{SIRBuilder, SIROffset};
     let mut b = SIRBuilder::new();
-    let mut ready = b.alloc_bit(1, false);
-    b.emit(SIRInstruction::Imm(ready, SIRValue::new(1u8)));
-    for status in statuses {
-        let value = b.alloc_bit(celox_design::PROCESS_STATUS_WIDTH, false);
-        b.emit(SIRInstruction::Load(
-            value,
-            *status,
-            SIROffset::Static(0),
-            celox_design::PROCESS_STATUS_WIDTH,
-        ));
-        let started = b.alloc_bit(1, false);
-        b.emit(SIRInstruction::Unary(
-            started,
-            celox_design::UnaryOp::Or,
-            value,
-        ));
-        let next = b.alloc_bit(1, false);
-        b.emit(SIRInstruction::Binary(
-            next,
-            ready,
-            celox_design::BinaryOp::And,
-            started,
-        ));
-        ready = next;
-    }
+    let started = b.alloc_bit(1, false);
+    b.emit(SIRInstruction::Load(
+        started,
+        ready,
+        SIROffset::Static(0),
+        1,
+    ));
     let execute = b.new_block();
     let done = b.new_block();
     b.seal_block(SIRTerminator::Branch {
-        cond: ready,
+        cond: started,
         true_block: (execute, vec![]),
         false_block: (done, vec![]),
     });
@@ -3863,6 +3891,81 @@ fn after_initial_processes(
     b.switch_to_block(done);
     b.flush_eu()
         .expect("process activation gate has instructions")
+}
+
+/// `ready = (|status_0) && (|status_1) && ...`: initial status is zero until
+/// a process first suspends or completes; all control slots are ordinary
+/// checkpointed state. Only this path reads the statuses, so their writes
+/// mark one partition rather than every gated unit.
+fn startup_ready_path(
+    arena: &mut SLTNodeArena<AbsoluteAddr>,
+    statuses: &[AbsoluteAddr],
+    ready: AbsoluteAddr,
+) -> Result<celox_slt::LogicPath<AbsoluteAddr>, ParserError> {
+    let width = celox_design::PROCESS_STATUS_WIDTH;
+    let mut expr = None;
+    let mut sources = HashSet::default();
+    for &status in statuses {
+        let input = arena.alloc(celox_slt::SLTNode::Input {
+            variable: status,
+            signed: false,
+            index: Vec::new(),
+            access: BitAccess::new(0, width - 1),
+        })?;
+        let started = arena.alloc(celox_slt::SLTNode::Unary(celox_design::UnaryOp::Or, input))?;
+        expr = Some(match expr {
+            None => started,
+            Some(previous) => arena.alloc(celox_slt::SLTNode::Binary(
+                previous,
+                celox_design::BinaryOp::And,
+                started,
+            ))?,
+        });
+        sources.insert(VarAtomBase::new(status, 0, width - 1));
+    }
+    let expr = expr.expect("a startup gate has statuses");
+    Ok(celox_slt::LogicPath {
+        target: celox_slt::LogicPathTarget::Var(VarAtomBase::new(ready, 0, 0)),
+        transparent_copy: false,
+        sources,
+        previous_sources: HashSet::default(),
+        address_sources: HashSet::default(),
+        local_inputs: Vec::new(),
+        order_before: HashSet::default(),
+        comb_capture_enable_sites: Vec::new(),
+        comb_capture_enable_always: false,
+        pre_lower_nodes: Vec::new(),
+        expr,
+    })
+}
+
+/// Declare the startup readiness bit read by gated `always_comb` units.
+fn declare_startup_ready(
+    modules: &mut HashMap<ModuleId, SimModule>,
+    root: ModuleId,
+    var_id: SourceVarId,
+) {
+    let variables = &mut modules.get_mut(&root).expect("top module").variables;
+    variables.insert(
+        var_id,
+        crate::symbolic::artifact::SymbolicVariable {
+            path: vec!["$startup".to_string(), "ready".to_string()],
+            kind: crate::VariableKind::Variable,
+            signed: false,
+            metadata: VariableMetadata {
+                width: 1,
+                is_4state: false,
+                kind: DomainKind::Other,
+                type_kind: celox_design::PortTypeKind::Bit,
+                array_dims: Vec::new(),
+                value_kind: Default::default(),
+            },
+            packed_dims: vec![1],
+            unpacked_ranges: Vec::new(),
+            source: None,
+            module_affiliated: false,
+        },
+    );
 }
 
 fn relocate_units(
@@ -3881,6 +3984,7 @@ fn relocate_units(
     split_commits: &mut SplitCommits,
     trace_opts: &crate::FrontendTraceOptions,
     trace: &mut Option<&mut crate::FrontendTrace>,
+    startup_ready: Option<AbsoluteAddr>,
 ) -> Result<
     (
         SLTNodeArena<AbsoluteAddr>,
@@ -3896,7 +4000,10 @@ fn relocate_units(
         Vec<ExternFunction>,
         i64,
         Vec<RelocatedProcess>,
-        Vec<celox_sir::FunctionUnit<RegionedAbsoluteAddr>>,
+        (
+            Vec<celox_sir::FunctionUnit<RegionedAbsoluteAddr>>,
+            Vec<celox_design::FunctionFrame>,
+        ),
     ),
     ParserError,
 > {
@@ -3919,6 +4026,7 @@ fn relocate_units(
     let mut extern_function_indices = HashMap::<String, usize>::default();
     let mut next_runtime_error_code = 2000;
     let mut functions = Vec::new();
+    let mut function_frames = Vec::new();
     let mut parallel_ff_units = parallel_ff_units;
     let mut startup_statuses: Vec<_> = expanded
         .values()
@@ -3941,6 +4049,7 @@ fn relocate_units(
         .collect();
     startup_statuses.sort();
     startup_statuses.dedup();
+    let mut gated_startup = false;
 
     for (path, id) in expanded {
         let module_id = &instance_modules[id];
@@ -4048,6 +4157,21 @@ fn relocate_units(
             };
             extern_function_map.insert(local as u32, global as u32);
         }
+        let mut runtime_event_site_map = HashMap::default();
+        let scope = elaborated_scope_name(root_name, path, expanded, indexed_instances);
+        let site_base = runtime_event_sites.len() as u32;
+        for (local_site, site) in sim_module.runtime_event_sites.iter().enumerate() {
+            let global_site = runtime_event_sites.len() as u32;
+            runtime_event_site_map.insert(local_site as u32, global_site);
+            let mut site = site.clone();
+            site.scope = Some(scope.clone());
+            // A deferred action names the flush point of its process in the
+            // same instance.
+            if let Some(celox_design::DeferredSite::Action { queue, .. }) = &mut site.deferred {
+                *queue += site_base;
+            }
+            runtime_event_sites.push(site);
+        }
         let function_base = u32::try_from(functions.len()).map_err(|_| {
             ParserError::illegal_context("function relocation", "function count exceeds u32", None)
         })?;
@@ -4071,7 +4195,7 @@ fn relocate_units(
                     &function.unit,
                     &locate,
                     &runtime_error_codes,
-                    &HashMap::default(),
+                    &runtime_event_site_map,
                     &extern_function_map,
                     function_base,
                 ),
@@ -4093,21 +4217,22 @@ fn relocate_units(
                 effects: Default::default(),
             });
         }
-        let mut runtime_event_site_map = HashMap::default();
-        let scope = elaborated_scope_name(root_name, path, expanded, indexed_instances);
-        let site_base = runtime_event_sites.len() as u32;
-        for (local_site, site) in sim_module.runtime_event_sites.iter().enumerate() {
-            let global_site = runtime_event_sites.len() as u32;
-            runtime_event_site_map.insert(local_site as u32, global_site);
-            let mut site = site.clone();
-            site.scope = Some(scope.clone());
-            // A deferred action names the flush point of its process in the
-            // same instance.
-            if let Some(celox_design::DeferredSite::Action { queue, .. }) = &mut site.deferred {
-                *queue += site_base;
+        // The callees of each copy are the copies in the same instance.
+        let rebase = |calls: &[celox_design::CallResume]| {
+            calls
+                .iter()
+                .map(|call| celox_design::CallResume {
+                    function: call.function + function_base,
+                    ..*call
+                })
+                .collect::<Vec<_>>()
+        };
+        function_frames.extend(sim_module.function_frames.iter().map(|frame| {
+            celox_design::FunctionFrame {
+                calls: rebase(&frame.calls),
+                ..frame.clone()
             }
-            runtime_event_sites.push(site);
-        }
+        }));
 
         // Lane-partitioning units of every trigger group: its independently
         // lowered parts when present, otherwise its whole evaluate/apply pair.
@@ -4184,6 +4309,11 @@ fn relocate_units(
                 ..
             } = &mut path.target
             {
+                if let Some(ready) = startup_ready.filter(|_| *after_initials)
+                    && !startup_statuses.is_empty()
+                {
+                    path.sources.insert(VarAtomBase::new(ready, 0, 0));
+                }
                 **unit = relocate_executation_unit_with_errors(
                     unit,
                     &|addr| *addr,
@@ -4192,8 +4322,11 @@ fn relocate_units(
                     &extern_function_map,
                     function_base,
                 );
-                if *after_initials && !startup_statuses.is_empty() {
-                    **unit = after_initial_processes(unit, &startup_statuses);
+                if let Some(ready) = startup_ready.filter(|_| *after_initials)
+                    && !startup_statuses.is_empty()
+                {
+                    **unit = after_initial_processes(unit, ready);
+                    gated_startup = true;
                 }
             }
         }
@@ -4295,6 +4428,7 @@ fn relocate_units(
                         scope: Some(scope.clone()),
                         ..process.origin.clone()
                     },
+                    call_resumes: rebase(&process.call_resumes),
                     key: (*id, index),
                 },
             ));
@@ -4400,6 +4534,13 @@ fn relocate_units(
             *units = vec![celox_sir::merge_sir_eu_refs(&phases).0];
         }
     }
+    if let Some(ready) = startup_ready.filter(|_| gated_startup) {
+        comb_blocks.push(startup_ready_path(
+            &mut global_arena,
+            &startup_statuses,
+            ready,
+        )?);
+    }
     Ok((
         global_arena,
         eval_apply_ffs,
@@ -4419,7 +4560,7 @@ fn relocate_units(
             processes.sort_unstable_by_key(|(key, _)| *key);
             processes.into_iter().map(|(_, process)| process).collect()
         },
-        functions,
+        (functions, function_frames),
     ))
 }
 
@@ -4429,6 +4570,8 @@ struct RelocatedProcess {
     slots: ProcessSlots<AbsoluteAddr>,
     frame: Option<celox_design::ProcessFrame<AbsoluteAddr>>,
     origin: celox_design::ProcessOrigin,
+    /// The calls at which the kernel can be suspended inside the callee.
+    call_resumes: Vec<celox_design::CallResume>,
     /// The instance and the module-local index of the process.
     key: (InstanceId, usize),
 }
@@ -4823,15 +4966,14 @@ fn relocate_timing(
             }));
         metadata
             .host_request_sites
-            .extend(
-                module
-                    .host_request_sites
-                    .iter()
-                    .map(|site| HostRequestSite {
-                        process: process_index[&(instance, site.process)],
-                        ..site.map(locate)
-                    }),
-            );
+            .extend(module.host_request_sites.iter().map(|site| {
+                HostRequestSite {
+                    process: site
+                        .process
+                        .with_index(process_index[&(instance, site.process.index())]),
+                    ..site.map(locate)
+                }
+            }));
         metadata.time_slots.extend(module.time_slot.map(locate));
         metadata.sample_shadows.extend(
             module

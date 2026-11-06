@@ -1687,6 +1687,7 @@ timed_cases! {
     fn fork_suspended_child_keeps_automatic_string_alive = "fork::suspended_child_keeps_automatic_string_alive";
     fn fork_child_delay_uses_current_simulation_time = "fork::child_delay_uses_current_simulation_time";
     fn fork_join_any_waits_only_for_immediate_children = "fork::join_any_waits_only_for_immediate_children";
+    fn fork_branches_call_imported_package_tasks = "fork::branches_call_imported_package_tasks";
 }
 
 timed_cases! { fn fork_four_state_automatic_values_survive_fork_suspension = "fork::four_state_automatic_values_survive_fork_suspension"; }

@@ -93,6 +93,118 @@ impl Plan {
     }
 }
 
+/// Where the code goes on after the host wrote at an update point.
+#[derive(Clone, Copy)]
+pub(super) enum AfterWrites {
+    /// The settle that follows settles them.
+    Settle,
+    /// The settle starting at this block runs again.
+    Again(celox_sir::BlockId),
+    /// They settle here, and the waits see them, before the scheduler goes
+    /// on: a kernel that runs next reads what they drive.
+    Settled,
+    /// The simulation ends: nothing reads them.
+    Ended,
+}
+
+impl Generator<'_> {
+    /// The host that watches every update sees the one just made
+    /// (`AFTER_UPDATE`) when the observer flag of the arena is set. Its
+    /// writes are host inputs of the slot, settled as `after` says; the
+    /// settle shows the host its update in turn. The edges they give
+    /// `events` are the slot's, as those of the writes before the domains.
+    pub(super) fn report_update(
+        &mut self,
+        service: u32,
+        checks: &[WaitCheck<'_>],
+        events: &[Event],
+        finish: celox_sir::BlockId,
+        after: AfterWrites,
+    ) {
+        let enabled = self.arena_header_load(offset_of!(ArenaHeader, observes_updates));
+        let enabled = self.equals(enabled, 1);
+        let notify = self.b.new_block();
+        let done = self.b.new_block();
+        self.b.seal_block(SIRTerminator::Branch {
+            cond: enabled,
+            true_block: (notify, Vec::new()),
+            false_block: (done, Vec::new()),
+        });
+        self.b.switch_to_block(notify);
+        let before: Vec<_> = events.iter().map(|event| self.level(event)).collect();
+        let context = self.load_at(
+            self.slots.defer_limit_settle,
+            celox_design::SCHEDULER_HOST_CONTEXT_BIT,
+            64,
+        );
+        let zero = self.constant(0, 64);
+        let request = self.constant(native_io::AFTER_UPDATE, 64);
+        let time = self.load(self.slots.now, 64);
+        let result = self.b.alloc_bit(64, false);
+        self.b.emit(SIRInstruction::ExternCall {
+            dst: Some(result),
+            func: service,
+            args: vec![context, zero, request, time, zero],
+        });
+        let error = self.mask_bit(result, 0);
+        let failed = self.exit_block(SchedulerExit::Internal);
+        let success = self.b.new_block();
+        self.b.seal_block(SIRTerminator::Branch {
+            cond: error,
+            true_block: (failed, Vec::new()),
+            false_block: (success, Vec::new()),
+        });
+        self.b.switch_to_block(success);
+        let stopped = self.mask_bit(result, 2);
+        let continued = self.b.new_block();
+        self.b.seal_block(SIRTerminator::Branch {
+            cond: stopped,
+            true_block: (finish, Vec::new()),
+            false_block: (continued, Vec::new()),
+        });
+        self.b.switch_to_block(continued);
+        let wrote = self.mask_bit(result, 1);
+        let writes = self.b.new_block();
+        self.b.seal_block(SIRTerminator::Branch {
+            cond: wrote,
+            true_block: (writes, Vec::new()),
+            false_block: (done, Vec::new()),
+        });
+        self.b.switch_to_block(writes);
+        // Each settle of the host's writes is a pass, which the round
+        // budget bounds (as `show_update` charges them).
+        self.service_call(service, u64::MAX, native_io::SCHEDULER_PASS, time, failed);
+        self.mark_dirty();
+        host_inputs::replay(self.program, self, checks);
+        if !events.is_empty() {
+            let mut edges = self.load(self.slots.exit_arg, self.event_bits);
+            for (index, (event, was)) in events.iter().zip(before).enumerate() {
+                let is = self.level(event);
+                let edge = self.settled_edge(event, was, is);
+                let bit = self.event_bit(edge, index);
+                edges = self.binary(self.event_bits, edges, BinaryOp::Or, bit);
+            }
+            self.store(self.slots.exit_arg, self.event_bits, edges);
+        }
+        match after {
+            AfterWrites::Settle | AfterWrites::Ended => {
+                self.b.seal_block(SIRTerminator::Jump(done, Vec::new()));
+            }
+            AfterWrites::Again(block) => {
+                self.b.seal_block(SIRTerminator::Jump(block, Vec::new()));
+            }
+            AfterWrites::Settled => {
+                let settled = self.b.new_block();
+                self.settle_then(settled);
+                self.b.switch_to_block(settled);
+                self.check_waits(checks);
+                self.b.seal_block(SIRTerminator::Jump(done, Vec::new()));
+            }
+        }
+        self.b.switch_to_block(done);
+    }
+}
+
 #[cfg(all(
     test,
     feature = "systemverilog",
@@ -274,6 +386,53 @@ endmodule"#;
         assert!(error.contains("does not settle"), "{error}");
         assert_eq!(sim.scheduler_stats().reference_steps, before);
     }
+    /// Writes `data` anew at every update of time 5.
+    struct UpdateFeedback {
+        data: SignalRef,
+        calls: usize,
+    }
+
+    impl<B: SimBackend> SlotObserver<B> for UpdateFeedback {
+        fn before_domains(&mut self, _: &mut SlotIo<'_, B>, _: u64) {}
+        fn end_of_slot(&mut self, _: &mut SlotIo<'_, B>, _: u64) {}
+        fn observes_updates(&self) -> bool {
+            true
+        }
+        fn after_update(&mut self, io: &mut SlotIo<'_, B>, time: u64) {
+            if time == 5 {
+                self.calls += 1;
+                assert!(self.calls < 64, "callback loop escaped the native budget");
+                io.set(self.data, self.calls as u32);
+            }
+        }
+    }
+
+    #[test]
+    fn update_callback_feedback_obeys_the_native_round_budget() {
+        let source = r#"`timescale 1ns/1ns
+module Top;
+    int d = 0, x = 0;
+    wire [31:0] e = d + 1;
+    initial #5 x = 1;
+endmodule"#;
+        for mode in [SchedulerMode::Reference, SchedulerMode::Compiled] {
+            let mut sim = Simulation::from_sv_sources(
+                vec![(source, std::path::Path::new("native-update-budget.sv"))],
+                "Top",
+            )
+            .scheduler_mode(mode)
+            .observable_updates(true)
+            .build_native()
+            .unwrap();
+            let data = sim.signal("d");
+            sim.observe_slots(Box::new(UpdateFeedback { data, calls: 0 }), &[data]);
+            sim.run_until(1).unwrap();
+            sim.state.set_slot_budgets(3, 16);
+            let error = sim.run_until(6).unwrap_err().to_string();
+            assert!(error.contains("does not settle"), "{mode:?}: {error}");
+        }
+    }
+
     fn host_clock<B: SimBackend + 'static>(
         mut sim: Simulation<B>,
         mode: SchedulerMode,

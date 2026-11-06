@@ -35,7 +35,12 @@ function createHandle() {
 			"function",
 			"newTiered is not available",
 		);
-		const handle = Handle.newTiered(SOURCES, "Lifetime", { optLevel: "O0" });
+		// Views must survive whole-image promotion; hotspot JIT never adopts
+		// an image.
+		const handle = Handle.newTiered(SOURCES, "Lifetime", {
+			optLevel: "O0",
+			hotspotJit: false,
+		});
 		assert.equal(handle.isTiered, true);
 		assert.equal(handle.tierCompiled, false);
 		return handle;

@@ -108,6 +108,14 @@ pub trait StepObserver<E: SimulationExecutor> {
         false
     }
 
+    /// Whether the observer reads the scheduling state of the simulation
+    /// between steps. Unless it does, consecutive runs of the compiled
+    /// scheduler keep the state of its kernels and clocks in its slots,
+    /// where the runtime's queues do not show it.
+    fn reads_scheduling_state(&self) -> bool {
+        true
+    }
+
     /// Called before a step, with the state it starts from.
     fn before_step(&mut self, state: &SimulationState<E::Backend>, executor: &mut E);
 
@@ -124,6 +132,10 @@ pub trait StepObserver<E: SimulationExecutor> {
 
 /// No observer.
 impl<E: SimulationExecutor> StepObserver<E> for () {
+    fn reads_scheduling_state(&self) -> bool {
+        false
+    }
+
     fn before_step(&mut self, _: &SimulationState<E::Backend>, _: &mut E) {}
 
     fn after_step(
@@ -135,6 +147,16 @@ impl<E: SimulationExecutor> StepObserver<E> for () {
     ) -> Result<(), SimulatorErrorCode> {
         Ok(())
     }
+}
+
+/// The frames of the calls an activation is suspended inside: the stack
+/// below [`celox_design::ProcessSlots::call_top`] when it suspended, and its
+/// kernel's resume point then, which names the call the first frame belongs
+/// to (see [`celox_design::FunctionFrame`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SavedCalls {
+    pub resume: u64,
+    pub stack: Vec<u8>,
 }
 
 /// Backend-independent state and execution rules for timed simulation.
@@ -190,6 +212,22 @@ pub struct SimulationState<B: SimBackend> {
     /// A host also watches data without a compiled event bit. Its changes
     /// must be reported before native waiting kernels consume them.
     observed_data: bool,
+    /// Set between two runs of the compiled scheduler in one run loop that
+    /// left its kernels and clocks in its slots instead of the queues above.
+    native: Option<NativeResidency<B>>,
+    /// The host watches every update of the current round
+    /// ([`HostBoundary::observes_updates`]).
+    shows_updates: bool,
+}
+
+/// What the runtime keeps of the compiled scheduler's kernels and host
+/// clocks while they stay resident in its slots between the runs of a run
+/// loop.
+struct NativeResidency<B: SimBackend> {
+    /// The time of the next slot of their work, `u64::MAX` for none.
+    next: u64,
+    /// The event of each clock slot armed in the slots.
+    clocks: Vec<Option<B::Event>>,
 }
 
 /// The most recent processes of a time slot that a slot that does not
@@ -266,6 +304,8 @@ impl<B: SimBackend> SimulationState<B> {
             stats: SchedulerStats::default(),
             observed_events: Default::default(),
             observed_data: false,
+            native: None,
+            shows_updates: false,
         };
         state.stats.kernels = (0..state.model.processes.len())
             .map(|index| match state.model.kernel_fallback.get(index) {
@@ -305,7 +345,10 @@ impl<B: SimBackend> SimulationState<B> {
         let mut native_time = None;
         let mut native_rounds = 0u64;
         let mut host_only = false;
+        // The observed signals do not change during the loop.
+        let observable = !self.observation_needs_reference();
         while self.compiles_slots()
+            && observable
             && self.finalizing.is_none()
             && self.suspended.is_none()
             && !self.declarations_pending
@@ -328,7 +371,7 @@ impl<B: SimBackend> SimulationState<B> {
             // `end` bounds this run to the first timestamp. A zero delay
             // may need several generated rounds to finish that timestamp.
             let before = self.stats.compiled_slots;
-            settled = self.run_compiled(executor, end, u64::MAX)?;
+            settled = self.run_compiled(executor, end, u64::MAX, false)?;
             let rounds = self.stats.compiled_slots - before;
             native_rounds = if native_time == Some(next) {
                 native_rounds.saturating_add(rounds)
@@ -362,6 +405,9 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
+        if self.native.is_some() {
+            self.unload_native(executor.backend())?;
+        }
         self.stats.reference_steps = self.stats.reference_steps.saturating_add(1);
         executor.await_runtime_event_room();
         self.stopped = false;
@@ -456,7 +502,9 @@ impl<B: SimBackend> SimulationState<B> {
 
     /// The steps of the slots up to `end`. Returns whether every slot up to
     /// `end` ran: not when a process stopped the run or `observer`
-    /// interrupted it.
+    /// interrupted it. Unless `observer` reads the scheduling state, the
+    /// consecutive runs of the compiled scheduler keep its kernels and clocks
+    /// resident in its slots; the queues hold all of it again on return.
     fn run_slots_to<E, O>(
         &mut self,
         executor: &mut E,
@@ -467,7 +515,9 @@ impl<B: SimBackend> SimulationState<B> {
         E: SimulationExecutor<Backend = B>,
         O: StepObserver<E>,
     {
-        let compiles = self.compiles_slots();
+        let resident = !observer.reads_scheduling_state() && self.may_stay_resident();
+        // The observed signals do not change during the loop.
+        let compiles = self.compiles_slots() && !self.observation_needs_reference();
         let waiting_kernels = self
             .model
             .scheduler
@@ -478,7 +528,7 @@ impl<B: SimBackend> SimulationState<B> {
                 break;
             }
             if observer.interrupts(self) {
-                return Ok(false);
+                return self.leave_resident(executor, Ok(false));
             }
             // A process the scheduler does not run waits: the slot stays in
             // the reference loop. Test that first, as designs with such
@@ -491,6 +541,7 @@ impl<B: SimBackend> SimulationState<B> {
             } else {
                 None
             };
+            // A host that stops or finishes the run there unloads first.
             if compiled.is_some()
                 && next_time > self.scheduler.time
                 && !self.leave_time(executor)?
@@ -502,17 +553,37 @@ impl<B: SimBackend> SimulationState<B> {
                 Some(limit) => {
                     executor.await_runtime_event_room();
                     let budget = observer.budget(self);
-                    self.run_compiled(executor, limit, budget)
+                    self.run_compiled(executor, limit, budget, resident)
                 }
                 None => self.step_reference_until(executor, end),
             };
-            observer.after_step(self, executor, end, &result)?;
+            if let Err(error) = observer.after_step(self, executor, end, &result) {
+                return self.leave_resident(executor, Err(error));
+            }
+            // A failed run or step unloaded before it returned.
             result?;
             if self.stopped {
-                return Ok(false);
+                return self.leave_resident(executor, Ok(false));
             }
         }
-        Ok(true)
+        self.leave_resident(executor, Ok(true))
+    }
+
+    /// `result`, with the queues the scheduling state again: a run loop
+    /// returns through it.
+    #[inline]
+    fn leave_resident<E>(
+        &mut self,
+        executor: &mut E,
+        result: Result<bool, SimulatorErrorCode>,
+    ) -> Result<bool, SimulatorErrorCode>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        if self.native.is_some() {
+            self.unload_native(executor.backend())?;
+        }
+        result
     }
 
     /// The host's work before a run leaves the current time
@@ -522,7 +593,12 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
-        match executor.try_leave_time(self.scheduler.time) {
+        let left = executor.try_leave_time(self.scheduler.time);
+        if left.is_err() && self.native.is_some() {
+            // The terminal and error paths below read the runtime's queues.
+            self.unload_native(executor.backend())?;
+        }
+        match left {
             Ok(()) => Ok(true),
             Err(Halt::Stop) => {
                 self.stopped = true;
@@ -561,9 +637,11 @@ impl<B: SimBackend> SimulationState<B> {
     /// signal run in the reference loop, where the host sees the change
     /// before any domain commits; the other kernels' slots stay compiled.
     /// When data without an event bit is observed, slots that can resume
-    /// design-driven waiters also use the reference loop, preserving the
-    /// boundary between a data change and the processes it wakes.
+    /// waiters a domain wakes also use the reference loop, preserving the
+    /// boundary between a domain's change and the processes it wakes.
     pub fn set_observed_signals(&mut self, signals: impl IntoIterator<Item = SignalRef>) {
+        // Residency is judged once per run loop, from the observed events.
+        debug_assert!(self.native.is_none());
         let Some(scheduler) = &self.model.scheduler else {
             return;
         };

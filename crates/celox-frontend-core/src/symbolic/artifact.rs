@@ -56,6 +56,9 @@ pub struct SymbolicProcess {
     pub slots: ProcessSlots<SourceVarId>,
     pub frame: Option<celox_design::ProcessFrame<SourceVarId>>,
     pub origin: celox_design::ProcessOrigin,
+    /// The calls at which the kernel can be suspended inside the callee,
+    /// naming functions of the module (see [`celox_design::FunctionFrame`]).
+    pub call_resumes: Vec<celox_design::CallResume>,
 }
 
 /// The commit of a trigger group's results, split by region.
@@ -133,6 +136,9 @@ pub struct SimModule {
     /// instance of the module, since a function reads and writes the state
     /// of its instance. Their frame slots are addressed in the FRAME region.
     pub functions: Vec<celox_sir::FunctionUnit<SymbolicRegionedAddr>>,
+    /// What the runtime reads in a saved frame of each of `functions`, in
+    /// the same order.
+    pub function_frames: Vec<celox_design::FunctionFrame>,
     /// Variables of the module that denote a variable of a package (IEEE
     /// 1800-2023 26.2). Every instance of the module refers to that one
     /// object instead of a state object of its own.

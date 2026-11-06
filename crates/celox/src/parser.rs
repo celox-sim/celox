@@ -476,6 +476,16 @@ pub(crate) fn optimize_scheduled_program(
     }
 
     let mut program = UnoptimizedSir::new(sir, runtime);
+    #[cfg(feature = "host-runtime")]
+    if !optimize_options.value_change_objects().is_empty() {
+        // The builder rejects a path that names no signal after layout.
+        let watched = optimize_options
+            .value_change_objects()
+            .iter()
+            .filter_map(|path| program.runtime.hierarchical_signal_addr(path))
+            .collect();
+        crate::value_change::instrument(&mut program.sir, &watched);
+    }
     debug_assert!(
         program.sir.calls_summarized(),
         "the program's call effects are stale"

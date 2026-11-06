@@ -2,7 +2,7 @@
 use super::*;
 use celox_runtime::Activation;
 use celox_runtime::timing::Value;
-use celox_runtime::{ActivationRecord, FrameValueKind, FrameValueRecord};
+use celox_runtime::{ActivationRecord, CallStackRecord, FrameValueKind, FrameValueRecord};
 use std::collections::BTreeSet;
 
 fn kind(object: &NamedObject) -> FrameValueKind {
@@ -87,23 +87,7 @@ impl<B: SimBackend> Simulator<B> {
         let mut bits = encode(&value.0);
         if object.strings {
             for element in bits.as_chunks_mut::<{ celox_heap::HANDLE_BYTES }>().0 {
-                let contents = self
-                    .backend
-                    .heap()
-                    .string(celox_heap::Handle::from_le_bytes(*element));
-                let id = if contents.is_empty() {
-                    0
-                } else {
-                    let index = strings
-                        .iter()
-                        .position(|s| s == contents)
-                        .unwrap_or_else(|| {
-                            strings.push(contents.to_vec());
-                            strings.len() - 1
-                        });
-                    u32::try_from(index + 1).map_err(|_| mismatch("too many strings"))?
-                };
-                *element = id.to_le_bytes();
+                self.capture_string(element, strings)?;
             }
         }
         Ok(FrameValueRecord {
@@ -113,6 +97,73 @@ impl<B: SimBackend> Simulator<B> {
             value: bits,
             mask: encode(&value.1),
         })
+    }
+
+    /// Replace the string handle `element` by its portable ID: 0 for `""`,
+    /// otherwise one more than the index of its contents in `strings`.
+    fn capture_string(
+        &self,
+        element: &mut [u8; celox_heap::HANDLE_BYTES],
+        strings: &mut Vec<Vec<u8>>,
+    ) -> Result<(), StateError> {
+        let contents = self
+            .backend
+            .heap()
+            .string(celox_heap::Handle::from_le_bytes(*element));
+        let id = if contents.is_empty() {
+            0
+        } else {
+            let index = strings
+                .iter()
+                .position(|s| s == contents)
+                .unwrap_or_else(|| {
+                    strings.push(contents.to_vec());
+                    strings.len() - 1
+                });
+            u32::try_from(index + 1).map_err(|_| mismatch("too many strings"))?
+        };
+        *element = id.to_le_bytes();
+        Ok(())
+    }
+
+    /// The frames of the calls processes are suspended inside, with their
+    /// string handles as portable IDs. Class handles stay out of state
+    /// files, as they do in state objects.
+    pub(super) fn capture_call_stacks(
+        &self,
+        state: &ProcessState,
+        process: impl Fn(usize) -> ProcessRef,
+        strings: &mut Vec<Vec<u8>>,
+    ) -> Result<Vec<CallStackRecord>, StateError> {
+        let kernel = |index: usize| state.activations.get(index).map_or(index, |a| a.kernel);
+        let mut records = Vec::new();
+        for (&index, saved) in &state.call_stacks {
+            let handles = self
+                .saved_frame_handles(kernel(index), saved)
+                .ok_or_else(|| mismatch("a call stack the design did not save"))?;
+            let mut stack = saved.stack.clone();
+            for (offset, kind) in handles {
+                let element: &mut [u8; celox_heap::HANDLE_BYTES] = (&mut stack
+                    [offset..offset + celox_heap::HANDLE_BYTES])
+                    .try_into()
+                    .expect("one handle");
+                match kind {
+                    celox_design::ValueKind::ObjRef => {
+                        if *element != [0; celox_heap::HANDLE_BYTES] {
+                            return Err(StateError::Objects("class handles in call frames".into()));
+                        }
+                    }
+                    celox_design::ValueKind::StrRef => self.capture_string(element, strings)?,
+                    celox_design::ValueKind::Bits => {}
+                }
+            }
+            records.push(CallStackRecord {
+                process: process(index),
+                resume: saved.resume,
+                stack,
+            });
+        }
+        Ok(records)
     }
 
     /// Queue payloads still use the legacy raw-bit codec. Reject heap-bearing
@@ -520,13 +571,16 @@ impl<B: SimBackend> Simulator<B> {
                     }
                     Some(ProcessStatus::HostRequest) => {
                         celox_design::HostRequestKind::decode(delay).is_some_and(|(kind, index)| {
-                            self.program
-                                .runtime_schema
-                                .host_request_sites
-                                .iter()
-                                .filter(|site| site.process == kernel && site.kind == kind)
-                                .nth(index as usize)
-                                .is_some()
+                            celox_design::host_request_site(
+                                self.program
+                                    .runtime_schema
+                                    .host_request_sites
+                                    .iter()
+                                    .filter(|site| site.process.index() == kernel),
+                                kind,
+                                index,
+                            )
+                            .is_some()
                         })
                     }
                     Some(ProcessStatus::Nba) => {
@@ -781,5 +835,23 @@ impl<B: SimBackend> Simulator<B> {
                 bind(value);
             }
         }
+        // The string slots of saved frames, which the load validated.
+        let mut stacks = std::mem::take(&mut state.call_stacks);
+        for (&index, saved) in &mut stacks {
+            let kernel = state.activations.get(index).map_or(index, |a| a.kernel);
+            for (offset, kind) in self.saved_frame_handles(kernel, saved).unwrap_or_default() {
+                if kind != celox_design::ValueKind::StrRef {
+                    continue;
+                }
+                let element = &mut saved.stack[offset..offset + celox_heap::HANDLE_BYTES];
+                let id = u32::from_le_bytes(element.try_into().expect("one handle")) as usize;
+                let content = id
+                    .checked_sub(1)
+                    .and_then(|i| strings.get(i))
+                    .map_or(&[][..], Vec::as_slice);
+                element.copy_from_slice(&self.backend.heap_mut().intern(content).to_le_bytes());
+            }
+        }
+        state.call_stacks = stacks;
     }
 }

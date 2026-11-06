@@ -1123,6 +1123,23 @@ pub enum ContainerOp {
     Literal,
     /// Empty associative array with the supplied default element.
     WithDefault,
+    /// An associative array of the pattern `'{k0: v0, ..., default: d}`
+    /// (IEEE 1800-2023 10.9.1): with `default`, the first argument is the
+    /// default element; then each key with its value.
+    Keyed {
+        default: bool,
+    },
+    /// The result of a conditional operator whose condition is ambiguous,
+    /// of its two container operands (IEEE 1800-2023 11.4.11): either one if
+    /// they are equal; for arrays other than associative ones of as many
+    /// elements, their elements combined, an element that differs taking
+    /// its type's default (Table 7-1); otherwise an empty container.
+    Merge,
+    /// A conditional operator, the one argument, whose operands are
+    /// containers and whose condition may be ambiguous (IEEE 1800-2023
+    /// 11.4.11): the condition selects the operand evaluated; an ambiguous
+    /// one evaluates both and takes their [`Self::Merge`].
+    Conditional,
     Convert,
     /// A new sequence of the elements of the sequence in the first argument
     /// and then those of the one in the second.

@@ -192,6 +192,16 @@ sys.exit(code)
         self.assertEqual((row["result"], row["rc"]), ("fail", "71"))
         self.assertEqual(row["failure_category"], "timeout")
 
+    def test_case_timeout_caps_every_case(self):
+        (self.tests / "fixture.sv").write_text(
+            "/*\n:tags: fixture\n:description: fixture\n:type: simulation\n:timeout: 30\n*/\n// SLEEP\n")
+        row = runner.run_case(self.root, self.driver, self.out, "fixture.sv", "2state", case_timeout=1)
+        self.assertEqual((row["result"], row["rc"]), ("fail", "71"))
+        self.assertEqual((row["failure_category"], row["diagnostic"]), ("timeout", "runner_timeout"))
+        # Without a cap the case's own timeout applies.
+        row = runner.run_case(self.root, self.driver, self.out, "fixture.sv", "2state")
+        self.assertEqual(row["rc"], "0")
+
     def test_partial_update_and_comparison(self):
         self.case()
         expected = self.root / "expected.tsv"

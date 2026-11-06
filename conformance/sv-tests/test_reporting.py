@@ -26,6 +26,7 @@ class ClassificationTests(unittest.TestCase):
             ("illegal_context\n × invalid argument", "1", "elaboration", "0", "compile_error"),
             ("elaboration requires a module root; none found", "1", "elaboration", "0", "unsupported"),
             ("$fatal: bad data", "1", "simulation", "0", "runtime_error"),
+            ("e :assert: (True)\nrun-time errors reported: 1", "1", "simulation", "0", "runtime_error"),
             ("Timeout: > 30s", "71", "simulation", "0", "timeout"),
             ("thread 'main' panicked at x.rs:1", "101", "elaboration", "0", "crash"),
             ("", "-11", "simulation", "1", "crash"),

@@ -1731,6 +1731,9 @@ mod host {
         /// Emit the additional combinational entries needed to reapply foreign
         /// force overrides between procedural store boundaries.
         pub native_force_support: bool,
+        /// Generate the compiled scheduler with a host observation point at
+        /// every update (see [`SimulatorBuilder::observable_updates`]).
+        pub observable_updates: bool,
         /// Cross-check every partitioned settle against one that runs every
         /// partition (see [`SimulatorBuilder::settle_check`]).
         pub settle_check: bool,
@@ -1740,8 +1743,12 @@ mod host {
         pub dead_store_policy: DeadStorePolicy,
         /// When the tiered backend adopts background-compiled code.
         pub tier_promotion: TierPromotion,
-        /// Experimentally compile hot execution groups independently on x86-64.
-        /// The default remains whole-image tiered compilation.
+        /// Compile hot execution groups independently on the tiered backend
+        /// (native x86-64 and AArch64 hosts), keeping cold work interpreted.
+        /// On by default; `false` selects whole-image tiered compilation.
+        /// Configurations it does not support (other hosts, parallel lanes,
+        /// force targets, deferred promotion, codegen traces) keep whole-image
+        /// tiering.
         pub hotspot_jit: bool,
         /// Allow Celox to lower function side effects that Veryl rejects in
         /// `always_ff` for SystemVerilog compatibility.
@@ -2057,10 +2064,11 @@ mod host {
                 sir_transform: None,
                 settle_check: false,
                 native_force_support: false,
+                observable_updates: false,
                 signal_access: crate::SignalAccessOptions::default(),
                 dead_store_policy: DeadStorePolicy::Off,
                 tier_promotion: TierPromotion::Always,
-                hotspot_jit: false,
+                hotspot_jit: true,
                 allow_always_ff_function_effects: false,
                 allow_inferred_latches: false,
                 dpi: crate::DpiSymbols::default(),
@@ -2103,6 +2111,10 @@ mod host {
         frontend_artifact: Option<celox_frontend_sdk::FrontendArtifact>,
         file_dependencies: celox_frontend_veryl::FileDependencyCollector,
         native_file_calls: bool,
+        /// Whether the build keeps the value change points of
+        /// [`Self::value_change_signals`]: not one that starts interpreted,
+        /// whose units have no host context until compiled.
+        value_change_points: bool,
         _marker: std::marker::PhantomData<Target>,
     }
 
@@ -2297,12 +2309,55 @@ mod host {
             self
         }
 
+        /// Generate the compiled scheduler so that a slot observer that
+        /// watches every update ([`crate::SlotObserver::observes_updates`]),
+        /// such as VPI value change callbacks, sees each of them inside
+        /// compiled slots. Without it, such an observer's slots run in the
+        /// reference loop. The points cost a test of the observer flag each
+        /// and keep combinational settles from being deferred.
+        pub fn observable_updates(mut self, enable: bool) -> Self {
+            self.options.observable_updates = enable;
+            self
+        }
+
+        /// Show a slot observer that watches every update each blocking
+        /// update a process makes of the signals at these hierarchical paths,
+        /// right after it is made, as VPI value change callbacks see them
+        /// (IEEE 1800-2023 38.36.1). Other updates of them are shown when the
+        /// unit that makes them ends. Only processes that write such a signal
+        /// change, and only around those writes. Needs the native backend
+        /// and [`Self::observable_updates`]; elsewhere, and in a tiered
+        /// build, whose interpreted tier has no host context in its units,
+        /// the points are dropped.
+        pub fn value_change_signals<S: Into<String>>(
+            mut self,
+            paths: impl IntoIterator<Item = S>,
+        ) -> Self {
+            self.options.optimize_options = self
+                .options
+                .optimize_options
+                .clone()
+                .with_value_change_objects(paths.into_iter().map(Into::into).collect());
+            self
+        }
+
+        /// The paths given to [`Self::value_change_signals`], which a new
+        /// optimizer profile keeps.
+        fn watched_objects(&self) -> Vec<String> {
+            self.options
+                .optimize_options
+                .value_change_objects()
+                .to_vec()
+        }
+
         fn enforce_native_force_optimizer(&mut self) {
             if !self.options.native_force_support {
                 return;
             }
             let diagnostics = self.options.optimize_options.diagnostics.clone();
-            self.options.optimize_options = crate::optimizer::OptimizeOptions::none();
+            let watched = self.watched_objects();
+            self.options.optimize_options =
+                crate::optimizer::OptimizeOptions::none().with_value_change_objects(watched);
             self.options.optimize_options.diagnostics = diagnostics;
             self.options.dead_store_policy = DeadStorePolicy::Off;
         }
@@ -2313,10 +2368,12 @@ mod host {
             let lanes = self.options.optimize_options.parallel_lanes();
             let partition = self.options.optimize_options.parallel_partition();
             let settle = self.options.optimize_options.settle_partition();
+            let watched = self.watched_objects();
             self.options.optimize_options = crate::optimizer::OptimizeOptions::new(level)
                 .with_parallel_lanes(lanes)
                 .with_parallel_partition(partition)
-                .with_settle_partition(settle);
+                .with_settle_partition(settle)
+                .with_value_change_objects(watched);
             self.options.cranelift_options =
                 crate::backend::CraneliftOptions::for_speed_optimization(
                     level != crate::optimizer::OptLevel::O0,
@@ -2352,6 +2409,7 @@ mod host {
             let lanes = self.options.optimize_options.parallel_lanes();
             let partition = self.options.optimize_options.parallel_partition();
             let settle = self.options.optimize_options.settle_partition();
+            let watched = self.watched_objects();
             self.options.optimize_options = if enable {
                 crate::optimizer::OptimizeOptions::all()
             } else {
@@ -2359,7 +2417,8 @@ mod host {
             }
             .with_parallel_lanes(lanes)
             .with_parallel_partition(partition)
-            .with_settle_partition(settle);
+            .with_settle_partition(settle)
+            .with_value_change_objects(watched);
             self
         }
 
@@ -2394,10 +2453,16 @@ mod host {
             } else {
                 self.options.optimize_options.settle_partition()
             };
+            let watched = if options.value_change_objects().is_empty() {
+                self.watched_objects()
+            } else {
+                options.value_change_objects().to_vec()
+            };
             self.options.optimize_options = options
                 .with_parallel_lanes(lanes)
                 .with_parallel_partition(partition)
-                .with_settle_partition(settle);
+                .with_settle_partition(settle)
+                .with_value_change_objects(watched);
             self
         }
 
@@ -2578,8 +2643,9 @@ mod host {
             self
         }
 
-        /// Enable experimental incremental compilation on the tiered backend.
-        /// Unsupported hosts retain the ordinary tiered execution policy.
+        /// Select incremental (hotspot) compilation on the tiered backend, the
+        /// default, or whole-image tiered compilation with `false`.
+        /// Unsupported configurations retain whole-image tiering.
         pub fn hotspot_jit(mut self, enabled: bool) -> Self {
             self.options.hotspot_jit = enabled;
             self
@@ -2796,6 +2862,7 @@ mod host {
                 frontend_artifact: None,
                 file_dependencies: Default::default(),
                 native_file_calls: false,
+                value_change_points: true,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2819,6 +2886,7 @@ mod host {
                 frontend_artifact: None,
                 file_dependencies: Default::default(),
                 native_file_calls: false,
+                value_change_points: true,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2843,6 +2911,7 @@ mod host {
                 frontend_artifact: None,
                 file_dependencies: Default::default(),
                 native_file_calls: false,
+                value_change_points: true,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2872,6 +2941,7 @@ mod host {
                 frontend_artifact: None,
                 file_dependencies: Default::default(),
                 native_file_calls: false,
+                value_change_points: true,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2900,6 +2970,7 @@ mod host {
                 frontend_artifact: Some(artifact),
                 file_dependencies: Default::default(),
                 native_file_calls: false,
+                value_change_points: true,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2929,6 +3000,7 @@ mod host {
                 frontend_artifact: Some(artifact),
                 file_dependencies: Default::default(),
                 native_file_calls: false,
+                value_change_points: true,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -3097,6 +3169,7 @@ mod host {
             }
 
             validate_signal_access(&laid_out, &self.options.signal_access)?;
+            validate_value_change_signals(&laid_out, &self.options.optimize_options)?;
             if self.options.dead_store_policy != DeadStorePolicy::Off {
                 let dse_start = phase_timing.then(crate::timing::now);
                 run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
@@ -3107,6 +3180,11 @@ mod host {
                     );
                 }
             }
+            #[cfg(feature = "host-runtime")]
+            crate::value_change::lower(
+                &mut laid_out,
+                self.native_file_calls && self.value_change_points,
+            );
 
             // Units generated from here on write state the settle may read.
             let first_generated_process = laid_out.sir.processes.len();
@@ -3118,6 +3196,9 @@ mod host {
             {
                 if self.native_file_calls {
                     crate::scheduler::enable_native_services(&mut laid_out);
+                }
+                if let Some(scheduler) = laid_out.runtime.runtime_schema.scheduler.as_mut() {
+                    scheduler.update_points = self.options.observable_updates;
                 }
                 crate::scheduler::attach(
                     &mut laid_out,
@@ -3323,9 +3404,11 @@ mod host {
 
             let (laid_out, warnings, options, vcd_path, injected_components) = {
                 let vcd_recording = self.vcd_path.is_some();
+                // As in the timed `build_tiered`: only a native image runs
+                // derived-edge units, and it expands deferred ones itself.
                 self.into_laid_out_program(
                     crate::backend::tiered::tiered_layout_mode(vcd_recording),
-                    false,
+                    crate::backend::tiered::native_is_default_target(),
                 )?
             };
             validate_untimed_processes(laid_out.runtime())?;
@@ -3395,9 +3478,11 @@ mod host {
 
             let (laid_out, warnings, options, vcd_path, injected_components) = {
                 let vcd_recording = self.vcd_path.is_some();
+                // As in the timed `build_tiered`: only a native image runs
+                // derived-edge units, and it expands deferred ones itself.
                 self.into_laid_out_program(
                     crate::backend::tiered::tiered_layout_mode(vcd_recording),
-                    false,
+                    crate::backend::tiered::native_is_default_target(),
                 )?
             };
             validate_untimed_processes(laid_out.runtime())?;
@@ -3810,9 +3895,11 @@ mod host {
                 }
 
                 validate_signal_access(&laid_out, &self.options.signal_access)?;
+                validate_value_change_signals(&laid_out, &self.options.optimize_options)?;
                 if self.options.dead_store_policy != DeadStorePolicy::Off {
                     run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
                 }
+                crate::value_change::lower(&mut laid_out, false);
 
                 #[cfg(any(
                     all(target_arch = "x86_64", not(feature = "arm64-codegen")),
@@ -3915,6 +4002,7 @@ mod host {
                 frontend_artifact: None,
                 file_dependencies: Default::default(),
                 native_file_calls: false,
+                value_change_points: true,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -3938,6 +4026,7 @@ mod host {
                 frontend_artifact: None,
                 file_dependencies: Default::default(),
                 native_file_calls: false,
+                value_change_points: true,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -3963,6 +4052,7 @@ mod host {
                 frontend_artifact: Some(artifact),
                 file_dependencies: Default::default(),
                 native_file_calls: false,
+                value_change_points: true,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -4118,7 +4208,15 @@ mod host {
         ) -> Result<crate::Simulation<crate::backend::TieredBackend>, SimulatorError> {
             let layout = crate::backend::tiered::tiered_layout_mode(self.vcd_path.is_some());
             self.native_file_calls = true;
-            self.build_with_backend(layout, false, |program, options| {
+            // The interpreted tier shows the updates of its units when they
+            // end; the compiled one does too, so that both show the same.
+            self.value_change_points = false;
+            // The interpreter and hotspot tiers walk derived-tick plans, and
+            // only a native image runs derived-edge units; it expands deferred
+            // ones itself. Expanding every unit here copies the comb settle
+            // into each of them, which exhausts memory on large designs.
+            let defer_derived_edges = crate::backend::tiered::native_is_default_target();
+            self.build_with_backend(layout, defer_derived_edges, |program, options| {
                 Ok(crate::backend::TieredBackend::new(program, options))
             })
         }
@@ -4442,11 +4540,50 @@ endmodule"#;
     }
 
     #[cfg(all(
-        test,
         feature = "systemverilog",
         target_arch = "x86_64",
         not(feature = "arm64-codegen")
     ))]
+    #[test]
+    fn hotspot_scheduler_releases_its_program_after_a_failed_stage() {
+        use crate::backend::hotspot::{EntryKey, HotspotRuntime, SCRATCH_BYTES};
+        let source = r#"`timescale 1ns/1ns
+module Top;
+  logic clk = 0;
+  logic [7:0] q = 0;
+  always #5 clk = ~clk;
+  always_ff @(posedge clk) q <= q + 1;
+endmodule"#;
+        let (program, _, options, _, _) = crate::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("failed-scheduler.sv"))],
+            "Top",
+        )
+        .emit_triggers()
+        .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false)
+        .unwrap();
+        for rejected in [false, true] {
+            let mut runtime = HotspotRuntime::new(program.layout(), &options).unwrap();
+            runtime.prepare_scheduler(&program);
+            assert!(runtime.holds_scheduler_program_for_test());
+            runtime.finish_scheduler_for_test(program.layout(), rejected);
+            let mut memory =
+                vec![0; program.layout().merged_total_size.div_ceil(8) + SCRATCH_BYTES / 8];
+            let poll = EntryKey::Block(0, usize::MAX, 0, crate::ir::BlockId(0));
+            assert!(runtime.try_run(poll, &mut memory).is_none());
+            let stats = runtime.stats();
+            assert_eq!(
+                (stats.failed_entries, stats.rejected_entries),
+                if rejected { (0, 1) } else { (1, 0) }
+            );
+            assert!(!runtime.has_compiled_scheduler());
+            assert!(
+                !runtime.holds_scheduler_program_for_test(),
+                "rejected={rejected}"
+            );
+        }
+    }
+
+    #[cfg(all(test, feature = "systemverilog", hotspot_jit))]
     #[test]
     fn hotspot_scheduler_overlaps_large_comb_and_links_after_publication() {
         use crate::backend::hotspot::{EntryKey, HotspotRuntime, SCRATCH_BYTES};
@@ -4505,9 +4642,11 @@ endmodule"#;
                     assert!(units.is_some());
                 }
                 runtime.finish(EntryKey::Comb, None, Some(program.sir.eval_comb.clone()));
-                // Large groups prepare on the owner while the worker compiles
-                // Comb; small groups retain lazy preparation on that worker.
-                assert_eq!(runtime.stats().compile_time.is_zero(), !large);
+                // Large groups prepare while the worker compiles Comb: on the
+                // owner with a single CPU, otherwise on their own thread.
+                // Small groups retain lazy preparation on that worker.
+                let synchronous = large && crate::backend::hotspot::single_cpu();
+                assert_eq!(runtime.stats().compile_time.is_zero(), !synchronous);
                 assert_eq!(runtime.stats().compiled_entries, 0);
                 assert_eq!(runtime.stats().code_bytes, 0);
                 assert_eq!(runtime.stats().failed_entries, 0);
@@ -4539,6 +4678,21 @@ endmodule"#;
                 }
             }
         }
+    }
+
+    fn validate_value_change_signals(
+        program: &LaidOutProgram,
+        options: &crate::optimizer::OptimizeOptions,
+    ) -> Result<(), SimulatorError> {
+        for path in options.value_change_objects() {
+            if program.hierarchical_signal_addr(path).is_none() {
+                return Err(crate::CodegenError::message(format!(
+                    "unknown or ambiguous signal `{path}`"
+                ))
+                .into());
+            }
+        }
+        Ok(())
     }
 
     fn validate_signal_access(
@@ -4807,7 +4961,7 @@ endmodule"#;
             site.process = count - 1 - site.process;
         }
         for site in &mut schema.host_request_sites {
-            site.process = count - 1 - site.process;
+            site.process = site.process.with_index(count - 1 - site.process.index());
         }
         program.sir.processes.reverse();
         let image =
@@ -5039,6 +5193,7 @@ endmodule"#;
             .live_signals
             .iter()
             .chain(&options.signal_access.force_signals)
+            .chain(options.optimize_options.value_change_objects())
         {
             let addr = program
                 .hierarchical_signal_addr(path)
@@ -5131,6 +5286,171 @@ endmodule"#;
         not(feature = "arm64-codegen")
     ))]
     #[test]
+    fn native_scheduler_delayed_nba_code_grows_linearly() {
+        // Every process both stages a delayed NBA and waits on the clock:
+        // publishing a site must not copy every wait check, nor replaying a
+        // host input every whole-object store, once per site or call.
+        for four_state in [false, true] {
+            let size = |processes| {
+                let mut source = String::from(
+                    "`timescale 1ns/1ns\nmodule Top; bit clk = 0; always #1 clk = ~clk;\n",
+                );
+                for index in 0..processes {
+                    source += &format!("logic [71:0] r{index} = 0;\n");
+                    let previous = index.max(1) - 1;
+                    source += &format!("always @(posedge clk) r{index} <= #1 r{previous} + 1;\n");
+                }
+                source += "endmodule\n";
+                let mut builder = crate::Simulation::from_sv_sources(
+                    vec![(source.as_str(), std::path::Path::new("delayed-nbas.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .emit_triggers();
+                builder.native_file_calls = true;
+                let (program, _, _, _, _) = builder
+                    .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, true)
+                    .unwrap();
+                let scheduler = program.runtime.runtime_schema.scheduler.as_ref().unwrap();
+                assert!(scheduler.fallback.iter().all(Option::is_none));
+                program.sir.processes[scheduler.unit.unwrap()]
+                    .blocks
+                    .values()
+                    .map(|block| block.instructions.len())
+                    .sum::<usize>()
+            };
+            let small = size(32);
+            let large = size(64);
+            assert!(
+                large < small * 3,
+                "quadratic delayed NBA code: {small} -> {large}, four_state={four_state}"
+            );
+        }
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    #[test]
+    fn hotspot_scheduler_outlines_kernels_past_its_inline_budget() {
+        // Hundreds of medium processes: inlining all of them would make the
+        // compiled scheduler one function of their combined size.
+        let mut source =
+            String::from("`timescale 1ns/1ns\nmodule Top; bit clk = 0; always #1 clk = ~clk;\n");
+        for index in 0..1000 {
+            source += &format!(
+                "logic [63:0] r{index} = {index};\ninitial forever begin @(posedge clk);\n"
+            );
+            for step in 0..40 {
+                source += &format!(
+                    "  if (r{index}[{bit}]) r{index} = r{index} * 3 + {step}; else r{index} = r{index} ^ (r{index} >> 3);\n",
+                    bit = step % 64
+                );
+            }
+            source += "end\n";
+        }
+        source += "endmodule\n";
+        let mut builder = crate::Simulation::from_sv_sources(
+            vec![(source.as_str(), std::path::Path::new("outlined-kernels.sv"))],
+            "Top",
+        )
+        .emit_triggers();
+        builder.native_file_calls = true;
+        let (program, _, _, _, _) = builder
+            .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, true)
+            .unwrap();
+        let scheduler = program.runtime.runtime_schema.scheduler.as_ref().unwrap();
+        assert!(scheduler.fallback.iter().all(Option::is_none));
+        let size = |unit: &crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>| {
+            unit.blocks
+                .values()
+                .map(|block| block.instructions.len())
+                .sum::<usize>()
+        };
+        let kernels: usize = program
+            .sir
+            .processes
+            .iter()
+            .enumerate()
+            .filter(|&(index, _)| Some(index) != scheduler.unit)
+            .map(|(_, unit)| size(unit))
+            .sum();
+        let budget = crate::scheduler::INLINE_BUDGET_INSTRUCTIONS;
+        assert!(
+            kernels > 2 * budget,
+            "the design must exceed the budget: {kernels}"
+        );
+        let staged = crate::scheduler::hotspot_scheduler(&program, Some(budget), None).unwrap();
+        assert!(staged.budgeted && !staged.callees.is_empty());
+        assert!(
+            size(&staged.unit) < kernels,
+            "scheduler {} inlines most of {kernels} kernel instructions",
+            size(&staged.unit)
+        );
+        // The final stage inlines them all.
+        let inlined = crate::scheduler::hotspot_scheduler(&program, None, None).unwrap();
+        assert!(!inlined.budgeted && inlined.callees.is_empty());
+        assert!(size(&inlined.unit) > kernels);
+        // A cancelled generation stops inlining and returns no scheduler.
+        let cancel = crate::backend::compile_cancel::CompileCancel::new();
+        cancel.cancel();
+        assert!(crate::scheduler::hotspot_scheduler(&program, None, Some(&cancel)).is_err());
+    }
+
+    #[cfg(feature = "systemverilog")]
+    #[test]
+    fn always_comb_startup_gate_reads_process_statuses_once() {
+        // Every always_comb waits for the time-zero barrier. Testing every
+        // process status in each of them would make every status write
+        // dirty every gated unit in a partitioned settle.
+        let mut source = String::from("`timescale 1ns/1ns\nmodule Top; logic clk = 0;\n");
+        for index in 0..8 {
+            source += &format!("logic [7:0] a{index} = 0, b{index};\n");
+            source += &format!("initial begin #1; a{index} = {index}; end\n");
+            source += &format!("always_comb b{index} = a{index} + 8'd1;\n");
+        }
+        source += "always #5 clk = ~clk;\nendmodule\n";
+        let (program, _, _, _, _) = crate::Simulation::from_sv_sources(
+            vec![(source.as_str(), std::path::Path::new("startup-gate.sv"))],
+            "Top",
+        )
+        .emit_triggers()
+        .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false)
+        .unwrap();
+        let statuses: crate::HashSet<_> = program
+            .runtime
+            .runtime_schema
+            .processes
+            .iter()
+            .map(|process| process.status)
+            .collect();
+        assert!(statuses.len() >= 9);
+        let loads = program
+            .sir
+            .eval_comb
+            .iter()
+            .flat_map(|unit| unit.blocks.values())
+            .flat_map(|block| &block.instructions)
+            .filter(|instruction| {
+                matches!(instruction, crate::ir::SIRInstruction::Load(_, address, ..)
+                    if statuses.contains(&address.absolute_addr()))
+            })
+            .count();
+        assert!(
+            loads <= statuses.len(),
+            "{loads} status loads for {} statuses",
+            statuses.len()
+        );
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    #[test]
     fn native_scheduler_host_wait_scans_grow_linearly() {
         for four_state in [false, true] {
             let size = |processes| {
@@ -5154,7 +5474,9 @@ endmodule"#;
                     .unwrap();
                 let scheduler = program.runtime.runtime_schema.scheduler.as_ref().unwrap();
                 assert!(scheduler.fallback.iter().all(Option::is_none));
-                let (unit, _) = crate::scheduler::hotspot_scheduler(&program).unwrap();
+                let unit = crate::scheduler::hotspot_scheduler(&program, None, None)
+                    .unwrap()
+                    .unit;
                 unit.blocks
                     .values()
                     .map(|block| block.instructions.len())

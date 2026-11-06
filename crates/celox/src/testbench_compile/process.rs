@@ -788,6 +788,7 @@ pub(crate) fn lower(
             resume: runtime.design.allocate_testbench_slot(16, false),
             status: runtime.design.allocate_testbench_slot(8, false),
             delay: runtime.design.allocate_testbench_slot(64, false),
+            call_top: None,
         };
         for slot in [slots.resume, slots.status, slots.delay] {
             runtime.runtime_schema.testbench_read_roots.insert(slot);

@@ -47,24 +47,23 @@ async def cocotb_clock_drives_a_dut_process(dut):
 
 
 @cocotb.test()
-async def data_changes_are_seen_settled(dut):
-    """Celox reports a value change of a register after the slot has settled,
-    so its combinational readers already show the new value. That is an
-    implementation choice: IEEE 1800-2023 4.7 leaves the order open, and
-    Icarus reports the change before `twice` follows."""
+async def data_changes_are_seen_before_their_readers_follow(dut):
+    """A value change callback runs right after the change (IEEE 1800-2023
+    38.36.1, 4.10): the register's combinational reader `twice` still holds
+    its value from before, as in Icarus."""
     for _ in range(3):
         await Edge(dut.count)
         count = int(dut.count.value)
-        settled = int(dut.twice.value) == 2 * count
-        dut._log.info("settled at value change: %s", settled)
+        followed = int(dut.twice.value) == 2 * count
+        dut._log.info("reader followed at value change: %s", followed)
         if cocotb.SIM_NAME == "Celox":
-            assert settled
+            assert not followed
 
 
 @cocotb.test()
 async def changes_are_seen_before_their_waiters_run(dut):
-    """A change is reported at the boundary of the wave that made it, before
-    the processes it wakes have run."""
+    """A change is reported right after the update that made it, before the
+    processes it wakes have run."""
     for _ in range(3):
         await Edge(dut.count)
         seen = (int(dut.count.value) - int(dut.mirror.value)) % 256

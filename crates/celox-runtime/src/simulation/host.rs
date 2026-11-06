@@ -102,6 +102,13 @@ pub trait UnitExecutor {
         Vec::new()
     }
 
+    /// Whether a native run may have left NBA values for
+    /// [`Self::take_compiled_nbas`] or [`Self::take_compiled_delayed_nbas`].
+    /// By default, whenever native runs hold the queues.
+    fn has_compiled_nbas(&self) -> bool {
+        self.compiled_nba_queues()
+    }
+
     /// Unpublished NBA values left by a native run, including an early error.
     fn take_compiled_nbas(&mut self) -> Vec<super::NbaUpdate> {
         Vec::new()
@@ -161,6 +168,22 @@ pub trait HostBoundary: UnitExecutor {
         Ok(false)
     }
 
+    /// Whether the host watches the updates of a slot through
+    /// [`Self::after_update`].
+    fn observes_updates(&self) -> bool {
+        false
+    }
+
+    /// Called after each update of a slot that may change a value the host
+    /// watches: a process ran until it suspended, flip-flop domains
+    /// committed, nonblocking assignments were published, scheduled values
+    /// applied, or combinational logic settled. A value change callback runs
+    /// after the change (IEEE 1800-2023 38.36.1, 4.10). Returns whether the
+    /// host wrote state, as [`Self::before_domains`] does.
+    fn after_update(&mut self, _timestamp: u64) -> Result<bool, Halt> {
+        Ok(false)
+    }
+
     /// Whether the host wrote state in [`Self::try_finish_timed_step`]
     /// since the last call. The writes are updates of that slot's time: the
     /// next step settles them there.
@@ -204,6 +227,11 @@ pub trait HostBoundary: UnitExecutor {
 
     /// Live values kept in dynamic process frames, outside backend state memory.
     fn retain_process_values(&mut self, _values: &[(crate::SignalRef, crate::timing::Value)]) {}
+
+    /// The frames of the calls that activations are suspended inside, kept
+    /// outside backend state memory: each with the kernel it runs, called
+    /// after [`Self::retain_process_values`] at the same safepoint.
+    fn retain_call_stacks(&mut self, _stacks: &[(usize, &super::SavedCalls)]) {}
 
     /// Called after the state for a simulation timestamp has stabilized.
     fn finish_timed_step(&mut self, _timestamp: u64) {}

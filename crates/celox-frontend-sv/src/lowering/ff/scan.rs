@@ -8,7 +8,7 @@ impl Ff<'_, '_> {
         args: &[Option<sv::ir::Expr>],
     ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
         use sv::ir::Expr;
-        if self.kernel.is_none() {
+        if !self.can_request() {
             return Err(unsupported(format!(
                 "{} requires Simulation scheduled execution",
                 function.name()
@@ -104,15 +104,14 @@ impl Ff<'_, '_> {
             .filter(|site| site.kind == HostRequestKind::Scan)
             .count() as u32;
         self.host_request_sites.push(HostRequestSite {
-            process: 0,
+            process: celox_design::SiteProcess::own(0),
             kind: HostRequestKind::Scan,
             operation: u32::from(function == sv::ir::SystemFunction::Fscanf),
             args: inputs,
             results,
             strings: Vec::new(),
         });
-        self.with_kernel(|kernel| kernel.host_request(HostRequestKind::Scan, site))
-            .map_err(kernel_error)?;
+        self.request_host(HostRequestKind::Scan, site)?;
         // A failed or ignored output must not overwrite a previously assigned
         // alias. Scan assignments are contiguous even with suppressed fields.
         for (index, (lvalues, value, guards)) in destinations.into_iter().enumerate() {

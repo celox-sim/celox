@@ -47,6 +47,8 @@ mod simulator;
 pub mod testbench;
 mod testbench_compile;
 pub(crate) mod timing;
+#[cfg(feature = "host-runtime")]
+mod value_change;
 pub use backend::SimulatorErrorCode as RuntimeErrorCode;
 pub use backend::{
     EventHandle, LayoutRequirements, MemoryLayout, MemoryLayoutMode, SimBackend, get_byte_size,
@@ -106,7 +108,7 @@ pub const MAX_SIMULATION_THREADS: u32 = 64;
 #[cfg(feature = "host-runtime")]
 mod host_api {
     use crate::SimBackend;
-    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    #[cfg(hotspot_jit)]
     pub use crate::backend::HotspotStats;
     pub use crate::backend::tiered::TieredEventRef;
     #[cfg(feature = "wasm-runtime")]
