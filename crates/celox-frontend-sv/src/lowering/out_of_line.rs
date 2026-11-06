@@ -142,6 +142,11 @@ pub(super) struct ProcessState {
     /// a delay, `$stop` or `$finish`. A unit of it is resumable (see
     /// [`Function::resume`]).
     pub suspends: bool,
+    /// Whether it suspends the calling process past the moment, for a delay
+    /// or `$stop`, so that other processes run before the call continues.
+    /// A host request does not: the host serves it before anything else
+    /// runs.
+    pub yields: bool,
 }
 
 /// What became of the calls of one subroutine.
@@ -305,6 +310,9 @@ pub(crate) struct OutOfLine {
     pub(super) observed: HashSet<SourceVarId>,
     /// The module's names that hierarchical names of other modules reach.
     pub(super) foreign: HashSet<String>,
+    /// The subroutines that may call themselves, through any chain of
+    /// calls (see [`ProcModule::mark_recursive`]).
+    pub(super) recursive: HashSet<String>,
 }
 
 impl OutOfLine {
@@ -866,6 +874,80 @@ impl ProcModule<'_> {
         }
     }
 
+    /// Record, before the module's processes are lowered, the subroutines
+    /// on a cycle of the module's call graph: those whose bodies, the
+    /// argument defaults of their calls included, may call themselves
+    /// again (see [`ProcModule::single_activation`]).
+    pub(super) fn mark_recursive(&mut self) {
+        if self.out_of_line().is_none() {
+            return;
+        }
+        let mut names: Vec<&String> = self.subroutines.keys().collect();
+        names.sort_unstable();
+        let index: HashMap<&str, usize> = names
+            .iter()
+            .enumerate()
+            .map(|(position, name)| (name.as_str(), position))
+            .collect();
+        let calls: Vec<Vec<usize>> = names
+            .iter()
+            .map(|name| {
+                let subroutine = &self.subroutines[*name];
+                let mut calls = Vec::new();
+                for stmt in subroutine.body.iter().chain(&subroutine.sensitivity_body) {
+                    stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
+                }
+                let mut callees = Vec::new();
+                let mut defaults = HashSet::default();
+                while let Some((callee, args)) = calls.pop() {
+                    let sv::ir::Callee::Subroutine(callee) = callee else {
+                        continue;
+                    };
+                    let Some(&target) = index.get(callee.as_str()) else {
+                        continue;
+                    };
+                    callees.push(target);
+                    // The defaults a call uses are those of its omitted
+                    // arguments.
+                    let omitted: Vec<bool> = args.iter().map(Option::is_none).collect();
+                    if defaults.insert((target, omitted)) {
+                        default_calls(&self.subroutines[names[target]], &args, &mut calls);
+                    }
+                }
+                callees.sort_unstable();
+                callees.dedup();
+                callees
+            })
+            .collect();
+        let recursive: HashSet<String> = super::recursion::recursive_components(&calls)
+            .into_iter()
+            .flatten()
+            .map(|node| names[node].clone())
+            .collect();
+        if let Some(functions) = self.out_of_line() {
+            functions.recursive = recursive;
+        }
+    }
+
+    /// Whether at most one activation of the unit of subroutine `name` can
+    /// be live at a time, so that its automatic unpacked arrays, which a
+    /// frame does not hold, may stay module variables (each activation
+    /// initializes them as its declarations say, as an inlined body does).
+    ///
+    /// A second activation could start only while one is live: by a call
+    /// from inside it, which only a cycle of the call graph makes (the
+    /// subroutine is not on one); or by another process while the first is
+    /// suspended, which only a suspension past the moment lets run (the body
+    /// has no delay and no `$stop`, nor do the bodies it reaches; a host
+    /// request is served before anything else runs, and `$finish` ends the
+    /// process). Processes run one at a time, so no other runs in between.
+    pub(super) fn single_activation(&mut self, name: &str) -> bool {
+        let recursive = self
+            .out_of_line()
+            .is_none_or(|functions| functions.recursive.contains(name));
+        !recursive && !self.process_state(name).yields
+    }
+
     /// Why subroutine `name` cannot go out of line wherever it is called,
     /// if it cannot: a property of its body and of the bodies it reaches.
     pub(super) fn out_of_line_reason(&mut self, name: &str) -> Option<Reason> {
@@ -935,7 +1017,10 @@ impl ProcModule<'_> {
                         // A delay suspends the process with the unit's
                         // frames, which the runtime keeps with the
                         // activation until the delay ends.
-                        sv::ir::Stmt::Delay { .. } => state.suspends = true,
+                        sv::ir::Stmt::Delay { .. } => {
+                            state.suspends = true;
+                            state.yields = true;
+                        }
                         sv::ir::Stmt::WaitEvent(_)
                         | sv::ir::Stmt::WaitImplicit { .. }
                         | sv::ir::Stmt::Wait(_)
@@ -984,9 +1069,13 @@ impl ProcModule<'_> {
                             }
                             // `$finish` ends and `$stop` suspends the
                             // process, the unit's frames with it.
-                            Some(SystemTaskKind::Control(
-                                RuntimeEventKind::Finish | RuntimeEventKind::Stop,
-                            )) => state.suspends = true,
+                            Some(SystemTaskKind::Control(RuntimeEventKind::Finish)) => {
+                                state.suspends = true;
+                            }
+                            Some(SystemTaskKind::Control(RuntimeEventKind::Stop)) => {
+                                state.suspends = true;
+                                state.yields = true;
+                            }
                             Some(SystemTaskKind::Control(_)) | None => note(Reason::HostRequest),
                         },
                         _ => {}

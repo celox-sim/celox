@@ -4761,6 +4761,7 @@ fn lower_module_with_overrides(
             .map(|functions| std::mem::take(&mut functions.foreign))
             .unwrap_or_default();
         pm.observe_storage(module, &foreign);
+        pm.mark_recursive();
         let blocks = lower_ff_processes(
             module,
             &mut pm,
