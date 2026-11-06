@@ -82,6 +82,14 @@ impl Guards {
             g.arena_header_store(offset_of!(ArenaHeader, guard_time), self.time);
             let one = g.constant(1, 64);
             g.arena_header_store(offset_of!(ArenaHeader, guard_valid), one);
+            // `recent_next` counts the runs since the last reset, each of
+            // which wrote one `recent` entry, from the first on; the entries
+            // after them still hold `u64::MAX`.
+            let used = g.arena_header_load(offset_of!(ArenaHeader, recent_next));
+            let capacity = g.constant(64, 64);
+            let over = g.binary(1, used, BinaryOp::GtU, capacity);
+            let used_capped = g.b.alloc_bit(64, false);
+            g.b.emit(SIRInstruction::Mux(used_capped, over, capacity, used));
             let zero = g.constant(0, 64);
             for offset in [
                 offset_of!(ArenaHeader, passes),
@@ -92,7 +100,7 @@ impl Guards {
                 g.arena_header_store(offset, zero);
             }
             let header = g.arena_header();
-            g.words(64, |g, index| {
+            g.word_range(used_capped, |g, index| {
                 let base = g.constant((offset_of!(ArenaHeader, recent) / 8) as u64, 64);
                 let word = g.binary(64, index, BinaryOp::Add, base);
                 let missing = g.constant(u64::MAX, 64);
@@ -112,14 +120,14 @@ impl Guards {
         });
         g.b.switch_to_block(run);
         let next = g.arena_header_load(offset_of!(ArenaHeader, recent_next));
+        let mask = g.constant(63, 64);
+        let slot = g.binary(64, next, BinaryOp::And, mask);
         let base = g.constant((offset_of!(ArenaHeader, recent) / 8) as u64, 64);
-        let word = g.binary(64, next, BinaryOp::Add, base);
+        let word = g.binary(64, slot, BinaryOp::Add, base);
         let header = g.arena_header();
         g.arena_store(header, word, self.process);
         let one = g.constant(1, 64);
         let next = g.binary(64, next, BinaryOp::Add, one);
-        let mask = g.constant(63, 64);
-        let next = g.binary(64, next, BinaryOp::And, mask);
         g.arena_header_store(offset_of!(ArenaHeader, recent_next), next);
         let work = g.constant(offset_of!(ArenaHeader, work) as u64, 64);
         let work_limit = g.arena_header_load(offset_of!(ArenaHeader, work_limit));

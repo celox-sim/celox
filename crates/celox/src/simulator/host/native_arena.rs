@@ -31,6 +31,8 @@ pub(crate) struct Header {
     pub returns: u64,
     pub work_limit: u64,
     pub return_limit: u64,
+    /// The runs since the guard reset; the entry each wrote is its index
+    /// modulo the ring's length.
     pub recent_next: u64,
     pub recent: [u64; 64],
     /// The slot observer watches every update (`AFTER_UPDATE`).
