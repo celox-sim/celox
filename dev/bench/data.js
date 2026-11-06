@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793990654458,
+  "lastUpdate": 1793991065516,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -437433,6 +437433,42 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-veryl-cc-x86_64/heliodor_suite_71v_linux_boot_execution",
             "unit": "ms",
             "value": 272300.692793
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "e9f6a987f2b5ed6f09bd99263e02247104bb9136",
+          "message": "perf(scheduler): keep scheduler state resident between compiled runs (#3177)",
+          "timestamp": "2026-11-05T09:26:27Z",
+          "url": "https://github.com/celox-sim/celox/commit/e9f6a987f2b5ed6f09bd99263e02247104bb9136"
+        },
+        "date": 1793991065516,
+        "cpu": "AMD EPYC 7763",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-native-x86_64/heliodor_suite_71v_linux_boot_compilation",
+            "unit": "ms",
+            "value": 60924.625763
+          },
+          {
+            "name": "heliodor-native-x86_64/heliodor_suite_71v_linux_boot_execution",
+            "unit": "ms",
+            "value": 332302.12795
+          },
+          {
+            "name": "heliodor-celox-jit/heliodor_suite_71v_linux_boot_execution",
+            "unit": "ms",
+            "value": 332191.809791
           }
         ]
       }
