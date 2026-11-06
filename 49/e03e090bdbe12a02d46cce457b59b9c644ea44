@@ -1,0 +1,1 @@
+Codex review: cap sequences at 1024 ticks; reject locals passed to written or referenced match-item arguments; a leading built-in cast is no local declaration.
