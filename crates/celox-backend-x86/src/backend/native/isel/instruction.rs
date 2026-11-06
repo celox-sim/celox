@@ -2380,12 +2380,26 @@ pub(super) fn lower_instruction(
                     rhs: rhs_vreg,
                     kind: CmpKind::Eq,
                 }),
-                BinaryOp::Ne => block.push(MInst::Cmp {
-                    dst: dst_vreg,
-                    lhs: lhs_vreg,
-                    rhs: rhs_vreg,
-                    kind: CmpKind::Ne,
-                }),
+                BinaryOp::Ne => {
+                    // A two-state one-bit value is its own non-zero test.
+                    let one_bit_against_zero = |value: &RegisterId, zero: &RegisterId| {
+                        !ctx.four_state
+                            && ctx.consts.get(zero) == Some(&0)
+                            && ctx.known_bits.get(&ctx.reg_map.get(*value)) == Some(&1)
+                    };
+                    if one_bit_against_zero(lhs, rhs) {
+                        ctx.emit_mov(block, dst_vreg, lhs_vreg);
+                    } else if one_bit_against_zero(rhs, lhs) {
+                        ctx.emit_mov(block, dst_vreg, rhs_vreg);
+                    } else {
+                        block.push(MInst::Cmp {
+                            dst: dst_vreg,
+                            lhs: lhs_vreg,
+                            rhs: rhs_vreg,
+                            kind: CmpKind::Ne,
+                        });
+                    }
+                }
                 BinaryOp::EqCase | BinaryOp::NeCase => {
                     if packed_state::compare(ctx, block, dst_vreg, *lhs, *rhs, *op) {
                         let zero = ctx.alloc_vreg(SpillDesc::remat(0));
@@ -2914,18 +2928,28 @@ pub(super) fn lower_instruction(
                     }
                 }
                 UnaryOp::LogicNot => {
-                    // dst = (src == 0) ? 1 : 0
-                    let zero = ctx.alloc_vreg(SpillDesc::remat(0));
-                    block.push(MInst::LoadImm {
-                        dst: zero,
-                        value: 0,
-                    });
-                    block.push(MInst::Cmp {
-                        dst: dst_vreg,
-                        lhs: src_vreg,
-                        rhs: zero,
-                        kind: CmpKind::Eq,
-                    });
+                    // dst = (src == 0) ? 1 : 0; a two-state one-bit source
+                    // flips its bit instead.
+                    if !ctx.four_state && ctx.known_bits.get(&src_vreg) == Some(&1) {
+                        let inverted = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::BitNot {
+                            dst: inverted,
+                            src: src_vreg,
+                        });
+                        ctx.emit_and_imm(block, dst_vreg, inverted, 1);
+                    } else {
+                        let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+                        block.push(MInst::LoadImm {
+                            dst: zero,
+                            value: 0,
+                        });
+                        block.push(MInst::Cmp {
+                            dst: dst_vreg,
+                            lhs: src_vreg,
+                            rhs: zero,
+                            kind: CmpKind::Eq,
+                        });
+                    }
                 }
                 UnaryOp::And => {
                     // Reduction AND: dst = (src == all_ones_mask) ? 1 : 0
