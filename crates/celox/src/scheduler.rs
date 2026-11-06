@@ -4610,25 +4610,31 @@ impl Plan {
             original,
         );
         let levels = g.load_levels();
-        let mut updated = levels;
-        for (source, gated) in &self.gating {
-            let was = g.saved_level(levels, position(tracked, *source));
-            let is = g.level(&self.events[*source]);
-            let changed = g.binary(1, was, BinaryOp::Ne, is);
-            for &clock in gated {
-                let bit = position(tracked, clock);
-                let was = g.saved_level(levels, bit);
-                let is = g.level(&self.events[clock]);
-                let edge = g.settled_edge(&self.events[clock], was, is);
-                let edge = g.binary(1, edge, BinaryOp::And, changed);
-                let edge = g.event_bit(edge, clock);
-                active = g.binary(self.event_bits, active, BinaryOp::Or, edge);
-                let level = g.b.alloc_bit(g.level_width(), false);
-                let prior = g.saved_level(updated, bit);
-                g.b.emit(SIRInstruction::Mux(level, changed, is, prior));
-                updated = g.replace_level(updated, level, bit);
+        let (active, updated) = match self.judge_gates_batched(g, tracked, levels, active) {
+            Some(judged) => judged,
+            None => {
+                let mut updated = levels;
+                for (source, gated) in &self.gating {
+                    let was = g.saved_level(levels, position(tracked, *source));
+                    let is = g.level(&self.events[*source]);
+                    let changed = g.binary(1, was, BinaryOp::Ne, is);
+                    for &clock in gated {
+                        let bit = position(tracked, clock);
+                        let was = g.saved_level(levels, bit);
+                        let is = g.level(&self.events[clock]);
+                        let edge = g.settled_edge(&self.events[clock], was, is);
+                        let edge = g.binary(1, edge, BinaryOp::And, changed);
+                        let edge = g.event_bit(edge, clock);
+                        active = g.binary(self.event_bits, active, BinaryOp::Or, edge);
+                        let level = g.b.alloc_bit(g.level_width(), false);
+                        let prior = g.saved_level(updated, bit);
+                        g.b.emit(SIRInstruction::Mux(level, changed, is, prior));
+                        updated = g.replace_level(updated, level, bit);
+                    }
+                }
+                (active, updated)
             }
-        }
+        };
         g.store_levels(updated);
         g.store(slots.exit_arg, self.event_bits, active);
         let one = g.constant(1, SCHEDULER_FLAG_WIDTH);
@@ -4640,6 +4646,111 @@ impl Plan {
         );
         g.b.seal_block(SIRTerminator::Jump(done, Vec::new()));
         g.b.switch_to_block(done);
+    }
+
+    /// [`Self::judge_gates`] as bit planes over the tracked positions, in a
+    /// two-state design whose event word is one machine word: the gated
+    /// clocks a changed source judges form a mask, their current levels one
+    /// word, and the edge formulas run once per word instead of once per
+    /// clock. Returns the active edges and the updated levels, or `None`
+    /// where the per-clock form is needed.
+    fn judge_gates_batched(
+        &self,
+        g: &mut Generator<'_>,
+        tracked: &[usize],
+        levels: Levels,
+        active: RegisterId,
+    ) -> Option<(RegisterId, Levels)> {
+        let width = self.event_bits;
+        if g.four_state.is_some() || width > 64 || tracked.len() > width {
+            return None;
+        }
+        let zero = g.constant(0, width);
+        // The positions whose clocks a changed source judges.
+        let mut judged = zero;
+        for (source, gated) in &self.gating {
+            let was = g.saved_level(levels, position(tracked, *source));
+            let is = g.level(&self.events[*source]);
+            let changed = g.binary(1, was, BinaryOp::Ne, is);
+            let mask = gated.iter().fold(BigUint::default(), |mask, &clock| {
+                mask | (BigUint::from(1u8) << position(tracked, clock))
+            });
+            let mask = g.wide_constant(mask, width);
+            let selected = g.b.alloc_bit(width, false);
+            g.b.emit(SIRInstruction::Mux(selected, changed, mask, zero));
+            judged = g.binary(width, judged, BinaryOp::Or, selected);
+        }
+        // The current levels of the gated clocks, at their positions, and
+        // the positions of each edge kind.
+        let mut clocks: Vec<usize> = self
+            .gating
+            .iter()
+            .flat_map(|(_, gated)| gated.iter().copied())
+            .collect();
+        clocks.sort_unstable();
+        clocks.dedup();
+        let mut is = zero;
+        let (mut rising, mut falling, mut toggling) =
+            (BigUint::default(), BigUint::default(), BigUint::default());
+        for &clock in &clocks {
+            let bit = position(tracked, clock);
+            let level = g.level(&self.events[clock]);
+            let set = g.bit_of(level, bit, width);
+            is = g.binary(width, is, BinaryOp::Or, set);
+            let event = &self.events[clock];
+            let one = BigUint::from(1u8) << bit;
+            if event.any_settled {
+                toggling |= one;
+            } else if event.active != 0 {
+                rising |= one;
+            } else {
+                falling |= one;
+            }
+        }
+        let was = levels.values;
+        let all = g.ones(width);
+        let not_was = g.binary(width, was, BinaryOp::Xor, all);
+        let not_is = g.binary(width, is, BinaryOp::Xor, all);
+        let rises = g.binary(width, not_was, BinaryOp::And, is);
+        let falls = g.binary(width, was, BinaryOp::And, not_is);
+        let toggles = g.binary(width, was, BinaryOp::Xor, is);
+        let mut edges = zero;
+        for (kind_edges, lanes) in [(rises, rising), (falls, falling), (toggles, toggling)] {
+            if lanes == BigUint::default() {
+                continue;
+            }
+            let lanes = g.wide_constant(lanes, width);
+            let masked = g.binary(width, kind_edges, BinaryOp::And, lanes);
+            edges = g.binary(width, edges, BinaryOp::Or, masked);
+        }
+        let edges = g.binary(width, edges, BinaryOp::And, judged);
+        // From tracked positions to event indices.
+        let edges = if clocks
+            .iter()
+            .all(|&clock| position(tracked, clock) == clock)
+        {
+            edges
+        } else {
+            let mut by_index = zero;
+            for &clock in &clocks {
+                let lane = g.mask_bit(edges, position(tracked, clock));
+                let bit = g.event_bit(lane, clock);
+                by_index = g.binary(width, by_index, BinaryOp::Or, bit);
+            }
+            by_index
+        };
+        let active = g.binary(width, active, BinaryOp::Or, edges);
+        let kept = g.binary(width, judged, BinaryOp::Xor, all);
+        let kept = g.binary(width, was, BinaryOp::And, kept);
+        let moved = g.binary(width, is, BinaryOp::And, judged);
+        let values = g.binary(width, kept, BinaryOp::Or, moved);
+        Some((
+            active,
+            Levels {
+                values,
+                unknown: None,
+            },
+        ))
     }
 
     /// The tracked events whose levels moved to their active edge against
