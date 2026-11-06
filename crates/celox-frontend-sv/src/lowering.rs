@@ -1850,6 +1850,7 @@ fn stmt_may_suspend(subroutines: &[sv::ir::Subroutine], stmt: &sv::ir::Stmt) -> 
         procedural::stmt_calls(stmt, &mut calls);
     });
     let mut visited = HashSet::default();
+    let mut seen_defaults = procedural::SeenDefaults::default();
     while !found && let Some((callee, args)) = calls.pop() {
         let sv::ir::Callee::Subroutine(name) = callee else {
             continue;
@@ -1861,7 +1862,7 @@ fn stmt_may_suspend(subroutines: &[sv::ir::Subroutine], stmt: &sv::ir::Stmt) -> 
             continue;
         };
         found |= subroutine.is_task;
-        procedural::default_calls(subroutine, &args, &mut calls);
+        procedural::default_calls(subroutine, &args, &mut calls, &mut seen_defaults);
         if visited.insert(name) {
             for stmt in &subroutine.body {
                 stmt.walk(&mut |stmt| procedural::stmt_calls(stmt, &mut calls));
@@ -1903,6 +1904,7 @@ fn kernel_written_names(
             procedural::stmt_calls(stmt, &mut calls);
         });
     }
+    let mut seen_defaults = procedural::SeenDefaults::default();
     while let Some((callee, args)) = calls.pop() {
         if let sv::ir::Callee::Object(op) = &callee {
             names.extend(
@@ -1942,7 +1944,7 @@ fn kernel_written_names(
         else {
             continue;
         };
-        procedural::default_calls(subroutine, &args, &mut calls);
+        procedural::default_calls(subroutine, &args, &mut calls, &mut seen_defaults);
         for (param, arg) in subroutine.params.iter().zip(&args) {
             if param.direction.is_written()
                 && let Some(lvalues) = arg.as_ref().and_then(procedural::lvalue_from_expr)
@@ -2145,6 +2147,7 @@ impl<'a> DriverScan<'a> {
                 procedural::stmt_calls(stmt, &mut calls);
             });
         }
+        let mut seen_defaults = procedural::SeenDefaults::default();
         while let Some((callee, args)) = calls.pop() {
             if let sv::ir::Callee::Object(op) = &callee {
                 for lhs in procedural::written_object_arguments(op, &args) {
@@ -2178,7 +2181,7 @@ impl<'a> DriverScan<'a> {
             else {
                 continue;
             };
-            procedural::default_calls(subroutine, &args, &mut calls);
+            procedural::default_calls(subroutine, &args, &mut calls, &mut seen_defaults);
             for (param, arg) in subroutine.params.iter().zip(&args) {
                 if param.direction.is_written()
                     && let Some(lvalues) = arg.as_ref().and_then(procedural::lvalue_from_expr)
@@ -4159,8 +4162,10 @@ fn specialize_module(
     // (`SimModule::instrumented_storage`), which the module's source shows
     // before it is lowered; waits and domains of other modules may watch
     // what hierarchical names reach.
-    let mut calls = (hierarchical.recursion_report.is_some() || hierarchical.force_out_of_line)
-        .then(|| recursion::CallGraph::new(hierarchical.force_out_of_line));
+    let mut calls = Some(recursion::CallGraph::new(
+        hierarchical.force_out_of_line,
+        hierarchical.recursion_report.is_some(),
+    ));
     if let Some(functions) = calls.as_mut().and_then(|graph| graph.out_of_line.as_mut()) {
         functions.foreign = hierarchical.shared.foreign_references.clone();
     }
@@ -4371,6 +4376,7 @@ fn needs_host_request(
     if found {
         return true;
     }
+    let mut seen_defaults = procedural::SeenDefaults::default();
     while let Some((callee, args)) = calls.pop() {
         match callee {
             sv::ir::Callee::System(function) if function.is_host_request() => return true,
@@ -4386,7 +4392,7 @@ fn needs_host_request(
                     .map(|position| matches!(args.get(position), None | Some(None)))
                     .collect();
                 if visited.insert(format!("defaults:{name}:{omitted:?}")) {
-                    procedural::default_calls(subroutine, &args, &mut calls);
+                    procedural::default_calls(subroutine, &args, &mut calls, &mut seen_defaults);
                 }
                 if visited.insert(format!("body:{name}"))
                     && needs_host_request(module, &subroutine.body, visited)
@@ -4871,8 +4877,10 @@ fn lower_module_with_overrides(
             .out_of_line()
             .map(|functions| std::mem::take(&mut functions.foreign))
             .unwrap_or_default();
+        // First, since the walks of calls below take the defaults they
+        // use, which an endless chain of defaults would keep them in.
+        pm.mark_recursive(module)?;
         pm.observe_storage(module, &foreign);
-        pm.mark_recursive();
         let blocks = lower_ff_processes(
             module,
             &mut pm,
@@ -12385,6 +12393,7 @@ mod tests {
                         procedural::stmt_calls(stmt, &mut calls);
                     });
                 }
+                let mut seen_defaults = procedural::SeenDefaults::default();
                 while let Some((callee, args)) = calls.pop() {
                     if let sv::ir::Callee::Object(op) = &callee {
                         for lhs in procedural::written_object_arguments(op, &args) {
@@ -12412,7 +12421,7 @@ mod tests {
                     else {
                         continue;
                     };
-                    procedural::default_calls(subroutine, &args, &mut calls);
+                    procedural::default_calls(subroutine, &args, &mut calls, &mut seen_defaults);
                     for (param, arg) in subroutine.params.iter().zip(&args) {
                         if param.direction.is_written()
                             && let Some(lvalues) =

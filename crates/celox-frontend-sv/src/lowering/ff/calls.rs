@@ -66,7 +66,7 @@ impl Ff<'_, '_> {
         args: &[Option<sv::ir::Expr>],
         places: Option<&[Place]>,
     ) -> Result<Option<usize>, sv::AnalyzerError> {
-        if self.m.out_of_line().is_none() {
+        if !self.m.out_of_line_policy(name) {
             return Ok(None);
         }
         if let Some(reason) = self.m.out_of_line_reason(name) {
@@ -94,7 +94,12 @@ impl Ff<'_, '_> {
             );
             return Ok(None);
         }
-        if !recursive && self.m.constant_arguments(subroutine, args) {
+        // A call over the size threshold goes out of line whatever its
+        // arguments: a large body that reads state does not fold.
+        if !recursive
+            && !self.m.out_of_line_for_size(name)
+            && self.m.constant_arguments(subroutine, args)
+        {
             self.record_outcome(
                 name,
                 Outcome::Inlined(Reason::Other("constant arguments".to_string())),

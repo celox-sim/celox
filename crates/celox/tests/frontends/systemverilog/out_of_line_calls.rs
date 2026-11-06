@@ -179,13 +179,12 @@ fn recursive_functions() {
     end
 endmodule
 "#;
-    // Inlining cannot expand recursion.
-    let inlined = simulate(source, false, false, "interpreter", 0, &["f"]);
-    assert!(
-        inlined
-            .as_ref()
-            .is_err_and(|error| error.contains("recursive call")),
-        "{inlined:?}"
+    // Inlining cannot expand recursion: without the switch the policy takes
+    // the recursive subroutines out of line, with the same results.
+    let by_default = simulate(source, false, false, "interpreter", 0, &["f"]);
+    assert_eq!(
+        by_default,
+        simulate(source, false, true, "interpreter", 0, &["f"])
     );
     assert_eq!(function_units(source, true), 4);
     for four_state in [false, true] {
@@ -1352,6 +1351,38 @@ endmodule
 }
 
 #[test]
+fn large_subroutines_go_out_of_line_by_default() {
+    // Without the switch a subroutine goes out of line when its fully
+    // inlined size exceeds the policy's threshold: `big` has more
+    // statements than that, `near` exactly as many, and `twice` calls it
+    // twice, so it is over the threshold through its callee. The calls take
+    // an input port: an initial process whose calls fold to constants is
+    // lowered symbolically, where every call is inlined.
+    let steps = |name: &str, count: usize| {
+        let body: String = (0..count).map(|_| "        t = t + 1;\n").collect();
+        format!(
+            "    function automatic int {name}(int v);\n        int t = v;\n{body}        return t;\n    endfunction\n"
+        )
+    };
+    let limit = 256;
+    // The declaration of `t` and the return are statements too.
+    let source = format!(
+        "module Top(input int i, output int a, output int b, output int c);\n{}{}    function automatic int twice(int v);\n        return near(v) + near(v);\n    endfunction\n    initial begin\n        a = big(i);\n        b = near(i);\n        c = twice(i);\n    end\nendmodule\n",
+        steps("big", limit),
+        steps("near", limit - 2),
+    );
+    assert_eq!(function_units(&source, false), 2, "big and twice");
+    assert_eq!(
+        simulate(&source, false, false, "interpreter", 0, &["a", "b", "c"]),
+        Ok(vec![
+            value(limit as u64),
+            value(limit as u64 - 2),
+            value(2 * (limit as u64 - 2))
+        ])
+    );
+}
+
+#[test]
 fn units_never_store_the_events_of_flip_flops() {
     // `tick` drives the clock of an `always_ff` process, whose stores
     // assembly gives the triggers of the flip-flop's domain, which only a
@@ -1374,6 +1405,90 @@ endmodule
         simulate(source, false, true, "interpreter", 7, &["count"]),
         Ok(vec![value(3)])
     );
+}
+
+#[test]
+fn defaults_count_at_every_call_of_the_size_policy() {
+    // The default of `pick` calls `wide`, which runs at each of the three
+    // calls of `caller`: inlined, `caller` is three times `wide`, over the
+    // threshold, though `pick` and `wide` are under it.
+    let body: String = (0..200).map(|_| "        t = t + 1;\n").collect();
+    let source = format!(
+        "module Top(input int i, output int c);\n    function automatic int wide();\n        int t = 0;\n{body}        return t;\n    endfunction\n    function automatic int pick(int v, int d = wide());\n        return v + d;\n    endfunction\n    function automatic int caller(int v);\n        return pick(v) + pick(v + 1) + pick(v + 2);\n    endfunction\n    initial c = caller(i);\nendmodule\n"
+    );
+    assert_eq!(function_units(&source, false), 1, "caller");
+    assert_eq!(
+        simulate(&source, false, false, "interpreter", 0, &["c"]),
+        Ok(vec![value(3 + 3 * 200)])
+    );
+}
+
+#[test]
+fn constant_arguments_do_not_keep_large_calls_inlined() {
+    // `big(1)` has constant arguments, but its body reads the input `i`, so
+    // it does not fold: over the threshold, it goes out of line.
+    let body: String = (0..300).map(|_| "        t = t + i;\n").collect();
+    let source = format!(
+        "`timescale 1ns/1ns\nmodule Top(input int i, output int a);\n    function automatic int big(int v);\n        int t = v;\n{body}        return t;\n    endfunction\n    initial #1 a = big(1);\nendmodule\n"
+    );
+    assert_eq!(function_units(&source, false), 1, "big");
+    assert_eq!(
+        simulate(&source, false, false, "interpreter", 2, &["a"]),
+        Ok(vec![value(1)])
+    );
+}
+
+#[test]
+fn defaults_that_call_each_other_are_rejected() {
+    // `f()` takes the default `g()`, which takes the default `f()`: the call
+    // of the `always_comb` process would never end (IEEE 1800-2023 13.5.3).
+    // Every walk of the calls stops, and the module is rejected, with or
+    // without the switch.
+    let source = r#"module Top(input int i, output int r);
+    function automatic int f(int a = g());
+        return a + i;
+    endfunction
+    function automatic int g(int b = f());
+        return b + 1;
+    endfunction
+    always_comb r = f();
+endmodule
+"#;
+    for forced in [false, true] {
+        let built = simulate(source, false, forced, "interpreter", 0, &["r"]);
+        assert!(
+            built
+                .as_ref()
+                .is_err_and(|error| error.contains("recursive call of `f` through the defaults")),
+            "forced {forced}: {built:?}"
+        );
+    }
+}
+
+#[test]
+fn cycles_through_defaults_go_out_of_line() {
+    // The default of `f` calls `g`, whose body calls `f` again with the
+    // default: a cycle only through the default, which the call of the
+    // `always_comb` process starts. Both go out of line by default; the
+    // default's call `g(0)` returns at once.
+    let source = r#"module Top(input int i, output int r);
+    function automatic int f(int n, int a = g(0));
+        return a + n;
+    endfunction
+    function automatic int g(int n);
+        return n > 0 ? f(n - 1) : 0;
+    endfunction
+    always_comb r = f(i + 3) + g(i + 2);
+endmodule
+"#;
+    assert_eq!(function_units(source, false), 2);
+    for forced in [false, true] {
+        assert_eq!(
+            simulate(source, false, forced, "interpreter", 0, &["r"]),
+            Ok(vec![value(4)]),
+            "forced {forced}"
+        );
+    }
 }
 
 #[test]
@@ -1457,12 +1572,12 @@ fn recursive_methods() {
     end
 endmodule
 "#;
-    let inlined = simulate(source, false, false, "interpreter", 0, &["f"]);
-    assert!(
-        inlined
-            .as_ref()
-            .is_err_and(|error| error.contains("recursive call")),
-        "{inlined:?}"
+    // Inlining cannot expand recursion: without the switch the policy takes
+    // the recursive subroutines out of line, with the same results.
+    let by_default = simulate(source, false, false, "interpreter", 0, &["f"]);
+    assert_eq!(
+        by_default,
+        simulate(source, false, true, "interpreter", 0, &["f"])
     );
     // With `i` 0: 0! = 1, fib(5) = 5, and the empty sum.
     for four_state in [false, true] {
@@ -1545,12 +1660,12 @@ module Top(input int i, output int a, output int b, output int c, output int d,
     end
 endmodule
 "#;
-    let inlined = simulate(source, false, false, "interpreter", 0, &["a"]);
-    assert!(
-        inlined
-            .as_ref()
-            .is_err_and(|error| error.contains("recursive call")),
-        "{inlined:?}"
+    // Inlining cannot expand recursion: without the switch the policy takes
+    // the recursive subroutines out of line, with the same results.
+    let by_default = simulate(source, false, false, "interpreter", 0, &["a"]);
+    assert_eq!(
+        by_default,
+        simulate(source, false, true, "interpreter", 0, &["a"])
     );
     for four_state in [false, true] {
         for backend in backends() {

@@ -4293,6 +4293,7 @@ pub(super) fn static_writes(
         });
     }
     let mut index = 0;
+    let mut seen_defaults = super::procedural::SeenDefaults::default();
     while index < calls.len() {
         let (name, args) = calls[index].clone();
         index += 1;
@@ -4303,7 +4304,7 @@ pub(super) fn static_writes(
             // Defaults execute at each call that omits an argument, even if
             // this subroutine's body has already been visited at another call.
             let mut defaults = Vec::new();
-            default_calls(&subroutine, &args, &mut defaults);
+            default_calls(&subroutine, &args, &mut defaults, &mut seen_defaults);
             calls.extend(defaults.into_iter().filter_map(|(callee, args)| {
                 if let sv::ir::Callee::Subroutine(name) = callee {
                     Some((name, args))

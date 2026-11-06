@@ -324,6 +324,7 @@ impl<'a> ProcModule<'a> {
     pub fn makes_host_request(&mut self, expr: &sv::ir::Expr) -> bool {
         let mut calls = Vec::new();
         collect_calls(expr, &mut calls);
+        let mut seen_defaults = SeenDefaults::default();
         while let Some((callee, args)) = calls.pop() {
             match callee {
                 sv::ir::Callee::System(function) if function.is_host_request() => return true,
@@ -333,7 +334,7 @@ impl<'a> ProcModule<'a> {
                         continue;
                     };
                     // An omitted argument evaluates its default at the call.
-                    default_calls(subroutine, &args, &mut calls);
+                    default_calls(subroutine, &args, &mut calls, &mut seen_defaults);
                     if self.subroutine_makes_host_request(&name) {
                         return true;
                     }
@@ -372,6 +373,7 @@ impl<'a> ProcModule<'a> {
                     stmt_calls(stmt, &mut calls);
                 });
             }
+            let mut seen_defaults = SeenDefaults::default();
             while let Some((callee, args)) = calls.pop() {
                 match callee {
                     sv::ir::Callee::System(function) => found |= function.is_host_request(),
@@ -380,7 +382,7 @@ impl<'a> ProcModule<'a> {
                     }
                     sv::ir::Callee::Subroutine(callee) => {
                         if let Some(subroutine) = self.subroutine(&callee) {
-                            default_calls(subroutine, &args, &mut calls);
+                            default_calls(subroutine, &args, &mut calls, &mut seen_defaults);
                         }
                         pending.push(callee);
                     }
@@ -404,6 +406,7 @@ impl<'a> ProcModule<'a> {
             stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
         }
         let mut visited = HashSet::default();
+        let mut seen_defaults = SeenDefaults::default();
         while let Some((callee, args)) = calls.pop() {
             let name = match callee {
                 sv::ir::Callee::System(function) => {
@@ -428,7 +431,7 @@ impl<'a> ProcModule<'a> {
                 if !subroutine.persistent_locals.is_empty() {
                     return true;
                 }
-                default_calls(subroutine, &args, &mut calls);
+                default_calls(subroutine, &args, &mut calls, &mut seen_defaults);
                 if visited.insert(name) {
                     for stmt in &subroutine.body {
                         stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
@@ -448,6 +451,7 @@ impl<'a> ProcModule<'a> {
             stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
         }
         let mut visited = HashSet::default();
+        let mut seen_defaults = SeenDefaults::default();
         while let Some((callee, args)) = calls.pop() {
             let sv::ir::Callee::Subroutine(name) = callee else {
                 continue;
@@ -456,7 +460,7 @@ impl<'a> ProcModule<'a> {
                 if subroutine.is_task {
                     return true;
                 }
-                default_calls(subroutine, &args, &mut calls);
+                default_calls(subroutine, &args, &mut calls, &mut seen_defaults);
                 if visited.insert(name) {
                     for stmt in &subroutine.body {
                         stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
@@ -480,6 +484,7 @@ impl<'a> ProcModule<'a> {
             stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
         }
         let mut visited = HashSet::default();
+        let mut seen_defaults = SeenDefaults::default();
         while let Some((callee, args)) = calls.pop() {
             let name = match callee {
                 sv::ir::Callee::System(function) => {
@@ -503,7 +508,7 @@ impl<'a> ProcModule<'a> {
                         expr_idents(arg, &mut names);
                     }
                 }
-                default_calls(subroutine, &args, &mut calls);
+                default_calls(subroutine, &args, &mut calls, &mut seen_defaults);
                 if visited.insert(name) {
                     written_names(&subroutine.body, &mut names);
                     for stmt in &subroutine.body {
@@ -655,12 +660,13 @@ impl<'a> ProcModule<'a> {
             stmt.walk(&mut |stmt| visit(stmt, &mut calls));
         }
         let mut visited = HashSet::default();
+        let mut seen_defaults = SeenDefaults::default();
         while let Some((callee, args)) = calls.pop() {
             let sv::ir::Callee::Subroutine(name) = callee else {
                 continue;
             };
             if let Some(subroutine) = self.subroutine(&name) {
-                default_calls(subroutine, &args, &mut calls);
+                default_calls(subroutine, &args, &mut calls, &mut seen_defaults);
                 if visited.insert(name) {
                     for stmt in &subroutine.body {
                         stmt.walk(&mut |stmt| visit(stmt, &mut calls));
@@ -3340,12 +3346,26 @@ pub(super) fn stmt_calls(
     }
 }
 
-/// The calls in the default values a call uses for its omitted arguments.
+/// The defaults a walk over calls has taken the calls of: each subroutine
+/// with the omitted arguments of a call of it.
+pub(super) type SeenDefaults = HashSet<(String, Vec<bool>)>;
+
+/// The calls in the default values a call uses for its omitted arguments,
+/// unless `seen` has them already: a walk takes the defaults of each
+/// subroutine once for each pattern of omitted arguments, since defaults
+/// that call each other would otherwise be walked forever.
 pub(super) fn default_calls(
     subroutine: &sv::ir::Subroutine,
     args: &[Option<sv::ir::Expr>],
     calls: &mut Vec<(sv::ir::Callee, Vec<Option<sv::ir::Expr>>)>,
+    seen: &mut SeenDefaults,
 ) {
+    let omitted: Vec<bool> = (0..subroutine.params.len())
+        .map(|position| matches!(args.get(position), None | Some(None)))
+        .collect();
+    if !seen.insert((subroutine.name.clone(), omitted)) {
+        return;
+    }
     for (position, param) in subroutine.params.iter().enumerate() {
         if matches!(args.get(position), None | Some(None))
             && let Some(default) = &param.default

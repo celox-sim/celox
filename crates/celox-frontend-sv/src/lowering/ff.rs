@@ -295,12 +295,13 @@ impl<'p, 'a> Ff<'p, 'a> {
         let body_calls = calls.len();
         let mut visited = HashSet::default();
         let mut index = 0;
+        let mut seen_defaults = super::procedural::SeenDefaults::default();
         while index < calls.len() {
             if let (sv::ir::Callee::Subroutine(name), args) = calls[index].clone()
                 && let Some(subroutine) = self.m.subroutine(&name).cloned()
             {
                 // The defaults of omitted arguments run at the call.
-                default_calls(&subroutine, &args, &mut calls);
+                default_calls(&subroutine, &args, &mut calls, &mut seen_defaults);
                 if visited.insert(name) {
                     for stmt in &subroutine.body {
                         stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
@@ -662,6 +663,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         if found {
             return true;
         }
+        let mut seen_defaults = super::procedural::SeenDefaults::default();
         while let Some((callee, args)) = calls.pop() {
             let sv::ir::Callee::Subroutine(name) = callee else {
                 continue;
@@ -669,7 +671,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             let Some(subroutine) = self.m.subroutine(&name).cloned() else {
                 continue;
             };
-            default_calls(&subroutine, &args, &mut calls);
+            default_calls(&subroutine, &args, &mut calls, &mut seen_defaults);
             if visited.insert(name) && self.has_deferred_assertions(&subroutine.body, visited) {
                 return true;
             }
@@ -840,6 +842,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         }
         let mut assigned = HashSet::default();
         let mut visited = HashSet::default();
+        let mut seen_defaults = super::procedural::SeenDefaults::default();
         while let Some((callee, args)) = calls.pop() {
             if let sv::ir::Callee::Object(op) = &callee {
                 assigned.extend(
@@ -854,7 +857,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             let Some(subroutine) = self.m.subroutine(&name) else {
                 continue;
             };
-            default_calls(subroutine, &args, &mut calls);
+            default_calls(subroutine, &args, &mut calls, &mut seen_defaults);
             if !visited.insert(name) {
                 continue;
             }
@@ -907,6 +910,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         for stmt in stmts {
             stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
         }
+        let mut seen_defaults = super::procedural::SeenDefaults::default();
         while let Some((callee, args)) = calls.pop() {
             if let sv::ir::Callee::Object(op) = &callee {
                 for lhs in written_object_arguments(op, &args) {
@@ -967,7 +971,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             let Some(subroutine) = self.m.subroutine(&name).cloned() else {
                 continue;
             };
-            default_calls(&subroutine, &args, &mut calls);
+            default_calls(&subroutine, &args, &mut calls, &mut seen_defaults);
             for (param, arg) in subroutine.params.iter().zip(args.iter()) {
                 if param.direction.is_written()
                     && let Some(lvalues) = arg.as_ref().and_then(lvalue_from_expr)
