@@ -1241,6 +1241,7 @@ fn select_aliases(
         };
         if diagnostic {
             *rejected.entry(reason).or_default() += 1;
+            tracing::trace!(target: "celox::alias", reason, alias = ?alias, canonical = ?canonical, "identity store");
         }
     }
     if diagnostic {

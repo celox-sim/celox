@@ -1,7 +1,7 @@
 use std::fmt;
 
 use celox_design::{ElaboratedDesign, RegionedStateAddr, RuntimeSchema, StateAddr, VarAtomBase};
-use celox_sir::{SIRInstruction, SirProgram};
+use celox_sir::{RegisterId, SIRInstruction, SirProgram};
 
 use crate::{FrontendLookup, HashMap};
 
@@ -62,21 +62,51 @@ impl ScheduledRtl {
                     .flat_map(|parallel| parallel.units_mut().map(|unit| &mut unit.unit)),
             )
         {
+            // The address each register loads, to tell a copy of an alias
+            // from a copy of the event's canonical signal.
+            let loaded: HashMap<RegisterId, StateAddr> = unit
+                .blocks
+                .values()
+                .flat_map(|block| &block.instructions)
+                .filter_map(|instruction| match instruction {
+                    SIRInstruction::Load(register, address, _, _) => {
+                        Some((*register, address.absolute_addr()))
+                    }
+                    _ => None,
+                })
+                .collect();
             for block in unit.blocks.values_mut() {
                 for instruction in &mut block.instructions {
-                    let (address, triggers) = match instruction {
-                        SIRInstruction::Store(address, _, _, _, triggers, _) => {
-                            (address.absolute_addr(), triggers)
+                    let (address, source, triggers) = match instruction {
+                        SIRInstruction::Store(address, _, _, source, triggers, _) => {
+                            (address.absolute_addr(), Some(*source), triggers)
                         }
                         SIRInstruction::Commit(_, address, .., triggers) => {
-                            (address.absolute_addr(), triggers)
+                            (address.absolute_addr(), None, triggers)
                         }
                         _ => continue,
                     };
                     let canonical = events.canonical(address);
-                    if let Some(event_triggers) = trigger_map.get(&canonical) {
-                        *triggers = event_triggers.clone();
+                    let Some(event_triggers) = trigger_map.get(&canonical) else {
+                        continue;
+                    };
+                    // A copy of an alias of the event repeats what the copy
+                    // of the canonical signal it descends from already
+                    // reported in the same evaluation: the copies run in
+                    // dependency order, and a partition reaches it in the
+                    // same settle. Only the canonical signal's own copies
+                    // carry the event, so the copies further out are plain
+                    // copies, which may alias their source.
+                    if address != canonical
+                        && source
+                            .and_then(|source| loaded.get(&source))
+                            .is_some_and(|&loaded| {
+                                loaded != canonical && events.canonical(loaded) == canonical
+                            })
+                    {
+                        continue;
                     }
+                    *triggers = event_triggers.clone();
                 }
             }
         }
