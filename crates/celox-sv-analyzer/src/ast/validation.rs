@@ -970,6 +970,14 @@ fn validate_scope(
             .is_some_and(|ty| {
                 !matches!(session.types.data(ty), super::semantic_types::TyData::Packed(_))
             })
+            && expression_binding::cast_target_class(
+                syntax_tree,
+                session,
+                target,
+                native,
+                indexed_dimensions,
+            )
+            .is_none()
         {
             expression_binding::cast_target_native(
                 target,

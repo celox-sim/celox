@@ -172,6 +172,86 @@ fn split_arguments(
     Ok((positional, named))
 }
 
+/// The class that cast target `target` names, as in `C'(h)` or
+/// `C#(N)'(h)`, by the type the cast has.
+pub(in crate::ast) fn cast_target_class(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    target: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Option<String> {
+    // Only a type expression can name a class; a size is not evaluated here.
+    if !matches!(
+        native.expression(ungroup(target, native)).kind,
+        ExprKind::Type(_)
+            | ExprKind::Name(_)
+            | ExprKind::Member { .. }
+            | ExprKind::Parameterized { .. }
+    ) {
+        return None;
+    }
+    let target = expression_types::cast_type(tree, session, target, native, dimensions)?;
+    expression_types::class_name(&session.types, target)
+}
+
+/// Whether `target'(operand)` casts to a class handle type, which a static
+/// cast does only as an assignment (IEEE 1800-2023 6.24.1): a handle of a
+/// class that derives from the target's. A downcast needs the run-time check
+/// of `$cast` (8.16), and a class is no destination of a bit-stream cast
+/// (6.24.3).
+fn class_cast(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    target: ExprId,
+    operand: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<bool> {
+    let Some(class) = cast_target_class(tree, session, target, native, dimensions) else {
+        return Ok(false);
+    };
+    // The operand's type decides whether the cast is valid, so it must be
+    // known: a conditional whose arms have no common type has none
+    // (11.4.11).
+    let Ok(source) = expression_types::type_of(tree, session, operand, native, dimensions) else {
+        if matches!(
+            native.expression(ungroup(operand, native)).kind,
+            ExprKind::Conditional { .. }
+        ) {
+            return Err(AnalyzerError::InvalidCast(format!(
+                "the conditional operand of a cast to class `{class}` has no common type \
+                 (IEEE 1800-2023 11.4.11)"
+            )));
+        }
+        return Err(unsupported(format!(
+            "static cast to class `{class}` of an operand whose type is not resolved"
+        )));
+    };
+    if !matches!(
+        session.types.data(source),
+        semantic_types::TyData::Class(_) | semantic_types::TyData::Null
+    ) {
+        return Err(AnalyzerError::InvalidCast(format!(
+            "`{}` is no class handle to cast to class `{class}`",
+            session.types.spell(source)
+        )));
+    }
+    objects::check_assignment(tree, session, operand, native, dimensions, &class, || {
+        "static cast".to_owned()
+    })
+    .map_err(|error| match error {
+        AnalyzerError::IncompatibleClassHandle { actual, target, .. } => {
+            AnalyzerError::InvalidCast(format!(
+                "a handle of class `{actual}` is not assignment compatible with class \
+                 `{target}`; a downcast needs `$cast`"
+            ))
+        }
+        error => error,
+    })?;
+    Ok(true)
+}
+
 /// The stream layout of the target of cast `target'(operand)`, when its
 /// type is known, after checking that the stream lowering gives a layout to
 /// both the operand and the target (6.24.3): one it cannot give is an
@@ -952,6 +1032,20 @@ fn bind_value_in(
                         let mut children = vec![(*count, None)];
                         children.extend(expressions.iter().map(|id| (*id, None)));
                         (Finish::Repeat { literals }, children)
+                    }
+                    ExprKind::Cast { target, expression }
+                        if class_cast(tree, session, *target, *expression, native, dimensions)? =>
+                    {
+                        // An upcast is the assignment of the handle (6.24.1).
+                        values.push(bind_value(
+                            *expression,
+                            native,
+                            tree,
+                            session,
+                            dimensions,
+                            None,
+                        )?);
+                        continue;
                     }
                     ExprKind::Cast { target, expression }
                         if streams::is_stream(*expression, native)

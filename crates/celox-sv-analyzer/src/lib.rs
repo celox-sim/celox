@@ -204,6 +204,14 @@ pub enum AnalyzerError {
         actual: String,
         target: String,
     },
+    /// A value of a type other than a class handle or `null` assigned to a
+    /// variable of class `target` (IEEE 1800-2023 8.16).
+    #[error("{context}: a value of type `{actual}` is no handle of class `{target}`")]
+    NotClassHandle {
+        context: String,
+        actual: String,
+        target: String,
+    },
     /// A value assigned to or compared with a virtual interface that is not
     /// `null`, a virtual interface or an interface instance of its type
     /// (IEEE 1800-2023 25.9).

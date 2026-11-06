@@ -26,8 +26,8 @@ pub(super) use chandles::{
 pub(super) use direct::bind_argument;
 pub(super) use direct::{
     arguments, bind_chandle_value, bind_value, call_name as native_name, callable_name,
-    cast_target_native, formal_arguments, format_arguments, member_context, real_value,
-    remove_real_division_guards, string_literal_bytes, targets_tagged_union, ungroup,
+    cast_target_class, cast_target_native, formal_arguments, format_arguments, member_context,
+    real_value, remove_real_division_guards, string_literal_bytes, targets_tagged_union, ungroup,
 };
 pub(super) use enums::{domain as enum_domain, membership as enum_membership};
 pub(super) use format_patterns::{

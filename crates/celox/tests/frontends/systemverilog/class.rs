@@ -2984,3 +2984,88 @@ fn class_handle_outputs_are_assigned_back_to_their_actuals() {
     sim.run_until(0).unwrap();
     assert_eq!(sim.get(sim.signal("seen")), 2u32.into());
 }
+
+#[test]
+fn static_class_casts_assign_upcasts_and_reject_downcasts() {
+    // IEEE 1800-2023 6.24.1: a static cast of an assignment compatible
+    // operand is the assignment; a downcast needs `$cast` (8.16), and a
+    // class is no destination of a bit-stream cast (6.24.3).
+    let source = "module Top(output int id, output int none);
+        class C; virtual function int id(); return 1; endfunction endclass
+        class D extends C; virtual function int id(); return 2; endfunction endclass
+        initial begin
+            D d; C c;
+            d = new;
+            c = C'(d);
+            id = c.id();
+            c = C'(null);
+            none = c == null;
+        end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("id")), 2u32.into());
+    assert_eq!(sim.get(sim.signal("none")), 1u32.into());
+    // The target is any class type: a specialization or a class of a
+    // package; the cast has the target's type, whose methods it calls.
+    let source =
+        "package p; class Q; virtual function int id(); return 7; endfunction endclass endpackage
+        module Top(output int special, output int called, output int packaged);
+        class Box #(int N = 1); virtual function int id(); return N; endfunction endclass
+        class Big extends Box #(4); virtual function int id(); return 40; endfunction endclass
+        class R extends p::Q; virtual function int id(); return 8; endfunction endclass
+        initial begin
+            Big b; Box #(4) x; R r;
+            b = new; r = new;
+            x = Box#(4)'(b);
+            special = x.id();
+            called = Box#(4)'(b).id();
+            packaged = p::Q'(r).id();
+        end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("special")), 40u32.into());
+    assert_eq!(sim.get(sim.signal("called")), 40u32.into());
+    assert_eq!(sim.get(sim.signal("packaged")), 8u32.into());
+    for (cast, expected) in [
+        ("d = D'(c);", "a downcast needs"),
+        ("c = C'(i);", "no class handle"),
+        ("c = C'(o);", "is not assignment compatible"),
+        (
+            "begin Box #(2) b2; b2 = Box#(2)'(c); end",
+            "is not assignment compatible",
+        ),
+        // The operand's type must be known: arms of a class handle and an
+        // int have no common type (11.4.11).
+        ("c = C'(i ? c : 1);", "has no common type"),
+        // Each arm of a conditional is a value the destination may take,
+        // and an int is no handle (8.16).
+        ("c = i ? c : 1;", "is no handle of class `C`"),
+        ("c = 1;", "is no handle of class `C`"),
+    ] {
+        let source = format!(
+            "module Top; class C; endclass class D extends C; endclass class O; endclass
+             class Box #(int N = 1); endclass
+             initial begin C c; D d; O o; int i; c = new; o = new; {cast} end endmodule"
+        );
+        let Err(error) = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build() else {
+            panic!("`{cast}` was accepted");
+        };
+        let error = error
+            .to_string()
+            .replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(error.contains(expected), "{cast}: {error}");
+    }
+}
