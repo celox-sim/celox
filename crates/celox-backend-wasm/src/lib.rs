@@ -689,20 +689,23 @@ fn compile_instruction(
         SIRInstruction::Load(dst, addr, offset, op_width) if addr.region == FRAME_REGION => {
             let slot = calls.slots[addr];
             let dst = locals.reg_map[dst].clone();
-            let base = Base::I32(
-                locals
-                    .frame_base
-                    .expect("only function units access frames"),
-            );
-            load_slot(
-                &dst,
-                base,
-                slot,
-                static_bits(offset),
-                *op_width,
-                four_state,
-                instrs,
-            );
+            let frame_base = locals
+                .frame_base
+                .expect("only function units access frames");
+            match static_bits(offset) {
+                Some(bits) => load_slot(
+                    &dst,
+                    Base::I32(frame_base),
+                    slot,
+                    bits,
+                    *op_width,
+                    four_state,
+                    instrs,
+                ),
+                None => load_slot_dynamic(
+                    &dst, frame_base, slot, offset, *op_width, four_state, locals, instrs,
+                ),
+            }
         }
         SIRInstruction::Load(dst, addr, offset, op_width) => {
             compile_load(
@@ -716,21 +719,24 @@ fn compile_instruction(
             debug_assert!(triggers.is_empty() && comb_capture_sites.is_empty());
             let slot = calls.slots[addr];
             let src = locals.reg_map[src].clone();
-            let base = Base::I32(
-                locals
-                    .frame_base
-                    .expect("only function units access frames"),
-            );
-            store_slot(
-                &src,
-                base,
-                slot,
-                static_bits(offset),
-                *op_width,
-                four_state,
-                locals,
-                instrs,
-            );
+            let frame_base = locals
+                .frame_base
+                .expect("only function units access frames");
+            match static_bits(offset) {
+                Some(bits) => store_slot(
+                    &src,
+                    Base::I32(frame_base),
+                    slot,
+                    bits,
+                    *op_width,
+                    four_state,
+                    locals,
+                    instrs,
+                ),
+                None => store_slot_dynamic(
+                    &src, frame_base, slot, offset, *op_width, four_state, locals, instrs,
+                ),
+            }
         }
         SIRInstruction::Store(addr, offset, op_width, src, triggers, comb_capture_sites) => {
             compile_store(
@@ -865,13 +871,114 @@ fn emit_address(base: Base, offset: usize, instrs: &mut Vec<Instruction<'static>
     }
 }
 
-/// The bit offset of a frame slot access, which the verifier requires to be
-/// static.
-fn static_bits(offset: &SIROffset) -> usize {
+/// The bit offset of a frame slot access when it is static; a slot holding
+/// an unpacked array is also accessed at offsets computed at run time.
+fn static_bits(offset: &SIROffset) -> Option<usize> {
     match offset {
-        SIROffset::Static(bits) => *bits,
-        offset => unreachable!("a frame slot is accessed at offset {offset}"),
+        SIROffset::Static(bits)
+        | SIROffset::PackedElements {
+            bit_offset: bits, ..
+        } => Some(*bits),
+        SIROffset::Dynamic(_) | SIROffset::Element { .. } => None,
     }
+}
+
+/// A local holding the absolute bit address of the access at `offset`, in
+/// its array's logical packed layout, of `slot` of the frame based at the
+/// address in `frame_base`.
+fn frame_bit_address(
+    frame_base: u32,
+    slot: &FrameSlot<RegionedAbsoluteAddr>,
+    offset: &SIROffset,
+    locals: &mut LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) -> u32 {
+    let logical = compile_logical_bit_offset(offset, locals, instrs);
+    instrs.push(Instruction::LocalGet(frame_base));
+    instrs.push(Instruction::I64ExtendI32U);
+    instrs.push(Instruction::I64Const(slot.offset as i64));
+    instrs.push(Instruction::I64Add);
+    instrs.push(Instruction::I64Const(3));
+    instrs.push(Instruction::I64Shl);
+    instrs.push(Instruction::LocalGet(logical));
+    instrs.push(Instruction::I64Add);
+    instrs.push(Instruction::LocalSet(logical));
+    logical
+}
+
+/// [`load_slot`] at an offset computed at run time.
+#[allow(clippy::too_many_arguments)]
+fn load_slot_dynamic(
+    dst: &RegLocal,
+    frame_base: u32,
+    slot: &FrameSlot<RegionedAbsoluteAddr>,
+    offset: &SIROffset,
+    op_width: usize,
+    four_state: bool,
+    locals: &mut LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    let bits = frame_bit_address(frame_base, slot, offset, locals, instrs);
+    compile_load_dynamic(dst, 0, bits, op_width, instrs);
+    let Some(mask_idx) = dst.mask_idx.filter(|_| four_state) else {
+        return;
+    };
+    let mask = RegLocal {
+        value_idx: mask_idx,
+        num_chunks: dst.num_chunks,
+        mask_idx: None,
+    };
+    if slot.four_state {
+        compile_load_dynamic(&mask, slot.plane_size(), bits, op_width, instrs);
+    } else {
+        for c in 0..dst.num_chunks {
+            instrs.push(Instruction::I64Const(0));
+            instrs.push(Instruction::LocalSet(mask_idx + c as u32));
+        }
+    }
+}
+
+/// [`store_slot`] at an offset computed at run time.
+#[allow(clippy::too_many_arguments)]
+fn store_slot_dynamic(
+    src: &RegLocal,
+    frame_base: u32,
+    slot: &FrameSlot<RegionedAbsoluteAddr>,
+    offset: &SIROffset,
+    op_width: usize,
+    four_state: bool,
+    locals: &mut LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    if op_width == 0 {
+        return;
+    }
+    let bits = frame_bit_address(frame_base, slot, offset, locals, instrs);
+    compile_store_dynamic(src, 0, bits, op_width, locals, instrs);
+    if !four_state || !slot.four_state {
+        return;
+    }
+    let mask = match src.mask_idx {
+        Some(mask_idx) => RegLocal {
+            value_idx: mask_idx,
+            num_chunks: src.num_chunks,
+            mask_idx: None,
+        },
+        None => {
+            // A two-state source gets a zero mask.
+            let zero = locals.alloc(src.num_chunks);
+            for c in 0..src.num_chunks {
+                instrs.push(Instruction::I64Const(0));
+                instrs.push(Instruction::LocalSet(zero + c as u32));
+            }
+            RegLocal {
+                value_idx: zero,
+                num_chunks: src.num_chunks,
+                mask_idx: None,
+            }
+        }
+    };
+    compile_store_dynamic(&mask, slot.plane_size(), bits, op_width, locals, instrs);
 }
 
 /// Load `op_width` bits `bits` into `slot`, of the frame at `base`, into

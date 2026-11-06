@@ -7137,6 +7137,7 @@ endmodule"#;
                         width: 32,
                         four_state: false,
                         handle: false,
+                        element_width: None,
                     }],
                 },
                 effects: Default::default(),
@@ -7717,6 +7718,7 @@ endmodule
                     width: ty.width(),
                     four_state: matches!(ty, RegisterType::Logic { .. }),
                     handle: false,
+                    element_width: None,
                 };
                 offset += slot.size().next_multiple_of(8);
                 slots.push(slot);

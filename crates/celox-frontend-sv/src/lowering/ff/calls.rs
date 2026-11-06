@@ -515,7 +515,7 @@ impl Ff<'_, '_> {
                 if single {
                     continue;
                 }
-                return Err(Reason::Other("unpacked array in the frame".to_string()));
+                array_slot(self.m.var(id))?;
             }
             slots.push(self.slot_of(id));
         }
@@ -584,6 +584,7 @@ impl Ff<'_, '_> {
             width: variable.width,
             four_state: variable.is_4state && self.m.four_state,
             kind: variable.value_kind,
+            element_width: super::super::unpacked_element_width(variable),
         }
     }
 
@@ -978,7 +979,7 @@ impl Ff<'_, '_> {
                     in_place.insert(id);
                     continue;
                 }
-                return Err(Reason::Other("unpacked array in the frame".to_string()));
+                array_slot(variable)?;
             }
             slots.push(self.slot_of(id));
         }
@@ -989,9 +990,9 @@ impl Ff<'_, '_> {
         // the stores into that, which only the stores of the units the
         // runtime runs can be.
         let persistent = self.m.static_storage();
-        let frame: HashMap<SourceVarId, (usize, SourceVarId)> = slots
+        let frame: HashMap<SourceVarId, (usize, SourceVarId, Option<usize>)> = slots
             .iter()
-            .map(|slot| (slot.id, (slot.width, slot.address)))
+            .map(|slot| (slot.id, (slot.width, slot.address, slot.element_width)))
             .collect();
         let mut reads = HashSet::default();
         let mut writes = HashSet::default();
@@ -1027,9 +1028,30 @@ impl Ff<'_, '_> {
                     }
                     _ => continue,
                 };
-                if let Some(&(slot_width, address)) = frame.get(&addr.var_id) {
-                    match offset {
-                        SIROffset::Static(offset) if offset + width <= slot_width => {}
+                if let Some(&(slot_width, address, element)) = frame.get(&addr.var_id) {
+                    // A slot holding an array is also accessed at positions
+                    // computed at run time, within one element, as the
+                    // lowering accesses an array of the state.
+                    match (offset, element) {
+                        (SIROffset::Static(offset), _)
+                        | (
+                            SIROffset::PackedElements {
+                                bit_offset: offset, ..
+                            },
+                            Some(_),
+                        ) if offset + width <= slot_width => {}
+                        (
+                            SIROffset::Element {
+                                element_width,
+                                bit_offset,
+                                dynamic_bit_offset,
+                                ..
+                            },
+                            Some(element),
+                        ) if *element_width == element
+                            && width <= element
+                            && (dynamic_bit_offset.is_some() || bit_offset + width <= element) => {}
+                        (SIROffset::Dynamic(_), Some(element)) if width <= element => {}
                         _ => return Err(other("dynamic frame access")),
                     }
                     *addr = frame_addr(address);
@@ -1415,4 +1437,15 @@ impl Ff<'_, '_> {
         self.b.seal_block(SIRTerminator::Error(code));
         self.b.switch_to_block(next);
     }
+}
+
+/// Check that unpacked array `variable` can be a slot of a frame: one of
+/// bits, which the collector need not scan element by element.
+fn array_slot(variable: &SvVariable) -> Result<(), Reason> {
+    if variable.value_kind != celox_design::ValueKind::Bits {
+        return Err(Reason::Other(
+            "unpacked array of handles in the frame".to_string(),
+        ));
+    }
+    Ok(())
 }

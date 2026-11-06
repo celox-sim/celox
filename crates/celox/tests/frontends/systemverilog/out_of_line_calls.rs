@@ -919,7 +919,8 @@ fn automatic_arrays_of_units_with_one_live_activation() {
     // host serves the request before the other process runs, so neither
     // sees the other's elements. Each activation of `fresh` starts with its
     // array cleared. `slow` waits with its array live, so a second process
-    // could enter it meanwhile: it stays inlined, each call with its own.
+    // enters it meanwhile: its array is a slot of its frame, one for each
+    // call.
     let source = r#"`timescale 1ns/1ns
 module Top(output int a, output int b, output int c, output int d, output int e, output int f);
     function automatic int tabulate(int n);
@@ -953,7 +954,42 @@ module Top(output int a, output int b, output int c, output int d, output int e,
     end
 endmodule
 "#;
-    same_as_inlined(source, 2, 4, &["a", "b", "c", "d", "e", "f"]);
+    same_as_inlined(source, 3, 4, &["a", "b", "c", "d", "e", "f"]);
+}
+
+#[test]
+fn recursive_functions_keep_their_arrays_in_their_frames() {
+    // Each activation of `digits` has its own arrays, slots of its frame,
+    // which it writes and reads at positions computed at run time, also
+    // after the recursive call returns.
+    let source = r#"module Top(output int a, output int b);
+    function automatic int digits(int n, int depth);
+        int q[4];
+        logic [7:0] w[3];
+        int k;
+        foreach (q[i]) q[i] = n * 10 + i + depth;
+        w[depth % 3] = 8'(n);
+        if (depth < 3) k = digits(n + 1, depth + 1);
+        else k = 0;
+        return q[n % 4] + q[3] + k + w[depth % 3];
+    endfunction
+    int one = 1;
+    initial begin
+        a = digits(one, 0);
+        b = digits(one + 4, 1);
+    end
+endmodule
+"#;
+    assert_eq!(function_units(source, true), 1);
+    for four_state in [false, true] {
+        for backend in backends() {
+            assert_eq!(
+                simulate(source, four_state, true, backend, 0, &["a", "b"]),
+                Ok(vec![value(240), value(405)]),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
 }
 
 #[test]

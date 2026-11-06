@@ -218,6 +218,11 @@ pub struct FrameSlot<A> {
     pub four_state: bool,
     /// Whether the slot holds a heap handle, which the collector scans.
     pub handle: bool,
+    /// The width of each element when the slot holds an unpacked array, in
+    /// its logical packed layout: such a slot is also accessed at dynamic
+    /// offsets within one element (see `SirProgram::verify_functions`).
+    #[serde(default)]
+    pub element_width: Option<usize>,
 }
 
 impl<A> FrameSlot<A> {
@@ -250,6 +255,7 @@ impl<A: Clone> FunctionUnit<A> {
                         width: slot.width,
                         four_state: slot.four_state,
                         handle: slot.handle,
+                        element_width: slot.element_width,
                     })
                     .collect(),
             },

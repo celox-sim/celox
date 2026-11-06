@@ -171,6 +171,9 @@ pub(super) struct Slot {
     /// What the slot holds: a heap handle, which the collector scans, or
     /// bits.
     pub kind: celox_design::ValueKind,
+    /// The width of an element when it holds an unpacked array, which the
+    /// unit accesses at positions computed at run time.
+    pub element_width: Option<usize>,
 }
 
 /// What a `ref` formal of a call refers to (IEEE 1800-2023 13.5.2), as an
@@ -415,6 +418,7 @@ impl OutOfLine {
                             width: slot.width,
                             four_state: slot.four_state,
                             handle: slot.kind != celox_design::ValueKind::Bits,
+                            element_width: slot.element_width,
                         })
                         .collect(),
                 },
