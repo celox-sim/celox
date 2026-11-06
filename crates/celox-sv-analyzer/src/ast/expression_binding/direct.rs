@@ -286,7 +286,11 @@ enum Finish {
         system: Option<SystemFunction>,
     },
     Cast(casts::RuntimeCastTarget),
-    Repeat,
+    /// A replication; `literals` when every replicated operand is a string
+    /// literal, which a non-constant count makes a string replication.
+    Repeat {
+        literals: bool,
+    },
     Inside(Vec<bool>),
     /// A string operation on the bound children, see [`strings`].
     StringCall(StringOp),
@@ -809,9 +813,15 @@ fn bind_value_in(
                         (Finish::Concat, parts.iter().map(|id| (*id, None)).collect())
                     }
                     ExprKind::Replication { count, expressions } if !expressions.is_empty() => {
+                        let literals = expressions.iter().all(|&id| {
+                            matches!(
+                                &native.expression(ungroup(id, native)).kind,
+                                ExprKind::Literal(text) if text.starts_with('"')
+                            )
+                        });
                         let mut children = vec![(*count, None)];
                         children.extend(expressions.iter().map(|id| (*id, None)));
-                        (Finish::Repeat, children)
+                        (Finish::Repeat { literals }, children)
                     }
                     ExprKind::Cast { target, expression }
                         if streams::is_stream(*expression, native) =>
@@ -1875,7 +1885,7 @@ fn bind_value_in(
                             casts::runtime_cast_target_expr(tree, target, operand, dimensions)?
                         }
                     }
-                    Finish::Repeat
+                    Finish::Repeat { .. }
                         if operands[1..]
                             .iter()
                             .any(|operand| strings::string_value(operand, dimensions)) =>
@@ -1890,14 +1900,43 @@ fn bind_value_in(
                         };
                         strings::call(StringOp::Replicate, vec![string, count])
                     }
-                    Finish::Repeat => {
+                    Finish::Repeat { literals } => {
                         let count = operands.remove(0);
-                        let count = expr_to_const(session, count.clone())
-                            .or_else(|| expr_to_index_const(tree, session, count, dimensions))
-                            .ok_or_else(|| unsupported("replication count"))?;
-                        Expr::RepeatConcat {
-                            count,
-                            parts: operands,
+                        let constant = expr_to_const(session, count.clone()).or_else(|| {
+                            expr_to_index_const(tree, session, count.clone(), dimensions)
+                        });
+                        // A count that names variables is not constant, even
+                        // as an index expression.
+                        let constant = constant.filter(|count| {
+                            !literals
+                                || eval_ast_const_expr(
+                                    &tree.functions,
+                                    count,
+                                    &dimensions.const_env,
+                                )
+                                .is_some()
+                        });
+                        match constant {
+                            Some(count) => Expr::RepeatConcat {
+                                count,
+                                parts: operands,
+                            },
+                            // A replication of string literals by a count that
+                            // is not constant is a string replication: the
+                            // literals convert to strings, and the result is
+                            // that many copies (Table 6-9, 11.4.12.2).
+                            None if literals => {
+                                let parts: Vec<Expr> = operands
+                                    .into_iter()
+                                    .map(|operand| strings::to_string(operand, dimensions))
+                                    .collect();
+                                let string = match <[Expr; 1]>::try_from(parts) {
+                                    Ok([string]) => string,
+                                    Err(parts) => strings::call(StringOp::Concat, parts),
+                                };
+                                strings::call(StringOp::Replicate, vec![string, count])
+                            }
+                            None => Err(unsupported("replication count"))?,
                         }
                     }
                     Finish::Inside(ranges) => {
