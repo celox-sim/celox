@@ -1,0 +1,1 @@
+Lint: expect_err instead of err().expect() in the random-mode rejection test
