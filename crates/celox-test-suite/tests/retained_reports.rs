@@ -1190,6 +1190,12 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "execute",
                             "assert_eq hits: expected 0xff, got 0x4be",
                         ),
+                        ("icarus", "system_functions::casts_between_numeric_types") => {
+                            ("compile_error", "compile", "source_0.sv:39: syntax error")
+                        }
+                        ("xezim", "system_functions::casts_between_numeric_types") => {
+                            ("mismatch", "execute", "expect_output: expected")
+                        }
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

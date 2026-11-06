@@ -447,6 +447,7 @@ test("every retained baseline accepts only its existing failures", () => {
                 "string_format::pattern_format_structure_containers",
                 "string_format::pattern_format_structure_values",
                 "system_functions::casts_address_destinations_as_assignments",
+                "system_functions::casts_between_numeric_types",
                 "system_functions::casts_evaluate_destination_operands_once",
                 "system_functions::casts_of_comparisons_and_cast_results",
                 "system_functions::casts_of_constants_to_enumerated_types",

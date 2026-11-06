@@ -192,12 +192,24 @@ fn updating(
         }
         path.push(id);
         jobs.push((id, true));
-        jobs.extend(
-            operands(&native.expression(id).kind)
-                .into_iter()
-                .rev()
-                .map(|id| (id, false)),
-        );
+        let kind = &native.expression(id).kind;
+        let mut evaluated = operands(kind);
+        // A query does not evaluate its first operand (20.6, 20.7): after
+        // the callee, skip it.
+        if let ExprKind::Call {
+            expression,
+            arguments,
+        } = kind
+            && let ExprKind::Name(name) = &native.expression(*expression).kind
+            && SystemFunction::from_name(&name.spelling)
+                .is_some_and(SystemFunction::has_unevaluated_operand)
+            && arguments
+                .first()
+                .is_some_and(|argument| argument.value.is_some())
+        {
+            evaluated.remove(1);
+        }
+        jobs.extend(evaluated.into_iter().rev().map(|id| (id, false)));
     }
     updating
 }
@@ -217,8 +229,10 @@ enum CastSource {
     Null,
 }
 
+/// Whether `roots` hold an assignment, increment or decrement, or a `$cast`,
+/// which assigns its destination.
 pub(super) fn has_updates(native: &Declarations, roots: &[ExprId]) -> bool {
-    !updating(native, roots, &mut |_| false).is_empty()
+    !updating(native, roots, &mut |id| cast_operands(native, id).is_some()).is_empty()
 }
 
 fn unsupported_context() -> AnalyzerError {
@@ -253,6 +267,11 @@ impl BodyBuilder<'_, '_, '_> {
             return Ok(());
         }
         let native = self.tree.declarations();
+        if let Some((destination, source)) = self.numeric_cast(id)? {
+            self.effect(destination, updating, stmts)?;
+            self.effect(source, updating, stmts)?;
+            return self.cast_numeric(id, destination, source, stmts);
+        }
         if let Some((destination, source)) = self.hoisted_cast(id)? {
             self.effect(destination, updating, stmts)?;
             self.effect(source, updating, stmts)?;
@@ -385,6 +404,9 @@ impl BodyBuilder<'_, '_, '_> {
         if let Some((destination, source, _)) = self.enum_cast(id)? {
             return Ok(Some((destination, source)));
         }
+        if let Some(operands) = self.numeric_cast(id)? {
+            return Ok(Some(operands));
+        }
         let native = self.tree.declarations();
         let Some((destination, source)) = cast_operands(native, id) else {
             return Ok(None);
@@ -422,6 +444,45 @@ impl BodyBuilder<'_, '_, '_> {
             &self.dims,
         )?
         .map(|domain| (destination, source, domain)))
+    }
+
+    /// The destination and source of `id` when it is a `$cast` between
+    /// numeric types: to a variable of an integral type other than an
+    /// enumerated one, or of a real type, from an integral or real value.
+    /// Such a cast is always valid and assigns as the assignment of the
+    /// source to the destination does (IEEE 1800-2023 6.24.1, 6.24.2).
+    pub(super) fn numeric_cast(&mut self, id: ExprId) -> Converted<Option<(ExprId, ExprId)>> {
+        let native = self.tree.declarations();
+        let Some((destination, source)) = cast_operands(native, id) else {
+            return Ok(None);
+        };
+        if self.enum_cast(id)?.is_some() {
+            return Ok(None);
+        }
+        // An anonymous enumeration whose members are not resolved has no
+        // enumerated semantic type; its declaration still tells.
+        if dimensions::operand_shape(destination, self.tree, self.session, &self.dims)?
+            .as_ref()
+            .and_then(type_names::declared_type)
+            .is_some_and(|ty| ty.is_enum || ty.packed_enum)
+        {
+            return Ok(None);
+        }
+        // An enumerated destination is never numeric, also when its domain
+        // is not resolved: only a member's value is assigned (6.24.2). Nor
+        // is a packed array of one, whose elements are each of that type.
+        let mut numeric = |id: ExprId, destination: bool| {
+            let ty = expression_types::type_of(self.tree, self.session, id, native, &self.dims);
+            ty.is_ok_and(|ty| match self.session.types.data(ty) {
+                semantic_types::TyData::Packed(packed) => {
+                    !destination
+                        || !matches!(packed.element, semantic_types::PackedElement::Enum { .. })
+                }
+                semantic_types::TyData::Real | semantic_types::TyData::Shortreal => true,
+                _ => false,
+            })
+        };
+        Ok((numeric(destination, true) && numeric(source, false)).then_some((destination, source)))
     }
 
     /// The destination and source of `id` when it is a `$cast` to a class
@@ -857,6 +918,23 @@ impl BodyBuilder<'_, '_, '_> {
             else_body: Vec::new(),
         });
         self.bind_effect(id, Expr::Ident(succeeded_source));
+        Ok(())
+    }
+
+    /// `$cast(destination, source)` `id` between numeric types, which
+    /// always succeeds and assigns as the assignment of the source to the
+    /// destination does (6.24.1, 6.24.2): through the ordinary assignment,
+    /// which saves the converted value before it addresses the destination
+    /// once (4.9.3). `id` binds to its success.
+    fn cast_numeric(
+        &mut self,
+        id: ExprId,
+        destination: ExprId,
+        source: ExprId,
+        stmts: &mut Vec<Stmt>,
+    ) -> Converted<()> {
+        stmts.extend(self.assignment_value("=", false, (destination, source))?);
+        self.bind_effect(id, Expr::Literal("1".into()));
         Ok(())
     }
 
