@@ -31,6 +31,8 @@ impl Ff<'_, '_> {
                     | ProcessOp::Suspend
                     | ProcessOp::SemaphorePut
                     | ProcessOp::SemaphoreTryGet
+                    | ProcessOp::SemaphoreGet
+                    | ProcessOp::Await
             ))
         {
             // A function unit suspends the process for the methods that
@@ -142,11 +144,14 @@ impl Ff<'_, '_> {
         args: &[Option<sv::ir::Expr>],
     ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
         use sv::ir::Expr;
-        if self.kernel.is_none() {
+        if self.kernel.is_some() {
+            self.process_control = true;
+            self.forked = true;
+        } else if !self.can_request() {
+            // A function unit makes the requests by suspending (see
+            // `out_of_line`); a blocking one retries when it continues.
             return Err(unsupported("mailbox method outside a process kernel"));
         }
-        self.process_control = true;
-        self.forked = true;
         let layout = |arg: &Option<Expr>| match arg {
             Some(Expr::Literal(literal)) => literal
                 .strip_prefix("64'd")
@@ -288,8 +293,7 @@ impl Ff<'_, '_> {
         let retry = self.b.new_block();
         self.jump(retry);
         self.b.switch_to_block(retry);
-        self.with_kernel(|k| k.host_request(HostRequestKind::Process, index))
-            .map_err(kernel_error)?;
+        self.request_host(HostRequestKind::Process, index)?;
         let success = Expr::Binary {
             left: Box::new(Expr::Ident(status.clone())),
             op: sv::ir::BinaryOp::Gt,

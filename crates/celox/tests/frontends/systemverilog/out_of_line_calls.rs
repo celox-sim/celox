@@ -394,7 +394,7 @@ endmodule
 
 #[test]
 fn ineligible_subroutines_stay_inlined() {
-    // A host request that a unit cannot make (a mailbox method) keeps a
+    // A host request that a unit cannot make (a VCD task) keeps a
     // subroutine inlined with every subroutine that calls it; `plain` and `bump`, whose `ref` formal
     // names `a`, still go out of line.
     let source = r#"module Top(output int a, output int b, output int c);
@@ -402,8 +402,8 @@ fn ineligible_subroutines_stay_inlined() {
         v = v + 1;
     endfunction
     function automatic int shout(int v);
-        mailbox #(int) box = new();
-        return v + box.num();
+        $dumpflush;
+        return v + 1;
     endfunction
     function automatic int via_shout(int v);
         return shout(v) * 2;
@@ -1274,6 +1274,79 @@ endmodule
             value(3),
             value(5),
             value(4)
+        ])
+    );
+}
+
+#[test]
+fn mailboxes_and_blocking_methods_in_function_units() {
+    // Units call the methods of a bounded mailbox, as UVM's TLM FIFOs do:
+    // `send` blocks on the third `put` until `take` gets a message, and a
+    // blocking method retries when its process is woken. `wait_keys`
+    // blocks in a semaphore's `get` until another process puts the keys,
+    // and `join_child` in `await` until a process ends. Each parks its
+    // process with the unit's frames kept.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c, output int d, output int e, output int f);
+    mailbox #(int) box = new(2);
+    semaphore keys = new(0);
+    process child;
+    task automatic send(int n);
+        box.put(n);
+    endtask
+    task automatic take(output int v);
+        box.get(v);
+    endtask
+    function automatic int count();
+        return box.num();
+    endfunction
+    function automatic bit try_send(int n);
+        return box.try_put(n);
+    endfunction
+    task automatic wait_keys(int n);
+        keys.get(n);
+    endtask
+    task automatic join_child();
+        child.await();
+    endtask
+    int one = 1;
+    initial begin
+        send(one);
+        send(one + 1);
+        send(one + 2);
+        a = $time;
+        b = count();
+    end
+    initial begin
+        #2 take(c);
+        #1 e = try_send(one + 10);
+    end
+    initial begin
+        wait_keys(one + 1);
+        d = $time;
+    end
+    initial #4 keys.put(2);
+    initial begin
+        child = process::self();
+        #5;
+    end
+    initial begin
+        #1 join_child();
+        f = $time;
+    end
+endmodule
+"#;
+    let names = ["a", "b", "c", "d", "e", "f"];
+    same_as_inlined(source, 6, 7, &names);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 7, &names),
+        Ok(vec![
+            value(2),
+            value(2),
+            value(1),
+            value(4),
+            value(0),
+            value(5)
         ])
     );
 }
