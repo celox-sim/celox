@@ -3070,7 +3070,13 @@ impl Plan {
             g.store_at(slots.ready, ordinals[index], 1, clear);
             let current = g.constant(index as u64, SCHEDULER_TIME_WIDTH);
             g.store(slots.current, SCHEDULER_TIME_WIDTH, current);
-            if self.cyclic {
+            // The work budget bounds zero-time loops. A kernel that only
+            // suspends for positive constant delays runs once in the slot it
+            // is due in and cannot take part in one, so it is not charged.
+            let budgeted = kernel.wait.is_some()
+                || self.inactive.iter().any(|&(process, _)| process == index)
+                || shortest_delay(&program.sir.processes[index], process.delay) == 0;
+            if self.cyclic && budgeted {
                 if let Some(guards) = &mut guards {
                     guards.charge(
                         &mut g,
@@ -6766,6 +6772,34 @@ fn delay_bound(unit: &Unit, delay: AbsoluteAddr) -> u64 {
             _ => None,
         })
         .max()
+        .unwrap_or(0)
+}
+
+/// The shortest delay `unit` can store in its delay slot `delay`: 0 unless
+/// every store of it is a known constant.
+fn shortest_delay(unit: &Unit, delay: AbsoluteAddr) -> u64 {
+    let constants: HashMap<RegisterId, u64> = instructions(unit)
+        .filter_map(|inst| match inst {
+            SIRInstruction::Imm(register, value) => u64::try_from(&value.payload)
+                .ok()
+                .map(|value| (*register, value)),
+            _ => None,
+        })
+        .collect();
+    let delay = stable(delay);
+    instructions(unit)
+        .filter_map(|inst| match inst {
+            SIRInstruction::Store(target, offset, _, value, ..) if *target == delay => {
+                Some(match offset {
+                    SIROffset::Static(0) => constants.get(value).copied().unwrap_or(0),
+                    _ => 0,
+                })
+            }
+            SIRInstruction::Commit(_, target, ..) if *target == delay => Some(0),
+            _ if inst.call_effects().is_some() && inst.state_writes().touches(&delay) => Some(0),
+            _ => None,
+        })
+        .min()
         .unwrap_or(0)
 }
 
