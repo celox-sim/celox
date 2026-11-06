@@ -26,6 +26,20 @@ pub const STRING: u64 = 114;
 /// its [`RANGED`] bit is set, or all of them; an element past the end streams the
 /// default value of the element type. String elements stream their bytes.
 pub const CONTAINER: u64 = 115;
+/// `wide_container(stream, a)`: `stream` extended by the elements of
+/// container `a`, in order, whose elements are integral values wider than 64
+/// bits held in records of one field at offset 0, of the width in the
+/// [`wide_parameter`]: the value bytes, little-endian, then, for a 4-state
+/// value, its mask bytes; a 4-state field stores both planes complemented,
+/// so an element without a record streams the default X bits.
+pub const WIDE_CONTAINER: u64 = 139;
+
+/// The [`WIDE_CONTAINER`] parameter: the elements' width, and whether they
+/// are 4-state values stored with complemented planes.
+pub const fn wide_parameter(width: u32, complemented: bool) -> u64 {
+    width as u64 | (complemented as u64) << 32
+}
+
 /// `append(stream, other)`: `stream` extended by the unread bits of stream
 /// `other`, which is freed.
 pub const APPEND: u64 = 116;
@@ -60,18 +74,29 @@ pub const TAKE_STRING: u64 = 124;
 pub const FREE: u64 = 125;
 /// `check(stream)`: `stream`, recording a fault when it has more unread bits
 /// than the width in the [`check_parameter`]: the fixed-size target is
-/// narrower than the stream; or, for a bit-stream cast, other than that many
-/// (IEEE 1800-2023 6.24.3).
+/// narrower than the stream; or, for a bit-stream cast (6.24.3) or the
+/// assignment of a dynamically sized array to a fixed-size one (7.6), other
+/// than that many (IEEE 1800-2023).
 pub const CHECK: u64 = 126;
+
+/// The size check of a [`CHECK`]: the stream fits its target.
+pub const FITS: u64 = 0;
+/// The size check of a [`CHECK`]: a bit-stream cast, whose stream has its
+/// type's width.
+pub const CAST: u64 = 1;
+/// The size check of a [`CHECK`]: the elements of a dynamically sized array
+/// fill the fixed-size array it is assigned to.
+pub const ASSIGNMENT: u64 = 2;
 
 /// `truncate(stream)`: `stream` without its unread bits past the first
 /// parameter's number: a source wider than its fixed-size targets gives
 /// them its leading bits (IEEE 1800-2023 11.4.14.3).
 pub const TRUNCATE: u64 = 127;
 
-/// The [`CHECK`] parameter.
-pub const fn check_parameter(width: u64, exact: bool) -> u64 {
-    width | (exact as u64) << 40
+/// The [`CHECK`] parameter, of size check [`FITS`], [`CAST`] or
+/// [`ASSIGNMENT`].
+pub const fn check_parameter(width: u64, check: u64) -> u64 {
+    width | check << 40
 }
 
 /// The [`PEEK`] parameter.
@@ -269,6 +294,45 @@ impl Heap {
                 }
                 a
             }
+            WIDE_CONTAINER => {
+                let width = parameter as u32;
+                let complemented = parameter >> 32 & 1 != 0;
+                let elements: Vec<Element> = match self.containers.get(&(b as Handle)) {
+                    Some(container) => match &container.contents {
+                        Contents::Sequence(v) => v.iter().copied().collect(),
+                        Contents::Associative(v) => v.values().copied().collect(),
+                    },
+                    None => Vec::new(),
+                };
+                let bytes = width.div_ceil(8) as usize;
+                for element in elements {
+                    let record = element.value as Handle;
+                    // The most significant word first.
+                    for first in (0..width).step_by(64).rev() {
+                        let count = (width - first).min(64);
+                        let at = first as usize / 8;
+                        let length = count.div_ceil(8) as usize;
+                        let bits = u64::MAX >> (64 - count);
+                        // An element without a record has zero bytes.
+                        let load = |heap: &mut Self, at: usize| {
+                            if record == crate::objects::NULL {
+                                0
+                            } else {
+                                heap.load(record, at, length)
+                            }
+                        };
+                        let value = load(self, at);
+                        let (value, mask) = if complemented {
+                            let mask = load(self, bytes + at);
+                            (!value & bits, !mask & bits)
+                        } else {
+                            (value & bits, 0)
+                        };
+                        self.stream(a).push(value, mask, count);
+                    }
+                }
+                a
+            }
             APPEND => {
                 let other = self.take_stream(b);
                 let bits = other.unread().to_vec();
@@ -315,10 +379,17 @@ impl Heap {
             CHECK => {
                 let width = parameter & ((1 << 40) - 1);
                 let unread = self.stream(a).unread().len() as u64;
-                if unread > width {
-                    self.stream_fault("the stream is wider than its fixed-size target");
-                } else if parameter >> 40 & 1 != 0 && unread != width {
-                    self.stream_fault("the stream and its cast type differ in size");
+                match parameter >> 40 {
+                    ASSIGNMENT if unread != width => {
+                        self.fault.get_or_insert(Fault::ArraySize);
+                    }
+                    _ if unread > width => {
+                        self.stream_fault("the stream is wider than its fixed-size target")
+                    }
+                    CAST if unread != width => {
+                        self.stream_fault("the stream and its cast type differ in size")
+                    }
+                    _ => {}
                 }
                 a
             }
@@ -481,10 +552,13 @@ mod tests {
         let mut heap = Heap::new();
         let stream = heap.call(NEW, 0, 0, 0);
         heap.call(encode(BITS, 8), stream, 0xff, 0);
-        heap.call(encode(CHECK, check_parameter(8, true)), stream, 0, 0);
+        heap.call(encode(CHECK, check_parameter(8, CAST)), stream, 0, 0);
+        heap.call(encode(CHECK, check_parameter(8, ASSIGNMENT)), stream, 0, 0);
         assert!(heap.fault.is_none());
-        heap.call(encode(CHECK, check_parameter(4, false)), stream, 0, 0);
+        heap.call(encode(CHECK, check_parameter(4, FITS)), stream, 0, 0);
         assert!(matches!(heap.fault.take(), Some(Fault::Stream(_))));
+        heap.call(encode(CHECK, check_parameter(16, ASSIGNMENT)), stream, 0, 0);
+        assert!(matches!(heap.fault.take(), Some(Fault::ArraySize)));
         heap.call(SKIP, stream, 9, 0);
         assert!(matches!(heap.fault.take(), Some(Fault::Stream(_))));
     }
