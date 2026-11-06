@@ -1,0 +1,1 @@
+Codex review: evaluate every value at the tick that decides it with one sampling transform and keep values for later ticks in monitor registers (sampled select bounds and match-item values); a named sequence may be the antecedent of |->.
