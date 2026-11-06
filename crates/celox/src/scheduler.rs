@@ -647,8 +647,12 @@ impl Plan {
                 .flat_map(instructions)
         };
         // A native kernel may read and write any state, which none of the
-        // storage sets below can name (see `read_storage`).
-        if planned().any(SIRInstruction::accesses_unknown_state) {
+        // storage sets below can name (see `read_storage`). The raw words of
+        // a wide commit are shadowed by typed commits of the same registers.
+        if planned().any(|instruction| {
+            instruction.accesses_unknown_state()
+                && !crate::settle::is_wide_commit_access(instruction)
+        }) {
             return Err("a unit may access any state".into());
         }
 
@@ -765,7 +769,7 @@ impl Plan {
                 .collect()
         };
         let rtl_stores: HashSet<AbsoluteAddr> = rtl_units().flat_map(stores).collect();
-        let opaque = |unit: &Unit| instructions(unit).any(makes_extern_calls);
+        let opaque = |unit: &Unit| instructions(unit).any(makes_host_calls);
         let opaque_comb = sir.eval_comb.iter().any(opaque);
         let kernel_stores: Vec<HashSet<AbsoluteAddr>> = sir
             .processes
@@ -861,7 +865,7 @@ impl Plan {
                 unknown_gate
                     || event.eval_only.as_ref().is_none_or(|units| {
                         units.iter().flat_map(instructions).any(|inst| {
-                            makes_extern_calls(inst)
+                            makes_host_calls(inst)
                                 || written_storage(inst).any(|target| {
                                     target.region == STABLE_REGION
                                         && active_observers
@@ -5620,7 +5624,7 @@ impl Generator<'_> {
         unit: &Unit,
         time_slots: &[AbsoluteAddr],
     ) {
-        if instructions(unit).any(makes_extern_calls) {
+        if instructions(unit).any(makes_host_calls) {
             self.check_waits_at(waits, false);
             return;
         }
@@ -5958,8 +5962,9 @@ impl Generator<'_> {
             // slots.dirty. Preserve intermediate changes as well as X/Z-only
             // changes; do not snapshot its notification flags again.
             self.inline_with_exit(unit, finish_exit);
-            // The instrumentation marks after a call's writes as well.
-            if instructions(unit).any(makes_extern_calls) {
+            // The instrumentation marks after a call's writes as well, and
+            // after the wide commits it makes itself.
+            if instructions(unit).any(makes_host_calls) {
                 self.mark_dirty();
             }
             return;
@@ -6003,7 +6008,7 @@ impl Generator<'_> {
                 self.store(self.slots.dirty, SCHEDULER_FLAG_WIDTH, dirty);
             }
         } else if instructions(unit).any(|inst| {
-            makes_extern_calls(inst)
+            makes_host_calls(inst)
                 || written_storage(inst).any(|target| self.settle_reads(target.absolute_addr()))
         }) {
             self.mark_dirty();
@@ -6019,7 +6024,7 @@ impl Generator<'_> {
         let mut bits = 0;
         for instruction in instructions(unit) {
             // An opaque call can change state outside explicit Stores.
-            if makes_extern_calls(instruction) {
+            if makes_host_calls(instruction) {
                 return None;
             }
             let (target, offset, width) = match instruction.state_writes() {
@@ -6346,6 +6351,8 @@ impl Generator<'_> {
     }
 
     fn inline_with_exit(&mut self, unit: &Unit, finish_exit: Option<celox_sir::BlockId>) {
+        // Compiled code commits wide runs by their raw words alone.
+        let unit = &*crate::settle::without_shadow_commits(unit);
         let captures = self.observers.is_some();
         let finishes = self.unit_finishes(unit);
         let counts = self.event_batch.is_some()
@@ -6953,6 +6960,19 @@ fn written_storage(
 /// SIR does not show.
 fn makes_extern_calls(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
     inst.host_effects().extern_calls
+}
+
+/// Whether `inst` calls into the host, which may change state outside its
+/// explicit stores: an extern call other than a native memory operation (the
+/// settle instrumentation's wide commits, whose writes the typed commits
+/// after them name), or a call of a function that makes one.
+fn makes_host_calls(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
+    match inst {
+        SIRInstruction::ExternCall { func, .. } => {
+            celox_sir::native_memory::NativeMemoryOp::decode(*func).is_none()
+        }
+        _ => makes_extern_calls(inst),
+    }
 }
 
 /// Whether `inst` is a call whose callee may record runtime events, and so

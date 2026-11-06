@@ -1,5 +1,6 @@
 ---
 source: crates/celox/tests/native_mir.rs
+assertion_line: 125
 expression: output
 ---
 === MIR used by native emission ===
@@ -35,23 +36,23 @@ Bindings:
   apply_ff trigger=rst
 --- MIR after main optimization, before regalloc-owned late folds ---
 bb0:
-  v0 = load.i8 [sim + 1224]
-  store.i8 [sim + 50], v0
+  v0 = load.i8 [sim + 1232]
+  store.i8 [sim + 48], v0
   ret
 --- MIR after late memory folds, before allocation-owned scheduling ---
 bb0:
-  v0 = load.i8 [sim + 1224]
-  store.i8 [sim + 50], v0
+  v0 = load.i8 [sim + 1232]
+  store.i8 [sim + 48], v0
   ret
 --- MIR after allocation-owned scheduling, before spill reconstruction ---
 bb0:
-  v0 = load.i8 [sim + 1224]
-  store.i8 [sim + 50], v0
+  v0 = load.i8 [sim + 1232]
+  store.i8 [sim + 48], v0
   ret
 --- MIR after register allocation and post-RA peepholes ---
 bb0:
-  v0 = load.i8 [sim + 1224]
-  store.i8 [sim + 50], v0
+  v0 = load.i8 [sim + 1232]
+  store.i8 [sim + 48], v0
   ret
 Spill frame: 0 bytes
 Register assignment:
@@ -61,8 +62,8 @@ x86-64 disassembly of emitted function:
   0x00000005  movq xmm15,rax
   0x0000000a  wrgsbase rdi
 bb0:
-  0x0000000f  movzx eax,byte [gs:4C8h]
-  0x00000018  mov [gs:32h],al
+  0x0000000f  movzx eax,byte [gs:4D0h]
+  0x00000018  mov [gs:30h],al
   0x00000021  xor eax,eax
   0x00000023  jmp short 0000000000000025h
   0x00000025  movq r11,xmm15
@@ -75,35 +76,35 @@ Bindings:
   eval_apply_ff trigger=rst
 --- MIR after main optimization, before regalloc-owned late folds ---
 bb0:
-  v0 = load.i8 [sim + 48]
-  v1 = load.i8 [sim + 49]
+  v0 = load.i8 [sim + 49]
+  v1 = load.i8 [sim + 50]
   v3 = imm 0x0
   v2 = cmp_select cmp.Eq v0, 0, v3, v1
-  store.i8 [sim + 50], v2
+  store.i8 [sim + 48], v2
   ret
 --- MIR after late memory folds, before allocation-owned scheduling ---
 bb0:
-  v0 = load.i8 [sim + 48]
-  v1 = load.i8 [sim + 49]
+  v0 = load.i8 [sim + 49]
+  v1 = load.i8 [sim + 50]
   v3 = imm 0x0
   v2 = cmp_select cmp.Eq v0, 0, v3, v1
-  store.i8 [sim + 50], v2
+  store.i8 [sim + 48], v2
   ret
 --- MIR after allocation-owned scheduling, before spill reconstruction ---
 bb0:
-  v0 = load.i8 [sim + 48]
+  v0 = load.i8 [sim + 49]
   v3 = imm 0x0
-  v1 = load.i8 [sim + 49]
+  v1 = load.i8 [sim + 50]
   v2 = cmp_select cmp.Eq v0, 0, v3, v1
-  store.i8 [sim + 50], v2
+  store.i8 [sim + 48], v2
   ret
 --- MIR after register allocation and post-RA peepholes ---
 bb0:
-  v0 = load.i8 [sim + 48]
+  v0 = load.i8 [sim + 49]
   v3 = imm 0x0
-  v1 = load.i8 [sim + 49]
+  v1 = load.i8 [sim + 50]
   v2 = cmp_select cmp.Eq v0, 0, v3, v1
-  store.i8 [sim + 50], v2
+  store.i8 [sim + 48], v2
   ret
 Spill frame: 0 bytes
 Register assignment:
@@ -116,12 +117,12 @@ x86-64 disassembly of emitted function:
   0x00000005  movq xmm15,rax
   0x0000000a  wrgsbase rdi
 bb0:
-  0x0000000f  movzx eax,byte [gs:30h]
+  0x0000000f  movzx eax,byte [gs:31h]
   0x00000018  xor edx,edx
-  0x0000001a  movzx esi,byte [gs:31h]
+  0x0000001a  movzx esi,byte [gs:32h]
   0x00000023  test rax,rax
   0x00000026  cmove rsi,rdx
-  0x0000002a  mov [gs:32h],sil
+  0x0000002a  mov [gs:30h],sil
   0x00000033  xor eax,eax
   0x00000035  jmp short 0000000000000037h
   0x00000037  movq r11,xmm15
@@ -134,66 +135,66 @@ Bindings:
   eval_comb_apply_ff trigger=rst
 --- MIR after main optimization, before regalloc-owned late folds ---
 bb0:
-  v0 = load.i8 [sim + 48]
+  v0 = load.i8 [sim + 49]
   v1 = cmp.Eq v0, 0
   br v1, bb1, bb2
 bb1:
   v2 = imm 0x0
-  store.i8 [sim + 50], v2
+  store.i8 [sim + 48], v2
   jmp bb3
 bb2:
-  v3 = load.i8 [sim + 49]
-  store.i8 [sim + 50], v3
+  v3 = load.i8 [sim + 50]
+  store.i8 [sim + 48], v3
   jmp bb3
 bb3:
   ret
 --- MIR after late memory folds, before allocation-owned scheduling ---
 bb0:
-  v0 = load.i8 [sim + 48]
+  v0 = load.i8 [sim + 49]
   br_pred CompareImm { lhs: v0, imm: 0, kind: Eq }, bb4, bb5
 bb4:
   jmp bb1
 bb1:
   v2 = imm 0x0
-  store.i8 [sim + 50], v2
+  store.i8 [sim + 48], v2
   jmp bb3
 bb5:
   jmp bb2
 bb2:
-  v3 = load.i8 [sim + 49]
-  store.i8 [sim + 50], v3
+  v3 = load.i8 [sim + 50]
+  store.i8 [sim + 48], v3
   jmp bb3
 bb3:
   ret
 --- MIR after allocation-owned scheduling, before spill reconstruction ---
 bb0:
-  v0 = load.i8 [sim + 48]
+  v0 = load.i8 [sim + 49]
   br_pred CompareImm { lhs: v0, imm: 0, kind: Eq }, bb4, bb5
 bb4:
   jmp bb1
 bb1:
   v2 = imm 0x0
-  store.i8 [sim + 50], v2
+  store.i8 [sim + 48], v2
   jmp bb3
 bb5:
   jmp bb2
 bb2:
-  v3 = load.i8 [sim + 49]
-  store.i8 [sim + 50], v3
+  v3 = load.i8 [sim + 50]
+  store.i8 [sim + 48], v3
   jmp bb3
 bb3:
   ret
 --- MIR after register allocation and post-RA peepholes ---
 bb0:
-  v0 = load.i8 [sim + 48]
+  v0 = load.i8 [sim + 49]
   br_pred CompareImm { lhs: v0, imm: 0, kind: Eq }, bb1, bb2
 bb1:
   v2 = imm 0x0
-  store.i8 [sim + 50], v2
+  store.i8 [sim + 48], v2
   jmp bb3
 bb2:
-  v3 = load.i8 [sim + 49]
-  store.i8 [sim + 50], v3
+  v3 = load.i8 [sim + 50]
+  store.i8 [sim + 48], v3
   jmp bb3
 bb3:
   ret
@@ -204,7 +205,7 @@ Register assignment:
   v3 -> rax
 x86-64 disassembly of emitted function:
   0x00000000  rdgsbase rax
-  0x00000005  mov [rdi+500h],rax
+  0x00000005  mov [rdi+510h],rax
   0x0000000c  wrgsbase rdi
   0x00000011  mov rax,[gs:8]
   0x0000001b  test rax,rax
@@ -213,16 +214,16 @@ x86-64 disassembly of emitted function:
   0x00000025  movq xmm15,rax
   0x0000002a  nop
 bb0:
-  0x0000002b  movzx eax,byte [gs:30h]
+  0x0000002b  movzx eax,byte [gs:31h]
   0x00000034  test rax,rax
   0x00000037  je short 000000000000004Dh
 bb2:
-  0x00000039  movzx eax,byte [gs:31h]
-  0x00000042  mov [gs:32h],al
+  0x00000039  movzx eax,byte [gs:32h]
+  0x00000042  mov [gs:30h],al
   0x0000004b  jmp short 0000000000000058h
 bb1:
   0x0000004d  xor eax,eax
-  0x0000004f  mov [gs:32h],al
+  0x0000004f  mov [gs:30h],al
 bb3:
   0x00000058  movq rax,xmm15
   0x0000005d  dec rax
@@ -232,7 +233,7 @@ bb3:
   0x00000069  xor eax,eax
   0x0000006b  movq r10,xmm15
   0x00000070  mov [gs:8],r10
-  0x00000079  mov r11,[gs:500h]
+  0x00000079  mov r11,[gs:510h]
   0x00000082  wrgsbase r11
   0x00000087  ret
 
@@ -242,35 +243,35 @@ Bindings:
   eval_only_ff trigger=rst
 --- MIR after main optimization, before regalloc-owned late folds ---
 bb0:
-  v0 = load.i8 [sim + 48]
-  v1 = load.i8 [sim + 49]
+  v0 = load.i8 [sim + 49]
+  v1 = load.i8 [sim + 50]
   v3 = imm 0x0
   v2 = cmp_select cmp.Eq v0, 0, v3, v1
-  store.i8 [sim + 1224], v2
+  store.i8 [sim + 1232], v2
   ret
 --- MIR after late memory folds, before allocation-owned scheduling ---
 bb0:
-  v0 = load.i8 [sim + 48]
-  v1 = load.i8 [sim + 49]
+  v0 = load.i8 [sim + 49]
+  v1 = load.i8 [sim + 50]
   v3 = imm 0x0
   v2 = cmp_select cmp.Eq v0, 0, v3, v1
-  store.i8 [sim + 1224], v2
+  store.i8 [sim + 1232], v2
   ret
 --- MIR after allocation-owned scheduling, before spill reconstruction ---
 bb0:
-  v0 = load.i8 [sim + 48]
+  v0 = load.i8 [sim + 49]
   v3 = imm 0x0
-  v1 = load.i8 [sim + 49]
+  v1 = load.i8 [sim + 50]
   v2 = cmp_select cmp.Eq v0, 0, v3, v1
-  store.i8 [sim + 1224], v2
+  store.i8 [sim + 1232], v2
   ret
 --- MIR after register allocation and post-RA peepholes ---
 bb0:
-  v0 = load.i8 [sim + 48]
+  v0 = load.i8 [sim + 49]
   v3 = imm 0x0
-  v1 = load.i8 [sim + 49]
+  v1 = load.i8 [sim + 50]
   v2 = cmp_select cmp.Eq v0, 0, v3, v1
-  store.i8 [sim + 1224], v2
+  store.i8 [sim + 1232], v2
   ret
 Spill frame: 0 bytes
 Register assignment:
@@ -283,12 +284,12 @@ x86-64 disassembly of emitted function:
   0x00000005  movq xmm15,rax
   0x0000000a  wrgsbase rdi
 bb0:
-  0x0000000f  movzx eax,byte [gs:30h]
+  0x0000000f  movzx eax,byte [gs:31h]
   0x00000018  xor edx,edx
-  0x0000001a  movzx esi,byte [gs:31h]
+  0x0000001a  movzx esi,byte [gs:32h]
   0x00000023  test rax,rax
   0x00000026  cmove rsi,rdx
-  0x0000002a  mov [gs:4C8h],sil
+  0x0000002a  mov [gs:4D0h],sil
   0x00000033  xor eax,eax
   0x00000035  jmp short 0000000000000037h
   0x00000037  movq r11,xmm15
