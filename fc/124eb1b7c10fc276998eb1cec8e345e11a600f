@@ -1,0 +1,1 @@
+Codex review: reject user function calls in by-value match-item arguments like other concurrent operands; leave arguments a system task writes unsampled.
