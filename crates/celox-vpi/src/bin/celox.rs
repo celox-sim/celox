@@ -276,6 +276,8 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
     } else {
         builder
     };
+    // Cross-check every partitioned settle against a full one (slow).
+    let builder = builder.settle_check(std::env::var_os("CELOX_SETTLE_CHECK").is_some());
     let builder = if let Some(path) = &arguments.execution.vcd {
         builder.vcd(path)
     } else {

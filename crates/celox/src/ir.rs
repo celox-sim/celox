@@ -752,6 +752,13 @@ impl LaidOutProgram {
         &self.layout
     }
 
+    /// Drop the settle marks of partitions whose bodies no longer touch the
+    /// marked state ([`crate::settle::prune_stale_marks`]); before the units
+    /// outside the settle are instrumented.
+    pub(crate) fn prune_stale_marks(&mut self) {
+        crate::settle::prune_stale_marks(&mut self.sir, &mut self.layout, &self.runtime);
+    }
+
     /// Cross-check every partitioned settle (see
     /// [`celox_state_layout::SettleLayout::check`]).
     #[cfg(feature = "host-runtime")]
@@ -859,15 +866,17 @@ impl OptimizedSir {
         self.into_laid_out_with_options(four_state, mode, false)
     }
 
-    /// As [`Self::into_laid_out_with_mode`]; with `defer_ff_units`, the FF
-    /// units are left for the caller to instrument
-    /// ([`crate::settle::instrument_ff_units`]), after its dead-store
+    /// As [`Self::into_laid_out_with_mode`]; with `defer_instrumentation`,
+    /// the units outside the settle are left for the caller to instrument
+    /// ([`LaidOutProgram::prune_stale_marks`],
+    /// [`crate::settle::instrument_processes_from`],
+    /// [`crate::settle::instrument_ff_units`]), after its dead-store
     /// elimination.
     pub fn into_laid_out_with_options(
         self,
         four_state: bool,
         mode: crate::backend::memory_layout::MemoryLayoutMode,
-        defer_ff_units: bool,
+        defer_instrumentation: bool,
     ) -> LaidOutProgram {
         let mut program = self;
         if !program.runtime_schema.comb_observers.is_empty()
@@ -955,9 +964,8 @@ impl OptimizedSir {
             #[cfg(feature = "host-runtime")]
             deferred_derived_edges: HashMap::default(),
         };
-        if defer_ff_units {
-            crate::settle::instrument_processes_from(&mut laid_out, 0, false);
-        } else {
+        if !defer_instrumentation {
+            laid_out.prune_stale_marks();
             crate::settle::instrument(&mut laid_out);
         }
         laid_out

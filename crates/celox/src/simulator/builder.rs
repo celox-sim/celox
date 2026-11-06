@@ -3203,6 +3203,10 @@ mod host {
             );
 
             if wide_commits {
+                // The units outside the settle were left uninstrumented:
+                // mark from the final partition bodies.
+                laid_out.prune_stale_marks();
+                crate::settle::instrument_processes_from(&mut laid_out, 0, false);
                 crate::settle::instrument_ff_units(&mut laid_out, true);
             }
 

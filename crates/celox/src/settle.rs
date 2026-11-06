@@ -16,6 +16,9 @@ use celox_sir::{BinaryOp, BlockId, SIRTerminator, SIRValue};
 use celox_state_layout::{SettleLayout, SettleObject};
 use std::collections::BTreeMap;
 
+mod prune;
+pub(crate) use prune::prune_stale_marks;
+
 /// The flag layout of `program`'s partitioned settle, if it has one.
 pub(crate) fn layout(
     program: &crate::ir::OptimizedSir,
