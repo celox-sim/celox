@@ -324,7 +324,7 @@ fn interface_signatures_collecting(
         .map(|prototype| {
             warnings.extend(crate::warning::analyzer_warnings(&prototype.warnings));
             let lowered = lower_module(
-                &prototype.module,
+                std::borrow::Cow::Borrowed(&prototype.module),
                 false,
                 true,
                 false,
@@ -1036,7 +1036,7 @@ fn lower_package_states(
         .enumerate()
         .map(|(index, module)| {
             let mut lowered = lower_module(
-                module,
+                std::borrow::Cow::Borrowed(module),
                 four_state,
                 true,
                 ff_parts,
@@ -2935,6 +2935,7 @@ fn prepare_external_hierarchy_collecting(
                 discovery: true,
                 ..HierarchicalNames::default()
             },
+            None,
         )?;
         ff::watched_properties(&lowered.source, &mut properties);
         for instance in &lowered.instances {
@@ -2982,6 +2983,7 @@ fn prepare_external_hierarchy_collecting(
                         properties: &properties,
                         ..HierarchicalNames::default()
                     },
+                    None,
                 )?,
             ))
         })
@@ -3701,7 +3703,7 @@ fn schedule_sources_collecting(
                 HierarchicalNames {
                     signals: &signals,
                     foreign_writes: foreign_writes.get(&module_id).unwrap_or(&no_foreign_writes),
-                    analyzed: analyses.get(&module_id).or(discovery_analysis.as_ref()),
+                    analyzed: analyses.get(&module_id),
                     recursion_report: analysis_options.recursion_report.as_deref(),
                     force_out_of_line: analysis_options.force_out_of_line_calls,
                     properties: &properties,
@@ -3713,6 +3715,7 @@ fn schedule_sources_collecting(
                             .unwrap_or(&no_foreign_references),
                     },
                 },
+                discovery_analysis,
             )?)
         };
         for (key, &module_id) in &module_ids {
@@ -4102,45 +4105,68 @@ fn specialize_module(
     warnings: &mut Vec<crate::warning::PendingWarning>,
     level_lists: LevelLists<'_>,
     hierarchical: HierarchicalNames<'_>,
+    owned_analysis: Option<sv::Ir>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     #[cfg(test)]
     tests::record_specialization(key, level_lists);
-    let analyzed;
-    let ir = match hierarchical.analyzed {
-        Some(ir) => {
+    let unsupported = || sv::AnalyzerError::Unsupported(format!("module `{}`", module.name));
+    fn find<'i>(ir: &'i sv::Ir, name: &str) -> Option<&'i sv::ir::Module> {
+        ir.modules()
+            .iter()
+            .find(|candidate| candidate.name() == name)
+    }
+    // The module lowered, and the same module when the recursion report
+    // needs it after a failed lowering (it keeps the shared analysis then).
+    let owned;
+    let (specialized, reported): (
+        std::borrow::Cow<'_, sv::ir::Module>,
+        Option<&sv::ir::Module>,
+    ) = match (hierarchical.analyzed, owned_analysis) {
+        (Some(ir), _) => {
             warnings.extend(crate::warning::analyzer_warnings(ir.warnings()));
-            ir
+            let specialized = find(ir, &module.name).ok_or_else(unsupported)?;
+            (std::borrow::Cow::Borrowed(specialized), Some(specialized))
         }
-        None => {
-            analyzed = analyze_specialization(module, design, key, hierarchical.signals, warnings)?;
-            &analyzed
+        (None, Some(ir)) if hierarchical.recursion_report.is_some() => {
+            owned = ir;
+            warnings.extend(crate::warning::analyzer_warnings(owned.warnings()));
+            let specialized = find(&owned, &module.name).ok_or_else(unsupported)?;
+            (std::borrow::Cow::Borrowed(specialized), Some(specialized))
+        }
+        (None, owned_analysis) => {
+            let ir = match owned_analysis {
+                Some(ir) => ir,
+                None => {
+                    analyze_specialization(module, design, key, hierarchical.signals, warnings)?
+                }
+            };
+            warnings.extend(crate::warning::analyzer_warnings(ir.warnings()));
+            let specialized = ir
+                .into_modules()
+                .into_iter()
+                .find(|candidate| candidate.name() == module.name)
+                .ok_or_else(unsupported)?;
+            (std::borrow::Cow::Owned(specialized), None)
         }
     };
-    let specialized = ir
-        .modules()
-        .iter()
-        .find(|candidate| candidate.name() == module.name)
-        .ok_or_else(|| sv::AnalyzerError::Unsupported(format!("module `{}`", module.name)))?;
     // Each module may store or wait on a watched property.
     let own;
     let properties = if hierarchical.discovery {
         let mut keys = hierarchical.properties.clone();
-        ff::watched_properties(specialized, &mut keys);
+        ff::watched_properties(&specialized, &mut keys);
         own = keys;
         &own
     } else {
         hierarchical.properties
     };
-    let counted;
     let specialized = if properties.is_empty() {
         specialized
     } else {
-        counted = specialized.clone().with_shared_variables(
+        std::borrow::Cow::Owned(specialized.into_owned().with_shared_variables(
             ff::PROPERTY_CHANGES,
             &property_change_names(properties),
             ff::PROPERTY_CHANGES_WIDTH,
-        );
-        &counted
+        ))
     };
     let local_forces = key
         .force_signals
@@ -4177,14 +4203,14 @@ fn specialize_module(
         hierarchical.shared,
         calls.as_mut(),
     );
-    let mut lowered = match (lowered, &calls, hierarchical.recursion_report) {
-        (Ok(lowered), _, _) => lowered,
+    let mut lowered = match (lowered, &calls, hierarchical.recursion_report, reported) {
+        (Ok(lowered), _, _, _) => lowered,
         // Report the graph recorded up to the error.
-        (Err(error), Some(graph), Some(path)) => {
+        (Err(error), Some(graph), Some(path), Some(specialized)) => {
             recursion::append(specialized, graph, path);
             return Err(error);
         }
-        (Err(error), _, _) => return Err(error),
+        (Err(error), ..) => return Err(error),
     };
     lowered.calls = calls;
     propagate_force_signals(&mut lowered.instances, &key.force_signals);
@@ -4314,7 +4340,7 @@ fn scope_time_scale(
 
 #[allow(clippy::too_many_arguments)]
 fn lower_module(
-    module: &sv::ir::Module,
+    module: std::borrow::Cow<'_, sv::ir::Module>,
     four_state: bool,
     implicit_nets_allowed: bool,
     ff_parts: bool,
@@ -4413,7 +4439,7 @@ struct FfEventRole {
 /// independently evaluated part, for lane-partitioned builds.
 #[allow(clippy::too_many_arguments)]
 fn lower_module_with_overrides(
-    module: &sv::ir::Module,
+    module: std::borrow::Cow<'_, sv::ir::Module>,
     parameter_overrides: &[LoweredSvParameterOverride],
     four_state: bool,
     implicit_nets_allowed: bool,
@@ -4426,39 +4452,45 @@ fn lower_module_with_overrides(
     shared: SharedAlways<'_>,
     mut calls: Option<&mut recursion::CallGraph>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
-    let parameter_types = module_parameter_types(module);
-    let constants = module_constants_with_overrides(module, parameter_overrides);
-    let demoted_stars = match level_lists {
-        LevelLists::Lowered { demoted }
-            if module.comb_processes().iter().any(|process| {
-                process.kind() == sv::ir::CombProcessKind::AlwaysStar
-                    && demoted.contains(&process.creation_order())
-            }) =>
-        {
-            Some(
-                module
-                    .clone()
-                    .run_comb_processes_as_processes(|_, process| {
-                        demoted.contains(&process.creation_order())
-                    }),
-            )
+    let parameter_types = module_parameter_types(&module);
+    let constants = module_constants_with_overrides(&module, parameter_overrides);
+    // The module's processes are rewritten in place when the lowering owns
+    // the module; a shared module is copied for the first rewrite.
+    let mut module = module;
+    if let LevelLists::Lowered { demoted } = level_lists
+        && module.comb_processes().iter().any(|process| {
+            process.kind() == sv::ir::CombProcessKind::AlwaysStar
+                && demoted.contains(&process.creation_order())
+        })
+    {
+        module = std::borrow::Cow::Owned(module.into_owned().run_comb_processes_as_processes(
+            |_, process| demoted.contains(&process.creation_order()),
+        ));
+    }
+    let sharing = share_always_variables(&module, &constants, &parameter_types, shared, warnings);
+    let shared_process_variables = match sharing {
+        Some((shared_module, names)) => {
+            module = std::borrow::Cow::Owned(shared_module);
+            Some(names)
         }
-        _ => None,
+        None => None,
     };
-    let module = demoted_stars.as_ref().unwrap_or(module);
-    let sharing = share_always_variables(module, &constants, &parameter_types, shared, warnings);
-    let module = sharing.as_ref().map_or(module, |(module, _)| module);
-    let shared_process_variables = sharing.as_ref().map(|(_, names)| names);
+    let shared_process_variables = shared_process_variables.as_ref();
+    // The rewrite visits the edge processes in order, once each.
     let fallbacks = module
         .ff_processes()
         .iter()
-        .any(|process| runs_as_process(module, process, &constants, &parameter_types))
-        .then(|| {
-            module.clone().run_edge_processes_as_processes(|process| {
-                runs_as_process(module, process, &constants, &parameter_types)
-            })
-        });
-    let module = fallbacks.as_ref().unwrap_or(module);
+        .map(|process| runs_as_process(&module, process, &constants, &parameter_types))
+        .collect::<Vec<_>>();
+    if fallbacks.contains(&true) {
+        let mut fallbacks = fallbacks.into_iter();
+        module = std::borrow::Cow::Owned(
+            module
+                .into_owned()
+                .run_edge_processes_as_processes(|_| fallbacks.next().unwrap_or(false)),
+        );
+    }
+    let module: &sv::ir::Module = &module;
     let mut ff_event_roles = Vec::new();
     for process in module.ff_processes() {
         let clock = clock_event_from_ff_process(process)
@@ -4491,6 +4523,8 @@ fn lower_module_with_overrides(
         .collect();
     validate_variable_driver_ranges(module, &drivers, &shared_all)?;
     validate_foreign_drivers(module, &drivers, &shared_memories, foreign_writes)?;
+    // The drivers above were scanned before the scheduled edges move, as
+    // the roles were: the rare rewrite works on a copy.
     let scheduled = module
         .ff_processes()
         .iter()
