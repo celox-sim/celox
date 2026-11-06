@@ -1196,6 +1196,30 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                         ("xezim", "system_functions::casts_between_numeric_types") => {
                             ("mismatch", "execute", "expect_output: expected")
                         }
+                        ("verilator", "concurrent_assertions::sequences_over_cycles") => (
+                            "compile_error",
+                            "compile",
+                            "Unsupported: Write to variable in sampled expression",
+                        ),
+                        ("icarus", "concurrent_assertions::sequences_over_cycles") => {
+                            ("compile_error", "compile", "Icarus build exit status")
+                        }
+                        (
+                            "verilator",
+                            "concurrent_assertions::sequence_values_over_sampled_ticks",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq marks: expected 0x5, got 0x0",
+                        ),
+                        ("xezim", "concurrent_assertions::sequence_values_over_sampled_ticks") => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq n_passed: expected 0x12, got 0x3",
+                        ),
+                        ("icarus", "concurrent_assertions::sequence_values_over_sampled_ticks") => {
+                            ("compile_error", "compile", "source_0.sv:14: syntax error")
+                        }
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

@@ -51,8 +51,390 @@ pub(super) fn concurrent_disable(expr: &Expr) -> Result<(), AnalyzerError> {
     Ok(())
 }
 
+/// One step of a sequence over cycles as each tick of the clock decides it
+/// (IEEE 1800-2023 16.7, 16.12.7): the attempt that started as many ticks
+/// ago as the step's offset reaches it if every earlier step matched.
+pub(super) struct SequenceStage {
+    /// Whether that attempt reaches the step; the first step always.
+    pub alive: Option<Expr>,
+    /// Whether the step matches at this tick.
+    pub matched: Expr,
+    /// An antecedent step, whose miss makes the attempt vacuous.
+    pub antecedent: bool,
+    /// The last step, whose match makes the attempt succeed.
+    pub last: bool,
+    /// The subroutine calls of its match items (16.11).
+    pub calls: Vec<Stmt>,
+    /// The step's offset in ticks from the start of its attempt.
+    pub offset: u32,
+}
+
+/// A sequence over cycles as its monitor decides it at each tick.
+pub(super) struct SequenceMonitor {
+    pub stages: Vec<SequenceStage>,
+    /// The monitor's count of the ticks it has seen, saturating at the
+    /// sequence's length: an attempt `k` ticks old exists only once `k`
+    /// ticks have passed.
+    pub ticks: Option<(String, u32)>,
+    /// The statements that end each tick: they keep the values that later
+    /// ticks read.
+    pub updates: Vec<Stmt>,
+}
+
+/// A value of an attempt that a later tick reads, a step's match or a
+/// local variable's assignment: computed at each tick from that tick's
+/// sampled values and kept for as many ticks as the latest read needs.
+pub(super) struct SequenceRegister {
+    /// Its value at this tick, sampled.
+    pub now: Expr,
+    pub ty: Type,
+    /// The values of the previous ticks, the latest first.
+    pub chain: Vec<String>,
+}
+
+/// An assignment to a local variable (16.10): how many assignments of the
+/// sequence precede it, the offset of its step, the value with the local
+/// reads it makes replaced but not yet sampled, and its register.
+pub(super) struct SequenceAssignment {
+    pub order: usize,
+    pub offset: u32,
+    pub value: Expr,
+    pub register: usize,
+}
+
+/// The local variables of a sequence by unique name, with their
+/// assignments in order.
+pub(super) type SequenceLocals = HashMap<String, Vec<SequenceAssignment>>;
+
+/// A point of an attempt: the offset of a step and how many local variable
+/// assignments of the sequence precede it, so a match item sees the
+/// assignments listed before it in its own step (16.10, 16.11).
+#[derive(Clone, Copy)]
+pub(super) struct SequencePoint {
+    pub at: u32,
+    pub before: usize,
+}
+
+/// `expr` evaluated over sampled values (16.5.1, 16.6): every variable it
+/// reads, also in a select's bounds and a function's arguments, takes its
+/// sampled value, and a function is evaluated on its sampled arguments.
+pub(super) fn sampled(expr: Expr) -> Expr {
+    Expr::Call {
+        callee: Callee::System(SystemFunction::Sampled),
+        args: vec![Some(expr)],
+        arg_order: Vec::new(),
+    }
+}
+
+/// Whether `expr` names one of `locals`.
+fn reads_local(expr: &Expr, locals: &SequenceLocals) -> bool {
+    let mut reads = false;
+    rename_expr_idents(&mut expr.clone(), &mut |name| {
+        reads |= locals.contains_key(name.as_str());
+        None
+    });
+    reads
+}
+
+/// Replace each identifier of `expr` that `values` gives a value for.
+/// `None` when such an identifier is a select's bound, which takes no
+/// expression.
+fn substitute(expr: &mut Expr, values: &HashMap<String, Expr>) -> Option<()> {
+    let mut bound = false;
+    let mut check = |bounds: &[&ConstExpr]| {
+        for bound_expr in bounds {
+            rename_const_idents(&mut (*bound_expr).clone(), &mut |name| {
+                bound |= values.contains_key(name.as_str());
+                None
+            });
+        }
+    };
+    match expr {
+        Expr::Ident(name) => {
+            if let Some(value) = values.get(name.as_str()) {
+                *expr = value.clone();
+            }
+        }
+        Expr::Literal(_) => {}
+        Expr::Select { expr, msb, lsb, .. } => {
+            check(&[msb, lsb]);
+            substitute(expr, values)?;
+        }
+        Expr::Concat(parts) => {
+            for part in parts {
+                substitute(part, values)?;
+            }
+        }
+        Expr::RepeatConcat { count, parts } => {
+            check(&[count]);
+            for part in parts {
+                substitute(part, values)?;
+            }
+        }
+        Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => substitute(expr, values)?,
+        Expr::Binary { left, right, .. } => {
+            substitute(left, values)?;
+            substitute(right, values)?;
+        }
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            substitute(condition, values)?;
+            substitute(then_expr, values)?;
+            substitute(else_expr, values)?;
+        }
+        Expr::Call { args, .. } => {
+            for arg in args.iter_mut().flatten() {
+                substitute(arg, values)?;
+            }
+        }
+        Expr::Inside { expr, items } => {
+            substitute(expr, values)?;
+            for item in items {
+                match item {
+                    InsideItem::Value(value) => substitute(value, values)?,
+                    InsideItem::Range { low, high } => {
+                        substitute(low, values)?;
+                        substitute(high, values)?;
+                    }
+                }
+            }
+        }
+    }
+    (!bound).then_some(())
+}
+
+impl BodyBuilder<'_, '_, '_> {
+    /// `expr` at `point` of an attempt with each read of a local variable
+    /// replaced by the value of its last earlier assignment: the value
+    /// itself when that assignment is at the same tick, else the register
+    /// that keeps it. The result is not yet sampled; [`sampled`] samples
+    /// it whole, the registers included, which change only at the end of
+    /// a tick.
+    pub(super) fn sequence_value(
+        &mut self,
+        expr: &Expr,
+        point: SequencePoint,
+        locals: &SequenceLocals,
+        registers: &mut [SequenceRegister],
+    ) -> Converted<Expr> {
+        if !reads_local(expr, locals) {
+            return Ok(expr.clone());
+        }
+        // A sampled-value function keeps the history of what it names,
+        // which a local variable has none of.
+        let mut history = false;
+        const_functions::visit_expr_calls(expr, &mut |callee, args| {
+            if let Callee::System(function) = callee
+                && function.reads_sampled_values()
+            {
+                match args {
+                    const_functions::CallArguments::Expressions(args) => {
+                        history |= args.iter().flatten().any(|arg| reads_local(arg, locals));
+                    }
+                    const_functions::CallArguments::Constants(args) => {
+                        for arg in args {
+                            rename_const_idents(&mut arg.clone(), &mut |name| {
+                                history |= locals.contains_key(name.as_str());
+                                None
+                            });
+                        }
+                    }
+                }
+            }
+        });
+        if history {
+            return Err(unsupported(
+                "sampled-value function of a local variable of a sequence",
+            ));
+        }
+        // The assignment each local read sees.
+        let mut reads = Vec::new();
+        let mut missing = false;
+        rename_expr_idents(&mut expr.clone(), &mut |name| {
+            if let Some(assignments) = locals.get(name.as_str()) {
+                match assignments
+                    .iter()
+                    .rev()
+                    .find(|assignment| assignment.order < point.before)
+                {
+                    Some(assignment) => reads.push((name.clone(), assignment)),
+                    None => missing = true,
+                }
+            }
+            None
+        });
+        if missing {
+            return Err(unsupported(
+                "local variable of a sequence read before a step assigns it",
+            ));
+        }
+        // A register is a variable, which also a select's bound may name.
+        let mut values = HashMap::default();
+        let mut renames = HashMap::default();
+        for (name, assignment) in reads {
+            let ago = point.at - assignment.offset;
+            if ago == 0 {
+                values.insert(name, assignment.value.clone());
+            } else {
+                let register = self.sequence_register(registers, assignment.register, ago);
+                renames.insert(name, register);
+            }
+        }
+        let mut result = expr.clone();
+        rename_expr_idents(&mut result, &mut |name| {
+            if let Some(register) = renames.get(name.as_str()) {
+                *name = register.clone();
+            }
+            None
+        });
+        substitute(&mut result, &values).ok_or_else(|| {
+            unsupported("select bound reading a local variable of a sequence assigned in its step")
+        })?;
+        Ok(result)
+    }
+
+    /// The variable of `registers[index]` that holds its value of `ago`
+    /// ticks before this one.
+    pub(super) fn sequence_register(
+        &mut self,
+        registers: &mut [SequenceRegister],
+        index: usize,
+        ago: u32,
+    ) -> String {
+        let register = &mut registers[index];
+        while register.chain.len() < ago as usize {
+            let delay = register.chain.len() + 1;
+            let name = self.declare(
+                &format!("past{index}@{delay}@sequence"),
+                register.ty.clone(),
+            );
+            register.chain.push(name);
+        }
+        register.chain[ago as usize - 1].clone()
+    }
+}
+
+/// The statements that end a tick: each register's chain moves one tick
+/// back and takes the value of this tick, all computed before any moves.
+pub(super) fn register_updates(
+    registers: Vec<SequenceRegister>,
+    mut temporary: impl FnMut(&Type) -> String,
+) -> Vec<Stmt> {
+    let assign = |name: String, rhs: Expr| Stmt::Assign {
+        lhs: LValue::Ident(name),
+        rhs,
+        nonblocking: false,
+    };
+    let mut computed = Vec::new();
+    let mut moves = Vec::new();
+    for register in registers {
+        if register.chain.is_empty() {
+            continue;
+        }
+        let now = temporary(&register.ty);
+        computed.push(assign(now.clone(), register.now));
+        for delay in (1..register.chain.len()).rev() {
+            moves.push(assign(
+                register.chain[delay].clone(),
+                Expr::Ident(register.chain[delay - 1].clone()),
+            ));
+        }
+        moves.push(assign(register.chain[0].clone(), Expr::Ident(now)));
+    }
+    computed.extend(moves);
+    computed
+}
+
 #[cfg(test)]
 mod tests {
+    fn analyze(locals: &str, property: &str) -> Result<(), String> {
+        let source = format!(
+            "module Top(input bit clk, b, input bit [7:0] bus, input int i); \
+             int g; function automatic int reads_g(); return g; endfunction \
+             function automatic int twice(int v); return v * 2; endfunction \
+             function automatic void note(int v); endfunction bit [7:0] mem [0:3]; \
+             function automatic void fill(output int v); v = 1; endfunction \
+             property p; {locals} @(posedge clk) {property}; endproperty \
+             assert property (p); endmodule"
+        );
+        crate::analyze_source(&source, std::path::Path::new("steps.sv"))
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    /// Every value of a sequence is evaluated over the sampled values of
+    /// the tick that decides it and kept for later ticks, so sampled-value
+    /// functions, `$time`, other system functions and variable selects in any
+    /// step are supported (IEEE 1800-2023 16.6, 16.10).
+    #[test]
+    fn values_of_earlier_steps_are_kept_from_their_ticks() {
+        for (locals, property) in [
+            ("", "$rose(b) ##1 b"),
+            ("", "($time == 1) |-> ##1 b"),
+            ("int idx;", "(1, idx = i) ##1 bus[idx]"),
+            ("int x;", "(b, x = $countones(bus)) ##1 x == i"),
+            ("", "b ##1 bus[i] == $countones(bus)"),
+            ("", "(b, $readmemh(\"m.hex\", mem)) ##1 b"),
+        ] {
+            if let Err(error) = analyze(locals, property) {
+                panic!("{property}: {error}");
+            }
+        }
+    }
+
+    /// What a sequence cannot keep is rejected: a select of a local as an
+    /// assignment target, a sampled-value function of a local, a select
+    /// bound reading a local assigned in its own step, and a user function,
+    /// whose reads of module variables would not be sampled.
+    #[test]
+    fn values_a_sequence_cannot_keep_are_rejected() {
+        for (locals, property, expected) in [
+            (
+                "int x;",
+                "(b, x[0] = 1) ##1 x",
+                "select of a local variable",
+            ),
+            (
+                "int x;",
+                "(b, x = i) ##1 $rose(x)",
+                "sampled-value function of a local",
+            ),
+            (
+                "int x;",
+                "(b, x = i, x = bus[x]) ##1 x",
+                "select bound reading a local",
+            ),
+            ("int x;", "(b, x = twice(i)) ##1 x == i", "call `twice`"),
+            ("", "(b, note(reads_g())) ##1 b", "call `reads_g`"),
+            (
+                "int x;",
+                "(b, x = i, fill(x)) ##1 b",
+                "passed to an output, inout or ref",
+            ),
+            ("", "b ##1025 b", "sequence longer than 1024 ticks"),
+            ("", "b ##2147483647 b", "sequence longer than 1024 ticks"),
+        ] {
+            let Err(error) = analyze(locals, property) else {
+                panic!("{property} is accepted");
+            };
+            assert!(error.contains(expected), "{property}: {error}");
+        }
+    }
+
+    /// A declaration whose body starts with a cast of a built-in type
+    /// declares no local variable.
+    #[test]
+    fn leading_casts_are_no_local_declarations() {
+        let source = "module Top(input bit clk, b); sequence s; int'(b) ##1 b; endsequence \
+                      assert property (@(posedge clk) s); endmodule";
+        if let Err(error) = crate::analyze_source(source, std::path::Path::new("cast.sv")) {
+            panic!("{error}");
+        }
+    }
+
     #[test]
     fn disable_conditions_do_not_infer_the_property_clock() {
         for condition in [

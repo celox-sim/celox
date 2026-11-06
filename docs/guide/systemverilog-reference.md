@@ -1930,7 +1930,7 @@ The cases that remain excluded fall into these groups:
 
 ### Concurrent assertions
 
-Module and generate items support single-cycle Boolean `assert property`,
+Module and generate items support Boolean `assert property`,
 `assume property`, and `cover property` with an explicit clock:
 
 ```systemverilog
@@ -1962,8 +1962,25 @@ instance, or of a sequence used as the antecedent, overrides the assertion's
 optionally after the assertion's clocking event, and a consequent instance may
 not have a different clock or an implication.
 
+A sequence may also be steps a fixed number of clock ticks apart, as in
+`a ##1 b` or `(valid, x = in) ##4 (out == x + 4)`, with `|->` or `|=>`
+between two such sequences (IEEE 1800-2023 16.7, 16.12.7), spanning at most
+1024 ticks. A named sequence
+or property may declare local variables of built-in integral types; match items
+assign them and call subroutines, which run in Reactive with the actions
+and see the values the assignments sampled (16.10, 16.11). Every value of a
+step, a match item's included, is evaluated over the sampled values of the
+tick that decides it, so sampled-value functions and variable selects may
+appear in any step (16.6). A named sequence may be the antecedent of `|->`.
+Each clock tick
+starts an attempt; a step that misses fails the attempt, or makes it succeed
+vacuously in the antecedent, and the last step's match runs the pass action.
+
 Procedural concurrent assertions, implicit/default clocking, named properties
-and sequences with formal arguments or elsewhere, delays/repetition,
-sampled-history and user-function predicates, and timed/NBA action statements
-remain unsupported.
+and sequences with formal arguments or elsewhere, cycle-delay ranges,
+repetition, sequence operators (`and`, `or`, `intersect`, `throughout`),
+instances inside a multi-cycle sequence, `disable iff` with a multi-cycle
+sequence, user function calls in predicates and in the values and by-value
+arguments of match items, and timed/NBA action
+statements remain unsupported.
 Explicit `disable iff` follows the clock in the supported syntax.

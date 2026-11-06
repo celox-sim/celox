@@ -1066,6 +1066,10 @@
     "sv_real_to_integral_class_properties": {
       "title": "A real value assigned to an integral class property is stored unconverted: with `int value`, `m.b.value = 5.5` and `$cast(m.b.value, 7.5)` leave 5.5 and 7.5 in the property instead of rounding to 6 and 8",
       "standard": "IEEE 1800-2023 6.12.1, 6.24.2, 10.7"
+    },
+    "sv_vacuous_success_pass_action": {
+      "title": "The pass action of a concurrent assertion does not run on a vacuous success: `assert property (@(posedge clk) a |-> b) passed++;` with `a` false at every tick leaves `passed` at 0",
+      "standard": "IEEE 1800-2023 16.14.8, 20.11"
     }
   },
   "cases": [
@@ -4659,6 +4663,14 @@
       "classification": "xezim_bug",
       "bug": "sv_semantic_leading_clock",
       "note": "assert property (@(posedge clk) low) with sequence low; @(negedge clk) cnt < 2; endsequence is clocked by negedge clk (16.16.1: the semantic leading clock of @(c) m is that of m when m has an explicit one), giving low_passed=1, low_failed=2; xezim 0.11.4 checks at posedge (low_passed=2). It also never fails assert property (tick |-> zero), whose leading clock is the antecedent's @(posedge clk). Observed through the suite harness; xezim passes named_sequences_and_properties, which uses the same declarations without overriding clocks."
+    },
+    {
+      "suite": "sv",
+      "name": "concurrent_assertions::sequence_values_over_sampled_ticks",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_vacuous_success_pass_action",
+      "note": "By default the pass action runs on vacuous success as on nonvacuous success (20.11; 16.14.8), so `n |-> cnt % 8 == 1`, whose antecedent matches at 5 of 20 ticks and whose consequent holds at 3 of them, runs its pass action 18 times. The pinned xezim runs it 3 times: it skips the pass action of every vacuous success, also for a Boolean `a |-> b` with `a` always false (0 passes instead of one per tick). The case's match-item calls, local values and sampled select bounds agree. Celox prints 18; Verilator 5.052 does not run the named sequence's match-item call (retained)."
     },
     {
       "suite": "sv",

@@ -21,6 +21,17 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "concurrent_assertions::sequence_values_over_sampled_ticks at 411:22: assert_eq n_passed: expected 0x12, got 0x3",
+      "expectation": "Simulation",
+      "name": "concurrent_assertions::sequence_values_over_sampled_ticks",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }
