@@ -70,6 +70,10 @@ pub(super) struct ExecutionArgs {
     native_memory_width: Option<usize>,
     #[arg(long, value_enum)]
     x86_slp: Option<OnOff>,
+    /// Write the partitioned settle's plan, with a lint of its
+    /// dependencies, to this file while compiling.
+    #[arg(long, value_name = "FILE")]
+    pub dump_settle_plan: Option<PathBuf>,
     /// Record waveform changes at each simulation time step (VCD).
     #[arg(long, value_name = "FILE", conflicts_with = "compile_only")]
     pub vcd: Option<PathBuf>,
@@ -214,6 +218,7 @@ struct Options {
     opt_level: OptLevel,
     backend: Backend,
     four_state: bool,
+    dump_settle_plan: Option<PathBuf>,
     vcd: Option<PathBuf>,
     fst: Option<PathBuf>,
     compile_only: bool,
@@ -317,6 +322,7 @@ pub(super) fn run(
         opt_level: design.opt_level.unwrap_or(OptLevel::O2),
         backend,
         four_state: design.four_state.unwrap_or(false),
+        dump_settle_plan: cli.dump_settle_plan,
         vcd: cli.vcd,
         fst: cli.fst,
         compile_only: cli.compile_only,
@@ -579,6 +585,9 @@ pub(super) fn run(
         .hotspot_jit(opts.hotspot_jit)
         .threads(opts.threads as usize)
         .diagnostics_from_env();
+    if let Some(path) = &opts.dump_settle_plan {
+        builder = builder.settle_plan_output(path);
+    }
     if let Some(path) = &opts.vcd {
         builder = builder.vcd(path);
     }
@@ -621,6 +630,7 @@ pub(super) fn run(
             let (compiled, mut trace) = builder
                 .trace_pre_optimized_sir()
                 .trace_post_optimized_sir()
+                .trace_settle_plan()
                 .trace_mir()
                 .compile_native_with_trace()?;
             if let Some(output_path) = &opts.native_image_output {
@@ -694,6 +704,16 @@ pub(super) fn run(
                 .ok_or(RunError::MissingTrace {
                     artifact: "native state-layout analysis",
                 })?;
+            if let Some(plan) = trace.settle_plan.take() {
+                let plan_path = output_dir.join("settle_plan.txt");
+                fs::write(&plan_path, &plan)?;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "wrote settle plan ({} bytes) to {}",
+                    plan.len(),
+                    plan_path.display()
+                );
+            }
             let native_sir_path = output_dir.join("native_optimized.sir");
             let mir_path = output_dir.join("mir.txt");
             let reactive_graph_path = output_dir.join("reactive_event_graph.txt");

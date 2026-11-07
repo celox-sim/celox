@@ -1706,6 +1706,45 @@ pub fn schedule_symbolic_rtl_reporting_loops(
     };
     let settle_partitions = schedule.partitions.clone();
     let settle_copies = schedule.copies.clone();
+    if let Some(t) = trace.as_deref_mut()
+        && trace_opts.settle_plan
+        && !settle_partitions.is_empty()
+    {
+        let instance_paths: HashMap<InstanceId, String> = expanded
+            .iter()
+            .map(|(path, &id)| {
+                let text = path
+                    .0
+                    .iter()
+                    .map(|(name, index)| {
+                        if *index == 0 {
+                            name.clone()
+                        } else {
+                            format!("{name}[{index}]")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(".");
+                (id, text)
+            })
+            .collect();
+        t.settle_plan = Some(super::settle_plan::format(&settle_partitions, |address| {
+            let variable = instance_modules
+                .get(&address.instance_id)
+                .and_then(|module| modules.get(module))
+                .and_then(|module| module.variables.get(&address.var_id));
+            match variable {
+                Some(variable) => format!(
+                    "{}.{}",
+                    instance_paths
+                        .get(&address.instance_id)
+                        .map_or("", String::as_str),
+                    variable.path.join(".")
+                ),
+                None => address.to_string(),
+            }
+        }));
+    }
 
     let settle_flags = settle_flags.filter(|_| !settle_partitions.is_empty());
     if let Some(settle) = &settle_flags {

@@ -150,6 +150,33 @@ fn partitioned_native_matches_single_pass() {
 /// A count of dirty partitions says nothing about their share of the work:
 /// unrelated partitions can contain much wider expressions or larger processes.
 /// Updating one input must not promote its three readers to a full settle.
+/// The traced plan lists every partition and its compared chunks, and its
+/// lint finds no reader marked for bits it does not read: `s3` takes
+/// `s2[3:0]` and `s1[7:4]`, so neither whole variable makes it a reader.
+#[test]
+fn traced_settle_plan_marks_only_readers_of_compared_bits() {
+    let result = partitioned().trace_settle_plan().build_with_trace();
+    let plan = result
+        .trace
+        .settle_plan
+        .clone()
+        .expect("a partitioned settle has a plan");
+    result.expect("the design builds");
+    assert!(plan.starts_with("settle plan: "), "{plan}");
+    assert!(
+        plan.contains("readers marked for bits they do not read (!) 0:"),
+        "{plan}"
+    );
+    assert!(plan.contains("\npartition 0 cost "), "{plan}");
+    assert!(plan.contains("  watch  "), "{plan}");
+    assert!(
+        !plan
+            .lines()
+            .any(|line| line.starts_with("  watch  ") && line.contains('!')),
+        "{plan}"
+    );
+}
+
 #[test]
 fn sparse_partition_updates_do_not_promote_unrelated_work() {
     const SOURCE: &str = r#"

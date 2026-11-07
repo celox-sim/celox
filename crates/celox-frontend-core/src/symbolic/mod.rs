@@ -12,6 +12,7 @@ pub mod flattening;
 pub mod parallel;
 pub mod pow;
 pub mod remap;
+pub mod settle_plan;
 pub mod width;
 
 /// The state objects `instruction` may read, each in part or whole: a Load's
