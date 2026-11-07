@@ -876,12 +876,563 @@ impl Ff<'_, '_> {
         Ok((unit, frame.size_patches, staging, calls))
     }
 
+    /// The delay word `word` of a suspension with status `code` from a call
+    /// of the kernel being lowered, as the process's: a wait at function
+    /// wait site `k` is a wait at the process's site `own + k`, `own` the
+    /// number of the kernel's own sites, which is patched in when the
+    /// kernel is finished (see `Ff::wait_offset_patches`).
+    fn function_wait_word(&mut self, code: RegisterId, word: RegisterId) -> RegisterId {
+        let status = |b: &mut SIRBuilder<Addr>, status: celox_design::ProcessStatus| {
+            let value = b.alloc_bit(celox_design::PROCESS_STATUS_WIDTH, false);
+            b.emit(SIRInstruction::Imm(value, SIRValue::new(status.code())));
+            let equal = b.alloc_bit(1, false);
+            b.emit(SIRInstruction::Binary(equal, code, BinaryOp::Eq, value));
+            equal
+        };
+        let wait = status(&mut self.b, celox_design::ProcessStatus::Wait);
+        let pending = status(&mut self.b, celox_design::ProcessStatus::Pending);
+        let waits = self.b.alloc_bit(1, false);
+        self.b
+            .emit(SIRInstruction::Binary(waits, wait, BinaryOp::Or, pending));
+        let width = celox_design::PROCESS_DELAY_WIDTH;
+        let zeros = self.b.alloc_bit(width - 1, false);
+        self.b.emit(SIRInstruction::Imm(zeros, SIRValue::new(0u8)));
+        let factor = self.b.alloc_bit(width, false);
+        self.b
+            .emit(SIRInstruction::Concat(factor, vec![zeros, waits]));
+        let own = self.b.alloc_bit(width, false);
+        self.b.emit(SIRInstruction::Imm(own, SIRValue::new(0u8)));
+        self.wait_offset_patches.push(own);
+        let offset = self.b.alloc_bit(width, false);
+        self.b
+            .emit(SIRInstruction::Binary(offset, factor, BinaryOp::Mul, own));
+        let translated = self.b.alloc_bit(width, false);
+        self.b.emit(SIRInstruction::Binary(
+            translated,
+            word,
+            BinaryOp::Add,
+            offset,
+        ));
+        translated
+    }
+
     /// Whether a unit with resume slots is being lowered, which can
     /// suspend the process it runs in.
     pub(super) fn can_suspend_unit(&self) -> bool {
         self.frame
             .as_ref()
             .is_some_and(|frame| frame.resume.is_some())
+    }
+
+    /// The end of the frame of the unit being lowered, function `own`
+    /// whose frame starts at the value of `base`.
+    fn own_top(&mut self, base: SourceVarId, own: usize) -> RegisterId {
+        let current = self.b.alloc_bit(32, false);
+        self.b.emit(SIRInstruction::Load(
+            current,
+            stable(base),
+            SIROffset::Static(0),
+            32,
+        ));
+        // The frame size is patched once known.
+        let size = self.b.alloc_bit(32, false);
+        self.b.emit(SIRInstruction::Imm(size, SIRValue::new(0u32)));
+        self.frame
+            .as_mut()
+            .expect("lowering a function unit")
+            .size_patches
+            .push((size, own));
+        let end = self.b.alloc_bit(32, false);
+        self.b
+            .emit(SIRInstruction::Binary(end, current, BinaryOp::Add, size));
+        end
+    }
+
+    /// Suspend the unit being lowered with the delay word `word` of a wait
+    /// at one of the module's function wait sites (see
+    /// `ProcModule::function_wait_sites`); the open block afterwards is the
+    /// resume point, whose value it returns.
+    pub(super) fn unit_wait(&mut self, word: u64) -> Result<u32, sv::AnalyzerError> {
+        let request = self.b.alloc_bit(celox_design::PROCESS_DELAY_WIDTH, false);
+        self.b
+            .emit(SIRInstruction::Imm(request, SIRValue::new(word)));
+        self.unit_wait_word(request)
+    }
+
+    /// [`Self::unit_wait`] with the delay word in register `request`.
+    fn unit_wait_word(&mut self, request: RegisterId) -> Result<u32, sv::AnalyzerError> {
+        let status = self.b.alloc_bit(celox_design::PROCESS_STATUS_WIDTH, false);
+        self.b.emit(SIRInstruction::Imm(
+            status,
+            SIRValue::new(celox_design::ProcessStatus::Wait.code()),
+        ));
+        self.suspend_unit(status, request, None)
+    }
+
+    /// The process continues after a wait in the unit being lowered: a
+    /// flush point of its deferred assertions (IEEE 1800-2023 16.4.2), as
+    /// a kernel's resume from a wait is. The site is the module's one for
+    /// every unit; it flushes the queue of the process the unit runs in.
+    pub(super) fn unit_flush_point(&mut self) {
+        let site = match self.m.unit_flush_site {
+            Some(site) => site,
+            None => {
+                let site = self.m.event_site(RuntimeEventSite {
+                    kind: RuntimeEventKind::Write,
+                    template: None,
+                    sizing: DisplaySizing::Ieee,
+                    scope: None,
+                    location: None,
+                    assertion: None,
+                    deferred: Some(DeferredSite::ProcessFlushPoint),
+                    timestamp_arg: false,
+                    arg_widths: Vec::new(),
+                    arg_signed: Vec::new(),
+                    arg_is_string: Vec::new(),
+                    arg_float_precision: Vec::new(),
+                    arg_is_handle: Vec::new(),
+                });
+                self.m.unit_flush_site = Some(site);
+                site
+            }
+        };
+        self.b.emit(SIRInstruction::RuntimeEvent {
+            site_id: site,
+            args: Vec::new(),
+        });
+    }
+
+    /// At resume point `point` of a wait with delay word `word`: continue
+    /// when `woken`, a one-bit register, holds; otherwise report that the
+    /// wait is still pending and return to the same point, as a kernel's
+    /// `wake_if` does. The continuation is open afterwards.
+    pub(super) fn unit_wake_if(
+        &mut self,
+        woken: RegisterId,
+        point: u32,
+        word: u64,
+    ) -> Result<(), sv::AnalyzerError> {
+        let frame = self.frame.as_ref().expect("lowering a function unit");
+        let (own, base) = (frame.function, frame.base);
+        let resume = frame
+            .resume
+            .as_ref()
+            .ok_or_else(|| unsupported("a wait in a unit that cannot suspend"))?;
+        let (resume_var, status_var, request_var, top_var) =
+            (resume.resume, resume.status, resume.request, resume.top);
+        let continuation = self.b.new_block();
+        let pending = self.b.new_block();
+        self.b.seal_block(SIRTerminator::Branch {
+            cond: woken,
+            true_block: (continuation, Vec::new()),
+            false_block: (pending, Vec::new()),
+        });
+        self.b.switch_to_block(pending);
+        let width = celox_frontend_core::process::PROCESS_RESUME_WIDTH;
+        let point_value = self.b.alloc_bit(width, false);
+        self.b.emit(SIRInstruction::Imm(
+            point_value,
+            SIRValue::new(u64::from(point)),
+        ));
+        self.store(resume_var, SIROffset::Static(0), width, point_value);
+        let status = self.b.alloc_bit(celox_design::PROCESS_STATUS_WIDTH, false);
+        self.b.emit(SIRInstruction::Imm(
+            status,
+            SIRValue::new(celox_design::ProcessStatus::Pending.code()),
+        ));
+        self.store(
+            status_var,
+            SIROffset::Static(0),
+            celox_design::PROCESS_STATUS_WIDTH,
+            status,
+        );
+        let request = self.b.alloc_bit(celox_design::PROCESS_DELAY_WIDTH, false);
+        self.b
+            .emit(SIRInstruction::Imm(request, SIRValue::new(word)));
+        self.store(
+            request_var,
+            SIROffset::Static(0),
+            celox_design::PROCESS_DELAY_WIDTH,
+            request,
+        );
+        let top = self.own_top(base, own);
+        self.store(
+            top_var,
+            SIROffset::Static(0),
+            celox_design::PROCESS_CALL_TOP_WIDTH,
+            top,
+        );
+        self.b.seal_block(SIRTerminator::Return);
+        self.b.switch_to_block(continuation);
+        Ok(())
+    }
+
+    /// An event control in the unit being lowered (IEEE 1800-2023 9.4.2).
+    ///
+    /// Each occurrence of an item is counted where it happens, as for a
+    /// kernel, when the items are module variables whose `iff` is either a
+    /// module variable or reads only the unit's frame. Such a frame-only
+    /// condition, such as whether a virtual interface the frame holds
+    /// denotes an instance (the analyzer makes one item per instance it may
+    /// denote), cannot change while the process waits: the unit evaluates
+    /// it at the start of the wait and waits at the site whose terms are
+    /// the items it selects, one site for each selection, among the sites
+    /// it lays out for the control. Items whose conditions compare one value
+    /// with distinct constants select at most one of them; otherwise each
+    /// set of them is a site, for up to [`MAX_SELECTED_ITEMS`] such items.
+    ///
+    /// Any other item reads the frame in its expression: the unit keeps a
+    /// sample of each item in its frame, waits for a change of what the
+    /// items read, and at each resume compares each item with its sample by
+    /// the edge rules of the item (Table 9-2), waiting again when none
+    /// occurred; samples in module variables, as a kernel's `$event[k]`
+    /// proxies take them, would be shared by every process waiting at the
+    /// site.
+    pub(super) fn unit_wait_event(
+        &mut self,
+        items: &[sv::ir::EventItem],
+    ) -> Result<(), sv::AnalyzerError> {
+        let items: Vec<sv::ir::EventItem> = items
+            .iter()
+            .map(|item| sv::ir::EventItem {
+                edge: item.edge,
+                expr: self.propagate(&item.expr),
+                iff: item.iff.as_ref().map(|iff| self.propagate(iff)),
+            })
+            .collect();
+        let shared = |this: &Self, expr: &sv::ir::Expr, one_bit: bool| match expr {
+            sv::ir::Expr::Ident(name) => this.m.id(name).is_some_and(|id| {
+                let variable = this.m.var(id);
+                !this.m.is_hidden(id)
+                    && variable.array_dims.is_empty()
+                    && (!one_bit || (variable.width == 1 && variable.float.is_none()))
+            }),
+            _ => false,
+        };
+        // Items that read no slot of the frame are those of a kernel's event
+        // control, over module storage, static storage of subroutines
+        // included: the kernel's terms, gates and proxies serve them.
+        if items.iter().all(|item| {
+            !self.reads_frame(&item.expr)
+                && item.iff.as_ref().is_none_or(|iff| !self.reads_frame(iff))
+        }) {
+            let mut terms = Vec::new();
+            let mut gates = Vec::new();
+            let mut samples = Vec::new();
+            self.event_terms(&items, &mut terms, &mut gates, &mut samples)?;
+            return self.suspend_on(terms, gates, samples);
+        }
+        // The items whose condition the frame decides, by position.
+        let mut selected = Vec::new();
+        let counted = items.iter().enumerate().all(|(position, item)| {
+            shared(self, &item.expr, false)
+                && match &item.iff {
+                    None => true,
+                    Some(iff) if self.frame_only(iff) => {
+                        selected.push(position);
+                        true
+                    }
+                    Some(iff) => !self.reads_frame(iff),
+                }
+        });
+        if !counted {
+            return self.unit_sampled_event(&items);
+        }
+        // The weight of each selected item in the number of the site: with
+        // conditions that select at most one item, its rank; otherwise a bit.
+        let (constants, parameter_types) = (self.m.constants, self.m.parameter_types);
+        let value = |expr: &sv::ir::Expr| {
+            let constant = match expr {
+                sv::ir::Expr::Literal(literal) => sv::ir::ConstExpr::Literal(literal.clone()),
+                sv::ir::Expr::Ident(name) if constants.contains_key(name) => {
+                    sv::ir::ConstExpr::Ident(name.clone())
+                }
+                _ => return None,
+            };
+            sv::typecheck::eval_const_expr_with_types(&constant, constants, parameter_types)
+        };
+        let exclusive = exclusive_selection(
+            selected.iter().map(|&position| {
+                items[position]
+                    .iff
+                    .as_ref()
+                    .expect("a selected item has a condition")
+            }),
+            value,
+        );
+        if !exclusive && selected.len() > MAX_SELECTED_ITEMS {
+            return self.unit_sampled_event(&items);
+        }
+        let selections: Vec<Vec<usize>> = if exclusive {
+            std::iter::once(Vec::new())
+                .chain(selected.iter().map(|&position| vec![position]))
+                .collect()
+        } else {
+            (0..1usize << selected.len())
+                .map(|mask| {
+                    (0..selected.len())
+                        .filter(|bit| mask & (1 << bit) != 0)
+                        .map(|bit| selected[bit])
+                        .collect()
+                })
+                .collect()
+        };
+        let mut first = None;
+        let mut samples = Vec::new();
+        for chosen in &selections {
+            let site_items: Vec<sv::ir::EventItem> = items
+                .iter()
+                .enumerate()
+                .filter(|(position, _)| !selected.contains(position) || chosen.contains(position))
+                .map(|(position, item)| sv::ir::EventItem {
+                    edge: item.edge,
+                    expr: item.expr.clone(),
+                    iff: if selected.contains(&position) {
+                        None
+                    } else {
+                        item.iff.clone()
+                    },
+                })
+                .collect();
+            let mut terms = Vec::new();
+            let mut gates = Vec::new();
+            self.event_terms(&site_items, &mut terms, &mut gates, &mut samples)?;
+            if gates.iter().all(Option::is_none) {
+                gates.clear();
+            }
+            let site = self.wait_site(terms, gates);
+            first.get_or_insert(site);
+        }
+        self.unit_samples(std::mem::take(&mut samples))?;
+        let first = first.expect("one site at least");
+        // The number of the site the frame selects now.
+        let mut index = sv::ir::Expr::Literal("64'd0".into());
+        for (rank, &position) in selected.iter().enumerate() {
+            let weight = if exclusive { rank + 1 } else { 1 << rank };
+            index = binary(
+                index,
+                sv::ir::BinaryOp::Add,
+                sv::ir::Expr::Mux {
+                    condition: Box::new(iff_truth(
+                        items[position]
+                            .iff
+                            .clone()
+                            .expect("a selected item has a condition"),
+                    )),
+                    then_expr: Box::new(sv::ir::Expr::Literal(format!("64'd{weight}"))),
+                    else_expr: Box::new(sv::ir::Expr::Literal("64'd0".into())),
+                },
+            );
+        }
+        let index = self.integer_of_width(&index, 64, false)?;
+        let base = self.b.alloc_bit(celox_design::PROCESS_DELAY_WIDTH, false);
+        self.b
+            .emit(SIRInstruction::Imm(base, SIRValue::new(u64::from(first))));
+        let word = self.b.alloc_bit(celox_design::PROCESS_DELAY_WIDTH, false);
+        self.b
+            .emit(SIRInstruction::Binary(word, base, BinaryOp::Add, index));
+        self.unit_wait_word(word)?;
+        self.unit_flush_point();
+        Ok(())
+    }
+
+    /// Whether variable `name` is a slot of the frame of the unit being
+    /// lowered: an automatic of the unit or of a body it expands, or a
+    /// temporary of its lowering. A static formal or local of a static
+    /// subroutine is module-wide storage, which another call may change.
+    fn frame_slot(&self, name: &str) -> bool {
+        self.m
+            .id(name)
+            .is_some_and(|id| self.m.is_hidden(id) && self.automatic_of_unit(id, name))
+    }
+
+    /// Whether `expr` reads only the frame of the unit being lowered and
+    /// constants, and calls nothing: its value does not change while the
+    /// process waits, since only the process writes its frame.
+    fn frame_only(&self, expr: &sv::ir::Expr) -> bool {
+        let mut calls = Vec::new();
+        collect_calls(expr, &mut calls);
+        let mut names = HashSet::default();
+        super::super::procedural::expr_idents(expr, &mut names);
+        calls.is_empty()
+            && names
+                .iter()
+                .all(|name| self.m.constants.contains_key(name) || self.frame_slot(name))
+    }
+
+    /// Whether `expr` reads a slot of the frame of the unit being lowered.
+    fn reads_frame(&self, expr: &sv::ir::Expr) -> bool {
+        let mut names = HashSet::default();
+        super::super::procedural::expr_idents(expr, &mut names);
+        names.iter().any(|name| self.frame_slot(name))
+    }
+
+    /// Whether `expr` reads a hidden variable that is not a slot of the
+    /// frame: static storage of a subroutine, which a concurrent call may
+    /// change.
+    fn reads_static_storage(&self, expr: &sv::ir::Expr) -> bool {
+        let mut names = HashSet::default();
+        super::super::procedural::expr_idents(expr, &mut names);
+        names.iter().any(|name| {
+            self.m
+                .id(name)
+                .is_some_and(|id| self.m.is_hidden(id) && !self.frame_slot(name))
+        })
+    }
+
+    /// Take `samples` of an event control of the unit being lowered, as a
+    /// kernel takes them before it suspends (see `Ff::event_expression`):
+    /// the proxies and their operand copies are module variables, which
+    /// every process waiting there may share, since the operands are the
+    /// module's storage, never the frame's.
+    pub(super) fn unit_samples(
+        &mut self,
+        samples: Vec<(String, sv::ir::Expr)>,
+    ) -> Result<(), sv::AnalyzerError> {
+        for (target, value) in samples {
+            if let Some(id) = self.m.id(&target)
+                && let Some(resume) = self.resume_frame()
+            {
+                resume.staging.insert(id);
+            }
+            self.assign(&sv::ir::LValue::Ident(target), &value)?;
+        }
+        Ok(())
+    }
+
+    /// The event control `items` by samples in the frame (see
+    /// [`Self::unit_wait_event`]).
+    fn unit_sampled_event(&mut self, items: &[sv::ir::EventItem]) -> Result<(), sv::AnalyzerError> {
+        let mut ids = Vec::new();
+        let mut samples = Vec::new();
+        for item in items {
+            let expr = item.expr.clone();
+            // The unit evaluates the items, and their gates, at each resume.
+            self.check_event_purity(&expr)?;
+            if let Some(iff) = &item.iff {
+                self.check_event_purity(iff)?;
+            }
+            if !matches!(item.edge, sv::ir::EventEdge::Any)
+                && self.m.expr_float_precision(&expr).is_some()
+            {
+                return Err(sv::AnalyzerError::RealEdgeEvent {
+                    edge: match item.edge {
+                        sv::ir::EventEdge::Pos => "posedge",
+                        sv::ir::EventEdge::Neg => "negedge",
+                        _ => "edge",
+                    },
+                });
+            }
+            ids.extend(self.level_terms(&expr)?);
+            // An occurrence counts only if the `iff` condition holds when it
+            // happens (IEEE 1800-2023 9.4.2.3), which this comparison at the
+            // resume cannot judge for a condition that may change meanwhile;
+            // a kernel's activation probe and gate counters do. A condition
+            // on the frame alone cannot change during the wait: its value at
+            // the start is its value at every occurrence.
+            // An operand in the static storage of a subroutine, which a
+            // concurrent call may change, neither wakes the unit nor is in
+            // its frame: the unit stays inlined, where a kernel watches it.
+            if self.reads_static_storage(&expr) {
+                return Err(unsupported(
+                    "an event control on the frame of a unit reading static storage",
+                ));
+            }
+            if item.iff.as_ref().is_some_and(|iff| !self.frame_only(iff)) {
+                return Err(unsupported(
+                    "an event control on the frame of a unit gated by module state",
+                ));
+            }
+            let float = self.m.expr_float_precision(&expr);
+            let width = match float {
+                Some(celox_sir::FloatPrecision::F64) => 64,
+                Some(celox_sir::FloatPrecision::F32) => 32,
+                None => sv_expr_natural_width(
+                    &self.m.typed_calls(&expr),
+                    self.m.variables,
+                    self.m.name_to_id,
+                    self.m.constants,
+                    self.m.parameter_types,
+                )
+                .ok_or_else(|| unsupported("event expression of unknown width"))?,
+            };
+            let signed = self.expr_signed(&expr);
+            let mut temp = |purpose| {
+                let (id, name) = self.m.temp(purpose, width, signed, float.is_none());
+                self.m.variables.get_mut(&id).expect("a sample").float = float;
+                name
+            };
+            let sample = temp("event_sample");
+            let current = temp("event_current");
+            let gate = match &item.iff {
+                Some(_) => {
+                    let (_, gate) = self.m.temp("event_gate", 1, false, false);
+                    Some(gate)
+                }
+                None => None,
+            };
+            samples.push((sample, current, expr, item.edge, item.iff.clone(), gate));
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        let site = self.wait_site(
+            ids.into_iter()
+                .map(|id| (id, CounterKind::Changes))
+                .collect(),
+            Vec::new(),
+        );
+        for (sample, _, expr, _, iff, gate) in &samples {
+            self.assign(&sv::ir::LValue::Ident(sample.clone()), expr)?;
+            if let (Some(iff), Some(gate)) = (iff, gate) {
+                self.assign(
+                    &sv::ir::LValue::Ident(gate.clone()),
+                    &iff_truth(iff.clone()),
+                )?;
+            }
+        }
+        let word = u64::from(site);
+        let point = self.unit_wait(word)?;
+        let mut occurred: Option<sv::ir::Expr> = None;
+        for (sample, current, expr, edge, _, gate) in &samples {
+            self.assign(&sv::ir::LValue::Ident(current.clone()), expr)?;
+            let mut item = edge_occurred(sample, current, *edge);
+            if let Some(gate) = gate {
+                item = binary(
+                    item,
+                    sv::ir::BinaryOp::LogicAnd,
+                    sv::ir::Expr::Ident(gate.clone()),
+                );
+            }
+            occurred = Some(match occurred {
+                Some(any) => binary(any, sv::ir::BinaryOp::LogicOr, item),
+                None => item,
+            });
+        }
+        let occurred = occurred.ok_or_else(|| unsupported("an empty event control"))?;
+        let (woken, _) = self.eval_truth(&occurred)?;
+        let continuation = self.b.new_block();
+        let again = self.b.new_block();
+        self.b.seal_block(SIRTerminator::Branch {
+            cond: woken,
+            true_block: (continuation, Vec::new()),
+            false_block: (again, Vec::new()),
+        });
+        // No occurrence: the values now are the samples of the next check.
+        self.b.switch_to_block(again);
+        for (sample, current, ..) in &samples {
+            self.assign(
+                &sv::ir::LValue::Ident(sample.clone()),
+                &sv::ir::Expr::Ident(current.clone()),
+            )?;
+        }
+        let never = self.b.alloc_bit(1, false);
+        self.b.emit(SIRInstruction::Imm(never, SIRValue::new(0u8)));
+        self.unit_wake_if(never, point, word)?;
+        // The continuation of `unit_wake_if` is never taken.
+        self.b.seal_block(SIRTerminator::Return);
+        self.b.switch_to_block(continuation);
+        self.unit_flush_point();
+        Ok(())
     }
 
     fn resume_frame(&mut self) -> Option<&mut ResumeFrame> {
@@ -1382,27 +1933,7 @@ impl Ff<'_, '_> {
         }
         let top = match top {
             Some(top) => top,
-            None => {
-                let current = self.b.alloc_bit(32, false);
-                self.b.emit(SIRInstruction::Load(
-                    current,
-                    stable(base),
-                    SIROffset::Static(0),
-                    32,
-                ));
-                // The frame size is patched once known.
-                let size = self.b.alloc_bit(32, false);
-                self.b.emit(SIRInstruction::Imm(size, SIRValue::new(0u32)));
-                self.frame
-                    .as_mut()
-                    .expect("lowering a function unit")
-                    .size_patches
-                    .push((size, own));
-                let end = self.b.alloc_bit(32, false);
-                self.b
-                    .emit(SIRInstruction::Binary(end, current, BinaryOp::Add, size));
-                end
-            }
+            None => self.own_top(base, own),
         };
         let width = celox_frontend_core::process::PROCESS_RESUME_WIDTH;
         let point_value = self.b.alloc_bit(width, false);
@@ -1752,8 +2283,13 @@ impl Ff<'_, '_> {
             });
             self.b.switch_to_block(suspend);
             let code = load(&mut self.b, status);
-            let word = load(&mut self.b, request);
+            let mut word = load(&mut self.b, request);
             let end = load(&mut self.b, top);
+            // A unit waits at a function wait site, which the process lists
+            // after the kernel's own sites.
+            if self.kernel.is_some() && self.m.process_state(&subroutine.name).waits {
+                word = self.function_wait_word(code, word);
+            }
             if self.kernel.is_some() {
                 let call_top = match self.call_top {
                     Some(id) => id,
@@ -2031,4 +2567,100 @@ fn actual_root(actual: &sv::ir::Expr) -> Option<&str> {
         sv::ir::Expr::Select { expr, .. } => actual_root(expr),
         _ => None,
     }
+}
+
+fn binary(left: sv::ir::Expr, op: sv::ir::BinaryOp, right: sv::ir::Expr) -> sv::ir::Expr {
+    sv::ir::Expr::Binary {
+        left: Box::new(left),
+        op,
+        right: Box::new(right),
+    }
+}
+
+/// Whether the value of an event expression went from that of variable
+/// `before` to that of variable `after` by an occurrence of `edge` (IEEE
+/// 1800-2023 9.4.2): any change of the value, or an edge of its least
+/// significant bit by Table 9-2, where a value of x or z is neither 0
+/// nor 1.
+fn edge_occurred(before: &str, after: &str, edge: sv::ir::EventEdge) -> sv::ir::Expr {
+    use sv::ir::BinaryOp::{EqCase, LogicAnd, LogicOr, NeCase};
+    let ident = |name: &str| sv::ir::Expr::Ident(name.to_string());
+    let bit = |name: &str| sv::ir::Expr::Select {
+        expr: Box::new(ident(name)),
+        msb: sv::ir::ConstExpr::Literal("0".into()),
+        lsb: sv::ir::ConstExpr::Literal("0".into()),
+        signed: false,
+    };
+    let is =
+        |name: &str, op, value: &str| binary(bit(name), op, sv::ir::Expr::Literal(value.into()));
+    // From `from` to anything else, or from neither to `to`.
+    let toward = |from: &str, to: &str| {
+        binary(
+            binary(is(before, EqCase, from), LogicAnd, is(after, NeCase, from)),
+            LogicOr,
+            binary(
+                binary(is(before, NeCase, from), LogicAnd, is(before, NeCase, to)),
+                LogicAnd,
+                is(after, EqCase, to),
+            ),
+        )
+    };
+    match edge {
+        sv::ir::EventEdge::Any => binary(ident(before), NeCase, ident(after)),
+        sv::ir::EventEdge::Pos => toward("1'b0", "1'b1"),
+        sv::ir::EventEdge::Neg => toward("1'b1", "1'b0"),
+        sv::ir::EventEdge::Both => binary(toward("1'b0", "1'b1"), LogicOr, toward("1'b1", "1'b0")),
+    }
+}
+
+/// The most items whose `iff` reads only the frame that an event control
+/// of a unit selects among by a site for each set of them (see
+/// `Ff::unit_wait_event`), unless their conditions exclude each other.
+const MAX_SELECTED_ITEMS: usize = 4;
+
+/// Whether at most one of `conditions` can hold at a time: each compares
+/// the same expression for equality with a constant, the constants'
+/// values all distinct, as the conditions that the analyzer makes for the
+/// instances a virtual interface may denote are. `value` evaluates a
+/// constant; a condition whose constant has no value makes them not
+/// exclusive.
+fn exclusive_selection<'a>(
+    conditions: impl Iterator<Item = &'a sv::ir::Expr>,
+    value: impl Fn(&sv::ir::Expr) -> Option<i128>,
+) -> bool {
+    let mut compared: Option<&sv::ir::Expr> = None;
+    let mut values = HashSet::default();
+    for condition in conditions {
+        let sv::ir::Expr::Binary {
+            left,
+            op: sv::ir::BinaryOp::Eq,
+            right,
+        } = condition
+        else {
+            return false;
+        };
+        let Some(constant) = value(right) else {
+            return false;
+        };
+        if compared.is_some_and(|compared| compared != &**left) || !values.insert(constant) {
+            return false;
+        }
+        compared = Some(left);
+    }
+    true
+}
+
+/// Whether the `iff` condition `iff` of an event item holds: a known
+/// nonzero value, x and z not (IEEE 1800-2023 9.4.2.3), as one bit that a
+/// kernel's gate and a unit's selection and samples alike take.
+pub(super) fn iff_truth(iff: sv::ir::Expr) -> sv::ir::Expr {
+    let not = |expr| sv::ir::Expr::Unary {
+        op: sv::ir::UnaryOp::LogicNot,
+        expr: Box::new(expr),
+    };
+    binary(
+        not(not(iff)),
+        sv::ir::BinaryOp::EqCase,
+        sv::ir::Expr::Literal("1'b1".into()),
+    )
 }

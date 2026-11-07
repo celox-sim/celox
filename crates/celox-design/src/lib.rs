@@ -174,6 +174,11 @@ pub enum DeferredSite {
         queue: u32,
         region: AssertionDeferral,
     },
+    /// A flush point of whichever process runs it, as a function unit's
+    /// wait is, which serves every process: the actions waiting in that
+    /// process's queue are discarded. The events of this site are not
+    /// shown.
+    ProcessFlushPoint,
 }
 
 /// Which action block of an assertion issues a report.
