@@ -917,3 +917,69 @@ fn dumpfile_uses_shared_string_literal_escape_decoding() {
         );
     }
 }
+
+/// A `$dumpfile` name ending in `.fst` records FST instead of VCD (the
+/// Icarus Verilog convention), with the same `$dumpvars`/`$dumpoff`/
+/// `$dumpon` controls driving it.
+#[test]
+fn dumpfile_with_fst_extension_records_fst() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("source.fst");
+    let source = format!(
+        r#"
+        module Top(output logic [3:0] value);
+            timeunit 1ps; timeprecision 1ps;
+            initial begin
+                $dumpfile("{}");
+                $dumpvars(0, Top.value);
+                value = 4'b0101;
+                #1 value = 4'b0110;
+                #1 $dumpoff; value = 4'b1111;
+                #1 $dumpon;
+                #1 $finish;
+            end
+        endmodule
+    "#,
+        path.display()
+    );
+    let mut simulation = Simulation::from_sv_sources(vec![(&source, Path::new("fst.sv"))], "Top")
+        .four_state(true)
+        .build_interpreter()
+        .unwrap();
+    simulation.run_until(4).unwrap();
+    simulation.flush_vcd().unwrap();
+    drop(simulation);
+
+    let mut wave = wellen::simple::read(&path).unwrap();
+    let hierarchy = wave.hierarchy();
+    let var = hierarchy.lookup_var(&["Top"], "value").unwrap();
+    let id = hierarchy[var].signal_ref();
+    wave.load_signals(&[id]);
+    let times: Vec<u64> = wave.time_table().to_vec();
+    let changes: Vec<(u64, String)> = wave
+        .get_signal(id)
+        .unwrap()
+        .iter_changes()
+        .map(|(index, value)| (times[index as usize], value.to_bit_string().unwrap()))
+        .collect();
+    assert_eq!(
+        changes.first().map(|(_, v)| v.as_str()),
+        Some("0101"),
+        "{changes:?}"
+    );
+    assert!(changes.iter().any(|(_, v)| v == "0110"), "{changes:?}");
+    assert!(
+        changes.iter().any(|(_, v)| v == "xxxx"),
+        "$dumpoff must record unknowns: {changes:?}"
+    );
+    assert!(
+        !changes.iter().any(|(time, v)| *time == 2 && v == "1111"),
+        "suspended change recorded: {changes:?}"
+    );
+    // $dumpon records the values current at resume time.
+    assert_eq!(
+        changes.last(),
+        Some(&(3, "1111".to_string())),
+        "{changes:?}"
+    );
+}

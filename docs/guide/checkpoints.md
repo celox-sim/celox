@@ -254,4 +254,4 @@ so `diff` compares it only with `--comb`.
 ## Further Reading
 
 - [Writing Tests](./writing-tests.md) -- Simulator and Simulation patterns.
-- [VCD Waveform Output](./vcd.md) -- Recording waveforms.
+- [Waveform Output (VCD and FST)](./vcd.md) -- Recording waveforms.

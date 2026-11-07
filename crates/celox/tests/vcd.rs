@@ -687,4 +687,115 @@ mod activity {
                 .any(|(_, _, value)| value != "0")
         );
     }
+
+    /// Read a waveform back with wellen and return `(time, full name, bits)`
+    /// for every recorded change.
+    fn wellen_changes(path: &std::path::Path) -> Vec<(u64, String, String)> {
+        let mut wave = wellen::simple::read(path).unwrap();
+        let hierarchy = wave.hierarchy();
+        let vars: Vec<(String, wellen::SignalRef)> = hierarchy
+            .all_vars()
+            .map(|var_ref| {
+                let var = &hierarchy[var_ref];
+                (var.full_name(hierarchy), var.signal_ref())
+            })
+            .collect();
+        let ids: Vec<_> = vars.iter().map(|(_, id)| *id).collect();
+        wave.load_signals(&ids);
+        let times: Vec<u64> = wave.time_table().to_vec();
+        let mut out = Vec::new();
+        for (name, id) in vars {
+            for (index, value) in wave.get_signal(id).unwrap().iter_changes() {
+                out.push((
+                    times[index as usize],
+                    name.clone(),
+                    value.to_bit_string().unwrap(),
+                ));
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// FST records the same waveform as VCD for the same stimulus: read both
+    /// back through an independent parser and compare every change.
+    #[test]
+    fn test_fst_matches_vcd_waveform() {
+        let code = r#"
+        module Top (
+            clk: input clock,
+            a: input logic<8>,
+            q: output logic<9>,
+        ) {
+            always_ff (clk) {
+                q = {1'b0, a} + q;
+            }
+        }
+        "#;
+        let dir = tempfile::tempdir().unwrap();
+        let vcd_path = dir.path().join("wave.vcd");
+        let fst_path = dir.path().join("wave.fst");
+
+        let run = |path: &std::path::Path, fst: bool| {
+            let builder = SimulatorBuilder::new(code, "Top");
+            let builder = if fst {
+                builder.fst(path)
+            } else {
+                builder.vcd(path)
+            };
+            let mut sim = builder.build().unwrap();
+            let a = sim.signal("a");
+            let clk = sim.event("clk");
+            sim.dump(0);
+            for step in 1..=4u64 {
+                sim.modify(|io| io.set(a, (step * 3) as u8)).unwrap();
+                sim.tick(clk).unwrap();
+                sim.dump(step * 10);
+            }
+            sim.flush_vcd().unwrap();
+            drop(sim);
+        };
+        run(&vcd_path, false);
+        run(&fst_path, true);
+
+        let vcd_changes = wellen_changes(&vcd_path);
+        let fst_changes = wellen_changes(&fst_path);
+        assert!(
+            fst_changes.iter().any(|(_, _, value)| value != "000000000"),
+            "FST recorded only zeroes: {fst_changes:?}"
+        );
+        assert_eq!(fst_changes, vcd_changes);
+    }
+
+    /// The FST file must be readable after `flush_vcd` alone (its header is
+    /// patched then), before the simulator is dropped.
+    #[test]
+    fn test_fst_readable_after_flush() {
+        let code = r#"
+        module Top (
+            a: input logic<8>,
+            b: output logic<8>,
+        ) {
+            assign b = a;
+        }
+        "#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wave.fst");
+        let mut sim = SimulatorBuilder::new(code, "Top")
+            .fst(&path)
+            .build()
+            .unwrap();
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 42u8)).unwrap();
+        sim.dump(0);
+        sim.flush_vcd().unwrap();
+        let changes = wellen_changes(&path);
+        assert!(
+            changes.iter().any(|(time, name, value)| *time == 0
+                && name.ends_with("b")
+                && value == "00101010"),
+            "{changes:?}"
+        );
+        drop(sim);
+    }
 }

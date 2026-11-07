@@ -74,9 +74,11 @@ impl<B: SimBackend> Simulation<B> {
             return Ok(());
         };
         let sim = &mut self.simulator;
+        let format = crate::WaveformFormat::from_path(&path);
         sim.sv_vcd.path = Some(path);
-        let mut writer = crate::VcdWriter::from_writer_with_time_precision(
+        let mut writer = crate::WaveformWriter::from_writer_with_time_precision(
             output,
+            format,
             &sim.sv_vcd.selections,
             sim.program.design.time_precision,
         );

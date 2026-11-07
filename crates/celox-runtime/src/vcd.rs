@@ -721,7 +721,7 @@ fn last_mask(width: usize) -> u8 {
     }
 }
 
-fn plane_equal(old: &[u8], value: &[u8], width: usize) -> bool {
+pub(crate) fn plane_equal(old: &[u8], value: &[u8], width: usize) -> bool {
     let Some((&last, prefix)) = old.split_last() else {
         return true;
     };
@@ -739,7 +739,7 @@ fn plane_equal(old: &[u8], value: &[u8], width: usize) -> bool {
     }
 }
 
-fn copy_plane(dst: &mut [u8], src: &[u8], width: usize) {
+pub(crate) fn copy_plane(dst: &mut [u8], src: &[u8], width: usize) {
     let len = dst.len().min(src.len());
     dst[..len].copy_from_slice(&src[..len]);
     dst[len..].fill(0);

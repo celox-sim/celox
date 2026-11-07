@@ -280,6 +280,8 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
     let builder = builder.settle_check(std::env::var_os("CELOX_SETTLE_CHECK").is_some());
     let builder = if let Some(path) = &arguments.execution.vcd {
         builder.vcd(path)
+    } else if let Some(path) = &arguments.execution.fst {
+        builder.fst(path)
     } else {
         builder
     };
