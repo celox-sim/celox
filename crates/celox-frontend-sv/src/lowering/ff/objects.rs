@@ -344,25 +344,27 @@ impl Ff<'_, '_> {
                 let advanced = self.b.alloc_bit(1, false);
                 self.b
                     .emit(SIRInstruction::Binary(advanced, now, BinaryOp::Ne, before));
-                let advanced = match gate {
+                // The item's `iff`, sampled at the start, gates every
+                // occurrence of it: by the object's count and by a switch.
+                let gated = |this: &mut Self, occurred: RegisterId| match gate {
                     Some((_, sample)) => {
-                        let id = self.m.id(sample).expect("a gate sample");
-                        let holds = self.b.alloc_bit(1, false);
-                        self.b.emit(SIRInstruction::Load(
+                        let id = this.m.id(sample).expect("a gate sample");
+                        let holds = this.b.alloc_bit(1, false);
+                        this.b.emit(SIRInstruction::Load(
                             holds,
                             stable(id),
                             SIROffset::Static(0),
                             1,
                         ));
-                        let both = self.b.alloc_bit(1, false);
-                        self.b
-                            .emit(SIRInstruction::Binary(both, advanced, BinaryOp::And, holds));
+                        let both = this.b.alloc_bit(1, false);
+                        this.b
+                            .emit(SIRInstruction::Binary(both, occurred, BinaryOp::And, holds));
                         both
                     }
-                    None => advanced,
+                    None => occurred,
                 };
                 let Some((value, current)) = value else {
-                    return Ok(advanced);
+                    return Ok(gated(self, advanced));
                 };
                 // Another object now: the change of the value decides.
                 let load = self.sampled_value(sv::ir::Expr::Call {
@@ -393,7 +395,7 @@ impl Ff<'_, '_> {
                     BinaryOp::Or,
                     by_switch,
                 ));
-                Ok(either)
+                Ok(gated(self, either))
             }
             Watched::Counted { counts, .. } => {
                 let mut any: Option<RegisterId> = None;

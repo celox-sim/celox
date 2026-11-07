@@ -5089,3 +5089,92 @@ endmodule
         );
     }
 }
+
+#[test]
+fn iff_of_property_items_gates_handle_switches() {
+    // `h` comes to denote `y`, whose `on` is 1 where `x`'s was 0: a rise by
+    // the switch, which the `iff` sampled at the start gates as it gates a
+    // rise by a store.
+    let source = r#"`timescale 1ns/1ns
+class ev_t;
+    bit on;
+endclass
+module Top(output int closed, output int open);
+    ev_t x = new, y = new, h;
+    initial begin
+        y.on = 1;
+        h = x;
+    end
+    initial begin
+        bit go = 0;
+        closed = 0;
+        @(posedge h.on iff go);
+        closed = $time;
+    end
+    initial begin
+        bit go = 1;
+        open = 0;
+        @(posedge h.on iff go);
+        open = $time;
+    end
+    initial #2 h = y;
+endmodule
+"#;
+    for forced in [false, true] {
+        assert_eq!(
+            simulate(source, false, forced, "interpreter", 5, &["closed", "open"]),
+            Ok(vec![value(0), value(2)]),
+            "forced {forced}"
+        );
+    }
+}
+
+#[test]
+fn handle_switches_are_seen_as_expression_events_are() {
+    // An expression event sees a process's writes when the process reaches a
+    // timing control or ends (docs/guide/systemverilog-reference.md): the
+    // pulse `a = 1; a = 0;` is no edge of `a & b`, and the switches
+    // `h = y; h = x;` are no edge of `h.on`, though `y.on` is 1.
+    let expression = r#"`timescale 1ns/1ns
+module Top(output int at);
+    bit a, b = 1;
+    initial begin
+        at = 0;
+        @(posedge (a & b));
+        at = $time;
+    end
+    initial #2 begin
+        a = 1;
+        a = 0;
+    end
+endmodule
+"#;
+    let handle = r#"`timescale 1ns/1ns
+class ev_t;
+    bit on;
+endclass
+module Top(output int at);
+    ev_t x = new, y = new, h;
+    initial begin
+        y.on = 1;
+        h = x;
+        at = 0;
+        @(posedge h.on);
+        at = $time;
+    end
+    initial #2 begin
+        h = y;
+        h = x;
+    end
+endmodule
+"#;
+    for source in [expression, handle] {
+        for forced in [false, true] {
+            assert_eq!(
+                simulate(source, false, forced, "interpreter", 5, &["at"]),
+                Ok(vec![value(0)]),
+                "forced {forced}: {source}"
+            );
+        }
+    }
+}

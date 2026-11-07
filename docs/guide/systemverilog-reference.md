@@ -188,8 +188,12 @@ blocks in programs. Two region deviations are listed under
   drivers with dynamic destination selects.
 - Timing controls in processes: impure function calls in event expressions;
   `wait` or event expressions reading a static task argument; event
-  expressions reading a class property (directly, through a handle or a
-  function, or a container held in one); `wait` conditions reading
+  expressions reading a class property inside a larger expression, through a
+  function, or in a container held in one (an item that is a property, such
+  as `@(posedge h.p)`, is supported); an `iff` on such a property item that
+  reads anything other than constants and what the waiting process alone
+  writes, and an expression item, or an `iff` other than a one-bit variable,
+  in the same event list as a property item; `wait` conditions reading
   `rand_mode()` or `constraint_mode()`; `wait` conditions over class
   properties that call a task or an effectful function, or read the time, a
   random number, a mailbox, or a process.
