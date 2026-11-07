@@ -4759,3 +4759,186 @@ endmodule
         );
     }
 }
+
+/// The time each of `names` holds at `until`, inlined and out of line in
+/// both state modes, which must be the same everywhere.
+fn waits_end_at(source: &str, units: usize, until: u64, names: &[&str], expected: &[u64]) {
+    same_as_inlined(source, units, until, names);
+    for four_state in [false, true] {
+        assert_eq!(
+            simulate(source, four_state, true, "interpreter", until, names),
+            Ok(expected.iter().map(|&at| value(at)).collect()),
+            "four_state {four_state}"
+        );
+    }
+}
+
+#[test]
+fn randomize_stores_are_occurrences_of_watched_properties() {
+    // `randomize` writes `v` through the heap's store, which counts it like
+    // an assignment does.
+    let source = r#"`timescale 1ns/1ns
+class r_t;
+    rand bit [7:0] v;
+    constraint big { v > 10; }
+endclass
+module Top(output int at, output int ok);
+    r_t r = new;
+    task automatic wait_v(r_t o, output int at);
+        @(o.v);
+        at = $time;
+    endtask
+    initial begin
+        fork
+            wait_v(r, at);
+        join_none
+        #3 ok = r.randomize();
+    end
+endmodule
+"#;
+    waits_end_at(source, 3, 10, &["at", "ok"], &[3, 1]);
+}
+
+#[test]
+fn container_write_backs_are_occurrences_of_watched_properties() {
+    // `push_back` writes the queue property's new handle back through the
+    // heap's store, which counts it.
+    let source = r#"`timescale 1ns/1ns
+class q_t;
+    int q[$];
+endclass
+module Top(output int at);
+    q_t o = new;
+    task automatic wait_q(q_t e, output int at);
+        @(e.q);
+        at = $time;
+    endtask
+    initial begin
+        fork
+            wait_q(o, at);
+        join_none
+        #4 o.q.push_back(5);
+    end
+endmodule
+"#;
+    waits_end_at(source, 2, 10, &["at"], &[4]);
+}
+
+#[test]
+fn waits_on_properties_follow_a_switched_handle() {
+    // `h` comes to denote `b`, whose `on` is 0 where `a`'s was 1: no rise,
+    // and the wait goes on with `b`, whose later rise is the occurrence.
+    let source = r#"`timescale 1ns/1ns
+class ev_t;
+    bit on;
+endclass
+module Top(output int at);
+    ev_t a = new, b = new, h;
+    task automatic wait_h(output int at);
+        @(posedge h.on);
+        at = $time;
+    endtask
+    initial begin
+        a.on = 1;
+        h = a;
+        fork
+            wait_h(at);
+        join_none
+        #2 h = b;
+        #2 b.on = 1;
+    end
+endmodule
+"#;
+    waits_end_at(source, 2, 10, &["at"], &[4]);
+}
+
+#[test]
+fn event_lists_mix_properties_and_signals() {
+    // Each item is waited on as what it is: a property by its object's
+    // count, a signal by its value's edge.
+    let source = r#"`timescale 1ns/1ns
+class ev_t;
+    bit on;
+endclass
+module Top(output int any_at, output int pos_at, output int neg_at);
+    ev_t o = new, other = new;
+    bit clk;
+    task automatic wait_any(output int at);
+        @(o.on or clk);
+        at = $time;
+    endtask
+    task automatic wait_pos(output int at);
+        @(posedge clk or other.on);
+        at = $time;
+    endtask
+    task automatic wait_neg(output int at);
+        @(negedge clk or other.on);
+        at = $time;
+    endtask
+    initial begin
+        fork
+            wait_any(any_at);
+            wait_pos(pos_at);
+            wait_neg(neg_at);
+        join_none
+        #1 o.on = 1;
+        #2 clk = 1;
+        #2 clk = 0;
+    end
+endmodule
+"#;
+    waits_end_at(source, 4, 10, &["any_at", "pos_at", "neg_at"], &[1, 3, 5]);
+}
+
+#[test]
+fn edges_of_real_properties_are_rejected() {
+    // An edge is of the least significant bit of an integral value (IEEE
+    // 1800-2023 9.4.2): as for any real expression.
+    let source = r#"`timescale 1ns/1ns
+class r_t;
+    real r;
+endclass
+module Top(output int at);
+    r_t o = new;
+    initial begin
+        @(posedge o.r);
+        at = $time;
+    end
+endmodule
+"#;
+    for forced in [false, true] {
+        let run = simulate(source, false, forced, "interpreter", 5, &["at"]);
+        assert!(
+            run.as_ref().is_err_and(|error| error.contains("posedge")),
+            "forced {forced}: {run:?}"
+        );
+    }
+}
+
+#[test]
+fn switched_handles_compare_real_properties_as_reals() {
+    // `h` comes to denote an object whose `r` differs by an eighth: a
+    // change, which an integer sample would round away (both round to 1).
+    let source = r#"`timescale 1ns/1ns
+class r_t;
+    real r;
+endclass
+module Top(output int at);
+    r_t a = new, b = new, h;
+    task automatic wait_h(output int at);
+        @(h.r);
+        at = $time;
+    endtask
+    initial begin
+        a.r = 1.25;
+        b.r = 1.375;
+        h = a;
+        fork
+            wait_h(at);
+        join_none
+        #2 h = b;
+    end
+endmodule
+"#;
+    waits_end_at(source, 2, 10, &["at"], &[2]);
+}

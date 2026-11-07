@@ -409,71 +409,9 @@ impl Heap {
         handle
     }
 
-    /// Keep the `bytes` bytes at `offset` of `object` (see
-    /// [`crate::ops::OBJECT_EDGE_BEGIN`]).
-    pub fn edge_begin(&mut self, object: Handle, offset: usize, bytes: usize) {
-        self.edge_before.clear();
-        if let Some(object) = self.objects.get(&object)
-            && let Some(before) = object.bytes.get(offset..offset + bytes)
-        {
-            self.edge_before.extend_from_slice(before);
-        }
-    }
-
-    /// Count the occurrences that the store into the property at `offset`
-    /// of `object` since [`Self::edge_begin`] made: a change of its value,
-    /// and a rise or a fall of its least significant bit by Table 9-2 of
-    /// IEEE 1800-2023. A `four_state` property holds the complements of its
-    /// value and of its mask, which follows its `value_bytes` value bytes.
-    pub fn edge_end(&mut self, object: Handle, offset: u32, value_bytes: usize, four_state: bool) {
-        let before = std::mem::take(&mut self.edge_before);
-        let Some(after) = self.objects.get(&object).and_then(|object| {
-            object
-                .bytes
-                .get(offset as usize..offset as usize + before.len())
-        }) else {
-            return;
-        };
-        if before.is_empty() || after == &before[..] {
-            self.edge_before = before;
-            return;
-        }
-        // The least significant bit: 0, 1, or neither (x or z). A 4-state
-        // property holds the complements of its value and mask planes, so
-        // that zeroed bytes read as x.
-        let bit = |bytes: &[u8]| -> Option<bool> {
-            if four_state {
-                if bytes.get(value_bytes).is_some_and(|mask| mask & 1 == 0) {
-                    return None;
-                }
-                return Some(bytes[0] & 1 == 0);
-            }
-            Some(bytes[0] & 1 != 0)
-        };
-        let (old, new) = (bit(&before), bit(after));
-        let rise = matches!(
-            (old, new),
-            (Some(false), Some(true) | None) | (None, Some(true))
-        );
-        let fall = matches!(
-            (old, new),
-            (Some(true), Some(false) | None) | (None, Some(false))
-        );
-        let counts = self.edges.entry((object, offset)).or_default();
-        counts[0] = counts[0].wrapping_add(1);
-        counts[1] = counts[1].wrapping_add(u32::from(rise));
-        counts[2] = counts[2].wrapping_add(u32::from(fall));
-        self.edge_before = before;
-    }
-
-    /// The occurrences counted for the property at `offset` of `object`:
-    /// its changes (`kind` 0), rises (1) or falls (2).
-    pub fn edge_count(&self, object: Handle, offset: u32, kind: usize) -> u32 {
-        self.edges
-            .get(&(object, offset))
-            .and_then(|counts| counts.get(kind))
-            .copied()
-            .unwrap_or(0)
+    /// The bytes of the properties of `object`, if it is live.
+    pub(crate) fn object_bytes(&self, object: Handle) -> Option<&[u8]> {
+        self.objects.get(&object).map(|object| &object.bytes[..])
     }
 
     /// The class `object` was created as, or 0 for `null`.
@@ -497,10 +435,11 @@ impl Heap {
 
     /// Write the low `count` bytes of `value` into `object` at `offset`.
     pub fn store(&mut self, object: Handle, offset: usize, count: usize, value: u64) {
+        let count = count.min(8);
+        self.edge_store(object, offset, count);
         let Some(object) = self.object_mut(object) else {
             return;
         };
-        let count = count.min(8);
         if let Some(target) = object.bytes.get_mut(offset..offset + count) {
             target.copy_from_slice(&value.to_le_bytes()[..count]);
         }
@@ -751,35 +690,5 @@ mod reserved_classes {
             let id = class_identifier(hash);
             assert!(id != 0 && id < FIRST_RESERVED_CLASS, "hash {hash:#x}");
         }
-    }
-}
-
-#[cfg(test)]
-mod edge_counts {
-    use super::*;
-
-    #[test]
-    fn counts_follow_their_objects() {
-        let mut heap = Heap::new();
-        let object = heap.new_object(7, 2);
-        // A 2-state bit: 0 -> 1 -> 0 is two changes, a rise and a fall.
-        for value in [1u64, 0] {
-            heap.edge_begin(object, 0, 1);
-            heap.store(object, 0, 1, value);
-            heap.edge_end(object, 0, 1, false);
-        }
-        assert_eq!(
-            [0, 1, 2].map(|kind| heap.edge_count(object, 0, kind)),
-            [2, 1, 1]
-        );
-        // A store of the same value is no occurrence.
-        heap.edge_begin(object, 0, 1);
-        heap.store(object, 0, 1, 0);
-        heap.edge_end(object, 0, 1, false);
-        assert_eq!(heap.edge_count(object, 0, 0), 2);
-        // The counts go with the object.
-        heap.collect([]);
-        assert!(!heap.contains_object(object));
-        assert_eq!(heap.edge_count(object, 0, 0), 0);
     }
 }

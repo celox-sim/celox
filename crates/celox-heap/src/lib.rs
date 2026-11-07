@@ -17,6 +17,7 @@ use std::sync::Arc;
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 pub mod containers;
+mod edges;
 mod objects;
 pub mod ops;
 pub mod randomization;
@@ -122,15 +123,14 @@ pub struct Heap {
     /// whose post_randomize runs, see [`Heap::begin_solved_visits`].
     #[serde(default)]
     solved: Vec<Handle>,
-    /// The occurrences of the properties an event control watches, by
-    /// object and byte offset: changes, rises and falls of the value (IEEE
-    /// 1800-2023 9.4.2), counted at each store (see
-    /// [`ops::OBJECT_EDGE_END`]). An entry goes with its object.
+    /// The properties that event controls watch and their occurrences, by
+    /// object (IEEE 1800-2023 9.4.2; see the `edges` module). An entry goes
+    /// with its object.
     #[serde(default)]
-    edges: HashMap<(Handle, u32), [u32; 3]>,
-    /// The bytes of the property a counted store is replacing.
+    edges: HashMap<Handle, Vec<edges::Watch>>,
+    /// The write of a watched property in progress.
     #[serde(default)]
-    edge_before: Vec<u8>,
+    edge_write: Option<edges::EdgeWrite>,
 }
 
 impl Default for Heap {
@@ -170,7 +170,7 @@ impl Heap {
             prepared: None,
             solved: Vec::new(),
             edges: HashMap::default(),
-            edge_before: Vec::new(),
+            edge_write: None,
         }
     }
 
@@ -268,6 +268,7 @@ impl Heap {
     /// Free every unpinned entry that `roots` cannot reach through the
     /// handle properties of objects. Roots that name no entry are ignored.
     pub fn collect(&mut self, roots: impl IntoIterator<Item = Root>) {
+        self.finish_edge_write();
         let mut strings = HashSet::default();
         let mut objects = HashSet::default();
         let mut pending: Vec<Root> = roots.into_iter().collect();
@@ -298,7 +299,7 @@ impl Heap {
             live
         });
         self.objects.retain(|handle, _| objects.contains(handle));
-        self.edges.retain(|(handle, _), _| objects.contains(handle));
+        self.edges.retain(|handle, _| objects.contains(handle));
         self.containers.retain(|handle, _| objects.contains(handle));
         self.container_lookup
             .retain(|_, handle| objects.contains(handle));

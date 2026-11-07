@@ -94,17 +94,15 @@ pub const OBJECT_MODE_SELECT: u64 = 60;
 pub const OBJECT_MODE_SELECTED: u64 = 61;
 /// Draw a randc domain index; parameter is the property offset, b its domain size.
 pub const OBJECT_RANDOM_CYCLIC: u64 = 62;
-/// `edge_begin(object, offset | bytes << 32)`: keep the `bytes` bytes of
-/// the property at `offset`, value and mask, which a store replaces next.
-pub const OBJECT_EDGE_BEGIN: u64 = 141;
-/// `edge_end(object, offset | value_bytes << 32, four_state)`: count the
-/// change of the property at `offset` that the store since
-/// [`OBJECT_EDGE_BEGIN`] made, and the edge of its least significant bit
-/// (IEEE 1800-2023 9.4.2, Table 9-2), in the object's occurrences.
-pub const OBJECT_EDGE_END: u64 = 142;
+/// `watch_edges(object, offset | value_bytes << 32, four_state)`: count
+/// from now on the writes of the property at `offset` of `object`: its
+/// changes and the edges of its least significant bit (IEEE 1800-2023
+/// 9.4.2, Table 9-2).
+pub const OBJECT_EDGE_WATCH: u64 = 141;
 /// `edge_count(object, offset, kind)`: the changes (`kind` 0), rises (1) or
-/// falls (2) counted for the property at `offset` of `object`; 0 for `null`.
-pub const OBJECT_EDGE_COUNT: u64 = 143;
+/// falls (2) counted for the watched property at `offset` of `object`; 0
+/// for `null`.
+pub const OBJECT_EDGE_COUNT: u64 = 142;
 /// `copy(object)`: a new object with a copy of the properties of `object`.
 pub const OBJECT_COPY: u64 = 63;
 /// Solve the scalar constraint program in string b for object a; c selects check-only.
@@ -317,12 +315,8 @@ impl Heap {
                 self.store(a as Handle, b as u32 as usize, (b >> 32) as usize, c);
                 0
             }
-            OBJECT_EDGE_BEGIN => {
-                self.edge_begin(a as Handle, b as u32 as usize, (b >> 32) as usize);
-                0
-            }
-            OBJECT_EDGE_END => {
-                self.edge_end(a as Handle, b as u32, (b >> 32) as usize, c != 0);
+            OBJECT_EDGE_WATCH => {
+                self.watch_edges(a as Handle, b as u32, (b >> 32) as u32, c != 0);
                 0
             }
             OBJECT_EDGE_COUNT => self.edge_count(a as Handle, b as u32, c as usize).into(),

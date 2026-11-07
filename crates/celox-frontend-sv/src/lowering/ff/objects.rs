@@ -18,201 +18,342 @@ impl Ff<'_, '_> {
         }
     }
 
-    /// Whether an event control watches the property `field` (see
-    /// `property_edges`): its stores count the occurrences of the object.
-    fn edges_watched(&self, field: &sv::ir::ObjectField) -> bool {
-        field.key != 0
-            && self
-                .m
-                .id(&property_changes(property_edges(field.key)))
-                .is_some()
+    /// The property and the object handle of event expression `expr` when it
+    /// is a property of an object whose stores count (see
+    /// [`property_changes`]): the heap counts its occurrences in each object
+    /// an event control watches (see `celox_heap::ops::OBJECT_EDGE_WATCH`).
+    fn watched_property(&self, expr: &sv::ir::Expr) -> Option<(sv::ir::ObjectField, sv::ir::Expr)> {
+        let sv::ir::Expr::Call {
+            callee: sv::ir::Callee::Object(op),
+            args,
+            ..
+        } = expr
+        else {
+            return None;
+        };
+        let (ObjectOp::Load(field), [Some(handle)]) = (&**op, args.as_slice()) else {
+            return None;
+        };
+        (field.key != 0 && self.m.id(&property_changes(field.key)).is_some())
+            .then(|| (*field, handle.clone()))
     }
 
-    /// Before a store of `field` into `object` that an event control
-    /// watches, keep the property's bytes; returns whether it does.
-    fn edges_begin(&mut self, object: RegisterId, field: &sv::ir::ObjectField) -> bool {
-        if !self.edges_watched(field) {
-            return false;
+    /// A variable holding a sample of an event control's item at a wait, of
+    /// the item's type; a real one holds its bits (see
+    /// [`Self::sampled_value`]). A forked kernel keeps one per activation; a
+    /// unit's lowering makes it a slot of its frame.
+    fn event_sample(
+        &mut self,
+        purpose: &str,
+        width: usize,
+        signed: bool,
+        four_state: bool,
+        float: Option<celox_sir::FloatPrecision>,
+    ) -> Result<String, sv::AnalyzerError> {
+        let (width, signed, four_state) = match float {
+            Some(celox_sir::FloatPrecision::F64) => (64, false, false),
+            Some(celox_sir::FloatPrecision::F32) => (32, false, false),
+            None => (width, signed, four_state),
+        };
+        let (id, name) = self.m.temp(purpose, width, signed, four_state);
+        if self.forked && self.kernel.is_some() {
+            let slot = self.frame_locals.len();
+            self.frame_locals.push(id);
+            self.with_kernel(|kernel| kernel.local(slot))
+                .map_err(kernel_error)?;
         }
-        let place = self.constant64(u64::from(field.offset) | u64::from(field.storage()) << 32);
-        self.heap_call(ops::OBJECT_EDGE_BEGIN, &[object, place]);
-        true
+        Ok(name)
     }
 
-    /// After that store, count its change and the edge of its least
-    /// significant bit in the object's occurrences (IEEE 1800-2023 9.4.2).
-    fn edges_end(&mut self, object: RegisterId, field: &sv::ir::ObjectField, counted: bool) {
-        if !counted {
-            return;
+    /// What an [`Self::event_sample`] of `expr` holds: its value, or the bits
+    /// of a real, so that every change of it is one, however small (as an
+    /// event expression's variable keeps them).
+    fn sampled_value(&self, expr: sv::ir::Expr) -> sv::ir::Expr {
+        let function = match self.m.expr_float_precision(&expr) {
+            None => return expr,
+            Some(celox_sir::FloatPrecision::F64) => sv::ir::SystemFunction::Realtobits,
+            Some(celox_sir::FloatPrecision::F32) => sv::ir::SystemFunction::Shortrealtobits,
+        };
+        sv::ir::Expr::Call {
+            callee: sv::ir::Callee::System(function),
+            args: vec![Some(expr)],
+            arg_order: Vec::new(),
         }
-        let place = self.constant64(u64::from(field.offset) | u64::from(field.bytes()) << 32);
-        let four_state = self.constant64(u64::from(field.four_state && self.m.four_state));
-        self.heap_call(ops::OBJECT_EDGE_END, &[object, place, four_state]);
     }
 
-    /// An event control whose items are properties of objects (IEEE
-    /// 1800-2023 9.4.2), in a kernel or a unit: each occurrence is counted
-    /// in the stored object at the store (see `edges_end`). The process
-    /// samples, at the start of the wait, each item's object and its count
-    /// of the item's occurrences, waits for a store of the property, which
-    /// bumps the key's change count, or for a change of a handle read from
-    /// module storage, and at each resume finds an occurrence when the
-    /// object's count advanced, or, for an item whose handle now denotes
-    /// another object, when the property's value changed by the item's edge
-    /// from the old object's to the new one's. Returns whether `items` were
-    /// such an event control.
+    /// An event control with an item that is a property of an object (IEEE
+    /// 1800-2023 9.4.2), in a kernel or a unit. Each item is waited on as
+    /// what it is:
+    ///
+    /// - a property: the process registers the object the handle denotes
+    ///   with the heap, which counts the property's occurrences in it at
+    ///   every store, and samples its count. It waits for a store of the
+    ///   property, which bumps the key's change count, or for a change of a
+    ///   handle read from module storage. The item occurs when the object's
+    ///   count advanced, or, when the handle now denotes another object,
+    ///   when the property's value changed by the item's edge from the old
+    ///   object's to the new one's;
+    /// - any other expression: the process samples its value and waits for
+    ///   a change of what it reads (see `level_terms`); the item occurs when
+    ///   the value changed by its edge.
+    ///
+    /// At each resume an item occurs when it did and its `iff` holds
+    /// (9.4.2.3). Without an occurrence the process samples every item
+    /// again, a property from the object its handle now denotes, and waits
+    /// again. Returns whether `items` have such a property.
     pub(super) fn property_event(
         &mut self,
         items: &[sv::ir::EventItem],
     ) -> Result<bool, sv::AnalyzerError> {
-        let mut parts = Vec::new();
-        for item in items {
-            let expr = self.propagate(&item.expr);
-            let sv::ir::Expr::Call {
-                callee: sv::ir::Callee::Object(op),
-                args,
-                ..
-            } = &expr
-            else {
-                return Ok(false);
-            };
-            let (ObjectOp::Load(field), [Some(handle)]) = (&**op, args.as_slice()) else {
-                return Ok(false);
-            };
-            if item.iff.is_some() || !self.edges_watched(field) {
-                return Ok(false);
-            }
-            parts.push((*field, handle.clone(), item.edge));
-        }
-        if parts.is_empty() {
+        let exprs: Vec<sv::ir::Expr> = items
+            .iter()
+            .map(|item| self.propagate(&item.expr))
+            .collect();
+        if !exprs
+            .iter()
+            .any(|expr| self.watched_property(expr).is_some())
+        {
             return Ok(false);
         }
         let mut terms = Vec::new();
-        let mut samples = Vec::new();
-        for (field, handle, edge) in &parts {
-            self.check_event_purity(handle)?;
-            let changes = self
-                .m
-                .id(&property_changes(field.key))
-                .ok_or_else(|| unsupported("an unwatched property in an event control"))?;
-            terms.push((changes, CounterKind::Changes));
-            // A handle in the frame or in the process cannot change while
-            // the process waits; one in module storage can.
-            let moves = !self.level_terms(handle)?.is_empty();
-            if moves {
+        let mut watched = Vec::new();
+        for (item, expr) in items.iter().zip(exprs) {
+            self.check_event_edge(item.edge, &expr)?;
+            let float = self.m.expr_float_precision(&expr);
+            if let Some((field, handle)) = self.watched_property(&expr) {
+                self.check_event_purity(&handle)?;
+                let changes = self
+                    .m
+                    .id(&property_changes(field.key))
+                    .expect("a watched property");
+                terms.push((changes, CounterKind::Changes));
+                // A handle in the frame or in the process cannot change while
+                // the process waits; one in module storage can.
+                let handle_terms = self.level_terms(&handle)?;
+                let moves = !handle_terms.is_empty();
                 terms.extend(
-                    self.level_terms(handle)?
+                    handle_terms
                         .into_iter()
                         .map(|id| (id, CounterKind::Changes)),
                 );
-            }
-            let (object_id, object) =
+                let (object_id, object) =
+                    self.m
+                        .temp("event_object", celox_design::HANDLE_WIDTH, false, false);
+                // A handle, which the collector follows and a state file
+                // refuses as any class handle (so a saved state never holds
+                // a waiter's counts; a checkpoint keeps the heap whole).
                 self.m
-                    .temp("event_object", celox_design::HANDLE_WIDTH, false, false);
-            // A handle, which the collector follows and a state file refuses
-            // as any class handle (so a saved state never holds a waiter's
-            // counts; a checkpoint keeps the heap whole).
-            self.m
-                .variables
-                .get_mut(&object_id)
-                .expect("an event object")
-                .value_kind = celox_design::ValueKind::ObjRef;
-            self.assign(&sv::ir::LValue::Ident(object.clone()), handle)?;
-            let (_, count) = self.m.temp("event_count", 32, false, false);
-            let value = moves.then(|| {
-                let width = field.width as usize;
-                let (_, value) = self
-                    .m
-                    .temp("event_value", width, field.signed, field.four_state);
-                value
-            });
-            let load = sv::ir::Expr::Call {
-                callee: sv::ir::Callee::Object(Box::new(ObjectOp::Load(*field))),
-                args: vec![Some(sv::ir::Expr::Ident(object.clone()))],
-                arg_order: Vec::new(),
-            };
-            if let Some(value) = &value {
-                self.assign(&sv::ir::LValue::Ident(value.clone()), &load)?;
+                    .variables
+                    .get_mut(&object_id)
+                    .expect("an event object")
+                    .value_kind = celox_design::ValueKind::ObjRef;
+                if self.forked && self.kernel.is_some() {
+                    let slot = self.frame_locals.len();
+                    self.frame_locals.push(object_id);
+                    self.with_kernel(|kernel| kernel.local(slot))
+                        .map_err(kernel_error)?;
+                }
+                let count = self.event_sample("event_count", 32, false, false, None)?;
+                // The value and, at each resume, the value the handle's
+                // object holds now; every sample is made before the
+                // process first suspends.
+                let value = if moves {
+                    let mut sample = || {
+                        self.event_sample(
+                            "event_value",
+                            field.width as usize,
+                            field.signed,
+                            field.four_state,
+                            float,
+                        )
+                    };
+                    Some((sample()?, sample()?))
+                } else {
+                    None
+                };
+                watched.push(Watched::Property {
+                    field,
+                    handle,
+                    edge: item.edge,
+                    object,
+                    count,
+                    value,
+                });
+            } else {
+                self.check_event_purity(&expr)?;
+                terms.extend(
+                    self.level_terms(&expr)?
+                        .into_iter()
+                        .map(|id| (id, CounterKind::Changes)),
+                );
+                let width = sv_expr_natural_width(
+                    &self.m.typed_calls(&expr),
+                    self.m.variables,
+                    self.m.name_to_id,
+                    self.m.constants,
+                    self.m.parameter_types,
+                )
+                .ok_or_else(|| unsupported("event expression of unknown width"))?;
+                let signed = self.expr_signed(&expr);
+                let four_state = self.m.four_state;
+                let sample = self.event_sample("event_value", width, signed, four_state, float)?;
+                let now = self.event_sample("event_value", width, signed, four_state, float)?;
+                watched.push(Watched::Value { expr, sample, now });
             }
-            samples.push((*field, handle.clone(), *edge, object, count, value));
         }
-        for (field, _, edge, object, count, _) in &samples {
-            let current = self.edge_count(object, field, *edge)?;
-            let id = self.m.id(count).expect("a count");
-            self.store(id, SIROffset::Static(0), 32, current);
-        }
+        self.sample_watched(&watched)?;
         terms.sort_unstable();
         terms.dedup();
         let site = self.wait_site(terms, Vec::new());
         let point = self.suspend_at(site, false)?;
         let mut occurred: Option<RegisterId> = None;
-        for (field, handle, edge, object, count, value) in &samples {
-            let id = self.m.id(count).expect("a count");
-            let before = self.b.alloc_bit(32, false);
-            self.b.emit(SIRInstruction::Load(
-                before,
-                stable(id),
-                SIROffset::Static(0),
-                32,
-            ));
-            let now = self.edge_count(object, field, *edge)?;
-            let advanced = self.b.alloc_bit(1, false);
-            self.b
-                .emit(SIRInstruction::Binary(advanced, now, BinaryOp::Ne, before));
-            let item = match value {
-                // Another object now: the change of the value decides.
-                Some(value) => {
-                    let (_, current) = self.m.temp(
-                        "event_value",
-                        field.width as usize,
-                        field.signed,
-                        field.four_state,
-                    );
-                    let load = sv::ir::Expr::Call {
-                        callee: sv::ir::Callee::Object(Box::new(ObjectOp::Load(*field))),
-                        args: vec![Some(handle.clone())],
-                        arg_order: Vec::new(),
-                    };
-                    self.assign(&sv::ir::LValue::Ident(current.clone()), &load)?;
-                    let switched = sv::ir::Expr::Binary {
-                        left: Box::new(handle.clone()),
-                        op: sv::ir::BinaryOp::Ne,
-                        right: Box::new(sv::ir::Expr::Ident(object.clone())),
-                    };
-                    let (switched, _) = self.eval_truth(&switched)?;
-                    let (changed, _) =
-                        self.eval_truth(&super::calls::edge_occurred_expr(value, &current, *edge))?;
-                    let by_switch = self.b.alloc_bit(1, false);
-                    self.b.emit(SIRInstruction::Binary(
-                        by_switch,
-                        switched,
-                        BinaryOp::And,
-                        changed,
-                    ));
-                    let either = self.b.alloc_bit(1, false);
-                    self.b.emit(SIRInstruction::Binary(
-                        either,
-                        advanced,
-                        BinaryOp::Or,
-                        by_switch,
-                    ));
-                    either
-                }
-                None => advanced,
-            };
+        for (item, watched) in items.iter().zip(&watched) {
+            let mut happened = self.watched_occurred(watched, item.edge)?;
+            if let Some(iff) = &item.iff {
+                let iff = self.propagate(iff);
+                let (holds, _) = self.eval_truth(&super::calls::iff_truth(iff))?;
+                let both = self.b.alloc_bit(1, false);
+                self.b
+                    .emit(SIRInstruction::Binary(both, happened, BinaryOp::And, holds));
+                happened = both;
+            }
             occurred = Some(match occurred {
                 Some(any) => {
                     let either = self.b.alloc_bit(1, false);
                     self.b
-                        .emit(SIRInstruction::Binary(either, any, BinaryOp::Or, item));
+                        .emit(SIRInstruction::Binary(either, any, BinaryOp::Or, happened));
                     either
                 }
-                None => item,
+                None => happened,
             });
         }
         let occurred = occurred.expect("an item");
+        // Without an occurrence, sample again before waiting again.
+        let again = self.b.new_block();
+        let join = self.b.new_block();
+        self.b.seal_block(SIRTerminator::Branch {
+            cond: occurred,
+            true_block: (join, Vec::new()),
+            false_block: (again, Vec::new()),
+        });
+        self.b.switch_to_block(again);
+        self.sample_watched(&watched)?;
+        self.b.seal_block(SIRTerminator::Jump(join, Vec::new()));
+        self.b.switch_to_block(join);
         self.wake_at(point, occurred)?;
         Ok(true)
+    }
+
+    /// Whether `watched` occurred since it was sampled, by `edge` (see
+    /// [`Self::property_event`]): a one-bit register.
+    fn watched_occurred(
+        &mut self,
+        watched: &Watched,
+        edge: sv::ir::EventEdge,
+    ) -> Result<RegisterId, sv::AnalyzerError> {
+        match watched {
+            Watched::Property {
+                field,
+                handle,
+                object,
+                count,
+                value,
+                ..
+            } => {
+                let id = self.m.id(count).expect("a count");
+                let before = self.b.alloc_bit(32, false);
+                self.b.emit(SIRInstruction::Load(
+                    before,
+                    stable(id),
+                    SIROffset::Static(0),
+                    32,
+                ));
+                let now = self.edge_count(object, field, edge)?;
+                let advanced = self.b.alloc_bit(1, false);
+                self.b
+                    .emit(SIRInstruction::Binary(advanced, now, BinaryOp::Ne, before));
+                let Some((value, current)) = value else {
+                    return Ok(advanced);
+                };
+                // Another object now: the change of the value decides.
+                let load = self.sampled_value(sv::ir::Expr::Call {
+                    callee: sv::ir::Callee::Object(Box::new(ObjectOp::Load(*field))),
+                    args: vec![Some(handle.clone())],
+                    arg_order: Vec::new(),
+                });
+                self.assign(&sv::ir::LValue::Ident(current.clone()), &load)?;
+                let switched = sv::ir::Expr::Binary {
+                    left: Box::new(handle.clone()),
+                    op: sv::ir::BinaryOp::Ne,
+                    right: Box::new(sv::ir::Expr::Ident(object.clone())),
+                };
+                let (switched, _) = self.eval_truth(&switched)?;
+                let (changed, _) =
+                    self.eval_truth(&super::calls::edge_occurred_expr(value, current, edge))?;
+                let by_switch = self.b.alloc_bit(1, false);
+                self.b.emit(SIRInstruction::Binary(
+                    by_switch,
+                    switched,
+                    BinaryOp::And,
+                    changed,
+                ));
+                let either = self.b.alloc_bit(1, false);
+                self.b.emit(SIRInstruction::Binary(
+                    either,
+                    advanced,
+                    BinaryOp::Or,
+                    by_switch,
+                ));
+                Ok(either)
+            }
+            Watched::Value { expr, sample, now } => {
+                let value = self.sampled_value(expr.clone());
+                self.assign(&sv::ir::LValue::Ident(now.clone()), &value)?;
+                let (changed, _) =
+                    self.eval_truth(&super::calls::edge_occurred_expr(sample, now, edge))?;
+                Ok(changed)
+            }
+        }
+    }
+
+    /// Sample each of `watched` (see [`Self::property_event`]).
+    fn sample_watched(&mut self, watched: &[Watched]) -> Result<(), sv::AnalyzerError> {
+        for watched in watched {
+            match watched {
+                Watched::Property {
+                    field,
+                    handle,
+                    edge,
+                    object,
+                    count,
+                    value,
+                } => {
+                    self.assign(&sv::ir::LValue::Ident(object.clone()), handle)?;
+                    let register = self.handle(&sv::ir::Expr::Ident(object.clone()))?;
+                    let place =
+                        self.constant64(u64::from(field.offset) | u64::from(field.bytes()) << 32);
+                    let four_state =
+                        self.constant64(u64::from(field.four_state && self.m.four_state));
+                    self.heap_call(ops::OBJECT_EDGE_WATCH, &[register, place, four_state]);
+                    let current = self.edge_count(object, field, *edge)?;
+                    let id = self.m.id(count).expect("a count");
+                    self.store(id, SIROffset::Static(0), 32, current);
+                    if let Some((value, _)) = value {
+                        let load = self.sampled_value(sv::ir::Expr::Call {
+                            callee: sv::ir::Callee::Object(Box::new(ObjectOp::Load(*field))),
+                            args: vec![Some(sv::ir::Expr::Ident(object.clone()))],
+                            arg_order: Vec::new(),
+                        });
+                        self.assign(&sv::ir::LValue::Ident(value.clone()), &load)?;
+                    }
+                }
+                Watched::Value { expr, sample, .. } => {
+                    let value = self.sampled_value(expr.clone());
+                    self.assign(&sv::ir::LValue::Ident(sample.clone()), &value)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The count of `edge` occurrences of `field` in the object variable
@@ -523,9 +664,7 @@ impl Ff<'_, '_> {
                         self.eval(&expr, Some((field.width as usize, signed)))?
                     }
                 };
-                let counted = self.edges_begin(object, field);
                 self.store_field(object, *field, value);
-                self.edges_end(object, field, counted);
                 self.property_stored(field);
                 self.constant64(0)
             }
@@ -546,9 +685,7 @@ impl Ff<'_, '_> {
                         self.integer_of_width(&expr, field.width as usize, signed)?
                     }
                 };
-                let counted = self.edges_begin(object, field);
                 let result = self.heap_call(ops::OBJECT_STORE, &[object, place, value]);
-                self.edges_end(object, field, counted);
                 self.property_stored(field);
                 result
             }
@@ -910,4 +1047,28 @@ impl Ff<'_, '_> {
         ));
         masked
     }
+}
+
+/// An item of an event control with a property of an object (see
+/// `Ff::property_event`), and the variables holding its samples.
+enum Watched {
+    /// A property of an object: the object its handle denoted, the count of
+    /// the item's edge in it, and, when the handle can denote another object
+    /// while the process waits, its value and where the value of the object
+    /// the handle denotes at a resume is read.
+    Property {
+        field: sv::ir::ObjectField,
+        handle: sv::ir::Expr,
+        edge: sv::ir::EventEdge,
+        object: String,
+        count: String,
+        value: Option<(String, String)>,
+    },
+    /// Any other expression: its value, and where the value at a resume is
+    /// evaluated.
+    Value {
+        expr: sv::ir::Expr,
+        sample: String,
+        now: String,
+    },
 }

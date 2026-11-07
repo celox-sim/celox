@@ -7983,6 +7983,26 @@ impl Ff<'_, '_> {
         self.suspend_on(terms, gates, samples)
     }
 
+    /// Reject an edge of event expression `expr` when it is real: an edge
+    /// is of the least significant bit of an integral value (IEEE 1800-2023
+    /// 9.4.2).
+    pub(super) fn check_event_edge(
+        &self,
+        edge: sv::ir::EventEdge,
+        expr: &sv::ir::Expr,
+    ) -> Result<(), sv::AnalyzerError> {
+        let edge = match edge {
+            sv::ir::EventEdge::Any => return Ok(()),
+            sv::ir::EventEdge::Pos => "posedge",
+            sv::ir::EventEdge::Neg => "negedge",
+            sv::ir::EventEdge::Both => "edge",
+        };
+        if self.m.expr_float_precision(expr).is_some() {
+            return Err(sv::AnalyzerError::RealEdgeEvent { edge });
+        }
+        Ok(())
+    }
+
     /// The counter terms of `items`, their `iff` gates, and the samples the
     /// process takes of their expressions before it suspends.
     fn event_terms(
@@ -7994,17 +8014,7 @@ impl Ff<'_, '_> {
     ) -> Result<(), sv::AnalyzerError> {
         for item in items {
             let expr = self.propagate(&item.expr);
-            let edge = match item.edge {
-                sv::ir::EventEdge::Any => None,
-                sv::ir::EventEdge::Pos => Some("posedge"),
-                sv::ir::EventEdge::Neg => Some("negedge"),
-                sv::ir::EventEdge::Both => Some("edge"),
-            };
-            if let Some(edge) = edge
-                && self.m.expr_float_precision(&expr).is_some()
-            {
-                return Err(sv::AnalyzerError::RealEdgeEvent { edge });
-            }
+            self.check_event_edge(item.edge, &expr)?;
             let mut variable = false;
             let id = match &expr {
                 sv::ir::Expr::Ident(name) => match self.m.id(name) {
@@ -8930,27 +8940,17 @@ pub(crate) fn watched_properties(
             }
         }
     }
-    // An event control on a property counts its occurrences in each object
-    // at the store (see `Ff::property_event`): the stores of its key are
-    // counted, which the key's edge marker says.
+    // An event control on a property waits for the stores of its key (see
+    // `Ff::property_event`); the heap counts the occurrences in each object.
     for expr in &events {
         for op in heap_reads(subroutine, expr) {
             if let sv::ir::ObjectOp::Load(field) = op
                 && field.key != 0
             {
                 keys.insert(field.key);
-                keys.insert(property_edges(field.key));
             }
         }
     }
-}
-
-/// The key whose [`property_changes`] variable marks that an event control
-/// watches the property with key `key`, so that each store of it counts the
-/// occurrences of the stored object (see `Ff::property_event`). A marker
-/// that is some other property's key only counts that property's stores too.
-pub(crate) fn property_edges(key: u32) -> u32 {
-    key.rotate_left(16) ^ 0x6564_6765
 }
 
 /// The name of the variable that counts the stores of the class property
