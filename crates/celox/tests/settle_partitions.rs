@@ -147,9 +147,6 @@ fn partitioned_native_matches_single_pass() {
     assert_eq!(trace!(partitioned().build_native().unwrap()), reference());
 }
 
-/// A count of dirty partitions says nothing about their share of the work:
-/// unrelated partitions can contain much wider expressions or larger processes.
-/// Updating one input must not promote its three readers to a full settle.
 /// The traced plan lists every partition and its compared chunks, and its
 /// lint finds no reader marked for bits it does not read: `s3` takes
 /// `s2[3:0]` and `s1[7:4]`, so neither whole variable makes it a reader.
@@ -177,6 +174,9 @@ fn traced_settle_plan_marks_only_readers_of_compared_bits() {
     );
 }
 
+/// A count of dirty partitions says nothing about their share of the work:
+/// unrelated partitions can contain much wider expressions or larger processes.
+/// Updating one input must not promote its three readers to a full settle.
 #[test]
 fn sparse_partition_updates_do_not_promote_unrelated_work() {
     const SOURCE: &str = r#"
