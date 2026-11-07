@@ -1274,6 +1274,19 @@ impl<'a> ProcModule<'a> {
         (id, name)
     }
 
+    /// The shared generation counter of the named block `block` that a
+    /// `disable` can leave: every activation of the block snapshots it on
+    /// entry, and disabling the block advances it so each other active
+    /// activation leaves at its next statement (IEEE 1800-2023 9.6.2).
+    /// One variable serves every process and inlining of the block.
+    pub fn disable_epoch(&mut self, block: u32) -> String {
+        let name = format!("$disable_epoch_{block}");
+        if self.id(&name).is_none() {
+            self.hidden(name.clone(), 64, false, false);
+        }
+        name
+    }
+
     /// The hidden variable through which the module's processes read the
     /// simulation time, which the scheduler stores into it
     /// (`RuntimeSchema::time_slots`). Its name is no SystemVerilog
@@ -3388,7 +3401,8 @@ pub(super) fn stmts_may_jump(stmts: &[sv::ir::Stmt], in_loop: bool) -> bool {
 pub(super) fn stmt_may_jump(stmt: &sv::ir::Stmt, in_loop: bool) -> bool {
     match stmt {
         sv::ir::Stmt::Break | sv::ir::Stmt::Continue => !in_loop,
-        sv::ir::Stmt::Return(_) => true,
+        sv::ir::Stmt::Return(_) | sv::ir::Stmt::DisableBlock(_) => true,
+        sv::ir::Stmt::Block { body, .. } => stmts_may_jump(body, in_loop),
         sv::ir::Stmt::If {
             then_body,
             else_body,

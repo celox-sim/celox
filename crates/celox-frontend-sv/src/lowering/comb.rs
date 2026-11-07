@@ -27,6 +27,8 @@ enum Frame {
         break_flag: SourceVarId,
         continue_flag: SourceVarId,
     },
+    /// A named block a `disable` can leave (9.6.2).
+    Block { id: u32, exit_flag: SourceVarId },
     Function {
         return_flag: SourceVarId,
         return_var: Option<String>,
@@ -1990,6 +1992,7 @@ impl<'p, 'a> Comb<'p, 'a> {
                         seen_loop = true;
                     }
                 }
+                Frame::Block { exit_flag, .. } => flags.push(*exit_flag),
                 Frame::Function { return_flag, .. } => {
                     flags.push(*return_flag);
                     break;
@@ -2157,22 +2160,56 @@ impl<'p, 'a> Comb<'p, 'a> {
                 body,
             } => self.exec_loop(store, frames, kind, init, condition.as_ref(), step, body),
             sv::ir::Stmt::Break | sv::ir::Stmt::Continue => {
-                let flag = frames
-                    .iter()
-                    .rev()
-                    .take_while(|frame| matches!(frame, Frame::Loop { .. }))
-                    .find_map(|frame| match frame {
+                // The innermost loop of this subroutine; named blocks are
+                // transparent to it.
+                let mut flag = None;
+                for frame in frames.iter().rev() {
+                    match frame {
                         Frame::Loop {
                             break_flag,
                             continue_flag,
-                        } => Some(if matches!(stmt, sv::ir::Stmt::Break) {
-                            *break_flag
-                        } else {
-                            *continue_flag
-                        }),
-                        Frame::Function { .. } => None,
-                    })
-                    .ok_or_else(|| unsupported("break or continue outside a loop"))?;
+                        } => {
+                            flag = Some(if matches!(stmt, sv::ir::Stmt::Break) {
+                                *break_flag
+                            } else {
+                                *continue_flag
+                            });
+                            break;
+                        }
+                        Frame::Block { .. } => {}
+                        Frame::Function { .. } => break,
+                    }
+                }
+                let flag = flag.ok_or_else(|| unsupported("break or continue outside a loop"))?;
+                self.set_flag(&mut store, flag, true)?;
+                Ok(store)
+            }
+            sv::ir::Stmt::Block { id, body } => {
+                let exit_flag = self.flag("block-exit");
+                self.set_flag(&mut store, exit_flag, false)?;
+                let mut frames = frames.to_vec();
+                frames.push(Frame::Block { id: *id, exit_flag });
+                self.exec_block(store, &frames, body)
+            }
+            sv::ir::Stmt::DisableBlock(id) => {
+                // The named block executing in this subroutine.
+                let mut flag = None;
+                for frame in frames.iter().rev() {
+                    match frame {
+                        Frame::Block {
+                            id: block,
+                            exit_flag,
+                        } if block == id => {
+                            flag = Some(*exit_flag);
+                            break;
+                        }
+                        Frame::Function { .. } => break,
+                        _ => {}
+                    }
+                }
+                let flag = flag.ok_or_else(|| {
+                    unsupported("disable of a block that is not executing in this process")
+                })?;
                 self.set_flag(&mut store, flag, true)?;
                 Ok(store)
             }
@@ -2185,7 +2222,7 @@ impl<'p, 'a> Comb<'p, 'a> {
                             return_flag,
                             return_var,
                         } => Some((*return_flag, return_var.clone())),
-                        Frame::Loop { .. } => None,
+                        Frame::Loop { .. } | Frame::Block { .. } => None,
                     })
                     .ok_or_else(|| unsupported("return outside a subroutine"))?;
                 if let (Some(value), Some(return_var)) = (value, return_var) {
@@ -3036,13 +3073,14 @@ impl<'p, 'a> Comb<'p, 'a> {
                     }
                 };
             }
-            // A `return` inside the loop ends it as well.
-            if let Some(active) = self.active_return(&store, frames)? {
+            // A `return` inside the loop ends it as well, and so does a
+            // `disable` of a named block around it.
+            if let Some(active) = self.active_around_loop(&store, frames)? {
                 match slt_bool(self.arena, &mut self.consts, active.0) {
                     Some(false) => break,
                     Some(true) => {}
                     None => {
-                        // Later iterations run only while no return was taken.
+                        // Later iterations run only while neither was taken.
                         let (node, sources) = self.read(&store, break_flag, full(1))?;
                         let returned = slt_not(self.arena, &mut self.consts, active.0)?;
                         let node = slt_or(self.arena, &mut self.consts, node, returned)?;
@@ -3056,29 +3094,59 @@ impl<'p, 'a> Comb<'p, 'a> {
         Ok(store)
     }
 
-    /// The active condition of the innermost function's `return` flag.
-    fn active_return(
+    /// The flags of the jumps that leave a loop with the frames `frames`
+    /// around it, besides its own `break`: the exit flags of the named
+    /// blocks around it in its subroutine (9.6.2) and that subroutine's
+    /// `return` flag. An enclosing loop has no flag the loop can set.
+    fn flags_around_loop(frames: &[Frame]) -> Vec<SourceVarId> {
+        let mut flags = Vec::new();
+        for frame in frames.iter().rev() {
+            match frame {
+                Frame::Loop { .. } => {}
+                Frame::Block { exit_flag, .. } => flags.push(*exit_flag),
+                Frame::Function { return_flag, .. } => {
+                    flags.push(*return_flag);
+                    break;
+                }
+            }
+        }
+        flags
+    }
+
+    /// The condition that none of the [`Self::flags_around_loop`] is set;
+    /// `None` when every one is known clear.
+    fn active_around_loop(
         &mut self,
         store: &Store,
         frames: &[Frame],
     ) -> Result<Option<Value>, sv::AnalyzerError> {
-        let Some(return_flag) = frames.iter().rev().find_map(|frame| match frame {
-            Frame::Function { return_flag, .. } => Some(*return_flag),
-            Frame::Loop { .. } => None,
-        }) else {
-            return Ok(None);
-        };
-        if store.get(&return_flag).is_none() {
-            return Ok(None);
+        let mut any: Option<Value> = None;
+        for flag in Self::flags_around_loop(frames) {
+            if store.get(&flag).is_none() {
+                continue;
+            }
+            let (node, sources) = self.read(store, flag, full(1))?;
+            if slt_bool(self.arena, &mut self.consts, node) == Some(false) {
+                continue;
+            }
+            any = Some(match any {
+                None => (node, sources),
+                Some((other, mut other_sources)) => {
+                    other_sources.extend(sources);
+                    (
+                        slt_or(self.arena, &mut self.consts, other, node)?,
+                        other_sources,
+                    )
+                }
+            });
         }
-        let (node, sources) = self.read(store, return_flag, full(1))?;
-        if slt_bool(self.arena, &mut self.consts, node) == Some(false) {
-            return Ok(None);
+        match any {
+            None => Ok(None),
+            Some((node, sources)) => Ok(Some((
+                slt_not(self.arena, &mut self.consts, node)?,
+                sources,
+            ))),
         }
-        Ok(Some((
-            slt_not(self.arena, &mut self.consts, node)?,
-            sources,
-        )))
     }
 
     /// Whether a counted loop must be folded: its bounds depend on run-time
@@ -3283,18 +3351,15 @@ impl<'p, 'a> Comb<'p, 'a> {
                 expr: update,
             });
         }
-        // The fold stops after an iteration that breaks or returns.
+        // The fold stops after an iteration that breaks, returns or
+        // disables a named block around the loop.
         let (broke, broke_sources) = self.read(&after, break_flag, full(1))?;
         let mut stop = broke;
         let mut stop_sources = broke_sources;
-        if let Some(Frame::Function { return_flag, .. }) = frames
-            .iter()
-            .rev()
-            .find(|frame| matches!(frame, Frame::Function { .. }))
-        {
-            if after.get(return_flag).is_some() {
-                let (returned, sources) = self.read(&after, *return_flag, full(1))?;
-                stop = slt_or(self.arena, &mut self.consts, stop, returned)?;
+        for flag in Self::flags_around_loop(frames) {
+            if after.get(&flag).is_some() {
+                let (left, sources) = self.read(&after, flag, full(1))?;
+                stop = slt_or(self.arena, &mut self.consts, stop, left)?;
                 stop_sources.extend(sources);
             }
         }

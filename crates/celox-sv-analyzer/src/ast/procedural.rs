@@ -123,6 +123,16 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
     /// The name of the subroutine whose body this is, which the names of
     /// its static variables carry (see [`Self::declare_static`]).
     owner: Option<String>,
+    /// The named blocks enclosing the current statement that a `disable`
+    /// can leave (9.6.2): their labels and block ids, innermost last, and
+    /// whether a `disable` in the body has named the block. Only such a
+    /// block stays a block in the statement tree.
+    pub(super) named_blocks: Vec<(String, u32, bool)>,
+    /// The named fork-branch blocks a `disable` in a sibling branch can
+    /// kill (9.6.2): their labels, the hidden variables holding each
+    /// branch's process handle and whether it is armed, and whether a
+    /// `disable` has named the branch. Only such a branch takes a handle.
+    pub(super) fork_blocks: Vec<(String, String, String, bool)>,
 }
 
 /// The names a body declares: its scopes of locals, innermost last, and
@@ -326,6 +336,7 @@ fn before_returns(body: &mut Vec<Stmt>, epilogue: &[Stmt], result: Option<&str>)
                     pending.push(step);
                     pending.push(body);
                 }
+                Stmt::Block { body, .. } => pending.push(body),
                 // A `return` in a forked branch ends only that branch.
                 _ => {}
             }
@@ -488,6 +499,8 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             return_chandle: None,
             sensitivity_body: Vec::new(),
             owner: None,
+            named_blocks: Vec::new(),
+            fork_blocks: Vec::new(),
             tree,
             session,
             dims,
@@ -2430,7 +2443,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 Err(unsupported("procedural continuous assignment"))
             }
             StatementKind::Disable(tokens) => {
-                let disables_fork = self
+                let mut words = self
                     .tree
                     .declarations()
                     .tokens
@@ -2438,12 +2451,55 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     .into_iter()
                     .flatten()
                     .filter(|token| !token.is_trivia())
-                    .find(|token| token.text != "disable")
-                    .is_some_and(|token| token.text == "fork");
-                if disables_fork {
-                    Ok(vec![Stmt::DisableFork])
-                } else {
-                    Err(unsupported("disable statement"))
+                    .map(|token| token.text.as_str());
+                // The target follows the `disable` keyword: `fork`, or a
+                // block, task or hierarchical name (9.6.2). Hierarchical
+                // and task targets stay unsupported.
+                let target = words.by_ref().find(|word| *word != "disable");
+                let hierarchical = matches!(words.next(), Some("." | "::"));
+                match target {
+                    Some("fork") if !hierarchical => Ok(vec![Stmt::DisableFork]),
+                    Some(name) if !hierarchical => {
+                        let name = instances::normalize_identifier(name);
+                        if let Some((_, id, targeted)) = self
+                            .named_blocks
+                            .iter_mut()
+                            .rev()
+                            .find(|(label, _, _)| *label == name)
+                        {
+                            // Killing a sibling fork branch by this name
+                            // while also inside a block of it is resolved
+                            // for the enclosing block first.
+                            *targeted = true;
+                            Ok(vec![Stmt::DisableBlock(*id)])
+                        } else if let Some((_, handle, armed, targeted)) = self
+                            .fork_blocks
+                            .iter_mut()
+                            .rev()
+                            .find(|(label, _, _, _)| *label == name)
+                        {
+                            *targeted = true;
+                            let (handle, armed) = (handle.clone(), armed.clone());
+                            Ok(vec![Stmt::If {
+                                condition: Expr::Ident(armed.clone()),
+                                then_body: vec![
+                                    Stmt::Eval(events::call(
+                                        celox_design::ProcessOp::Kill,
+                                        vec![Expr::Ident(handle)],
+                                    )),
+                                    Stmt::Assign {
+                                        lhs: LValue::Ident(armed),
+                                        rhs: Expr::Literal("1'b0".into()),
+                                        nonblocking: false,
+                                    },
+                                ],
+                                else_body: Vec::new(),
+                            }])
+                        } else {
+                            Err(unsupported("disable statement"))
+                        }
+                    }
+                    _ => Err(unsupported("disable statement")),
                 }
             }
             StatementKind::Parallel { .. } => Err(unsupported("fork-join block")),

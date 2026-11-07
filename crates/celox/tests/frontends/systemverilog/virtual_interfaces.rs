@@ -695,3 +695,36 @@ fn virtual_interface_members_keep_package_and_unit_types() {
     assert_eq!(sim.get(sim.signal("data")), 0xabu8.into());
     assert_eq!(sim.get(sim.signal("wide")), 0xcdeu16.into());
 }
+
+sv_backends! {
+    // An enclosing `@*` reads only the statements, not the handle and member
+    // of an event control nested in a named block that a `disable` names
+    // (IEEE 1800-2023 9.4.2.2, 9.6.2): the clock the nested control waits
+    // for does not rerun the statements.
+    fn implicit_event_ignores_nested_control_in_disabled_block(sim) {
+        @setup { let source = r#"`timescale 1ns/1ns
+interface bus_if(input logic clk); endinterface
+module Top(output int outs, output int last);
+    logic tick = 0;
+    always #2 tick = ~tick;
+    bus_if ticking(tick);
+    virtual bus_if clocked;
+    logic [7:0] data = 0;
+    always @* begin : sample
+        @(posedge clocked.clk);
+        if (data == 8'h00) disable sample;
+        outs = outs + 1;
+        last = int'($time);
+    end
+    initial begin
+        clocked = ticking;
+        #3 data = 8'haa;
+    end
+endmodule
+"#; }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("implicit_event_in_disabled_block.sv"))], "Top");
+        sim.run_until(12).unwrap();
+        assert_eq!(sim.get(sim.signal("outs")), 1u32.into());
+        assert_eq!(sim.get(sim.signal("last")), 6u32.into());
+    }
+}

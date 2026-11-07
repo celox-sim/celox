@@ -3593,7 +3593,6 @@ fn rejects_unimplemented_timing_constructs() {
             "event e; logic c; initial @(e or posedge c);",
             "event control mixing named events with other events",
         ),
-        ("initial begin : b disable b; end", "disable statement"),
     ] {
         let code = format!("module Top; {body} endmodule");
         let error = analyze_source(&code, Path::new("timing.sv"))
@@ -8385,4 +8384,32 @@ fn static_class_functions_are_constant_functions() {
         .map(|signal| signal.r#type().resolved_width())
         .collect::<Vec<_>>();
     assert_eq!(widths, [Some(5), Some(3)]);
+}
+
+/// Only a named block that a `disable` names stays a block (IEEE 1800-2023
+/// 9.6.2): a label alone leaves the statements in their enclosing list, as
+/// the analyses of a process body expect them.
+#[test]
+fn only_disabled_named_blocks_stay_blocks() {
+    let code = "module Top(input logic clk, input logic d, output logic q, r);\n\
+                always_ff @(posedge clk) begin : plain q <= d; end\n\
+                always_ff @(posedge clk) begin : left if (d) disable left; r <= d; end\n\
+                endmodule";
+    let ir = analyze_source(code, Path::new("named_blocks.sv")).expect("named blocks");
+    let blocks = |process: &ir::FfProcess| {
+        let mut blocks = 0;
+        for stmt in process.body() {
+            stmt.walk(&mut |stmt| blocks += usize::from(matches!(stmt, ir::Stmt::Block { .. })));
+        }
+        blocks
+    };
+    let processes = ir.modules()[0].ff_processes();
+    assert_eq!(processes.iter().map(blocks).collect::<Vec<_>>(), [0, 1]);
+    assert!(matches!(
+        processes[0].body(),
+        [ir::Stmt::Assign {
+            nonblocking: true,
+            ..
+        }]
+    ));
 }

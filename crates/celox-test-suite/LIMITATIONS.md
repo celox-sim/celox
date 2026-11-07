@@ -2215,3 +2215,18 @@ The shared `types::enum_explicit_integral_assignments` and
 explicit casts, aliases, conditional enum values, function results and enum
 parameters wider than 64 bits through packages, generated scopes and
 overrides.
+
+### Disabling a block of concurrent task activations
+
+`procedural::disable_block_in_concurrent_task` calls an automatic task from
+two fork branches; one activation disables the task's named block while the
+other is suspended in it. Disabling a block inside an automatic task proceeds
+for all concurrent executions of the task (IEEE 1800-2023 9.6.2), so neither
+activation reaches the statement after the delay: Celox and Icarus 13.0 count
+no write.
+
+Verilator 5.052 ends only the activation that executes the `disable`; the
+other one resumes after its delay and performs the write. The executed
+mismatch is retained in
+[the Verilator procedural report](verification/sv/verilator/procedural.json).
+No assertion is weakened.

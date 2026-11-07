@@ -1624,6 +1624,36 @@
   "#)
   (top Top) (run_until 0)
   (assert_eq sum 110))
+
+(case randcase_weights
+  (source "randcase.sv" #"
+module Top(output bit ok);
+  int x, y = 6, hits = 0;
+  initial begin
+    ok = 1;
+    repeat (50) begin
+      randcase
+        0: ok = 0;
+        1: hits++;
+      endcase
+    end
+    ok = ok && hits == 50;
+    x = 7;
+    randcase
+      y - y: x = 1;
+      0: x = 2;
+    endcase
+    ok = ok && x == 7;
+    randcase
+      y - y: ok = 0;
+      y + y: x = 10;
+    endcase
+    ok = ok && x == 10;
+  end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq ok 1))
+
 (case pull_and_supply_nets
   (source "pull_supply.sv" #"
 module Top(output bit ok);
@@ -1639,3 +1669,151 @@ endmodule
 "#)
   (four_state) (top Top) (run_until 0) (assert_eq ok 1))
 
+(case disable_block_in_concurrent_task
+  (source "disable_block_in_concurrent_task.sv" #"
+module Top(output bit ok);
+  int writes = 0;
+  task automatic work(int id);
+    begin : B
+      if (id == 0) begin #5; disable B; end
+      else #10;
+      writes = writes + 1;
+    end
+  endtask
+  initial begin
+    fork
+      work(0);
+      work(1);
+    join
+    ok = writes == 0;
+  end
+endmodule
+"#)
+  (top Top) (run_until 20) (assert_eq ok 1))
+
+(case disable_named_blocks
+  (source "disable_named_blocks.sv" #"
+module Top(output bit ok);
+  int a = 0, b = 0, c = 0, n = 0;
+  function automatic int f(int x);
+    begin : fb
+      if (x > 10) disable fb;
+      return x * 2;
+    end
+    return -1;
+  endfunction
+  logic [7:0] y;
+  logic s = 1;
+  always_comb begin : cb
+    y = 8'd3;
+    if (s) disable cb;
+    y = 8'd7;
+  end
+  initial begin : blk
+    a = 1;
+    disable blk;
+    b = 1;
+  end
+  initial begin
+    fork
+      begin : branch
+        #10 c = 1;
+        #10 c = 2;
+      end
+      #15 disable branch;
+    join
+    begin : outer
+      for (int i = 0; i < 10; i++) begin
+        n++;
+        if (n == 3) disable outer;
+      end
+      n = 99;
+    end
+    ok = a == 1 && b == 0 && c == 1 && n == 3 && y == 8'd3
+      && f(5) == 10 && f(20) == -1;
+  end
+endmodule
+"#)
+  (top Top) (run_until 30) (assert_eq ok 1))
+
+; A named block a `disable` names stays a block in the statement tree, and
+; the statements in it keep the meaning they have outside one
+; (IEEE 1800-2023 9.6.2).
+(case disable_block_keeps_static_task_local
+  ; A static variable declared in the block is initialized once and keeps
+  ; its value between the calls of a task that suspends (6.21).
+  (source "disable_block_keeps_static_task_local.sv" #"
+module Top(output bit ok);
+  int first, second;
+  task step(output int value);
+    begin : body
+      static int calls = 0;
+      calls++;
+      #1;
+      if (calls > 2) disable body;
+      value = calls;
+    end
+  endtask
+  initial begin
+    step(first);
+    step(second);
+    ok = first == 1 && second == 2;
+  end
+endmodule
+"#)
+  (top Top) (run_until 5) (assert_eq ok 1))
+
+(case disable_block_keeps_nonblocking_region
+  ; A nonblocking write in the block takes effect in the NBA region: a read
+  ; after it still sees the blocking write of the same variable (4.9.3,
+  ; 4.9.4, 10.4.2).
+  (source "disable_block_keeps_nonblocking_region.sv" #"
+module Top(input logic clk, input logic stop,
+           output logic [7:0] q, output logic [7:0] mid);
+  always @(posedge clk) begin : update
+    q = 8'd1;
+    q <= 8'd2;
+    mid = q;
+    if (stop) disable update;
+    q <= 8'd3;
+  end
+endmodule
+"#)
+  (top Top)
+  (set clk 0) (set stop 1)
+  (tick clk)
+  (assert_eq q 2) (assert_eq mid 1)
+  (set stop 0)
+  (tick clk)
+  (assert_eq q 3) (assert_eq mid 1))
+
+(case disable_block_stops_combinational_loop
+  ; A `disable` of the named block around a loop ends the loop with the
+  ; block: no later iteration runs, whether the loop is unrolled or its
+  ; bound is a run-time value (9.6.2, 12.7).
+  (source "disable_block_stops_combinational_loop.sv" #"
+module Top(input logic stop, input logic [3:0] n,
+           output logic [7:0] y, output logic [7:0] z);
+  always_comb begin : fixed
+    y = 8'd0;
+    for (int i = 0; i < 2; i++) begin
+      y = y + 8'd1;
+      if (stop) disable fixed;
+    end
+    y = y + 8'd10;
+  end
+  always_comb begin : bounded
+    z = 8'd0;
+    for (int i = 0; i < n; i++) begin
+      z = z + 8'd1;
+      if (stop && i == 1) disable bounded;
+    end
+    z = z + 8'd10;
+  end
+endmodule
+"#)
+  (top Top)
+  (set stop 1) (set n 3)
+  (assert_eq y 1) (assert_eq z 2)
+  (set stop 0)
+  (assert_eq y 12) (assert_eq z 13))

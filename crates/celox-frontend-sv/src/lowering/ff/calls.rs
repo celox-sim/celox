@@ -739,6 +739,7 @@ impl Ff<'_, '_> {
             return_block,
             return_var: subroutine.return_var.clone(),
             loop_depth: 0,
+            block_depth: 0,
         });
         if let Some(return_var) = &subroutine.return_var
             && !subroutine.persistent_locals.contains(return_var)
