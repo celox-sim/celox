@@ -750,7 +750,7 @@ fn unsupported_and_illegal_uses_are_rejected() {
             "unsupported packed struct member",
         ),
         (
-            "typedef union { int a; bit b; } u_t; u_t u;",
+            "typedef union { real a; bit b; } u_t; u_t u;",
             "unpacked struct, union",
         ),
         (

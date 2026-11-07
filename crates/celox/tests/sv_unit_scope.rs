@@ -165,7 +165,7 @@ fn compilation_unit_variables_of_several_files_are_unsupported() {
 fn unused_unsupported_unit_items_are_ignored() {
     assert_eq!(
         output(
-            "typedef union { int i; bit b; } bint;
+            "typedef union { real r; int i; } bint;
              localparam int W = 4;
              module Top(output logic [7:0] y); assign y = 8'd3; endmodule"
         ),
@@ -173,7 +173,7 @@ fn unused_unsupported_unit_items_are_ignored() {
     );
     // A module that uses the unit reports why it cannot be analyzed.
     let error = build(&[(
-        "typedef union { int i; bit b; } bint;
+        "typedef union { real r; int i; } bint;
          localparam int W = 4;
          module Top(output logic [7:0] y); assign y = W; endmodule",
         "unit.sv",

@@ -162,6 +162,7 @@ impl CallSites for Type {
             virtual_interface: _,
             container: _,
             unpacked_struct: _,
+            unpacked_union: _,
             spelling: _,
             chandle: _,
         } = self;
@@ -207,6 +208,7 @@ impl CallSites for VariableDimensions {
             members,
             signed_element_depth: _,
             unpacked_struct: _,
+            unpacked_union: _,
             chandle: _,
         } = &**self;
         packed.call_sites(visit);

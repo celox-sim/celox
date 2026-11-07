@@ -20,6 +20,7 @@ pub(in crate::ast) fn of_type(
         class: ty.class.as_deref(),
         virtual_interface: ty.virtual_interface.as_deref(),
         unpacked_struct: ty.unpacked_struct.as_deref(),
+        unpacked_union: ty.unpacked_union,
         kind: ty.kind,
         enumeration: ty.is_enum || ty.packed_enum,
         packed_enum: ty.packed_enum,
@@ -69,6 +70,7 @@ pub(in crate::ast) fn of_shape(
         class: shape.class.as_deref(),
         virtual_interface: shape.virtual_interface.as_deref(),
         unpacked_struct: shape.unpacked_struct.as_deref(),
+        unpacked_union: shape.unpacked_union,
         kind,
         enumeration: shape.enum_domain.is_some()
             || shape.packed_enum
@@ -100,6 +102,7 @@ struct Parts<'a> {
     class: Option<&'a str>,
     virtual_interface: Option<&'a VirtualInterface>,
     unpacked_struct: Option<&'a UnpackedStruct>,
+    unpacked_union: bool,
     kind: TypeKind,
     /// An enumeration or a packed array of one.
     enumeration: bool,
@@ -190,6 +193,20 @@ impl Parts<'_> {
             return Some(TyData::UnpackedStruct(
                 self.aggregate_decl(aggregate.identity(), members),
             ));
+        }
+        if self.unpacked_union {
+            let owner = self.members.first()?.owner().clone();
+            let members = self
+                .members
+                .iter()
+                .map(|member| {
+                    Some((
+                        Arc::<str>::from(member.name()),
+                        of_type(table, functions, member.r#type(), env)?,
+                    ))
+                })
+                .collect::<Option<Arc<[_]>>>()?;
+            return Some(TyData::UnpackedUnion(self.aggregate_decl(&owner, members)));
         }
         if self.chandle {
             return Some(TyData::Chandle);

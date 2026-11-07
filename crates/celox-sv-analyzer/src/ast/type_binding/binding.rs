@@ -113,6 +113,97 @@ fn append_member_dimensions(
     Ok(())
 }
 
+/// Finish an aggregate whose member types are the last `names.len()`
+/// values, in a helper so the frame of [`bind_in_mode`] does not grow:
+/// it is live through class specialization, whose tests run on a small
+/// stack. Returns `None` when the aggregate form is unsupported here.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn finish_aggregate(
+    values: &mut Vec<Type>,
+    owner: Arc<str>,
+    union: bool,
+    soft: bool,
+    tagged: bool,
+    voids: Vec<bool>,
+    signed: bool,
+    names: Vec<String>,
+    defaults: Vec<Option<celox_sv_syntax::ExprId>>,
+    ranges: Vec<PackedRange>,
+    packed: bool,
+    declared_packed: bool,
+    native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    context: &PackedDimensions,
+    mode: BindingMode,
+) -> Converted<Option<()>> {
+    let start = values
+        .len()
+        .checked_sub(names.len())
+        .ok_or_else(|| unsupported("aggregate fields"))?;
+    if !packed {
+        if !ranges.is_empty() {
+            return Ok(None);
+        }
+        let fields = names
+            .into_iter()
+            .zip(values.split_off(start))
+            .zip(defaults)
+            .map(|((name, ty), default)| (name, ty, default))
+            .collect();
+        let Some(fields) = unpacked_member_defaults(fields, native, tree, session, context, mode)?
+        else {
+            return Ok(None);
+        };
+        let Some(ty) =
+            unpacked_structs::native_type(&tree.functions, owner, fields, &context.const_env)
+        else {
+            return Ok(None);
+        };
+        values.push(ty);
+        return Ok(Some(()));
+    }
+    let fields = names
+        .into_iter()
+        .zip(values.split_off(start))
+        .zip(voids)
+        .map(|((name, ty), is_void)| (name, ty, is_void))
+        .collect();
+    // A packed dimension on a plain unpacked union would make
+    // it a packed array of unions, which only the `packed` or
+    // `soft` forms allow (Syntax 7-2 note 17).
+    if union && !declared_packed && !soft && !ranges.is_empty() {
+        return Ok(None);
+    }
+    let Some(mut ty) = packed_structs::native_type(
+        tree,
+        if tagged {
+            packed_structs::AggregateKind::TaggedUnion
+        } else if union && !declared_packed && !soft {
+            packed_structs::AggregateKind::UnpackedUnion
+        } else if soft {
+            packed_structs::AggregateKind::SoftUnion
+        } else if union {
+            packed_structs::AggregateKind::HardUnion
+        } else {
+            packed_structs::AggregateKind::Struct
+        },
+        signed,
+        owner,
+        fields,
+        ranges,
+        &context.const_env,
+    ) else {
+        return Ok(None);
+    };
+    if !soft && !tagged {
+        ty.spelling = type_names::Spelling::aggregate(if union { "union" } else { "struct" });
+    }
+    values.push(ty);
+    Ok(Some(()))
+}
+
 fn bind_in_mode(
     root: TypeId,
     native: &celox_sv_syntax::Declarations,
@@ -137,6 +228,7 @@ fn bind_in_mode(
             defaults: Vec<Option<celox_sv_syntax::ExprId>>,
             ranges: Vec<PackedRange>,
             packed: bool,
+            declared_packed: bool,
         },
     }
     let mut jobs = vec![Job::Enter(root)];
@@ -341,8 +433,10 @@ fn bind_in_mode(
                         packed,
                         fields,
                     } => {
-                        // Unpacked unions are not supported (IEEE 1800-2023 7.3).
-                        if !packed && !soft && (*union || *tagged) {
+                        // Unpacked tagged unions are not supported (IEEE
+                        // 1800-2023 7.3). A plain unpacked union of
+                        // integral members is laid out further below.
+                        if !packed && !soft && *tagged {
                             return Ok(None);
                         }
                         let mut names = Vec::new();
@@ -387,7 +481,8 @@ fn bind_in_mode(
                             names,
                             defaults: fields.iter().map(|field| field.default).collect(),
                             ranges,
-                            packed: *packed || *soft,
+                            packed: *packed || *soft || *union,
+                            declared_packed: *packed,
                         });
                         for (field, is_void) in fields.iter().zip(voids).rev() {
                             if is_void {
@@ -480,69 +575,42 @@ fn bind_in_mode(
                 defaults,
                 ranges,
                 packed,
+                declared_packed,
             } => {
-                let start = values
-                    .len()
-                    .checked_sub(names.len())
-                    .ok_or_else(|| unsupported("aggregate fields"))?;
-                if !packed {
-                    if !ranges.is_empty() {
-                        return Ok(None);
-                    }
-                    let fields = names
-                        .into_iter()
-                        .zip(values.split_off(start))
-                        .zip(defaults)
-                        .map(|((name, ty), default)| (name, ty, default))
-                        .collect();
-                    let Some(fields) =
-                        unpacked_member_defaults(fields, native, tree, session, context, mode)?
-                    else {
-                        return Ok(None);
-                    };
-                    let Some(ty) = unpacked_structs::native_type(
-                        &tree.functions,
-                        owner,
-                        fields,
-                        &context.const_env,
-                    ) else {
-                        return Ok(None);
-                    };
-                    values.push(ty);
-                    continue;
-                }
-                let fields = names
-                    .into_iter()
-                    .zip(values.split_off(start))
-                    .zip(voids)
-                    .map(|((name, ty), is_void)| (name, ty, is_void))
-                    .collect();
-                let Some(mut ty) = packed_structs::native_type(
-                    tree,
-                    if tagged {
-                        packed_structs::AggregateKind::TaggedUnion
-                    } else if soft {
-                        packed_structs::AggregateKind::SoftUnion
-                    } else if union {
-                        packed_structs::AggregateKind::HardUnion
-                    } else {
-                        packed_structs::AggregateKind::Struct
-                    },
-                    signed,
+                if finish_aggregate(
+                    &mut values,
                     owner,
-                    fields,
+                    union,
+                    soft,
+                    tagged,
+                    voids,
+                    signed,
+                    names,
+                    defaults,
                     ranges,
-                    &context.const_env,
-                ) else {
+                    packed,
+                    declared_packed,
+                    native,
+                    tree,
+                    session,
+                    context,
+                    mode,
+                )?
+                .is_none()
+                {
                     return Ok(None);
-                };
-                if !soft && !tagged {
-                    ty.spelling =
-                        type_names::Spelling::aggregate(if union { "union" } else { "struct" });
                 }
-                values.push(ty);
             }
         }
+    }
+    // A packed dimension on an unpacked union type would make a packed
+    // array of unions, which only the `packed` or `soft` forms allow
+    // (Syntax 7-2 note 17), such as through a typedef.
+    if let Some(ty) = values.last()
+        && ty.unpacked_union
+        && ty.packed_ranges.len() > 1
+    {
+        return Err(unsupported("packed array of an unpacked union"));
     }
     // A chandle has its own packed range only; it is no packed array
     // element or enumeration base (IEEE 1800-2023 6.14, 6.19), such as

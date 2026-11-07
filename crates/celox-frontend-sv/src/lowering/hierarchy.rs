@@ -248,6 +248,15 @@ impl<'a> Hierarchy<'a> {
         else {
             return Ok(None);
         };
+        // The scope that names the signal reads it as a vector, which a
+        // whole unpacked union is not (IEEE 1800-2023 7.3); a member the
+        // path goes on to select is one.
+        if r#type.is_unpacked_union() && length == components.len() {
+            return Err(sv::AnalyzerError::Unsupported(format!(
+                "hierarchical reference `{}` to an unpacked union",
+                components[..length].join(".")
+            )));
+        }
         let r#type = resolved_type(elaborated, r#type).ok_or_else(|| {
             sv::AnalyzerError::Unsupported(format!(
                 "hierarchical reference `{}` to a signal of this type",

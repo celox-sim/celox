@@ -572,7 +572,12 @@ fn aggregate_name(
         (depth, Some(signed)) if signed == depth => true,
         _ => return Err(unsupported_operand("a packed array of a signed type")),
     };
-    let mut name = format!("{aggregate} packed");
+    // An unpacked union is laid out as a packed one but is none (7.3).
+    let mut name = if r#type.unpacked_union {
+        aggregate.to_string()
+    } else {
+        format!("{aggregate} packed")
+    };
     if signed {
         name.push_str(" signed");
     }

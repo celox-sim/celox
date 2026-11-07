@@ -289,7 +289,8 @@ pub(super) fn four_state_of(table: &semantic_types::TyTable, ty: TyId) -> bool {
         match table.data(ty) {
             TyData::Packed(packed) if packed.four_state => return true,
             TyData::Array { element, .. } => pending.push(*element),
-            TyData::UnpackedStruct(Decl::Aggregate { members, .. }) => {
+            TyData::UnpackedStruct(Decl::Aggregate { members, .. })
+            | TyData::UnpackedUnion(Decl::Aggregate { members, .. }) => {
                 pending.extend(members.iter().map(|(_, member)| *member));
             }
             _ => {}

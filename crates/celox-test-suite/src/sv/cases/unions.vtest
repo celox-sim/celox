@@ -144,3 +144,110 @@ endmodule
     (assert_eq value (& e 255))
     (assert_eq extended e)
     (assert_eq member_extended me)))
+
+; IEEE 1800-2023 7.3: an unpacked union is a single storage accessed
+; through any of its members. Integral members share the storage aligned
+; at its least significant bits, so writing one member determines the low
+; bits read through another; a whole-union assignment and equality compare
+; the storage, and `$bits` is the widest member.
+(case unpacked_overlay
+  (source "unpacked_union.sv" #"
+module Top(output logic [7:0] wide, arr_wide, output logic [3:0] narrow,
+           output bit same, output int unsigned bits);
+    typedef union { bit [7:0] v1; bit [3:0] v2; } u_t;
+    u_t un, copy_;
+    u_t arr[2];
+    always_comb begin
+        un.v1 = 8'd140;
+        narrow = un.v2;
+        copy_ = un;
+        same = copy_ == un;
+        copy_.v2 = 4'd5;
+        wide = copy_.v1;
+        bits = $bits(u_t);
+        arr[1].v1 = 8'h3c;
+        arr[0] = arr[1];
+        arr_wide = arr[0].v1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq narrow 12) (assert_eq wide 133) (assert_eq same 1)
+  (assert_eq bits 8) (assert_eq arr_wide 60))
+
+(case unpacked_four_state
+  (four_state)
+  (source "unpacked_union_four_state.sv" #"
+module Top(input logic [7:0] raw, output logic [3:0] narrow,
+           output logic [7:0] wide);
+    union { logic [7:0] v1; logic [3:0] v2; } data;
+    always_comb begin
+        data.v1 = raw;
+        narrow = data.v2;
+        wide = data.v1;
+    end
+endmodule
+"#)
+  (top Top)
+  (modify (set raw (fourstate 0xa0 0x0c)))
+  (assert_eq narrow (fourstate 0 12))
+  (assert_eq wide (fourstate 0xa0 12)))
+
+(case unpacked_whole_values
+  ; A whole unpacked union is assigned to a place of its type, also an
+  ; element of an array of them and through a function, compared for
+  ; equality and chosen by a conditional (7.3); its storage is no packed
+  ; dimension (20.7).
+  (source "unpacked_union_whole_values.sv" #"
+module Top(output logic [7:0] elem, cont, ret, pick,
+           output bit same, differ, output int dims, bits);
+    typedef union { bit [7:0] v1; bit [3:0] v2; } u_t;
+    u_t a, b, r, p;
+    u_t arr[2], held[2];
+    function automatic u_t pass(u_t x);
+        return x;
+    endfunction
+    always_comb begin
+        a.v1 = 8'd140;
+        b.v1 = 8'd7;
+        arr[1].v1 = 8'h3c;
+        arr[0] = arr[1];
+        elem = arr[0].v1;
+        r = pass(a);
+        ret = r.v1;
+        same = arr[0] == arr[1];
+        differ = a != b;
+        p = differ ? b : a;
+        pick = p.v1;
+        dims = $dimensions(a);
+        bits = $bits(a);
+    end
+    assign held[0] = a;
+    assign cont = held[0].v1;
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq elem 60) (assert_eq cont 140) (assert_eq ret 140) (assert_eq pick 7)
+  (assert_eq same 1) (assert_eq differ 1) (assert_eq dims 0) (assert_eq bits 8))
+
+(case unpacked_four_state_equality
+  ; An equality of unpacked unions with four-state members is unknown
+  ; where a member bit is (11.4.5).
+  (four_state)
+  (source "unpacked_union_four_state_equality.sv" #"
+module Top(input logic [7:0] raw, output logic eq, output logic same);
+    typedef union { logic [7:0] a; logic [3:0] b; } l_t;
+    l_t u, v;
+    always_comb begin
+        u.a = raw;
+        v.a = 8'h00;
+        eq = u == v;
+        same = v == v;
+    end
+endmodule
+"#)
+  (top Top)
+  (modify (set raw (fourstate 0xf0 0xf0)))
+  (assert_eq eq (fourstate 1 1)) (assert_eq same 1)
+  (modify (set raw 0x01))
+  (assert_eq eq 0))

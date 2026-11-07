@@ -235,10 +235,15 @@ pub(super) fn assignment_value(
                 .members
                 .iter()
                 .any(packed_structs::PackedMember::is_tagged)
+                || shape.unpacked_union
                 || (shape.members.len() > 1
                     && shape.members.iter().all(|member| member.offset() == 0))
             {
-                return Err(unsupported("assignment pattern for a packed union"));
+                return Err(unsupported(if shape.unpacked_union {
+                    "assignment pattern for an unpacked union"
+                } else {
+                    "assignment pattern for a packed union"
+                }));
             }
             return Ok(Expr::Concat(
                 shape

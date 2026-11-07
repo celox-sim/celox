@@ -164,6 +164,7 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                 members: port.r#type().members.clone(),
                 signed_element_depth: port.r#type().signed_element_depth,
                 unpacked_struct: port.r#type().unpacked_struct.clone(),
+                unpacked_union: port.r#type().unpacked_union,
             }),
         );
     }
@@ -214,6 +215,7 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                 members: signal.r#type().members.clone(),
                 signed_element_depth: signal.r#type().signed_element_depth,
                 unpacked_struct: signal.r#type().unpacked_struct.clone(),
+                unpacked_union: signal.r#type().unpacked_union,
             }),
         );
     }
@@ -404,6 +406,7 @@ fn extend_variable_dimensions_from_const_env(context: &mut PackedDimensions, con
             class: None,
             virtual_interface: None,
             unpacked_struct: None,
+            unpacked_union: false,
             spelling: type_names::Spelling::default(),
         };
         let mut shape = procedural::dimensions_from_type(&ty);
@@ -616,6 +619,7 @@ pub(super) fn parameter_packed_dimensions(parameters: &[Parameter]) -> VariableP
                     members: parameter.members.clone(),
                     signed_element_depth: parameter.signed_element_depth,
                     unpacked_struct: None,
+                    unpacked_union: false,
                 }),
             )
         })

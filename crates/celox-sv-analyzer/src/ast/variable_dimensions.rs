@@ -167,6 +167,8 @@ pub(super) struct VariableShape {
     /// A variable of unpacked structure type: the names of its members
     /// are variables (see [`unpacked_structs`]).
     pub(super) unpacked_struct: Option<Arc<unpacked_structs::UnpackedStruct>>,
+    /// An unpacked union type (see [`Type::unpacked_union`]).
+    pub(super) unpacked_union: bool,
     /// The declared type, for `$typename`.
     pub(super) declared: type_names::Declared,
     /// A `chandle` variable (see [`Type::chandle`]).

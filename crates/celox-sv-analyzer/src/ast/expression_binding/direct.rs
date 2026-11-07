@@ -623,6 +623,7 @@ fn bind_value_in(
     session: &mut Session,
 ) -> Converted<Expr> {
     let mut permits = chandles::Permits::new(root, chandle);
+    let mut unions = unpacked_structs::UnionPermits::default();
     let mut jobs = vec![Job::Enter(root, target.cloned().map(Rc::new), None)];
     let mut values = Vec::new();
     while let Some(job) = jobs.pop() {
@@ -687,6 +688,14 @@ fn bind_value_in(
                         "unpacked structure value received by a destination that is not of its type",
                     ));
                 }
+                // The same for a whole unpacked union value (7.3), in a
+                // helper so this frame does not grow: it is live through
+                // class specialization, whose tests run on a small stack.
+                check_union_target(target.as_deref(), id, native, tree, session, dimensions)?;
+                // The one check of every value the binder reads as a
+                // whole union.
+                let whole_union =
+                    unions.check(session, id, target.as_deref(), tree, native, dimensions)?;
                 if let Some(ty) = target.as_deref().and_then(|shape| {
                     shape
                         .virtual_interface
@@ -929,6 +938,7 @@ fn bind_value_in(
                 let (finish, children) = match &native.expression(id).kind {
                     ExprKind::Group(inner) => {
                         permits.grant_if(permitted, *inner);
+                        unions.grant_if(whole_union, *inner);
                         jobs.push(Job::Enter(*inner, target, scope.clone()));
                         continue;
                     }
@@ -1024,6 +1034,7 @@ fn bind_value_in(
                         }
                         permits
                             .binary(session, operator, *left, *right, tree, native, dimensions)?;
+                        unions.binary(operator, *left, *right);
                         (
                             Finish::Binary(operator.clone()),
                             vec![(*left, None), (*right, None)],
@@ -1036,6 +1047,8 @@ fn bind_value_in(
                     } => {
                         // The condition is a Boolean test; the branches are
                         // values where the conditional is one.
+                        unions.grant_if(whole_union, *then_expression);
+                        unions.grant_if(whole_union, *else_expression);
                         permits.grant(*condition);
                         permits.conditional(
                             session,
@@ -4242,6 +4255,32 @@ pub(in crate::ast) fn copied_in_target<'a>(
                 || (shape.virtual_interface.is_some() || shape.container.is_some())
                     && copied_in(dimensions, name, position)
         })
+}
+
+/// Check a value bound for `target` against the unpacked union rules, as
+/// the arms above do for an unpacked structure (IEEE 1800-2023 7.3).
+#[inline(never)]
+fn check_union_target(
+    target: Option<&VariableDimensions>,
+    id: ExprId,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> Converted<()> {
+    if let Some(owner) = target
+        .filter(|shape| shape.unpacked.is_empty())
+        .and_then(unpacked_structs::UnionIdentity::of_shape)
+    {
+        unpacked_structs::check_union_value(&owner, id, native, tree, session, dimensions)?;
+    } else if target.is_some_and(|shape| shape.unpacked.is_empty() && shape.container.is_none())
+        && unpacked_structs::native_union(id, native, tree, session, dimensions)?.is_some()
+    {
+        return Err(unsupported(
+            "unpacked union value received by a destination that is not of its type",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

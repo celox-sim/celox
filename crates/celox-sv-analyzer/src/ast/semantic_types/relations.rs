@@ -283,7 +283,8 @@ impl TyTable {
                 ..
             } => true,
             TyData::Array { element, .. } => self.holds_associative(*element),
-            TyData::UnpackedStruct(Decl::Aggregate { members, .. }) => members
+            TyData::UnpackedStruct(Decl::Aggregate { members, .. })
+            | TyData::UnpackedUnion(Decl::Aggregate { members, .. }) => members
                 .iter()
                 .any(|(_, member)| self.holds_associative(*member)),
             _ => false,

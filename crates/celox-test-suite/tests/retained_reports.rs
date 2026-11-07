@@ -1368,6 +1368,23 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "compile",
                             "reserved word not implemented: '$coverage_control'",
                         ),
+                        ("icarus", "unions::unpacked_overlay") => {
+                            ("compile_error", "compile", "Unpacked structs not supported")
+                        }
+                        ("icarus", "unions::unpacked_four_state") => {
+                            ("compile_error", "compile", "Unpacked structs not supported")
+                        }
+                        ("icarus", "unions::unpacked_four_state_equality") => {
+                            ("compile_error", "compile", "Unpacked structs not supported")
+                        }
+                        ("icarus", "unions::unpacked_whole_values") => {
+                            ("compile_error", "compile", "Unpacked structs not supported")
+                        }
+                        ("verilator", "unions::unpacked_overlay") => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq wide: expected 0x85, got 0x5",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

@@ -54,6 +54,50 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:4: sorry: Unpacked structs not supported.\n",
+      "expectation": "Simulation",
+      "name": "unions::unpacked_four_state",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:3: sorry: Unpacked structs not supported.\n",
+      "expectation": "Simulation",
+      "name": "unions::unpacked_four_state_equality",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:4: sorry: Unpacked structs not supported.\n",
+      "expectation": "Simulation",
+      "name": "unions::unpacked_overlay",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:4: sorry: Unpacked structs not supported.\n",
+      "expectation": "Simulation",
+      "name": "unions::unpacked_whole_values",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

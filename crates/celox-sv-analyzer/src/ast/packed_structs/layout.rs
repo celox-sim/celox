@@ -8,6 +8,9 @@ pub(in crate::ast) enum AggregateKind {
     HardUnion,
     SoftUnion,
     TaggedUnion,
+    /// A plain unpacked union (7.3), laid out like a soft union but no
+    /// integral type.
+    UnpackedUnion,
 }
 
 /// Freeze member bounds in the declaration environment before generated scopes
@@ -38,7 +41,8 @@ pub(in crate::ast) fn capture_member_type(
     Some(ty)
 }
 
-/// Syntax-independent IEEE7.2.1/7.3.1 layout kernel.
+/// Syntax-independent IEEE 7.2.1/7.3.1 layout kernel; an unpacked union
+/// (7.3) shares the soft layout.
 pub(in crate::ast) fn native_type(
     tree: &AnalysisContext<'_>,
     kind: AggregateKind,
@@ -57,13 +61,34 @@ pub(in crate::ast) fn native_type(
             if !names.insert(name.clone()) || ty.chandle {
                 return None;
             }
+            // The members of an unpacked union share one flat storage, so
+            // they are integral (7.3): no string, handle, virtual
+            // interface or event.
+            if matches!(kind, AggregateKind::UnpackedUnion)
+                && (matches!(
+                    ty.kind,
+                    TypeKind::String | TypeKind::Object | TypeKind::Process | TypeKind::Event
+                ) || ty.class.is_some()
+                    || ty.virtual_interface.is_some()
+                    || ty.container.is_some())
+            {
+                return None;
+            }
+            let captured = capture_member_type(functions, ty, env)?;
+            // An unpacked union is no integral type (7.3), so no packed
+            // type holds one as a member (7.2.1). Nor does an unpacked
+            // union here: a member of one is not classified as a whole
+            // union where it is read.
+            if captured.unpacked_union {
+                return None;
+            }
             Some(PackedMember {
                 owner: owner.clone(),
                 name,
                 offset: 0,
                 tag: None,
                 is_void,
-                r#type: capture_member_type(functions, ty, env)?,
+                r#type: captured,
             })
         })
         .collect::<Option<Vec<_>>>()?;
@@ -91,13 +116,16 @@ fn finish_type(
             if matches!(kind, AggregateKind::HardUnion) && width != 0 && width != member_width {
                 return None;
             }
-            // Soft members are right-justified in the largest member width.
+            // Soft and unpacked-union members are right-justified in the
+            // largest member width (7.3 leaves the representation of an
+            // unpacked union to the tool).
             width = width.max(member_width);
         } else {
             member.offset = width;
             width = width.checked_add(member_width)?;
         }
     }
+    let unpacked = matches!(kind, AggregateKind::UnpackedUnion);
     let tagged = matches!(kind, AggregateKind::TaggedUnion);
     if tagged {
         let tag_width = (usize::BITS - members.len().checked_sub(1)?.leading_zeros()) as usize;
@@ -127,5 +155,6 @@ fn finish_type(
         ConstExpr::Literal("0".into()),
     ));
     r#type.members = members;
+    r#type.unpacked_union = unpacked;
     Some(r#type)
 }

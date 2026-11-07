@@ -1,0 +1,15 @@
+{
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "unions::unpacked_overlay at 175:25: assert_eq wide: expected 0x85, got 0x5",
+      "expectation": "Simulation",
+      "name": "unions::unpacked_overlay",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

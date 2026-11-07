@@ -2256,3 +2256,22 @@ define the macros. The executed compile errors are retained in the
 [Verilator](verification/sv/verilator/system_functions.json) and
 [Icarus](verification/sv/icarus/system_functions.json) system function
 reports. No assertion is weakened.
+
+### Unpacked unions
+
+`unions::unpacked_overlay`, `unions::unpacked_four_state`,
+`unions::unpacked_whole_values` and `unions::unpacked_four_state_equality`
+declare plain unpacked unions of integral members (IEEE 1800-2023 7.3).
+
+Icarus 13.0 does not compile them ("Unpacked structs not supported"). The
+executed compile errors are retained in
+[the Icarus union report](verification/sv/icarus/unions.json).
+
+Verilator 5.052 passes `unions::unpacked_whole_values`. In
+`unions::unpacked_overlay` it reads a member other than the one last written:
+after a write of the 4-bit member it reads the 8-bit member as `8'h05`, where
+Celox keeps the bits the write did not cover and reads `8'h85`. 7.3 leaves the
+representation of an unpacked union to the tool, so the case records the
+overlay Celox documents and the executed mismatch is retained in
+[the Verilator union report](verification/sv/verilator/unions.json). No
+assertion is weakened.

@@ -388,6 +388,7 @@ fn solver_type(
         | TyData::Class(_)
         | TyData::VirtualInterface { .. }
         | TyData::UnpackedStruct(_)
+        | TyData::UnpackedUnion(_)
         | TyData::Array { .. } => {
             Err("a handle, string, container or property wider than 64 bits in a constraint".into())
         }

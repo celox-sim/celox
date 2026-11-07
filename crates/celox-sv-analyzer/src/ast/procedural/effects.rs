@@ -1071,6 +1071,7 @@ impl BodyBuilder<'_, '_, '_> {
                 semantic_types::TyData::Class(_)
                 | semantic_types::TyData::VirtualInterface { .. }
                 | semantic_types::TyData::UnpackedStruct(_)
+                | semantic_types::TyData::UnpackedUnion(_)
                 | semantic_types::TyData::Array { .. }
                 | semantic_types::TyData::Null
                 | semantic_types::TyData::Chandle,
@@ -1448,6 +1449,11 @@ impl BodyBuilder<'_, '_, '_> {
             &self.dims,
             if increment { "++" } else { "--" },
         )?;
+        if unpacked_structs::native_union(operand, native, self.tree, self.session, &self.dims)?
+            .is_some()
+        {
+            return Err(unsupported("increment or decrement of an unpacked union"));
+        }
         // A virtual interface is no number to step (IEEE 1800-2023 25.9).
         if let Some(ty) =
             virtual_interfaces::native_type(self.tree, self.session, operand, native, &self.dims)

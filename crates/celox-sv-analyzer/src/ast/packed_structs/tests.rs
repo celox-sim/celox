@@ -62,7 +62,7 @@ fn selects_members_of_unpacked_array_elements() {
 #[test]
 fn rejects_invalid_or_unsupported_struct_shapes() {
     for body in [
-        "union { logic a; } value;",
+        "union { real a; } value;",
         "union packed { logic a; logic [1:0] b; } value;",
         "union soft { real a; bit [63:0] b; } value;",
         "union soft { logic a[2]; logic b; } value;",

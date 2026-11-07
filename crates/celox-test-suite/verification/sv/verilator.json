@@ -38,6 +38,7 @@
     "verilator/tagged_unions.json",
     "verilator/timing.json",
     "verilator/types.json",
+    "verilator/unions.json",
     "verilator/unpacked_structs.json",
     "verilator/virtual_interfaces.json",
     "verilator/wide_container_elements.json"

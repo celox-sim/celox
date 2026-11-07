@@ -423,6 +423,7 @@ pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
         members: r#type.members.clone(),
         signed_element_depth: r#type.signed_element_depth,
         unpacked_struct: r#type.unpacked_struct.clone(),
+        unpacked_union: r#type.unpacked_union,
         declared: type_names::Declared::new(r#type),
     })
 }
@@ -636,6 +637,7 @@ pub(super) fn int_type() -> Type {
         class: None,
         virtual_interface: None,
         unpacked_struct: None,
+        unpacked_union: false,
         spelling: type_names::Spelling::keyword("int"),
     }
 }
@@ -1077,6 +1079,14 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     ));
                 }
                 self.reject_tagged_integral_target(id)?;
+                // A whole unpacked union is no integral place (7.3).
+                if unpacked_structs::native_union(id, native, self.tree, self.session, &self.dims)?
+                    .is_some()
+                {
+                    return Err(unsupported(
+                        "unpacked union in the target of a concatenation assignment",
+                    ));
+                }
                 let target = expression_binding::variable_lvalue(
                     id,
                     native,
@@ -1138,6 +1148,18 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             return Err(unsupported(format!(
                 "operator `{op}` on an unpacked structure"
             )));
+        }
+        if op != "="
+            && unpacked_structs::native_union(
+                left,
+                self.tree.declarations(),
+                self.tree,
+                self.session,
+                &self.dims,
+            )?
+            .is_some()
+        {
+            return Err(unsupported(format!("operator `{op}` on an unpacked union")));
         }
         if containers::element_member(
             left,
@@ -1445,7 +1467,8 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         {
             value
         } else if op == "=" {
-            expression_binding::expression(
+            expression_binding::assigned(
+                left,
                 right,
                 self.tree.declarations(),
                 &written,
@@ -4787,6 +4810,19 @@ pub(super) fn lower_subroutine(
     {
         return Err(unsupported(
             "unpacked structure array members in subroutine interfaces",
+        ));
+    }
+    // Nor is the result or an argument of a method call (see the class
+    // property check).
+    if class.is_some()
+        && return_type
+            .as_ref()
+            .into_iter()
+            .chain(params.iter().map(|(_, _, ty, _)| ty))
+            .any(|ty| ty.unpacked_union)
+    {
+        return Err(unsupported(
+            "unpacked union in the interface of a class method",
         ));
     }
     // An event control could not tell a call of such a function from a

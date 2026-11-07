@@ -117,6 +117,51 @@ pub(super) fn selected_pattern(
     bind_value(right, native, tree, session, dimensions, Some(&shape)).map(Some)
 }
 
+/// The variable that `id`, a path through an interface, names: a signal of
+/// the interface, bound as a variable of the scope.
+pub(super) fn interface_variable(
+    id: ExprId,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> Option<String> {
+    let ExprKind::Member { .. } = &native.expression(id).kind else {
+        return None;
+    };
+    let Ok((mut parts, None)) = direct::path(id, native, tree, session, dimensions) else {
+        return None;
+    };
+    if parts.len() < 2 || !packed_structs::bind_interface_path(tree, &mut parts, dimensions) {
+        return None;
+    }
+    let [variable] = parts.as_slice() else {
+        return None;
+    };
+    Some(variable.clone())
+}
+
+/// Bind `right` as the value place `left` receives, which is written as
+/// `lhs`: as [`expression`] does, and for a whole element of an array of
+/// unpacked unions as a value of the union type (IEEE 1800-2023 7.3).
+pub(super) fn assigned(
+    left: ExprId,
+    right: ExprId,
+    native: &Declarations,
+    lhs: &LValue,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> Converted<Expr> {
+    if matches!(lhs, LValue::Select { .. })
+        && unpacked_structs::native_union(left, native, tree, session, dimensions)?.is_some()
+        && let Some(shape) = crate::ast::dimensions::operand_shape(left, tree, session, dimensions)?
+    {
+        return bind_value(right, native, tree, session, dimensions, Some(&shape));
+    }
+    expression(right, native, lhs, tree, session, dimensions)
+}
+
 pub(super) fn expression(
     root: ExprId,
     native: &Declarations,

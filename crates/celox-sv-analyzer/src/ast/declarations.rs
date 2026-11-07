@@ -69,6 +69,11 @@ pub(super) fn ports_from_scope(
         if ty.kind() == TypeKind::Event {
             return Err(unsupported("event port"));
         }
+        // A connection is not checked against the union type of the
+        // port it binds, which a whole union value requires (7.3).
+        if ty.unpacked_union {
+            return Err(unsupported("unpacked union port"));
+        }
         if ty.unpacked_struct().is_some() {
             if ty
                 .unpacked_struct()
