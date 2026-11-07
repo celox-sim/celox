@@ -1,12 +1,13 @@
 # SystemVerilog サポート
 
-Celox は、SystemVerilog で記述した同期 RTL を **Rust API** からシミュレートできます。
+Celox は **Rust API** から SystemVerilog をシミュレートできます。
 Cargo feature の `systemverilog` を有効にし、ソースファイルとトップモジュールを指定して使います。
 TypeScript パッケージと Vite プラグインは、現時点では Veryl のみを読み込みます。
 
-モジュール、メモリ、interface、2 値・4 値シミュレーションなど、SystemVerilog の一部に対応しています。
-バックエンドとランタイムは Veryl と共通です。個々の構文の対応状況は
-[言語リファレンス](./systemverilog-reference)で確認できます。
+Celox は IEEE Std 1800™-2023 に従います。
+標準をなぞる代わりに、[逸脱事項のページ](./systemverilog-reference)では
+未対応の構文、意図的な逸脱、処理系定義の選択だけを挙げています。
+そこに無い挙動は標準どおりです。見つからない差異は不具合として扱ってください。
 
 ## 最初のモジュールを動かす
 
@@ -52,78 +53,65 @@ assert_eq!(sim.get(q), 1u8.into());
 | テストで行いたいこと | API |
 | --- | --- |
 | Rust から入力を設定し、論理を評価してクロックイベントを進める | `Simulator::from_sv_sources` |
-| シミュレーション時刻を進め、タイミング制御を持つ `initial` / `always` プロセスを実行する | `Simulation::from_sv_sources` |
+| シミュレーション時刻を進め、時間を持つプロセスと `final` 手続きを実行する | `Simulation::from_sv_sources` |
 | Veryl と SystemVerilog のソースを一緒に扱う | `Simulator::from_mixed_sources` |
 
 `Simulator::tick` は指定イベントの立ち上がりエッジを駆動します。
 `Simulation` は時刻を管理し、スケジュールされたエッジを実行します。
-定数による初期化はどちらにも適用されます。デザインの状態を読む、またはシステムタスクを呼ぶ
-`initial` ブロック、タイミング制御を持つプロセス、`@*` でも
-[文が読む変数](./systemverilog-reference#timing-controls)でもないセンシティビティリストを持つ
-`always` はプロセスとして実行するため `Simulation` が必要です。`Simulator` はプロセスを実行しないため、
-このようなデザインでは `SimulatorErrorKind::ProcessRequiresSimulation` でビルドに失敗し、
-最初のプロセスとそのソース位置を示します。Veryl と混在する階層では
-`Simulation::from_sources(veryl).with_sv_sources(sv)` で `Simulation` を作成します。
+`Simulator` はプロセスを実行しません。そのため、タイミング制御を持つプロセス、
+定数でない `initial` ブロック、`final` 手続きを持つデザインには `Simulation` が必要です。
+`Simulator` で構築すると `SimulatorErrorKind::ProcessRequiresSimulation` で失敗します。
+どのプロセスに `Simulation` が必要かは
+[実行モデル](./systemverilog-reference#celox-execution-model)を参照してください。
 
 X/Z を扱う場合は builder に `.four_state(true)` を指定します。
-状態モデルは [4 値シミュレーション](./four-state)、時刻、`$stop`、メモリの読み込みなどは
-[実行時のリファレンス](./systemverilog-reference#semantics-worth-knowing)で説明しています。
+状態モデルは [4 値シミュレーション](./four-state)を参照してください。
+Veryl と混在する階層では `Simulation::from_sources(veryl).with_sv_sources(sv)` を使います。
 
-## サポートしているもの
+## 標準からの逸脱
 
-主な対応範囲は次のとおりです。
+未対応の構文は、構文名と追跡 issue を含む `Unsupported` エラーで拒否します。
+黙って無視することはありません。
+デザインを移植するときに変更が必要になりやすいのは次の領域です。
 
-| 領域 | 例 |
-| --- | --- |
-| デザイン構造 | モジュール階層、パラメータ、generate、package、interface と modport |
-| データ | packed ベクタ、多次元 packed 配列、構造体、enum、unpacked メモリ |
-| RTL のプロセス | `assign`、`always_comb`、`always @*`、ブロッキング代入の `always_latch`、エッジで起動する `always` と `always_ff` |
-| 時間を持つプロセス | `#delay`（`#5ns` などの時間リテラルを含む）、変数・エッジ・選択・式・`@*` に対する `@(...)`、`wait (...)`、ノンブロッキング代入、タイミング制御を持つ task 呼び出しを使う `initial` と `always` |
-| 演算と制御 | 算術、部分選択、assignment pattern、分岐、ループ、関数 |
-| シミュレーション補助 | 即時アサーションと遅延付き即時アサーション、表示タスク、`$readmemh` / `$readmemb`、時刻の取得、乱数 |
+- Boolean と固定遅延 sequence の部分集合を超える並行アサーション、
+  スカラ部分集合を超えるクラスのランダム化と制約。
+- `bind`、checker、covergroup、clocking ブロック、`specify` ブロック、UDP、
+  `defparam`、手続き的な `force` / `release`、`disable fork` 以外の `disable`。
+- `always_comb` と `always_latch` 内のノンブロッキング代入、複数ドライバ、
+  トライステートバス、`always_ff` の `iff`。
+- ワイルドカード `.*` 接続、`ref` ポート、non-ANSI ポート式、
+  遅延・強度付きゲートプリミティブ、interface の一部の機能。
+- `always_comb` の推論ラッチ。`inferred_latch = "warn"` または `"allow"` を
+  設定しない限りエラーになります。
 
-各領域には制約があります。デザインを移植する際は、
-[詳しい対応一覧](./systemverilog-reference#what-is-supported)でポート、型、文、システム関数を確認してください。
-
-`and`、`nand`、`or`、`nor`、`xor`、`xnor` は、遅延・強度指定がなく、端子が1ビットの整数式なら対応しています（IEEE 1800-2023 28.4）。名前付き・名前なし、同一宣言での複数インスタンス、generate スコープを利用できます。
-
-## サポートしていないもの
-
-デザインの変更が必要になりやすいのは、次の機能です。
-
-- [単純なクラス](./systemverilog-reference#classes)を超えるクラスを使う検証、[Booleanと固定遅延sequenceの部分集合](./systemverilog-reference#並行アサーション)を超える並行アサーション。
-- `fork` / `join`、ノンブロッキング代入内のイベント制御と定数でない遅延、
-  `always_ff` のイベント制御の `iff`（[#452](https://github.com/celox-sim/celox/issues/452)）。
-- ラッチ内のノンブロッキング代入、複数ドライバ、トライステートバス。`always_comb` の暗黙のラッチ推論は 共通の `[diagnostics]` 設定で `inferred_latch = "warn"` または `"allow"` を指定して許可します。
-- 非 ANSI モジュールポート、ワイルドカード `.*` 接続、遅延・強度指定やインスタンス配列を持つゲートプリミティブ、`bind`。
-- `real`、ポートや、整数以外・2 値と 4 値の混在・メンバ初期値を含む固定長配列の unpacked 構造体、interface の一部の機能。
-
-[制約の一覧](./systemverilog-reference#what-is-not-supported)に、より細かな条件と追跡 issue をまとめています。
-未対応の構文は、構文名と追跡 issue を含む診断を返します。
+完全な一覧は[逸脱事項のページ](./systemverilog-reference#what-is-not-supported)です。
+コンパイル時に読む `$readmemh` のような意図的な逸脱や、乱数・時刻の既定値・
+イベント実行順序といった処理系定義の選択もそこにまとめています。
 
 ## Veryl と混在させる
 
 どちらの言語もトップにでき、モジュール階層は双方向に言語境界を跨げます。
 `Simulator::from_mixed_sources` に両言語のソースを渡します。
 Veryl からは `$sv::Module`、SV からは `prj_Module` などの Veryl の出力名で参照します。
-
 interface と `input` / `output` modport も言語間で接続できます。
-名前の付け方、interface パラメータ、言語間の制約は
 [Veryl と SystemVerilog の混在](./systemverilog-reference#mixed-language)を参照してください。
 
 ## DPI-C imports
 
-`sv-dpi` を有効にすると、対応する C 関数を SV のクロックで起動するプロセスから呼び出せます。
+`sv-dpi` を有効にすると、`always_ff` プロセスから C 関数を呼び出せます。
 関数や共有ライブラリは `dpi_function` / `dpi_library` で登録します。
 C と SV の型を一致させる必要があるため、どちらも `unsafe` API です。
 対応する型と呼び出し位置は [DPI-C imports](./systemverilog-reference#dpi-c-imports)を参照してください。
 
-## 個別の挙動を調べる {#知っておくべき挙動}
+## 個別の挙動を調べる {#semantics-worth-knowing}
 
-- [初期化、スコープ、変数の寿命、メモリファイル](./systemverilog-reference#semantics-worth-knowing)
-- [プロセス内のイベント待ちとレベル待ち](./systemverilog-reference#timing-semantics)
-- [時間単位、精度、時刻の取得](./systemverilog-reference#time-and-precision)
+- [未対応の構文](./systemverilog-reference#what-is-not-supported)
+- [意図的な逸脱](./systemverilog-reference#intentional-deviations)
+- [イベント実行順序の選択](./systemverilog-reference#timing-semantics)
+- [時間単位と精度の既定値](./systemverilog-reference#time-and-precision)
 - [乱数のシードと再現性](./systemverilog-reference#random-numbers)
+- [終了処理と `final` 手続き](./systemverilog-reference#celox-execution-model)
 
 ## Veryl が出力する SystemVerilog
 
