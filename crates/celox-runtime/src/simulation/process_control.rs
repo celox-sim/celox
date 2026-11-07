@@ -515,6 +515,9 @@ impl<B: SimBackend> SimulationState<B> {
                     events.push(0);
                 }
                 self.process_state.activations[current].control.events = events;
+                // The process resumes from the wait: a flush point of its
+                // deferred assertions (IEEE 1800-2023 16.4.2).
+                value = 1;
                 true
             }
             _ => unreachable!(),
