@@ -12292,6 +12292,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn packed_dimensions_come_from_the_type_table() {
+        // `W` is a parameter, not a local parameter, so the analyzer keeps
+        // the local's range `[W-1:0]` as written: the frontend takes its
+        // bounds from the analysis's type table, whatever its own constants
+        // hold. UVM's `uvm_hdl_data_t` (`logic [UVM_HDL_MAX_WIDTH-1:0]`)
+        // reached the frontend so, whose constants held the parameter only
+        // by its qualified name: the dimension was left out.
+        let source = "module Top #(parameter int W = 8)(output int y); \
+                      initial begin logic [W-1:0] v; v = '1; y = v; end endmodule";
+        let ir = sv::analyze_source(source, Path::new("bounds.sv")).unwrap();
+        let module = &ir.modules()[0];
+        let local = module
+            .locals()
+            .iter()
+            .find(|local| local.source_name == "v")
+            .expect("the local `v`");
+        let range = &local.r#type.packed_ranges()[0];
+        assert!(
+            !matches!(range.left(), sv::ir::ConstExpr::Literal(_)),
+            "the range stays as written: {:?}",
+            range.left()
+        );
+        let info =
+            signal_type_from_sv(&local.r#type, &HashMap::default(), &HashMap::default()).unwrap();
+        assert_eq!(info.packed_ranges, vec![(7, 0)]);
+        assert_eq!(info.width, 8);
+    }
+
+    #[test]
     fn shared_always_temporaries_exclude_queued_writes() {
         // The syntax frontend currently rejects untimed wildcard NBAs before
         // lowering. Exercise the IR transformation directly so it remains safe
