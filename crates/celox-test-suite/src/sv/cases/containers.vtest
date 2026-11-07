@@ -2489,3 +2489,63 @@ endmodule
   (top Top) (run_until 0)
   (assert_eq strings 1) (assert_eq handles 1) (assert_eq structs 1)
   (assert_eq calls 1) (assert_eq argument 1) (assert_eq continuous 1))
+
+; IEEE 1800-2023 6.24.2, 7.6: `$cast` of a dynamically sized array to a
+; fixed-size one assigns it only when it has as many elements, and returns
+; whether it did; a failed cast leaves the destination unchanged.
+(case casts_of_dynamic_arrays_to_fixed_size_ones_check_the_size
+  (source "cast.sv" #"
+module Top(output int matched, output int first, output int last,
+           output int longer, output int kept, output int from_queue,
+           output bit from_call, output bit handles, output bit strings);
+    class Cell;
+        int n;
+        function new(int n);
+            this.n = n;
+        endfunction
+    endclass
+    typedef int queue_t [$];
+    int d [];
+    int q [$];
+    int f [2];
+    int calls;
+    Cell cd [];
+    Cell cf [2];
+    string sd [];
+    string sf [2];
+    function automatic queue_t make();
+        queue_t r;
+        calls++;
+        r.push_back(21);
+        r.push_back(23);
+        return r;
+    endfunction
+    initial begin
+        d = new[2];
+        d[0] = 5;
+        d[1] = 7;
+        matched = $cast(f, d);
+        first = f[0];
+        last = f[1];
+        d = new[3];
+        longer = $cast(f, d);
+        kept = f[1];
+        q.push_back(11);
+        q.push_back(13);
+        from_queue = $cast(f, q);
+        from_call = $cast(f, make()) && calls == 1 && f[0] == 21 && f[1] == 23;
+        cd = new[2];
+        cd[0] = new(3);
+        cd[1] = new(4);
+        handles = $cast(cf, cd) && cf[0] == cd[0] && cf[1].n == 4;
+        sd = new[2];
+        sd[0] = "ab";
+        sd[1] = "cd";
+        strings = $cast(sf, sd) && sf[0] == "ab" && sf[1] == "cd";
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq matched 1) (assert_eq first 5) (assert_eq last 7)
+  (assert_eq longer 0) (assert_eq kept 7) (assert_eq from_queue 1)
+  (assert_eq from_call 1) (assert_eq handles 1) (assert_eq strings 1))
