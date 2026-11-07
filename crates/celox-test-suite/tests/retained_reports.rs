@@ -1315,6 +1315,12 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "execute",
                             "assert_eq element: expected 0x5, got 0x0",
                         ),
+                        ("icarus", "concurrent_assertions::boolean_iff_properties") => {
+                            ("compile_error", "compile", "source_0.sv:4: syntax error")
+                        }
+                        ("xezim", "concurrent_assertions::boolean_iff_properties") => {
+                            ("mismatch", "execute", "assert_eq p2: expected 0x4, got 0x3")
+                        }
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

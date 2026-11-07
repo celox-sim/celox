@@ -424,6 +424,42 @@ mod tests {
         }
     }
 
+    /// `p iff q` of two Booleans is supported as a property and as the
+    /// consequent of an implication, which binds looser (IEEE 1800-2023
+    /// 16.12.8, Table 16-3); an operand over cycles, a chain and a named
+    /// operand are rejected.
+    #[test]
+    fn iff_of_booleans() {
+        for property in ["b iff bus[0]", "b |-> b iff bus[0] == g"] {
+            if let Err(error) = analyze("", property) {
+                panic!("{property}: {error}");
+            }
+        }
+        for property in ["b ##1 b iff b", "b iff b iff b"] {
+            let source = format!(
+                "module Top(input bit clk, b); assert property (@(posedge clk) {property}); endmodule"
+            );
+            let Err(error) = crate::analyze_source(&source, std::path::Path::new("iff.sv")) else {
+                panic!("{property} is accepted");
+            };
+            let error = error.to_string();
+            assert!(
+                error.contains("iff of properties over cycles"),
+                "{property}: {error}"
+            );
+            // A named property with it is captured unconverted.
+            if let Ok(()) = analyze("", property) {
+                panic!("{property} is accepted in a named property");
+            }
+        }
+        let source = "module Top(input bit clk, a, b); sequence s; a; endsequence \
+                      assert property (@(posedge clk) s iff b); endmodule";
+        let Err(error) = crate::analyze_source(source, std::path::Path::new("iff.sv")) else {
+            panic!("a named operand of iff is accepted");
+        };
+        assert!(error.to_string().contains("operand of iff"), "{error}");
+    }
+
     /// A declaration whose body starts with a cast of a built-in type
     /// declares no local variable.
     #[test]

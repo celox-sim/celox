@@ -478,6 +478,7 @@ impl BodyBuilder<'_, '_, '_> {
                                         disable,
                                         antecedent,
                                         condition,
+                                        equivalent,
                                         sequence,
                                     },
                                 module_item,
@@ -521,6 +522,17 @@ impl BodyBuilder<'_, '_, '_> {
                                 } else {
                                     let mut operand = self.native_value(*condition)?;
                                     assertions::concurrent_operand(&operand)?;
+                                    // `p iff q` holds when both are true or
+                                    // both false; X/Z is false (16.12.8).
+                                    if let Some(equivalent) = equivalent {
+                                        let equivalent = self.native_value(*equivalent)?;
+                                        assertions::concurrent_operand(&equivalent)?;
+                                        operand = Expr::Binary {
+                                            left: Box::new(procedural_truth_condition(operand)),
+                                            op: BinaryOp::Eq,
+                                            right: Box::new(procedural_truth_condition(equivalent)),
+                                        };
+                                    }
                                     if let Some(antecedent) = antecedent {
                                         let antecedent = self.native_value(*antecedent)?;
                                         assertions::concurrent_operand(&antecedent)?;

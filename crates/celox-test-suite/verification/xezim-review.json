@@ -4678,6 +4678,14 @@
     },
     {
       "suite": "sv",
+      "name": "concurrent_assertions::boolean_iff_properties",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_vacuous_success_pass_action",
+      "note": "By default the pass action runs on vacuous success (20.11; 16.14.8), so `c |-> eq`, vacuous at the one tick where c is 0, runs its pass action 4 times out of 5. The pinned xezim runs it 3 times, skipping the vacuous success. The plain `a iff b` assertion's counts agree (3 passes, 2 failures), X counting as false."
+    },
+    {
+      "suite": "sv",
       "name": "concurrent_assertions::sequence_values_over_sampled_ticks",
       "status": "mismatch",
       "classification": "xezim_bug",

@@ -2,6 +2,17 @@
   "cases": [
     {
       "category": "Sequential",
+      "detail": "concurrent_assertions::boolean_iff_properties at 436:36: assert_eq p2: expected 0x4, got 0x3",
+      "expectation": "Simulation",
+      "name": "concurrent_assertions::boolean_iff_properties",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "concurrent_assertions::named_sequence_leading_clock at 323:2: assert_eq low_passed: expected 0x1, got 0x2",
       "expectation": "Simulation",
       "name": "concurrent_assertions::named_sequence_leading_clock",
