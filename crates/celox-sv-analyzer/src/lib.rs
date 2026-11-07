@@ -193,6 +193,13 @@ pub enum AnalyzerError {
         actual: String,
         target: String,
     },
+    /// A value that is not an unpacked array where an unpacked array of type
+    /// `target` is expected, such as a scalar item of an assignment pattern
+    /// level that selects subarrays (IEEE 1800-2023 10.9.1, 7.6).
+    #[error(
+        "{context}: a value that is not an unpacked array is not assignment compatible with `{target}`"
+    )]
+    NotUnpackedArray { context: String, target: String },
     /// A handle of class `actual` assigned to a variable of class `target`
     /// that `actual` neither derives from nor implements; only `$cast` may
     /// assign it (IEEE 1800-2023 8.16, 8.26.5).

@@ -3026,6 +3026,166 @@ fn class_handle_outputs_are_assigned_back_to_their_actuals() {
     sim.run_until(0).unwrap();
     assert_eq!(sim.get(sim.signal("seen")), 2u32.into());
 }
+#[test]
+fn class_handle_array_patterns_check_their_elements() {
+    // IEEE 1800-2023 10.9.1: each item of an array pattern is assigned to
+    // its element, so an element of class `A` takes only a handle its class
+    // takes (8.16), whether listed, given by `default` or initializing.
+    for body in [
+        "A arr [2]; initial begin b = new; arr = '{b, null}; end",
+        "initial begin A arr [2]; b = new; arr = '{null, b}; end",
+        "B gb = new; A arr [2] = '{gb, null};",
+        "A arr [2]; initial begin b = new; arr = '{default: b}; end",
+        "A arr [2][2]; initial begin b = new; arr = '{'{null, null}, '{b, null}}; end",
+    ] {
+        let source =
+            format!("module Top; class A; endclass class B; endclass B b; {body} endmodule");
+        let Err(error) = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build() else {
+            panic!("an array pattern took an unrelated class's handle: {body}");
+        };
+        let error = error.to_string();
+        assert!(
+            error.contains("assignment pattern member")
+                && error.contains("a handle of class `B` is not"),
+            "{error}"
+        );
+    }
+    // An item of a level that selects subarrays is assigned to a subarray,
+    // which takes no single handle (10.9.1, 7.6).
+    for body in [
+        "A arr [2][2]; initial begin a = new; arr = '{a, '{null, null}}; end",
+        "A arr [2][2]; initial begin a = new; arr = '{'{null, null}, a}; end",
+        "A arr [2][2]; initial begin a = new; arr = '{1: a, default: '{null, null}}; end",
+    ] {
+        let source = format!("module Top; class A; endclass A a; {body} endmodule");
+        let Err(error) = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build() else {
+            panic!("a subarray took a single handle: {body}");
+        };
+        let error = error
+            .to_string()
+            .replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            error.contains("assignment pattern item")
+                && error.contains("not an unpacked array is not assignment compatible"),
+            "{body}: {error}"
+        );
+    }
+    // A default that is an array of the selected element's type is
+    // assigned as an item is: an array of `B` handles is no array of `A`
+    // handles (7.6), and one of `A` handles fills each element.
+    let source = "module Top; class A; endclass class B; endclass
+        A dst [2][2]; B src [2]; initial dst = '{default: src}; endmodule";
+    let Err(error) =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top").build()
+    else {
+        panic!("an array default of unrelated handles was assigned");
+    };
+    let error = error
+        .to_string()
+        .replace('│', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        error.contains("assignment pattern item") && error.contains("not assignment compatible"),
+        "{error}"
+    );
+    // A call returning a subarray of the element type fills it.
+    let source = "module Top;
+        class A; virtual function int id(); return 3; endfunction endclass
+        typedef A pair_t [2];
+        int listed, defaulted;
+        A dst [2][2];
+        function pair_t make(); make[1] = new; endfunction
+        initial begin
+            dst = '{'{null, null}, make()};
+            listed = dst[1][1].id();
+            dst = '{default: make()};
+            defaulted = dst[0][1].id();
+        end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("listed")), 3u32.into());
+    assert_eq!(sim.get(sim.signal("defaulted")), 3u32.into());
+    // An item of any expression form is typed, a call by its declared
+    // result: an array of `B` handles is no subarray of `A` handles.
+    for body in [
+        "A dst [2][2]; initial dst = '{make(), '{null, null}};",
+        "A dst [2][2]; initial dst = '{default: make()};",
+        "A dst [2][2]; initial dst = '{1: make(), default: '{null, null}};",
+    ] {
+        let source = format!(
+            "module Top; class A; endclass class B; endclass
+            typedef B pair_t [2];
+            function pair_t make(); return '{{null, null}}; endfunction
+            {body} endmodule"
+        );
+        let Err(error) = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build() else {
+            panic!("a call's array of unrelated handles was assigned: {body}");
+        };
+        let error = error
+            .to_string()
+            .replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            error.contains("assignment pattern item")
+                && error.contains("not assignment compatible"),
+            "{body}: {error}"
+        );
+    }
+    let source = "module Top;
+        class A; virtual function int id(); return 1; endfunction endclass
+        int corner;
+        A dst [2][2]; A src [2];
+        initial begin src[1] = new; dst = '{default: src}; corner = dst[1][1].id(); end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("corner")), 1u32.into());
+    let source = "module Top;
+        class A; virtual function int id(); return 1; endfunction endclass
+        class B extends A; virtual function int id(); return 2; endfunction endclass
+        int first, second, rest;
+        A arr [3];
+        initial begin
+            A a; B b;
+            a = new; b = new;
+            arr = '{b, a, null};
+            first = arr[0].id();
+            second = arr[1].id();
+            rest = arr[2] == null;
+        end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("first")), 2u32.into());
+    assert_eq!(sim.get(sim.signal("second")), 1u32.into());
+    assert_eq!(sim.get(sim.signal("rest")), 1u32.into());
+}
 
 #[test]
 fn static_class_casts_assign_upcasts_and_reject_downcasts() {
