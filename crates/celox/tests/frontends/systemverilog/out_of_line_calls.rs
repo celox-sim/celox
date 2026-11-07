@@ -5178,3 +5178,61 @@ endmodule
         }
     }
 }
+
+#[test]
+fn packed_dimensions_of_package_types_keep_their_bounds() {
+    // `wide_t`'s bound names a package parameter, which the module's
+    // constants do not hold by the name the range spells: the variables of
+    // the type keep its packed dimension as the analysis resolved it, so a
+    // write of a bit at a run-time position works, in the recursive unit
+    // `fill` and in the `initial` kernel.
+    let source = r#"`timescale 1ns/1ns
+package p;
+    parameter int PKG_W = 96;
+    typedef logic [PKG_W-1:0] wide_t;
+    class C;
+        extern function int fill(int depth, int k);
+    endclass
+    // An out-of-block method declaration, as UVM's
+    // `uvm_mem::backdoor_read_func`.
+    function int C::fill(int depth, int k);
+        wide_t val = 0;
+        val[k] = 1'b1;
+        val[k + 64] = 1'b1;
+        if (depth == 0) return int'(val[k +: 8]) + int'(val[64 +: 32]);
+        return fill(depth - 1, k + 1);
+    endfunction
+endpackage
+import p::*;
+module Top(output int unit_bits, output int kernel_bits);
+    C c = new;
+    int at = 3;
+    initial begin
+        wide_t val = 0;
+        val[at] = 1'b1;
+        val[at + 64] = 1'b1;
+        kernel_bits = int'(val[7:0]) + int'(val[95:64]);
+        unit_bits = c.fill(2, at);
+    end
+endmodule
+"#;
+    assert!(function_units(source, false) > 0, "out of line");
+    for four_state in [false, true] {
+        for forced in [false, true] {
+            for backend in backends() {
+                assert_eq!(
+                    simulate(
+                        source,
+                        four_state,
+                        forced,
+                        backend,
+                        2,
+                        &["unit_bits", "kernel_bits"]
+                    ),
+                    Ok(vec![value(1 + (1 << 5)), value((1 << 3) + (1 << 3))]),
+                    "{backend}, four-state {four_state}, forced {forced}"
+                );
+            }
+        }
+    }
+}

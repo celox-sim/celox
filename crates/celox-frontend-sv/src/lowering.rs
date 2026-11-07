@@ -8889,31 +8889,38 @@ fn signal_type_from_sv(
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Result<SvSignalType, sv::AnalyzerError> {
-    let packed_width = if typ.packed_ranges().is_empty() {
-        1
-    } else {
-        typ.packed_ranges()
+    // The bounds of the packed dimensions, as the analysis resolved them:
+    // a range may name constants of a scope, such as a package, that
+    // `constants` does not hold. A range that neither resolves is an error,
+    // not a dimension to leave out.
+    let packed_ranges: Vec<(i128, i128)> = match typ.packed_bounds() {
+        Some(bounds) => bounds.to_vec(),
+        None => typ
+            .packed_ranges()
             .iter()
-            .try_fold(1usize, |acc, range| {
-                let left = sv::typecheck::eval_const_expr_with_types(
-                    range.left(),
-                    constants,
-                    parameter_types,
-                )?;
-                let right = sv::typecheck::eval_const_expr_with_types(
-                    range.right(),
-                    constants,
-                    parameter_types,
-                )?;
-                let width = usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?;
-                acc.checked_mul(width)
+            .map(|range| {
+                let bound = |expr| {
+                    sv::typecheck::eval_const_expr_with_types(expr, constants, parameter_types)
+                };
+                bound(range.left())
+                    .zip(bound(range.right()))
+                    .ok_or_else(|| {
+                        sv::AnalyzerError::Unsupported(format!(
+                            "packed dimension whose bounds {:?} and {:?} are not constant here",
+                            range.left(),
+                            range.right(),
+                        ))
+                    })
             })
-            .or_else(|| typ.resolved_width())
-            .ok_or_else(|| {
-                sv::AnalyzerError::Unsupported("unresolved explicit packed width".to_string())
-            })?
-            .max(1)
+            .collect::<Result<_, _>>()?,
     };
+    let packed_width = packed_ranges
+        .iter()
+        .try_fold(1usize, |acc, &(left, right)| {
+            acc.checked_mul(usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?)
+        })
+        .ok_or_else(|| sv::AnalyzerError::Unsupported("packed width overflow".to_string()))?
+        .max(1);
     let array_dims = typ
         .unpacked_ranges()
         .iter()
@@ -8955,23 +8962,6 @@ fn signal_type_from_sv(
                 | sv::ir::TypeKind::Process
                 | sv::ir::TypeKind::Event
         );
-    let packed_ranges = typ
-        .packed_ranges()
-        .iter()
-        .filter_map(|range| {
-            let left = sv::typecheck::eval_const_expr_with_types(
-                range.left(),
-                constants,
-                parameter_types,
-            )?;
-            let right = sv::typecheck::eval_const_expr_with_types(
-                range.right(),
-                constants,
-                parameter_types,
-            )?;
-            Some((left, right))
-        })
-        .collect();
     let type_kind = match typ.kind() {
         sv::ir::TypeKind::Bit => PortTypeKind::Bit,
         sv::ir::TypeKind::Real => PortTypeKind::Real,

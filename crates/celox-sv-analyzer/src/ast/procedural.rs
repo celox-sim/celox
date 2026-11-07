@@ -595,12 +595,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         self.state.locals.push(LocalVariable {
             name: unique.clone(),
             source_name: source.to_string(),
-            r#type: crate::ir::Type::from_ast(
+            r#type: super::ir_type(
+                self.session,
+                &self.tree.functions,
                 scoped_type(r#type, &self.dims.const_env),
-                &const_functions::Environment {
-                    constants: &*self.dims.const_env,
-                    functions: &self.tree.functions,
-                },
+                &self.dims.const_env,
             ),
         });
         self.names
@@ -4435,12 +4434,11 @@ pub(super) fn lower_subroutine(
             name,
             source_name: source,
             direction,
-            r#type: crate::ir::Type::from_ast(
+            r#type: super::ir_type(
+                builder.session,
+                &tree.functions,
                 scoped_type(r#type, declaration_env),
-                &const_functions::Environment {
-                    constants: &*item.env,
-                    functions: &tree.functions,
-                },
+                &item.env,
             ),
             default,
             leaves: Vec::new(),
@@ -4632,12 +4630,11 @@ pub(super) fn lower_subroutine(
             .collect(),
         persistent_locals: Vec::new(),
         return_type: return_type.map(|r#type| {
-            crate::ir::Type::from_ast(
+            super::ir_type(
+                builder.session,
+                &tree.functions,
                 scoped_type(r#type, declaration_env),
-                &const_functions::Environment {
-                    constants: &*item.env,
-                    functions: &tree.functions,
-                },
+                &item.env,
             )
         }),
         params: lowered_params,
