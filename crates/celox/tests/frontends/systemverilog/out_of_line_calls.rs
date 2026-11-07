@@ -3045,3 +3045,753 @@ fn ref_formals_bind_the_locals_of_forked_processes() {
         }
     }
 }
+
+#[test]
+fn forks_in_functions_start_processes_that_outlive_the_call() {
+    // `spawn` forks a call of `work` and returns at once; the children
+    // run in copies of its frame after it returned (IEEE 1800-2023 9.3.2).
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c, output int d);
+    int hits[$];
+    task automatic work(int n);
+        #(n);
+        hits.push_back(n);
+    endtask
+    function automatic void spawn(int n);
+        fork
+            work(n);
+        join_none
+    endfunction
+    int three = 3, one = 1;
+    initial begin
+        spawn(three);
+        spawn(one);
+        a = hits.size();
+        #5;
+        b = hits.size();
+        c = hits[0];
+        d = hits[1];
+    end
+endmodule
+"#;
+    same_as_inlined(source, 2, 6, &["a", "b", "c", "d"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 6, &["a", "b", "c", "d"]),
+        Ok(vec![value(0), value(2), value(1), value(3)])
+    );
+}
+
+#[test]
+fn forks_in_a_loop_give_each_child_its_own_variable() {
+    // Each execution of the fork's declaration makes a new `k`, which the
+    // child started then keeps.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c, output int d);
+    int seen[$];
+    function automatic void spawn_all(int n);
+        for (int i = 0; i < n; i++) begin
+            fork
+                automatic int k = i;
+                begin
+                    #(n - k);
+                    seen.push_back(k * 10);
+                end
+            join_none
+        end
+    endfunction
+    int four = 4;
+    initial begin
+        spawn_all(four);
+        #5;
+        a = seen[0];
+        b = seen[1];
+        c = seen[2];
+        d = seen[3];
+    end
+endmodule
+"#;
+    same_as_inlined(source, 1, 6, &["a", "b", "c", "d"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 6, &["a", "b", "c", "d"]),
+        Ok(vec![value(30), value(20), value(10), value(0)])
+    );
+}
+
+#[test]
+fn forked_children_draw_on_their_own_process_state() {
+    // A child's `process::self()` is its own process, and `srandom` seeds
+    // its RNG, which its `$urandom` draws on: a unit's frames take the
+    // child's state as they continue. Two children seeded alike draw alike.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c, output int d, output bit same, output bit distinct);
+    int rands[$];
+    process procs[$];
+    function automatic void draws(int seed, bit reseed);
+        fork
+            begin
+                process p = process::self();
+                procs.push_back(p);
+                if (reseed) p.srandom(seed);
+                #1;
+                rands.push_back($urandom);
+            end
+            begin
+                #2;
+                rands.push_back($urandom_range(1000));
+            end
+        join_none
+        rands.push_back($urandom);
+    endfunction
+    int seed = 7;
+    bit yes = 1, no = 0;
+    initial begin
+        draws(seed, no);
+        draws(seed, yes);
+        draws(seed, yes);
+        #5;
+        a = rands[0];
+        b = rands[3];
+        c = rands[6];
+        d = rands[8];
+        same = rands[4] == rands[5];
+        distinct = procs[0] != procs[1] && procs[1] != procs[2];
+    end
+endmodule
+"#;
+    let names = ["a", "b", "c", "d", "same", "distinct"];
+    same_as_inlined(source, 1, 6, &names);
+    let run = simulate(source, false, true, "interpreter", 6, &names).expect("runs");
+    assert_eq!(run[4..], [value(1), value(1)]);
+}
+
+#[test]
+fn recursion_through_a_fork_goes_out_of_line() {
+    // `walk` forks a child at each level and recurses: out of line by
+    // default, where inlining cannot expand it.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c);
+    int seen[$];
+    function automatic void walk(int depth);
+        if (depth == 0) return;
+        fork
+            begin
+                #(depth);
+                seen.push_back(100 + depth);
+            end
+        join_none
+        walk(depth - 1);
+    endfunction
+    int three = 3;
+    initial begin
+        walk(three);
+        #5;
+        a = seen[0];
+        b = seen[1];
+        c = seen[2];
+    end
+endmodule
+"#;
+    assert_eq!(function_units(source, false), 1);
+    for four_state in [false, true] {
+        for forced in [false, true] {
+            assert_eq!(
+                simulate(
+                    source,
+                    four_state,
+                    forced,
+                    "interpreter",
+                    6,
+                    &["a", "b", "c"]
+                ),
+                Ok(vec![value(101), value(102), value(103)]),
+                "four_state {four_state} forced {forced}"
+            );
+        }
+    }
+}
+
+#[test]
+fn forked_children_share_the_variables_they_write() {
+    // `x` is the task's, which the parent and both children share, and `y`
+    // the fork's, which both children share: each sees the others' writes
+    // (IEEE 1800-2023 6.21, 9.3.2), through a box their frames hold.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c);
+    int got[$];
+    task automatic share(int start);
+        int x = start;
+        fork
+            automatic int y = 0;
+            begin
+                #1 x = x + 1; y = 5;
+            end
+            begin
+                #2 got.push_back(x); got.push_back(y);
+                x = x + 10;
+            end
+        join_none
+        #3 got.push_back(x);
+    endtask
+    int one = 1;
+    initial begin
+        share(one);
+        a = got[0];
+        b = got[1];
+        c = got[2];
+    end
+endmodule
+"#;
+    same_as_inlined(source, 1, 4, &["a", "b", "c"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 4, &["a", "b", "c"]),
+        Ok(vec![value(2), value(5), value(12)])
+    );
+}
+
+#[test]
+fn joins_and_fork_control_in_task_units() {
+    // `join`, `join_any`, `wait fork` and `disable fork` in a unit act on
+    // the children of the process it runs in.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c, output int d, output int e, output int f);
+    int log_[$];
+    task automatic joins(int base);
+        fork
+            #(base + 2) log_.push_back(1);
+            #(base + 1) log_.push_back(2);
+        join
+        a = $time;
+        fork
+            #3 log_.push_back(3);
+            #1 log_.push_back(4);
+        join_any
+        b = $time;
+        fork
+            #4 log_.push_back(5);
+        join_none
+        wait fork;
+        c = $time;
+        fork
+            #10 log_.push_back(99);
+        join_none
+        #1 disable fork;
+        d = $time;
+    endtask
+    int zero = 0;
+    initial begin
+        joins(zero);
+        #20;
+        e = log_.size();
+        f = log_[log_.size() - 1];
+    end
+endmodule
+"#;
+    let names = ["a", "b", "c", "d", "e", "f"];
+    same_as_inlined(source, 1, 30, &names);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 30, &names),
+        Ok(vec![
+            value(2),
+            value(3),
+            value(7),
+            value(8),
+            value(5),
+            value(5)
+        ])
+    );
+}
+
+#[test]
+fn boxes_of_forked_children_survive_collections() {
+    // Only the saved frames of the children hold the box of `x` after the
+    // parent returned; another process allocates enough for the heap to
+    // collect while they wait.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int n);
+    class Item;
+        int v;
+        function new(int x);
+            v = x;
+        endfunction
+    endclass
+    function automatic void spawn(int start);
+        int x = start;
+        fork
+            #2 x = x + 1;
+            #5 a = x;
+        join_none
+    endfunction
+    int seven = 7;
+    int count = 2000;
+    initial spawn(seven);
+    initial begin
+        Item t;
+        #1;
+        for (int i = 0; i < count; i++) begin
+            t = new(i);
+            n += t.v % 2;
+        end
+    end
+endmodule
+"#;
+    same_as_inlined(source, 2, 10, &["a", "n"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 10, &["a"]),
+        Ok(vec![value(8)])
+    );
+}
+
+#[test]
+fn forked_children_write_the_callers_variables_through_ref() {
+    // `owner` passes its automatics by `ref` to `spawn2`, directly and
+    // through `pass_on`, whose fork's two children write them in turn: the
+    // owner boxes each, so both writes reach it (IEEE 1800-2023 13.5.2). A
+    // `ref` formal may be named in a fork only when it joins all (9.3.2).
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b);
+    task automatic spawn2(ref int x);
+        fork
+            #1 x = x + 1;
+            #2 x = x + 10;
+        join
+    endtask
+    task automatic pass_on(ref int y);
+        spawn2(y);
+    endtask
+    task automatic owner(input int start, output int r, output int s);
+        int v = start;
+        int w = start;
+        spawn2(v);
+        pass_on(w);
+        r = v;
+        s = w;
+    endtask
+    int zero = 0;
+    initial owner(zero, a, b);
+endmodule
+"#;
+    same_as_inlined(source, 3, 10, &["a", "b"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 10, &["a", "b"]),
+        Ok(vec![value(11), value(11)])
+    );
+}
+
+#[test]
+fn state_files_keep_the_boxes_forked_children_share() {
+    // Saved while three children of `spawn` wait, holding the box of `x`
+    // in their frames: the file holds the box once, and a load on any
+    // backend gives the frames one box again, so the second child's write
+    // after the load reaches the third.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a);
+    function automatic void spawn(int start);
+        int x = start;
+        fork
+            #2 x = x + 1;
+            #4 x = x + 10;
+            #6 a = x;
+        join_none
+    endfunction
+    int seven = 7;
+    initial spawn(seven);
+endmodule
+"#;
+    let build = || {
+        Simulation::from_sv_sources(vec![(source, Path::new("calls.sv"))], "Top")
+            .force_out_of_line_calls()
+    };
+    let mut origin = build().build_interpreter().expect("builds");
+    origin.run_until(3).expect("the design runs");
+    let mut bytes = Vec::new();
+    origin
+        .save_state()
+        .expect("the boxes save")
+        .write_to(&mut bytes)
+        .expect("the file writes");
+    let file = celox::StateFile::read_from(bytes.as_slice()).expect("the file reads");
+    assert_eq!(
+        file.schedule
+            .as_ref()
+            .expect("a schedule")
+            .processes
+            .boxes
+            .len(),
+        1,
+        "one box, which three frames share"
+    );
+    origin.run_until(10).expect("the saved run continues");
+    assert_eq!(origin.get(origin.signal("a")), 18u8.into());
+    macro_rules! resumes {
+        ($build:ident) => {{
+            let mut target = build().$build().expect("builds");
+            target.load_state(&file).expect("the boxes load");
+            target.run_until(10).expect("the loaded design runs");
+            assert_eq!(
+                target.get(target.signal("a")),
+                18u8.into(),
+                stringify!($build)
+            );
+        }};
+    }
+    resumes!(build_interpreter);
+    resumes!(build_cranelift);
+    resumes!(build_wasm);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    resumes!(build_native);
+}
+
+#[test]
+fn state_files_keep_shared_strings_and_refuse_shared_containers() {
+    // A string the children of `spawn` share is a value: the file holds
+    // its contents with the box, and the frames share the box again after
+    // a load on any backend. A shared queue is a container, which state
+    // files do not record in a variable either.
+    let strings = r#"`timescale 1ns/1ns
+module Top(output int a);
+    function automatic void spawn(int start);
+        string s = "ab";
+        fork
+            #2 s = {s, "c"};
+            #4 s = {s, "de"};
+            #6 a = s.len() * 100 + start;
+        join_none
+    endfunction
+    int seven = 7;
+    initial spawn(seven);
+endmodule
+"#;
+    let build = || {
+        Simulation::from_sv_sources(vec![(strings, Path::new("calls.sv"))], "Top")
+            .force_out_of_line_calls()
+    };
+    let mut origin = build().build_interpreter().expect("builds");
+    origin.run_until(3).expect("the design runs");
+    let mut bytes = Vec::new();
+    origin
+        .save_state()
+        .expect("the string box saves")
+        .write_to(&mut bytes)
+        .expect("the file writes");
+    let file = celox::StateFile::read_from(bytes.as_slice()).expect("the file reads");
+    let boxes = &file.schedule.as_ref().expect("a schedule").processes.boxes;
+    assert_eq!(boxes.len(), 1, "one box, which three frames share");
+    assert_eq!(boxes[0].kind, celox_runtime::FrameValueKind::String);
+    origin.run_until(10).expect("the saved run continues");
+    assert_eq!(origin.get(origin.signal("a")), 507u16.into());
+    macro_rules! resumes {
+        ($build:ident) => {{
+            let mut target = build().$build().expect("builds");
+            target.load_state(&file).expect("the box loads");
+            target.run_until(10).expect("the loaded design runs");
+            assert_eq!(
+                target.get(target.signal("a")),
+                507u16.into(),
+                stringify!($build)
+            );
+        }};
+    }
+    resumes!(build_interpreter);
+    resumes!(build_cranelift);
+    resumes!(build_wasm);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    resumes!(build_native);
+
+    let queues = r#"`timescale 1ns/1ns
+module Top(output int a);
+    function automatic void spawn(int start);
+        int q[$];
+        fork
+            #2 q.push_back(start);
+            #4 a = q.size();
+        join_none
+    endfunction
+    int seven = 7;
+    initial spawn(seven);
+endmodule
+"#;
+    let mut sim = Simulation::from_sv_sources(vec![(queues, Path::new("calls.sv"))], "Top")
+        .force_out_of_line_calls()
+        .build_interpreter()
+        .expect("builds");
+    sim.run_until(3).expect("the design runs");
+    assert!(
+        matches!(sim.save_state(), Err(celox::StateError::Objects(_))),
+        "a container in a frame"
+    );
+    sim.run_until(10).expect("the design runs on");
+    assert_eq!(sim.get(sim.signal("a")), 1u8.into());
+}
+
+#[test]
+fn ref_formals_bind_elements_of_the_callers_arrays() {
+    // `owner` passes an element of its array to `spawn2`, whose two
+    // children write it in turn, and to `bump`: the array is the caller's
+    // whole variable, shared as any is (IEEE 1800-2023 13.5.2). A unit
+    // names the element's array by the caller's storage for it, here the
+    // copy an inlined activation of `owner` has; an array in the frame of
+    // the calling unit keeps the call inlined.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c);
+    task automatic spawn2(ref int x);
+        fork
+            #1 x = x + 1;
+            #2 x = x + 10;
+        join
+    endtask
+    task automatic bump(ref int x);
+        x = x + 1;
+    endtask
+    task automatic owner(input int start, output int r, output int s);
+        int v[2];
+        v[0] = start;
+        v[1] = start;
+        spawn2(v[0]);
+        bump(v[1]);
+        bump(v[1]);
+        r = v[0];
+        s = v[1];
+    endtask
+    int zero = 0;
+    initial begin
+        owner(zero, a, b);
+        #1 owner(zero + 5, c, b);
+    end
+endmodule
+"#;
+    let names = ["a", "b", "c"];
+    // A function for each of `spawn2` and `bump` per array they bind: each
+    // inlined call of `owner` has its own copy of `v`.
+    same_as_inlined(source, 4, 20, &names);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 20, &names),
+        Ok(vec![value(11), value(7), value(16)])
+    );
+}
+
+#[test]
+fn state_files_refuse_scheduler_objects_in_saved_frames() {
+    // A semaphore is a scheduler object, whose class no box shares: a frame
+    // holding one while the task waits is refused as a class handle is,
+    // since state files do not record semaphores, and the run goes on with
+    // the semaphore intact.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    task automatic hold();
+        semaphore s = new(1);
+        s.get(1);
+        #5 s.put(1);
+        s.get(1);
+        done = 1;
+    endtask
+    initial hold();
+endmodule
+"#;
+    let mut sim = Simulation::from_sv_sources(vec![(source, Path::new("calls.sv"))], "Top")
+        .force_out_of_line_calls()
+        .build_interpreter()
+        .expect("builds");
+    sim.run_until(1).expect("the design runs");
+    assert!(
+        matches!(sim.save_state(), Err(celox::StateError::Objects(_))),
+        "a semaphore in a frame"
+    );
+    sim.run_until(10).expect("the design runs on");
+    assert_eq!(sim.get(sim.signal("done")), 1u8.into());
+}
+
+#[test]
+fn units_whose_fork_branches_fail_stay_inlined() {
+    // A branch of a fork in `spawn`, here one of a nested fork, that cannot
+    // be lowered leaves the unit unlowered: the call is inlined and the
+    // design gets the diagnostic an inlined body gets, with and without
+    // out-of-line calls.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a);
+    bit [1:0] bus;
+    function automatic bit pick(int i);
+        a++;
+        return bus[i];
+    endfunction
+    function automatic void spawn(int i);
+        fork
+            begin
+                fork
+                    @(posedge pick(i));
+                join_none
+            end
+        join_none
+    endfunction
+    int zero = 0;
+    initial spawn(zero);
+endmodule
+"#;
+    for forced in [false, true] {
+        let run = simulate(source, false, forced, "interpreter", 10, &["a"]);
+        assert!(
+            run.as_ref()
+                .is_err_and(|error| error.contains("impure call `pick` in an event expression")),
+            "forced {forced}: {run:?}"
+        );
+    }
+}
+
+#[test]
+fn forked_children_store_class_properties_through_formals() {
+    // The child stores into a property of the object a formal of `one`
+    // holds: the analyzer's temporaries for the update, which the body does
+    // not declare, are shared like a formal, in a box made at the entry.
+    let source = r#"`timescale 1ns/1ns
+class st_t;
+    int done;
+endclass
+module Top(output int a);
+    task automatic one(st_t s, int n);
+        fork
+            begin
+                #(n);
+                s.done = s.done + 1;
+            end
+        join_none
+    endtask
+    int two = 2;
+    st_t o = new;
+    initial begin
+        one(o, two);
+        one(o, two + 1);
+        #5 a = o.done;
+    end
+endmodule
+"#;
+    same_as_inlined(source, 2, 10, &["a"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 10, &["a"]),
+        Ok(vec![value(2)])
+    );
+}
+
+#[test]
+fn forked_children_display_arrays_they_do_not_write() {
+    // A `$display` argument is read, not written: `seen`, which only its
+    // declaration writes, is copied into each child, not shared through a
+    // box (which an unpacked array cannot have), so the recursive `walk`
+    // still goes out of line.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a);
+    function automatic void walk(int depth);
+        int seen[2] = '{depth, depth * 10};
+        if (depth == 0) return;
+        fork
+            begin
+                #(depth);
+                $display("level %0d %0d", seen[0], seen[1]);
+                a = a + seen[1];
+            end
+        join_none
+        walk(depth - 1);
+    endfunction
+    int two = 2;
+    initial begin
+        a = 0;
+        walk(two);
+    end
+endmodule
+"#;
+    assert_eq!(function_units(source, false), 1);
+    for four_state in [false, true] {
+        for backend in backends() {
+            let (values, events) = simulate_run(source, four_state, true, backend, 5, &["a"])
+                .unwrap_or_else(|error| panic!("{backend}: {error}"));
+            assert_eq!(
+                values,
+                vec![value(30)],
+                "{backend}, four-state {four_state}"
+            );
+            let displays: Vec<String> = events
+                .iter()
+                .filter_map(|event| match event {
+                    celox::RuntimeEvent::Display { message } => {
+                        Some(String::from_utf8_lossy(message).into_owned())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                displays,
+                ["level 1 10", "level 2 20"],
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+}
+
+#[test]
+fn forked_children_write_parts_of_shared_variables() {
+    // Each child writes part of the shared `x`: a bit, a part-select and
+    // both indexed part-selects. Through the box each loads `x`, writes its
+    // part and stores it back, as a write to part of a class property does.
+    let source = r#"`timescale 1ns/1ns
+module Top(output logic [15:0] a);
+    task automatic parts(logic [15:0] start);
+        logic [15:0] x = start;
+        int i = 4;
+        fork
+            begin #1 x[0] = 1'b1; end
+            begin #2 x[7:4] = 4'ha; end
+            begin #3 x[i * 2 +: 4] = 4'h5; end
+            begin #4 x[15 -: 2] = 2'b11; end
+        join_none
+        #5 a = x;
+    endtask
+    logic [15:0] zero = 0;
+    initial parts(zero);
+endmodule
+"#;
+    same_as_inlined(source, 1, 6, &["a"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 6, &["a"]),
+        Ok(vec![value(0xc5a1)])
+    );
+}
+
+#[test]
+fn joined_children_read_ref_arrays_without_sharing_them() {
+    // `show`'s child only reads `arr`, and `show` joins it: the caller waits
+    // in the call, so the child reads the caller's array through the copied
+    // frame and nothing is shared. The recursive `walk`, whose array could
+    // not be shared, stays out of line.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a);
+    task automatic show(ref int arr[3], input int depth);
+        fork
+            begin
+                #1 a += arr[0] + arr[1] + arr[2] + depth;
+            end
+        join
+    endtask
+    task automatic walk(int depth);
+        int arr[3] = '{depth, depth * 10, depth * 100};
+        if (depth == 0) return;
+        show(arr, depth);
+        walk(depth - 1);
+    endtask
+    int two = 2;
+    initial begin
+        a = 0;
+        walk(two);
+    end
+endmodule
+"#;
+    assert!(function_units(source, false) > 0, "out of line");
+    for four_state in [false, true] {
+        for forced in [false, true] {
+            for backend in backends() {
+                assert_eq!(
+                    simulate(source, four_state, forced, backend, 5, &["a"]),
+                    Ok(vec![value(336)]),
+                    "{backend}, four-state {four_state}, forced {forced}"
+                );
+            }
+        }
+    }
+}

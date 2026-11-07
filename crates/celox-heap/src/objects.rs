@@ -11,6 +11,54 @@ use crate::{Handle, HandleKind, Heap};
 /// The handle of `null`, the value of zero-initialized memory.
 pub const NULL: Handle = 0;
 
+/// The class identifiers the design's classes never take: a class's
+/// identifier is a hash below this one (see [`class_identifier`]), and each
+/// reserved class is one of those from it up.
+pub const FIRST_RESERVED_CLASS: u32 = u32::MAX - 15;
+
+/// The class of a record holding an unpacked structure as a container
+/// element.
+pub const RECORD_CLASS: u32 = u32::MAX;
+
+/// The class of the heap objects the scheduler owns, semaphores and
+/// mailboxes.
+pub const SCHEDULER_CLASS: u32 = u32::MAX - 1;
+
+/// The class of a box: an object no class declares, which holds an
+/// automatic variable that a fork shares between the frames of its parent
+/// and children. Its bytes are the variable's value, and state files save
+/// a box by its value, a string by its contents (see [`Heap::box_contents`]).
+pub const BOX_CLASS: u32 = u32::MAX - 2;
+
+const _: () = {
+    let reserved = [RECORD_CLASS, SCHEDULER_CLASS, BOX_CLASS];
+    let mut i = 0;
+    while i < reserved.len() {
+        assert!(
+            reserved[i] >= FIRST_RESERVED_CLASS,
+            "a reserved class in range"
+        );
+        let mut j = i + 1;
+        while j < reserved.len() {
+            assert!(reserved[i] != reserved[j], "distinct reserved classes");
+            j += 1;
+        }
+        i += 1;
+    }
+};
+
+/// The identifier of a class whose name hashes to `hash`: never 0, which
+/// `null` reads as, and never a reserved class's.
+pub const fn class_identifier(hash: u32) -> u32 {
+    if hash == 0 {
+        1
+    } else if hash >= FIRST_RESERVED_CLASS {
+        hash - FIRST_RESERVED_CLASS + 1
+    } else {
+        hash
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Object {
     class: u32,
@@ -333,6 +381,34 @@ impl Heap {
         }
     }
 
+    /// The bytes of box `object` (see [`BOX_CLASS`]), and what its value
+    /// refers to when it is a handle; `None` for any other object.
+    pub fn box_contents(&self, object: Handle) -> Option<(&[u8], Option<HandleKind>)> {
+        let object = self
+            .objects
+            .get(&object)
+            .filter(|object| object.class == BOX_CLASS)?;
+        let kind = match object.handles.as_slice() {
+            [] => None,
+            [(0, kind)] => Some(*kind),
+            _ => return None,
+        };
+        Some((&object.bytes, kind))
+    }
+
+    /// A new box (see [`BOX_CLASS`]) holding `bytes`, a handle of `kind`
+    /// if any.
+    pub fn new_box(&mut self, bytes: &[u8], kind: Option<HandleKind>) -> Handle {
+        let handle = self.new_object(BOX_CLASS, bytes.len());
+        if let Some(object) = self.object_mut(handle) {
+            object.bytes.copy_from_slice(bytes);
+        }
+        if let Some(kind) = kind {
+            self.declare_handle(handle, 0, kind);
+        }
+        handle
+    }
+
     /// The class `object` was created as, or 0 for `null`.
     pub fn class_of(&self, object: Handle) -> u32 {
         self.objects.get(&object).map_or(0, |object| object.class)
@@ -592,5 +668,21 @@ mod random_tests {
         assert_eq!(heap.take_fault(), None);
         heap.random_object(NULL);
         assert_eq!(heap.take_fault(), Some(Fault::NullDereference));
+    }
+}
+
+#[cfg(test)]
+mod reserved_classes {
+    use super::*;
+
+    #[test]
+    fn no_class_identifier_is_reserved() {
+        for hash in [0, 1, FIRST_RESERVED_CLASS - 1]
+            .into_iter()
+            .chain(FIRST_RESERVED_CLASS..=u32::MAX)
+        {
+            let id = class_identifier(hash);
+            assert!(id != 0 && id < FIRST_RESERVED_CLASS, "hash {hash:#x}");
+        }
     }
 }

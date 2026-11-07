@@ -39,6 +39,15 @@
 //! handles in the saved frames through the module's resume table
 //! ([`celox_design::CallResume`]), and checkpoints keep the saved stack.
 //!
+//! A `fork` in a unit is such a suspension too, whose branches are resume
+//! points of the unit (see `Ff::fork_in_unit`): the runtime starts each
+//! child as an activation of the calling kernel in a copy of the parent's
+//! frames, the unit resuming at the child's entry, so the children outlive
+//! the call. A variable that the children and the parent share and write
+//! lives in a box, a heap object whose handle the copies share (see
+//! `calls::SharedBox`). `wait fork` and `disable fork` act on the children
+//! of the process the unit runs in.
+//!
 //! A `ref` formal is a place (see [`Place`]): the call passes its static
 //! part, which selects the function, so one subroutine has a function for
 //! each binding its calls make (a variable the unit names itself, the field
@@ -93,8 +102,7 @@ pub(super) enum Reason {
     /// two `ref` formals to one automatic of the calling unit, which the
     /// call copies (see [`Place::Frame`]).
     RefFormal,
-    /// It, or a subroutine it calls, has an event control, a wait or a
-    /// fork.
+    /// It, or a subroutine it calls, has an event control or a wait.
     MaySuspend,
     /// It, or a subroutine it calls, makes a host request a unit cannot
     /// make: `$exit`, monitors, strobes, VCD tasks, or a DPI-C import; or a caller that cannot suspend calls a
@@ -145,6 +153,12 @@ pub(super) struct ProcessState {
     /// A host request does not: the host serves it before anything else
     /// runs.
     pub yields: bool,
+    /// Whether it forks (`fork`, `wait fork`, `disable fork`): a fork
+    /// suspends with the branches as resume points of the unit, and each
+    /// child continues the call in a copy of the frames (see
+    /// [`celox_design::PROCESS_FORK_RESUME_SHIFT`]); the calling kernel
+    /// keeps a process frame, as one that forks itself.
+    pub forks: bool,
     /// Whether it reads `e.triggered` (IEEE 1800-2023 15.5.3) or a process's
     /// `status()` (9.7), which a level wait's predicate reads as an
     /// observation of the event or process, so that a predicate's call of
@@ -1327,12 +1341,22 @@ impl ProcModule<'_> {
                             state.suspends = true;
                             state.yields = true;
                         }
+                        // A fork creates processes that run the unit's
+                        // code in copies of its frames, and the parent
+                        // goes on; `wait fork` parks the process until
+                        // they end.
+                        sv::ir::Stmt::Fork { .. } | sv::ir::Stmt::WaitFork => {
+                            state.suspends = true;
+                            state.yields = true;
+                            state.forks = true;
+                        }
+                        sv::ir::Stmt::DisableFork => {
+                            state.suspends = true;
+                            state.forks = true;
+                        }
                         sv::ir::Stmt::WaitEvent(_)
                         | sv::ir::Stmt::WaitImplicit { .. }
                         | sv::ir::Stmt::Wait(_)
-                        | sv::ir::Stmt::WaitFork
-                        | sv::ir::Stmt::DisableFork
-                        | sv::ir::Stmt::Fork { .. }
                         | sv::ir::Stmt::DelayedNonblocking { .. }
                         | sv::ir::Stmt::DeferActive
                         | sv::ir::Stmt::AssertionRegion { .. } => note(Reason::MaySuspend),
