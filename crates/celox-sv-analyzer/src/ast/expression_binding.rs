@@ -40,7 +40,7 @@ pub(super) use objects::{
     Cast as ObjectCast, Receiver as ObjectReceiver,
     aggregate_property as object_aggregate_property, call_method as object_call_method,
     callee as call_callee, cast_to as object_cast_to, check_access as check_member_access,
-    check_assignment as check_handle_assignment, check_writable,
+    check_assignment as check_handle_assignment, check_writable, class as object_class,
     constraint_mode_call as object_constraint_mode_call, constructor as object_constructor,
     method as object_method, method_result as object_method_result, named_class,
     native_class as object_native_class, property as object_property,
