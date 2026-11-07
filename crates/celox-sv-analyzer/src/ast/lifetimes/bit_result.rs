@@ -355,11 +355,13 @@ mod tests {
             .iter()
             .find(|function| function.name == "f")
             .unwrap();
-        let prefix = format!("{variable}@");
+        // A static local is named `x%<owner>@N`; a retained result or
+        // formal `x@N`.
+        let (local, retained) = (format!("{variable}%"), format!("{variable}@"));
         let name = function
             .persistent_locals
             .iter()
-            .find(|name| name.starts_with(&prefix))
+            .find(|name| name.starts_with(&local) || name.starts_with(&retained))
             .unwrap_or_else(|| panic!("missing persistent {variable}: {source}"));
         assert!(module.signals().iter().any(|signal| signal.name() == name));
         assert!(!module.locals().iter().any(|local| &local.name == name));
