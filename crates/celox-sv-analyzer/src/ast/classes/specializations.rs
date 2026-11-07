@@ -956,17 +956,27 @@ fn finish_specialization(
             .map(|(key, ty)| (key.clone(), ty.clone())),
     );
     aliases.insert(scope_key(generic), super::handle(&name));
-    // The body parameters and typedefs in the order the body declares them.
+    // The body parameters, typedefs and properties of an enumeration type it
+    // declares in place, in the order the body declares them.
     let mut body = declaration
         .parameters
         .iter()
         .map(|&id| (native.parameter_declaration(id).tokens.start, Ok(id)))
-        .chain(
-            declaration
-                .type_aliases
-                .iter()
-                .map(|&id| (native.type_alias(id).tokens.start, Err(id))),
-        )
+        .chain(declaration.type_aliases.iter().filter_map(|&id| {
+            let alias = native.type_alias(id);
+            let celox_sv_syntax::TypeAliasTarget::DataType(target) = alias.target else {
+                return None;
+            };
+            Some((alias.tokens.start, Err((Some(id), target))))
+        }))
+        .chain(declaration.properties.iter().filter_map(|property| {
+            let target = property.declaration.data_type;
+            matches!(
+                native.data_type(target).kind,
+                celox_sv_syntax::DataTypeKind::Enum { .. }
+            )
+            .then_some((property.declaration.tokens.start, Err((None, target))))
+        }))
         .collect::<Vec<_>>();
     body.sort_by_key(|(start, _)| *start);
     let mut own_enum_constants = HashMap::default();
@@ -985,11 +995,11 @@ fn finish_specialization(
                     return Err(unresolved_parameter(&name));
                 }
             }
-            Err(id) => {
-                let alias = native.type_alias(id);
-                let celox_sv_syntax::TypeAliasTarget::DataType(target) = alias.target else {
-                    continue;
-                };
+            // A property's enumeration type is a type of the class scope as
+            // a typedef's is, whose members the class's methods name (IEEE
+            // 1800-2023 6.19, 8.3).
+            Err((alias_id, target)) => {
+                let alias = alias_id.map(|id| native.type_alias(id));
                 // The type is fixed in the scope of the parameters, whose
                 // string values without an integral one it reads as their
                 // literals. A typedef that cannot be bound is left out; a
@@ -1000,29 +1010,35 @@ fn finish_specialization(
                     .ok()
                     .flatten()
                     .and_then(|ty| {
-                        // Its unpacked dimensions may make it a dynamic
-                        // container (IEEE 1800-2023 7.5, 7.8, 7.10).
-                        let ty = containers::with_dimensions(
-                            ty,
-                            &alias.dimensions,
-                            tree,
-                            session,
-                            &context,
-                        )
-                        .ok()?;
+                        // A typedef's unpacked dimensions may make it a
+                        // dynamic container (IEEE 1800-2023 7.5, 7.8, 7.10).
+                        let ty = match alias {
+                            Some(alias) => containers::with_dimensions(
+                                ty,
+                                &alias.dimensions,
+                                tree,
+                                session,
+                                &context,
+                            )
+                            .ok()?,
+                            None => ty,
+                        };
                         type_parameters::resolve(&tree.functions, ty, &env)
                     });
                 if let Some(mut ty) = ty {
-                    let alias = instances::normalize_identifier(&alias.name.spelling);
-                    ty.name_declaration(|| {
-                        (
-                            format!("{name}::{alias}"),
-                            type_names::TypedefName::Class {
-                                class: name.as_str().into(),
-                                name: alias.as_str().into(),
-                            },
-                        )
-                    });
+                    let alias =
+                        alias.map(|alias| instances::normalize_identifier(&alias.name.spelling));
+                    if let Some(alias) = &alias {
+                        ty.name_declaration(|| {
+                            (
+                                format!("{name}::{alias}"),
+                                type_names::TypedefName::Class {
+                                    class: name.as_str().into(),
+                                    name: alias.as_str().into(),
+                                },
+                            )
+                        });
+                    }
                     let enum_binding = crate::ast::parameters::enum_constant_type(
                         tree, session, target, &ty, &env, &aliases,
                     )?;
@@ -1085,8 +1101,10 @@ fn finish_specialization(
                             );
                         }
                     }
-                    parameters.own_aliases.insert(alias.clone(), ty.clone());
-                    aliases.insert(alias, ty);
+                    if let Some(alias) = alias {
+                        parameters.own_aliases.insert(alias.clone(), ty.clone());
+                        aliases.insert(alias, ty);
+                    }
                 }
             }
         }

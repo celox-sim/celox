@@ -623,6 +623,50 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 10; see <case>/build.log\n<case>/source_0.sv:15: sorry: Subroutine ports with unpacked dimensions are not yet supported.\n<case>/source_0.sv:19: error: the type of the variable 'q' doesn't match the context type.\n<case>/source_0.sv:19:      : variable type=queue of netvector_t:bool signed[31:0]\n<case>/source_0.sv:19:      : context type=11netuarray_t\n<case>/source_0.sv:22: error: the type of the variable 'd' doesn't match the context type.\n<case>/source_0.sv:22:      : variable type=dynamic array of netvector_t:bool signed[31:0]\n<case>/source_0.sv:22:      : context type=11netuarray_t\n<case>/source_0.sv:14: error: Can not assign non-array identifier `d` to array.\n<case>/source_0.sv:27: error: the type of the variable 'd' doesn't match the context type.\n<case>/source_0.sv:27:      : variable type=dynamic array of netvector_t:bool signed[31:0]\n<case>/source_0.sv:27:      : context type=11netuarray_t\n<case>/source_0.sv:30: error: the type of the variable 'd' doesn't match the context type.\n<case>/source_0.sv:30:      : variable type=dynamic array of netvector_t:bool signed[31:0]\n<case>/source_0.sv:30:      : context type=11netuarray_t\n<case>/source_0.sv:33: error: the type of the variable 'q' doesn't match the context type.\n<case>/source_0.sv:33:      : variable type=queue of netvector_t:bool signed[31:0]\n<case>/source_0.sv:33:      : context type=11netuarray_t\n<case>/source_0.sv:35: sorry: Assignment to an  array slice is not yet supported.\n<case>/source_0.sv:37: error: The expression 'q' cannot be implicitly cast to the target type.\n<case>/source_0.sv:41: error: The expression '(s)?(q):(d)' cannot be implicitly cast to the target type.\n10 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "containers::fixed_size_arrays_take_dynamic_array_elements",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:9: error: the type of the variable 'w' doesn't match the context type.\n<case>/source_0.sv:9:      : variable type=dynamic array of netvector_t:logic unsigned[129:0]\n<case>/source_0.sv:9:      : context type=11netuarray_t\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "containers::fixed_size_arrays_take_wide_dynamic_array_elements",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:10: sorry: Unpacked structs not supported.\n",
+      "expectation": "Simulation",
+      "name": "containers::fixed_size_arrays_take_dynamic_arrays_of_any_element_type",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:16: Sorry: Dynamic array of type `class Cell{}` is not yet supported.\n<case>/source_0.sv:42: Error: Class/null r-value not allowed in this context.\n<case>/source_0.sv:43: Error: Class/null r-value not allowed in this context.\n<case>/source_0.sv:44: error: Both arguments (class, logic) must be class/null for '==' operator.\n4 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "containers::casts_of_dynamic_arrays_to_fixed_size_ones_check_the_size",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

@@ -152,6 +152,12 @@ The `chandle` type updates two expectations: both state modes of
 `6.14--chandle`, which declares a chandle variable, now pass. It is the only
 fail-to-pass transition in the full local run; no failure expectation is broadened.
 
+Recursive subroutines going out of line by default update two expectations:
+both state modes of `13.4.2--function-recursive` now pass. Its `factorial`
+calls itself with constant arguments, which no longer keep the call inlined;
+the local simulation driver prints 1, 1, 2, 120 and 39916800 in both modes.
+CI reports no other change; no failure expectation is broadened.
+
 The official runner’s process exit code is separate from the case verdict.
 The wrapper reads its `PASS`/`FAIL` log messages; it does not reconstruct their
 rules from tool exit codes or `should_fail` metadata. A negative test may pass

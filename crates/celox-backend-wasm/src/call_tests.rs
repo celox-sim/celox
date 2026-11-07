@@ -209,6 +209,7 @@ fn factorial(fail: bool) -> FunctionUnit<RegionedAbsoluteAddr> {
                     width: 32,
                     four_state: false,
                     handle: false,
+                    element_width: None,
                 })
                 .collect(),
         },
@@ -278,6 +279,7 @@ fn identity() -> FunctionUnit<RegionedAbsoluteAddr> {
                     width: 100,
                     four_state: true,
                     handle: false,
+                    element_width: None,
                 })
                 .collect(),
         },

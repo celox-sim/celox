@@ -94,7 +94,11 @@ fn incompatible_types(
             }
         )
     };
-    (fixed(actual) && fixed(target) && table.assignable_array(actual, target).is_err())
+    // A fixed-size array takes another array of equivalent elements: a
+    // fixed-size one of as many, or a dynamically sized one, whose size is
+    // checked at run time (IEEE 1800-2023 7.6).
+    let array = |id| matches!(table.data(id), semantic_types::TyData::Array { .. });
+    (array(actual) && fixed(target) && table.assignable_array(actual, target).is_err())
         .then(|| (table.spell(actual), table.spell(target)))
 }
 
@@ -306,7 +310,10 @@ fn check_assignment(
         return check_assignment(tree, session, *else_expression, target, context, dims);
     }
     let target = target.type_id(&mut session.types, &tree.functions, &dims.const_env);
-    let actual = native_unpacked_type(id, tree, session, dims);
+    // A selection of a variable is typed through its declaration; any other
+    // expression, such as a call returning an array, by its own type.
+    let actual = native_unpacked_type(id, tree, session, dims)
+        .or_else(|| expression_types::type_of(tree, session, id, tree.declarations(), dims).ok());
     let Some((actual, target)) = target
         .zip(actual)
         .and_then(|(target, actual)| incompatible_types(&session.types, actual, target))

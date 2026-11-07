@@ -83,6 +83,7 @@ enum Job {
     AssertionThen {
         concurrent: Option<Option<Expr>>,
         condition: Expr,
+        stages: Option<assertions::SequenceMonitor>,
         keyword: String,
         assertion: celox_design::AssertionSite,
         span: Option<crate::procedural::SourceSpan>,
@@ -92,6 +93,7 @@ enum Job {
     AssertionFinish {
         concurrent: Option<Option<Expr>>,
         condition: Expr,
+        stages: Option<assertions::SequenceMonitor>,
         then_body: Vec<Stmt>,
         assertion: celox_design::AssertionSite,
         default_failure: Option<(String, Option<crate::procedural::SourceSpan>)>,
@@ -316,6 +318,24 @@ impl BodyBuilder<'_, '_, '_> {
                         });
                         jobs.push(Job::Enter(*body));
                     }
+                    // A case statement on a type reference selects its arm
+                    // at elaboration: the first whose type matches, else the
+                    // default one (IEEE 1800-2023 6.23).
+                    StatementKind::Case {
+                        keyword,
+                        mode: None,
+                        expression: Some(value),
+                        arms,
+                        ..
+                    } if keyword == "case"
+                        && expression_binding::type_references::reference(*value, native)
+                            .is_some() =>
+                    {
+                        let selected = self.type_case_arm(*value, arms)?;
+                        if let Some(body) = selected {
+                            jobs.push(Job::Enter(body));
+                        }
+                    }
                     StatementKind::Case {
                         keyword,
                         mode,
@@ -444,6 +464,7 @@ impl BodyBuilder<'_, '_, '_> {
                         success,
                         failure,
                     } => {
+                        let mut stages = None;
                         let (condition, deferred, concurrent) = match header {
                             celox_sv_syntax::AssertionHeader::Immediate { deferred, .. } => (
                                 self.native_assertion_condition(keyword, header)?,
@@ -457,6 +478,7 @@ impl BodyBuilder<'_, '_, '_> {
                                         disable,
                                         antecedent,
                                         condition,
+                                        sequence,
                                     },
                                 module_item,
                                 ..
@@ -476,36 +498,60 @@ impl BodyBuilder<'_, '_, '_> {
                                 if !matches!(keyword.as_str(), "assert" | "assume" | "cover") {
                                     return Err(unsupported("concurrent assertion directive"));
                                 }
-                                let mut operand = self.native_value(*condition)?;
-                                assertions::concurrent_operand(&operand)?;
-                                if let Some(antecedent) = antecedent {
-                                    let antecedent = self.native_value(*antecedent)?;
-                                    assertions::concurrent_operand(&antecedent)?;
-                                    // A Boolean sequence matches only when true.
-                                    // X/Z antecedents have no match (16.12.7).
-                                    let matched = procedural_truth_condition(antecedent);
-                                    operand = Expr::Binary {
-                                        left: Box::new(Expr::Unary {
-                                            op: UnaryOp::LogicNot,
-                                            expr: Box::new(matched),
-                                        }),
-                                        op: BinaryOp::LogicOr,
-                                        right: Box::new(operand),
-                                    };
+                                if let Some(sequence) = sequence {
+                                    let monitor = self.sequence_stages(*sequence)?;
+                                    // An attempt of one tick is disabled at that tick; a
+                                    // longer one would need the condition at each tick.
+                                    if disable.is_some() && monitor.ticks.is_some() {
+                                        return Err(unsupported(
+                                            "disable iff of a sequence over cycles",
+                                        ));
+                                    }
+                                    stages = Some(monitor);
+                                    let disable = disable
+                                        .map(|id| {
+                                            self.native_value(id).map(procedural_truth_condition)
+                                        })
+                                        .transpose()?;
+                                    if let Some(disable) = &disable {
+                                        assertions::concurrent_operand(disable)?;
+                                        assertions::concurrent_disable(disable)?;
+                                    }
+                                    (Expr::Literal("1'b1".into()), &None, Some(disable))
+                                } else {
+                                    let mut operand = self.native_value(*condition)?;
+                                    assertions::concurrent_operand(&operand)?;
+                                    if let Some(antecedent) = antecedent {
+                                        let antecedent = self.native_value(*antecedent)?;
+                                        assertions::concurrent_operand(&antecedent)?;
+                                        // A Boolean sequence matches only when true.
+                                        // X/Z antecedents have no match (16.12.7).
+                                        let matched = procedural_truth_condition(antecedent);
+                                        operand = Expr::Binary {
+                                            left: Box::new(Expr::Unary {
+                                                op: UnaryOp::LogicNot,
+                                                expr: Box::new(matched),
+                                            }),
+                                            op: BinaryOp::LogicOr,
+                                            right: Box::new(operand),
+                                        };
+                                    }
+                                    let condition = procedural_truth_condition(Expr::Call {
+                                        callee: Callee::System(SystemFunction::Sampled),
+                                        args: vec![Some(operand)],
+                                        arg_order: Vec::new(),
+                                    });
+                                    let disable = disable
+                                        .map(|id| {
+                                            self.native_value(id).map(procedural_truth_condition)
+                                        })
+                                        .transpose()?;
+                                    if let Some(disable) = &disable {
+                                        assertions::concurrent_operand(disable)?;
+                                        assertions::concurrent_disable(disable)?;
+                                    }
+                                    (condition, &None, Some(disable))
                                 }
-                                let condition = procedural_truth_condition(Expr::Call {
-                                    callee: Callee::System(SystemFunction::Sampled),
-                                    args: vec![Some(operand)],
-                                    arg_order: Vec::new(),
-                                });
-                                let disable = disable
-                                    .map(|id| self.native_value(id).map(procedural_truth_condition))
-                                    .transpose()?;
-                                if let Some(disable) = &disable {
-                                    assertions::concurrent_operand(disable)?;
-                                    assertions::concurrent_disable(disable)?;
-                                }
-                                (condition, &None, Some(disable))
                             }
                             _ => unreachable!(),
                         };
@@ -527,6 +573,7 @@ impl BodyBuilder<'_, '_, '_> {
                         jobs.push(Job::AssertionThen {
                             concurrent,
                             condition,
+                            stages,
                             keyword: keyword.clone(),
                             assertion: celox_design::AssertionSite {
                                 label: statement
@@ -578,6 +625,24 @@ impl BodyBuilder<'_, '_, '_> {
                                     &self.dims,
                                 )?;
                             }
+                            // A class handle result takes a handle its class
+                            // takes (8.16, 13.4.1).
+                            if let Some(class) = self
+                                .return_shape
+                                .as_ref()
+                                .filter(|shape| shape.unpacked.is_empty())
+                                .and_then(|shape| shape.class.clone())
+                            {
+                                expression_binding::check_handle_assignment(
+                                    self.tree,
+                                    self.session,
+                                    *id,
+                                    native,
+                                    &self.dims,
+                                    &class,
+                                    || "return value".into(),
+                                )?;
+                            }
                         }
                         let value = value
                             .map(|id| {
@@ -623,6 +688,7 @@ impl BodyBuilder<'_, '_, '_> {
                 Job::AssertionThen {
                     concurrent,
                     condition,
+                    stages,
                     keyword,
                     assertion,
                     span,
@@ -633,6 +699,7 @@ impl BodyBuilder<'_, '_, '_> {
                     jobs.push(Job::AssertionFinish {
                         concurrent,
                         condition,
+                        stages,
                         then_body,
                         assertion,
                         default_failure: if failure.is_none() && keyword != "cover" {
@@ -649,6 +716,7 @@ impl BodyBuilder<'_, '_, '_> {
                 Job::AssertionFinish {
                     concurrent,
                     condition,
+                    stages,
                     mut then_body,
                     assertion,
                     default_failure,
@@ -680,6 +748,79 @@ impl BodyBuilder<'_, '_, '_> {
                         then_body.insert(0, Stmt::AssertionRegion { reactive: true });
                         else_body.insert(0, Stmt::AssertionRegion { reactive: true });
                         output.push(Stmt::AssertionRegion { reactive: false });
+                    }
+                    // A sequence over cycles decides each step that an
+                    // attempt reaches at this tick, the oldest attempt first.
+                    if let Some(monitor) = stages {
+                        let mut decisions = Vec::new();
+                        // Older attempts first; steps at one offset in their
+                        // order, a `##0` sequence's calls before its action.
+                        let mut ordered = monitor.stages;
+                        ordered.sort_by_key(|stage| std::cmp::Reverse(stage.offset));
+                        for stage in ordered {
+                            // Match-item calls and the pass action share one
+                            // Reactive region.
+                            let mut on_match = Vec::new();
+                            if !stage.calls.is_empty() || stage.last {
+                                on_match.push(Stmt::AssertionRegion { reactive: true });
+                            }
+                            on_match.extend(stage.calls);
+                            if stage.last {
+                                on_match.extend(then_body.iter().skip(1).cloned());
+                            }
+                            // A missed antecedent step succeeds vacuously.
+                            let on_miss = if stage.antecedent {
+                                then_body.clone()
+                            } else {
+                                else_body.clone()
+                            };
+                            let decision = Stmt::If {
+                                condition: stage.matched,
+                                then_body: on_match,
+                                else_body: on_miss,
+                            };
+                            decisions.push(match stage.alive {
+                                Some(alive) => Stmt::If {
+                                    condition: alive,
+                                    then_body: vec![decision],
+                                    else_body: Vec::new(),
+                                },
+                                None => decision,
+                            });
+                        }
+                        if let Some(Some(disable)) = &concurrent {
+                            output.push(Stmt::If {
+                                condition: disable.clone(),
+                                then_body: Vec::new(),
+                                else_body: decisions,
+                            });
+                        } else {
+                            output.extend(decisions);
+                        }
+                        // The values later ticks read, once this tick
+                        // decided its steps.
+                        output.extend(monitor.updates);
+                        if let Some((ticks, length)) = monitor.ticks {
+                            let count = Expr::Ident(ticks.clone());
+                            output.push(Stmt::If {
+                                condition: Expr::Binary {
+                                    left: Box::new(count.clone()),
+                                    op: BinaryOp::Lt,
+                                    right: Box::new(Expr::Literal(length.to_string())),
+                                },
+                                then_body: vec![Stmt::Assign {
+                                    lhs: LValue::Ident(ticks),
+                                    rhs: Expr::Binary {
+                                        left: Box::new(count),
+                                        op: BinaryOp::Add,
+                                        right: Box::new(Expr::Literal("1".into())),
+                                    },
+                                    nonblocking: false,
+                                }],
+                                else_body: Vec::new(),
+                            });
+                        }
+                        continue;
                     }
                     let decision = Stmt::If {
                         condition,
@@ -973,6 +1114,391 @@ pub(super) fn mark_breaks(body: Vec<Stmt>, stop: &str) -> Vec<Stmt> {
         }
     }
     marked
+}
+
+impl BodyBuilder<'_, '_, '_> {
+    /// The body of the arm that a case statement on type reference `value`
+    /// selects: the first whose type matches, else the default one (IEEE
+    /// 1800-2023 6.23).
+    fn type_case_arm(
+        &mut self,
+        value: celox_sv_syntax::ExprId,
+        arms: &[celox_sv_syntax::CaseArm],
+    ) -> Converted<Option<StatementId>> {
+        let native = self.tree.declarations();
+        for arm in arms {
+            for case_match in &arm.matches {
+                let celox_sv_syntax::CaseMatch::Expression(label) = case_match else {
+                    return Err(unsupported("range item of a case on a type"));
+                };
+                if expression_binding::type_references::matching(
+                    self.tree,
+                    self.session,
+                    value,
+                    *label,
+                    native,
+                    &self.dims,
+                )? {
+                    return Ok(Some(arm.body));
+                }
+            }
+        }
+        Ok(arms.iter().find(|arm| arm.default).map(|arm| arm.body))
+    }
+
+    /// The steps of sequence `id` as each tick of the assertion clock decides
+    /// them, in the order of their offsets (IEEE 1800-2023 16.7, 16.10,
+    /// 16.12.7). Each tick starts an attempt; with fixed delays, the attempt
+    /// that started `k` ticks ago reaches the step at offset `k` if every
+    /// earlier step matched at its own offset. Every value is evaluated
+    /// over the sampled values of the tick that decides it (16.6); a later
+    /// tick reads it from a register of the monitor.
+    pub(super) fn sequence_stages(
+        &mut self,
+        id: celox_sv_syntax::SequenceId,
+    ) -> Converted<assertions::SequenceMonitor> {
+        let native = self.tree.declarations();
+        let sequence = native.sequence(id).clone();
+        // Local variables bind as locals of the monitor; their reads become
+        // the values their assignments sampled.
+        self.push_scope();
+        let mut locals = assertions::SequenceLocals::default();
+        let mut local_types = HashMap::default();
+        let mut registers = Vec::new();
+        for local in &sequence.locals {
+            let ty = type_binding::bind(local.data_type, self.tree, self.session, &self.dims)?
+                .filter(|ty| {
+                    // An integral variable, which a register can keep.
+                    matches!(
+                        ty.kind,
+                        TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
+                    ) && ty.container.is_none()
+                        && ty.unpacked_ranges.is_empty()
+                        && ty.unpacked_struct.is_none()
+                        && ty.class.is_none()
+                        && ty.virtual_interface.is_none()
+                        && !ty.chandle
+                })
+                .ok_or_else(|| unsupported("type of a local variable of a sequence"))?;
+            for name in &local.names {
+                let unique = self.declare(&normalize_identifier(&name.spelling), ty.clone());
+                locals.insert(unique.clone(), Vec::new());
+                local_types.insert(unique, ty.clone());
+            }
+        }
+        let mut steps = Vec::new();
+        let mut offset = 0u32;
+        let mut order = 0usize;
+        let parts = [
+            (true, sequence.antecedent.clone().unwrap_or_default()),
+            (false, sequence.consequent.clone()),
+        ];
+        for (antecedent, part) in parts {
+            for step in part {
+                offset = offset
+                    .checked_add(step.delay)
+                    .ok_or_else(|| unsupported("sequence longer than 2^32 ticks"))?;
+                let point = assertions::SequencePoint {
+                    at: offset,
+                    before: order,
+                };
+                let condition = self.native_value(step.expression)?;
+                assertions::concurrent_operand(&condition)?;
+                let condition = self.sequence_value(&condition, point, &locals, &mut registers)?;
+                let mut calls = Vec::new();
+                for item in &step.items {
+                    match item {
+                        celox_sv_syntax::SequenceMatchItem::Assign {
+                            target,
+                            operator,
+                            value,
+                        } => {
+                            let native = self.tree.declarations();
+                            let celox_sv_syntax::ExprKind::Name(name) = &native
+                                .expression(expression_binding::ungroup(*target, native))
+                                .kind
+                            else {
+                                return Err(unsupported(
+                                    "match item assigning a select of a local variable",
+                                ));
+                            };
+                            let source = normalize_identifier(&name.spelling);
+                            let lvalue = LValue::Ident(source.clone());
+                            let rhs = match value {
+                                Some(value) => expression_binding::value(
+                                    *value,
+                                    native,
+                                    self.tree,
+                                    self.session,
+                                    &self.dims,
+                                )?,
+                                None => Expr::Literal("1".into()),
+                            };
+                            // An operator assignment, increment or decrement
+                            // reads the local's previous value.
+                            let value = match operator.as_str() {
+                                "=" => rhs,
+                                "++" | "--" => statements::assignment_op_expr(
+                                    self.tree,
+                                    self.session,
+                                    &lvalue,
+                                    if operator == "++" { "+=" } else { "-=" },
+                                    rhs,
+                                    &self.dims,
+                                )?,
+                                _ => statements::assignment_op_expr(
+                                    self.tree,
+                                    self.session,
+                                    &lvalue,
+                                    operator,
+                                    rhs,
+                                    &self.dims,
+                                )?,
+                            };
+                            // The value converts to the local's type as an
+                            // assignment's does (10.7).
+                            let mut value = coerce_procedural_assignment_rhs(
+                                self.tree, value, &lvalue, &self.dims,
+                            );
+                            self.rename_expr(&mut value);
+                            assertions::concurrent_operand(&value)?;
+                            let mut target = Expr::Ident(source);
+                            self.rename_expr(&mut target);
+                            let Expr::Ident(unique) = target else {
+                                return Err(unsupported("match item target"));
+                            };
+                            if !locals.contains_key(&unique) {
+                                return Err(unsupported(
+                                    "match item assigning a variable that is no local variable of the sequence",
+                                ));
+                            }
+                            // The value is that of the tick of its step, over
+                            // its sampled values (16.10).
+                            let here = assertions::SequencePoint {
+                                at: offset,
+                                before: order,
+                            };
+                            let value =
+                                self.sequence_value(&value, here, &locals, &mut registers)?;
+                            registers.push(assertions::SequenceRegister {
+                                now: assertions::sampled(value.clone()),
+                                ty: local_types[&unique].clone(),
+                                chain: Vec::new(),
+                            });
+                            let register = registers.len() - 1;
+                            locals.get_mut(&unique).expect("a local variable").push(
+                                assertions::SequenceAssignment {
+                                    order,
+                                    offset,
+                                    value,
+                                    register,
+                                },
+                            );
+                            order += 1;
+                        }
+                        celox_sv_syntax::SequenceMatchItem::Call(call) => {
+                            // An argument passed by value takes the sampled
+                            // value, and one reading a local variable the
+                            // value its assignment sampled (16.11).
+                            let here = assertions::SequencePoint {
+                                at: offset,
+                                before: order,
+                            };
+                            for mut statement in self.subroutine_call_statement(*call)? {
+                                self.sample_call_arguments(
+                                    &mut statement,
+                                    here,
+                                    &locals,
+                                    &mut registers,
+                                )?;
+                                calls.push(statement);
+                            }
+                        }
+                    }
+                }
+                steps.push((antecedent, point, condition, calls));
+            }
+        }
+        let length = offset;
+        // A value later ticks read takes a register per tick it is kept.
+        if length > MAX_SEQUENCE_TICKS {
+            return Err(unsupported(format!(
+                "sequence longer than {MAX_SEQUENCE_TICKS} ticks"
+            )));
+        }
+        let ticks = (length > 0).then(|| self.declare("ticks@sequence", super::int_type()));
+        // Each step's match at this tick, kept for the later steps of the
+        // attempt.
+        let mut bit = Type::new(TypeKind::Bit);
+        bit.is_signed = false;
+        let mut matches = Vec::with_capacity(steps.len());
+        for (_, _, condition, _) in &steps {
+            let matched = procedural_truth_condition(assertions::sampled(condition.clone()));
+            registers.push(assertions::SequenceRegister {
+                now: matched.clone(),
+                ty: bit.clone(),
+                chain: Vec::new(),
+            });
+            matches.push((matched, registers.len() - 1));
+        }
+        let count = steps.len();
+        let mut stages = Vec::with_capacity(count);
+        for (index, (antecedent, point, _, calls)) in steps.iter().enumerate() {
+            // The attempt that started `point.at` ticks ago exists.
+            let mut alive = ticks
+                .as_ref()
+                .filter(|_| point.at > 0)
+                .map(|ticks| Expr::Binary {
+                    left: Box::new(Expr::Ident(ticks.clone())),
+                    op: BinaryOp::Ge,
+                    right: Box::new(Expr::Literal(point.at.to_string())),
+                });
+            for (earlier, (matched, register)) in steps[..index].iter().zip(&matches) {
+                let ago = point.at - earlier.1.at;
+                let matched = if ago == 0 {
+                    matched.clone()
+                } else {
+                    Expr::Ident(self.sequence_register(&mut registers, *register, ago))
+                };
+                alive = Some(match alive {
+                    None => matched,
+                    Some(previous) => Expr::Binary {
+                        left: Box::new(previous),
+                        op: BinaryOp::LogicAnd,
+                        right: Box::new(matched),
+                    },
+                });
+            }
+            stages.push(assertions::SequenceStage {
+                alive,
+                matched: matches[index].0.clone(),
+                antecedent: *antecedent,
+                last: index + 1 == count,
+                calls: calls.clone(),
+                offset: point.at,
+            });
+        }
+        let updates =
+            assertions::register_updates(registers, |ty| self.declare("now@sequence", ty.clone()));
+        self.pop_scope();
+        Ok(assertions::SequenceMonitor {
+            stages,
+            ticks: ticks.map(|ticks| (ticks, length)),
+            updates,
+        })
+    }
+
+    /// Rewrite the arguments of match-item call `statement` at `here`. An
+    /// argument passed by value, to an `input` formal or a system task
+    /// argument the task does not write, is evaluated over sampled values;
+    /// any argument reading a local variable takes the value its assignment
+    /// sampled (16.11).
+    fn sample_call_arguments(
+        &mut self,
+        statement: &mut Stmt,
+        here: assertions::SequencePoint,
+        locals: &assertions::SequenceLocals,
+        registers: &mut [assertions::SequenceRegister],
+    ) -> Converted<()> {
+        let all_directions = self.state.subroutine_directions;
+        let mut sampled = |expr: &mut Expr, argument: Argument| -> Converted<()> {
+            // A written or referenced argument needs the storage of what it
+            // names, which a local's kept value is not.
+            if argument == Argument::Storage
+                && locals.keys().any(|local| {
+                    let mut reads = false;
+                    rename_expr_idents(&mut expr.clone(), &mut |name| {
+                        reads |= name == local;
+                        None
+                    });
+                    reads
+                })
+            {
+                return Err(unsupported(
+                    "local variable of a sequence passed to an output, inout or ref argument",
+                ));
+            }
+            let by_value = argument == Argument::Value;
+            let value = self.sequence_value(expr, here, locals, registers)?;
+            *expr = if by_value {
+                // A value read over sampled values, as an operand is: a user
+                // function would read module variables that sampling does
+                // not reach (16.6).
+                assertions::concurrent_operand(&value)?;
+                assertions::sampled(value)
+            } else {
+                value
+            };
+            Ok(())
+        };
+        match statement {
+            Stmt::SystemTask { task, args, .. } => {
+                let task = *task;
+                for (position, arg) in args.iter_mut().enumerate() {
+                    if let crate::procedural::SystemTaskArg::Expr(expr) = arg {
+                        // A task's destination, as `$readmemh`'s memory, is
+                        // written, not read (21.4).
+                        sampled(
+                            expr,
+                            if task.writes_argument(position) {
+                                Argument::Storage
+                            } else {
+                                Argument::Value
+                            },
+                        )?;
+                    }
+                }
+            }
+            Stmt::Call { name, args, .. } => {
+                let directions = all_directions.get(name.as_str());
+                for (index, arg) in args.iter_mut().enumerate() {
+                    if let Some(expr) = arg {
+                        let argument = match directions.and_then(|directions| directions.get(index))
+                        {
+                            Some(crate::procedural::ParamDirection::Input) => Argument::Value,
+                            Some(direction)
+                                if direction.is_written() || direction.is_reference() =>
+                            {
+                                Argument::Storage
+                            }
+                            _ => Argument::Other,
+                        };
+                        sampled(expr, argument)?;
+                    }
+                }
+            }
+            _ => {
+                let mut error = None;
+                statement.visit_mut(
+                    &mut |expr| {
+                        if let Err(failure) = sampled(expr, Argument::Other) {
+                            error = error.take().or(Some(failure));
+                        }
+                    },
+                    &mut |_| {},
+                    &mut |_| {},
+                );
+                if let Some(error) = error {
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The most ticks a sequence may span: each value a later tick reads is
+/// kept in a register per tick.
+const MAX_SEQUENCE_TICKS: u32 = 1024;
+
+/// How a match-item call passes an argument (16.11).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Argument {
+    /// By value: evaluated over sampled values.
+    Value,
+    /// To a formal or task argument that writes or refers to it.
+    Storage,
+    Other,
 }
 
 #[cfg(test)]

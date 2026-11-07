@@ -103,6 +103,11 @@ pub(super) struct Ff<'p, 'a> {
     frame_positions: bool,
     process_control: bool,
     process_predicate: bool,
+    /// The subroutines whose inlined calls are binding a default argument
+    /// that calls, innermost last: such a call reached again inside its own
+    /// default would bind that default again, forever, so it is a
+    /// recursive call, which inlining cannot expand.
+    binding_defaults: Vec<String>,
     frame_locals: Vec<SourceVarId>,
     postponed_locals: HashSet<SourceVarId>,
     event_probes: Vec<celox_design::ProcessEventProbe<SourceVarId>>,
@@ -217,6 +222,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             frame_positions: false,
             process_control: false,
             process_predicate: false,
+            binding_defaults: Vec::new(),
             frame_locals: Vec::new(),
             postponed_locals: HashSet::default(),
             event_probes: Vec::new(),
@@ -295,12 +301,13 @@ impl<'p, 'a> Ff<'p, 'a> {
         let body_calls = calls.len();
         let mut visited = HashSet::default();
         let mut index = 0;
+        let mut seen_defaults = super::procedural::SeenDefaults::default();
         while index < calls.len() {
             if let (sv::ir::Callee::Subroutine(name), args) = calls[index].clone()
                 && let Some(subroutine) = self.m.subroutine(&name).cloned()
             {
                 // The defaults of omitted arguments run at the call.
-                default_calls(&subroutine, &args, &mut calls);
+                default_calls(&subroutine, &args, &mut calls, &mut seen_defaults);
                 if visited.insert(name) {
                     for stmt in &subroutine.body {
                         stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
@@ -646,22 +653,12 @@ impl<'p, 'a> Ff<'p, 'a> {
                     found = true;
                 }
                 stmt_calls(stmt, &mut calls);
-                // Timing controls evaluate their expressions too.
-                match stmt {
-                    sv::ir::Stmt::Wait(condition) => collect_calls(condition, &mut calls),
-                    sv::ir::Stmt::WaitEvent(items) => {
-                        for item in items {
-                            collect_calls(&item.expr, &mut calls);
-                        }
-                    }
-                    sv::ir::Stmt::Delay { amount, .. } => collect_calls(amount, &mut calls),
-                    _ => {}
-                }
             });
         }
         if found {
             return true;
         }
+        let mut seen_defaults = super::procedural::SeenDefaults::default();
         while let Some((callee, args)) = calls.pop() {
             let sv::ir::Callee::Subroutine(name) = callee else {
                 continue;
@@ -669,7 +666,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             let Some(subroutine) = self.m.subroutine(&name).cloned() else {
                 continue;
             };
-            default_calls(&subroutine, &args, &mut calls);
+            default_calls(&subroutine, &args, &mut calls, &mut seen_defaults);
             if visited.insert(name) && self.has_deferred_assertions(&subroutine.body, visited) {
                 return true;
             }
@@ -840,6 +837,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         }
         let mut assigned = HashSet::default();
         let mut visited = HashSet::default();
+        let mut seen_defaults = super::procedural::SeenDefaults::default();
         while let Some((callee, args)) = calls.pop() {
             if let sv::ir::Callee::Object(op) = &callee {
                 assigned.extend(
@@ -854,7 +852,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             let Some(subroutine) = self.m.subroutine(&name) else {
                 continue;
             };
-            default_calls(subroutine, &args, &mut calls);
+            default_calls(subroutine, &args, &mut calls, &mut seen_defaults);
             if !visited.insert(name) {
                 continue;
             }
@@ -907,6 +905,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         for stmt in stmts {
             stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
         }
+        let mut seen_defaults = super::procedural::SeenDefaults::default();
         while let Some((callee, args)) = calls.pop() {
             if let sv::ir::Callee::Object(op) = &callee {
                 for lhs in written_object_arguments(op, &args) {
@@ -967,7 +966,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             let Some(subroutine) = self.m.subroutine(&name).cloned() else {
                 continue;
             };
-            default_calls(&subroutine, &args, &mut calls);
+            default_calls(&subroutine, &args, &mut calls, &mut seen_defaults);
             for (param, arg) in subroutine.params.iter().zip(args.iter()) {
                 if param.direction.is_written()
                     && let Some(lvalues) = arg.as_ref().and_then(lvalue_from_expr)
@@ -5043,15 +5042,6 @@ impl<'p, 'a> Ff<'p, 'a> {
             .cloned()
             .ok_or_else(|| unsupported(format!("call of `{name}`")))?;
         self.m.record_call(&self.active_calls, name);
-        let out_of_line = self.out_of_line_callee(name, &subroutine, args)?;
-        if out_of_line.is_none() && self.active_calls.iter().any(|active| active == name) {
-            self.m
-                .record_argument_calls(&self.active_calls, &subroutine, args);
-            return Err(unsupported(format!("recursive call of `{name}`")));
-        }
-        if out_of_line.is_none() && self.active_calls.len() >= MAX_CALL_DEPTH {
-            return Err(unsupported("subroutine call depth limit exceeded"));
-        }
         if args.len() > subroutine.params.len() {
             return Err(unsupported(format!(
                 "function call `{name}` with too many arguments"
@@ -5080,6 +5070,97 @@ impl<'p, 'a> Ff<'p, 'a> {
             }
             _ => args,
         };
+        // Evaluate every input before any formal is written: an argument may
+        // read a formal of an enclosing call of another subroutine.
+        let mut outputs = Vec::new();
+        let mut inputs = Vec::new();
+        let mut references = Vec::new();
+        let mut aliases = Vec::new();
+        // The name of each `ref` formal's actual that is a variable.
+        let mut actual_names: HashMap<String, String> = HashMap::default();
+        let mut property_outputs = Vec::new();
+        let mut place_outputs = Vec::new();
+        // The formals an out-of-line call copies back, each with the
+        // temporary that receives it from the callee's frame.
+        let mut copies = Vec::new();
+        let positions: Vec<_> = if arg_order.is_empty() {
+            (0..subroutine.params.len()).collect()
+        } else {
+            arg_order.to_vec()
+        };
+        // The objects and positions that references capture come first (the
+        // order of evaluation of arguments is undefined, IEEE 1800-2023
+        // 13.5): keeping one in a forked activation's frame starts a new
+        // resume point, which no evaluated input may span.
+        for &position in &positions {
+            let Some(param) = subroutine
+                .params
+                .get(position)
+                .filter(|param| param.direction.is_reference())
+            else {
+                continue;
+            };
+            let id = self
+                .m
+                .id(&param.name)
+                .ok_or_else(|| unsupported(format!("argument `{}`", param.source_name)))?;
+            let actual = subroutine
+                .actual(position, args, receiver_kept)
+                .map_err(unsupported)?;
+            if param.leaves.is_empty() {
+                if let Some(sv::ir::Expr::Ident(actual)) = &actual {
+                    actual_names.insert(param.name.clone(), actual.clone());
+                }
+                match self.reference(name, param, actual)? {
+                    Reference::Variable(target) => {
+                        references.push((param.name.clone(), id, target));
+                    }
+                    Reference::Alias(alias) => aliases.push(*alias),
+                }
+                continue;
+            }
+            // Each member of a formal of unpacked structure type refers to
+            // the matching member of the actual, which the analyzer binds as
+            // the concatenation of its members.
+            let parts = match actual {
+                Some(sv::ir::Expr::Concat(parts)) if parts.len() == param.leaves.len() => parts,
+                _ => {
+                    return Err(unsupported(format!(
+                        "ref argument `{}` of `{name}`",
+                        param.source_name
+                    )));
+                }
+            };
+            for (leaf, part) in param.leaves.iter().zip(parts) {
+                let id = self
+                    .m
+                    .id(leaf)
+                    .ok_or_else(|| unsupported(format!("argument `{}`", param.source_name)))?;
+                let member = sv::ir::SubroutineParam {
+                    name: leaf.clone(),
+                    leaves: Vec::new(),
+                    default: None,
+                    ..param.clone()
+                };
+                match self.reference(name, &member, Some(part))? {
+                    Reference::Variable(target) => references.push((leaf.clone(), id, target)),
+                    Reference::Alias(alias) => aliases.push(*alias),
+                }
+            }
+        }
+        // An out-of-line call passes what each `ref` formal refers to as a
+        // place (see `out_of_line::Place`), whose static part selects the
+        // function.
+        let places = self.ref_places(&subroutine, &references, &aliases, &actual_names);
+        let out_of_line = self.out_of_line_callee(name, &subroutine, args, places.as_deref())?;
+        if out_of_line.is_none() && self.active_calls.iter().any(|active| active == name) {
+            self.m
+                .record_argument_calls(&self.active_calls, &subroutine, args);
+            return Err(unsupported(format!("recursive call of `{name}`")));
+        }
+        if out_of_line.is_none() && self.active_calls.len() >= MAX_CALL_DEPTH {
+            return Err(unsupported("subroutine call depth limit exceeded"));
+        }
         // Each inlined automatic task activation owns persistent storage, so
         // another process can enter the same task while this one is suspended.
         // Static formals/locals deliberately keep their module-wide addresses.
@@ -5131,79 +5212,6 @@ impl<'p, 'a> Ff<'p, 'a> {
                 activation.push((name.clone(), original));
             }
         }
-        // Evaluate every input before any formal is written: an argument may
-        // read a formal of an enclosing call of another subroutine.
-        let mut outputs = Vec::new();
-        let mut inputs = Vec::new();
-        let mut references = Vec::new();
-        let mut aliases = Vec::new();
-        let mut property_outputs = Vec::new();
-        let mut place_outputs = Vec::new();
-        // The formals an out-of-line call copies back, each with the
-        // temporary that receives it from the callee's frame.
-        let mut copies = Vec::new();
-        let positions: Vec<_> = if arg_order.is_empty() {
-            (0..subroutine.params.len()).collect()
-        } else {
-            arg_order.to_vec()
-        };
-        // The objects and positions that references capture come first (the
-        // order of evaluation of arguments is undefined, IEEE 1800-2023
-        // 13.5): keeping one in a forked activation's frame starts a new
-        // resume point, which no evaluated input may span.
-        for &position in &positions {
-            let Some(param) = subroutine
-                .params
-                .get(position)
-                .filter(|param| param.direction.is_reference())
-            else {
-                continue;
-            };
-            let id = self
-                .m
-                .id(&param.name)
-                .ok_or_else(|| unsupported(format!("argument `{}`", param.source_name)))?;
-            let actual = subroutine
-                .actual(position, args, receiver_kept)
-                .map_err(unsupported)?;
-            if param.leaves.is_empty() {
-                match self.reference(name, param, actual)? {
-                    Reference::Variable(target) => {
-                        references.push((param.name.clone(), id, target));
-                    }
-                    Reference::Alias(alias) => aliases.push(*alias),
-                }
-                continue;
-            }
-            // Each member of a formal of unpacked structure type refers to
-            // the matching member of the actual, which the analyzer binds as
-            // the concatenation of its members.
-            let parts = match actual {
-                Some(sv::ir::Expr::Concat(parts)) if parts.len() == param.leaves.len() => parts,
-                _ => {
-                    return Err(unsupported(format!(
-                        "ref argument `{}` of `{name}`",
-                        param.source_name
-                    )));
-                }
-            };
-            for (leaf, part) in param.leaves.iter().zip(parts) {
-                let id = self
-                    .m
-                    .id(leaf)
-                    .ok_or_else(|| unsupported(format!("argument `{}`", param.source_name)))?;
-                let member = sv::ir::SubroutineParam {
-                    name: leaf.clone(),
-                    leaves: Vec::new(),
-                    default: None,
-                    ..param.clone()
-                };
-                match self.reference(name, &member, Some(part))? {
-                    Reference::Variable(target) => references.push((leaf.clone(), id, target)),
-                    Reference::Alias(alias) => aliases.push(*alias),
-                }
-            }
-        }
         // An input evaluates into a register, which a host request in a later
         // input, a default included, would lose: each input before the last
         // one that can make a request is kept, converted to its formal, in a
@@ -5219,6 +5227,14 @@ impl<'p, 'a> Ff<'p, 'a> {
                         .is_some_and(|actual| self.m.makes_host_request(&actual))
             })
         });
+        // An out-of-line call passes the arguments it omits for the unit to
+        // evaluate their defaults (see `out_of_line::Function::omitted`).
+        let omitted = out_of_line.and_then(|index| {
+            self.m
+                .out_of_line()
+                .and_then(|functions| functions.functions[index].omitted.clone())
+        });
+        let mut omitted_bits = 0u64;
         for (index, position) in positions.into_iter().enumerate() {
             let keep = last_request.is_some_and(|last| index < last);
             let param = subroutine
@@ -5226,6 +5242,13 @@ impl<'p, 'a> Ff<'p, 'a> {
                 .get(position)
                 .ok_or_else(|| unsupported(format!("argument position of `{name}`")))?;
             if param.direction.is_reference() {
+                continue;
+            }
+            if let Some((_, defaulted)) = &omitted
+                && defaulted.contains(&position)
+                && matches!(args.get(position), None | Some(None))
+            {
+                omitted_bits |= 1 << position;
                 continue;
             }
             let id = self
@@ -5292,8 +5315,19 @@ impl<'p, 'a> Ff<'p, 'a> {
                     ))
                 })?;
                 let actual = self.string_conversion(id, actual);
+                let defaulted = matches!(args.get(position), None | Some(None));
                 let actual = if self.m.calls(&actual) {
-                    self.hoist(&actual)?
+                    if defaulted {
+                        if self.binding_defaults.iter().any(|active| active == name) {
+                            return Err(unsupported(format!("recursive call of `{name}`")));
+                        }
+                        self.binding_defaults.push(name.to_string());
+                    }
+                    let hoisted = self.hoist(&actual);
+                    if defaulted {
+                        self.binding_defaults.pop();
+                    }
+                    hoisted?
                 } else {
                     actual
                 };
@@ -5342,6 +5376,42 @@ impl<'p, 'a> Ff<'p, 'a> {
             {
                 let value = self.default_reg(id);
                 inputs.push((id, self.kept_input(id, value, keep)));
+            }
+        }
+        if let (Some(index), Some((slot, _))) = (out_of_line, &omitted) {
+            let functions = self.m.out_of_line().expect("calling out of line");
+            let id = functions.functions[index].slots[*slot].id;
+            let bits = self.b.alloc_bit(64, false);
+            self.b
+                .emit(SIRInstruction::Imm(bits, SIRValue::new(omitted_bits)));
+            inputs.push((id, Ok(bits)));
+        }
+        // The dynamic parts of the places pass through the frame: the
+        // handle of a property, the positions of an element, and the value
+        // of an automatic of the calling unit, which also comes back.
+        if let (Some(index), Some(places)) = (out_of_line, &places) {
+            let functions = self.m.out_of_line().expect("calling out of line");
+            let function = &functions.functions[index];
+            let slots: Vec<Vec<SourceVarId>> = function
+                .places
+                .iter()
+                .map(|own| own.iter().map(|&slot| function.slots[slot].id).collect())
+                .collect();
+            for (place, ids) in places.iter().zip(slots) {
+                use super::out_of_line::Place;
+                match place {
+                    Place::Variable(_) => {}
+                    Place::Property { handle, .. } => inputs.push((ids[0], Err(handle.clone()))),
+                    Place::Element { positions, .. } => {
+                        for (&id, position) in ids.iter().zip(positions) {
+                            inputs.push((id, Err(position.clone())));
+                        }
+                    }
+                    Place::Frame { id, name } => {
+                        inputs.push((ids[0], Err(name.clone())));
+                        copies.push((ids[0], *id));
+                    }
+                }
             }
         }
         let called = match out_of_line {
@@ -6921,16 +6991,6 @@ impl Ff<'_, '_> {
                 stmt.walk(&mut |stmt| {
                     found |= matches!(stmt, sv::ir::Stmt::Fork { .. } | sv::ir::Stmt::WaitFork);
                     stmt_calls(stmt, &mut calls);
-                    match stmt {
-                        sv::ir::Stmt::Wait(condition) => collect_calls(condition, &mut calls),
-                        sv::ir::Stmt::WaitEvent(items) => {
-                            for item in items {
-                                collect_calls(&item.expr, &mut calls);
-                            }
-                        }
-                        sv::ir::Stmt::Delay { amount, .. } => collect_calls(amount, &mut calls),
-                        _ => {}
-                    }
                 });
             }
             if found {
@@ -7015,16 +7075,6 @@ impl Ff<'_, '_> {
             for stmt in body {
                 stmt.walk(&mut |stmt| {
                     stmt_calls(stmt, &mut calls);
-                    match stmt {
-                        sv::ir::Stmt::Wait(condition) => collect_calls(condition, &mut calls),
-                        sv::ir::Stmt::WaitEvent(items) => {
-                            for item in items {
-                                collect_calls(&item.expr, &mut calls);
-                            }
-                        }
-                        sv::ir::Stmt::Delay { amount, .. } => collect_calls(amount, &mut calls),
-                        _ => {}
-                    }
                 });
             }
             while let Some((callee, args)) = calls.pop() {
@@ -8306,15 +8356,45 @@ impl Ff<'_, '_> {
         }) {
             return Err(unsupported("wait condition reading a static task argument"));
         }
-        // A write of a class property does not wake a waiting process yet, so
-        // a condition that reads one would never be checked again.
-        if let Some(op) = heap_read(self.m, condition) {
-            return Err(unsupported(format!("{op} in a wait condition")));
+        // A store of a class property bumps its change count, which the
+        // wait watches; a property without one, such as in a design whose
+        // waits were not collected, or a random mode, is never checked again.
+        let mut changes = Vec::new();
+        let reads = heap_reads(|name| self.m.subroutine(name), condition);
+        // A store of the same property of another object, or of its own
+        // value, or a `randomize` checks the condition again: it must be a
+        // value of what it reads, so that an extra evaluation is invisible.
+        if !reads.is_empty()
+            && let Some(name) = impure_call_reading(self.m, condition, |op| {
+                matches!(
+                    op,
+                    sv::ir::ObjectOp::Load(_)
+                        | sv::ir::ObjectOp::ClassOf
+                        | sv::ir::ObjectOp::Box(_)
+                        | sv::ir::ObjectOp::Locator(_)
+                        | sv::ir::ObjectOp::Concat(_)
+                ) || matches!(op, sv::ir::ObjectOp::Container { op, .. } if !op.mutates())
+            })
+        {
+            return Err(unsupported(format!(
+                "{name} in a wait condition that reads a class property"
+            )));
+        }
+        for op in reads {
+            match &op {
+                sv::ir::ObjectOp::Load(field)
+                    if let Some(id) = self.m.id(&property_changes(field.key)) =>
+                {
+                    changes.push(id);
+                }
+                _ => return Err(unsupported(format!("{op} in a wait condition"))),
+            }
         }
         let mut ids: Vec<_> = names
             .iter()
             .filter_map(|name| self.m.id(name))
             .filter(|&id| !self.m.is_hidden(id) || (self.forked && self.frame_locals.contains(&id)))
+            .chain(changes)
             .collect();
         ids.sort_unstable();
         ids.dedup();
@@ -8557,18 +8637,22 @@ fn subroutine_reads(pm: &ProcModule<'_>, expr: &sv::ir::Expr, names: &mut HashSe
     }
 }
 
-/// The name of an operation in `expr` that reads the class object heap,
-/// directly or through the functions it calls: a class property, or the
-/// random mode of one. Container contents are values of their handles. The
-/// default of an argument counts only where a call omits the argument.
-fn heap_read(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
+/// The operations in `expr` that read the class object heap, directly or
+/// through the functions it calls, which `subroutine` finds by name: class
+/// properties, and the random modes of them. Container contents are values
+/// of their handles. The default of an argument counts only where a call
+/// omits the argument.
+pub(super) fn heap_reads<'a>(
+    subroutine: impl Fn(&str) -> Option<&'a sv::ir::Subroutine>,
+    expr: &sv::ir::Expr,
+) -> Vec<sv::ir::ObjectOp> {
+    let mut reads = Vec::new();
     let mut pending = vec![expr.clone()];
     let mut calls = Vec::new();
     let mut visited = HashSet::default();
     let mut defaults = HashSet::default();
     loop {
         while let Some(expr) = pending.pop() {
-            let mut found = None;
             expr_calls(&expr, &mut |callee| {
                 if let sv::ir::Callee::Object(op) = callee
                     && matches!(
@@ -8577,21 +8661,21 @@ fn heap_read(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
                             | sv::ir::ObjectOp::ModeGet(..)
                             | sv::ir::ObjectOp::ConstraintModeGet(_)
                     )
+                    && !reads.contains(&**op)
                 {
-                    found.get_or_insert(op.to_string());
+                    reads.push((**op).clone());
                 }
                 false
             });
-            if let Some(op) = found {
-                return Some(op);
-            }
             collect_calls(&expr, &mut calls);
         }
-        let (callee, args) = calls.pop()?;
+        let Some((callee, args)) = calls.pop() else {
+            return reads;
+        };
         let sv::ir::Callee::Subroutine(name) = callee else {
             continue;
         };
-        let Some(subroutine) = pm.subroutine(&name) else {
+        let Some(subroutine) = subroutine(&name) else {
             continue;
         };
         for (position, param) in subroutine.params.iter().enumerate() {
@@ -8617,10 +8701,79 @@ fn heap_read(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
     }
 }
 
+/// The keys of the class properties that the level waits of `module` read
+/// (IEEE 1800-2023 9.4.3), in its processes and subroutines: a store of
+/// one of them must wake the waits (see [`property_changes`]).
+pub(crate) fn watched_properties(
+    module: &sv::ir::Module,
+    keys: &mut std::collections::BTreeSet<u32>,
+) {
+    let subroutine = |name: &str| {
+        module
+            .subroutines()
+            .iter()
+            .find(|subroutine| subroutine.name == name)
+    };
+    let mut conditions = Vec::new();
+    let mut visit = |stmts: &[sv::ir::Stmt]| {
+        for stmt in stmts {
+            stmt.walk(&mut |stmt| {
+                if let sv::ir::Stmt::Wait(condition) = stmt {
+                    conditions.push(condition.clone());
+                }
+            });
+        }
+    };
+    for process in module.initial_processes() {
+        visit(process.body());
+    }
+    for process in module.ff_processes() {
+        visit(process.body());
+    }
+    for process in module.comb_processes() {
+        visit(process.body());
+    }
+    for subroutine in module.subroutines() {
+        visit(&subroutine.body);
+    }
+    for condition in &conditions {
+        for op in heap_reads(subroutine, condition) {
+            if let sv::ir::ObjectOp::Load(field) = op
+                && field.key != 0
+            {
+                keys.insert(field.key);
+            }
+        }
+    }
+}
+
+/// The name of the variable that counts the stores of the class property
+/// with key `key`, which the level waits that read the property watch: a
+/// variable of the package [`PROPERTY_CHANGES`], shared by every module.
+pub(crate) fn property_changes(key: u32) -> String {
+    format!("$property_changes@{key:08x}")
+}
+
+/// The package that holds the [`property_changes`] variables.
+pub(crate) const PROPERTY_CHANGES: &str = "$property_changes";
+
+/// Bits of a [`property_changes`] variable.
+pub(crate) const PROPERTY_CHANGES_WIDTH: usize = 32;
+
 /// The name of a call in `expr` that has an effect or reads the state of the
 /// simulation, directly or through the functions it calls: an event
 /// expression must be a value of the variables it reads.
 fn impure_call(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
+    impure_call_reading(pm, expr, |_| false)
+}
+
+/// [`impure_call`], where object operation `op` is a value of what it
+/// reads when `reads(op)`, besides container element reads.
+fn impure_call_reading(
+    pm: &ProcModule<'_>,
+    expr: &sv::ir::Expr,
+    reads: impl Fn(&sv::ir::ObjectOp) -> bool,
+) -> Option<String> {
     let mut pending = vec![expr.clone()];
     let mut visited = HashSet::default();
     while let Some(expr) = pending.pop() {
@@ -8652,7 +8805,8 @@ fn impure_call(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
                             op: sv::ir::ContainerOp::Get,
                             ..
                         } | sv::ir::ObjectOp::Unbox(_)
-                    ) || matches!(*op, sv::ir::ObjectOp::Load(field) if field.nullable) =>
+                    ) || matches!(*op, sv::ir::ObjectOp::Load(field) if field.nullable)
+                        || reads(&op) =>
                 {
                     continue;
                 }

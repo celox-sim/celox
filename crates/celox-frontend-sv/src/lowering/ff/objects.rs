@@ -10,6 +10,49 @@ use celox_heap::ops;
 use sv::ir::{HandleProperty, ObjectOp};
 
 impl Ff<'_, '_> {
+    /// Count a store of property `field` in its change count, if a level
+    /// wait of the design reads it (see [`property_changes`]).
+    pub(super) fn property_stored(&mut self, field: &sv::ir::ObjectField) {
+        if let Some(id) = self.m.id(&property_changes(field.key)) {
+            self.count_property_change(id);
+        }
+    }
+
+    /// Count a store of every watched property: `randomize` writes the
+    /// random properties of objects whose classes it finds as it runs.
+    fn properties_randomized(&mut self) {
+        let mut ids: Vec<_> = self
+            .m
+            .name_to_id
+            .iter()
+            .filter(|(name, _)| {
+                name.strip_prefix(PROPERTY_CHANGES)
+                    .is_some_and(|rest| rest.starts_with('@'))
+            })
+            .map(|(_, &id)| id)
+            .collect();
+        ids.sort_unstable();
+        for id in ids {
+            self.count_property_change(id);
+        }
+    }
+
+    fn count_property_change(&mut self, id: SourceVarId) {
+        let count = self.b.alloc_bit(PROPERTY_CHANGES_WIDTH, false);
+        self.b.emit(SIRInstruction::Load(
+            count,
+            stable(id),
+            SIROffset::Static(0),
+            PROPERTY_CHANGES_WIDTH,
+        ));
+        let one = self.b.alloc_bit(PROPERTY_CHANGES_WIDTH, false);
+        self.b.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+        let next = self.b.alloc_bit(PROPERTY_CHANGES_WIDTH, false);
+        self.b
+            .emit(SIRInstruction::Binary(next, count, BinaryOp::Add, one));
+        self.store(id, SIROffset::Static(0), PROPERTY_CHANGES_WIDTH, next);
+    }
+
     /// `expr` converted for property `field` when either is real: a real
     /// value rounds to the nearest integer of an integral property's width,
     /// and a real property holds the real value of `expr` (IEEE 1800-2023
@@ -96,7 +139,7 @@ impl Ff<'_, '_> {
                 let check = self.integer_of_width(&args[1], 1, false)?;
                 let bytes = serde_json::to_vec(program).expect("constraint program serialization");
                 let program = self.frozen_bytes(&bytes);
-                if args.len() == 2 {
+                let result = if args.len() == 2 {
                     self.heap_call(ops::OBJECT_RANDOMIZE, &[object, program, check])
                 } else {
                     let mut inputs = self.heap_call(ops::NEW, &[]);
@@ -108,7 +151,9 @@ impl Ff<'_, '_> {
                         inputs = self.heap_call(ops::APPEND_BYTES, &[inputs, value, eight]);
                     }
                     self.heap_call(ops::OBJECT_RANDOMIZE_INPUTS, &[object, program, inputs])
-                }
+                };
+                self.properties_randomized();
+                result
             }
             ObjectOp::ConstraintModeGet(index) => {
                 let object = self.handle(&args[0])?;
@@ -249,6 +294,7 @@ impl Ff<'_, '_> {
                     }
                 };
                 self.store_field(object, *field, value);
+                self.property_stored(field);
                 self.constant64(0)
             }
             ObjectOp::Store(field) => {
@@ -268,7 +314,9 @@ impl Ff<'_, '_> {
                         self.integer_of_width(&expr, field.width as usize, signed)?
                     }
                 };
-                self.heap_call(ops::OBJECT_STORE, &[object, place, value])
+                let result = self.heap_call(ops::OBJECT_STORE, &[object, place, value]);
+                self.property_stored(field);
+                result
             }
             ObjectOp::RandomCyclic { offset, count } => {
                 let object = self.handle(&args[0])?;

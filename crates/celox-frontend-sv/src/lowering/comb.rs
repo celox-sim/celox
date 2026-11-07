@@ -39,6 +39,9 @@ pub(super) struct Comb<'p, 'a> {
     /// Constant values of `arena` nodes.
     consts: ConstCache,
     active_calls: Vec<String>,
+    /// The subroutines whose calls are binding a default argument that
+    /// calls (see `Ff::binding_defaults`).
+    binding_defaults: Vec<String>,
     unrolled: usize,
     /// Whether nonblocking assignments are allowed (they are not in
     /// combinational processes).
@@ -84,6 +87,7 @@ impl<'p, 'a> Comb<'p, 'a> {
             arena,
             consts: ConstCache::default(),
             active_calls: Vec::new(),
+            binding_defaults: Vec::new(),
             unrolled: 0,
             allow_nonblocking: false,
             facts: Vec::new(),
@@ -3517,8 +3521,19 @@ impl<'p, 'a> Comb<'p, 'a> {
                         param.source_name
                     ))
                 })?;
+                let defaulted = matches!(args.get(position), None | Some(None));
                 let actual = if self.m.calls(&actual) {
-                    self.hoist(store, frames, &actual)?
+                    if defaulted {
+                        if self.binding_defaults.iter().any(|active| active == name) {
+                            return Err(unsupported(format!("recursive call of `{name}`")));
+                        }
+                        self.binding_defaults.push(name.to_string());
+                    }
+                    let hoisted = self.hoist(store, frames, &actual);
+                    if defaulted {
+                        self.binding_defaults.pop();
+                    }
+                    hoisted?
                 } else {
                     actual
                 };
@@ -4293,6 +4308,7 @@ pub(super) fn static_writes(
         });
     }
     let mut index = 0;
+    let mut seen_defaults = super::procedural::SeenDefaults::default();
     while index < calls.len() {
         let (name, args) = calls[index].clone();
         index += 1;
@@ -4303,7 +4319,7 @@ pub(super) fn static_writes(
             // Defaults execute at each call that omits an argument, even if
             // this subroutine's body has already been visited at another call.
             let mut defaults = Vec::new();
-            default_calls(&subroutine, &args, &mut defaults);
+            default_calls(&subroutine, &args, &mut defaults, &mut seen_defaults);
             calls.extend(defaults.into_iter().filter_map(|(callee, args)| {
                 if let sv::ir::Callee::Subroutine(name) = callee {
                     Some((name, args))

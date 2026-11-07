@@ -81,6 +81,17 @@
     },
     {
       "category": "Functions",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:39: syntax error\n<case>/source_0.sv:39: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "system_functions::casts_between_numeric_types",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
       "detail": "",
       "expectation": "Simulation",
       "name": "system_functions::countbits_in_constant_expressions",

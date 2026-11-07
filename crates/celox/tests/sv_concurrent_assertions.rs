@@ -115,7 +115,7 @@ endmodule"#;
 #[test]
 fn unsupported_temporal_and_procedural_forms_are_not_boolean_checks() {
     for body in [
-        "assert property (@(posedge clk) 1 |=> 0);",
+        "assert property (@(posedge clk) 1 |=> 0[*2]);",
         "initial assert property (@(posedge clk) 1);",
         "assert property (@(posedge clk) 1) q <= 1;",
     ] {

@@ -18,6 +18,10 @@ sv_backends! {
     fn untargeted_and_nested_container_merges(sim) { @case "containers::untargeted_and_nested_container_merges"; }
     fn conditionals_received_by_containers(sim) { @case "containers::conditionals_received_by_containers"; }
     fn associative_default_strings(sim) { @case "containers::associative_default_strings"; }
+    fn fixed_size_arrays_take_dynamic_array_elements(sim) { @case "containers::fixed_size_arrays_take_dynamic_array_elements"; }
+    fn fixed_size_arrays_take_wide_dynamic_array_elements(sim) { @case "containers::fixed_size_arrays_take_wide_dynamic_array_elements"; }
+    fn fixed_size_arrays_take_dynamic_arrays_of_any_element_type(sim) { @case "containers::fixed_size_arrays_take_dynamic_arrays_of_any_element_type"; }
+    fn casts_of_dynamic_arrays_to_fixed_size_ones_check_the_size(sim) { @case "containers::casts_of_dynamic_arrays_to_fixed_size_ones_check_the_size"; }
     fn associative_default_copy(sim) { @case "containers::associative_default_copy"; }
     fn associative_default_four_state(sim) { @case "containers::associative_default_four_state"; }
     fn associative_default_wide(sim) { @case "containers::associative_default_wide"; }
@@ -541,4 +545,105 @@ fn last_element_compound_updates() {
     sim.run_until(0).unwrap();
     let values = signals.map(|signal| sim.get(signal));
     assert_eq!(values, [0x11u8, 0x20, 0x50, 0x40, 2].map(BigUint::from));
+}
+
+#[test]
+fn fixed_size_arrays_of_another_size_or_element_reject_dynamic_arrays() {
+    // IEEE 1800-2023 7.6: a dynamic array of another number of elements
+    // than its fixed-size target is a run-time error (the assignments that
+    // succeed are the shared case
+    // `containers::fixed_size_arrays_take_dynamic_array_elements`).
+    let source = r#"module Top(output int out);
+        int d []; int f [3];
+        initial begin d = '{1, 2}; f = d; out = f[0]; end
+    endmodule"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("arrays.sv"))], "Top")
+        .build()
+        .unwrap();
+    let error = sim.run_until(1).unwrap_err().to_string();
+    assert!(error.contains("differ in size"), "{error}");
+    // The elements must be equivalent (6.22.2), and an associative array is
+    // no source of a fixed-size one.
+    for (declarations, expected) in [
+        ("byte d []; int f [2];", "not assignment compatible"),
+        ("int d [int]; int f [2];", "not assignment compatible"),
+    ] {
+        let source = format!("module Top; {declarations} initial f = d; endmodule");
+        let Err(error) = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("arrays.sv"))],
+            "Top",
+        )
+        .build() else {
+            panic!("`{declarations}` was assigned");
+        };
+        let error = error
+            .to_string()
+            .replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(error.contains(expected), "{declarations}: {error}");
+    }
+}
+
+#[test]
+fn fixed_size_arrays_of_other_elements_check_dynamic_array_sizes() {
+    // IEEE 1800-2023 7.6: a dynamic array of elements of any type, here
+    // strings, of another number of elements than its fixed-size target is
+    // a run-time error (the assignments that succeed are the shared case
+    // `containers::fixed_size_arrays_take_dynamic_arrays_of_any_element_type`).
+    let source = r#"module Top(output int out);
+        string d []; string f [3];
+        initial begin d = '{"a", "b"}; f = d; out = 1; end
+    endmodule"#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("arrays.sv"))], "Top")
+        .build()
+        .unwrap();
+    let error = sim.run_until(1).unwrap_err().to_string();
+    assert!(error.contains("differ in size"), "{error}");
+}
+
+#[test]
+fn fixed_size_arrays_of_container_typedefs_are_unsupported() {
+    // A fixed-size array whose elements are queues, dynamic or associative
+    // arrays has no lowering yet; declared through a typedef it is rejected
+    // with that reason, as `int a [2][$]` is, rather than typed as an array
+    // of integers.
+    for body in [
+        "typedef int queue_t [$]; queue_t f [2]; int x; initial x = $size(f);",
+        "typedef int dyn_t []; dyn_t f [2];",
+        "typedef int map_t [int]; map_t f [2];",
+        "typedef int queue_t [$]; typedef queue_t pair_t [2]; pair_t f;",
+        "typedef int queue_t [$]; initial begin queue_t f [2]; end",
+    ] {
+        let source = format!("module Top; {body} endmodule");
+        let Err(error) = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("arrays.sv"))],
+            "Top",
+        )
+        .build() else {
+            panic!("a fixed-size array of containers was accepted: {body}");
+        };
+        let error = error
+            .to_string()
+            .replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            error.contains("fixed-size unpacked array of dynamically sized arrays"),
+            "{body}: {error}"
+        );
+    }
+    // Containers of containers stay supported.
+    let source = "module Top(output int out);
+        typedef int queue_t [$];
+        queue_t m [int];
+        initial begin m[3].push_back(7); out = m[3][0]; end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("arrays.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("out")), 7u32.into());
 }

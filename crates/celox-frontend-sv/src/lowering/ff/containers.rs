@@ -101,6 +101,9 @@ impl Ff<'_, '_> {
         if op == Conditional {
             return self.container_conditional(layout, args);
         }
+        if let Fixed { count } = op {
+            return self.container_fixed(layout, count, args);
+        }
         let mut args = args
             .iter()
             .map(|arg| {
@@ -510,6 +513,7 @@ impl Ff<'_, '_> {
                                     celox_heap::ops::OBJECT_STORE,
                                     &[owner, place, updated],
                                 );
+                                this.property_stored(&field);
                                 return Ok(());
                             }
                             let (id, updated_name) =
@@ -532,6 +536,33 @@ impl Ff<'_, '_> {
             self.store(temp, SIROffset::Static(0), width, narrow);
         }
         Ok(sv::ir::Expr::Ident(name))
+    }
+
+    /// The fixed-size unpacked array of `count` elements that the container
+    /// in `args[0]` is assigned, read by `args[1]` (see
+    /// [`ContainerOp::Fixed`]): the container is evaluated once and checked
+    /// to have `count` elements, and the reads take the checked handle.
+    fn container_fixed(
+        &mut self,
+        layout: ContainerLayout,
+        count: u32,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        let [Some(source), Some(elements)] = args else {
+            return Err(unsupported("fixed-size array of a container"));
+        };
+        let hoisted = self.hoist(source)?;
+        let handle = self.handle(&hoisted)?;
+        let count = self.constant64(u64::from(count));
+        let code = encode(heap::SIZED, self.container_parameter(layout));
+        let checked = self.heap_call(code, &[handle, count]);
+        let (temp, name) = self.m.temp("fixed_source", 32, false, false);
+        self.m.variables.get_mut(&temp).unwrap().value_kind = celox_design::ValueKind::ObjRef;
+        let narrow = self.b.alloc_bit(32, false);
+        self.b.emit(SIRInstruction::Slice(narrow, checked, 0, 32));
+        self.store(temp, SIROffset::Static(0), 32, narrow);
+        let elements = replace_expr(elements, source, &sv::ir::Expr::Ident(name));
+        self.hoist(&elements)
     }
 
     /// `receiver` with the indices of the outer containers it reads, and the
@@ -1076,9 +1107,14 @@ fn operand(op: ContainerOp, index: usize, count: usize) -> Operand {
                 Operand::Key
             }
         }
-        Merge | Conditional | Convert | Concat | Bound { .. } | Equal | CaseEqual => {
-            Operand::Container
-        }
+        Merge
+        | Conditional
+        | Convert
+        | Concat
+        | Bound { .. }
+        | Equal
+        | CaseEqual
+        | Fixed { .. } => Operand::Container,
         New if index == 0 => Operand::Size,
         New => Operand::Container,
         Slice if index == 0 => Operand::Container,
@@ -1091,6 +1127,74 @@ fn operand(op: ContainerOp, index: usize, count: usize) -> Operand {
         | Clear | Delete | Insert | PushFront | PushBack | PopFront | PopBack | Exists => {
             Operand::Key
         }
+    }
+}
+
+/// `expr` with each occurrence of `from` replaced by `to`.
+fn replace_expr(expr: &sv::ir::Expr, from: &sv::ir::Expr, to: &sv::ir::Expr) -> sv::ir::Expr {
+    use sv::ir::Expr;
+    if expr == from {
+        return to.clone();
+    }
+    let go = |expr: &Expr| Box::new(replace_expr(expr, from, to));
+    match expr {
+        Expr::Select {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => Expr::Select {
+            expr: go(expr),
+            msb: msb.clone(),
+            lsb: lsb.clone(),
+            signed: *signed,
+        },
+        Expr::Concat(parts) => Expr::Concat(
+            parts
+                .iter()
+                .map(|part| replace_expr(part, from, to))
+                .collect(),
+        ),
+        Expr::Resize {
+            expr,
+            width,
+            signed,
+        } => Expr::Resize {
+            expr: go(expr),
+            width: *width,
+            signed: *signed,
+        },
+        Expr::Unary { op, expr } => Expr::Unary {
+            op: *op,
+            expr: go(expr),
+        },
+        Expr::Binary { left, op, right } => Expr::Binary {
+            left: go(left),
+            op: *op,
+            right: go(right),
+        },
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => Expr::Mux {
+            condition: go(condition),
+            then_expr: go(then_expr),
+            else_expr: go(else_expr),
+        },
+        Expr::Call {
+            callee,
+            args,
+            arg_order,
+        } => Expr::Call {
+            callee: callee.clone(),
+            args: args
+                .iter()
+                .map(|arg| arg.as_ref().map(|arg| replace_expr(arg, from, to)))
+                .collect(),
+            arg_order: arg_order.clone(),
+        },
+        _ => expr.clone(),
     }
 }
 

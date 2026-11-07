@@ -1177,6 +1177,144 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "execute",
                             "assert_eq low_passed: expected 0x1, got 0x2",
                         ),
+                        ("verilator", "types::type_operator") => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq hits: expected 0xff, got 0xef",
+                        ),
+                        ("icarus", "types::type_operator") => {
+                            ("compile_error", "compile", "syntax error")
+                        }
+                        ("xezim", "types::type_operator") => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq hits: expected 0xff, got 0x4be",
+                        ),
+                        ("icarus", "system_functions::casts_between_numeric_types") => {
+                            ("compile_error", "compile", "source_0.sv:39: syntax error")
+                        }
+                        ("xezim", "system_functions::casts_between_numeric_types") => {
+                            ("mismatch", "execute", "expect_output: expected")
+                        }
+                        ("verilator", "concurrent_assertions::sequences_over_cycles") => (
+                            "compile_error",
+                            "compile",
+                            "Unsupported: Write to variable in sampled expression",
+                        ),
+                        ("icarus", "concurrent_assertions::sequences_over_cycles") => {
+                            ("compile_error", "compile", "Icarus build exit status")
+                        }
+                        (
+                            "verilator",
+                            "concurrent_assertions::sequence_values_over_sampled_ticks",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq marks: expected 0x5, got 0x0",
+                        ),
+                        ("xezim", "concurrent_assertions::sequence_values_over_sampled_ticks") => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq n_passed: expected 0x12, got 0x3",
+                        ),
+                        ("icarus", "concurrent_assertions::sequence_values_over_sampled_ticks") => {
+                            ("compile_error", "compile", "source_0.sv:14: syntax error")
+                        }
+                        ("icarus", "containers::fixed_size_arrays_take_dynamic_array_elements") => {
+                            (
+                                "compile_error",
+                                "compile",
+                                "the type of the variable 'q' doesn't match the context type",
+                            )
+                        }
+                        (
+                            "icarus",
+                            "containers::fixed_size_arrays_take_wide_dynamic_array_elements",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "the type of the variable 'w' doesn't match the context type",
+                        ),
+                        (
+                            "verilator",
+                            "containers::fixed_size_arrays_take_dynamic_array_elements",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "is not an unpacked array, but is in an unpacked array context",
+                        ),
+                        (
+                            "verilator",
+                            "containers::fixed_size_arrays_take_wide_dynamic_array_elements",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "Assignment between 2-state and 4-state types requires equivalent element types",
+                        ),
+                        ("verilator", "class::waits_on_instance_properties") => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq t_func: expected 0x6, got 0x0",
+                        ),
+                        ("icarus", "class::waits_on_instance_properties") => (
+                            "compile_error",
+                            "compile",
+                            "source_0.sv:22: sorry: Constraint declarations not supported.",
+                        ),
+                        ("icarus", "class::waits_on_properties_in_package_subroutines") => (
+                            "compile_error",
+                            "compile",
+                            "internal error: Empty NexusSet from wait expression.",
+                        ),
+                        (
+                            "icarus",
+                            "containers::fixed_size_arrays_take_dynamic_arrays_of_any_element_type",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "sorry: Unpacked structs not supported.",
+                        ),
+                        (
+                            "verilator",
+                            "containers::fixed_size_arrays_take_dynamic_arrays_of_any_element_type",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "is not an unpacked array, but is in an unpacked array context",
+                        ),
+                        (
+                            "xezim",
+                            "containers::fixed_size_arrays_take_dynamic_arrays_of_any_element_type",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq structs: expected 0x1, got 0x0",
+                        ),
+                        (
+                            "icarus",
+                            "containers::casts_of_dynamic_arrays_to_fixed_size_ones_check_the_size",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "Dynamic array of type `class Cell{}` is not yet supported.",
+                        ),
+                        (
+                            "verilator",
+                            "containers::casts_of_dynamic_arrays_to_fixed_size_ones_check_the_size",
+                        ) => ("compile_error", "compile", "Unsupported: $cast to"),
+                        (
+                            "xezim",
+                            "containers::casts_of_dynamic_arrays_to_fixed_size_ones_check_the_size",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq first: expected 0x5, got 0x0",
+                        ),
+                        ("xezim", "containers::fixed_size_arrays_take_dynamic_array_elements") => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq element: expected 0x5, got 0x0",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

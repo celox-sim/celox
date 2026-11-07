@@ -57,6 +57,17 @@
     },
     {
       "category": "Functions",
+      "detail": "system_functions::casts_between_numeric_types at 3483:3: expect_output: expected [56, 32, 56, 32, 45, 51, 32, 51, 10, 49, 49, 32, 49, 48, 32, 49, 32, 49, 48, 46, 50, 53, 10, 49, 32, 54, 32, 50, 10, 49, 32, 56, 32, 49, 32, 51, 10], got [56, 32, 56, 32, 45, 51, 32, 51, 10, 49, 49, 32, 49, 48, 32, 49, 32, 49, 48, 46, 50, 53, 10, 49, 32, 54, 32, 50, 10, 49, 32, 55, 46, 53, 32, 49, 32, 51, 10]",
+      "expectation": "Simulation",
+      "name": "system_functions::casts_between_numeric_types",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
       "detail": "system_functions::character_formats_preserve_non_utf8_bytes at 2493:3: expect_output: expected [128, 255, 124, 255, 1, 128, 124, 32, 32, 254, 124, 15, 128, 195, 169, 10], got [128, 255, 124, 255, 1, 128, 124, 32, 254, 124, 15, 128, 195, 169, 10]",
       "expectation": "Simulation",
       "name": "system_functions::character_formats_preserve_non_utf8_bytes",
