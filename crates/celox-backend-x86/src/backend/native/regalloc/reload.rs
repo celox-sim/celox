@@ -1364,8 +1364,22 @@ pub(super) fn analyze_with_queries(
     cfg: &NormalizedCfg,
     requested_points: &BTreeSet<PointUse>,
 ) -> Result<ReloadRecipeAnalysis, ReloadRecipeError> {
+    analyze_with_queries_checked(func, cfg, requested_points, true)
+}
+
+/// [`analyze_with_queries`], rebuilding every fact a second time to check
+/// the analysis against itself only when `verify` is set: the check costs as
+/// much as the analysis.
+pub(super) fn analyze_with_queries_checked(
+    func: &MFunction,
+    cfg: &NormalizedCfg,
+    requested_points: &BTreeSet<PointUse>,
+    verify: bool,
+) -> Result<ReloadRecipeAnalysis, ReloadRecipeError> {
     let analysis = analyze_unverified_with_queries(func, cfg, requested_points, false, false)?;
-    analysis.verify(func, cfg)?;
+    if verify {
+        analysis.verify(func, cfg)?;
+    }
     Ok(analysis)
 }
 

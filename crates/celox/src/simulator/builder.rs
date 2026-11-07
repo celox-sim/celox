@@ -1713,6 +1713,12 @@ mod host {
         /// When true, JIT-compiled functions emit trigger detection code for
         /// edge-based event discovery. Only needed by [`crate::Simulation`].
         pub emit_triggers: bool,
+        /// Whether the host may move event signals ([`crate::Simulator::tick`]).
+        /// A timed [`crate::Simulation`] has no such API: its compiled
+        /// scheduler moves them, so the generated derived-edge units, which
+        /// only host-moved edges run, are built only for the events of the
+        /// kernels the scheduler leaves to the host.
+        pub(crate) host_edges: bool,
         /// Generated derived-edge units the tests run, recorded here.
         #[cfg(all(test, feature = "cranelift", feature = "systemverilog"))]
         pub(crate) derived_edge_units: Option<crate::derived_edge::TestEdgeUnits>,
@@ -2050,6 +2056,7 @@ mod host {
                 sv_timescale: None,
                 legacy_empty_reductions: false,
                 emit_triggers: false,
+                host_edges: true,
                 #[cfg(all(test, feature = "cranelift", feature = "systemverilog"))]
                 derived_edge_units: None,
                 #[cfg(test)]
@@ -3006,6 +3013,7 @@ mod host {
             self,
             layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
             defer_derived_edges: bool,
+            wide_commits: bool,
         ) -> Result<
             (
                 crate::ir::LaidOutProgram,
@@ -3016,14 +3024,24 @@ mod host {
             ),
             SimulatorError,
         > {
-            self.into_laid_out_program_with_trace(layout_mode, None, defer_derived_edges)
+            self.into_laid_out_program_with_trace(
+                layout_mode,
+                None,
+                defer_derived_edges,
+                wide_commits,
+            )
         }
 
+        /// `wide_commits` asks the settle instrumentation for the wide FF
+        /// commits only a native backend compiles
+        /// ([`crate::settle::instrument_ff_units`]); VCD recording keeps the
+        /// per-object commits it traces.
         fn into_laid_out_program_with_trace(
             mut self,
             layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
             trace: Option<&mut crate::debug::CompilationTrace>,
             defer_derived_edges: bool,
+            wide_commits: bool,
         ) -> Result<
             (
                 crate::ir::LaidOutProgram,
@@ -3151,8 +3169,14 @@ mod host {
             };
             // Build memory layout (consumes semantic layout requirements).
             let layout_start = phase_timing.then(crate::timing::now);
-            let mut laid_out =
-                program.into_laid_out_with_mode(self.options.four_state, layout_mode);
+            // The wide commits read state words no analysis can name: the
+            // FF units get them after the dead-store elimination.
+            let wide_commits = wide_commits && !vcd_recording;
+            let mut laid_out = program.into_laid_out_with_options(
+                self.options.four_state,
+                layout_mode,
+                wide_commits,
+            );
             if vcd_recording {
                 laid_out.enable_vcd_tracking();
             }
@@ -3177,6 +3201,14 @@ mod host {
                 &mut laid_out,
                 self.native_file_calls && self.value_change_points,
             );
+
+            if wide_commits {
+                // The units outside the settle were left uninstrumented:
+                // mark from the final partition bodies.
+                laid_out.prune_stale_marks();
+                crate::settle::instrument_processes_from(&mut laid_out, 0, false);
+                crate::settle::instrument_ff_units(&mut laid_out, true);
+            }
 
             // Units generated from here on write state the settle may read.
             let first_generated_process = laid_out.sir.processes.len();
@@ -3205,9 +3237,9 @@ mod host {
                 .is_enabled(crate::optimizer::SirPass::DerivedEdgeUnits)
             {
                 if defer_derived_edges {
-                    crate::derived_edge::attach_deferred(&mut laid_out);
+                    crate::derived_edge::attach_deferred(&mut laid_out, self.options.host_edges);
                 } else {
-                    crate::derived_edge::attach(&mut laid_out);
+                    crate::derived_edge::attach(&mut laid_out, self.options.host_edges);
                 }
             }
             #[cfg(all(test, feature = "cranelift", feature = "systemverilog"))]
@@ -3266,6 +3298,7 @@ mod host {
             let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(
                     crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
+                    false,
                     false,
                 )?;
             validate_untimed_processes(laid_out.runtime())?;
@@ -3340,6 +3373,7 @@ mod host {
                 .into_laid_out_program(
                     crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
                     false,
+                    false,
                 )?;
             validate_untimed_processes(laid_out.runtime())?;
 
@@ -3401,6 +3435,7 @@ mod host {
                 self.into_laid_out_program(
                     crate::backend::tiered::tiered_layout_mode(vcd_recording),
                     crate::backend::tiered::native_is_default_target(),
+                    false,
                 )?
             };
             validate_untimed_processes(laid_out.runtime())?;
@@ -3475,6 +3510,7 @@ mod host {
                 self.into_laid_out_program(
                     crate::backend::tiered::tiered_layout_mode(vcd_recording),
                     crate::backend::tiered::native_is_default_target(),
+                    false,
                 )?
             };
             validate_untimed_processes(laid_out.runtime())?;
@@ -3528,6 +3564,7 @@ mod host {
                 .into_laid_out_program(
                     crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
                     true,
+                    true,
                 )?;
             validate_untimed_processes(laid_out.runtime())?;
             if let Some(start) = sir_start {
@@ -3573,6 +3610,7 @@ mod host {
                 .into_laid_out_program_with_trace(
                     crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
                     Some(&mut trace),
+                    true,
                     true,
                 )?;
             validate_untimed_processes(laid_out.runtime())?;
@@ -3704,6 +3742,7 @@ mod host {
             let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(
                     crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
+                    false,
                     false,
                 )?;
             validate_untimed_processes(laid_out.runtime())?;
@@ -4073,6 +4112,7 @@ mod host {
             self.build_with_backend(
                 crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
                 false,
+                false,
                 |program, options| {
                     let mut trace = crate::debug::CompilationTrace::default();
                     let wants_trace = options.trace.pre_optimized_clif
@@ -4101,7 +4141,25 @@ mod host {
             self.build_with_backend(
                 crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
                 true,
-                crate::backend::native::NativeBackend::new,
+                true,
+                |program, options| {
+                    if !(options.trace.mir || options.trace.native) {
+                        return crate::backend::native::NativeBackend::new(program, options);
+                    }
+                    let (backend, native_trace) =
+                        crate::backend::native::NativeBackend::new_with_codegen_trace(
+                            program, options,
+                        )?;
+                    if options.trace.output_to_stdout {
+                        crate::debug::CompilationTrace {
+                            native_optimized_sir: Some(native_trace.optimized_sir),
+                            mir: options.trace.mir.then_some(native_trace.mir),
+                            ..crate::debug::CompilationTrace::default()
+                        }
+                        .print();
+                    }
+                    Ok(backend)
+                },
             )
         }
 
@@ -4119,9 +4177,11 @@ mod host {
         ) -> Result<NativeCompilation<crate::Simulation>, SimulatorError> {
             self.native_file_calls = true;
             self.options.emit_triggers = true;
+            self.options.host_edges = false;
             let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(
                     crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
+                    true,
                     true,
                 )?;
             let image = crate::backend::native::NativeBackend::compile_image(&laid_out, &options)
@@ -4178,6 +4238,7 @@ mod host {
             self.build_with_backend(
                 crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
                 false,
+                false,
                 crate::backend::wasm_runtime::WasmBackend::new,
             )
         }
@@ -4188,6 +4249,7 @@ mod host {
         ) -> Result<crate::Simulation<crate::backend::InterpBackend>, SimulatorError> {
             self.build_with_backend(
                 crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
+                false,
                 false,
                 crate::backend::InterpBackend::new,
             )
@@ -4208,7 +4270,7 @@ mod host {
             // ones itself. Expanding every unit here copies the comb settle
             // into each of them, which exhausts memory on large designs.
             let defer_derived_edges = crate::backend::tiered::native_is_default_target();
-            self.build_with_backend(layout, defer_derived_edges, |program, options| {
+            self.build_with_backend(layout, defer_derived_edges, false, |program, options| {
                 Ok(crate::backend::TieredBackend::new(program, options))
             })
         }
@@ -4228,6 +4290,7 @@ mod host {
             let mut simulation = self.build_with_backend(
                 crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
                 false,
+                false,
                 crate::backend::TieredBackend::for_scheduler_test,
             )?;
             if publish {
@@ -4240,11 +4303,13 @@ mod host {
             mut self,
             layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
             defer_derived_edges: bool,
+            wide_commits: bool,
             compile: impl Fn(&crate::ir::LaidOutProgram, &SimulatorOptions) -> Result<B, SimulatorError>,
         ) -> Result<crate::Simulation<B>, SimulatorError> {
             self.options.emit_triggers = true;
+            self.options.host_edges = false;
             let (laid_out, mut warnings, options, vcd_path, injected_components) =
-                self.into_laid_out_program(layout_mode, defer_derived_edges)?;
+                self.into_laid_out_program(layout_mode, defer_derived_edges, wide_commits)?;
             let backend = compile(&laid_out, &options)
                 .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
             let shadow = Self::start_shadow(
@@ -4464,7 +4529,7 @@ endmodule"#;
         .force_out_of_line_calls()
         .threads(4)
         .parallel_partition(crate::ParallelPartition::Always)
-        .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false)
+        .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false, false)
         .unwrap();
         assert_eq!(program.sir.functions.len(), 1);
         for codegen in [
@@ -4551,7 +4616,7 @@ endmodule"#;
             "Top",
         )
         .emit_triggers()
-        .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false)
+        .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false, false)
         .unwrap();
         for rejected in [false, true] {
             let mut runtime = HotspotRuntime::new(program.layout(), &options).unwrap();
@@ -4595,7 +4660,7 @@ endmodule"#;
         .emit_triggers()
         .four_state(true)
         .settle_partition(crate::SettlePartition::Always)
-        .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false)
+        .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false, false)
         .unwrap();
         assert!(!program.sir.eval_comb.is_empty());
         for large in [false, true] {
@@ -4738,14 +4803,14 @@ endmodule"#;
                 builder
             };
             let (base, _, options, _, _) = builder
-                .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false)
+                .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false, false)
                 .unwrap();
             let first = base.sir.processes.len();
             let mut expanded = base.clone();
-            crate::derived_edge::attach(&mut expanded);
+            crate::derived_edge::attach(&mut expanded, true);
             crate::settle::instrument_processes_from(&mut expanded, first, false);
             let mut deferred = base;
-            crate::derived_edge::attach_deferred(&mut deferred);
+            crate::derived_edge::attach_deferred(&mut deferred, true);
             crate::settle::instrument_processes_from(&mut deferred, first, false);
             assert!(deferred.deferred_derived_edges.len() >= 4);
             assert_eq!(expanded.sir.processes.len(), deferred.sir.processes.len());
@@ -4863,7 +4928,7 @@ endmodule"#;
             vec![(source, std::path::Path::new("chunks.sv"))],
             "Top",
         )
-        .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false)
+        .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false, false)
         .unwrap();
         crate::backend::native::NativeBackend::split_comb_units_for_test(&mut program);
         assert!(program.sir.eval_comb.len() > 1);
@@ -4938,7 +5003,7 @@ endmodule"#;
         let (mut program, warnings, options, _, _) =
             crate::Simulation::from_sv_sources(sources, "Top")
                 .emit_triggers()
-                .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false)
+                .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false, false)
                 .unwrap();
         let schema = &mut program.runtime.runtime_schema;
         let count = schema.processes.len();
@@ -4998,7 +5063,7 @@ endmodule"#;
             "Top",
         )
         .emit_triggers()
-        .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false)
+        .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false, false)
         .unwrap();
         let image =
             crate::backend::native::NativeBackend::compile_image(&program, &options).unwrap();
@@ -5048,7 +5113,7 @@ endmodule"#;
             vec![(&source, std::path::Path::new("native-vcd.sv"))],
             "Top",
         )
-        .into_laid_out_program(crate::MemoryLayoutMode::Packed, false)
+        .into_laid_out_program(crate::MemoryLayoutMode::Packed, false, false)
         .unwrap();
         let image =
             crate::backend::native::NativeBackend::compile_image(&program, &options).unwrap();
@@ -5110,7 +5175,7 @@ endmodule"#;
                 "Top",
             )
             .four_state(four_state)
-            .into_laid_out_program(crate::MemoryLayoutMode::Packed, false)
+            .into_laid_out_program(crate::MemoryLayoutMode::Packed, false, false)
             .unwrap();
             let image =
                 crate::backend::native::NativeBackend::compile_image(&program, &options).unwrap();
@@ -5301,7 +5366,7 @@ endmodule"#;
                 .emit_triggers();
                 builder.native_file_calls = true;
                 let (program, _, _, _, _) = builder
-                    .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, true)
+                    .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, true, false)
                     .unwrap();
                 let scheduler = program.runtime.runtime_schema.scheduler.as_ref().unwrap();
                 assert!(scheduler.fallback.iter().all(Option::is_none));
@@ -5351,7 +5416,7 @@ endmodule"#;
         .emit_triggers();
         builder.native_file_calls = true;
         let (program, _, _, _, _) = builder
-            .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, true)
+            .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, true, false)
             .unwrap();
         let scheduler = program.runtime.runtime_schema.scheduler.as_ref().unwrap();
         assert!(scheduler.fallback.iter().all(Option::is_none));
@@ -5409,7 +5474,7 @@ endmodule"#;
             "Top",
         )
         .emit_triggers()
-        .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false)
+        .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false, false)
         .unwrap();
         let statuses: crate::HashSet<_> = program
             .runtime
@@ -5462,7 +5527,7 @@ endmodule"#;
                 .emit_triggers();
                 builder.native_file_calls = true;
                 let (program, _, _, _, _) = builder
-                    .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, true)
+                    .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, true, false)
                     .unwrap();
                 let scheduler = program.runtime.runtime_schema.scheduler.as_ref().unwrap();
                 assert!(scheduler.fallback.iter().all(Option::is_none));
@@ -5553,7 +5618,7 @@ endmodule"#;
         "#;
         let (program, _, _, _, _) = crate::Simulation::builder(source, "Top")
             .four_state(false)
-            .into_laid_out_program(crate::MemoryLayoutMode::Packed, false)
+            .into_laid_out_program(crate::MemoryLayoutMode::Packed, false, false)
             .unwrap();
         assert_eq!(program.sir.eval_comb_stateful, Some(Vec::new()));
         let (defers, by_loads) = crate::scheduler::defers_settles_for_test(&program);
@@ -5594,6 +5659,7 @@ endmodule"#;
                     .build_with_backend(
                         crate::MemoryLayoutMode::ElementStrided,
                         true,
+                        false,
                         |program, options| {
                             // Existing SV probes otherwise mask the missing stateful
                             // consumer dependency in the scheduler's classification.
@@ -5667,6 +5733,7 @@ endmodule"#;
                 .build_with_backend(
                     crate::MemoryLayoutMode::ElementStrided,
                     true,
+                    false,
                     |program, options| {
                         assert!(
                             program
@@ -6639,6 +6706,7 @@ endmodule"#
             .build_with_backend(
                 crate::MemoryLayoutMode::Packed,
                 false,
+                false,
                 |program, options| {
                     let first = crate::scheduler::without_fused_domains(program.clone(), true);
                     let unit = first
@@ -6681,7 +6749,7 @@ endmodule"#
         let (program, _, _, _, _) = crate::Simulation::builder(source, "Top")
             .emit_triggers()
             .four_state(false)
-            .into_laid_out_program(crate::MemoryLayoutMode::Packed, false)
+            .into_laid_out_program(crate::MemoryLayoutMode::Packed, false, false)
             .unwrap();
         let unit = program
             .runtime
@@ -6735,7 +6803,7 @@ endmodule"#
         let (mut program, _, options, _, _) = crate::Simulation::builder(&source, "Top")
             .emit_triggers()
             .four_state(false)
-            .into_laid_out_program(crate::MemoryLayoutMode::Packed, false)
+            .into_laid_out_program(crate::MemoryLayoutMode::Packed, false, false)
             .unwrap();
         if alias {
             assert!(program.sir.eval_comb.iter().flat_map(|u| u.blocks.values())
@@ -6906,7 +6974,7 @@ endmodule"#;
             };
             let (program, _, _, _, _) = builder()
                 .emit_triggers()
-                .into_laid_out_program(crate::MemoryLayoutMode::Packed, false)
+                .into_laid_out_program(crate::MemoryLayoutMode::Packed, false, false)
                 .unwrap();
             assert!(
                 crate::scheduler::incremental_inputs_for_test(&program)
@@ -6925,6 +6993,196 @@ endmodule"#;
                 "{stats:?}"
             );
         }
+    }
+
+    /// A partitioned settle has a clock cone of its own: the partitions
+    /// the kernels' clock writes dirty and those they publish to. The slot
+    /// after a clock toggle runs only the cone; a kernel writing data as
+    /// well runs the whole settle.
+    #[cfg(all(
+        feature = "systemverilog",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn partitioned_clock_cone_matches_the_single_pass_settle() {
+        let source = r#"`timescale 1ns/1ns
+module Top(output logic [7:0] fast, output logic [7:0] slow, output logic [7:0] jcount, output wire [7:0] view, output wire tick, output wire [7:0] mix);
+    bit clk = 0;
+    bit jclk = 0;
+    logic en = 0;
+    logic [7:0] din = 0;
+    always #5 clk = ~clk;
+    always #7 jclk = ~jclk;
+    always #11 en = ~en;
+    always #3 din = din + 8'd29;
+    logic en_l;
+    always_latch if (!clk) en_l = en;
+    wire gclk = clk & en_l;
+    assign tick = clk ^ jclk;
+    initial begin fast = 0; slow = 0; jcount = 0; end
+    always @(posedge clk) fast <= fast + din;
+    always @(posedge gclk) slow <= slow ^ fast;
+    always @(posedge jclk) jcount <= jcount + 8'd1;
+    assign view = slow + fast + jcount + {7'd0, tick};
+    // Data logic outside the clock cone.
+    logic [31:0] d0, d1, d2, d3, d4, d5, d6, d7;
+    assign d0 = {din, fast, slow, jcount} * 32'd2654435761;
+    assign d1 = d0 ^ (d0 >> 7);
+    assign d2 = d1 + {jcount, din, fast, slow};
+    assign d3 = d2 ^ (d2 << 3);
+    assign d4 = d3 * 32'd40503;
+    assign d5 = d4 ^ (d4 >> 11);
+    assign d6 = d5 + d1;
+    assign d7 = d6 ^ d3;
+    assign mix = d7[7:0] ^ d7[15:8] ^ d7[23:16] ^ d7[31:24];
+    // A kernel waiting on the data outputs keeps their logic eager: the
+    // settle is not deferred.
+    integer hits = 0;
+    always @(mix or view) hits = hits + 1;
+endmodule"#;
+        let builder = || {
+            crate::Simulation::from_sv_sources(
+                vec![(source, std::path::Path::new("clock-cone.sv"))],
+                "Top",
+            )
+            .settle_partition(crate::SettlePartition::Always)
+        };
+        let (program, _, _, _, _) = builder()
+            .emit_triggers()
+            .into_laid_out_program(crate::MemoryLayoutMode::Packed, false, false)
+            .unwrap();
+        assert!(
+            crate::scheduler::incremental_inputs_for_test(&program)
+                .is_some_and(|inputs| inputs >= 2),
+            "the clock writes must use the partition cone"
+        );
+        let trace = |mut simulation: crate::Simulation| {
+            let outputs =
+                ["fast", "slow", "jcount", "view", "tick"].map(|name| simulation.signal(name));
+            let mut trace = Vec::new();
+            for time in 0..120 {
+                simulation.run_until(time).unwrap();
+                trace.push(outputs.map(|signal| simulation.get(signal)));
+            }
+            (trace, simulation.scheduler_stats())
+        };
+        let (cone, stats) = trace(
+            builder()
+                .settle_check(true)
+                .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+                .build_native()
+                .unwrap(),
+        );
+        assert!(
+            stats.compiled_slots > 0 && stats.checked_steps > 0,
+            "{stats:?}"
+        );
+        let (single, _) = trace(
+            crate::Simulation::from_sv_sources(
+                vec![(source, std::path::Path::new("clock-cone.sv"))],
+                "Top",
+            )
+            .disable_pass(crate::optimizer::SirPass::PartitionedSettle)
+            .build_native()
+            .unwrap(),
+        );
+        assert_eq!(cone, single);
+        assert_ne!(single[119][1], 0u8.into(), "the gated domain must have run");
+    }
+
+    /// The kernels' data writes are cone sources too: the slot after a
+    /// write of `din`, declared before the clocks so that its mark comes
+    /// first in a pass that also toggles a clock, runs the cone of both,
+    /// and the data logic reading `din` is settled before anything
+    /// observes it.
+    #[cfg(all(
+        feature = "systemverilog",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn partitioned_clock_cone_covers_the_kernels_data_writes() {
+        let source = r#"`timescale 1ns/1ns
+module Top(output logic [7:0] fast, output logic [7:0] slow, output wire [7:0] view, output wire [7:0] mix, output wire [7:0] dmix);
+    logic [7:0] din = 0;
+    always #3 din = din + 8'd29;
+    bit clk = 0;
+    bit jclk = 0;
+    logic en = 0;
+    always #5 clk = ~clk;
+    always #7 jclk = ~jclk;
+    always #11 en = ~en;
+    logic en_l;
+    always_latch if (!clk) en_l = en;
+    wire gclk = clk & en_l;
+    initial begin fast = 0; slow = 0; end
+    always @(posedge clk) fast <= fast + din;
+    always @(posedge gclk) slow <= slow ^ fast;
+    assign view = slow + fast + {7'd0, clk ^ jclk};
+    // Data logic reading the kernel's write directly.
+    logic [31:0] d0, d1, d2, d3;
+    assign d0 = {din, din ^ 8'h5a, ~din, din + 8'd3} * 32'd2654435761;
+    assign d1 = d0 ^ (d0 >> 7);
+    assign d2 = d1 + {4{din}};
+    assign d3 = d2 ^ (d2 << 3);
+    assign dmix = d3[7:0] ^ d3[15:8] ^ d3[23:16] ^ d3[31:24];
+    // Data logic of the registers.
+    logic [31:0] e0, e1;
+    assign e0 = {fast, slow, fast ^ slow, din} * 32'd40503;
+    assign e1 = e0 ^ (e0 >> 11);
+    assign mix = e1[7:0] ^ e1[15:8] ^ e1[23:16] ^ e1[31:24];
+    integer hits = 0;
+    always @(mix or view or dmix) hits = hits + 1;
+endmodule"#;
+        let builder = || {
+            crate::Simulation::from_sv_sources(
+                vec![(source, std::path::Path::new("data-cone.sv"))],
+                "Top",
+            )
+            .settle_partition(crate::SettlePartition::Always)
+        };
+        let (program, _, _, _, _) = builder()
+            .emit_triggers()
+            .into_laid_out_program(crate::MemoryLayoutMode::Packed, false, false)
+            .unwrap();
+        assert!(
+            crate::scheduler::incremental_inputs_for_test(&program).is_some(),
+            "the kernel writes must use the partition cone"
+        );
+        let trace = |mut simulation: crate::Simulation| {
+            let outputs =
+                ["fast", "slow", "view", "mix", "dmix"].map(|name| simulation.signal(name));
+            let mut trace = Vec::new();
+            for time in 0..120 {
+                simulation.run_until(time).unwrap();
+                trace.push(outputs.map(|signal| simulation.get(signal)));
+            }
+            (trace, simulation.scheduler_stats())
+        };
+        let (cone, stats) = trace(
+            builder()
+                .settle_check(true)
+                .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+                .build_native()
+                .unwrap(),
+        );
+        assert!(
+            stats.compiled_slots > 0 && stats.checked_steps > 0,
+            "{stats:?}"
+        );
+        let (single, _) = trace(
+            crate::Simulation::from_sv_sources(
+                vec![(source, std::path::Path::new("data-cone.sv"))],
+                "Top",
+            )
+            .disable_pass(crate::optimizer::SirPass::PartitionedSettle)
+            .build_native()
+            .unwrap(),
+        );
+        assert_eq!(cone, single);
+        assert_ne!(
+            single[119][4], single[3][4],
+            "the data logic must follow din"
+        );
     }
 
     #[cfg(all(
@@ -6957,7 +7215,7 @@ endmodule"#;
             };
             let (mut program, _, _, _, _) = builder()
                 .emit_triggers()
-                .into_laid_out_program(crate::MemoryLayoutMode::Packed, false)
+                .into_laid_out_program(crate::MemoryLayoutMode::Packed, false, false)
                 .unwrap();
             let (deferred, _) = crate::scheduler::defers_settles_for_test(&program);
             assert!(
@@ -7249,7 +7507,7 @@ endmodule
         #[test]
         fn inventories_count_what_calls_touch() {
             let (program, _, _, _, _) = untimed()
-                .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false)
+                .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false, false)
                 .unwrap();
             let a = object([&program.sir.functions[0].unit], INPUT, false);
             let b = object([&program.sir.functions[0].unit], OUTPUT, true);
@@ -7342,7 +7600,7 @@ module Top (
         fn strided_layouts_follow_the_accesses_of_callees() {
             let (program, _, _, _, _) = Simulator::builder(ARRAY, "Top")
                 .four_state(false)
-                .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false)
+                .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, false, false)
                 .unwrap();
             let mem = program.get_addr(&[], &["lanes"]).unwrap();
             let LaidOutProgram {
@@ -7459,7 +7717,7 @@ endmodule
         ) {
             let (program, _, _, _, _) = timed(transform)
                 .emit_triggers()
-                .into_laid_out_program(crate::MemoryLayoutMode::Packed, false)
+                .into_laid_out_program(crate::MemoryLayoutMode::Packed, false, false)
                 .unwrap();
             let plan = crate::scheduler::plan_for_test(&program);
             (program, plan)
@@ -7790,7 +8048,7 @@ module Top (clk: input clock, d: input bit<8>, q: output bit<8>) {
         fn clock_aliases_written_by_calls_are_not_wiring() {
             let (program, _, _, _, _) = Simulator::builder(ALIASED, "Top")
                 .four_state(false)
-                .into_laid_out_program(crate::MemoryLayoutMode::Packed, false)
+                .into_laid_out_program(crate::MemoryLayoutMode::Packed, false, false)
                 .unwrap();
             let clock = crate::edge_plans::event_addresses(&program)[0];
             let copies = crate::clock_aliases::extract(&program, clock).expect("wiring copies");

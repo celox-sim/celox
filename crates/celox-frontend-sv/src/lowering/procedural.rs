@@ -525,7 +525,7 @@ impl<'a> ProcModule<'a> {
     /// or in a call. Then either
     /// - the items name exactly the variables the implicit event expression
     ///   of `body` has (IEEE 1800-2023 9.4.2.2), a part-select of a whole
-    ///   variable naming it, or
+    ///   variable naming it, or exactly the bits it has, or
     /// - the items cover every bit `body` reads, and running `body` when
     ///   none of those bits changed is unobservable: it has no side effects,
     ///   reads no variable it writes, and stores each variable at most once
@@ -585,6 +585,17 @@ impl<'a> ProcModule<'a> {
         }
         let reads = self.implicit_reads(body, false);
         if exact && listed == reads {
+            return true;
+        }
+        // The same bits, partitioned differently (`w[7:0] or w[31:8]` for
+        // reads of every byte of `w`), are the implicit event expression too.
+        let bits = |atoms: &HashSet<VarAtomBase<SourceVarId>>| -> HashSet<(SourceVarId, usize)> {
+            atoms
+                .iter()
+                .flat_map(|atom| (atom.access.lsb..=atom.access.msb).map(move |bit| (atom.id, bit)))
+                .collect()
+        };
+        if bits(&listed) == bits(&reads) {
             return true;
         }
         if !self.is_pure(body) {

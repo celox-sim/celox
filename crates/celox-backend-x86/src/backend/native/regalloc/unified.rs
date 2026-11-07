@@ -435,6 +435,7 @@ fn inst_opcode(inst: &MInst) -> &'static str {
         MInst::Store { .. }
         | MInst::AndStoreImm { .. }
         | MInst::OrStoreImm { .. }
+        | MInst::StoreImm { .. }
         | MInst::StorePtr { .. }
         | MInst::ReleaseStorePtr { .. }
         | MInst::StoreIndexed { .. }

@@ -85,6 +85,14 @@ impl<'a> PipelineBuilder<'a> {
         }
     }
 
+    /// The clocked paths: their diamonds select stored values, and no later
+    /// pass of theirs recovers branches from `Mux`es.
+    fn add_if_conversion(&self, passes: &mut ExecutionUnitPassManager) {
+        if self.on(SirPass::IfConversion) {
+            passes.add_pass(IfConversionPass);
+        }
+    }
+
     fn add_memory_lowering(
         &self,
         passes: &mut ExecutionUnitPassManager,
@@ -112,6 +120,7 @@ impl<'a> PipelineBuilder<'a> {
     pub(super) fn fused_ff(&self, program: &OptimizationContext<'_>) -> ExecutionUnitPassManager {
         let mut passes = self.manager();
         self.add_initial_simplification(&mut passes, program, false, true, AfterGvn::PostCleanup);
+        self.add_if_conversion(&mut passes);
         self.add_memory_lowering(&mut passes, self.on(SirPass::Reschedule));
         if self.on(SirPass::SplitWideCommits) {
             passes.add_pass(SplitWideCommitsPass);
@@ -225,6 +234,7 @@ impl<'a> PipelineBuilder<'a> {
     pub(super) fn eval_only(&self, program: &OptimizationContext<'_>) -> ExecutionUnitPassManager {
         let mut passes = self.manager();
         self.add_initial_simplification(&mut passes, program, false, true, AfterGvn::PostCleanup);
+        self.add_if_conversion(&mut passes);
         self.add_memory_lowering(&mut passes, self.on(SirPass::Reschedule));
         if self.on(SirPass::Reschedule) {
             passes.add_pass(ReschedulePass);
@@ -243,6 +253,7 @@ impl<'a> PipelineBuilder<'a> {
         if self.on(SirPass::HoistCommonBranchLoads) {
             passes.add_pass(HoistCommonBranchLoadsPass);
         }
+        self.add_if_conversion(&mut passes);
         self.add_memory_lowering(&mut passes, self.on(SirPass::Reschedule));
         if self.on(SirPass::SplitWideCommits) {
             passes.add_pass(SplitWideCommitsPass);

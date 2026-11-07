@@ -1793,6 +1793,12 @@ pub(super) fn compile_unit_refs_inspected(
         );
     }
     let start = timing.then(crate::timing::now);
+    // Phase timing also reports the merged-SIR phases.
+    let timed_diagnostics = (timing && !diagnostics.pass_timing).then(|| {
+        let mut diagnostics = diagnostics.clone();
+        diagnostics.pass_timing = true;
+        diagnostics
+    });
     let sir_eu = prepare_merged_sir(
         units,
         layout,
@@ -1800,7 +1806,7 @@ pub(super) fn compile_unit_refs_inspected(
         label,
         merge_kind,
         first_ff_unit,
-        diagnostics,
+        timed_diagnostics.as_ref().unwrap_or(diagnostics),
         cancel,
         x86_options.baseline,
         // A function unit, or a unit that calls one.
@@ -2872,24 +2878,157 @@ fn compile_program_with_outlining_threshold(
             }
         }
     };
+    // Outlining amortizes the dominant circuit across all derived edges.
+    // Keep small circuits inline, where cross-boundary optimization is cheap.
+    let comb_instructions = sir
+        .sir
+        .eval_comb
+        .iter()
+        .flat_map(|unit| unit.blocks.values())
+        .map(|block| block.instructions.len())
+        .sum::<usize>();
+    let outline_comb = cfg!(any(
+        feature = "x86_64-codegen",
+        all(target_arch = "x86_64", not(feature = "arm64-codegen"))
+    )) && !sir.deferred_derived_edges.is_empty()
+        && comb_instructions >= outline_threshold;
+    let outlined_comb = if outline_comb {
+        let slot = u32::try_from(kernel_slots)
+            .ok()
+            .filter(|&slot| slot < 0x1000_0000)
+            .ok_or_else(|| codegen_message("too many native extern functions"))?;
+        let mut builder = celox_sir::SIRBuilder::new();
+        builder.emit(SIRInstruction::ExternCall {
+            dst: None,
+            func: celox_sir::extern_abi::NATIVE_KERNEL_CALL_TAG | slot,
+            args: Vec::new(),
+        });
+        builder.seal_block(SIRTerminator::Return);
+        let (blocks, register_map, _) = builder.drain();
+        Some([ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        }])
+    } else {
+        None
+    };
+    let derived_model = (!sir.deferred_derived_edges.is_empty()).then(|| {
+        celox_design::schedule::ScheduleModel::derive(&sir.design, &sir.runtime().runtime_schema)
+    });
+    let process_sizes = sir
+        .sir
+        .processes
+        .iter()
+        .enumerate()
+        .map(|(index, unit)| {
+            sir.deferred_derived_edges.get(&index).map_or_else(
+                || {
+                    (
+                        unit.blocks.len(),
+                        unit.blocks
+                            .values()
+                            .map(|block| block.instructions.len())
+                            .sum(),
+                    )
+                },
+                |edge| {
+                    if outline_comb {
+                        // The recipe estimate includes two complete comb
+                        // copies. Both now use a single call; its fixed CFG
+                        // allowance already covers those call instructions.
+                        (
+                            edge.blocks.saturating_sub(comb_blocks.saturating_mul(2)),
+                            edge.instructions
+                                .saturating_sub(comb_instructions.saturating_mul(2)),
+                        )
+                    } else {
+                        (edge.blocks, edge.instructions)
+                    }
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let max_process_blocks = process_sizes.iter().map(|size| size.0).max().unwrap_or(0);
+    let max_process_instructions = process_sizes.iter().map(|size| size.1).max().unwrap_or(0);
+    // The resource budget already includes overlapping SIR/MIR copies.
+    // Use the expanded size, rather than the tiny reserved process entry.
+    let mut process_order = (0..process_sizes.len()).collect::<Vec<_>>();
+    process_order.sort_by_key(|&index| std::cmp::Reverse(process_sizes[index]));
+    // Without an outlined comb the process units depend on no other compiled
+    // code: they join the first parallel phase instead of waiting for it.
+    let pool_processes = !outline_comb;
+    let compile_process = |index: usize, process_options: &crate::backend::X86BackendOptions| {
+        let unit = &sir.sir.processes[index];
+        if cancelled(cancel) {
+            return Err(cancelled_error());
+        }
+        // Expand, compile, then drop just this edge's SIR. Retaining every
+        // expansion makes memory scale with circuit size times edge count.
+        let generated = sir
+            .deferred_derived_edges
+            .get(&index)
+            .map(|edge| {
+                let model = derived_model.as_ref().expect("deferred edge model");
+                if let Some(comb) = &outlined_comb {
+                    edge.generate_with_comb(sir, model, comb)
+                } else {
+                    edge.generate(sir, model)
+                }
+                .map_err(codegen_message)
+            })
+            .transpose()?;
+        let unit = generated.as_ref().unwrap_or(unit);
+        compile_unit_refs(
+            &[unit],
+            layout,
+            options.four_state,
+            &format!("process[{index}]"),
+            NativeMergeKind::Complete,
+            None,
+            process_options,
+            capture_trace,
+            &options.optimize_options.diagnostics,
+            cancel,
+        )
+    };
     release_pages();
+    let pooled = if pool_processes {
+        process_sizes.len()
+    } else {
+        0
+    };
+    let pool_blocks = max_task_blocks.max(if pool_processes {
+        max_process_blocks
+    } else {
+        0
+    });
+    let pool_instructions = max_task_instructions.max(if pool_processes {
+        max_process_instructions
+    } else {
+        0
+    });
     let workers = super::compile_resources::workers_with_primary(
         comb_size,
-        (max_task_blocks, max_task_instructions),
-        compile_tasks.len(),
+        (pool_blocks, pool_instructions),
+        compile_tasks.len() + pooled,
     );
     let serial = workers == 1;
     // Start expensive functions early so the final fused function does not
     // sit behind short FF entries. Stable task identities preserve image order.
-    let mut task_order = (0..compile_tasks.len()).collect::<Vec<_>>();
+    // Pool entries at and past `ff_count` are process units.
+    let ff_count = compile_tasks.len();
+    let mut task_order = (0..ff_count + pooled).collect::<Vec<_>>();
     task_order.sort_by_key(|&id| {
-        std::cmp::Reverse(
+        std::cmp::Reverse(if id < ff_count {
             compile_tasks[id]
                 .units
                 .iter()
                 .map(|unit| unit.blocks.len())
-                .sum::<usize>(),
-        )
+                .sum::<usize>()
+        } else {
+            process_sizes[id - ff_count].0
+        })
     });
     if options.x86_options.diagnostics.phase_timing {
         tracing::debug!(
@@ -2914,6 +3053,7 @@ fn compile_program_with_outlining_threshold(
         && comb_size.1 >= outline_threshold;
     let mut comb_chunk_jits = Vec::new();
     let next_task = AtomicUsize::new(0);
+    let mut pooled_process_jits = None;
     let (comb_jit, compiled_ff_codes) = if split_comb {
         let ff_count = compile_tasks.len();
         let sizes = task_sizes
@@ -3066,12 +3206,13 @@ fn compile_program_with_outlining_threshold(
                     cancel,
                 )
             });
-            let task_worker_count = compile_tasks.len().min(workers.saturating_sub(1));
+            let task_worker_count = task_order.len().min(workers.saturating_sub(1));
             let task_handles = (0..task_worker_count)
                 .map(|_| {
                     let next_task = &next_task;
                     let compile_tasks = &compile_tasks;
                     let task_order = &task_order;
+                    let compile_process = &compile_process;
                     scope.spawn(move || {
                         let mut compiled = Vec::new();
                         loop {
@@ -3082,6 +3223,11 @@ fn compile_program_with_outlining_threshold(
                             let Some(&task_id) = task_order.get(index) else {
                                 break;
                             };
+                            if task_id >= ff_count {
+                                let code = compile_process(task_id - ff_count, x86_options)?;
+                                compiled.push((task_id, code));
+                                continue;
+                            }
                             let task = &compile_tasks[task_id];
                             let code = compile_unit_refs(
                                 &task.units,
@@ -3106,11 +3252,27 @@ fn compile_program_with_outlining_threshold(
                 .join()
                 .map_err(|_| codegen_message("native eval_comb compile thread panicked"))??;
             let mut compiled_ff_codes = HashMap::default();
+            let mut process_codes = Vec::new();
             for handle in task_handles {
                 let compiled = handle
                     .join()
                     .map_err(|_| codegen_message("native FF compile thread panicked"))??;
-                compiled_ff_codes.extend(compiled);
+                for (task_id, code) in compiled {
+                    if task_id < ff_count {
+                        compiled_ff_codes.insert(task_id, code);
+                    } else {
+                        process_codes.push((task_id - ff_count, code));
+                    }
+                }
+            }
+            if pooled > 0 {
+                process_codes.sort_unstable_by_key(|(index, _)| *index);
+                pooled_process_jits = Some(
+                    process_codes
+                        .into_iter()
+                        .map(|(_, code)| code)
+                        .collect::<Vec<_>>(),
+                );
             }
             Ok::<_, SimulatorError>((comb_jit, compiled_ff_codes))
         })?
@@ -3160,139 +3322,35 @@ fn compile_program_with_outlining_threshold(
     // Return completed codegen's allocator pages before budgeting the process
     // workers. Small designs leave unrelated process heaps alone.
     release_pages();
-    // Outlining amortizes the dominant circuit across all derived edges.
-    // Keep small circuits inline, where cross-boundary optimization is cheap.
-    let comb_instructions = sir
-        .sir
-        .eval_comb
-        .iter()
-        .flat_map(|unit| unit.blocks.values())
-        .map(|block| block.instructions.len())
-        .sum::<usize>();
-    let outline_comb = cfg!(any(
-        feature = "x86_64-codegen",
-        all(target_arch = "x86_64", not(feature = "arm64-codegen"))
-    )) && !sir.deferred_derived_edges.is_empty()
-        && comb_instructions >= outline_threshold;
-    let outlined_comb = if outline_comb {
-        let slot = u32::try_from(kernel_slots)
-            .ok()
-            .filter(|&slot| slot < 0x1000_0000)
-            .ok_or_else(|| codegen_message("too many native extern functions"))?;
-        let mut builder = celox_sir::SIRBuilder::new();
-        builder.emit(SIRInstruction::ExternCall {
-            dst: None,
-            func: celox_sir::extern_abi::NATIVE_KERNEL_CALL_TAG | slot,
-            args: Vec::new(),
-        });
-        builder.seal_block(SIRTerminator::Return);
-        let (blocks, register_map, _) = builder.drain();
-        Some([ExecutionUnit {
-            entry_block_id: BlockId(0),
-            blocks,
-            register_map,
-        }])
-    } else {
-        None
-    };
-    let mut process_options = options.x86_options.clone();
-    if outline_comb {
-        // Nested functions must not overwrite the caller's spills, saved
-        // registers, scratch values, or extern call area.
-        process_options = process_options.with_native_callees([comb_jit.required_state_size]);
-    }
-    let derived_model = (!sir.deferred_derived_edges.is_empty()).then(|| {
-        celox_design::schedule::ScheduleModel::derive(&sir.design, &sir.runtime().runtime_schema)
-    });
-    let process_sizes = sir
-        .sir
-        .processes
-        .iter()
-        .enumerate()
-        .map(|(index, unit)| {
-            sir.deferred_derived_edges.get(&index).map_or_else(
-                || {
-                    (
-                        unit.blocks.len(),
-                        unit.blocks
-                            .values()
-                            .map(|block| block.instructions.len())
-                            .sum(),
-                    )
-                },
-                |edge| {
-                    if outline_comb {
-                        // The recipe estimate includes two complete comb
-                        // copies. Both now use a single call; its fixed CFG
-                        // allowance already covers those call instructions.
-                        (
-                            edge.blocks.saturating_sub(comb_blocks.saturating_mul(2)),
-                            edge.instructions
-                                .saturating_sub(comb_instructions.saturating_mul(2)),
-                        )
-                    } else {
-                        (edge.blocks, edge.instructions)
-                    }
-                },
-            )
-        })
-        .collect::<Vec<_>>();
-    let max_process_blocks = process_sizes.iter().map(|size| size.0).max().unwrap_or(0);
-    let max_process_instructions = process_sizes.iter().map(|size| size.1).max().unwrap_or(0);
-    // The resource budget already includes overlapping SIR/MIR copies.
-    // Use the expanded size, rather than the tiny reserved process entry.
-    let process_workers = super::compile_resources::workers(
-        max_process_blocks,
-        max_process_instructions,
-        process_sizes.len(),
-    );
-    let mut process_order = (0..process_sizes.len()).collect::<Vec<_>>();
-    process_order.sort_by_key(|&index| std::cmp::Reverse(process_sizes[index]));
-    if options.x86_options.diagnostics.phase_timing {
-        tracing::debug!(
-            "[native-timing] process_compile workers={process_workers} units={} max_blocks={max_process_blocks} max_instructions={max_process_instructions}",
-            process_sizes.len()
-        );
-    }
-    let compile_process = |index| {
-        let unit = &sir.sir.processes[index];
-        if cancelled(cancel) {
-            return Err(cancelled_error());
-        }
-        // Expand, compile, then drop just this edge's SIR. Retaining every
-        // expansion makes memory scale with circuit size times edge count.
-        let generated = sir
-            .deferred_derived_edges
-            .get(&index)
-            .map(|edge| {
-                let model = derived_model.as_ref().expect("deferred edge model");
-                if let Some(comb) = &outlined_comb {
-                    edge.generate_with_comb(sir, model, comb)
-                } else {
-                    edge.generate(sir, model)
-                }
-                .map_err(codegen_message)
+    let process_jits = match pooled_process_jits {
+        Some(jits) => jits,
+        None => {
+            let mut process_options = options.x86_options.clone();
+            if outline_comb {
+                // Nested functions must not overwrite the caller's spills, saved
+                // registers, scratch values, or extern call area.
+                process_options =
+                    process_options.with_native_callees([comb_jit.required_state_size]);
+            }
+            let process_workers = super::compile_resources::workers(
+                max_process_blocks,
+                max_process_instructions,
+                process_sizes.len(),
+            );
+            if options.x86_options.diagnostics.phase_timing {
+                tracing::debug!(
+                    "[native-timing] process_compile workers={process_workers} units={} max_blocks={max_process_blocks} max_instructions={max_process_instructions}",
+                    process_sizes.len()
+                );
+            }
+            super::compile_resources::compile_tasks(&process_order, process_workers, |index| {
+                compile_process(index, &process_options)
             })
-            .transpose()?;
-        let unit = generated.as_ref().unwrap_or(unit);
-        compile_unit_refs(
-            &[unit],
-            layout,
-            options.four_state,
-            &format!("process[{index}]"),
-            NativeMergeKind::Complete,
-            None,
-            &process_options,
-            capture_trace,
-            &options.optimize_options.diagnostics,
-            cancel,
-        )
-    };
-    let process_jits =
-        super::compile_resources::compile_tasks(&process_order, process_workers, compile_process)
             .map_err(|_| codegen_message("native process compile thread panicked"))?
             .into_iter()
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()?
+        }
+    };
     let lane_kernels = super::lanes::compile_lane_kernels(sir, options, cancel)?;
     let mut clock_alias_jits = Vec::new();
     if !options.four_state && !options.native_force_support && force_bindings.is_empty() {

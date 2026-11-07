@@ -643,6 +643,7 @@ dependencies = [
  "num-traits",
  "serde_json",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]

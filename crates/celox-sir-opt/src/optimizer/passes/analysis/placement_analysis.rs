@@ -259,7 +259,10 @@ impl PlacementAnalysis {
         include_state_and_effects: bool,
         two_state_memory: bool,
     ) -> Result<Self, PlacementAnalysisError> {
-        if eu.verify_result().is_err() {
+        // The whole-unit verification is a debug precondition: release
+        // builds take the pipeline's canonical SIR on trust, as every other
+        // pass does (the branchify pass asks for this analysis twice per unit).
+        if cfg!(debug_assertions) && eu.verify_result().is_err() {
             return Err(PlacementAnalysisError::InvalidSir);
         }
         let cfg = if include_state_and_effects {

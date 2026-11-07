@@ -17,6 +17,7 @@ pub(in crate::optimizer) use control_flow::pass_control_flow_simplify::{
     ControlFlowSimplifyPass, PostGvnCfgCleanupPass,
 };
 pub(in crate::optimizer) use control_flow::pass_guarded_region_sinking::GuardedRegionSinkingPass;
+pub(in crate::optimizer) use control_flow::pass_if_conversion::IfConversionPass;
 pub(in crate::optimizer) use control_flow::pass_optimize_blocks::OptimizeBlocksPass;
 pub(in crate::optimizer) use control_flow::pass_phi_outcome_compression::PhiOutcomeCompressionPass;
 pub(in crate::optimizer) use control_flow::pass_sparse_case_dispatch::SparseCaseDispatchPass;

@@ -57,6 +57,11 @@ impl Ir {
         &self.modules
     }
 
+    /// The modules, to lower them from their own bodies.
+    pub fn into_modules(self) -> Vec<Module> {
+        self.modules
+    }
+
     /// Source diagnostics of the analyzed declarations, including functions
     /// whose bodies disappear during constant elaboration.
     pub fn warnings(&self) -> &[AnalyzerWarning] {
