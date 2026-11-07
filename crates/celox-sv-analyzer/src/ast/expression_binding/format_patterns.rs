@@ -833,9 +833,67 @@ pub(in crate::ast) fn bytes_literal(bytes: &[u8]) -> Expr {
     ))
 }
 
+/// The hierarchical name a `%m` conversion prints in a subroutine: that of
+/// the subroutine, not of its caller (IEEE 1800-2023 21.2.1.5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::ast) enum ScopeName {
+    /// A subroutine of a package or the compilation unit, or a method of a
+    /// class there: the same wherever it is called from.
+    Absolute(String),
+    /// A subroutine of a design element, named under the instance that runs
+    /// it.
+    Relative(String),
+}
+
+/// `template` with each `%m` naming `scope` rather than the calling
+/// instance; unchanged without a scope.
+pub(in crate::ast) fn scoped_template(template: &[u8], scope: Option<&ScopeName>) -> Vec<u8> {
+    let Some(scope) = scope else {
+        return template.to_vec();
+    };
+    let literal = |name: &str| name.replace('%', "%%").into_bytes();
+    let mut out = Vec::with_capacity(template.len());
+    let mut position = 0;
+    while position < template.len() {
+        if template[position] != b'%' {
+            out.push(template[position]);
+            position += 1;
+            continue;
+        }
+        let start = position;
+        position += 1;
+        while position < template.len() && b"-+ #0".contains(&template[position]) {
+            position += 1;
+        }
+        while position < template.len()
+            && (template[position].is_ascii_digit() || template[position] == b'.')
+        {
+            position += 1;
+        }
+        match template.get(position) {
+            Some(b'm' | b'M') => {
+                match scope {
+                    ScopeName::Absolute(name) => out.extend(literal(name)),
+                    ScopeName::Relative(path) => {
+                        out.extend_from_slice(b"%m.");
+                        out.extend(literal(path));
+                    }
+                }
+                position += 1;
+            }
+            Some(_) => {
+                position += 1;
+                out.extend_from_slice(&template[start..position]);
+            }
+            None => out.extend_from_slice(&template[start..]),
+        }
+    }
+    out
+}
+
 /// `$sformatf` of the bound `operands`, a format and its values, whose native
-/// expressions are `ids` (21.3.3). A literal format has its `%p` conversions
-/// rewritten.
+/// expressions are `ids` (21.3.3). A literal format has its `%m` and `%p`
+/// conversions rewritten.
 pub(in crate::ast) fn format(
     ticks_per_unit: u64,
     ids: &[ExprId],
@@ -848,11 +906,15 @@ pub(in crate::ast) fn format(
     if let Some((&format, values)) = ids.split_first()
         && let ExprKind::Literal(text) = &native.expression(ungroup(format, native)).kind
         && let Some(bytes) = string_literal_bytes(text)
-        && has_pattern(&bytes)
         && let Some((first, rest)) = operands.split_first_mut()
     {
-        let template = rewrite_format(&bytes, values, rest, tree, session, native, dimensions)?;
-        *first = bytes_literal(&template);
+        let mut template = scoped_template(&bytes, dimensions.scope_name.as_deref());
+        if has_pattern(&template) {
+            template = rewrite_format(&template, values, rest, tree, session, native, dimensions)?;
+        }
+        if template != bytes {
+            *first = bytes_literal(&template);
+        }
     }
     Ok(strings::call(StringOp::Format { ticks_per_unit }, operands))
 }
