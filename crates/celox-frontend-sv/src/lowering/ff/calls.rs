@@ -1114,7 +1114,30 @@ impl Ff<'_, '_> {
                 }
             });
         }
-        if branches.is_empty() {
+        // The variables the body passes to a `ref` formal that a fork of
+        // the callee shares, which the callee's children reach through the
+        // place the call passes: the variable is shared as its own would be
+        // (IEEE 1800-2023 13.5.2).
+        let mut passed = HashSet::default();
+        for stmt in &body {
+            stmt.walk(&mut |stmt| {
+                let mut calls = Vec::new();
+                stmt_calls(stmt, &mut calls);
+                for (callee, args) in calls {
+                    let sv::ir::Callee::Subroutine(callee) = callee else {
+                        continue;
+                    };
+                    for (position, arg) in args.iter().enumerate() {
+                        if let Some(sv::ir::Expr::Ident(name)) = arg
+                            && forks_through_ref(self.m, &callee, position)
+                        {
+                            passed.insert(name.clone());
+                        }
+                    }
+                }
+            });
+        }
+        if branches.is_empty() && passed.is_empty() {
             return Ok((body, 0));
         }
         let lvalue_idents = |lvalue: &sv::ir::LValue, names: &mut HashSet<String>| {
@@ -1194,7 +1217,9 @@ impl Ff<'_, '_> {
             });
         }
         let mut shared: Vec<&String> = automatic_names(subroutine)
-            .filter(|name| named.contains(*name) && written.contains(*name))
+            .filter(|name| {
+                named.contains(*name) && written.contains(*name) || passed.contains(*name)
+            })
             .collect();
         shared.sort_unstable();
         shared.dedup();
@@ -1279,7 +1304,10 @@ impl Ff<'_, '_> {
     pub(super) fn open_box(&mut self, shared: &SharedBox) -> Result<(), sv::AnalyzerError> {
         use celox_heap::ops;
         let size = self.constant64(u64::from(shared.field.storage()));
-        let object = self.heap_call(ops::encode(ops::OBJECT_NEW, 0), &[size]);
+        let object = self.heap_call(
+            ops::encode(ops::OBJECT_NEW, u64::from(celox_heap::BOX_CLASS)),
+            &[size],
+        );
         if let Some(kind) = shared.field.handle {
             let offset = self.constant64(0);
             let kind = self.constant64(match kind {
@@ -1942,4 +1970,67 @@ fn array_slot(variable: &SvVariable) -> Result<(), Reason> {
         ));
     }
     Ok(())
+}
+
+/// Whether formal `position` of subroutine `name` is a `ref` formal that a
+/// branch of a fork in its body names, also by passing it on to such a
+/// formal of another subroutine: the children of that fork, which run in
+/// copies of the frames, then reach the caller's variable through it.
+fn forks_through_ref(m: &ProcModule<'_>, name: &str, position: usize) -> bool {
+    use super::super::procedural::expr_idents;
+    let mut pending = vec![(name.to_string(), position)];
+    let mut visited = HashSet::default();
+    while let Some((name, position)) = pending.pop() {
+        if !visited.insert((name.clone(), position)) {
+            continue;
+        }
+        let Some(subroutine) = m.subroutine(&name) else {
+            continue;
+        };
+        let Some(param) = subroutine
+            .params
+            .get(position)
+            .filter(|param| param.direction.is_reference())
+        else {
+            continue;
+        };
+        let formal = &param.name;
+        let mut named = false;
+        for stmt in &subroutine.body {
+            stmt.walk(&mut |stmt| {
+                if let sv::ir::Stmt::Fork { branches, .. } = stmt {
+                    for stmt in branches.iter().flatten() {
+                        let mut names = HashSet::default();
+                        let mut targets = HashSet::default();
+                        let mut stmt = stmt.clone();
+                        stmt.visit_mut(
+                            &mut |expr| expr_idents(expr, &mut names),
+                            &mut |lvalue| {
+                                targets.insert(lvalue.name().to_string());
+                            },
+                            &mut |_| {},
+                        );
+                        named |= targets.contains(formal);
+                        named |= names.contains(formal);
+                    }
+                }
+                let mut calls = Vec::new();
+                stmt_calls(stmt, &mut calls);
+                for (callee, args) in calls {
+                    let sv::ir::Callee::Subroutine(callee) = callee else {
+                        continue;
+                    };
+                    for (next, arg) in args.iter().enumerate() {
+                        if matches!(arg, Some(sv::ir::Expr::Ident(actual)) if actual == formal) {
+                            pending.push((callee.clone(), next));
+                        }
+                    }
+                }
+            });
+        }
+        if named {
+            return true;
+        }
+    }
+    false
 }

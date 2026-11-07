@@ -733,7 +733,9 @@ impl<B: SimBackend> Simulator<B> {
             ..ProcessRecord::default()
         };
         self.capture_activation_values(state, &mut record, strings)?;
-        record.call_stacks = self.capture_call_stacks(state, process, strings)?;
+        let mut boxes = Vec::new();
+        record.call_stacks = self.capture_call_stacks(state, process, strings, &mut boxes)?;
+        record.boxes = boxes;
         Ok(record)
     }
 
@@ -1105,8 +1107,8 @@ impl<B: SimBackend> Simulator<B> {
                 resume: saved.resume,
                 stack: saved.stack.clone(),
             };
-            // As on capture, no class handle is saved in a frame, and each
-            // string is one of the file's.
+            // As on capture, no class handle is saved in a frame, but boxes,
+            // each one of the file's, and each string is one of the file's.
             let valid = self
                 .saved_frame_handles(kernel(index), &calls)
                 .is_some_and(|handles| {
@@ -1117,7 +1119,7 @@ impl<B: SimBackend> Simulator<B> {
                                 .expect("one handle"),
                         ) as usize;
                         match kind {
-                            celox_design::ValueKind::ObjRef => word == 0,
+                            celox_design::ValueKind::ObjRef => word <= record.boxes.len(),
                             celox_design::ValueKind::StrRef => word <= file.strings.len(),
                             celox_design::ValueKind::Bits => true,
                         }

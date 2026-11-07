@@ -134,9 +134,12 @@ impl<B: SimBackend> Simulator<B> {
         state: &ProcessState,
         process: impl Fn(usize) -> ProcessRef,
         strings: &mut Vec<Vec<u8>>,
+        boxes: &mut Vec<Vec<u8>>,
     ) -> Result<Vec<CallStackRecord>, StateError> {
         let kernel = |index: usize| state.activations.get(index).map_or(index, |a| a.kernel);
         let mut records = Vec::new();
+        // Each box once, whatever frames share it.
+        let mut numbered: fxhash::FxHashMap<celox_heap::Handle, u32> = fxhash::FxHashMap::default();
         for (&index, saved) in &state.call_stacks {
             let handles = self
                 .saved_frame_handles(kernel(index), saved)
@@ -149,9 +152,26 @@ impl<B: SimBackend> Simulator<B> {
                     .expect("one handle");
                 match kind {
                     celox_design::ValueKind::ObjRef => {
-                        if *element != [0; celox_heap::HANDLE_BYTES] {
-                            return Err(StateError::Objects("class handles in call frames".into()));
+                        let handle = celox_heap::Handle::from_le_bytes(*element);
+                        if handle == celox_heap::NULL {
+                            continue;
                         }
+                        // A box a fork shares is saved by its contents; a
+                        // class object is not.
+                        let Some(contents) = self.backend.heap().box_contents(handle) else {
+                            return Err(StateError::Objects("class handles in call frames".into()));
+                        };
+                        let id = match numbered.get(&handle) {
+                            Some(&id) => id,
+                            None => {
+                                boxes.push(contents.to_vec());
+                                let id = u32::try_from(boxes.len())
+                                    .map_err(|_| mismatch("too many boxes"))?;
+                                numbered.insert(handle, id);
+                                id
+                            }
+                        };
+                        *element = id.to_le_bytes();
                     }
                     celox_design::ValueKind::StrRef => self.capture_string(element, strings)?,
                     celox_design::ValueKind::Bits => {}
@@ -839,16 +859,29 @@ impl<B: SimBackend> Simulator<B> {
                 bind(value);
             }
         }
-        // The string slots of saved frames, which the load validated.
+        // The string and box slots of saved frames, which the load
+        // validated; each saved box becomes one new box, which the frames
+        // that held it share again.
+        let boxes = &record.boxes;
+        let mut made: Vec<Option<celox_heap::Handle>> = vec![None; boxes.len()];
         let mut stacks = std::mem::take(&mut state.call_stacks);
         for (&index, saved) in &mut stacks {
             let kernel = state.activations.get(index).map_or(index, |a| a.kernel);
             for (offset, kind) in self.saved_frame_handles(kernel, saved).unwrap_or_default() {
+                let element = &mut saved.stack[offset..offset + celox_heap::HANDLE_BYTES];
+                let id = u32::from_le_bytes(element.try_into().expect("one handle")) as usize;
+                if kind == celox_design::ValueKind::ObjRef {
+                    let Some(position) = id.checked_sub(1) else {
+                        continue;
+                    };
+                    let handle = *made[position]
+                        .get_or_insert_with(|| self.backend.heap_mut().new_box(&boxes[position]));
+                    element.copy_from_slice(&handle.to_le_bytes());
+                    continue;
+                }
                 if kind != celox_design::ValueKind::StrRef {
                     continue;
                 }
-                let element = &mut saved.stack[offset..offset + celox_heap::HANDLE_BYTES];
-                let id = u32::from_le_bytes(element.try_into().expect("one handle")) as usize;
                 let content = id
                     .checked_sub(1)
                     .and_then(|i| strings.get(i))

@@ -60,11 +60,14 @@
 //! processes suspended inside a call: count u32, then per stack: process |
 //! resume point u64 | stack bytes. A string handle in a saved frame is
 //! written like the value of a string object.
+//! Version 8 adds, after the call stacks, the boxes the saved frames hold
+//! (see `celox_heap::BOX_CLASS`): count u32, then per box: its bytes. A box
+//! handle in a saved frame is written as one more than the index of its box.
 
 use std::io::{self, Read, Write};
 
 const MAGIC: &[u8; 8] = b"CXSTATE\0";
-const VERSION: u16 = 7;
+const VERSION: u16 = 8;
 
 mod activations;
 use activations::*;
@@ -172,6 +175,10 @@ pub struct ProcessRecord {
     pub finished: bool,
     /// The frames of the calls processes are suspended inside.
     pub call_stacks: Vec<CallStackRecord>,
+    /// The contents of the boxes the saved frames hold: a box handle in a
+    /// frame is written as one more than the index of its box here, so the
+    /// frames that shared a box share it again when the file is loaded.
+    pub boxes: Vec<Vec<u8>>,
 }
 
 /// The frames of the calls a process is suspended inside (see
@@ -280,7 +287,9 @@ impl StateFile {
             .map(|schedule| &schedule.processes)
             .filter(|processes| **processes != ProcessRecord::default());
         let version = processes.map_or(1, |p| {
-            if !p.call_stacks.is_empty() {
+            if !p.boxes.is_empty() {
+                8
+            } else if !p.call_stacks.is_empty() {
                 7
             } else if !p.delayed_nba.is_empty() || !p.deferred_ready.is_empty() {
                 6
@@ -679,6 +688,12 @@ fn put_processes(w: &mut impl Write, processes: &ProcessRecord, version: u16) ->
             put_bytes(w, &saved.stack)?;
         }
     }
+    if version >= 8 {
+        put_len(w, processes.boxes.len())?;
+        for contents in &processes.boxes {
+            put_bytes(w, contents)?;
+        }
+    }
     Ok(())
 }
 
@@ -801,6 +816,11 @@ fn get_processes(r: &mut impl Read, version: u16) -> Result<ProcessRecord, State
                 })
             })
             .collect::<Result<_, StateFileError>>()?;
+    }
+    if version >= 8 {
+        result.boxes = (0..get_u32(r)?)
+            .map(|_| get_len_bytes(r))
+            .collect::<Result<_, _>>()?;
     }
     Ok(result)
 }

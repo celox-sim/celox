@@ -3340,3 +3340,103 @@ endmodule
         Ok(vec![value(8)])
     );
 }
+
+#[test]
+fn forked_children_write_the_callers_variables_through_ref() {
+    // `owner` passes its automatics by `ref` to `spawn2`, directly and
+    // through `pass_on`, whose fork's two children write them in turn: the
+    // owner boxes each, so both writes reach it (IEEE 1800-2023 13.5.2). A
+    // `ref` formal may be named in a fork only when it joins all (9.3.2).
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b);
+    task automatic spawn2(ref int x);
+        fork
+            #1 x = x + 1;
+            #2 x = x + 10;
+        join
+    endtask
+    task automatic pass_on(ref int y);
+        spawn2(y);
+    endtask
+    task automatic owner(input int start, output int r, output int s);
+        int v = start;
+        int w = start;
+        spawn2(v);
+        pass_on(w);
+        r = v;
+        s = w;
+    endtask
+    int zero = 0;
+    initial owner(zero, a, b);
+endmodule
+"#;
+    same_as_inlined(source, 3, 10, &["a", "b"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 10, &["a", "b"]),
+        Ok(vec![value(11), value(11)])
+    );
+}
+
+#[test]
+fn state_files_keep_the_boxes_forked_children_share() {
+    // Saved while three children of `spawn` wait, holding the box of `x`
+    // in their frames: the file holds the box once, and a load on any
+    // backend gives the frames one box again, so the second child's write
+    // after the load reaches the third.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a);
+    function automatic void spawn(int start);
+        int x = start;
+        fork
+            #2 x = x + 1;
+            #4 x = x + 10;
+            #6 a = x;
+        join_none
+    endfunction
+    int seven = 7;
+    initial spawn(seven);
+endmodule
+"#;
+    let build = || {
+        Simulation::from_sv_sources(vec![(source, Path::new("calls.sv"))], "Top")
+            .force_out_of_line_calls()
+    };
+    let mut origin = build().build_interpreter().expect("builds");
+    origin.run_until(3).expect("the design runs");
+    let mut bytes = Vec::new();
+    origin
+        .save_state()
+        .expect("the boxes save")
+        .write_to(&mut bytes)
+        .expect("the file writes");
+    let file = celox::StateFile::read_from(bytes.as_slice()).expect("the file reads");
+    assert_eq!(
+        file.schedule
+            .as_ref()
+            .expect("a schedule")
+            .processes
+            .boxes
+            .len(),
+        1,
+        "one box, which three frames share"
+    );
+    origin.run_until(10).expect("the saved run continues");
+    assert_eq!(origin.get(origin.signal("a")), 18u8.into());
+    macro_rules! resumes {
+        ($build:ident) => {{
+            let mut target = build().$build().expect("builds");
+            target.load_state(&file).expect("the boxes load");
+            target.run_until(10).expect("the loaded design runs");
+            assert_eq!(
+                target.get(target.signal("a")),
+                18u8.into(),
+                stringify!($build)
+            );
+        }};
+    }
+    resumes!(build_interpreter);
+    resumes!(build_cranelift);
+    resumes!(build_wasm);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    resumes!(build_native);
+}
