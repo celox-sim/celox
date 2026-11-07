@@ -8889,31 +8889,38 @@ fn signal_type_from_sv(
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Result<SvSignalType, sv::AnalyzerError> {
-    let packed_width = if typ.packed_ranges().is_empty() {
-        1
-    } else {
-        typ.packed_ranges()
+    // The bounds of the packed dimensions, as the analysis resolved them:
+    // a range may name constants of a scope, such as a package, that
+    // `constants` does not hold. A range that neither resolves is an error,
+    // not a dimension to leave out.
+    let packed_ranges: Vec<(i128, i128)> = match typ.packed_bounds() {
+        Some(bounds) => bounds.to_vec(),
+        None => typ
+            .packed_ranges()
             .iter()
-            .try_fold(1usize, |acc, range| {
-                let left = sv::typecheck::eval_const_expr_with_types(
-                    range.left(),
-                    constants,
-                    parameter_types,
-                )?;
-                let right = sv::typecheck::eval_const_expr_with_types(
-                    range.right(),
-                    constants,
-                    parameter_types,
-                )?;
-                let width = usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?;
-                acc.checked_mul(width)
+            .map(|range| {
+                let bound = |expr| {
+                    sv::typecheck::eval_const_expr_with_types(expr, constants, parameter_types)
+                };
+                bound(range.left())
+                    .zip(bound(range.right()))
+                    .ok_or_else(|| {
+                        sv::AnalyzerError::Unsupported(format!(
+                            "packed dimension whose bounds {:?} and {:?} are not constant here",
+                            range.left(),
+                            range.right(),
+                        ))
+                    })
             })
-            .or_else(|| typ.resolved_width())
-            .ok_or_else(|| {
-                sv::AnalyzerError::Unsupported("unresolved explicit packed width".to_string())
-            })?
-            .max(1)
+            .collect::<Result<_, _>>()?,
     };
+    let packed_width = packed_ranges
+        .iter()
+        .try_fold(1usize, |acc, &(left, right)| {
+            acc.checked_mul(usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?)
+        })
+        .ok_or_else(|| sv::AnalyzerError::Unsupported("packed width overflow".to_string()))?
+        .max(1);
     let array_dims = typ
         .unpacked_ranges()
         .iter()
@@ -8955,23 +8962,6 @@ fn signal_type_from_sv(
                 | sv::ir::TypeKind::Process
                 | sv::ir::TypeKind::Event
         );
-    let packed_ranges = typ
-        .packed_ranges()
-        .iter()
-        .filter_map(|range| {
-            let left = sv::typecheck::eval_const_expr_with_types(
-                range.left(),
-                constants,
-                parameter_types,
-            )?;
-            let right = sv::typecheck::eval_const_expr_with_types(
-                range.right(),
-                constants,
-                parameter_types,
-            )?;
-            Some((left, right))
-        })
-        .collect();
     let type_kind = match typ.kind() {
         sv::ir::TypeKind::Bit => PortTypeKind::Bit,
         sv::ir::TypeKind::Real => PortTypeKind::Real,
@@ -12300,6 +12290,60 @@ fn inferred_clock(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn locator_locals_take_their_dimensions_from_the_type_table() {
+        // The iterator of `find` is a local the analyzer makes for the call
+        // (a locator local), of the element type `logic [W-1:0]`, whose range
+        // stays as written: it is typed through the type table as every
+        // declared local is.
+        let source = "module Top #(parameter int W = 8)(output int y);
+                      logic [W-1:0] q[$];
+                      initial begin
+                          int k = 2;
+                          q.push_back(8'h04);
+                          y = q.find(x) with (x[k] == 1'b1).size();
+                      end
+                      endmodule";
+        let ir = sv::analyze_source(source, Path::new("locator.sv")).unwrap();
+        let local = ir.modules()[0]
+            .locals()
+            .iter()
+            .find(|local| local.source_name == "x")
+            .expect("the iterator `x`");
+        let info =
+            signal_type_from_sv(&local.r#type, &HashMap::default(), &HashMap::default()).unwrap();
+        assert_eq!(info.packed_ranges, vec![(7, 0)]);
+    }
+
+    #[test]
+    fn packed_dimensions_come_from_the_type_table() {
+        // `W` is a parameter, not a local parameter, so the analyzer keeps
+        // the local's range `[W-1:0]` as written: the frontend takes its
+        // bounds from the analysis's type table, whatever its own constants
+        // hold. UVM's `uvm_hdl_data_t` (`logic [UVM_HDL_MAX_WIDTH-1:0]`)
+        // reached the frontend so, whose constants held the parameter only
+        // by its qualified name: the dimension was left out.
+        let source = "module Top #(parameter int W = 8)(output int y); \
+                      initial begin logic [W-1:0] v; v = '1; y = v; end endmodule";
+        let ir = sv::analyze_source(source, Path::new("bounds.sv")).unwrap();
+        let module = &ir.modules()[0];
+        let local = module
+            .locals()
+            .iter()
+            .find(|local| local.source_name == "v")
+            .expect("the local `v`");
+        let range = &local.r#type.packed_ranges()[0];
+        assert!(
+            !matches!(range.left(), sv::ir::ConstExpr::Literal(_)),
+            "the range stays as written: {:?}",
+            range.left()
+        );
+        let info =
+            signal_type_from_sv(&local.r#type, &HashMap::default(), &HashMap::default()).unwrap();
+        assert_eq!(info.packed_ranges, vec![(7, 0)]);
+        assert_eq!(info.width, 8);
+    }
 
     #[test]
     fn shared_always_temporaries_exclude_queued_writes() {

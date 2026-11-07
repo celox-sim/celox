@@ -117,6 +117,14 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
             }
         }
 
+        // The ranges of ports and signals name parameters of their declared
+        // types.
+        let type_env = ast::with_parameter_types(
+            &constants,
+            parameter_types
+                .iter()
+                .map(|(name, r#type)| (name.as_str(), r#type.width, r#type.signed)),
+        );
         let mut port_table = PortTable::default();
         let mut ports = Vec::new();
         for port in module.ports() {
@@ -125,13 +133,7 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                 ir::Port::new(
                     port.name().to_string(),
                     port.direction().into(),
-                    ir::Type::from_ast(
-                        port.r#type().clone(),
-                        &ast::const_functions::Environment {
-                            constants: &constants,
-                            functions: &tree.functions,
-                        },
-                    ),
+                    ast::ir_type(session, &tree.functions, port.r#type().clone(), &type_env),
                     port.is_net(),
                 )
                 .with_unresolved_net(port.is_unresolved_net())
@@ -171,13 +173,7 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                     ir::Port::new(
                         name,
                         port.direction().into(),
-                        ir::Type::from_ast(
-                            ty,
-                            &ast::const_functions::Environment {
-                                constants: &constants,
-                                functions: &tree.functions,
-                            },
-                        ),
+                        ast::ir_type(session, &tree.functions, ty, &type_env),
                         port.is_net(),
                     )
                     .with_unresolved_net(port.is_unresolved_net()),
@@ -191,13 +187,7 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
             .map(|signal| {
                 ir::Signal::new(
                     signal.name().to_string(),
-                    ir::Type::from_ast(
-                        signal.r#type().clone(),
-                        &ast::const_functions::Environment {
-                            constants: &constants,
-                            functions: &tree.functions,
-                        },
-                    ),
+                    ast::ir_type(session, &tree.functions, signal.r#type().clone(), &type_env),
                     signal.is_net(),
                 )
                 .with_unresolved_net(signal.is_unresolved_net())
