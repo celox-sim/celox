@@ -2548,6 +2548,20 @@ mod host {
         /// a design with several clock events;
         /// [`crate::SettlePartition::Always`] partitions every settle it can,
         /// for testing.
+        /// Count the work of a partitioned settle: each partition's runs,
+        /// the runs that changed something it compares, and the settles.
+        /// The counters live at the end of the settle's flags; read them
+        /// with `settle_profile` on the simulation. A run changing nothing
+        /// is work the settle could have skipped.
+        pub fn settle_profile(mut self, enable: bool) -> Self {
+            self.options.optimize_options = self
+                .options
+                .optimize_options
+                .clone()
+                .with_settle_profile(enable);
+            self
+        }
+
         pub fn settle_partition(mut self, partition: crate::SettlePartition) -> Self {
             self.options.optimize_options = self
                 .options

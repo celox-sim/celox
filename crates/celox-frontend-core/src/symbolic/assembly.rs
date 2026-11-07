@@ -1650,6 +1650,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                     target_cost,
                     external_readers,
                     clock_nets: clock_nets.clone(),
+                    profile: parallel.settle_profile.then_some(process_count),
                 }
             },
         );
@@ -1759,7 +1760,12 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             &mut modules,
             root_id,
             settle.flags.var_id,
-            celox_design::settle_flag_count(settle_partitions.len(), process_count),
+            if settle.profile.is_some() {
+                celox_design::settle_profile_offset(settle_partitions.len(), process_count)
+                    + celox_design::settle_profile_bytes(settle_partitions.len())
+            } else {
+                celox_design::settle_flag_count(settle_partitions.len(), process_count)
+            },
         );
     }
     let object_sizes = super::parallel::ObjectSizes {
@@ -2765,6 +2771,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             partitions: settle_partitions.len() as u32,
             marks,
             waits: process_count as u32,
+            profile: settle.profile.is_some(),
             copies: settle_copies
                 .iter()
                 .filter_map(|(target, source)| {

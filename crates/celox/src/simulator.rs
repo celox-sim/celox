@@ -3612,6 +3612,17 @@ mod host {
             self.backend.layout()
         }
 
+        /// The work a partitioned settle counted since the simulation
+        /// started, when built with `settle_profile`.
+        pub fn settle_profile(&self) -> Option<celox_state_layout::SettleProfile> {
+            let settle = self.layout().settle.as_ref()?;
+            let (memory, size) = self.memory_as_ptr();
+            // SAFETY: the backend's state image is `size` readable bytes and
+            // nothing writes it while `self` is borrowed.
+            let memory = unsafe { std::slice::from_raw_parts(memory, size) };
+            settle.profile(memory)
+        }
+
         /// Take ownership of the waveform writer, if one was configured at
         /// build time.
         ///
