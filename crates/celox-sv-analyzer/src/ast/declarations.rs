@@ -360,6 +360,30 @@ pub(super) fn signals_from_scope_with_declaration_ranges(
     Ok(signals)
 }
 
+/// The variables `signals` declared so far, as the scope of a type operator
+/// applied to an expression (IEEE 1800-2023 6.23). Boxed: the recursion of
+/// class specializations goes through the caller.
+fn declared_scope(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &ConstEnv,
+    aliases: &HashMap<String, Type>,
+    signals: &[Signal],
+) -> Box<PackedDimensions> {
+    let variables: HashMap<_, _> = signals
+        .iter()
+        .map(|signal| {
+            (
+                signal.name().to_string(),
+                procedural::dimensions_from_type(signal.r#type()),
+            )
+        })
+        .collect();
+    let scope = PackedDimensions::new(variables, env, aliases);
+    scope.bind_types(&mut session.types, &tree.functions);
+    Box::new(scope)
+}
+
 pub(super) fn signals_from_body_item(
     id: celox_sv_syntax::BodyItemId,
     tree: &AnalysisContext<'_>,
@@ -402,7 +426,21 @@ pub(super) fn signals_from_body_item(
                 {
                     type_binding::alias_signals(value, tree, session, env, aliases, selected_name)?
                 } else {
-                    type_binding::local_signals(value, tree, session, env, aliases, selected_name)?
+                    // A type operator names the variables declared before.
+                    let scope = matches!(
+                        tree.declarations().data_type(value.data_type).kind,
+                        celox_sv_syntax::DataTypeKind::TypeOf(_)
+                    )
+                    .then(|| declared_scope(tree, session, env, aliases, signals));
+                    type_binding::local_signals(
+                        value,
+                        tree,
+                        session,
+                        env,
+                        aliases,
+                        selected_name,
+                        scope.as_deref(),
+                    )?
                 }
             }
             DataDeclaration::Unconverted(_) => {

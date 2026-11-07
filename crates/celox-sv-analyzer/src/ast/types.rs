@@ -409,6 +409,14 @@ pub(super) fn type_with_unpacked_ranges(
             "fixed-size unpacked array of chandle".into(),
         ));
     }
+    // An array of queues, dynamic or associative arrays declared through a
+    // typedef has no lowering yet; `int a [2][$]` is rejected as it is
+    // parsed.
+    if r#type.container.is_some() && !ranges.is_empty() {
+        return Err(AnalyzerError::Unsupported(
+            "fixed-size unpacked array of dynamically sized arrays".into(),
+        ));
+    }
     let mut unpacked_ranges = ranges;
     unpacked_ranges.extend(r#type.unpacked_ranges);
     r#type.unpacked_ranges = unpacked_ranges;

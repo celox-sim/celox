@@ -1092,6 +1092,33 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 Some(&shape),
             )?
         } else if op == "="
+            && let Some(target) = array_compatibility::native_unpacked_shape(
+                left,
+                self.tree,
+                self.session,
+                &self.dims,
+            )
+            && containers::native_type(
+                right,
+                self.tree.declarations(),
+                self.tree,
+                self.session,
+                &self.dims,
+            )?
+            .is_some()
+        {
+            // A fixed-size unpacked array, also a selected element of an
+            // array of them, takes the elements of a dynamically sized one
+            // (IEEE 1800-2023 7.6).
+            expression_binding::bind_value(
+                right,
+                self.tree.declarations(),
+                self.tree,
+                self.session,
+                &self.dims,
+                Some(&target),
+            )?
+        } else if op == "="
             && let Some(value) = expression_binding::selected_pattern(
                 left,
                 right,
@@ -2423,6 +2450,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             &self.dims.const_env,
             &self.type_aliases,
             None,
+            Some(&self.dims),
         )?;
         let mut stmts = Vec::new();
         for (mut signal, assignment) in
@@ -2948,6 +2976,31 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     assertion: None,
                     args: vec![SystemTaskArg::Str(
                         "$cast of a value that is no member of the enumerated type".into(),
+                    )],
+                }],
+            }]);
+        }
+        // The effects of the statement made the cast, and `root` is bound to
+        // whether it was valid (6.24.2): an assignment or a pack always is.
+        if name == "$cast"
+            && let Some((_, _, plan)) = self.cast_plan(root)?
+            && !matches!(plan, effects::CastPlan::Object)
+        {
+            if let effects::CastPlan::Unsupported(reason) = plan {
+                return Err(unsupported(reason));
+            }
+            if discarded || matches!(plan, effects::CastPlan::Assign | effects::CastPlan::Pack) {
+                return Ok(Vec::new());
+            }
+            return Ok(vec![Stmt::If {
+                condition: self.native_value(root)?,
+                then_body: Vec::new(),
+                else_body: vec![Stmt::SystemTask {
+                    task: SystemTask::Severity(system_functions::Severity::Error),
+                    site: source_span(declarations.expression(root).tokens, self.tree),
+                    assertion: None,
+                    args: vec![SystemTaskArg::Str(
+                        "$cast of a value that is not cast compatible with its destination".into(),
                     )],
                 }],
             }]);
@@ -4324,6 +4377,19 @@ pub(super) fn lower_subroutine(
                         &builder.dims,
                         builder.session,
                     )?;
+                    // That of a class handle formal, a handle its class
+                    // takes (8.16).
+                    if let Some(class) = ty.class().filter(|_| ty.unpacked_ranges.is_empty()) {
+                        expression_binding::check_handle_assignment(
+                            tree,
+                            builder.session,
+                            root,
+                            tree.declarations(),
+                            &builder.dims,
+                            class,
+                            || format!("default of `{formal}`"),
+                        )?;
+                    }
                     // The default of a container input is a container value;
                     // that of a chandle, a chandle.
                     let shape = (ty.tagged_identity().is_some()
@@ -4795,6 +4861,7 @@ fn dispatch_body(
             four_state: false,
             nullable: false,
             real: false,
+            key: 0,
         }),
         vec![this.clone()],
     );

@@ -62,6 +62,9 @@ pub enum Fault {
     /// A streaming concatenation whose sizes do not fit (IEEE 1800-2023
     /// 11.4.14), such as a stream wider than its fixed-size target.
     Stream(String),
+    /// A dynamically sized array assigned to a fixed-size array of another
+    /// number of elements (IEEE 1800-2023 7.6).
+    ArraySize,
 }
 
 impl std::fmt::Display for Fault {
@@ -76,6 +79,10 @@ impl std::fmt::Display for Fault {
             }
             Self::NullDereference => f.write_str("null object handle dereferenced"),
             Self::Stream(reason) => write!(f, "streaming concatenation: {reason}"),
+            Self::ArraySize => f.write_str(
+                "a dynamically sized array and the fixed-size array it is assigned to differ in \
+                 size",
+            ),
             Self::RandomizationClassMismatch => {
                 f.write_str("class randomization through a base handle is unsupported")
             }

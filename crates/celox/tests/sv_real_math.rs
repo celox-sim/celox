@@ -60,7 +60,7 @@ macro_rules! math_backend {
                   localparam real EXPLICIT = $sqrt(8.0);
                   localparam int FROM_REAL = EXPLICIT;
                   localparam int CAST = int'($sqrt(8.0));
-                  localparam logic [7:0] WRAP = 8'($pow(2.0, 40.0));
+                  localparam logic [7:0] WRAP = 8'(longint'($pow(2.0, 40.0)));
                   localparam int CHOSEN = $ln($exp(0.25)) ? 7 : 9;
                   localparam logic [127:0] MARKER = 128'h80000000000000000000000000000001;
                   logic [WIDTH-1:0] data;

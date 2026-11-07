@@ -3872,6 +3872,7 @@ module Top (
                         width: 32,
                         four_state: false,
                         handle: false,
+                        element_width: None,
                     })
                     .collect(),
             },

@@ -1004,9 +1004,31 @@ fn lower_package_states(
     first: usize,
     four_state: bool,
     ff_parts: bool,
+    properties: &BTreeSet<u32>,
     warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<Vec<(String, ModuleId, LoweredSvModule)>, sv::AnalyzerError> {
-    let states = packages.specialized_state_modules(design);
+    let mut states = packages.specialized_state_modules(design);
+    // The change counts of the watched class properties (see
+    // `ff::property_changes`), shared by every module and package, whose
+    // initializers may store the properties too.
+    if !properties.is_empty() {
+        let names = property_change_names(properties);
+        states = states
+            .into_iter()
+            .map(|state| {
+                state.with_shared_variables(
+                    ff::PROPERTY_CHANGES,
+                    &names,
+                    ff::PROPERTY_CHANGES_WIDTH,
+                )
+            })
+            .collect();
+        states.push(sv::ir::Module::shared_variables(
+            ff::PROPERTY_CHANGES,
+            &names,
+            ff::PROPERTY_CHANGES_WIDTH,
+        ));
+    }
     let mut states = states.iter().collect::<Vec<_>>();
     states.sort_by(|left, right| left.name().cmp(right.name()));
     states
@@ -1048,6 +1070,27 @@ fn lower_package_states(
             }
             Ok((module.name().to_string(), ModuleId(first + index), lowered))
         })
+        .collect()
+}
+
+/// Add the keys of the class properties that the level waits of the state
+/// modules of `packages` read to `keys` (see `ff::watched_properties`).
+fn package_watched_properties(
+    packages: &sv::Packages,
+    design: &sv::Design,
+    keys: &mut BTreeSet<u32>,
+) {
+    for state in packages.specialized_state_modules(design) {
+        ff::watched_properties(&state, keys);
+    }
+}
+
+/// The names of the change counts of the class properties with keys
+/// `properties` (see `ff::property_changes`).
+fn property_change_names(properties: &BTreeSet<u32>) -> Vec<String> {
+    properties
+        .iter()
+        .map(|&key| ff::property_changes(key))
         .collect()
 }
 
@@ -1807,6 +1850,7 @@ fn stmt_may_suspend(subroutines: &[sv::ir::Subroutine], stmt: &sv::ir::Stmt) -> 
         procedural::stmt_calls(stmt, &mut calls);
     });
     let mut visited = HashSet::default();
+    let mut seen_defaults = procedural::SeenDefaults::default();
     while !found && let Some((callee, args)) = calls.pop() {
         let sv::ir::Callee::Subroutine(name) = callee else {
             continue;
@@ -1818,7 +1862,7 @@ fn stmt_may_suspend(subroutines: &[sv::ir::Subroutine], stmt: &sv::ir::Stmt) -> 
             continue;
         };
         found |= subroutine.is_task;
-        procedural::default_calls(subroutine, &args, &mut calls);
+        procedural::default_calls(subroutine, &args, &mut calls, &mut seen_defaults);
         if visited.insert(name) {
             for stmt in &subroutine.body {
                 stmt.walk(&mut |stmt| procedural::stmt_calls(stmt, &mut calls));
@@ -1860,6 +1904,7 @@ fn kernel_written_names(
             procedural::stmt_calls(stmt, &mut calls);
         });
     }
+    let mut seen_defaults = procedural::SeenDefaults::default();
     while let Some((callee, args)) = calls.pop() {
         if let sv::ir::Callee::Object(op) = &callee {
             names.extend(
@@ -1899,7 +1944,7 @@ fn kernel_written_names(
         else {
             continue;
         };
-        procedural::default_calls(subroutine, &args, &mut calls);
+        procedural::default_calls(subroutine, &args, &mut calls, &mut seen_defaults);
         for (param, arg) in subroutine.params.iter().zip(&args) {
             if param.direction.is_written()
                 && let Some(lvalues) = arg.as_ref().and_then(procedural::lvalue_from_expr)
@@ -2102,6 +2147,7 @@ impl<'a> DriverScan<'a> {
                 procedural::stmt_calls(stmt, &mut calls);
             });
         }
+        let mut seen_defaults = procedural::SeenDefaults::default();
         while let Some((callee, args)) = calls.pop() {
             if let sv::ir::Callee::Object(op) = &callee {
                 for lhs in procedural::written_object_arguments(op, &args) {
@@ -2135,7 +2181,7 @@ impl<'a> DriverScan<'a> {
             else {
                 continue;
             };
-            procedural::default_calls(subroutine, &args, &mut calls);
+            procedural::default_calls(subroutine, &args, &mut calls, &mut seen_defaults);
             for (param, arg) in subroutine.params.iter().zip(&args) {
                 if param.direction.is_written()
                     && let Some(lvalues) = arg.as_ref().and_then(procedural::lvalue_from_expr)
@@ -2807,6 +2853,10 @@ fn prepare_external_hierarchy_collecting(
         queue.push(key);
     }
 
+    // The keys of the class properties that level waits read, in any
+    // module or package, whose stores every module counts (see
+    // `ff::property_changes`), collected while discovering the hierarchy.
+    let mut properties = BTreeSet::new();
     let mut index = 0;
     while index < queue.len() {
         let key = queue[index].clone();
@@ -2884,8 +2934,12 @@ fn prepare_external_hierarchy_collecting(
             false,
             warnings,
             LevelLists::Processes,
-            HierarchicalNames::default(),
+            HierarchicalNames {
+                discovery: true,
+                ..HierarchicalNames::default()
+            },
         )?;
+        ff::watched_properties(&lowered.source, &mut properties);
         for instance in &lowered.instances {
             let child_key = LoweredSvModuleKey::instance_key(instance);
             if !analyzed.contains_key(&child_key.name)
@@ -2902,6 +2956,9 @@ fn prepare_external_hierarchy_collecting(
         }
     }
 
+    if let Some(module) = analyzed.values().next() {
+        package_watched_properties(&module.packages, &design, &mut properties);
+    }
     let mut lowered_modules = module_ids
         .iter()
         .map(|(key, &module_id)| {
@@ -2924,7 +2981,10 @@ fn prepare_external_hierarchy_collecting(
                     false,
                     warnings,
                     LevelLists::Processes,
-                    HierarchicalNames::default(),
+                    HierarchicalNames {
+                        properties: &properties,
+                        ..HierarchicalNames::default()
+                    },
                 )?,
             ))
         })
@@ -2997,6 +3057,7 @@ fn prepare_external_hierarchy_collecting(
         module_ids.len(),
         four_state,
         false,
+        &properties,
         warnings,
     )?;
     // How often the design instantiates these modules is not known here;
@@ -3583,6 +3644,24 @@ fn schedule_sources_collecting(
     }
     drop(virtual_sources);
 
+    // A store of a class property that a level wait reads, in any module,
+    // wakes the wait (see `ff::property_changes`).
+    let mut properties = BTreeSet::new();
+    for module_id in module_ids.values() {
+        let key = keys[module_id];
+        let ir = analyses
+            .get(module_id)
+            .or_else(|| discovery_analyses.get(module_id));
+        if let Some(module) = ir
+            .into_iter()
+            .flat_map(|ir| ir.modules())
+            .find(|module| module.name() == key.name)
+        {
+            ff::watched_properties(module, &mut properties);
+        }
+    }
+    package_watched_properties(&analyzed[&top].packages, &design, &mut properties);
+
     // Level-sensitive always blocks in a static combinational loop may
     // converge as event processes. Demote the participating blocks and retry;
     // the runtime then evaluates convergence using their authored sensitivity.
@@ -3628,6 +3707,8 @@ fn schedule_sources_collecting(
                     analyzed: analyses.get(&module_id).or(discovery_analysis.as_ref()),
                     recursion_report: analysis_options.recursion_report.as_deref(),
                     force_out_of_line: analysis_options.force_out_of_line_calls,
+                    properties: &properties,
+                    discovery: false,
                     shared: SharedAlways {
                         temporaries: analysis_options.shared_always_temporaries,
                         foreign_references: foreign_references
@@ -3739,6 +3820,7 @@ fn schedule_sources_collecting(
             module_ids.len(),
             four_state,
             parallel.enabled(),
+            &properties,
             warnings,
         )?;
         validate_package_variable_drivers([&root_key], &module_ids, &lowered_modules)?;
@@ -4042,6 +4124,27 @@ fn specialize_module(
         .iter()
         .find(|candidate| candidate.name() == module.name)
         .ok_or_else(|| sv::AnalyzerError::Unsupported(format!("module `{}`", module.name)))?;
+    // Each module may store or wait on a watched property.
+    let own;
+    let properties = if hierarchical.discovery {
+        let mut keys = hierarchical.properties.clone();
+        ff::watched_properties(specialized, &mut keys);
+        own = keys;
+        &own
+    } else {
+        hierarchical.properties
+    };
+    let counted;
+    let specialized = if properties.is_empty() {
+        specialized
+    } else {
+        counted = specialized.clone().with_shared_variables(
+            ff::PROPERTY_CHANGES,
+            &property_change_names(properties),
+            ff::PROPERTY_CHANGES_WIDTH,
+        );
+        &counted
+    };
     let local_forces = key
         .force_signals
         .iter()
@@ -4059,8 +4162,10 @@ fn specialize_module(
     // (`SimModule::instrumented_storage`), which the module's source shows
     // before it is lowered; waits and domains of other modules may watch
     // what hierarchical names reach.
-    let mut calls = (hierarchical.recursion_report.is_some() || hierarchical.force_out_of_line)
-        .then(|| recursion::CallGraph::new(hierarchical.force_out_of_line));
+    let mut calls = Some(recursion::CallGraph::new(
+        hierarchical.force_out_of_line,
+        hierarchical.recursion_report.is_some(),
+    ));
     if let Some(functions) = calls.as_mut().and_then(|graph| graph.out_of_line.as_mut()) {
         functions.foreign = hierarchical.shared.foreign_references.clone();
     }
@@ -4113,12 +4218,21 @@ struct HierarchicalNames<'a> {
     /// Whether to lower each subroutine that can be out of line (see
     /// `AnalysisOptions::force_out_of_line_calls`).
     force_out_of_line: bool,
+    /// The keys of the class properties that level waits of the design
+    /// read, whose stores the module counts (see `ff::property_changes`).
+    /// A wait that reads any other property is rejected.
+    properties: &'a BTreeSet<u32>,
+    /// A lowering that only discovers the hierarchy, before `properties`
+    /// is known: the module counts the stores of the properties its own
+    /// waits read, and the result is not simulated.
+    discovery: bool,
 }
 
 impl Default for HierarchicalNames<'_> {
     fn default() -> Self {
         static EMPTY: std::sync::LazyLock<HashMap<String, hierarchy::ForeignWrites>> =
             std::sync::LazyLock::new(HashMap::default);
+        static NO_PROPERTIES: BTreeSet<u32> = BTreeSet::new();
         Self {
             signals: &[],
             foreign_writes: &EMPTY,
@@ -4126,6 +4240,8 @@ impl Default for HierarchicalNames<'_> {
             analyzed: None,
             recursion_report: None,
             force_out_of_line: false,
+            properties: &NO_PROPERTIES,
+            discovery: false,
         }
     }
 }
@@ -4260,6 +4376,7 @@ fn needs_host_request(
     if found {
         return true;
     }
+    let mut seen_defaults = procedural::SeenDefaults::default();
     while let Some((callee, args)) = calls.pop() {
         match callee {
             sv::ir::Callee::System(function) if function.is_host_request() => return true,
@@ -4275,7 +4392,7 @@ fn needs_host_request(
                     .map(|position| matches!(args.get(position), None | Some(None)))
                     .collect();
                 if visited.insert(format!("defaults:{name}:{omitted:?}")) {
-                    procedural::default_calls(subroutine, &args, &mut calls);
+                    procedural::default_calls(subroutine, &args, &mut calls, &mut seen_defaults);
                 }
                 if visited.insert(format!("body:{name}"))
                     && needs_host_request(module, &subroutine.body, visited)
@@ -4760,6 +4877,7 @@ fn lower_module_with_overrides(
             .out_of_line()
             .map(|functions| std::mem::take(&mut functions.foreign))
             .unwrap_or_default();
+        pm.mark_recursive(module);
         pm.observe_storage(module, &foreign);
         let blocks = lower_ff_processes(
             module,
@@ -12273,6 +12391,7 @@ mod tests {
                         procedural::stmt_calls(stmt, &mut calls);
                     });
                 }
+                let mut seen_defaults = procedural::SeenDefaults::default();
                 while let Some((callee, args)) = calls.pop() {
                     if let sv::ir::Callee::Object(op) = &callee {
                         for lhs in procedural::written_object_arguments(op, &args) {
@@ -12300,7 +12419,7 @@ mod tests {
                     else {
                         continue;
                     };
-                    procedural::default_calls(subroutine, &args, &mut calls);
+                    procedural::default_calls(subroutine, &args, &mut calls, &mut seen_defaults);
                     for (param, arg) in subroutine.params.iter().zip(&args) {
                         if param.direction.is_written()
                             && let Some(lvalues) =

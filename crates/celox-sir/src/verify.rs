@@ -784,8 +784,9 @@ impl<EventAddr, StateAddr: Ord + Clone + std::hash::Hash> crate::SirProgram<Even
     /// - each frame slot lies within its frame, and no two slots of the
     ///   program share an address;
     /// - a frame slot is accessed only by its own function's unit, within the
-    ///   slot (static offsets), and never committed;
-    /// - a frame slot is accessed at a static offset;
+    ///   slot, and never committed;
+    /// - a frame slot is accessed at a static offset, or one holding an
+    ///   unpacked array also at a dynamic one within one of its elements;
     /// - every [`SIRInstruction::Call`] names a function of the program,
     ///   stores each argument into a slot of the callee of the argument's
     ///   width, and has a `dst` exactly as wide as the outputs it reads;
@@ -841,13 +842,46 @@ impl<EventAddr, StateAddr: Ord + Clone + std::hash::Hash> crate::SirProgram<Even
                                 format!("accesses a frame slot of fn{owner} outside fn{owner}"),
                             ));
                         }
-                        let crate::SIROffset::Static(offset) = access.offset else {
-                            return Err(SirVerifyError::instruction(
-                                "FRAME.STATIC_OFFSET",
-                                block.id,
-                                index,
-                                format!("accesses a frame slot at offset {}", access.offset),
-                            ));
+                        // A slot holding an unpacked array is also accessed
+                        // at a position computed at run time, within one of
+                        // its elements; the producer keeps the position in
+                        // the array, as for an array of the state.
+                        let offset = match (access.offset, slot.element_width) {
+                            (crate::SIROffset::Static(offset), _)
+                            | (
+                                crate::SIROffset::PackedElements {
+                                    bit_offset: offset, ..
+                                },
+                                Some(_),
+                            ) => *offset,
+                            (
+                                crate::SIROffset::Element {
+                                    element_width,
+                                    bit_offset,
+                                    dynamic_bit_offset,
+                                    ..
+                                },
+                                Some(slot_element),
+                            ) if *element_width == slot_element
+                                && access.width <= slot_element
+                                && (dynamic_bit_offset.is_some()
+                                    || bit_offset + access.width <= slot_element) =>
+                            {
+                                continue;
+                            }
+                            (crate::SIROffset::Dynamic(_), Some(slot_element))
+                                if access.width <= slot_element =>
+                            {
+                                continue;
+                            }
+                            _ => {
+                                return Err(SirVerifyError::instruction(
+                                    "FRAME.STATIC_OFFSET",
+                                    block.id,
+                                    index,
+                                    format!("accesses a frame slot at offset {}", access.offset),
+                                ));
+                            }
                         };
                         if offset + access.width > slot.width {
                             return Err(SirVerifyError::instruction(
@@ -1421,6 +1455,7 @@ mod tests {
             width: 32,
             four_state: false,
             handle: false,
+            element_width: None,
         };
         let mut program = crate::SirProgram {
             eval_comb: Vec::new(),
@@ -1552,6 +1587,51 @@ mod tests {
                 body.instructions[0] =
                     SIRInstruction::Load(RegisterId(0), 100, SIROffset::Dynamic(RegisterId(0)), 32);
             })),
+            "FRAME.STATIC_OFFSET"
+        );
+    }
+
+    #[test]
+    fn array_slots_are_accessed_within_an_element() {
+        // A slot holding an unpacked array of one 32-bit element.
+        let dynamic = |offset: SIROffset, width: usize| {
+            move |program: &mut crate::SirProgram<usize, usize>| {
+                program.functions[0].frame.slots[0].element_width = Some(32);
+                let body = program.functions[0]
+                    .unit
+                    .blocks
+                    .get_mut(&BlockId(0))
+                    .unwrap();
+                body.instructions[0] = SIRInstruction::Load(RegisterId(0), 100, offset, width);
+                program.summarize_calls();
+            }
+        };
+        calls(dynamic(SIROffset::Dynamic(RegisterId(0)), 32)).unwrap();
+        calls(dynamic(
+            SIROffset::Element {
+                index: RegisterId(0),
+                element_width: 32,
+                bit_offset: 0,
+                dynamic_bit_offset: None,
+            },
+            32,
+        ))
+        .unwrap();
+        // Elements of another width, and accesses wider than an element.
+        assert_eq!(
+            invariant(calls(dynamic(
+                SIROffset::Element {
+                    index: RegisterId(0),
+                    element_width: 16,
+                    bit_offset: 0,
+                    dynamic_bit_offset: None,
+                },
+                16,
+            ))),
+            "FRAME.STATIC_OFFSET"
+        );
+        assert_eq!(
+            invariant(calls(dynamic(SIROffset::Dynamic(RegisterId(0)), 33))),
             "FRAME.STATIC_OFFSET"
         );
     }

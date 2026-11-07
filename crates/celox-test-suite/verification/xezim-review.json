@@ -1058,6 +1058,30 @@
     "sv_semantic_leading_clock": {
       "title": "An instantiated sequence's explicit clock does not override the assertion's, and a clocked antecedent does not clock an implication",
       "standard": "IEEE 1800-2023 16.16.1"
+    },
+    "sv_type_operator": {
+      "title": "Type references are compared and sized wrongly: `logic` and `bit` vectors of one width match, `type(4'(x))` is one bit wide, and a case on a type reference selects a nonmatching arm",
+      "standard": "IEEE 1800-2023 6.22.1, 6.23"
+    },
+    "sv_real_to_integral_class_properties": {
+      "title": "A real value assigned to an integral class property is stored unconverted: with `int value`, `m.b.value = 5.5` and `$cast(m.b.value, 7.5)` leave 5.5 and 7.5 in the property instead of rounding to 6 and 8",
+      "standard": "IEEE 1800-2023 6.12.1, 6.24.2, 10.7"
+    },
+    "sv_vacuous_success_pass_action": {
+      "title": "The pass action of a concurrent assertion does not run on a vacuous success: `assert property (@(posedge clk) a |-> b) passed++;` with `a` false at every tick leaves `passed` at 0",
+      "standard": "IEEE 1800-2023 16.14.8, 20.11"
+    },
+    "sv_dynamic_struct_arrays_to_fixed": {
+      "title": "Assigning a dynamic array of unpacked structures to a fixed-size array of them leaves the destination zero: with typedef struct { int a; byte b; } pair_t, pair_t pd [] = {'{5, 7}, '{6, 8}} and pair_t pf [2], pf = pd gives pf[0].a == 0, while copying pd[0] and pd[1] one by one gives the values",
+      "standard": "IEEE 1800-2023 7.6"
+    },
+    "sv_cast_dynamic_to_fixed_arrays": {
+      "title": "$cast of a dynamic array or queue to a fixed-size unpacked array of as many equivalent elements returns 1 but leaves the destination unassigned: with int d[] = new[2], d[0] = 5 and int f[2], $cast(f, d) returns 1 and f[0] stays 0",
+      "standard": "IEEE 1800-2023 6.24.2, 7.6"
+    },
+    "sv_dynamic_arrays_to_fixed_subarrays": {
+      "title": "A dynamic array assigned to an element of a fixed-size array of fixed-size arrays is lost: with typedef int pair_t [2], pair_t a [3] and int d [] = '{4, 5}, a[1] = d leaves a[1][1] at 0",
+      "standard": "IEEE 1800-2023 7.6, 7.4.5"
     }
   },
   "cases": [
@@ -4647,6 +4671,14 @@
     },
     {
       "suite": "sv",
+      "name": "concurrent_assertions::sequence_values_over_sampled_ticks",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_vacuous_success_pass_action",
+      "note": "By default the pass action runs on vacuous success as on nonvacuous success (20.11; 16.14.8), so `n |-> cnt % 8 == 1`, whose antecedent matches at 5 of 20 ticks and whose consequent holds at 3 of them, runs its pass action 18 times. The pinned xezim runs it 3 times: it skips the pass action of every vacuous success, also for a Boolean `a |-> b` with `a` always false (0 passes instead of one per tick). The case's match-item calls, local values and sampled select bounds agree. Celox prints 18; Verilator 5.052 does not run the named sequence's match-item call (retained)."
+    },
+    {
+      "suite": "sv",
       "name": "fork_control::process_finished_parent_kills_descendants",
       "status": "mismatch",
       "classification": "xezim_bug",
@@ -5463,6 +5495,14 @@
     },
     {
       "suite": "sv",
+      "name": "types::type_operator",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_type_operator",
+      "note": "xezim runs the case but gets hits 0x4be instead of 0xff. With T = logic [11:0], `case (type(T))` selects the `type(logic [12:0])` arm, `type(T) != type(bit [11:0])` is false although logic and bit vectors do not match (6.22.1), `type(e) === type(bit [12:0])` is false for `bit [12:0] e`, and `var type(4'(bus)) f` declares a 1-bit variable instead of 4 bits (6.23: the self-determined type of the cast). Celox passes; Verilator differs only by treating `int` and `bit signed [31:0]` as nonmatching, which 6.22.1 e) makes matching."
+    },
+    {
+      "suite": "sv",
       "name": "containers::functions_returning_containers",
       "status": "mismatch",
       "classification": "xezim_bug",
@@ -5564,6 +5604,14 @@
       "classification": "xezim_bug",
       "bug": "sv_casts_through_method_results",
       "note": "$cast evaluates its destination once whether or not it assigns it (6.24.2, 8.16), so Keys::key() in the string index of `$cast(entries[Keys::key()], 9)` runs once and creates one entry; the packed and unpacked structure members and the virtual interface member as sources agree. The pinned xezim runs the index twice and leaves three entries, as it evaluates other cast destinations the wrong number of times (see the bug's probe). Verilator 5.052 passes the shared case."
+    },
+    {
+      "suite": "sv",
+      "name": "system_functions::casts_between_numeric_types",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_real_to_integral_class_properties",
+      "note": "A $cast between numeric types assigns as the assignment of the source to the destination does (6.24.2), and a real assigned to an integral variable is rounded (6.12.1), so $cast(m.get().value, bump() + 2.5) stores 8 in the int property, runs get() once and prints 1 8 1 3. The pinned xezim prints 1 7.5 1 3: it stores the real unconverted, also for a property named directly and for a plain assignment `m.get().value = 5.5`, while it rounds a $cast to an int variable. Celox and Verilator 5.052 print 1 8 1 3."
     },
     {
       "suite": "sv",
@@ -5699,6 +5747,30 @@
       "classification": "xezim_bug",
       "bug": "sv_container_expression_values",
       "note": "An ambiguous conditional of queues compared without a target merges first (11.4.11), so (c ? a : a) == a is 1 and (c ? a : b) == a with a = '{1, 2}, b = '{1, 3} is 0; inner queues compare by their elements (7.6, 11.4.5). The pinned xezim prints x for all three comparisons of conditionals, still finds two queues of queues equal after an inner element changed (1 1 instead of 0 0), and gives 0 instead of x for equal outer queues whose inner queue holds 4'b1x00. Celox prints the expected output; Verilator 5.052 does not run four-state cases."
+    },
+    {
+      "suite": "sv",
+      "name": "containers::fixed_size_arrays_take_dynamic_arrays_of_any_element_type",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_dynamic_struct_arrays_to_fixed",
+      "note": "pd is a two-element dynamic array of pair_t {'{5, 7}, '{6, 8}} and pf is pair_t [2], so pf = pd assigns the elements (7.6) and structs is 1. xezim 0.11.4 leaves every member of pf at 0 (assert_eq structs: expected 0x1, got 0x0); a standalone probe prints pd as 5 7 6 8, pf after pf = pd as 0 0 0 0, and a fixed array assigned pd[0] and pd[1] one by one as 5 7 6 8. The string and class handle elements of the same case pass."
+    },
+    {
+      "suite": "sv",
+      "name": "containers::casts_of_dynamic_arrays_to_fixed_size_ones_check_the_size",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_cast_dynamic_to_fixed_arrays",
+      "note": "d is a two-element dynamic array {5, 7} and f is int [2], so d is assignment compatible with f (7.6) and $cast(f, d) assigns it and returns 1 (6.24.2). xezim 0.11.4 returns 1 (matched passes) but does not assign f, so f[0] reads 0 (assert_eq first: expected 0x5, got 0x0). The plain assignment of a dynamic array to a fixed-size variable passes under xezim (containers::fixed_size_arrays_take_wide_dynamic_array_elements), so $cast is what loses the elements."
+    },
+    {
+      "suite": "sv",
+      "name": "containers::fixed_size_arrays_take_dynamic_array_elements",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_dynamic_arrays_to_fixed_subarrays",
+      "note": "a is pair_t [3] with typedef int pair_t [2], and d = '{4, 5} has as many equivalent elements as a[1], so a[1] = d assigns them (7.6) and a[1][1] is 5. xezim 0.11.4 leaves a[1][1] at 0 (assert_eq element: expected 0x5, got 0x0); the assignments of d and q to whole variables in the same case (f0, f1, g0, g1, from_queue) pass, as does the wide case containers::fixed_size_arrays_take_wide_dynamic_array_elements."
     }
   ]
 }

@@ -114,11 +114,11 @@ fn select<'a>(
     if let Some((dim, rest)) = shape.unpacked.split_first() {
         let (left, right, count) = dimension_bounds(functions, &dim.left, &dim.right, dims)?;
         // Selecting an unpacked dimension keeps the declaration of its
-        // element type, including the nominal structure identity.
+        // element type, including the nominal structure identity and the
+        // class of a handle element.
         let sub = Shape::Owned(Rc::new(VariableDimensions::new(VariableShape {
             container: None,
             real: false,
-            class: None,
             unpacked: rest.to_vec(),
             ..(*shape).clone_shape()
         })));
@@ -420,7 +420,6 @@ pub(in crate::ast) fn bind_native(
                     let sub = Shape::Owned(Rc::new(VariableDimensions::new(VariableShape {
                         container: None,
                         real: false,
-                        class: None,
                         unpacked: rest.to_vec(),
                         ..(*shape).clone_shape()
                     })));
@@ -433,8 +432,17 @@ pub(in crate::ast) fn bind_native(
                     }));
                     continue;
                 }
-                if check {
+                // A default that is not broadcast to the elements is an
+                // array of the selected one's type, checked as an item is
+                // (IEEE 1800-2023 10.9.1, 7.6).
+                if check || (default && !pattern && !shape.unpacked.is_empty()) {
                     check_native_array(tree, session, id, &shape, dims)?;
+                }
+                // An item of an unpacked level is assigned to a subarray, so
+                // a value that is no array is not assignment compatible with
+                // it (10.9.1, 7.6).
+                if check && !pattern && !shape.unpacked.is_empty() {
+                    check_subarray_item(tree, session, id, &shape, dims)?;
                 }
                 // A typed pattern of a member must name the member's
                 // structure type (6.22.3).
@@ -478,8 +486,11 @@ pub(in crate::ast) fn bind_native(
                     )?);
                     continue;
                 }
+                // A handle is checked where it is one element; a value
+                // given to a subarray is an array, checked as one above.
                 if let Some(class) = shape.class.as_deref()
                     && !pattern
+                    && shape.unpacked.is_empty()
                 {
                     if let Some(call) = expression_binding::object_constructor(
                         tree, session, id, native, dims, class,
@@ -685,11 +696,49 @@ fn native_rank(
                 // Members and subarrays retain their resolved unpacked shape.
                 // An array-valued default is copied as a whole value rather
                 // than broadcast into scalar elements (10.9.2).
-                return Ok(dimensions::operand_shape(root, tree, session, dims)?
-                    .map_or(0, |shape| shape.unpacked.len()));
+                if let Some(shape) = dimensions::operand_shape(root, tree, session, dims)? {
+                    return Ok(shape.unpacked.len());
+                }
+                // Any other expression, such as a call returning an array,
+                // has the unpacked dimensions of its own type.
+                let Ok(mut ty) = expression_types::type_of(tree, session, root, native, dims)
+                else {
+                    return Ok(0);
+                };
+                let mut rank = 0;
+                while let semantic_types::TyData::Array {
+                    kind: semantic_types::ArrayKind::Fixed(_),
+                    element,
+                } = session.types.data(ty)
+                {
+                    rank += 1;
+                    ty = *element;
+                }
+                return Ok(rank);
             }
         }
     }
+}
+fn check_subarray_item(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    shape: &VariableDimensions,
+    dims: &PackedDimensions,
+) -> Converted<()> {
+    let Some(item) = dimensions::operand_shape(id, tree, session, dims)? else {
+        return Ok(());
+    };
+    if !item.unpacked.is_empty() || item.container.is_some() {
+        return Ok(());
+    }
+    let Some(target) = shape.type_id(&mut session.types, &tree.functions, &dims.const_env) else {
+        return Ok(());
+    };
+    Err(AnalyzerError::NotUnpackedArray {
+        context: "assignment pattern item".into(),
+        target: session.types.spell(target),
+    })
 }
 fn check_native_array(
     tree: &AnalysisContext<'_>,

@@ -528,6 +528,30 @@ impl<'a, 'b> Elaborator<'a, 'b> {
         arms: &[celox_sv_syntax::GenerateCaseArm],
         scope: &Scope,
     ) -> Result<Option<BodyItemId>, AnalyzerError> {
+        // A case on a type reference selects the first arm whose type
+        // matches, else the default one (IEEE 1800-2023 6.23).
+        let native = self.tree.declarations();
+        if expression_binding::type_references::reference(selector, native).is_some() {
+            let context = PackedDimensions::new(HashMap::default(), &scope.env, &*self.aliases);
+            for arm in arms {
+                for label in &arm.labels {
+                    if expression_binding::type_references::matching(
+                        &self.tree,
+                        self.session,
+                        selector,
+                        *label,
+                        native,
+                        &context,
+                    )? {
+                        return Ok(Some(arm.body));
+                    }
+                }
+            }
+            return Ok(arms
+                .iter()
+                .find(|arm| arm.labels.is_empty())
+                .map(|arm| arm.body));
+        }
         let selector = self
             .expression(selector, scope)?
             .ok_or_else(|| unsupported("unknown case-generate selector"))?;

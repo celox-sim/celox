@@ -179,13 +179,12 @@ fn recursive_functions() {
     end
 endmodule
 "#;
-    // Inlining cannot expand recursion.
-    let inlined = simulate(source, false, false, "interpreter", 0, &["f"]);
-    assert!(
-        inlined
-            .as_ref()
-            .is_err_and(|error| error.contains("recursive call")),
-        "{inlined:?}"
+    // Inlining cannot expand recursion: without the switch the policy takes
+    // the recursive subroutines out of line, with the same results.
+    let by_default = simulate(source, false, false, "interpreter", 0, &["f"]);
+    assert_eq!(
+        by_default,
+        simulate(source, false, true, "interpreter", 0, &["f"])
     );
     assert_eq!(function_units(source, true), 4);
     for four_state in [false, true] {
@@ -394,17 +393,16 @@ endmodule
 
 #[test]
 fn ineligible_subroutines_stay_inlined() {
-    // A `ref` formal keeps a subroutine inlined, and a host request that a
-    // unit cannot make (a process method, which acts on the calling
-    // process) keeps it inlined with every subroutine that calls it;
-    // `plain` still goes out of line.
+    // A host request that a unit cannot make (a VCD task) keeps a
+    // subroutine inlined with every subroutine that calls it; `plain` and `bump`, whose `ref` formal
+    // names `a`, still go out of line.
     let source = r#"module Top(output int a, output int b, output int c);
     function automatic void bump(ref int v);
         v = v + 1;
     endfunction
     function automatic int shout(int v);
-        process p = process::self();
-        return v + (p == null ? 0 : 1);
+        $dumpflush;
+        return v + 1;
     endfunction
     function automatic int via_shout(int v);
         return shout(v) * 2;
@@ -420,7 +418,7 @@ fn ineligible_subroutines_stay_inlined() {
     end
 endmodule
 "#;
-    same_as_inlined(source, 1, 0, &["a", "b", "c"]);
+    same_as_inlined(source, 2, 0, &["a", "b", "c"]);
 }
 
 #[test]
@@ -626,10 +624,10 @@ endmodule
 }
 
 #[test]
-fn stores_a_wait_observes_stay_inlined() {
+fn stores_a_wait_observes_are_counted_in_units() {
     // A level wait reads the static `count`, so its stores are instrumented:
-    // `counter`, which stores it, stays inlined, and `twice`, which stores
-    // nothing a wait observes, still goes out of line.
+    // `counter`, which stores it, goes out of line with its stores counted
+    // as a process's, and the wait sees the store that `advance` makes.
     let source = r#"`timescale 1ns/1ns
 module Top(output int done_at, output int r, output int d);
     function int counter(bit advance);
@@ -652,7 +650,7 @@ module Top(output int done_at, output int r, output int d);
     end
 endmodule
 "#;
-    same_as_inlined(source, 1, 3, &["done_at", "r", "d"]);
+    same_as_inlined(source, 2, 3, &["done_at", "r", "d"]);
     assert_eq!(
         simulate(
             source,
@@ -668,9 +666,8 @@ endmodule
 
 #[test]
 fn callers_of_subroutines_with_ref_formals_go_out_of_line() {
-    // `bump` passes through `ref`, so it stays inlined; `bumped_twice`,
-    // which only calls it, goes out of line with `bump` inlined into its
-    // unit, bound to the frame slot of its local.
+    // `bumped_twice` goes out of line, and so does `bump`, bound to the
+    // frame slot of its local, which each call copies in and back.
     let source = r#"module Top(input int i, output int a, output int b);
     function automatic void bump(ref int v);
         v = v + 1;
@@ -687,7 +684,7 @@ fn callers_of_subroutines_with_ref_formals_go_out_of_line() {
     end
 endmodule
 "#;
-    same_as_inlined(source, 1, 0, &["a", "b"]);
+    same_as_inlined(source, 2, 0, &["a", "b"]);
     assert_eq!(
         simulate(source, false, true, "interpreter", 0, &["a", "b"]),
         Ok(vec![value(4), value(12)])
@@ -698,7 +695,9 @@ endmodule
 fn calls_kept_only_for_sensitivity_count_as_observing() {
     // The branch that never runs still makes `always_comb` sensitive to
     // what `counter` reads (IEEE 1800-2023 9.2.2.2.1), the static `total`
-    // among it, so `counter`, which stores `total`, stays inlined.
+    // among it, so the combinational process keeps its call of `counter`,
+    // which stores `total`, inlined; the initial process calls it out of
+    // line.
     let source = r#"module Top(input int i, output int y, output int r);
     function int counter(int v);
         static int total = 0;
@@ -713,7 +712,7 @@ fn calls_kept_only_for_sensitivity_count_as_observing() {
     initial r = counter(i + 2);
 endmodule
 "#;
-    same_as_inlined(source, 1, 0, &["y", "r"]);
+    same_as_inlined(source, 2, 0, &["y", "r"]);
     assert_eq!(
         simulate(source, false, true, "interpreter", 0, &["y", "r"]),
         Ok(vec![value(1), value(2)])
@@ -724,8 +723,9 @@ endmodule
 fn defaults_a_level_wait_watches_count_as_observing() {
     // A level wait watches what the defaults of the formals of the
     // functions it calls read, supplied or not, the static `total` of
-    // `counter` among it, so `counter`, which stores `total`, stays inlined.
-    // `ready`, whose call supplies `v`, still goes out of line.
+    // `counter` among it, so the stores of `counter` into `total` are
+    // counted, also out of line. `ready`, whose call supplies `v`, goes out
+    // of line too.
     let source = r#"`timescale 1ns/1ns
 module Top(input int i, output int done_at, output int r);
     function int counter(int v);
@@ -743,11 +743,872 @@ module Top(input int i, output int done_at, output int r);
     initial #1 r = counter(i + 1);
 endmodule
 "#;
-    same_as_inlined(source, 1, 2, &["done_at", "r"]);
+    same_as_inlined(source, 2, 2, &["done_at", "r"]);
     assert_eq!(
         simulate(source, false, true, "interpreter", 2, &["done_at", "r"]),
         Ok(vec![value(1), value(1)])
     );
+}
+
+#[test]
+fn ref_formals_pass_their_places_out_of_line() {
+    // A `ref` formal's place selects the function and passes the rest in
+    // the frame: a module queue the unit names itself (`push(q, ..)`), a
+    // class property through the handle the call evaluated, an array
+    // element at the index the call fixed (`i` changes after it), and an
+    // automatic of the calling unit, copied in and back (`twice`'s `t`,
+    // `local_queue`'s queue, also passed on to a second unit).
+    let source = r#"module Top(output int a, output int b, output int c, output int d, output int e);
+    class Node;
+        int v;
+    endclass
+    int q[$];
+    int arr[4];
+    function automatic void push(ref int target[$], input int n);
+        target.push_back(n);
+        target.push_back(target.size() + n);
+    endfunction
+    function automatic void bump(ref int v, input int by);
+        v = v + by;
+    endfunction
+    function automatic void swap_ends(ref int target[$]);
+        int t = target[0];
+        target[0] = target[target.size() - 1];
+        target[target.size() - 1] = t;
+    endfunction
+    function automatic int local_queue(int n);
+        int mine[$];
+        push(mine, n);
+        swap_ends(mine);
+        return mine[0] * 100 + mine[1];
+    endfunction
+    function automatic int twice(int start);
+        int t = start;
+        bump(t, start);
+        bump(t, 1);
+        return t;
+    endfunction
+    int one = 1;
+    initial begin
+        Node n = new;
+        int i = one;
+        push(q, one + 2);
+        bump(n.v, one + 4);
+        bump(n.v, one);
+        bump(arr[i], one + 6);
+        i = 2;
+        bump(arr[i], one + 8);
+        a = q[0] * 100 + q[1];
+        b = n.v;
+        c = arr[1] * 100 + arr[2];
+        d = twice(one + 3);
+        e = local_queue(one + 4);
+    end
+endmodule
+"#;
+    same_as_inlined(source, 9, 0, &["a", "b", "c", "d", "e"]);
+}
+
+#[test]
+fn recursive_calls_pass_their_ref_formals_on() {
+    // `collect` passes its own `ref` formal to itself: the place is the
+    // same, so the call enters the same function, for a module queue and
+    // for an automatic queue of `gather`.
+    let source = r#"module Top(output int a, output int b);
+    int q[$];
+    function automatic void collect(ref int out[$], input int depth);
+        out.push_back(depth);
+        if (depth > 0) collect(out, depth - 1);
+    endfunction
+    function automatic int gather(int depth);
+        int mine[$];
+        collect(mine, depth);
+        return mine.size() * 100 + mine[0];
+    endfunction
+    int one = 1;
+    initial begin
+        collect(q, one + 2);
+        a = q.size() * 100 + q[0] * 10 + q[3];
+        b = gather(one + 3);
+    end
+endmodule
+"#;
+    assert_eq!(function_units(source, true), 3);
+    for four_state in [false, true] {
+        for backend in backends() {
+            assert_eq!(
+                simulate(source, four_state, true, backend, 0, &["a", "b"]),
+                Ok(vec![value(430), value(504)]),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+}
+
+#[test]
+fn automatics_passed_by_ref_keep_their_copy_across_suspensions() {
+    // `slow_bump` waits twice with the copy of `run`'s automatic in its
+    // frame; meanwhile the sibling fork branch runs its own call of `run`,
+    // whose `mine` is another automatic with another copy, and the copies
+    // come back into each `mine` when each call returns.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c);
+    task automatic slow_bump(ref int v, input int by);
+        #1 v = v + by;
+        #1 v = v + by;
+    endtask
+    task automatic run(input int start, output int result);
+        int mine = start;
+        slow_bump(mine, start);
+        result = mine;
+    endtask
+    int one = 1;
+    initial begin
+        fork
+            run(one, a);
+            run(one + 9, b);
+        join
+        c = a * 100 + b;
+    end
+endmodule
+"#;
+    same_as_inlined(source, 2, 5, &["a", "b", "c"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 5, &["a", "b", "c"]),
+        Ok(vec![value(3), value(30), value(330)])
+    );
+}
+
+#[test]
+fn ref_places_a_call_cannot_pass_stay_inlined() {
+    // One automatic bound to two `ref` formals would be two copies, so
+    // `add_both` stays inlined into `aliased`; `bump(watched, ..)`, which
+    // stores into what a continuous assignment reads, goes out of line.
+    let source = r#"module Top(output int a, output int b, output int w);
+    function automatic void add_both(ref int x, ref int y);
+        x = x + 1;
+        y = y + 10;
+    endfunction
+    function automatic int aliased(int start);
+        int t = start;
+        add_both(t, t);
+        return t;
+    endfunction
+    function automatic void bump(ref int v, input int by);
+        v = v + by;
+    endfunction
+    int watched;
+    assign w = watched + 1;
+    int one = 1;
+    initial begin
+        a = aliased(one);
+        bump(watched, one + 1);
+        b = watched;
+    end
+endmodule
+"#;
+    same_as_inlined(source, 2, 0, &["a", "b", "w"]);
+}
+
+#[test]
+fn automatic_arrays_of_units_with_one_live_activation() {
+    // `tabulate` and `fresh` keep their local arrays as module variables: no
+    // call cycle reaches them and they do not wait, so one activation at a
+    // time is live. Two processes call `tabulate` in the same time slot, each
+    // across a host request between writing and reading its array; the
+    // host serves the request before the other process runs, so neither
+    // sees the other's elements. Each activation of `fresh` starts with its
+    // array cleared. `slow` waits with its array live, so a second process
+    // enters it meanwhile: its array is a slot of its frame, one for each
+    // call.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c, output int d, output int e, output int f);
+    function automatic int tabulate(int n);
+        int q[4];
+        string text;
+        foreach (q[k]) q[k] = n * 10 + k;
+        text = $sformatf("%0d", q[n % 4]);
+        return q[0] + q[3] + text.len() * 1000;
+    endfunction
+    function automatic int fresh(int n);
+        int q[3];
+        q[n % 3] = n;
+        return q[0] + q[1] * 10 + q[2] * 100;
+    endfunction
+    task automatic slow(input int n, output int r);
+        int q[2];
+        q[0] = n;
+        #1 q[1] = n + 1;
+        r = q[0] * 100 + q[1];
+    endtask
+    int one = 1;
+    initial begin
+        a = tabulate(one + 1);
+        #1 c = fresh(one);
+        slow(one + 2, e);
+    end
+    initial begin
+        b = tabulate(one + 4);
+        #1 d = fresh(one + 1);
+        slow(one + 6, f);
+    end
+endmodule
+"#;
+    same_as_inlined(source, 3, 4, &["a", "b", "c", "d", "e", "f"]);
+}
+
+#[test]
+fn recursive_functions_keep_their_arrays_in_their_frames() {
+    // Each activation of `digits` has its own arrays, slots of its frame,
+    // which it writes and reads at positions computed at run time, also
+    // after the recursive call returns.
+    let source = r#"module Top(output int a, output int b);
+    function automatic int digits(int n, int depth);
+        int q[4];
+        logic [7:0] w[3];
+        int k;
+        foreach (q[i]) q[i] = n * 10 + i + depth;
+        w[depth % 3] = 8'(n);
+        if (depth < 3) k = digits(n + 1, depth + 1);
+        else k = 0;
+        return q[n % 4] + q[3] + k + w[depth % 3];
+    endfunction
+    int one = 1;
+    initial begin
+        a = digits(one, 0);
+        b = digits(one + 4, 1);
+    end
+endmodule
+"#;
+    assert_eq!(function_units(source, true), 1);
+    for four_state in [false, true] {
+        for backend in backends() {
+            assert_eq!(
+                simulate(source, four_state, true, backend, 0, &["a", "b"]),
+                Ok(vec![value(240), value(405)]),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+}
+
+#[test]
+fn wide_elements_of_frame_arrays() {
+    // Elements of 65 and 100 bits, at positions computed at run time, start
+    // at bit offsets that are not byte aligned (the second element of a
+    // 65-bit array starts at bit 65): every backend reads and writes them
+    // in place, and the neighbouring elements keep their bits. `wide` waits
+    // with its arrays live, so they are slots of its frame, one per call.
+    let source = r#"`timescale 1ns/1ns
+module Top(output logic [64:0] a, output logic [99:0] b, output logic [64:0] c, output logic [99:0] d);
+    task automatic wide(input int n, output logic [64:0] x, output logic [99:0] y);
+        logic [64:0] q[3];
+        logic [99:0] r[3];
+        foreach (q[i]) begin
+            q[i] = {1'b1, 64'(n) << (i * 7)} ^ 65'(i);
+            r[i] = (100'(n) << (30 + i * 11)) | 100'(i + 1);
+        end
+        #1;
+        x = q[n % 3] ^ q[(n + 1) % 3];
+        y = r[n % 3] + r[(n + 2) % 3];
+        q[(n + 1) % 3] = x;
+        r[n % 3] = y;
+        x = x ^ q[(n + 1) % 3] ^ q[(n + 2) % 3] ^ q[n % 3];
+        y = y ^ r[n % 3] ^ r[(n + 1) % 3] ^ r[(n + 2) % 3];
+    endtask
+    int one = 1;
+    initial wide(one, a, b);
+    initial wide(one + 4, c, d);
+endmodule
+"#;
+    same_as_inlined(source, 1, 2, &["a", "b", "c", "d"]);
+}
+
+#[test]
+fn frame_arrays_passed_by_ref_stay_in_their_frames() {
+    // `walk` recurses, so its array is a slot of each activation's frame.
+    // Passed by `ref`, it has no place a call can pass, so the calls of
+    // `fill` and `total`, which only reads it, stay inlined into `walk`'s
+    // unit and name the slot: each activation keeps its own elements across
+    // the recursive call.
+    let source = r#"module Top(output int a, output int b);
+    function automatic void fill(ref int target[3], input int n);
+        foreach (target[i]) target[i] = n * 10 + i;
+    endfunction
+    function automatic int total(ref int target[3]);
+        return target[0] + target[1] + target[2];
+    endfunction
+    function automatic int walk(int n);
+        int q[3];
+        int k;
+        fill(q, n);
+        k = n > 0 ? walk(n - 1) : 0;
+        return total(q) + k;
+    endfunction
+    int one = 1;
+    initial begin
+        a = walk(one + 1);
+        b = walk(one + 2);
+    end
+endmodule
+"#;
+    assert_eq!(function_units(source, true), 1);
+    for four_state in [false, true] {
+        for backend in backends() {
+            assert_eq!(
+                simulate(source, four_state, true, backend, 0, &["a", "b"]),
+                Ok(vec![value(99), value(192)]),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+}
+
+#[test]
+fn event_triggers_in_function_units() {
+    // Units trigger events, blocking and nonblocking, and read whether one
+    // was triggered: each is a host request that wakes the waiting
+    // processes and lets the caller continue at once. A class's event is
+    // triggered through its object, as UVM's objections trigger theirs.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c, output int d, output int e);
+    class Box;
+        event dropped;
+        function void drop(int n);
+            if (n > 0) -> dropped;
+        endfunction
+    endclass
+    event done, late;
+    function automatic void fire(int n);
+        if (n > 0) -> done;
+        ->> late;
+    endfunction
+    function automatic bit seen();
+        return done.triggered;
+    endfunction
+    function automatic int check(int n);
+        fire(n);
+        return seen() + 10;
+    endfunction
+    Box box = new;
+    int one = 1;
+    initial begin
+        #1 a = check(one);
+        #1 box.drop(one);
+    end
+    initial begin
+        @(done) b = $time;
+        @(late) c = $time;
+    end
+    initial begin
+        wait (done.triggered) d = 5;
+    end
+    initial begin
+        @(box.dropped) e = $time;
+    end
+endmodule
+"#;
+    same_as_inlined(source, 5, 3, &["a", "b", "c", "d", "e"]);
+    assert_eq!(
+        simulate(
+            source,
+            false,
+            true,
+            "interpreter",
+            3,
+            &["a", "b", "c", "d", "e"]
+        ),
+        Ok(vec![value(11), value(1), value(1), value(5), value(2)])
+    );
+    // A level wait's predicate that reads `triggered` through a call
+    // observes the event, which a unit cannot tell the host: the call stays
+    // inlined, where it is rejected as before.
+    let predicate = source.replace("wait (done.triggered)", "wait (seen())");
+    for forced in [false, true] {
+        let built = simulate(&predicate, false, forced, "interpreter", 3, &["d"]);
+        assert!(
+            built
+                .as_ref()
+                .is_err_and(|error| error.contains("read by a function called in a wait condition")),
+            "forced {forced}: {built:?}"
+        );
+    }
+}
+
+#[test]
+fn process_control_in_function_units() {
+    // Units read a process's status, kill another process, resume one and
+    // put and take semaphore keys without waiting: host requests after
+    // which the caller continues. `nap` suspends its own process inside the
+    // unit, with its frames kept until `wake` resumes it. UVM's objections
+    // kill their drain processes this way.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c, output int d, output int e);
+    process worker, sleeper;
+    semaphore keys = new(0);
+    function automatic int state_of(process p);
+        return p == null ? -1 : int'(p.status());
+    endfunction
+    function automatic void stop(process p);
+        if (p != null) p.kill();
+    endfunction
+    function automatic void wake(process p);
+        if (p != null) p.resume();
+    endfunction
+    task automatic nap(int n);
+        int start = n;
+        process::self().suspend();
+        b = start * 100 + $time;
+    endtask
+    function automatic void give(int n);
+        keys.put(n);
+    endfunction
+    function automatic bit take(int n);
+        return keys.try_get(n);
+    endfunction
+    int one = 1;
+    initial begin
+        worker = process::self();
+        #1;
+        forever begin
+            a = a + 1;
+            #2;
+        end
+    end
+    initial begin
+        sleeper = process::self();
+        nap(one + 4);
+    end
+    initial begin
+        #3 wake(sleeper);
+        #1 c = state_of(worker) * 10;
+        stop(worker);
+        c = c + state_of(worker);
+        give(one + 1);
+        e = take(one) + take(one) * 2 + take(one) * 4;
+        #3 d = a;
+    end
+endmodule
+"#;
+    same_as_inlined(source, 6, 8, &["a", "b", "c", "d", "e"]);
+    assert_eq!(
+        simulate(
+            source,
+            false,
+            true,
+            "interpreter",
+            8,
+            &["a", "b", "c", "d", "e"]
+        ),
+        Ok(vec![value(2), value(503), value(24), value(2), value(3)])
+    );
+}
+
+#[test]
+fn units_store_into_what_waits_and_logic_observe() {
+    // As UVM's objections push to a static queue that a task waits on,
+    // `schedule` pushes to `Sched::pending`, which `drain` (inlined, since it
+    // waits) waits for with a level wait; `note` stores `last`, which an event control waits on and
+    // a continuous assignment reads. `pulse` changes `blip` and changes it
+    // back, which an event control on it sees only as the stores' own
+    // changes (IEEE 1800-2023 9.4.2). Assembly counts these stores in the
+    // units as a process's, so every waiter wakes. `mirror` stores what the
+    // `always_comb` process that calls it observes, so that call stays
+    // inlined.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int got, output int seen_at, output int follow, output int y, output int z,
+           output int pulsed_at);
+    class Sched;
+        static int pending[$];
+        static function void schedule(int n);
+            pending.push_back(n);
+        endfunction
+        static task drain(output int v);
+            wait (pending.size() != 0);
+            v = pending.pop_front();
+        endtask
+    endclass
+    int last;
+    function automatic void note(int n);
+        last = n;
+    endfunction
+    int blip;
+    function automatic void pulse();
+        blip = blip + 1;
+        blip = blip - 1;
+    endfunction
+    assign follow = last + 1;
+    int shadow;
+    function automatic int mirror(int n);
+        shadow = n;
+        return n + 1;
+    endfunction
+    int one = 1;
+    always_comb y = mirror(one) + shadow;
+    initial Sched::drain(got);
+    initial begin
+        @(last);
+        seen_at = $time;
+    end
+    initial begin
+        @(blip);
+        pulsed_at = $time;
+    end
+    initial begin
+        #2 Sched::schedule(one + 6);
+        #1 note(one + 2);
+        #1 z = mirror(one + 3);
+        pulse();
+    end
+endmodule
+"#;
+    let names = ["got", "seen_at", "follow", "y", "z", "pulsed_at"];
+    same_as_inlined(source, 4, 5, &names);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 5, &names),
+        Ok(vec![
+            value(7),
+            value(3),
+            value(4),
+            value(3),
+            value(5),
+            value(4)
+        ])
+    );
+}
+
+#[test]
+fn mailboxes_and_blocking_methods_in_function_units() {
+    // Units call the methods of a bounded mailbox, as UVM's TLM FIFOs do:
+    // `send` blocks on the third `put` until `take` gets a message, and a
+    // blocking method retries when its process is woken. `wait_keys`
+    // blocks in a semaphore's `get` until another process puts the keys,
+    // and `join_child` in `await` until a process ends. Each parks its
+    // process with the unit's frames kept.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c, output int d, output int e, output int f);
+    mailbox #(int) box = new(2);
+    semaphore keys = new(0);
+    process child;
+    task automatic send(int n);
+        box.put(n);
+    endtask
+    task automatic take(output int v);
+        box.get(v);
+    endtask
+    function automatic int count();
+        return box.num();
+    endfunction
+    function automatic bit try_send(int n);
+        return box.try_put(n);
+    endfunction
+    task automatic wait_keys(int n);
+        keys.get(n);
+    endtask
+    task automatic join_child();
+        child.await();
+    endtask
+    int one = 1;
+    initial begin
+        send(one);
+        send(one + 1);
+        send(one + 2);
+        a = $time;
+        b = count();
+    end
+    initial begin
+        #2 take(c);
+        #1 e = try_send(one + 10);
+    end
+    initial begin
+        wait_keys(one + 1);
+        d = $time;
+    end
+    initial #4 keys.put(2);
+    initial begin
+        child = process::self();
+        #5;
+    end
+    initial begin
+        #1 join_child();
+        f = $time;
+    end
+endmodule
+"#;
+    let names = ["a", "b", "c", "d", "e", "f"];
+    same_as_inlined(source, 6, 7, &names);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 7, &names),
+        Ok(vec![
+            value(2),
+            value(2),
+            value(1),
+            value(4),
+            value(0),
+            value(5)
+        ])
+    );
+}
+
+#[test]
+fn large_subroutines_go_out_of_line_by_default() {
+    // Without the switch a subroutine goes out of line when its fully
+    // inlined size exceeds the policy's threshold: `big` has more
+    // statements than that, `near` exactly as many, and `twice` calls it
+    // twice, so it is over the threshold through its callee. The calls take
+    // an input port: an initial process whose calls fold to constants is
+    // lowered symbolically, where every call is inlined.
+    let steps = |name: &str, count: usize| {
+        let body: String = (0..count).map(|_| "        t = t + 1;\n").collect();
+        format!(
+            "    function automatic int {name}(int v);\n        int t = v;\n{body}        return t;\n    endfunction\n"
+        )
+    };
+    let limit = 256;
+    // The declaration of `t` and the return are statements too.
+    let source = format!(
+        "module Top(input int i, output int a, output int b, output int c);\n{}{}    function automatic int twice(int v);\n        return near(v) + near(v);\n    endfunction\n    initial begin\n        a = big(i);\n        b = near(i);\n        c = twice(i);\n    end\nendmodule\n",
+        steps("big", limit),
+        steps("near", limit - 2),
+    );
+    assert_eq!(function_units(&source, false), 2, "big and twice");
+    assert_eq!(
+        simulate(&source, false, false, "interpreter", 0, &["a", "b", "c"]),
+        Ok(vec![
+            value(limit as u64),
+            value(limit as u64 - 2),
+            value(2 * (limit as u64 - 2))
+        ])
+    );
+}
+
+#[test]
+fn units_never_store_the_events_of_flip_flops() {
+    // `tick` drives the clock of an `always_ff` process, whose stores
+    // assembly gives the triggers of the flip-flop's domain, which only a
+    // process kernel carries: the task stays inlined.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int count);
+    logic clk = 0;
+    task automatic tick(int n);
+        clk = 1;
+        #1 clk = 0;
+        #1;
+    endtask
+    always_ff @(posedge clk) count <= count + 1;
+    int one = 1;
+    initial repeat (3) tick(one);
+endmodule
+"#;
+    same_as_inlined(source, 0, 7, &["count"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 7, &["count"]),
+        Ok(vec![value(3)])
+    );
+}
+
+#[test]
+fn defaults_count_at_every_call_of_the_size_policy() {
+    // The default of `pick` calls `wide`, which runs at each of the three
+    // calls of `caller`: inlined, `caller` is three times `wide`, over the
+    // threshold, though `pick` and `wide` are under it.
+    let body: String = (0..200).map(|_| "        t = t + 1;\n").collect();
+    let source = format!(
+        "module Top(input int i, output int c);\n    function automatic int wide();\n        int t = 0;\n{body}        return t;\n    endfunction\n    function automatic int pick(int v, int d = wide());\n        return v + d;\n    endfunction\n    function automatic int caller(int v);\n        return pick(v) + pick(v + 1) + pick(v + 2);\n    endfunction\n    initial c = caller(i);\nendmodule\n"
+    );
+    assert_eq!(function_units(&source, false), 1, "caller");
+    assert_eq!(
+        simulate(&source, false, false, "interpreter", 0, &["c"]),
+        Ok(vec![value(3 + 3 * 200)])
+    );
+}
+
+#[test]
+fn constant_arguments_do_not_keep_large_calls_inlined() {
+    // `big(1)` has constant arguments, but its body reads the input `i`, so
+    // it does not fold: over the threshold, it goes out of line.
+    let body: String = (0..300).map(|_| "        t = t + i;\n").collect();
+    let source = format!(
+        "`timescale 1ns/1ns\nmodule Top(input int i, output int a);\n    function automatic int big(int v);\n        int t = v;\n{body}        return t;\n    endfunction\n    initial #1 a = big(1);\nendmodule\n"
+    );
+    assert_eq!(function_units(&source, false), 1, "big");
+    assert_eq!(
+        simulate(&source, false, false, "interpreter", 2, &["a"]),
+        Ok(vec![value(1)])
+    );
+}
+
+#[test]
+fn defaults_that_call_each_other_recurse_at_run_time() {
+    // `f()` takes the default `g()`, which takes the default `f()`. The units
+    // evaluate the defaults of the arguments their calls omit, so this is a
+    // recursion like any other: the call of the `always_comb` process never
+    // ends, and the call depth guard stops the run (IEEE 1800-2023 13.5.3).
+    let source = r#"module Top(input int i, output int r);
+    function automatic int f(int a = g());
+        return a + i;
+    endfunction
+    function automatic int g(int b = f());
+        return b + 1;
+    endfunction
+    always_comb r = f();
+endmodule
+"#;
+    for forced in [false, true] {
+        let run = simulate(source, false, forced, "interpreter", 0, &["r"]);
+        assert!(
+            run.as_ref()
+                .is_err_and(|error| error.contains("call depth exceeds")),
+            "forced {forced}: {run:?}"
+        );
+    }
+}
+
+#[test]
+fn defaults_of_static_subroutines_that_call_each_other_recurse_at_run_time() {
+    // As `defaults_that_call_each_other_recurse_at_run_time`, with static
+    // subroutines, which go out of line from a procedural process (a
+    // combinational one cannot share their static formals with a unit):
+    // their units evaluate the defaults too.
+    let source = r#"module Top(input int i, output int r);
+    function int f(int a = g());
+        return a + i;
+    endfunction
+    function int g(int b = f());
+        return b + 1;
+    endfunction
+    initial r = f();
+endmodule
+"#;
+    for forced in [false, true] {
+        let run = simulate(source, false, forced, "interpreter", 0, &["r"]);
+        assert!(
+            run.as_ref()
+                .is_err_and(|error| error.contains("call depth exceeds")),
+            "forced {forced}: {run:?}"
+        );
+    }
+}
+
+#[test]
+fn doubling_default_chains_build_in_linear_time() {
+    // The default of each `fN` calls `fN-1` twice: 2^30 call paths, but 31
+    // pairs of a subroutine and the arguments its calls omit, which the
+    // policy sizes once each. They go out of line, and each unit evaluates
+    // its default with two calls of the next.
+    let depth = 30;
+    let mut source = String::from(
+        "module Top(input int i, output int r);\n    function automatic int f0(int a = 0);\n        return a + i;\n    endfunction\n",
+    );
+    for n in 1..=depth {
+        let p = n - 1;
+        source += &format!(
+            "    function automatic int f{n}(int a = f{p}() + f{p}());\n        return a;\n    endfunction\n"
+        );
+    }
+    source += &format!("    always_comb r = f5() + f{depth}(1);\nendmodule\n");
+    let start = std::time::Instant::now();
+    assert_eq!(
+        simulate(&source, false, false, "interpreter", 0, &["r"]),
+        Ok(vec![value(1)])
+    );
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(30),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn defaults_that_may_call_each_other_end_when_a_branch_does() {
+    // The default of `f` calls `g` only when `c` is clear, and that of `g`
+    // calls `f`: a cycle through the defaults that ends when `c` is set.
+    let source = r#"module Top(input bit c, output int r);
+    function automatic int f(int a = c ? 0 : g());
+        return a + 1;
+    endfunction
+    function automatic int g(int b = f());
+        return b + 10;
+    endfunction
+    always_comb r = g();
+endmodule
+"#;
+    for forced in [false, true] {
+        let mut sim = Simulation::from_sv_sources(vec![(source, Path::new("calls.sv"))], "Top");
+        if forced {
+            sim = sim.force_out_of_line_calls();
+        }
+        let mut sim = sim.build_interpreter().expect("the design builds");
+        let c = sim.signal("c");
+        sim.modify(|io| io.set(c, 1u8)).unwrap();
+        sim.run_until(0).unwrap();
+        let r = sim.signal("r");
+        assert_eq!(sim.get(r), BigUint::from(11u8), "forced {forced}");
+    }
+}
+
+#[test]
+fn recursive_calls_with_constant_arguments_go_out_of_line() {
+    // `down(3)` has constant arguments, but `down` recurses, which inlining
+    // cannot expand nor fold: the continuous assignment, like the
+    // `always_comb` process, calls it out of line.
+    let source = r#"module Top(input int i, output int r, output int s);
+    function automatic int down(int n);
+        return n <= 0 ? 0 : down(n - 1) + 1;
+    endfunction
+    assign r = down(3);
+    always_comb s = down(i);
+endmodule
+"#;
+    assert_eq!(function_units(source, false), 1);
+    for forced in [false, true] {
+        assert_eq!(
+            simulate(source, false, forced, "interpreter", 0, &["r", "s"]),
+            Ok(vec![value(3), value(0)]),
+            "forced {forced}"
+        );
+    }
+}
+
+#[test]
+fn calls_in_timing_controls_count_for_the_size_policy() {
+    // The delays of `pause` call `cost`, whose 200 statements run at each:
+    // inlined, `pause` is twice `cost`, over the threshold.
+    let body: String = (0..200).map(|_| "        t = t ^ 1;\n").collect();
+    let source = format!(
+        "`timescale 1ns/1ns\nmodule Top(input int i, output int a);\n    function automatic int cost(int v);\n        int t = v;\n{body}        return t;\n    endfunction\n    task automatic pause(int v);\n        #(cost(v));\n        #(cost(v + 1));\n    endtask\n    initial begin\n        pause(i + 1);\n        a = $time;\n    end\nendmodule\n"
+    );
+    assert_eq!(function_units(&source, false), 1, "pause");
+    assert_eq!(
+        simulate(&source, false, false, "interpreter", 5, &["a"]),
+        Ok(vec![value(3)])
+    );
+}
+
+#[test]
+fn cycles_through_defaults_go_out_of_line() {
+    // The default of `f` calls `g`, whose body calls `f` again with the
+    // default: a cycle only through the default, which the call of the
+    // `always_comb` process starts. Both go out of line by default; the
+    // default's call `g(0)` returns at once.
+    let source = r#"module Top(input int i, output int r);
+    function automatic int f(int n, int a = g(0));
+        return a + n;
+    endfunction
+    function automatic int g(int n);
+        return n > 0 ? f(n - 1) : 0;
+    endfunction
+    always_comb r = f(i + 3) + g(i + 2);
+endmodule
+"#;
+    assert_eq!(function_units(source, false), 2);
+    for forced in [false, true] {
+        assert_eq!(
+            simulate(source, false, forced, "interpreter", 0, &["r"]),
+            Ok(vec![value(4)]),
+            "forced {forced}"
+        );
+    }
 }
 
 #[test]
@@ -831,12 +1692,12 @@ fn recursive_methods() {
     end
 endmodule
 "#;
-    let inlined = simulate(source, false, false, "interpreter", 0, &["f"]);
-    assert!(
-        inlined
-            .as_ref()
-            .is_err_and(|error| error.contains("recursive call")),
-        "{inlined:?}"
+    // Inlining cannot expand recursion: without the switch the policy takes
+    // the recursive subroutines out of line, with the same results.
+    let by_default = simulate(source, false, false, "interpreter", 0, &["f"]);
+    assert_eq!(
+        by_default,
+        simulate(source, false, true, "interpreter", 0, &["f"])
     );
     // With `i` 0: 0! = 1, fib(5) = 5, and the empty sum.
     for four_state in [false, true] {
@@ -919,12 +1780,12 @@ module Top(input int i, output int a, output int b, output int c, output int d,
     end
 endmodule
 "#;
-    let inlined = simulate(source, false, false, "interpreter", 0, &["a"]);
-    assert!(
-        inlined
-            .as_ref()
-            .is_err_and(|error| error.contains("recursive call")),
-        "{inlined:?}"
+    // Inlining cannot expand recursion: without the switch the policy takes
+    // the recursive subroutines out of line, with the same results.
+    let by_default = simulate(source, false, false, "interpreter", 0, &["a"]);
+    assert_eq!(
+        by_default,
+        simulate(source, false, true, "interpreter", 0, &["a"])
     );
     for four_state in [false, true] {
         for backend in backends() {
@@ -1236,6 +2097,128 @@ module Top(output int a, output int b, output int c, output int d);
 endmodule
 "#;
     same_as_inlined(source, 3, 4, &["a", "b", "c", "d"]);
+}
+
+#[test]
+fn process_methods_suspend_through_function_units() {
+    // `process::self()`, the RNG state of a process and a new semaphore are
+    // host requests a unit makes by suspending. `keep_rng` saves the RNG
+    // state of its process around a construction that draws on it, as UVM
+    // does, and draws in between; `reseed` seeds the process; `same` gets
+    // a handle passed in; `make` returns a semaphore the process then
+    // takes keys of. Two processes and a fork call them, so each request
+    // reads the RNG of the process that made it, which a caller holds
+    // while its call is suspended.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c, output int d, output int e);
+    class Item;
+        int v;
+        function new();
+            v = $urandom % 1000;
+        endfunction
+    endclass
+    function automatic int keep_rng(int n);
+        process p = process::self();
+        string state = p.get_randstate();
+        Item item = new;
+        int first = $urandom % 1000;
+        p.set_randstate(state);
+        item = new;
+        return n + (first == $urandom % 1000 ? item.v : -1);
+    endfunction
+    function automatic int reseed(int seed);
+        process p = process::self();
+        p.srandom(seed);
+        return $urandom % 1000;
+    endfunction
+    function automatic bit same(process q);
+        return process::self() == q;
+    endfunction
+    function automatic semaphore make(int keys);
+        semaphore s = new(keys);
+        return s;
+    endfunction
+    function automatic int nested(int n);
+        process p = process::self();
+        string state = p.get_randstate();
+        int x = keep_rng(n);
+        p.set_randstate(state);
+        return x + keep_rng(n + 1) + $urandom % 10;
+    endfunction
+    int one = 1;
+    initial begin
+        process p = process::self();
+        semaphore s = make(one + 1);
+        a = keep_rng(one) + reseed(one + 4);
+        b = same(p) + 2 * s.try_get(2) + 4 * s.try_get(1);
+        #1 c = nested(one + 1);
+        fork
+            d = keep_rng(one + 2) + reseed(one + 8);
+        join
+    end
+    initial begin
+        #2 e = nested(one) + reseed(one + 4);
+    end
+endmodule
+"#;
+    same_as_inlined(source, 6, 3, &["a", "b", "c", "d", "e"]);
+}
+
+#[test]
+fn functions_write_static_class_properties_and_module_variables() {
+    // UVM's constructors count their instances in a static property and
+    // its singletons keep theirs in one: writes no other process observes
+    // go out of line, and so does `touch`, which writes what a continuous
+    // assignment reads; `logged` writes a variable that the `always_comb`
+    // process calling it owns as an output, so it stays inlined.
+    let source = r#"module Top(output int a, output int b, output int c, output int d, output int f);
+    class Counter;
+        static int count = 0;
+        static Counter inst;
+        int id;
+        function new();
+            id = count++;
+        endfunction
+        static function void set(Counter c);
+            inst = c;
+        endfunction
+        static function Counter get();
+            if (inst == null) begin
+                Counter made = new;
+                set(made);
+            end
+            return inst;
+        endfunction
+    endclass
+    int log_count;
+    function automatic void note(int n);
+        log_count += n;
+    endfunction
+    int seen;
+    function automatic void touch(int n);
+        seen = n;
+    endfunction
+    assign d = seen + 1;
+    int comb_log;
+    function automatic int logged(int n);
+        comb_log = n;
+        return n + 1;
+    endfunction
+    always_comb f = logged(a);
+    initial begin
+        Counter x = Counter::get();
+        Counter y = new;
+        Counter z = Counter::get();
+        note(y.id + 2);
+        note(y.id + 3);
+        touch(y.id + 5);
+        a = y.id;
+        b = x == z ? Counter::count : -1;
+        c = log_count;
+    end
+endmodule
+"#;
+    same_as_inlined(source, 5, 0, &["a", "b", "c", "d", "f"]);
 }
 
 #[test]
@@ -1971,4 +2954,94 @@ endmodule
     sim.run_until(2).expect("the design runs");
     sim.finish().expect("the host finishes");
     assert!(sim.save_state().is_ok(), "{:?}", sim.save_state().err());
+}
+
+/// The classes of the tests of `ref` formals bound to the locals of the
+/// caller: `recurse` collects the nodes of a tree into the queue its `ref`
+/// formal names, recursively, so it goes out of line by default, and its
+/// unit writes the caller's variable.
+const TREE: &str = r#"`timescale 1ns/1ns
+class node;
+    node kids[$];
+endclass
+class root;
+    int offs[$];
+    function void find_all(node n, ref node out[$]);
+        recurse(out, n);
+    endfunction
+    function void recurse(ref node out[$], input node n = null);
+        out.push_back(n);
+        foreach (n.kids[i]) this.recurse(out, n.kids[i]);
+    endfunction
+    function void depth(node n, ref int d);
+        d = d + 1;
+        foreach (n.kids[i]) this.depth(n.kids[i], d);
+    endfunction
+"#;
+
+#[test]
+fn ref_formals_bind_the_locals_of_a_process() {
+    // An automatic queue of an `initial` process, and an automatic `int`,
+    // which the recursive units write through their `ref` formals.
+    let source = format!(
+        "{TREE}endclass\nmodule Top(output int a, output int b, output int d);\n    initial begin\n        automatic root r = new;\n        automatic node x = new, y = new;\n        automatic node q[$];\n        automatic int n = 0;\n        x.kids.push_back(y);\n        r.find_all(x, q);\n        a = q.size();\n        r.find_all(x, q);\n        b = q.size();\n        r.depth(x, n);\n        d = n;\n    end\nendmodule\n"
+    );
+    for four_state in [false, true] {
+        for forced in [false, true] {
+            assert_eq!(
+                simulate(
+                    &source,
+                    four_state,
+                    forced,
+                    "interpreter",
+                    0,
+                    &["a", "b", "d"]
+                ),
+                Ok(vec![value(2), value(4), value(2)]),
+                "four_state {four_state} forced {forced}"
+            );
+        }
+    }
+}
+
+#[test]
+fn ref_formals_bind_the_locals_of_subroutines() {
+    // The shapes of UVM's `uvm_root::find` (an automatic local of a
+    // function), `uvm_root::m_do_timeout_settings` (a local of a `foreach`
+    // body after a delay, in a task) and `uvm_utils::find_all` (a local of
+    // a static method), and a local of static lifetime.
+    let source = format!(
+        "{TREE}    function int find(node a);\n        node list[$];\n        find_all(a, list);\n        return list.size();\n    endfunction\n    task timeouts(node a, output int sizes[$]);\n        foreach (offs[i]) begin\n            node comps[$];\n            #(offs[i]);\n            find_all(a, comps);\n            sizes.push_back(comps.size());\n        end\n    endtask\n    static function int count(node a);\n        node list[$];\n        root r = new;\n        r.find_all(a, list);\n        return list.size();\n    endfunction\n    function int kept(node a);\n        static node list[$];\n        find_all(a, list);\n        return list.size();\n    endfunction\nendclass\nmodule Top(output int a, output int b, output int c, output int d, output int e);\n    initial begin\n        automatic root r = new;\n        automatic node x = new, y = new, z = new;\n        automatic int sizes[$];\n        x.kids.push_back(y);\n        y.kids.push_back(z);\n        r.offs.push_back(1);\n        r.offs.push_back(2);\n        a = r.find(x);\n        b = root::count(y);\n        void'(r.kept(z));\n        e = r.kept(y);\n        r.timeouts(x, sizes);\n        c = sizes[0];\n        d = sizes[1];\n    end\nendmodule\n"
+    );
+    // The delays of the class's task are in the default time unit: a
+    // `timescale` does not set that of the compilation unit (IEEE 1800-2023
+    // 3.14.2.3).
+    let names = ["a", "b", "c", "d", "e"];
+    for four_state in [false, true] {
+        for forced in [false, true] {
+            assert_eq!(
+                simulate(&source, four_state, forced, "interpreter", 10_000, &names),
+                Ok(vec![value(3), value(2), value(3), value(3), value(3)]),
+                "four_state {four_state} forced {forced}"
+            );
+        }
+    }
+}
+
+#[test]
+fn ref_formals_bind_the_locals_of_forked_processes() {
+    // Each forked process has its own automatic queue, which the units fill
+    // while the other process is suspended.
+    let source = format!(
+        "{TREE}endclass\nmodule Top(output int a, output int b);\n    root r = new;\n    node x = new, y = new, z = new;\n    initial begin\n        x.kids.push_back(y);\n        y.kids.push_back(z);\n        for (int k = 0; k < 2; k++) begin\n            fork\n                automatic int kk = k;\n                begin\n                    automatic node q[$];\n                    #(kk + 1);\n                    r.find_all(kk == 0 ? x : y, q);\n                    #1;\n                    if (kk == 0) a = q.size(); else b = q.size();\n                end\n            join_none\n        end\n    end\nendmodule\n"
+    );
+    for four_state in [false, true] {
+        for forced in [false, true] {
+            assert_eq!(
+                simulate(&source, four_state, forced, "interpreter", 5, &["a", "b"]),
+                Ok(vec![value(3), value(2)]),
+                "four_state {four_state} forced {forced}"
+            );
+        }
+    }
 }

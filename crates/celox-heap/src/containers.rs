@@ -72,6 +72,10 @@ pub const BOUND: u64 = 106;
 /// elements combined, an element that is not equal in both taking the
 /// default of the layout (Table 7-1); otherwise an empty container.
 pub const MERGE: u64 = 107;
+/// `sized(a, b)`: container `a`, which a fixed-size unpacked array of `b`
+/// elements is assigned: a run-time error ([`Fault::ArraySize`]) unless `a`
+/// has `b` elements (IEEE 1800-2023 7.6). An empty container may be null.
+pub const SIZED: u64 = 140;
 
 /// The operation parameter encodes the element width (bits 0..6), whether
 /// it is two-state (7), its handle kind (8..9: none/string/object), container
@@ -636,6 +640,16 @@ impl Heap {
         }
         if op == MERGE {
             return self.merge(a as Handle, b as Handle, Layout(parameter)) as u64;
+        }
+        if op == SIZED {
+            let size = self
+                .containers
+                .get(&(a as Handle))
+                .map_or(0, |container| container.len());
+            if size as u64 != b {
+                self.fault.get_or_insert(Fault::ArraySize);
+            }
+            return a;
         }
         let layout = Layout(parameter);
         let key = layout.key(self, b);
@@ -1220,6 +1234,21 @@ mod tests {
         assert_eq!(call(&mut heap, CLEAR, p, c, 0, 0), 0);
         call(&mut heap, NEW, p, u64::MAX, 0, 0);
         assert_eq!(heap.take_fault(), Some(Fault::NegativeArraySize));
+    }
+    #[test]
+    fn sized_containers_pass_through_and_others_fault() {
+        let mut heap = Heap::new();
+        let p = parameter(8, false, 0, 1, 0, false, false, false);
+        let a = call(&mut heap, INSERT, p, 0, 0, 17);
+        let a = call(&mut heap, INSERT, p, a, 1, 18);
+        assert_eq!(call(&mut heap, SIZED, p, a, 2, 0), a);
+        assert_eq!(heap.take_fault(), None);
+        assert_eq!(call(&mut heap, SIZED, p, a, 3, 0), a);
+        assert_eq!(heap.take_fault(), Some(Fault::ArraySize));
+        assert_eq!(call(&mut heap, SIZED, p, 0, 0, 0), 0);
+        assert_eq!(heap.take_fault(), None);
+        assert_eq!(call(&mut heap, SIZED, p, 0, 1, 0), 0);
+        assert_eq!(heap.take_fault(), Some(Fault::ArraySize));
     }
     #[test]
     fn queue_slice_clips_and_copies_elements_and_masks() {

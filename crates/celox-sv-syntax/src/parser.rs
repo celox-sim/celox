@@ -70,6 +70,7 @@ pub struct Declarations {
     pub package_bindings: Vec<PackageBinding>,
     pub modport_declarations: Vec<ModportDeclaration>,
     pub assertion_declarations: Vec<AssertionDeclaration>,
+    pub sequences: Vec<Sequence>,
     pub type_aliases: Vec<TypeAlias>,
     pub time_declarations: Vec<TimeDeclaration>,
     pub time_directives: Vec<TimeDirective>,
@@ -122,6 +123,7 @@ impl Declarations {
             package_bindings: Vec::new(),
             modport_declarations: Vec::new(),
             assertion_declarations: Vec::new(),
+            sequences: Vec::new(),
             type_aliases: Vec::new(),
             time_declarations: Vec::new(),
             time_directives: Vec::new(),
@@ -149,6 +151,7 @@ impl Declarations {
         let package_bindings = parser.package_bindings;
         let modport_declarations = parser.modport_declarations;
         let assertion_declarations = parser.assertion_declarations;
+        let sequences = parser.sequences;
         let type_aliases = parser.type_aliases;
         let time_declarations = parser.time_declarations;
         let time_directives = parser.time_directives;
@@ -173,6 +176,7 @@ impl Declarations {
             package_bindings,
             modport_declarations,
             assertion_declarations,
+            sequences,
             type_aliases,
             time_declarations,
             time_directives,
@@ -243,6 +247,10 @@ impl Declarations {
 
     pub fn assertion_declaration(&self, id: AssertionDeclarationId) -> &AssertionDeclaration {
         &self.assertion_declarations[id.0]
+    }
+
+    pub fn sequence(&self, id: SequenceId) -> &Sequence {
+        &self.sequences[id.0]
     }
 
     pub fn type_alias(&self, id: TypeAliasId) -> &TypeAlias {
@@ -346,6 +354,7 @@ struct Parser<'a> {
     package_bindings: Vec<PackageBinding>,
     modport_declarations: Vec<ModportDeclaration>,
     assertion_declarations: Vec<AssertionDeclaration>,
+    sequences: Vec<Sequence>,
     type_aliases: Vec<TypeAlias>,
     time_declarations: Vec<TimeDeclaration>,
     time_directives: Vec<TimeDirective>,

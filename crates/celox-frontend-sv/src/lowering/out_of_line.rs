@@ -7,10 +7,13 @@
 //! inlined. A subroutine qualifies when it cannot suspend its caller other
 //! than for a host request, nor make one a unit cannot make, both
 //! transitively (see [`Reason`]; its prints and messages are runtime
-//! events, which a unit raises), has no `ref`
-//! formal (the callees inlined into its unit may), and its unit touches no
-//! state but its frame, the variables it reads, and the static storage of
-//! subroutines. Nor may it make a store that assembly instruments per store
+//! events, which a unit raises), has no `ref` formal of unpacked structure
+//! type (the callees inlined into its unit may), and its unit touches no
+//! state but its frame, the variables it reads, and the module variables
+//! it writes that the lowering does not keep hidden for a process, such as
+//! the static storage of subroutines and static class properties; a
+//! combinational process calls it only if it writes nothing but that static
+//! storage. Nor may it make a store that assembly instruments per store
 //! (a nonblocking one, or one into what a wait, an event control or
 //! combinational logic observes), since assembly sees only the stores of
 //! the units the runtime runs: the frontend keeps out the stores into what
@@ -18,7 +21,9 @@
 //! rejects a function that makes one all the same.
 //!
 //! A unit whose body suspends the process, for a host request (`$sformatf`,
-//! file I/O, `$sscanf`, plusargs, `$system`, the distribution functions), a
+//! file I/O, `$sscanf`, plusargs, `$system`, the distribution functions,
+//! `process::self()`, `srandom`, `get_randstate`, `set_randstate` and a
+//! semaphore's `new`), a
 //! `#` delay, `$stop` or `$finish`, is resumable (see [`Function::resume`]):
 //! a suspension stores the unit's resume point and returns with the status,
 //! and each caller up the chain does the same at its call, down to the
@@ -34,12 +39,23 @@
 //! handles in the saved frames through the module's resume table
 //! ([`celox_design::CallResume`]), and checkpoints keep the saved stack.
 //!
+//! A `ref` formal is a place (see [`Place`]): the call passes its static
+//! part, which selects the function, so one subroutine has a function for
+//! each binding its calls make (a variable the unit names itself, the field
+//! of a property, the array and shape of an element, or a copy), and its
+//! dynamic part through the frame: the handle of a property, the positions
+//! of an element, or the value of an automatic of the calling unit, which
+//! comes back whenever the call returns. A recursive call that passes its
+//! own `ref` formal on binds the same place, and so enters the same
+//! function.
+//!
 //! The frame of a function holds its own frame base and call depth first
 //! (the caller passes both: a unit run by the runtime starts with an empty
 //! stack at offset zero and depth zero), then the resume slots of a
 //! resumable unit, then the state of the calling
 //! process that its body and the bodies it reaches use ([`ProcessState`]),
-//! then its automatic formals, its result and its locals, then the
+//! then the dynamic parts of the places of its `ref` formals, then its
+//! automatic formals, its result and its locals, then the
 //! temporaries the lowering of its body created, which a recursive
 //! activation must not share. The process state is the RNG state and seed
 //! of `$urandom` and the seed of `$random`: the caller passes its own and
@@ -73,14 +89,15 @@ type Addr = RegionedVarAddr;
 /// them: the first that applies.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Reason {
-    /// It, or a subroutine it calls, has a `ref` formal.
+    /// It has a `ref` formal of unpacked structure type, or the call binds
+    /// two `ref` formals to one automatic of the calling unit, which the
+    /// call copies (see [`Place::Frame`]).
     RefFormal,
     /// It, or a subroutine it calls, has an event control, a wait or a
     /// fork.
     MaySuspend,
     /// It, or a subroutine it calls, makes a host request a unit cannot
-    /// make: `$exit`, monitors, strobes, VCD tasks, process and mailbox
-    /// methods, or a DPI-C import; or a caller that cannot suspend calls a
+    /// make: `$exit`, monitors, strobes, VCD tasks, or a DPI-C import; or a caller that cannot suspend calls a
     /// unit that can suspend.
     HostRequest,
     /// Anything else, described.
@@ -123,6 +140,16 @@ pub(super) struct ProcessState {
     /// a delay, `$stop` or `$finish`. A unit of it is resumable (see
     /// [`Function::resume`]).
     pub suspends: bool,
+    /// Whether it suspends the calling process past the moment, for a delay
+    /// or `$stop`, so that other processes run before the call continues.
+    /// A host request does not: the host serves it before anything else
+    /// runs.
+    pub yields: bool,
+    /// Whether it reads `e.triggered` (IEEE 1800-2023 15.5.3) or a process's
+    /// `status()` (9.7), which a level wait's predicate reads as an
+    /// observation of the event or process, so that a predicate's call of
+    /// it stays inlined.
+    pub observes_events: bool,
 }
 
 /// What became of the calls of one subroutine.
@@ -147,12 +174,79 @@ pub(super) struct Slot {
     /// What the slot holds: a heap handle, which the collector scans, or
     /// bits.
     pub kind: celox_design::ValueKind,
+    /// The width of an element when it holds an unpacked array, which the
+    /// unit accesses at positions computed at run time.
+    pub element_width: Option<usize>,
+}
+
+/// What a `ref` formal of a call refers to (IEEE 1800-2023 13.5.2), as an
+/// out-of-line call passes it: a static part, which selects the function
+/// (see [`Place::key`]), and a dynamic part, the variables of the caller
+/// whose values the call passes in the frame.
+#[derive(Debug, Clone)]
+pub(super) enum Place {
+    /// A variable the unit names itself, as an inlined body renames the
+    /// formal to it.
+    Variable(SourceVarId),
+    /// Property `field` of the object that the caller's variable `handle`
+    /// holds, the object the call evaluated.
+    Property {
+        field: sv::ir::ObjectField,
+        handle: String,
+    },
+    /// An element of an unpacked array whose positions the call fixed in
+    /// the caller's variables `positions`; `element` names the `k`-th of
+    /// them `#k`.
+    Element {
+        element: Box<sv::ir::LValue>,
+        signed: bool,
+        width: usize,
+        total: usize,
+        positions: Vec<String>,
+    },
+    /// An automatic variable of the calling unit, named `name` there, whose
+    /// value the call copies into the formal's slot and back whenever the
+    /// call returns: nothing else can name it while the call runs.
+    Frame { id: SourceVarId, name: String },
+}
+
+impl Place {
+    /// The static part of the place, which the unit is lowered for.
+    pub fn key(&self) -> String {
+        match self {
+            Place::Variable(id) => format!("v{}", id.0),
+            Place::Property { field, .. } => format!("p{field:?}"),
+            Place::Element {
+                element,
+                signed,
+                width,
+                total,
+                ..
+            } => format!("e{element:?}/{signed}/{width}/{total}"),
+            Place::Frame { .. } => "f".to_string(),
+        }
+    }
+}
+
+/// The key of the function of `name` for the places of its `ref` formals.
+pub(super) fn function_key(name: &str, places: &[Place]) -> String {
+    if places.is_empty() {
+        return name.to_string();
+    }
+    let keys: Vec<String> = places.iter().map(Place::key).collect();
+    format!("{name}({})", keys.join(","))
 }
 
 /// A subroutine lowered out of line, or being lowered.
 #[derive(Debug, Clone)]
 pub(super) struct Function {
-    pub name: String,
+    /// The subroutine's name with the places of its `ref` formals (see
+    /// [`function_key`]): the functions of one subroutine differ in them.
+    pub key: String,
+    /// For each `ref` formal, in order, the slots of the dynamic part of its
+    /// place: the handle of a property, the positions of an element, the
+    /// copy of an automatic; none for a variable.
+    pub places: Vec<Vec<usize>>,
     /// The frame's slots: the frame base, the call depth, the calling
     /// process's state, then the formals, result and locals, all known
     /// before the body is lowered, then the temporaries of the body.
@@ -188,6 +282,12 @@ pub(super) struct Function {
     /// The calls at which the unit can be suspended inside the callee, once
     /// the body is lowered.
     pub calls: Vec<celox_design::CallResume>,
+    /// The slot whose bit `p` says that a call omits argument `p`, and the
+    /// positions of the formals whose defaults the unit evaluates then (IEEE
+    /// 1800-2023 13.5.3), in its own frame, where the calls of a default are
+    /// calls of the unit: defaults that call each other then recurse at run
+    /// time, as any recursion, instead of expanding at the call forever.
+    pub omitted: Option<(usize, Vec<usize>)>,
 }
 
 impl Function {
@@ -217,14 +317,46 @@ pub(crate) struct OutOfLine {
     /// The number of frame slots of the module so far, which numbers their
     /// addresses.
     pub(super) slots: u32,
-    /// The variables whose stores a function unit must not make (see
-    /// [`ProcModule::observe_storage`]).
+    /// The variables whose stores assembly instruments (see
+    /// [`ProcModule::observe_storage`]): a combinational process does not
+    /// call a function unit that stores into them.
     pub(super) observed: HashSet<SourceVarId>,
+    /// Those of them whose instrumentation assembly makes in process and
+    /// flip-flop units only, which a function unit must not store into.
+    pub(super) excluded: HashSet<SourceVarId>,
     /// The module's names that hierarchical names of other modules reach.
     pub(super) foreign: HashSet<String>,
+    /// The subroutines that may call themselves, through any chain of
+    /// calls (see [`ProcModule::mark_recursive`]).
+    pub(super) recursive: HashSet<String>,
+    /// Whether every subroutine that can go out of line does, which a test
+    /// switch asks for (`AnalysisOptions::force_out_of_line_calls`);
+    /// otherwise only those of [`ProcModule::out_of_line_policy`] do.
+    pub(super) forced: bool,
+    /// The fully inlined size of each subroutine, in statements (see
+    /// [`ProcModule::mark_recursive`]).
+    inlined_sizes: HashMap<String, u64>,
 }
 
+/// The fully inlined size, in statements, above which a subroutine goes out
+/// of line (see [`ProcModule::out_of_line_policy`]).
+pub(super) const OUT_OF_LINE_STATEMENTS: u64 = 256;
+
 impl OutOfLine {
+    /// No functions yet, forced to take every subroutine out of line or
+    /// not.
+    pub(super) fn new(forced: bool) -> Self {
+        Self {
+            forced,
+            ..Self::default()
+        }
+    }
+
+    /// The fully inlined size of subroutine `name`, in statements.
+    pub(super) fn inlined_size(&self, name: &str) -> Option<u64> {
+        self.inlined_sizes.get(name).copied()
+    }
+
     /// Note how a call of `name` was lowered: going out of line once is
     /// what counts, else the first reason.
     pub(super) fn record(&mut self, name: &str, outcome: Outcome) {
@@ -240,7 +372,7 @@ impl OutOfLine {
     /// Forget the functions from `len` on, which a discarded lowering made.
     pub(super) fn truncate(&mut self, len: usize) {
         for function in self.functions.drain(len.min(self.functions.len())..) {
-            self.by_name.remove(&function.name);
+            self.by_name.remove(&function.key);
         }
     }
 
@@ -324,6 +456,7 @@ impl OutOfLine {
                             width: slot.width,
                             four_state: slot.four_state,
                             handle: slot.kind != celox_design::ValueKind::Bits,
+                            element_width: slot.element_width,
                         })
                         .collect(),
                 },
@@ -390,6 +523,40 @@ impl OutOfLine {
         }
         lines
     }
+}
+
+/// The fully inlined size of each subroutine `node`, whose own statements
+/// are `own[node]` and whose calls, one entry per call, are `sites[node]`:
+/// its own statements and, at each of its calls, the size of the callee,
+/// unless the callee is a member of a recursive component (`members`) and
+/// so goes out of line. The callees that count form no cycle, so each size
+/// is the sum over a tree of calls, taken in post-order on a stack of its
+/// own: a chain of calls may be deeper than the host stack.
+fn fully_inlined_sizes(own: &[u64], sites: &[Vec<usize>], members: &HashSet<usize>) -> Vec<u64> {
+    let mut sizes: Vec<Option<u64>> = vec![None; own.len()];
+    for start in 0..own.len() {
+        let mut stack = vec![(start, 0)];
+        while let Some((node, next)) = stack.pop() {
+            if sizes[node].is_some() {
+                continue;
+            }
+            if let Some(&callee) = sites[node].get(next) {
+                stack.push((node, next + 1));
+                if !members.contains(&callee) && sizes[callee].is_none() {
+                    stack.push((callee, 0));
+                }
+                continue;
+            }
+            let total = sites[node]
+                .iter()
+                .filter(|callee| !members.contains(callee))
+                .fold(own[node], |total, &callee| {
+                    total.saturating_add(sizes[callee].expect("a callee is sized first"))
+                });
+            sizes[node] = Some(total);
+        }
+    }
+    sizes.into_iter().map(|size| size.unwrap_or(0)).collect()
 }
 
 /// The automatic storage of `subroutine` (IEEE 1800-2023 13.4.2): its
@@ -461,6 +628,25 @@ pub(super) fn attach_functions(
             }
         }
     }
+    // A store of a function unit repeats at every call, so each signal a
+    // unit stores gets counters, as one a kernel may store twice between
+    // two checks does: assembly counts the stores of a signal a wait or an
+    // event domain watches, in the units as in the kernels.
+    let counted: HashSet<SourceVarId> = module
+        .counter_slots
+        .iter()
+        .map(|slots| slots.signal)
+        .collect();
+    let stored: Vec<SourceVarId> = functions
+        .iter()
+        .flat_map(|function| function.unit.blocks.values())
+        .flat_map(|block| &block.instructions)
+        .filter_map(celox_frontend_core::watch::write_destination)
+        .filter(|address| address.region == STABLE_REGION && !counted.contains(&address.var_id))
+        .map(|address| address.var_id)
+        .collect();
+    let slots = celox_frontend_core::watch::declare_counter_slots(&mut module.variables, stored);
+    module.counter_slots.extend(slots);
     let mut work = Vec::new();
     module_units(module).for_each(|unit| calls(unit, &mut work));
     for path in &module.comb_blocks {
@@ -665,7 +851,7 @@ impl ProcModule<'_> {
     }
 
     /// Whether assembly may instrument the stores into `id` (see
-    /// [`Self::observe_storage`]), which a function unit must not make.
+    /// [`Self::observe_storage`]).
     pub(super) fn is_observed(&self, id: SourceVarId) -> bool {
         self.calls
             .as_deref()
@@ -673,12 +859,23 @@ impl ProcModule<'_> {
             .is_some_and(|functions| functions.observed.contains(&id))
     }
 
+    /// Whether assembly instruments the stores into `id` in ways only the
+    /// units of processes and flip-flops carry (see
+    /// [`Self::observe_storage`]), so that a function unit must not make
+    /// them.
+    pub(super) fn is_excluded(&self, id: SourceVarId) -> bool {
+        self.calls
+            .as_deref()
+            .and_then(|graph| graph.out_of_line.as_ref())
+            .is_some_and(|functions| functions.excluded.contains(&id))
+    }
+
     /// Record, before `module`'s processes are lowered, the variables whose
     /// stores assembly may instrument (`SimModule::instrumented_storage`),
     /// as far as a function unit can store them.
     ///
-    /// A function unit stores no module state but the static storage of
-    /// subroutines. Assembly instruments the stores into what a wait or an
+    /// A function unit stores no hidden module state but the static storage
+    /// of subroutines. Assembly instruments the stores into what a wait or an
     /// event control watches, what combinational logic is sensitive to, and
     /// the targets of nonblocking assignments. Each construct is walked by
     /// the walk its lowering derives that instrumentation from, so the two
@@ -690,8 +887,22 @@ impl ProcModule<'_> {
     /// nonblocking assignments and `foreign`, the names that hierarchical
     /// names of other modules reach. The set may be more than assembly
     /// instruments, which only keeps a subroutine inlined that could have
-    /// gone out of line; assembly rejects a function unit that stores into
-    /// instrumented storage all the same.
+    /// gone out of line.
+    ///
+    /// Assembly instruments a function unit's stores as a process kernel's
+    /// for the counters of waits and event controls, which are kept for the
+    /// stored variable, whatever process stores it. Its other
+    /// instrumentation is for process and flip-flop units only: the
+    /// triggers of flip-flop events, the staging of nonblocking
+    /// assignments, the counting of what flip-flops write, and the
+    /// captures of combinational observers in combinational processes. So a
+    /// function unit stores into none of the `excluded` storage: the events
+    /// and the writes of flip-flops, what instance ports connect (an
+    /// event of the instance, as far as this module can tell), the targets
+    /// of nonblocking assignments and `foreign`; and a combinational process
+    /// calls no function unit that stores into `observed` storage. Assembly
+    /// rejects a function unit that stores into storage it cannot
+    /// instrument all the same.
     pub(super) fn observe_storage(&mut self, module: &sv::ir::Module, foreign: &HashSet<String>) {
         if self.out_of_line().is_none() {
             return;
@@ -702,6 +913,24 @@ impl ProcModule<'_> {
             nonblocking: false,
         };
         let mut observers: Vec<sv::ir::Stmt> = Vec::new();
+        // What a function unit must not store into: the events of
+        // flip-flops, whose stores assembly gives their triggers, what
+        // flip-flops write, what instance ports connect (a clock of the
+        // instance, as far as this module can tell), and below the targets
+        // of nonblocking assignments and the names of other modules.
+        let mut hard: Vec<sv::ir::Stmt> = Vec::new();
+        let mut hard_names: Vec<String> = Vec::new();
+        for process in module.ff_processes() {
+            hard_names.extend(
+                process
+                    .events()
+                    .iter()
+                    .map(|event| event.signal().to_string()),
+            );
+            let mut written = HashSet::default();
+            super::procedural::written_names(process.body(), &mut written);
+            hard_names.extend(written);
+        }
         for assignment in module.assignments() {
             observers.push(assign(assignment.lhs_value(), assignment.rhs()));
         }
@@ -716,6 +945,7 @@ impl ProcModule<'_> {
             for connection in instance.port_connections() {
                 if let Some(actual) = connection.actual_expr() {
                     observers.push(sv::ir::Stmt::Eval(actual.clone()));
+                    hard.push(sv::ir::Stmt::Eval(actual.clone()));
                 }
             }
         }
@@ -771,6 +1001,19 @@ impl ProcModule<'_> {
             .into_iter()
             .flat_map(|expr| super::ff::level_reads(self, expr))
             .collect();
+        let mut excluded: HashSet<SourceVarId> = self
+            .implicit_reads(&hard, true)
+            .into_iter()
+            .map(|atom| atom.id)
+            .collect();
+        excluded.extend(
+            targets
+                .iter()
+                .copied()
+                .chain(foreign.iter().map(String::as_str))
+                .chain(hard_names.iter().map(String::as_str))
+                .filter_map(|name| self.id(name)),
+        );
         observed.extend(
             targets
                 .into_iter()
@@ -778,9 +1021,237 @@ impl ProcModule<'_> {
                 .chain(foreign.iter().map(String::as_str))
                 .filter_map(|name| self.id(name)),
         );
+        observed.extend(excluded.iter().copied());
         if let Some(functions) = self.out_of_line() {
             functions.observed = observed;
+            functions.excluded = excluded;
         }
+    }
+
+    /// Record, before the module's processes are lowered, the subroutines
+    /// on a cycle of the module's call graph: those whose bodies, the
+    /// argument defaults of their calls included, may call themselves
+    /// again (see [`ProcModule::single_activation`]).
+    pub(super) fn mark_recursive(&mut self, module: &sv::ir::Module) {
+        if self.out_of_line().is_none() {
+            return;
+        }
+        let mut names: Vec<&String> = self.subroutines.keys().collect();
+        names.sort_unstable();
+        let index: HashMap<&str, usize> = names
+            .iter()
+            .enumerate()
+            .map(|(position, name)| (name.as_str(), position))
+            .collect();
+        // The call graph over calls: a node for each subroutine with each
+        // pattern of omitted arguments it is called with, one for each
+        // distinct pair however many call paths reach it. The node with
+        // nothing omitted is the body; a node omitting arguments is a call
+        // that runs the body and the defaults of those arguments (IEEE
+        // 1800-2023 13.5.3). Each node's sites are the nodes it calls, once
+        // per call, which size it; recursion is a cycle of this graph.
+        let mut nodes: HashMap<(usize, Vec<bool>), usize> = HashMap::default();
+        let mut keys: Vec<(usize, Vec<bool>)> = Vec::new();
+        let mut node = |key: (usize, Vec<bool>), keys: &mut Vec<_>| -> usize {
+            *nodes.entry(key.clone()).or_insert_with(|| {
+                keys.push(key);
+                keys.len() - 1
+            })
+        };
+        // The node a call makes: the omitted arguments that take a default.
+        let site = |(callee, args): (sv::ir::Callee, Vec<Option<sv::ir::Expr>>)| {
+            let sv::ir::Callee::Subroutine(callee) = callee else {
+                return None;
+            };
+            let &target = index.get(callee.as_str())?;
+            let mut omitted: Vec<bool> = self.subroutines[names[target]]
+                .params
+                .iter()
+                .enumerate()
+                .map(|(position, param)| {
+                    param.default.is_some() && matches!(args.get(position), None | Some(None))
+                })
+                .collect();
+            if !omitted.contains(&true) {
+                omitted.clear();
+            }
+            Some((target, omitted))
+        };
+        for target in 0..names.len() {
+            node((target, Vec::new()), &mut keys);
+        }
+        // The calls of the module's processes, continuous assignments and
+        // port connections, which reach the nodes of their omitted arguments.
+        let mut roots = Vec::new();
+        let bodies = module
+            .initial_processes()
+            .iter()
+            .map(|process| process.body())
+            .chain(module.ff_processes().iter().map(|process| process.body()))
+            .chain(
+                module
+                    .comb_processes()
+                    .iter()
+                    .flat_map(|process| [process.body(), process.sensitivity_body()]),
+            );
+        for body in bodies {
+            for stmt in body {
+                stmt.walk(&mut |stmt| stmt_calls(stmt, &mut roots));
+            }
+        }
+        for assignment in module.assignments().iter().chain(
+            module
+                .comb_processes()
+                .iter()
+                .flat_map(|process| process.assignments()),
+        ) {
+            collect_calls(assignment.rhs(), &mut roots);
+        }
+        for instance in module.instances() {
+            for connection in instance.port_connections() {
+                if let Some(actual) = connection.actual_expr() {
+                    collect_calls(actual, &mut roots);
+                }
+            }
+        }
+        for key in roots.into_iter().filter_map(site) {
+            node(key, &mut keys);
+        }
+        // Each node's own statements and sites, in the order nodes appear;
+        // a node's sites may add nodes, sized in turn.
+        let mut own: Vec<u64> = Vec::new();
+        let mut sites: Vec<Vec<usize>> = Vec::new();
+        while own.len() < keys.len() {
+            let (target, omitted) = keys[own.len()].clone();
+            let subroutine = &self.subroutines[names[target]];
+            let mut calls = Vec::new();
+            let mut statements = 0u64;
+            let mut own_sites = Vec::new();
+            if omitted.is_empty() {
+                for stmt in subroutine.body.iter().chain(&subroutine.sensitivity_body) {
+                    stmt.walk(&mut |stmt| {
+                        statements += 1;
+                        stmt_calls(stmt, &mut calls)
+                    });
+                }
+            } else {
+                own_sites.push(node((target, Vec::new()), &mut keys));
+                for (param, _) in subroutine
+                    .params
+                    .iter()
+                    .zip(&omitted)
+                    .filter(|(_, omitted)| **omitted)
+                {
+                    statements += 1;
+                    collect_calls(
+                        param.default.as_ref().expect("a defaulted formal"),
+                        &mut calls,
+                    );
+                }
+            }
+            for key in calls.into_iter().filter_map(site) {
+                own_sites.push(node(key, &mut keys));
+            }
+            own.push(statements);
+            sites.push(own_sites);
+        }
+        let calls: Vec<Vec<usize>> = sites
+            .iter()
+            .map(|callees| {
+                let mut callees = callees.clone();
+                callees.sort_unstable();
+                callees.dedup();
+                callees
+            })
+            .collect();
+        let recursive_nodes: HashSet<usize> = super::recursion::recursive_components(&calls)
+            .into_iter()
+            .flatten()
+            .collect();
+        let recursive_targets: HashSet<usize> =
+            recursive_nodes.iter().map(|&node| keys[node].0).collect();
+        // A call of a recursive subroutine inlines nothing, whatever it omits.
+        let members: HashSet<usize> = (0..keys.len())
+            .filter(|&node| recursive_targets.contains(&keys[node].0))
+            .collect();
+        let sizes = fully_inlined_sizes(&own, &sites, &members);
+        // A subroutine's size is that of its largest call: one policy holds
+        // for all its calls, and a call that inlines its defaults inlines
+        // their calls too.
+        let mut inlined_sizes: HashMap<String, u64> = HashMap::default();
+        for (node, size) in sizes.into_iter().enumerate() {
+            let entry = inlined_sizes
+                .entry(names[keys[node].0].clone())
+                .or_default();
+            *entry = (*entry).max(size);
+        }
+        let recursive: HashSet<String> = recursive_targets
+            .iter()
+            .map(|&target| names[target].clone())
+            .collect();
+        if let Some(functions) = self.out_of_line() {
+            functions.recursive = recursive;
+            functions.inlined_sizes = inlined_sizes;
+        }
+    }
+
+    /// Whether a call of subroutine `name` goes out of line whatever its
+    /// arguments (see [`Self::out_of_line_policy`]), even constant ones,
+    /// which would otherwise keep it inlined to fold: when `name` is on a
+    /// cycle of the call graph, whose calls inlining cannot expand, or over
+    /// the size threshold, whose body does not fold smaller.
+    pub(super) fn out_of_line_whatever_arguments(&self, name: &str) -> bool {
+        self.calls
+            .as_deref()
+            .and_then(|graph| graph.out_of_line.as_ref())
+            .is_some_and(|functions| {
+                functions.recursive.contains(name)
+                    || (!functions.forced
+                        && functions
+                            .inlined_size(name)
+                            .is_some_and(|size| size > OUT_OF_LINE_STATEMENTS))
+            })
+    }
+
+    /// Whether a call of subroutine `name` may go out of line: always when
+    /// that is forced; otherwise when `name` is on a cycle of the call
+    /// graph, which inlining cannot expand, or when its fully inlined size
+    /// exceeds [`OUT_OF_LINE_STATEMENTS`]. Every other call is inlined, as
+    /// without out-of-line calls.
+    ///
+    /// The size is measured on the IR before anything is lowered (see
+    /// [`Self::mark_recursive`]), so the choice does not depend on the order
+    /// of lowering.
+    pub(super) fn out_of_line_policy(&self, name: &str) -> bool {
+        self.calls
+            .as_deref()
+            .and_then(|graph| graph.out_of_line.as_ref())
+            .is_some_and(|functions| {
+                functions.forced
+                    || functions.recursive.contains(name)
+                    || functions
+                        .inlined_size(name)
+                        .is_some_and(|size| size > OUT_OF_LINE_STATEMENTS)
+            })
+    }
+
+    /// Whether at most one activation of the unit of subroutine `name` can
+    /// be live at a time, so that its automatic unpacked arrays, which a
+    /// frame does not hold, may stay module variables (each activation
+    /// initializes them as its declarations say, as an inlined body does).
+    ///
+    /// A second activation could start only while one is live: by a call
+    /// from inside it, which only a cycle of the call graph makes (the
+    /// subroutine is not on one); or by another process while the first is
+    /// suspended, which only a suspension past the moment lets run (the body
+    /// has no delay and no `$stop`, nor do the bodies it reaches; a host
+    /// request is served before anything else runs, and `$finish` ends the
+    /// process). Processes run one at a time, so no other runs in between.
+    pub(super) fn single_activation(&mut self, name: &str) -> bool {
+        let recursive = self
+            .out_of_line()
+            .is_none_or(|functions| functions.recursive.contains(name));
+        !recursive && !self.process_state(name).yields
     }
 
     /// Why subroutine `name` cannot go out of line wherever it is called,
@@ -822,7 +1293,9 @@ impl ProcModule<'_> {
         // the caller's unit, which binds them as any inlined call does.
         if let Some(subroutine) = self.subroutine(name) {
             for param in &subroutine.params {
-                if param.direction.is_reference() {
+                // A `ref` formal of unpacked structure type binds each member
+                // to a member of the actual, which a place does not express.
+                if param.direction.is_reference() && !param.leaves.is_empty() {
                     note(Reason::RefFormal);
                 }
                 if !param.leaves.is_empty() {
@@ -850,7 +1323,10 @@ impl ProcModule<'_> {
                         // A delay suspends the process with the unit's
                         // frames, which the runtime keeps with the
                         // activation until the delay ends.
-                        sv::ir::Stmt::Delay { .. } => state.suspends = true,
+                        sv::ir::Stmt::Delay { .. } => {
+                            state.suspends = true;
+                            state.yields = true;
+                        }
                         sv::ir::Stmt::WaitEvent(_)
                         | sv::ir::Stmt::WaitImplicit { .. }
                         | sv::ir::Stmt::Wait(_)
@@ -899,9 +1375,13 @@ impl ProcModule<'_> {
                             }
                             // `$finish` ends and `$stop` suspends the
                             // process, the unit's frames with it.
-                            Some(SystemTaskKind::Control(
-                                RuntimeEventKind::Finish | RuntimeEventKind::Stop,
-                            )) => state.suspends = true,
+                            Some(SystemTaskKind::Control(RuntimeEventKind::Finish)) => {
+                                state.suspends = true;
+                            }
+                            Some(SystemTaskKind::Control(RuntimeEventKind::Stop)) => {
+                                state.suspends = true;
+                                state.yields = true;
+                            }
                             Some(SystemTaskKind::Control(_)) | None => note(Reason::HostRequest),
                         },
                         _ => {}
@@ -909,13 +1389,70 @@ impl ProcModule<'_> {
                     stmt_calls(stmt, &mut calls);
                 });
             }
+            let mut seen_defaults = super::procedural::SeenDefaults::default();
             while let Some((callee, args)) = calls.pop() {
                 match callee {
                     sv::ir::Callee::System(function) => {
                         use sv::ir::SystemFunction;
                         match function {
-                            // A process method acts on the calling process,
-                            // and some park it.
+                            // `process::self()`, the RNG state of a process,
+                            // a new semaphore and the triggers of events are
+                            // host requests a unit makes by suspending: none
+                            // parks the process, which continues as soon as
+                            // the host served it. The calling process holds
+                            // its RNG state while the call is suspended: the
+                            // frames that hold it give it back first. The
+                            // other process methods act on the calling
+                            // process, and some park it.
+                            SystemFunction::Process(
+                                celox_design::ProcessOp::SelfHandle
+                                | celox_design::ProcessOp::Srandom
+                                | celox_design::ProcessOp::GetRandstate
+                                | celox_design::ProcessOp::SetRandstate
+                                | celox_design::ProcessOp::SemaphoreNew
+                                | celox_design::ProcessOp::Trigger
+                                | celox_design::ProcessOp::TriggerNonblocking
+                                | celox_design::ProcessOp::Kill
+                                | celox_design::ProcessOp::Resume
+                                | celox_design::ProcessOp::SemaphorePut
+                                | celox_design::ProcessOp::SemaphoreTryGet,
+                            ) => state.suspends = true,
+                            // `suspend()` of the calling process parks it
+                            // until another process resumes it, `await()`
+                            // until another ends, and the blocking methods of
+                            // semaphores and mailboxes until they can be
+                            // served; the frames stay with the activation
+                            // meanwhile, and a mailbox method retries when the
+                            // process is woken.
+                            SystemFunction::Process(
+                                celox_design::ProcessOp::Suspend
+                                | celox_design::ProcessOp::Await
+                                | celox_design::ProcessOp::SemaphoreGet
+                                | celox_design::ProcessOp::MailboxPut
+                                | celox_design::ProcessOp::MailboxGet
+                                | celox_design::ProcessOp::MailboxPeek,
+                            ) => {
+                                state.suspends = true;
+                                state.yields = true;
+                            }
+                            SystemFunction::Process(
+                                celox_design::ProcessOp::MailboxNew
+                                | celox_design::ProcessOp::MailboxNum
+                                | celox_design::ProcessOp::MailboxTryPut
+                                | celox_design::ProcessOp::MailboxTryGet
+                                | celox_design::ProcessOp::MailboxTryPeek,
+                            ) => state.suspends = true,
+                            // A level wait whose predicate reads them is
+                            // waiting on the event or process too, which
+                            // only the predicate's own code can tell the
+                            // host; a unit's code serves every caller.
+                            SystemFunction::Process(
+                                celox_design::ProcessOp::Triggered
+                                | celox_design::ProcessOp::Status,
+                            ) => {
+                                state.suspends = true;
+                                state.observes_events = true;
+                            }
                             SystemFunction::Process(_) => note(Reason::HostRequest),
                             _ if function.is_host_request() => state.suspends = true,
                             SystemFunction::Urandom
@@ -961,7 +1498,7 @@ impl ProcModule<'_> {
                         if self.dpi_imports.contains_key(&callee) {
                             note(Reason::HostRequest);
                         } else if let Some(subroutine) = self.subroutine(&callee) {
-                            default_calls(subroutine, &args, &mut calls);
+                            default_calls(subroutine, &args, &mut calls, &mut seen_defaults);
                             pending.push(callee);
                         } else {
                             note(Reason::Other(format!("no subroutine `{callee}`")));
@@ -1017,6 +1554,7 @@ impl ProcModule<'_> {
             stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
         }
         let mut visited = HashSet::default();
+        let mut seen_defaults = super::procedural::SeenDefaults::default();
         while let Some((callee, args)) = calls.pop() {
             let sv::ir::Callee::Subroutine(name) = callee else {
                 continue;
@@ -1032,12 +1570,14 @@ impl ProcModule<'_> {
             // variables, which a combinational process's call cannot share
             // with it (see `Ff::out_of_line_callee`).
             if subroutine.automatic
+                && self.out_of_line_policy(&name)
                 && self.out_of_line_reason(&name).is_none()
-                && !self.constant_arguments(&subroutine, &args)
+                && (self.out_of_line_whatever_arguments(&name)
+                    || !self.constant_arguments(&subroutine, &args))
             {
                 return true;
             }
-            default_calls(&subroutine, &args, &mut calls);
+            default_calls(&subroutine, &args, &mut calls, &mut seen_defaults);
             if visited.insert(name) {
                 for stmt in &subroutine.body {
                     stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
@@ -1045,5 +1585,48 @@ impl ProcModule<'_> {
             }
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sizes_sum_the_calls_that_inline() {
+        // 0 calls 1 twice and 2 once; 2 is recursive, so it counts nothing.
+        let own = [1, 10, 100];
+        let sites = [vec![1, 1, 2], vec![], vec![2]];
+        let members: HashSet<usize> = [2].into_iter().collect();
+        assert_eq!(
+            fully_inlined_sizes(&own, &sites, &members),
+            vec![21, 10, 100]
+        );
+    }
+
+    #[test]
+    fn deep_call_chains_are_sized_without_recursion() {
+        // A chain of a million calls on a small stack.
+        let depth = 1_000_000;
+        let sizes = std::thread::Builder::new()
+            .stack_size(256 << 10)
+            .spawn(move || {
+                let own = vec![1; depth];
+                let sites: Vec<Vec<usize>> = (0..depth)
+                    .map(|node| {
+                        if node + 1 < depth {
+                            vec![node + 1]
+                        } else {
+                            Vec::new()
+                        }
+                    })
+                    .collect();
+                fully_inlined_sizes(&own, &sites, &HashSet::default())
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(sizes[0], depth as u64);
+        assert_eq!(sizes[depth - 1], 1);
     }
 }

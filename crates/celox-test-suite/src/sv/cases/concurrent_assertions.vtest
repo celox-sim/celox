@@ -321,3 +321,93 @@ endmodule"#)
 endmodule"#)
  (top Top) (run_until 8)
  (assert_eq low_passed 1) (assert_eq low_failed 2) (assert_eq tick_failed 1))
+
+; Sequences over cycles (IEEE 1800-2023 16.7, 16.10, 16.11): every tick
+; starts an attempt, a fixed `##n` moves it to a later tick, a local
+; variable keeps the value its match item sampled, and a match-item call
+; sees it and the sampled values of its other arguments.
+(case sequences_over_cycles
+ (source "cycles.sv" #"module Top(output int s_passed, s_failed, p_failed, noted, sum, q_failed,
+  output int w_failed, d_passed, d_failed, seen_sum, g_passed, g_failed,
+  output int i_passed, i_failed, acc, order, c_failed);
+ bit clk;
+ int cnt;
+ int out;
+ always @(posedge clk) cnt <= cnt + 1;
+ assign out = cnt == 12 ? 0 : (cnt - 3) * 10 + 7;
+ function automatic void note(int value);
+  noted++;
+  sum += value;
+ endfunction
+ function automatic void seen(int value);
+  seen_sum += value;
+ endfunction
+ function automatic void pair(input int v, ref int sink);
+  sink += v;
+ endfunction
+ function automatic void step(int v);
+  order = order * 10 + v;
+ endfunction
+ sequence s; @(posedge clk) cnt % 4 == 1 ##1 cnt % 4 == 2; endsequence
+ assert property (s) s_passed++; else s_failed++;
+ assert property (@(posedge clk) (cnt % 4 == 1 ##1 cnt % 4 == 2)) g_passed++; else g_failed++;
+ assert property (@(posedge clk) cnt inside {1, 5} ##1 cnt % 4 == 2) i_passed++; else i_failed++;
+ // Steps of one tick run their calls in order (`##0`).
+ assert property (@(posedge clk) (cnt % 4 == 1, step(1)) ##0 (1, step(2)) |-> 1);
+ // Operator assignments and increments read the local's previous value.
+ property c; int y; @(posedge clk) (cnt % 4 == 1, y = cnt, y += 10, y++) |=> cnt == y - 10; endproperty
+ assert property (c) else c_failed++;
+ property p;
+  int x;
+  @(posedge clk) (cnt % 4 == 1, x = cnt * 10) |-> ##3 (out == x + 7, note(x), seen(cnt * 2), pair(.sink(acc), .v(cnt)));
+ endproperty
+ assert property (p) else p_failed++;
+ assert property (@(posedge clk) cnt % 4 == 2 |=> cnt % 4 == 0) else q_failed++;
+ // A match item converts its value to the local's type.
+ property w; bit [3:0] y; @(posedge clk) (cnt % 4 == 1, y = 5'h1f) |-> y == 4'hf; endproperty
+ assert property (w) else w_failed++;
+ // `disable iff` reads the current value of `cnt`, one more than sampled.
+ property d; int z; @(posedge clk) disable iff (cnt >= 8) (1, z = cnt) |-> z < 8; endproperty
+ assert property (d) d_passed++; else d_failed++;
+ initial repeat (20) begin #1 clk = 1; #1 clk = 0; end
+endmodule"#)
+ (top Top) (run_until 41)
+ (assert_eq s_passed 5) (assert_eq s_failed 15) (assert_eq p_failed 1)
+ (assert_eq noted 3) (assert_eq sum 190) (assert_eq q_failed 5)
+ (assert_eq w_failed 0) (assert_eq d_passed 7) (assert_eq d_failed 0)
+ (assert_eq seen_sum 56) (assert_eq g_passed 5) (assert_eq g_failed 15)
+ (assert_eq i_passed 2) (assert_eq i_failed 18) (assert_eq acc 28)
+ (assert_eq order 1212121212) (assert_eq c_failed 0))
+
+(case sequence_values_over_sampled_ticks
+ (source "sampled.sv" #"module Top(output int marks, n_passed, n_failed, kept, f_failed,
+  output int r_failed, r_negated, r_single);
+ bit clk;
+ int cnt;
+ bit [7:0] bus = 8'b0100_0100;
+ always @(posedge clk) cnt <= cnt + 1;
+ function automatic void mark();
+  marks++;
+ endfunction
+ function automatic void keep(int value);
+  kept += value;
+ endfunction
+ // A named sequence of one tick with a match item is an antecedent.
+ sequence n; (cnt % 4 == 1, mark()); endsequence
+ assert property (@(posedge clk) n |-> cnt % 8 == 1) n_passed++; else n_failed++;
+ // A local takes the value over the sampled values of its tick (16.10):
+ // `cnt`, there one less than its value after the clock's NBA.
+ property v; int x; @(posedge clk) (cnt % 4 == 1, x = $countones(cnt) + cnt) |=> (1, keep(x)); endproperty
+ assert property (v);
+ // A select's bound is sampled, also beside a function call (16.6).
+ assert property (@(posedge clk) cnt % 4 == 1 |=> bus[cnt % 8] && $countones(cnt) > 0) else f_failed++;
+ // A sampled-value function decides its step at that step's tick.
+ assert property (@(posedge clk) $rose(cnt[1]) |=> cnt[1]) else r_failed++;
+ assert property (@(posedge clk) $rose(cnt[1]) |=> !cnt[1]) else r_negated++;
+ assert property (@(posedge clk) $rose(cnt[1]) |-> !cnt[1]) else r_single++;
+ initial repeat (20) begin #1 clk = 1; #1 clk = 0; end
+endmodule"#)
+ (top Top) (run_until 41)
+ (assert_eq marks 5) (assert_eq n_passed 18) (assert_eq n_failed 2)
+ (assert_eq kept 55) (assert_eq f_failed 0) (assert_eq r_failed 0)
+ (assert_eq r_negated 5) (assert_eq r_single 5))

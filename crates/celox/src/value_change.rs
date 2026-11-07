@@ -69,9 +69,12 @@ fn instrument_unit<A>(unit: &mut ExecutionUnit<A>, watched: impl Fn(&A) -> bool)
 }
 
 /// Follow every blocking update of a `watched` object in a process kernel
-/// of `sir` with a value change point. A flip-flop commit or a settle shows
-/// its updates when the unit ends, and so does a function, whose units run
-/// in the phases too.
+/// or a function unit of `sir` with a value change point. A flip-flop
+/// commit or a settle shows its updates when the unit ends. A function
+/// unit runs inside the unit that calls it: inside a kernel, its points show
+/// the host the updates as the kernel's own; inside a flip-flop or settle
+/// unit, which runs with no host context, they do nothing and the updates
+/// show when that unit ends.
 pub(crate) fn instrument(sir: &mut SirProgram, watched: &HashSet<AbsoluteAddr>) {
     if watched.is_empty() {
         return;
@@ -82,6 +85,35 @@ pub(crate) fn instrument(sir: &mut SirProgram, watched: &HashSet<AbsoluteAddr>) 
     for unit in &mut sir.processes {
         instrument_unit(unit, stable);
     }
+    let mut functions = false;
+    for function in &mut sir.functions {
+        functions |= instrument_unit(&mut function.unit, stable);
+    }
+    // A call's effects include the host interaction of its points.
+    if functions {
+        sir.summarize_calls();
+    }
+}
+
+/// Whether `unit` has a value change point, or calls a function of `sir`
+/// that has one, directly or through further calls.
+fn reaches_points<A, U>(unit: &ExecutionUnit<U>, sir: &celox_sir::SirProgram<A, U>) -> bool {
+    let mut seen = HashSet::default();
+    let mut pending = vec![unit];
+    while let Some(unit) = pending.pop() {
+        if has_points(unit) {
+            return true;
+        }
+        for instruction in unit.blocks.values().flat_map(|block| &block.instructions) {
+            if let SIRInstruction::Call { function, .. } = instruction
+                && seen.insert(function.0)
+                && let Some(callee) = sir.functions.get(function.0 as usize)
+            {
+                pending.push(&callee.unit);
+            }
+        }
+    }
+    false
 }
 
 /// Whether `unit` has a value change point.
@@ -201,7 +233,12 @@ pub(crate) fn lower_unit<A>(
 pub(crate) fn lower(program: &mut crate::ir::LaidOutProgram, native: bool) -> bool {
     use celox_sir::SIROffset;
 
-    let any = program.sir.processes.iter().any(has_points);
+    let any = program.sir.processes.iter().any(has_points)
+        || program
+            .sir
+            .functions
+            .iter()
+            .any(|function| has_points(&function.unit));
     if !any {
         return false;
     }
@@ -233,11 +270,18 @@ pub(crate) fn lower(program: &mut crate::ir::LaidOutProgram, native: bool) -> bo
             .processes
             .iter()
             .enumerate()
-            .filter(|(_, unit)| has_points(unit))
+            .filter(|(_, unit)| reaches_points(unit, &program.sir))
             .map(|(index, _)| index)
             .collect();
     }
-    for unit in &mut program.sir.processes {
+    let units = program.sir.processes.iter_mut().chain(
+        program
+            .sir
+            .functions
+            .iter_mut()
+            .map(|function| &mut function.unit),
+    );
+    for unit in units {
         lower_unit(unit, |unit, site| {
             let Some((service, (context_slot, now))) = service else {
                 return Lowered {
@@ -300,6 +344,10 @@ pub(crate) fn lower(program: &mut crate::ir::LaidOutProgram, native: bool) -> bo
                 failed: Some(failed),
             }
         });
+    }
+    // The calls of functions whose points changed have new effects.
+    if !program.sir.functions.is_empty() {
+        program.sir.summarize_calls();
     }
     service.is_some()
 }

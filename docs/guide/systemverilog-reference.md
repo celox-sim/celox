@@ -433,11 +433,11 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   edges (`@(e or posedge clk)`), `triggered` in a `wait` condition with other
   operands or read by a function that the condition calls, and `wait_order`.
 - Timing controls in processes: impure function calls in event expressions,
-  `wait` or event expressions reading a static task argument, and `wait`
-  conditions or event expressions reading a class property (directly, through
-  a handle or a function, or a container held in one), since a write of the
-  property does not wake the waiting process. Static class properties are
-  module variables and may be waited on.
+  `wait` or event expressions reading a static task argument, event
+  expressions reading a class property (directly, through a handle or a
+  function, or a container held in one), and `wait` conditions reading the
+  random mode of a property (`rand_mode()`, `constraint_mode()`). Static class
+  properties are module variables and may be waited on in both.
 - Nonblocking assignments inside `always_latch` ([#431](https://github.com/celox-sim/celox/issues/431)); use blocking assignments for the supported latch subset.
 - Inferred latches inside `always_comb` are rejected by default. Set `inferred_latch = "warn"` or `"allow"` in `celox.toml` under `[diagnostics]` to permit retained blocking assignments. Ordinary `always @*` and explicit `always_latch` do not require this option.
 - Ports and instances: non-ANSI port expressions such as `module m({a, b}, c[3:0], .p(d))` ([#1953](https://github.com/celox-sim/celox/issues/1953)), `ref` ports
@@ -1038,6 +1038,15 @@ unsupported, including when the inference option is enabled.
   (IEEE 1800-2023 9.4.2). In `a = 1; @(a ^ b);` the write to `a` is not an
   event of the wait; the process resumes when `a` or `b` changes later.
   Icarus 13.0 wakes on the earlier write; Verilator 5.052 agrees with Celox.
+- A `wait` condition may read class properties, directly, through a handle,
+  `this` or a function it calls, or as a container held in one
+  (`wait (obj.q.size() > 0)`). The condition is checked again after any store
+  of a property it reads, through any handle, in any process or module, and
+  after every `randomize()` call (9.4.3). A store of the same property of
+  another object, or of the value the property holds, also makes it check
+  again. So such a condition must be a value of what it reads: one that
+  calls a task or a function with an effect, or that reads the time, a random
+  number, a mailbox or a process, is rejected.
 - `posedge` and `negedge` of a multi-bit expression follow its least
   significant bit (Table 9-2): `@(posedge v)` ignores `v[3]`, and
   `@(posedge v[3])` follows it. Transitions through X and Z count as in that
@@ -1257,6 +1266,22 @@ of signed typedefs, classes with non-integral value parameters, and operands
 other than names and data types, such as `$typename(a + b)`. Simulators
 differ in this spelling; Verilator, Icarus and xezim each deviate from 20.6.1
 (see the [suite limitations](https://github.com/celox-sim/celox/blob/master/crates/celox-test-suite/LIMITATIONS.md)).
+
+
+### Type operator
+
+`var type(e)` and `var type(data_type)` (IEEE 1800-2023 6.23) declare
+variables: `var type(a + b) c;` declares `c` with the self-determined type of
+`a + b`, an integral vector of its width and signing, `real`, `shortreal` or
+`string`, which is not evaluated; a variable keeps its declared type, an
+enumeration or struct among them. Without `var` the declaration is rejected.
+Comparing two type references with `==`, `!=`, `===` or `!==` is a constant
+that tells whether the types match (6.22.1), also in a parameter or a generate
+condition, and a `case` statement or case generate construct on a type
+reference selects its first matching arm at elaboration. A type reference
+compared with a value, range items in a `case` on a type, and a type operator
+applied to an expression that reads a port, or to any expression in a
+generate block, are rejected.
 
 ### System functions called as statements
 
@@ -1914,7 +1939,7 @@ The cases that remain excluded fall into these groups:
 
 ### Concurrent assertions
 
-Module and generate items support single-cycle Boolean `assert property`,
+Module and generate items support Boolean `assert property`,
 `assume property`, and `cover property` with an explicit clock:
 
 ```systemverilog
@@ -1946,8 +1971,25 @@ instance, or of a sequence used as the antecedent, overrides the assertion's
 optionally after the assertion's clocking event, and a consequent instance may
 not have a different clock or an implication.
 
+A sequence may also be steps a fixed number of clock ticks apart, as in
+`a ##1 b` or `(valid, x = in) ##4 (out == x + 4)`, with `|->` or `|=>`
+between two such sequences (IEEE 1800-2023 16.7, 16.12.7), spanning at most
+1024 ticks. A named sequence
+or property may declare local variables of built-in integral types; match items
+assign them and call subroutines, which run in Reactive with the actions
+and see the values the assignments sampled (16.10, 16.11). Every value of a
+step, a match item's included, is evaluated over the sampled values of the
+tick that decides it, so sampled-value functions and variable selects may
+appear in any step (16.6). A named sequence may be the antecedent of `|->`.
+Each clock tick
+starts an attempt; a step that misses fails the attempt, or makes it succeed
+vacuously in the antecedent, and the last step's match runs the pass action.
+
 Procedural concurrent assertions, implicit/default clocking, named properties
-and sequences with formal arguments or elsewhere, delays/repetition,
-sampled-history and user-function predicates, and timed/NBA action statements
-remain unsupported.
+and sequences with formal arguments or elsewhere, cycle-delay ranges,
+repetition, sequence operators (`and`, `or`, `intersect`, `throughout`),
+instances inside a multi-cycle sequence, `disable iff` with a multi-cycle
+sequence, user function calls in predicates and in the values and by-value
+arguments of match items, and timed/NBA action
+statements remain unsupported.
 Explicit `disable iff` follows the clock in the supported syntax.

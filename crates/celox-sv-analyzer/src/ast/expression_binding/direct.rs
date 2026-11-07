@@ -172,6 +172,186 @@ fn split_arguments(
     Ok((positional, named))
 }
 
+/// The class that cast target `target` names, as in `C'(h)` or
+/// `C#(N)'(h)`, by the type the cast has.
+pub(in crate::ast) fn cast_target_class(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    target: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Option<String> {
+    // Only a type expression can name a class; a size is not evaluated here.
+    if !matches!(
+        native.expression(ungroup(target, native)).kind,
+        ExprKind::Type(_)
+            | ExprKind::Name(_)
+            | ExprKind::Member { .. }
+            | ExprKind::Parameterized { .. }
+    ) {
+        return None;
+    }
+    let target = expression_types::cast_type(tree, session, target, native, dimensions)?;
+    expression_types::class_name(&session.types, target)
+}
+
+/// Whether `target'(operand)` casts to a class handle type, which a static
+/// cast does only as an assignment (IEEE 1800-2023 6.24.1): a handle of a
+/// class that derives from the target's. A downcast needs the run-time check
+/// of `$cast` (8.16), and a class is no destination of a bit-stream cast
+/// (6.24.3).
+fn class_cast(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    target: ExprId,
+    operand: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<bool> {
+    let Some(class) = cast_target_class(tree, session, target, native, dimensions) else {
+        return Ok(false);
+    };
+    // The operand's type decides whether the cast is valid, so it must be
+    // known: a conditional whose arms have no common type has none
+    // (11.4.11).
+    let Ok(source) = expression_types::type_of(tree, session, operand, native, dimensions) else {
+        if matches!(
+            native.expression(ungroup(operand, native)).kind,
+            ExprKind::Conditional { .. }
+        ) {
+            return Err(AnalyzerError::InvalidCast(format!(
+                "the conditional operand of a cast to class `{class}` has no common type \
+                 (IEEE 1800-2023 11.4.11)"
+            )));
+        }
+        return Err(unsupported(format!(
+            "static cast to class `{class}` of an operand whose type is not resolved"
+        )));
+    };
+    if !matches!(
+        session.types.data(source),
+        semantic_types::TyData::Class(_) | semantic_types::TyData::Null
+    ) {
+        return Err(AnalyzerError::InvalidCast(format!(
+            "`{}` is no class handle to cast to class `{class}`",
+            session.types.spell(source)
+        )));
+    }
+    objects::check_assignment(tree, session, operand, native, dimensions, &class, || {
+        "static cast".to_owned()
+    })
+    .map_err(|error| match error {
+        AnalyzerError::IncompatibleClassHandle { actual, target, .. } => {
+            AnalyzerError::InvalidCast(format!(
+                "a handle of class `{actual}` is not assignment compatible with class \
+                 `{target}`; a downcast needs `$cast`"
+            ))
+        }
+        error => error,
+    })?;
+    Ok(true)
+}
+
+/// The stream layout of the target of cast `target'(operand)`, when its
+/// type is known, after checking that the stream lowering gives a layout to
+/// both the operand and the target (6.24.3): one it cannot give is an
+/// unsupported cast rather than a stream of another shape.
+fn stream_layouts(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    target: ExprId,
+    operand: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<semantic_types::StreamLayout>> {
+    use semantic_types::StreamRole;
+    // A stream operand's items are laid out where it is packed.
+    if !streams::is_stream(operand, native)
+        && let Ok(source) = expression_types::type_of(tree, session, operand, native, dimensions)
+    {
+        session
+            .types
+            .stream_layout(source, StreamRole::Operand)
+            .map_err(unsupported)?;
+    }
+    let names_type = match &native.expression(ungroup(target, native)).kind {
+        ExprKind::Type(_) => true,
+        _ => call_name(tree, target, native)
+            .is_some_and(|name| dimensions.type_aliases.contains_key(&name)),
+    };
+    if !names_type {
+        return Ok(None);
+    }
+    let Some(target) = expression_types::cast_type(tree, session, target, native, dimensions)
+    else {
+        return Ok(None);
+    };
+    // A streaming concatenation is the operand only of a cast to a
+    // bit-stream type (IEEE 1800-2023 11.4.14, 6.24.3), which a real, a
+    // chandle or a virtual interface is not.
+    if streams::is_stream(operand, native)
+        && matches!(
+            session.types.data(target),
+            semantic_types::TyData::Real
+                | semantic_types::TyData::Shortreal
+                | semantic_types::TyData::Chandle
+                | semantic_types::TyData::VirtualInterface { .. }
+        )
+    {
+        return Err(AnalyzerError::InvalidStream(format!(
+            "a streaming concatenation cast to `{}`, which is not a bit-stream type",
+            session.types.spell(target)
+        )));
+    }
+    session
+        .types
+        .stream_layout(target, StreamRole::Target)
+        .map(Some)
+        .map_err(unsupported)
+}
+
+/// Whether type cast `target'(operand)` converts between bit-stream types
+/// that are not both integral (IEEE 1800-2023 6.24.3): its operand packs
+/// into the target as the stream `{>>{operand}}` would, index 0 first.
+fn bit_stream_cast(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    target: ExprId,
+    operand: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> bool {
+    // A size or signing cast is no bit-stream cast; its size is not
+    // evaluated here.
+    let names_type = match &native.expression(ungroup(target, native)).kind {
+        ExprKind::Type(_) => true,
+        _ => call_name(tree, target, native)
+            .is_some_and(|name| dimensions.type_aliases.contains_key(&name)),
+    };
+    if !names_type {
+        return false;
+    }
+    let Some(target) = expression_types::cast_type(tree, session, target, native, dimensions)
+    else {
+        return false;
+    };
+    let Ok(source) = expression_types::type_of(tree, session, operand, native, dimensions) else {
+        return false;
+    };
+    let integral = |id| matches!(session.types.data(id), semantic_types::TyData::Packed(_));
+    // An integral value converts to a string by its own rule, zero-filled
+    // on the left to whole characters (6.16), not by the stream's
+    // right-padded bytes.
+    let string = matches!(session.types.data(target), semantic_types::TyData::String);
+    // Fixed sizes that differ are reported where the stream is packed.
+    !(integral(source) && (integral(target) || string))
+        && matches!(
+            session.types.castable(source, target),
+            Ok(semantic_types::Castable::BitStream { .. })
+                | Err(semantic_types::Mismatch::Size { .. })
+        )
+}
+
 pub(in crate::ast) fn cast_target_native(
     target: ExprId,
     operand: ExprId,
@@ -194,9 +374,27 @@ pub(in crate::ast) fn cast_target_native(
             short: ty.kind() == TypeKind::Shortreal,
         });
     }
+    // The operand of a size or signing cast is integral (6.24.1).
+    let check_integral = |session: &mut Session, cast: &str| {
+        let Ok(operand) = expression_types::type_of(tree, session, operand, native, dimensions)
+        else {
+            return Ok(());
+        };
+        if matches!(
+            session.types.data(operand),
+            semantic_types::TyData::Packed(_)
+        ) {
+            return Ok(());
+        }
+        Err(AnalyzerError::InvalidCast(format!(
+            "the operand of a {cast} cast is `{}`, not an integral value",
+            session.types.spell(operand)
+        )))
+    };
     if let ExprKind::Name(name) = &native.expression(target).kind
         && matches!(name.spelling.as_str(), "signed" | "unsigned")
     {
+        check_integral(session, "signing")?;
         return Ok(casts::RuntimeCastTarget::Signing(name.spelling == "signed"));
     }
     let named = call_name(tree, target, native);
@@ -243,6 +441,7 @@ pub(in crate::ast) fn cast_target_native(
             .and_then(|value| usize::try_from(value).ok())
             .filter(|width| *width > 0)
             .ok_or_else(|| unsupported("cast target type"))?;
+        check_integral(session, "size")?;
         (
             ExprType {
                 width: value,
@@ -286,7 +485,11 @@ enum Finish {
         system: Option<SystemFunction>,
     },
     Cast(casts::RuntimeCastTarget),
-    Repeat,
+    /// A replication; `literals` when every replicated operand is a string
+    /// literal, which a non-constant count makes a string replication.
+    Repeat {
+        literals: bool,
+    },
     Inside(Vec<bool>),
     /// A string operation on the bound children, see [`strings`].
     StringCall(StringOp),
@@ -528,6 +731,36 @@ fn bind_value_in(
                     )?);
                     continue;
                 }
+                // A fixed-size unpacked array takes the elements of a
+                // dynamically sized one (7.6). A conditional is bound below,
+                // its operands receiving the array in turn.
+                if let Some(shape) = target
+                    .as_deref()
+                    .filter(|shape| !shape.unpacked.is_empty() && shape.container.is_none())
+                    .filter(|_| {
+                        !matches!(
+                            native.expression(ungroup(id, native)).kind,
+                            ExprKind::Conditional { .. }
+                        )
+                    })
+                    && containers::native_type(id, native, tree, session, dimensions)?.is_some()
+                {
+                    let source = expression_types::type_of(tree, session, id, native, dimensions)?;
+                    let fixed = shape
+                        .type_id(&mut session.types, &tree.functions, &dimensions.const_env)
+                        .ok_or_else(|| unsupported("type of a fixed-size unpacked array"))?;
+                    if session.types.assignable_array(source, fixed).is_err() {
+                        return Err(AnalyzerError::IncompatibleUnpackedArray {
+                            context: "assignment".into(),
+                            actual: session.types.spell(source),
+                            target: session.types.spell(fixed),
+                        });
+                    }
+                    values.push(streams::assign_to_fixed(
+                        id, shape, native, tree, session, dimensions,
+                    )?);
+                    continue;
+                }
                 if let Some(value) = locators::index(id, native, tree, session, dimensions)? {
                     values.push(value);
                     continue;
@@ -740,6 +973,14 @@ fn bind_value_in(
                         permits.grant_if(operator == "!", *expression);
                         (Finish::Unary(operator.clone()), vec![(*expression, None)])
                     }
+                    // A comparison of type references is a constant
+                    // (IEEE 1800-2023 6.23).
+                    ExprKind::Binary { .. } if type_references::compares(id, native) => {
+                        values.push(type_references::comparison(
+                            tree, session, id, native, dimensions,
+                        )?);
+                        continue;
+                    }
                     ExprKind::Binary {
                         left,
                         operator,
@@ -801,13 +1042,52 @@ fn bind_value_in(
                         (Finish::Concat, parts.iter().map(|id| (*id, None)).collect())
                     }
                     ExprKind::Replication { count, expressions } if !expressions.is_empty() => {
+                        let literals = expressions.iter().all(|&id| {
+                            matches!(
+                                &native.expression(ungroup(id, native)).kind,
+                                ExprKind::Literal(text) if text.starts_with('"')
+                            )
+                        });
                         let mut children = vec![(*count, None)];
                         children.extend(expressions.iter().map(|id| (*id, None)));
-                        (Finish::Repeat, children)
+                        (Finish::Repeat { literals }, children)
                     }
                     ExprKind::Cast { target, expression }
-                        if streams::is_stream(*expression, native) =>
+                        if class_cast(tree, session, *target, *expression, native, dimensions)? =>
                     {
+                        // An upcast is the assignment of the handle (6.24.1).
+                        values.push(bind_value(
+                            *expression,
+                            native,
+                            tree,
+                            session,
+                            dimensions,
+                            None,
+                        )?);
+                        continue;
+                    }
+                    ExprKind::Cast { target, expression }
+                        if streams::is_stream(*expression, native)
+                            || bit_stream_cast(
+                                tree,
+                                session,
+                                *target,
+                                *expression,
+                                native,
+                                dimensions,
+                            ) =>
+                    {
+                        // Both sides convert by their layouts in a stream
+                        // (6.24.3), which also tells which the lowering
+                        // cannot give yet.
+                        let target_layout = stream_layouts(
+                            tree,
+                            session,
+                            *target,
+                            *expression,
+                            native,
+                            dimensions,
+                        )?;
                         // A cast to a type that is not integral receives the
                         // stream as an assignment does.
                         let ty = match call_name(tree, *target, native) {
@@ -822,13 +1102,20 @@ fn bind_value_in(
                         if let Some(shape) = ty
                             .as_ref()
                             .map(procedural::dimensions_from_type)
-                            .filter(|shape| {
-                                shape.container.is_some()
-                                    || shape.string
-                                    || !shape.unpacked.is_empty()
+                            .filter(|shape| match target_layout {
+                                Some(semantic_types::StreamLayout::Bits {
+                                    element: None, ..
+                                }) => false,
+                                Some(_) => true,
+                                None => {
+                                    shape.container.is_some()
+                                        || shape.string
+                                        || !shape.unpacked.is_empty()
+                                }
                             })
                         {
-                            let receiver = streams::receiver(&shape, &tree.functions, dimensions)?;
+                            let receiver =
+                                streams::cast_receiver(&shape, &tree.functions, dimensions)?;
                             values.push(streams::pack(
                                 *expression,
                                 Some(receiver),
@@ -1867,7 +2154,7 @@ fn bind_value_in(
                             casts::runtime_cast_target_expr(tree, target, operand, dimensions)?
                         }
                     }
-                    Finish::Repeat
+                    Finish::Repeat { .. }
                         if operands[1..]
                             .iter()
                             .any(|operand| strings::string_value(operand, dimensions)) =>
@@ -1882,14 +2169,43 @@ fn bind_value_in(
                         };
                         strings::call(StringOp::Replicate, vec![string, count])
                     }
-                    Finish::Repeat => {
+                    Finish::Repeat { literals } => {
                         let count = operands.remove(0);
-                        let count = expr_to_const(session, count.clone())
-                            .or_else(|| expr_to_index_const(tree, session, count, dimensions))
-                            .ok_or_else(|| unsupported("replication count"))?;
-                        Expr::RepeatConcat {
-                            count,
-                            parts: operands,
+                        let constant = expr_to_const(session, count.clone()).or_else(|| {
+                            expr_to_index_const(tree, session, count.clone(), dimensions)
+                        });
+                        // A count that names variables is not constant, even
+                        // as an index expression.
+                        let constant = constant.filter(|count| {
+                            !literals
+                                || eval_ast_const_expr(
+                                    &tree.functions,
+                                    count,
+                                    &dimensions.const_env,
+                                )
+                                .is_some()
+                        });
+                        match constant {
+                            Some(count) => Expr::RepeatConcat {
+                                count,
+                                parts: operands,
+                            },
+                            // A replication of string literals by a count that
+                            // is not constant is a string replication: the
+                            // literals convert to strings, and the result is
+                            // that many copies (Table 6-9, 11.4.12.2).
+                            None if literals => {
+                                let parts: Vec<Expr> = operands
+                                    .into_iter()
+                                    .map(|operand| strings::to_string(operand, dimensions))
+                                    .collect();
+                                let string = match <[Expr; 1]>::try_from(parts) {
+                                    Ok([string]) => string,
+                                    Err(parts) => strings::call(StringOp::Concat, parts),
+                                };
+                                strings::call(StringOp::Replicate, vec![string, count])
+                            }
+                            None => Err(unsupported("replication count"))?,
                         }
                     }
                     Finish::Inside(ranges) => {
@@ -3668,26 +3984,36 @@ pub(in crate::ast) fn check_argument(
             || format!("argument {ordinal} of `{name}`"),
             dimensions,
         )?;
-        if let Some(class) = shape.class.as_deref().filter(|_| shape.unpacked.is_empty())
-            && copies_actual_in(dimensions, name, position)
-        {
-            objects::check_assignment(tree, session, actual, native, dimensions, class, || {
-                format!("argument {ordinal} of `{name}`")
-            })?;
+        if let Some(class) = shape.class.as_deref().filter(|_| shape.unpacked.is_empty()) {
+            use crate::procedural::ParamDirection;
+            let direction = dimensions
+                .subroutine_directions
+                .get(name)
+                .and_then(|directions| directions.get(position));
+            let context = || format!("argument {ordinal} of `{name}`");
+            if matches!(
+                direction,
+                Some(ParamDirection::Input | ParamDirection::Inout)
+            ) {
+                objects::check_assignment(
+                    tree, session, actual, native, dimensions, class, context,
+                )?;
+            }
+            // An output or inout formal is assigned back to its actual
+            // (13.5.1).
+            if matches!(
+                direction,
+                Some(ParamDirection::Output | ParamDirection::Inout)
+            ) && let Some(target) =
+                objects::native_class(tree, session, actual, native, dimensions)
+            {
+                objects::check_class_assignment(
+                    tree, session, dimensions, class, &target, context,
+                )?;
+            }
         }
     }
     Ok(())
-}
-
-/// Whether the call copies actual `position` of subroutine `name` into its
-/// formal: an input or inout (13.5.1).
-fn copies_actual_in(dimensions: &PackedDimensions, name: &str, position: usize) -> bool {
-    use crate::procedural::ParamDirection;
-    dimensions
-        .subroutine_directions
-        .get(name)
-        .and_then(|directions| directions.get(position))
-        .is_some_and(|direction| matches!(direction, ParamDirection::Input | ParamDirection::Inout))
 }
 
 /// Bind actual `actual` of formal `position` of subroutine `name`, which
