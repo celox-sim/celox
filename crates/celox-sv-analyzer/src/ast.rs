@@ -3036,6 +3036,44 @@ pub(crate) const OBJECT_VALUE: &str = crate::ir::PLACE_VALUE;
 /// An [`LValue::Object`] past the statement that assigns it: the body
 /// builder lowers each place with its statement, into a load and a store of
 /// the object (`BodyBuilder::place_assignment`), so no other pass sees it.
+/// `env` with the declared width and signedness of each parameter of
+/// `types`, by which the type table evaluates the ranges that name them
+/// (IEEE 1800-2023 6.20.2): `~P` of a 4-bit `P` is 4 bits wide.
+pub(crate) fn with_parameter_types<'a>(
+    env: &ConstEnv,
+    types: impl IntoIterator<Item = (&'a str, usize, bool)>,
+) -> ConstEnv {
+    let mut env = env.clone();
+    for (name, width, signed) in types {
+        env.insert(dimensions::parameter_width_marker(name), width as i128);
+        env.insert(
+            dimensions::parameter_signed_marker(name),
+            i128::from(signed),
+        );
+    }
+    env
+}
+
+/// The IR type of `ty`, whose ranges name constants of `env`, with the
+/// bounds of its packed dimensions as the session's type table resolves
+/// them (see [`crate::ir::Type::packed_bounds`]).
+pub(crate) fn ir_type(
+    session: &mut Session,
+    functions: &const_functions::ConstantFunctions,
+    ty: Type,
+    env: &ConstEnv,
+) -> crate::ir::Type {
+    let bounds = semantic_types::packed_bounds(&mut session.types, functions, &ty, env);
+    crate::ir::Type::from_ast(
+        ty,
+        &const_functions::Environment {
+            constants: env,
+            functions,
+        },
+    )
+    .with_packed_bounds(bounds)
+}
+
 pub(crate) fn lowered_object() -> ! {
     unreachable!("an object place is lowered with the statement that assigns it")
 }
