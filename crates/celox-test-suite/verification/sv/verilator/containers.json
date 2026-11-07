@@ -182,6 +182,17 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:32:19: CVTPACKSTRING is not an unpacked array, but is in an unpacked array context\n                                : ... note: In instance 'celox_suite_tb.dut'\n   32 |     assign cont = sd;\n      |                   ^~\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: <case>/source_0.sv:34:14: CVTPACKSTRING is not an unpacked array, but is in an unpacked array context\n                                : ... note: In instance 'celox_suite_tb.dut'\n   34 |         sf = sd;\n      |              ^~\n%Error: <case>/source_0.sv:39:14: VARREF 'cd' is not an unpacked array, but is in an unpacked array context\n                                : ... note: In instance 'celox_suite_tb.dut'\n   39 |         cf = cd;\n      |              ^~\n%Error: <case>/source_0.sv:44:14: VARREF 'pd' is not an unpacked array, but is in an unpacked array context\n                                : ... note: In instance 'celox_suite_tb.dut'\n   44 |         pf = pd;\n      |              ^~\n%Error: <case>/source_0.sv:46:16: CVTPACKSTRING is not an unpacked array, but is in an unpacked array context\n                                : ... note: In instance 'celox_suite_tb.dut'\n   46 |         made = make();\n      |                ^~~~\n%Error: <case>/source_0.sv:48:27: VARREF 'cd' is not an unpacked array, but is in an unpacked array context\n                                : ... note: In instance 'celox_suite_tb.dut'\n   48 |         argument = second(cd) == 4;\n      |                           ^~\n%Warning-ZERODLY: <case>/testbench.sv:103:25: Value of # delay control statically unknown. Assuming it can be #0.\n                                            : ... If all # delays are non-zero at runtime,\n                                            : ... use '--no-sched-zero-delay' for improved performance.\n                                            : ... If a real #0 is expected at runtime,\n                                            : ... use '--sched-zero-delay' to suppress this warning.\n  103 |         if (t1 > $time) #(t1 - $time);\n      |                         ^\n                  ... For warning description see https://verilator.org/warn/ZERODLY?v=5.052\n                  ... Use \"/* verilator lint_off ZERODLY */\" and lint_on around source to disable this message.\n%Error: Exiting due to 12 error(s)\n",
+      "expectation": "Simulation",
+      "name": "containers::fixed_size_arrays_take_dynamic_arrays_of_any_element_type",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

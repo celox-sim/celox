@@ -310,6 +310,17 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "containers::fixed_size_arrays_take_dynamic_arrays_of_any_element_type at 2490:47: assert_eq structs: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "containers::fixed_size_arrays_take_dynamic_arrays_of_any_element_type",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

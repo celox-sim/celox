@@ -1266,6 +1266,30 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "compile",
                             "internal error: Empty NexusSet from wait expression.",
                         ),
+                        (
+                            "icarus",
+                            "containers::fixed_size_arrays_take_dynamic_arrays_of_any_element_type",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "sorry: Unpacked structs not supported.",
+                        ),
+                        (
+                            "verilator",
+                            "containers::fixed_size_arrays_take_dynamic_arrays_of_any_element_type",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "is not an unpacked array, but is in an unpacked array context",
+                        ),
+                        (
+                            "xezim",
+                            "containers::fixed_size_arrays_take_dynamic_arrays_of_any_element_type",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq structs: expected 0x1, got 0x0",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }
