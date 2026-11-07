@@ -142,7 +142,8 @@ Standard streams, named pipes and devices remain live external channels. Their a
 and delivered output are not rewound. No handler state enters the core checkpoint.
 
 Source-driven `$dumpfile`/`$dumpvars` recording resumes in a new, uniquely named
-`<original-name>.resume-<id>.vcd` beside the original file; the CLI reports its path.
+`<original-name>.resume-<id>.<ext>` beside the original file, keeping its
+extension and format; the CLI reports its path.
 The original trace is neither truncated nor appended to. Each segment has its own
 header and starts at the restored time with the saved signal selections and
 `$dumpoff`/`$dumpon` state. `$dumplimit` retains its configured per-file limit with

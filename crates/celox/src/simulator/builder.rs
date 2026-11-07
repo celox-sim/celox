@@ -1787,7 +1787,7 @@ mod host {
         program: LaidOutProgram,
         warnings: Vec<CompilationWarning>,
         options: SimulatorOptions,
-        vcd_path: Option<std::path::PathBuf>,
+        vcd_path: Option<(std::path::PathBuf, crate::WaveformFormat)>,
         injected_components: crate::InjectedComponents,
         _target: std::marker::PhantomData<Target>,
     }
@@ -1822,7 +1822,7 @@ mod host {
     fn validate_native_vcd_layout(
         layout: &crate::MemoryLayout,
         program: &crate::ir::RuntimeProgram,
-        vcd_path: &Option<std::path::PathBuf>,
+        vcd_path: &Option<(std::path::PathBuf, crate::WaveformFormat)>,
     ) -> Result<(), SimulatorError> {
         let source_vcd = program
             .runtime_schema
@@ -1852,7 +1852,7 @@ mod host {
         program: crate::ir::RuntimeProgram,
         warnings: Vec<CompilationWarning>,
         options: SimulatorOptions,
-        vcd_path: Option<std::path::PathBuf>,
+        vcd_path: Option<(std::path::PathBuf, crate::WaveformFormat)>,
         injected_components: crate::InjectedComponents,
     ) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {
         validate_untimed_processes(&program)?;
@@ -1864,10 +1864,11 @@ mod host {
         if let Err(error) = validate_native_vcd_layout(sim.layout(), &sim.program, &vcd_path) {
             return Err(error.with_warnings(std::mem::take(&mut sim.warnings)));
         }
-        if let Some(path) = vcd_path {
+        if let Some((path, format)) = vcd_path {
             let descs = sim.build_vcd_descs(options.four_state);
-            let vcd_writer = crate::VcdWriter::new_with_time_precision(
+            let vcd_writer = crate::WaveformWriter::new_with_time_precision(
                 path,
+                format,
                 &descs,
                 sim.program.design.time_precision,
             )
@@ -1903,7 +1904,7 @@ mod host {
         program: LaidOutProgram,
         warnings: Vec<CompilationWarning>,
         options: SimulatorOptions,
-        vcd_path: Option<std::path::PathBuf>,
+        vcd_path: Option<(std::path::PathBuf, crate::WaveformFormat)>,
         injected_components: crate::InjectedComponents,
     ) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {
         #[cfg(any(
@@ -2099,7 +2100,7 @@ mod host {
             usize,
         )>,
         options: SimulatorOptions,
-        vcd_path: Option<std::path::PathBuf>,
+        vcd_path: Option<(std::path::PathBuf, crate::WaveformFormat)>,
         metadata: Option<Metadata>,
         clock_type: Option<ClockType>,
         reset_type: Option<ResetType>,
@@ -2215,7 +2216,15 @@ mod host {
 
         /// Enable VCD dumping to the specified file.
         pub fn vcd<P: AsRef<std::path::Path>>(mut self, path: P) -> Self {
-            self.vcd_path = Some(path.as_ref().to_path_buf());
+            self.vcd_path = Some((path.as_ref().to_path_buf(), crate::WaveformFormat::Vcd));
+            self
+        }
+
+        /// Enable FST dumping to the specified file. FST is the compressed
+        /// binary waveform format read natively by GTKWave and Surfer; it
+        /// records the same signals and timestamps as [`Self::vcd`].
+        pub fn fst<P: AsRef<std::path::Path>>(mut self, path: P) -> Self {
+            self.vcd_path = Some((path.as_ref().to_path_buf(), crate::WaveformFormat::Fst));
             self
         }
 
@@ -3019,7 +3028,7 @@ mod host {
                 crate::ir::LaidOutProgram,
                 Vec<CompilationWarning>,
                 SimulatorOptions,
-                Option<std::path::PathBuf>,
+                Option<(std::path::PathBuf, crate::WaveformFormat)>,
                 crate::InjectedComponents,
             ),
             SimulatorError,
@@ -3047,7 +3056,7 @@ mod host {
                 crate::ir::LaidOutProgram,
                 Vec<CompilationWarning>,
                 SimulatorOptions,
-                Option<std::path::PathBuf>,
+                Option<(std::path::PathBuf, crate::WaveformFormat)>,
                 crate::InjectedComponents,
             ),
             SimulatorError,
@@ -3334,10 +3343,11 @@ mod host {
             sim.diagnostics = options.diagnostics.clone();
             sim.set_plusargs(options.plusargs.clone());
             sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
-            if let Some(path) = vcd_path {
+            if let Some((path, format)) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
-                let vcd_writer = crate::VcdWriter::new_with_time_precision(
+                let vcd_writer = crate::WaveformWriter::new_with_time_precision(
                     path,
+                    format,
                     &descs,
                     sim.program.design.time_precision,
                 )
@@ -3393,10 +3403,11 @@ mod host {
             sim.diagnostics = options.diagnostics.clone();
             sim.set_plusargs(options.plusargs.clone());
             sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
-            if let Some(path) = vcd_path {
+            if let Some((path, format)) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
-                let vcd_writer = crate::VcdWriter::new_with_time_precision(
+                let vcd_writer = crate::WaveformWriter::new_with_time_precision(
                     path,
+                    format,
                     &descs,
                     sim.program.design.time_precision,
                 )
@@ -3455,10 +3466,11 @@ mod host {
             sim.diagnostics = options.diagnostics.clone();
             sim.set_plusargs(options.plusargs.clone());
             sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
-            if let Some(path) = vcd_path {
+            if let Some((path, format)) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
-                let vcd_writer = crate::VcdWriter::new_with_time_precision(
+                let vcd_writer = crate::WaveformWriter::new_with_time_precision(
                     path,
+                    format,
                     &descs,
                     sim.program.design.time_precision,
                 )
@@ -3531,10 +3543,11 @@ mod host {
             sim.diagnostics = options.diagnostics.clone();
             sim.set_plusargs(options.plusargs.clone());
             sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
-            if let Some(path) = vcd_path {
+            if let Some((path, format)) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
-                let vcd_writer = crate::VcdWriter::new_with_time_precision(
+                let vcd_writer = crate::WaveformWriter::new_with_time_precision(
                     path,
+                    format,
                     &descs,
                     sim.program.design.time_precision,
                 )
@@ -3754,10 +3767,11 @@ mod host {
             sim.diagnostics = options.diagnostics.clone();
             sim.set_plusargs(options.plusargs.clone());
             sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
-            if let Some(path) = vcd_path {
+            if let Some((path, format)) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
-                let vcd_writer = crate::VcdWriter::new_with_time_precision(
+                let vcd_writer = crate::WaveformWriter::new_with_time_precision(
                     path,
+                    format,
                     &descs,
                     sim.program.design.time_precision,
                 )
@@ -4384,7 +4398,7 @@ mod host {
             program: crate::ir::RuntimeProgram,
             warnings: Vec<CompilationWarning>,
             options: SimulatorOptions,
-            vcd_path: Option<std::path::PathBuf>,
+            vcd_path: Option<(std::path::PathBuf, crate::WaveformFormat)>,
             injected_components: crate::InjectedComponents,
         ) -> Result<crate::Simulation<crate::backend::native::NativeBackend>, SimulatorError>
         {
@@ -4436,7 +4450,7 @@ mod host {
             program: crate::ir::RuntimeProgram,
             warnings: Vec<CompilationWarning>,
             options: SimulatorOptions,
-            vcd_path: Option<std::path::PathBuf>,
+            vcd_path: Option<(std::path::PathBuf, crate::WaveformFormat)>,
             injected_components: crate::InjectedComponents,
         ) -> Result<crate::Simulation<crate::backend::native::NativeBackend>, SimulatorError>
         {
@@ -4452,7 +4466,7 @@ mod host {
             program: crate::ir::RuntimeProgram,
             warnings: Vec<CompilationWarning>,
             options: &SimulatorOptions,
-            vcd_path: Option<std::path::PathBuf>,
+            vcd_path: Option<(std::path::PathBuf, crate::WaveformFormat)>,
             injected_components: crate::InjectedComponents,
         ) -> Result<crate::Simulation<B>, SimulatorError> {
             // Initial kernels must keep their time-zero gates until the timed
@@ -4463,10 +4477,11 @@ mod host {
             sim.diagnostics = options.diagnostics.clone();
             sim.set_plusargs(options.plusargs.clone());
             sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
-            if let Some(path) = vcd_path {
+            if let Some((path, format)) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
-                let vcd_writer = crate::VcdWriter::new_with_time_precision(
+                let vcd_writer = crate::WaveformWriter::new_with_time_precision(
                     path,
+                    format,
                     &descs,
                     sim.program.design.time_precision,
                 )

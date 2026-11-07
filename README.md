@@ -47,7 +47,7 @@ compiler demo: the result can run real RTL tests, in Node.js or in a browser.
 - Exercise multiple clock domains and combinational clock cascades.
 - Enable four-state simulation and drive or inspect `X` and `Z` values.
 - Override top-level parameters and include test-only Veryl sources.
-- Inspect child instances and emit VCD waveforms.
+- Inspect child instances and emit VCD and FST waveforms.
 - Compile a Veryl design into a native executable and run cocotb tests through VPI.
 - Simulate SystemVerilog designs and timed testbenches from Rust, including
   DPI-C imports and hierarchies that mix Veryl and SystemVerilog modules.
@@ -210,7 +210,7 @@ evolving.
 - [Celox CLI and cocotb](https://celox-sim.github.io/celox/guide/cocotb)
 - [External Frontends and Rust Binaries](https://celox-sim.github.io/celox/guide/external-frontends)
 - [Four-State Simulation](https://celox-sim.github.io/celox/guide/four-state)
-- [VCD Waveforms](https://celox-sim.github.io/celox/guide/vcd)
+- [VCD and FST Waveforms](https://celox-sim.github.io/celox/guide/vcd)
 - [TypeScript API](https://celox-sim.github.io/celox/api/)
 - [Simulator Internals](https://celox-sim.github.io/celox/internals/architecture)
 - [Release Policy](.github/RELEASING.md)

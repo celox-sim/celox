@@ -1,31 +1,44 @@
-# VCD Waveform Output
+# Waveform Output (VCD and FST)
 
-Celox can write [Value Change Dump](https://en.wikipedia.org/wiki/Value_change_dump) (VCD) files for viewing waveforms in tools like [GTKWave](https://gtkwave.sourceforge.net/) or [Surfer](https://surfer-project.org/).
+Celox can write waveform files in two formats for viewing in tools like [GTKWave](https://gtkwave.sourceforge.net/) or [Surfer](https://surfer-project.org/):
+
+- [Value Change Dump](https://en.wikipedia.org/wiki/Value_change_dump) (VCD):
+  the universal text format. Human-readable, but large for long runs.
+- Fast Signal Trace (FST): GTKWave's compressed binary format. The same
+  signals and timestamps at a fraction of the size, with fast random access
+  in viewers. Prefer it for long simulations.
+
+Both formats record the same signals with the same dump points; every option,
+method, and HDL control on this page applies to whichever output is selected.
+`vcd` and `fst` options are mutually exclusive.
 
 ## CLI
 
-Use `--vcd <FILE>` with `celox run` to record a SystemVerilog or Veryl
-testbench without adding HDL dump tasks:
+Use `--vcd <FILE>` or `--fst <FILE>` with `celox run` to record a
+SystemVerilog or Veryl testbench without adding HDL dump tasks:
 
 ```sh
 celox run top.sv --top Top --backend native --vcd waves.vcd
-celox run top.veryl --top Top --vcd waves.vcd
+celox run top.veryl --top Top --fst waves.fst
 ```
 
 The CLI records each simulation time step and flushes the file when the run
-ends, including on a test failure or step limit. VCD recording keeps eligible
+ends, including on a test failure or step limit. Recording keeps eligible
 compiled schedulers enabled; they return to the host at waveform boundaries.
-`--vcd` cannot be combined with `--compile-only`.
+Waveform recording cannot be combined with `--compile-only`.
 
 ## Basic Usage
 
-Pass `vcd` with the output file path when creating a simulator:
+Pass `vcd` (or `fst`) with the output file path when creating a simulator:
 
 ```typescript
 const sim = Simulator.fromSource(SOURCE, "Top", {
   vcd: "./dump.vcd",
+  // fst: "./dump.fst",
 });
 ```
+
+In Rust, use `SimulatorBuilder::vcd` or `SimulatorBuilder::fst`.
 
 Then call `sim.dump(timestamp)` at each point in time you want recorded:
 
@@ -41,12 +54,14 @@ sim.dispose();    // flushes and closes the file
 ```
 
 ::: warning
-VCD output is buffered. Always call `dispose()` when you are done so the remaining bytes are written — or use a try/finally block.
+Waveform output is buffered. Always call `dispose()` when you are done so the remaining bytes are written — or use a try/finally block. Disposing also finalizes an FST file's header.
 :::
 
 In Rust, call `Simulator::flush_vcd()` or `Simulation::flush_vcd()` to make
 buffered output visible before dropping the simulator and to handle write errors.
-Standalone `VcdWriter` instances provide `flush()` and `into_inner()`.
+(Despite the name, it flushes FST output too, patching the file header so the
+file is readable mid-run.) Standalone `VcdWriter`/`FstWriter` instances
+provide `flush()` and `into_inner()`.
 
 The [VCD performance notes](../internals/vcd-performance.md) describe change
 tracking, shared-memory behavior, and reproducible benchmarks.
@@ -99,5 +114,10 @@ extend past the limit. A zero limit removes the bound.
 
 `$dumpfile` accepts a string literal or an integral expression containing the
 filename and must run before `$dumpvars`. The default filename is `dump.vcd`.
-Source controls enable the necessary trace storage automatically; a host VCD
-path is optional. Host waveform methods remain available.
+As a Celox extension (following Icarus Verilog), a filename ending in `.fst`
+records FST instead of the VCD format the standard defines; the dump controls
+above drive it the same way, with `$dumpoff`/`$dumpon` also written as FST
+blackout records. `$dumplimit` applies approximately for FST: already-queued,
+uncompressed changes can take the file past the limit before recording stops.
+Source controls enable the necessary trace storage automatically; a host
+waveform path is optional. Host waveform methods remain available.
