@@ -30,10 +30,11 @@ pub(super) use direct::{
     real_value, remove_real_division_guards, string_literal_bytes, targets_tagged_union, ungroup,
 };
 pub(super) use enums::{domain as enum_domain, membership as enum_membership};
+pub(in crate::ast) use format_patterns::ScopeName;
 pub(super) use format_patterns::{
     aggregate_text as format_aggregate_text, bytes_literal, format as format_call, has_pattern,
     pattern as format_pattern, pattern_argument as format_pattern_argument, rewrite_format,
-    rewrite_template,
+    rewrite_template, scoped_template,
 };
 pub(super) use lvalues::{net_lvalue, variable_lvalue};
 pub(super) use objects::{
