@@ -70,9 +70,12 @@ pub(super) struct ExecutionArgs {
     native_memory_width: Option<usize>,
     #[arg(long, value_enum)]
     x86_slp: Option<OnOff>,
-    /// Record waveform changes at each simulation time step.
+    /// Record waveform changes at each simulation time step (VCD).
     #[arg(long, value_name = "FILE", conflicts_with = "compile_only")]
     pub vcd: Option<PathBuf>,
+    /// Record waveform changes at each simulation time step (FST).
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["compile_only", "vcd"])]
+    pub fst: Option<PathBuf>,
     /// Simulation threads, including the calling thread.
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=64))]
     pub threads: u32,
@@ -212,6 +215,7 @@ struct Options {
     backend: Backend,
     four_state: bool,
     vcd: Option<PathBuf>,
+    fst: Option<PathBuf>,
     compile_only: bool,
     native_image_output: Option<PathBuf>,
     native_image_input: Option<PathBuf>,
@@ -314,6 +318,7 @@ pub(super) fn run(
         backend,
         four_state: design.four_state.unwrap_or(false),
         vcd: cli.vcd,
+        fst: cli.fst,
         compile_only: cli.compile_only,
         native_image_output: cli.native_image_output,
         native_image_input: cli.native_image_input,
@@ -576,6 +581,9 @@ pub(super) fn run(
         .diagnostics_from_env();
     if let Some(path) = &opts.vcd {
         builder = builder.vcd(path);
+    }
+    if let Some(path) = &opts.fst {
+        builder = builder.fst(path);
     }
     builder = opts.design.apply_parameters(builder);
     if opts.always_partition {

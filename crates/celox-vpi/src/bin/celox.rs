@@ -273,6 +273,8 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
         .defer_initialization(arguments.save_state.restore_checkpoint.is_some());
     let builder = if let Some(path) = &arguments.execution.vcd {
         builder.vcd(path)
+    } else if let Some(path) = &arguments.execution.fst {
+        builder.fst(path)
     } else {
         builder
     };

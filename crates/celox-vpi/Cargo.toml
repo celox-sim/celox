@@ -62,5 +62,8 @@ mimalloc = "0.1.52"
 
 
 
+[dev-dependencies]
+wellen = "0.25"
+
 [lints]
 workspace = true

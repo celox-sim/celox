@@ -374,8 +374,13 @@ export interface SimulatorOptions {
 	 * diagnostic level is set. Project diagnostics take precedence. Default: false.
 	 */
 	allowInferredLatches?: boolean;
-	/** Path to write VCD waveform output. */
+	/** Path to write VCD waveform output. Mutually exclusive with `fst`. */
 	vcd?: string;
+	/**
+	 * Path to write FST waveform output (compressed binary, read natively
+	 * by GTKWave and Surfer). Mutually exclusive with `vcd`.
+	 */
+	fst?: string;
 	/**
 	 * Optimization level preset. Default: "O1".
 	 * - "O0": No SIR optimizations (except TailCallSplit). Fast compilation.

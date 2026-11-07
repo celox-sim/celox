@@ -8,6 +8,7 @@ mod error;
 mod event_buffer;
 pub mod file_io;
 pub mod file_io_backend;
+mod fst;
 pub mod parallel;
 pub mod plusargs;
 mod reflection;
@@ -19,6 +20,7 @@ mod state_file;
 mod testbench;
 pub mod timing;
 mod vcd;
+mod waveform;
 
 pub use derived_tick::{
     BackendExecutor, DerivedDomain, DerivedTickPlan, DerivedTickPlans, DerivedTickScratch, EdgeRun,
@@ -30,6 +32,7 @@ pub use edge::{
 };
 pub use error::{SimulatorErrorCode, comb_fatal_code, comb_fatal_site};
 pub use event_buffer::RuntimeEventBuffer;
+pub use fst::FstWriter;
 pub use reflection::{
     DesignReflection, ReflectionScope, ReflectionScopeId, ReflectionSignal, ReflectionSignalId,
     SignalDirection,
@@ -52,6 +55,7 @@ pub use timing::{
     ProcessState, TermRefs, Waiter, Waiters,
 };
 pub use vcd::{VcdExternalSignalDesc, VcdSignalDesc, VcdStatistics, VcdWriter};
+pub use waveform::{WaveformFormat, WaveformStatistics, WaveformWriter};
 
 pub type AbsoluteAddr = celox_design::StateAddr;
 pub type MemoryLayout = celox_state_layout::MemoryLayout<AbsoluteAddr>;

@@ -821,7 +821,7 @@ impl<B: SimBackend> Simulation<B> {
     /// Captures the current state of all signals and writes them to the VCD file.
     pub fn dump(&mut self, timestamp: u64) {
         if let Err(error) = self.try_dump(timestamp) {
-            panic!("VCD dump at {timestamp} failed: {error}");
+            panic!("waveform dump at {timestamp} failed: {error}");
         }
     }
 

@@ -143,8 +143,9 @@ mod host_api {
     pub use celox_macros::veryl_test;
     pub use celox_runtime::{
         BackendExecutor, DerivedTickPlan, DerivedTickPlans, DerivedTickScratch, Edge, EdgeOutcome,
-        EventEdge, EventEdges, Halt, SignalWrite, VcdSignalDesc, VcdStatistics, VcdWriter,
-        move_signal, run_edge, run_edges, run_tick, set_level,
+        EventEdge, EventEdges, FstWriter, Halt, SignalWrite, VcdSignalDesc, VcdStatistics,
+        VcdWriter, WaveformFormat, WaveformStatistics, WaveformWriter, move_signal, run_edge,
+        run_edges, run_tick, set_level,
     };
 
     pub struct IOContext<'a, B: SimBackend = DefaultBackend> {
