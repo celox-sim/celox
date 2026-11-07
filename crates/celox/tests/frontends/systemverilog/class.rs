@@ -3,6 +3,11 @@
 use super::*;
 
 sv_backends! {
+    fn class_external_constraints(sim) { @case "class::external_constraints"; }
+    fn class_external_constraints_in_packages(sim) {
+        @case "class::external_constraints_in_packages";
+    }
+
     fn class_imported_member_type_dimensions(sim) { @case "class::imported_member_type_dimensions"; }
     fn class_members_hide_module_names(sim) { @case "class::members_hide_module_names"; }
     fn class_imported_member_type_inheritance(sim) { @case "class::imported_member_type_inheritance"; }

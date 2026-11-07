@@ -125,6 +125,9 @@ pub(super) fn result(
             }
             if op.returns_string() {
                 Some(session.types.intern(TyData::String))
+            } else if op == StringOp::Atoreal {
+                // 6.16.10: the result is a `real`.
+                Some(session.types.intern(TyData::Real))
             } else {
                 // 6.16.1, 6.16.3, 6.16.6–9: retain the declared integer
                 // data type, including its state domain and keyword.

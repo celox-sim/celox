@@ -276,6 +276,12 @@ impl Parser<'_> {
                 self.class_method(keyword, id)?;
                 prototype = false;
                 Some(BodyItemKind::Subroutine(id))
+            } else if delimiters.is_empty() && self.external_constraint_start() {
+                self.external_constraint()?;
+                Some(BodyItemKind::Unconverted {
+                    category: "constraint".to_string(),
+                    items: Vec::new(),
+                })
             } else if root
                 && pending.as_ref().is_some_and(|value| value.1 == self.at)
                 && self.net_start()
@@ -419,7 +425,7 @@ impl Parser<'_> {
             self.at += 1;
             if closing && let Some((start, category, items)) = captured.pop() {
                 if category == "class" {
-                    self.finish_class();
+                    self.finish_class(None);
                 }
                 if let Some((_, _, parent)) = captured.last_mut() {
                     parent.push(super::generate::Builder::node(
@@ -932,6 +938,25 @@ impl Parser<'_> {
             }
             if frame.item_start
                 && frame.delimiters.is_empty()
+                && frame.scopes.last() != Some(&"endclass")
+                && self.external_constraint_start()
+            {
+                let start = self.at;
+                self.external_constraint()?;
+                frame.record(
+                    self,
+                    start,
+                    BodyItemKind::Unconverted {
+                        category: "constraint".to_string(),
+                        items: Vec::new(),
+                    },
+                )?;
+                frame.item_start = true;
+                frames.push(frame);
+                continue;
+            }
+            if frame.item_start
+                && frame.delimiters.is_empty()
                 && frame.scopes.last() == Some(&"endclass")
                 && self.class_property_start()
             {
@@ -1132,7 +1157,11 @@ impl Parser<'_> {
             let semicolon = word == ";";
             self.at += 1;
             if closing_class {
-                self.finish_class();
+                let package = std::iter::once(&frame)
+                    .chain(frames.iter().rev())
+                    .find(|frame| frame.unit.kind == UnitKind::Package)
+                    .map(|frame| frame.unit.name.spelling.clone());
+                self.finish_class(package);
                 let class = frame
                     .classes
                     .pop()

@@ -59,6 +59,8 @@ impl Parser<'_> {
                 class.constraints.push(ClassConstraint {
                     name,
                     expressions: None,
+                    defined: false,
+                    is_static,
                 });
             }
             return Ok(());
@@ -71,8 +73,98 @@ impl Parser<'_> {
             class.constraints.push(ClassConstraint {
                 name,
                 expressions: if is_static { None } else { expressions },
+                defined: true,
+                is_static,
             });
         }
+        Ok(())
+    }
+
+    /// Whether the tokens at the cursor start an external constraint
+    /// block, `constraint C::c { ... }` (18.5.1).
+    pub(super) fn external_constraint_start(&self) -> bool {
+        if self.peek() != "constraint" {
+            return false;
+        }
+        // A scoped name follows: identifiers and parameter lists joined
+        // by `::`, ending at the block.
+        let mut offset = 1;
+        let mut scoped = false;
+        loop {
+            match self.nth(offset) {
+                "::" => {
+                    scoped = true;
+                    offset += 1;
+                }
+                "{" => return scoped,
+                "" | ";" => return false,
+                _ => offset += 1,
+            }
+        }
+    }
+
+    /// Parse an external constraint block and complete the prototype it
+    /// names in its finished class declaration (18.5.1).
+    pub(super) fn external_constraint(&mut self) -> Result<()> {
+        self.expect("constraint")?;
+        let mut names = vec![self.name()?];
+        loop {
+            if self.eat("#") {
+                self.expect("(")?;
+                let mut depth = 1usize;
+                while depth > 0 {
+                    match self.peek() {
+                        "" => return Err(self.error("unterminated parameter list")),
+                        "(" | "[" | "{" => depth += 1,
+                        ")" | "]" | "}" => depth -= 1,
+                        _ => {}
+                    }
+                    self.at += 1;
+                }
+            }
+            if !self.eat("::") {
+                break;
+            }
+            names.push(self.name()?);
+        }
+        let (Some(constraint), Some(class)) = (names.pop(), names.pop()) else {
+            return Err(self.error("external constraint requires a scoped name"));
+        };
+        // A leading scope names the package and outer classes the class
+        // was declared in, or a suffix of them as written from inside that
+        // scope (18.5.1); with no scope, the latest declaration of the
+        // name is the visible one.
+        let given: Vec<String> = names.iter().map(|name| name.spelling.clone()).collect();
+        let expressions = self.constraint_block()?;
+        let Some(index) = self
+            .classes
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(index, declared)| {
+                declared.name.spelling == class.spelling
+                    && (given.is_empty() || self.class_scopes[*index].ends_with(&given))
+            })
+            .map(|(index, _)| index)
+        else {
+            return Err(self.error("external constraint of an undeclared class"));
+        };
+        let class = &mut self.classes[index];
+        let Some(block) = class
+            .constraints
+            .iter_mut()
+            .find(|block| block.name.spelling == constraint.spelling)
+        else {
+            return Err(self.error("external constraint without a prototype"));
+        };
+        if block.defined {
+            return Err(self.error("duplicate external constraint block"));
+        }
+        block.defined = true;
+        // A static prototype completed externally stays static, which the
+        // analyzer treats as unsupported as it does an in-class static
+        // block (18.5.10).
+        block.expressions = if block.is_static { None } else { expressions };
         Ok(())
     }
 
