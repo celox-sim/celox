@@ -21,6 +21,38 @@ mod tests;
 
 pub(super) use bindings::ConstantType;
 pub(super) use conversion::{of_shape, of_type};
+
+/// The bounds of the packed dimensions of `ty`, outermost first, as the
+/// type table resolves them with the constants of `env` (an element's, for
+/// a fixed-size unpacked array); none for a type without packed bits.
+/// `None` when `ty` has no semantic type.
+pub(super) fn packed_bounds(
+    table: &mut TyTable,
+    functions: &crate::ast::const_functions::ConstantFunctions,
+    ty: &crate::ast::Type,
+    env: &crate::ast::ConstEnv,
+) -> Option<Vec<(i128, i128)>> {
+    let mut id = of_type(table, functions, ty, env)?;
+    loop {
+        match table.data(id) {
+            TyData::Packed(packed) => {
+                return Some(
+                    packed
+                        .dims
+                        .iter()
+                        .map(|range| (range.left, range.right))
+                        .collect(),
+                );
+            }
+            TyData::Array {
+                kind: ArrayKind::Fixed(_),
+                element,
+            } => id = *element,
+            TyData::Array { .. } => return None,
+            _ => return Some(Vec::new()),
+        }
+    }
+}
 pub(super) use relations::{Assignable, Castable, Mismatch};
 pub(super) use streams::{StreamLayout, StreamRole};
 
