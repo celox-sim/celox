@@ -3635,3 +3635,37 @@ endmodule
         );
     }
 }
+
+#[test]
+fn forked_children_store_class_properties_through_formals() {
+    // The child stores into a property of the object a formal of `one`
+    // holds: the analyzer's temporaries for the update, which the body does
+    // not declare, are shared like a formal, in a box made at the entry.
+    let source = r#"`timescale 1ns/1ns
+class st_t;
+    int done;
+endclass
+module Top(output int a);
+    task automatic one(st_t s, int n);
+        fork
+            begin
+                #(n);
+                s.done = s.done + 1;
+            end
+        join_none
+    endtask
+    int two = 2;
+    st_t o = new;
+    initial begin
+        one(o, two);
+        one(o, two + 1);
+        #5 a = o.done;
+    end
+endmodule
+"#;
+    same_as_inlined(source, 2, 10, &["a"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 10, &["a"]),
+        Ok(vec![value(2)])
+    );
+}

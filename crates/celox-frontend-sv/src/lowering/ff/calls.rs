@@ -1314,9 +1314,20 @@ impl Ff<'_, '_> {
                 },
             ));
         }
+        // A variable the body does not declare, a formal or a temporary the
+        // analyzer made, gets its box at the entry; one it declares, each
+        // time the declaration runs.
+        let mut declared = HashSet::default();
+        for stmt in &body {
+            stmt.walk(&mut |stmt| {
+                if let sv::ir::Stmt::Local { name, .. } = stmt {
+                    declared.insert(name.clone());
+                }
+            });
+        }
         let count = boxes.len();
         for (formal, shared) in boxes {
-            if formal {
+            if formal || !declared.contains(&shared.var) {
                 self.open_box(&shared)?;
             }
             self.shared_boxes.push(shared);
