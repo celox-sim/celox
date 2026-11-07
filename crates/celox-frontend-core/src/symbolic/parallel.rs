@@ -31,6 +31,9 @@ pub struct ParallelScheduleOptions {
     /// run only when what they read changed. Only a host that reports its
     /// writes and instruments the units it generates may request it.
     pub settle: SettlePartitionMode,
+    /// Whether a partitioned settle counts its partitions' runs
+    /// (`celox_design::settle_profile_offset`).
+    pub settle_profile: bool,
 }
 
 /// Whether a settle is partitioned ([`ParallelScheduleOptions::settle`]).
@@ -52,6 +55,7 @@ impl ParallelScheduleOptions {
         synchronization_cost: 400,
         minimum_speedup_percent: 125,
         settle: SettlePartitionMode::Off,
+        settle_profile: false,
     };
 
     /// Request `lanes` simulation lanes with the default cost model.

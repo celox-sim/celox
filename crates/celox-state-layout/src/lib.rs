@@ -13,7 +13,7 @@ use std::hash::Hash;
 
 mod settle;
 mod trace;
-pub use settle::{SettleLayout, SettleObject};
+pub use settle::{SettleLayout, SettleObject, SettleProfile};
 pub use trace::{TRACE_GROUP_BYTES, TraceLayout};
 
 pub const RUNTIME_EVENT_CAPACITY: usize = 1024;

@@ -1544,6 +1544,12 @@ impl<B: SimBackend> Simulation<B> {
         self.simulator.layout()
     }
 
+    /// The work a partitioned settle counted since the simulation started,
+    /// when built with `settle_profile`.
+    pub fn settle_profile(&self) -> Option<celox_state_layout::SettleProfile> {
+        self.simulator.settle_profile()
+    }
+
     /// Returns all ports of the top-level module.
     pub fn named_signals(&self) -> Vec<NamedSignal> {
         self.simulator.named_signals()

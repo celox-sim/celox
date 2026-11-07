@@ -68,6 +68,7 @@ pub(crate) fn layout(
         merged,
     );
     settle_layout.wait_flags = settle.waits as usize;
+    settle_layout.profile = settle.profile;
     Some(settle_layout)
 }
 
