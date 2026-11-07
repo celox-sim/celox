@@ -7247,8 +7247,13 @@ impl Ff<'_, '_> {
         let frame = self.forked.then(|| {
             let mut private = self.m.created[first_created..].to_vec();
             private.extend([slots.resume, slots.status, slots.delay]);
-            private
-                .retain(|id| !self.frame_locals.contains(id) && Some(*id) != self.m.id(TIME_SLOT));
+            // The change counts of boxes are the module's, which every
+            // activation bumps and every waiter watches.
+            private.retain(|id| {
+                !self.frame_locals.contains(id)
+                    && Some(*id) != self.m.id(TIME_SLOT)
+                    && !self.m.box_changes.contains(id)
+            });
             celox_design::ProcessFrame {
                 resume_count,
                 private,
@@ -8590,9 +8595,7 @@ impl Ff<'_, '_> {
         }
         for op in reads {
             match &op {
-                sv::ir::ObjectOp::Load(field)
-                    if let Some(id) = self.m.id(&property_changes(field.key)) =>
-                {
+                sv::ir::ObjectOp::Load(field) if let Some(id) = self.m.change_counter(field) => {
                     changes.push(id);
                 }
                 _ => return Err(unsupported(format!("{op} in a wait condition"))),
@@ -8915,9 +8918,9 @@ pub(crate) fn watched_properties(
     for condition in &conditions {
         for op in heap_reads(subroutine, condition) {
             if let sv::ir::ObjectOp::Load(field) = op
-                && field.key != 0
+                && let sv::ir::ChangeKey::Property(key) = field.key
             {
-                keys.insert(field.key);
+                keys.insert(key);
             }
         }
     }

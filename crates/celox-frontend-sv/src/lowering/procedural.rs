@@ -29,6 +29,7 @@ pub(super) struct Checkpoint {
     function_wait_sites: usize,
     event_assignments: usize,
     activation_copies: usize,
+    box_changes: usize,
     function_nba_sites: usize,
     runtime_errors: usize,
     extern_functions: usize,
@@ -87,6 +88,11 @@ pub(super) struct ProcModule<'a> {
     /// The runtime event site of the flush points of the units' waits
     /// (IEEE 1800-2023 16.4.2), made at the first.
     pub unit_flush_site: Option<u32>,
+    /// The change counts of the boxes of the module's units, in the order
+    /// they were made (see `Ff::box_changes`): module variables that any
+    /// unit may bump. A box's field names its count by the count's id
+    /// (`ChangeKey::Box`), apart from the counts of class properties.
+    pub box_changes: Vec<SourceVarId>,
     /// Runtime errors (fatal assertions) of the module, by local code.
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
     /// The continuous assignments `$event[k] = expr` of the event
@@ -326,6 +332,7 @@ impl<'a> ProcModule<'a> {
             function_wait_sites: Vec::new(),
             function_nba_sites: Vec::new(),
             unit_flush_site: None,
+            box_changes: Vec::new(),
             runtime_errors: HashMap::default(),
             event_assignments: Vec::new(),
             unpacked_bounds,
@@ -1075,6 +1082,7 @@ impl<'a> ProcModule<'a> {
             function_nba_sites,
             // Restored with `runtime_event_sites`.
             unit_flush_site: _,
+            box_changes,
             runtime_errors,
             event_assignments,
             // Filled before any lowering.
@@ -1096,6 +1104,7 @@ impl<'a> ProcModule<'a> {
             function_nba_sites: function_nba_sites.len(),
             event_assignments: event_assignments.len(),
             activation_copies: activation_copies.len(),
+            box_changes: box_changes.len(),
             runtime_errors: runtime_errors.len(),
             extern_functions: extern_functions.len(),
             extern_calls: *extern_calls,
@@ -1121,6 +1130,7 @@ impl<'a> ProcModule<'a> {
             function_nba_sites,
             event_assignments,
             activation_copies,
+            box_changes,
             runtime_errors,
             extern_functions,
             extern_calls,
@@ -1142,6 +1152,7 @@ impl<'a> ProcModule<'a> {
         self.temp_counter = temp_counter;
         self.capture_counter = capture_counter;
         self.runtime_event_sites.truncate(runtime_event_sites);
+        self.box_changes.truncate(box_changes);
         // A flush site made since then is gone with it.
         if self
             .unit_flush_site
@@ -3184,6 +3195,23 @@ impl ProcModule<'_> {
             if !grew {
                 return names;
             }
+        }
+    }
+}
+
+impl ProcModule<'_> {
+    /// The counter that the stores of `field` bump, for the waits that read
+    /// it: a watched class property's (see `ff::property_changes`) or a
+    /// box's (see [`Self::box_changes`]).
+    pub(super) fn change_counter(&self, field: &sv::ir::ObjectField) -> Option<SourceVarId> {
+        match field.key {
+            sv::ir::ChangeKey::None => None,
+            sv::ir::ChangeKey::Property(key) => self.id(&super::ff::property_changes(key)),
+            sv::ir::ChangeKey::Box(id) => self
+                .box_changes
+                .iter()
+                .copied()
+                .find(|counter| counter.0 == id),
         }
     }
 }

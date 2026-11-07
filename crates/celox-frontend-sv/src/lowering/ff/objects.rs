@@ -13,7 +13,7 @@ impl Ff<'_, '_> {
     /// Count a store of property `field` in its change count, if a level
     /// wait of the design reads it (see [`property_changes`]).
     pub(super) fn property_stored(&mut self, field: &sv::ir::ObjectField) {
-        if let Some(id) = self.m.id(&property_changes(field.key)) {
+        if let Some(id) = self.m.change_counter(field) {
             self.count_property_change(id);
         }
     }

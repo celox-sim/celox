@@ -949,11 +949,25 @@ pub struct ObjectField {
     /// A `real` (64 bits) or `shortreal` (32 bits) value, as its IEEE 754
     /// bits (IEEE 1800-2023 6.12).
     pub real: bool,
-    /// Which class property this is, the same in every class that inherits
-    /// it: a hash of the declaring class and the property name, never 0. A
-    /// record member, and any other field that is no property, has 0. Two
-    /// properties may share a key.
-    pub key: u32,
+    /// Whose stores the waits that read the field count (see [`ChangeKey`]).
+    pub key: ChangeKey,
+}
+
+/// Which counter the stores of an [`ObjectField`] bump, for the waits that
+/// read it. Class properties and the boxes of shared variables count in
+/// namespaces of their own, so no key of one is a key of the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ChangeKey {
+    /// A field that is no property, such as a record member.
+    #[default]
+    None,
+    /// A class property, the same in every class that inherits it: a hash
+    /// of the declaring class and the property name. Two properties may
+    /// share a key.
+    Property(u32),
+    /// The box of a variable that forked children share, by the frontend's
+    /// number for its counter.
+    Box(u32),
 }
 
 /// The layout of an immutable heap record that holds the value of an
