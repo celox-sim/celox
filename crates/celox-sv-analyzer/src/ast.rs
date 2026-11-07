@@ -3743,6 +3743,9 @@ struct PackedDimensions {
     /// body calls rather than reads its result variable (IEEE 1800-2023
     /// 13.4.1).
     method_name: Option<String>,
+    /// The name `%m` prints in the body being bound, when the body is a
+    /// subroutine's; `None` names the calling instance.
+    scope_name: Option<Arc<expression_binding::ScopeName>>,
     /// Where array locator methods declare their iterator locals; `None`
     /// outside a procedural body.
     locator_locals: Option<locators::LocalSink>,
@@ -3836,6 +3839,7 @@ impl PackedDimensions {
             class_scope: None,
             constructor: false,
             method_name: None,
+            scope_name: None,
             locator_locals: None,
             locator_iterators: Arc::default(),
             effect_values: Arc::default(),
