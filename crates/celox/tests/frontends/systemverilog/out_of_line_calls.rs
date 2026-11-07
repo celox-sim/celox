@@ -3568,3 +3568,34 @@ endmodule
         Ok(vec![value(11), value(7), value(16)])
     );
 }
+
+#[test]
+fn state_files_refuse_scheduler_objects_in_saved_frames() {
+    // A semaphore is a scheduler object, whose class no box shares: a frame
+    // holding one while the task waits is refused as a class handle is,
+    // since state files do not record semaphores, and the run goes on with
+    // the semaphore intact.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    task automatic hold();
+        semaphore s = new(1);
+        s.get(1);
+        #5 s.put(1);
+        s.get(1);
+        done = 1;
+    endtask
+    initial hold();
+endmodule
+"#;
+    let mut sim = Simulation::from_sv_sources(vec![(source, Path::new("calls.sv"))], "Top")
+        .force_out_of_line_calls()
+        .build_interpreter()
+        .expect("builds");
+    sim.run_until(1).expect("the design runs");
+    assert!(
+        matches!(sim.save_state(), Err(celox::StateError::Objects(_))),
+        "a semaphore in a frame"
+    );
+    sim.run_until(10).expect("the design runs on");
+    assert_eq!(sim.get(sim.signal("done")), 1u8.into());
+}

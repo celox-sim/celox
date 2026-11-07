@@ -1581,13 +1581,14 @@ fn property_key(owner: &str, property: &str) -> u32 {
 }
 
 /// A run-time identifier of class `name`: an FNV-1a hash, never 0, which
-/// `null` reads as.
+/// `null` reads as, nor a class the heap reserves (see
+/// `celox_heap::class_identifier`).
 fn class_id(name: &str) -> u32 {
     // Compilation-unit declaration names already contain their source identity.
     let hash = name.bytes().fold(0x811c_9dc5u32, |hash, byte| {
         (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
     });
-    hash.max(1)
+    celox_heap::class_identifier(hash)
 }
 
 /// The classes whose objects a handle of class `ancestor` may refer to:

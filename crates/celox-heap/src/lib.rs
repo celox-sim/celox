@@ -24,7 +24,9 @@ pub mod streams;
 mod uvm_dpi;
 pub use uvm_dpi::deglob as uvm_deglob;
 
-pub use objects::{BOX_CLASS, Fault, NULL};
+pub use objects::{
+    BOX_CLASS, FIRST_RESERVED_CLASS, Fault, NULL, RECORD_CLASS, SCHEDULER_CLASS, class_identifier,
+};
 
 /// A reference to a heap entry, as stored in state memory.
 pub type Handle = u32;
