@@ -3057,6 +3057,16 @@ pub(super) fn written_names_with_calls(
     );
 }
 
+impl ProcModule<'_> {
+    /// The names `body` writes, by assignments and through the written
+    /// arguments of the system tasks, functions and subroutines it calls.
+    pub(super) fn written_names(&self, body: &[sv::ir::Stmt]) -> HashSet<String> {
+        let mut names = HashSet::default();
+        super::kernel_written_names(self, body, &mut names, &mut HashSet::default(), 0);
+        names
+    }
+}
+
 /// The lvalue an output argument writes back to.
 /// The variables a call of `function` writes through its arguments, such as
 /// the seed of `$random(seed)`.

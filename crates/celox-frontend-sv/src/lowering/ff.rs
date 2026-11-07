@@ -1472,6 +1472,21 @@ impl<'p, 'a> Ff<'p, 'a> {
         Ok(lvalue)
     }
 
+    /// A variable of the type of property `field`, through which an
+    /// assignment to part of a property formal writes (see
+    /// [`references::Alias::rewrite`]). One that a unit's lowering makes is
+    /// a slot of the unit's frame, so each activation has its own.
+    fn part_scratch(&mut self, field: &sv::ir::ObjectField) -> String {
+        self.m
+            .temp(
+                "ref_part",
+                field.width as usize,
+                field.signed,
+                field.four_state,
+            )
+            .1
+    }
+
     /// A copy of a position for [`Self::freeze_const`].
     fn position_temp(
         &mut self,
@@ -5491,7 +5506,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 };
                 self.split_property_concats(&mut body, &aliases);
                 for alias in &aliases {
-                    body = alias.rewrite(body, &constant)?;
+                    body = alias.rewrite(body, &constant, &mut |field| self.part_scratch(field))?;
                 }
                 // A fork of a body inlined into a unit shares variables as
                 // the unit's own body does.

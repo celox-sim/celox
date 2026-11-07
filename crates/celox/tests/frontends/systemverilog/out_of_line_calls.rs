@@ -3669,3 +3669,87 @@ endmodule
         Ok(vec![value(2)])
     );
 }
+
+#[test]
+fn forked_children_display_arrays_they_do_not_write() {
+    // A `$display` argument is read, not written: `seen`, which only its
+    // declaration writes, is copied into each child, not shared through a
+    // box (which an unpacked array cannot have), so the recursive `walk`
+    // still goes out of line.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a);
+    function automatic void walk(int depth);
+        int seen[2] = '{depth, depth * 10};
+        if (depth == 0) return;
+        fork
+            begin
+                #(depth);
+                $display("level %0d %0d", seen[0], seen[1]);
+                a = a + seen[1];
+            end
+        join_none
+        walk(depth - 1);
+    endfunction
+    int two = 2;
+    initial begin
+        a = 0;
+        walk(two);
+    end
+endmodule
+"#;
+    assert_eq!(function_units(source, false), 1);
+    for four_state in [false, true] {
+        for backend in backends() {
+            let (values, events) = simulate_run(source, four_state, true, backend, 5, &["a"])
+                .unwrap_or_else(|error| panic!("{backend}: {error}"));
+            assert_eq!(
+                values,
+                vec![value(30)],
+                "{backend}, four-state {four_state}"
+            );
+            let displays: Vec<String> = events
+                .iter()
+                .filter_map(|event| match event {
+                    celox::RuntimeEvent::Display { message } => {
+                        Some(String::from_utf8_lossy(message).into_owned())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                displays,
+                ["level 1 10", "level 2 20"],
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+}
+
+#[test]
+fn forked_children_write_parts_of_shared_variables() {
+    // Each child writes part of the shared `x`: a bit, a part-select and
+    // both indexed part-selects. Through the box each loads `x`, writes its
+    // part and stores it back, as a write to part of a class property does.
+    let source = r#"`timescale 1ns/1ns
+module Top(output logic [15:0] a);
+    task automatic parts(logic [15:0] start);
+        logic [15:0] x = start;
+        int i = 4;
+        fork
+            begin #1 x[0] = 1'b1; end
+            begin #2 x[7:4] = 4'ha; end
+            begin #3 x[i * 2 +: 4] = 4'h5; end
+            begin #4 x[15 -: 2] = 2'b11; end
+        join_none
+        #5 a = x;
+    endtask
+    logic [15:0] zero = 0;
+    initial parts(zero);
+endmodule
+"#;
+    same_as_inlined(source, 1, 6, &["a"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 6, &["a"]),
+        Ok(vec![value(0xc5a1)])
+    );
+}

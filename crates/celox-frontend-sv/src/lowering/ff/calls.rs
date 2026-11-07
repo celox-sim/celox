@@ -795,7 +795,7 @@ impl Ff<'_, '_> {
         };
         self.split_property_concats(&mut body, &aliases);
         for alias in &aliases {
-            body = alias.rewrite(body, &constant)?;
+            body = alias.rewrite(body, &constant, &mut |field| self.part_scratch(field))?;
         }
         let (body, shared) = self.share_forked(subroutine, body)?;
         let originals: Vec<(String, Option<SourceVarId>)> = renames
@@ -1120,9 +1120,7 @@ impl Ff<'_, '_> {
         subroutine: &sv::ir::Subroutine,
         mut body: Vec<sv::ir::Stmt>,
     ) -> Result<(Vec<sv::ir::Stmt>, usize), sv::AnalyzerError> {
-        use super::super::procedural::{
-            expr_idents, written_object_arguments, written_system_arguments,
-        };
+        use super::super::procedural::expr_idents;
         if self.frame.is_none() || self.kernel.is_some() {
             return Ok((body, 0));
         }
@@ -1200,47 +1198,9 @@ impl Ff<'_, '_> {
             }
             named.extend(names.into_iter().filter(|name| !declared.contains(name)));
         }
-        // What the body writes, but by declarations: through assignments,
-        // and conservatively every argument of a subroutine or system task.
-        let mut written = HashSet::default();
-        for stmt in &body {
-            stmt.walk(&mut |stmt| {
-                match stmt {
-                    sv::ir::Stmt::Assign { lhs, .. } => {
-                        written.insert(lhs.name().to_string());
-                    }
-                    sv::ir::Stmt::AssignConcat { parts, .. } => {
-                        written.extend(parts.iter().map(|part| part.name().to_string()));
-                    }
-                    sv::ir::Stmt::SystemTask { args, .. } => {
-                        for arg in args {
-                            if let sv::ir::SystemTaskArg::Expr(expr) = arg {
-                                expr_idents(expr, &mut written);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-                let mut calls = Vec::new();
-                stmt_calls(stmt, &mut calls);
-                for (callee, args) in calls {
-                    let lvalues = match &callee {
-                        sv::ir::Callee::Subroutine(_) => {
-                            for arg in args.iter().flatten() {
-                                expr_idents(arg, &mut written);
-                            }
-                            continue;
-                        }
-                        sv::ir::Callee::Object(op) => written_object_arguments(op, &args),
-                        sv::ir::Callee::System(function) => {
-                            written_system_arguments(*function, &args)
-                        }
-                        _ => Vec::new(),
-                    };
-                    written.extend(lvalues.iter().map(|lvalue| lvalue.name().to_string()));
-                }
-            });
-        }
+        // What the body writes, but by declarations: by assignments, and
+        // through the arguments that the tasks and subroutines it calls write.
+        let written = self.m.written_names(&body);
         let mut shared: Vec<&String> = automatic_names(subroutine)
             .filter(|name| {
                 named.contains(*name) && written.contains(*name) || passed.contains(*name)
@@ -1304,7 +1264,7 @@ impl Ff<'_, '_> {
                     field,
                 },
             };
-            body = alias.rewrite(body, &constant)?;
+            body = alias.rewrite(body, &constant, &mut |field| self.part_scratch(field))?;
             boxes.push((
                 param.is_some(),
                 SharedBox {

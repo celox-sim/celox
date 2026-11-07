@@ -1875,7 +1875,7 @@ fn stmt_may_suspend(subroutines: &[sv::ir::Subroutine], stmt: &sv::ir::Stmt) -> 
 /// Adds the names of the variables `body` writes, directly or in the
 /// subroutines it calls, to `names` (see [`DriverScan`]).
 fn kernel_written_names(
-    scan: &DriverScan<'_>,
+    scan: &impl CallDefinitions,
     body: &[sv::ir::Stmt],
     names: &mut HashSet<String>,
     visited: &mut HashSet<String>,
@@ -1937,11 +1937,7 @@ fn kernel_written_names(
             );
             continue;
         }
-        let Some(subroutine) = scan
-            .subroutines
-            .iter()
-            .find(|subroutine| subroutine.name == name)
-        else {
+        let Some(subroutine) = scan.subroutine(&name) else {
             continue;
         };
         procedural::default_calls(subroutine, &args, &mut calls, &mut seen_defaults);
@@ -2100,6 +2096,34 @@ fn validate_variable_driver_ranges(
     Ok(())
 }
 
+/// Where a scan of a body finds the subroutines and DPI-C imports it calls.
+trait CallDefinitions {
+    fn subroutine(&self, name: &str) -> Option<&sv::ir::Subroutine>;
+    fn dpi_import(&self, name: &str) -> Option<&sv::ir::DpiImport>;
+}
+
+impl CallDefinitions for DriverScan<'_> {
+    fn subroutine(&self, name: &str) -> Option<&sv::ir::Subroutine> {
+        self.subroutines
+            .iter()
+            .find(|subroutine| subroutine.name == name)
+    }
+
+    fn dpi_import(&self, name: &str) -> Option<&sv::ir::DpiImport> {
+        self.dpi_imports.iter().find(|import| import.name() == name)
+    }
+}
+
+impl CallDefinitions for procedural::ProcModule<'_> {
+    fn subroutine(&self, name: &str) -> Option<&sv::ir::Subroutine> {
+        self.subroutines.get(name)
+    }
+
+    fn dpi_import(&self, name: &str) -> Option<&sv::ir::DpiImport> {
+        self.dpi_imports.get(name)
+    }
+}
+
 /// Walks a body for the variables it writes: by assignments, and through the
 /// output arguments and bodies of the subroutines it calls, which write for
 /// the calling process (IEEE 1800-2023 9.2.2.2).
@@ -2114,10 +2138,6 @@ impl<'a> DriverScan<'a> {
             subroutines: module.subroutines(),
             dpi_imports: module.dpi_imports(),
         }
-    }
-
-    fn dpi_import(&self, name: &str) -> Option<&sv::ir::DpiImport> {
-        self.dpi_imports.iter().find(|import| import.name() == name)
     }
 
     /// Calls `record` with each assignment target of `body`.
@@ -2174,11 +2194,7 @@ impl<'a> DriverScan<'a> {
                 }
                 continue;
             }
-            let Some(subroutine) = self
-                .subroutines
-                .iter()
-                .find(|subroutine| subroutine.name == name)
-            else {
+            let Some(subroutine) = self.subroutine(&name) else {
                 continue;
             };
             procedural::default_calls(subroutine, &args, &mut calls, &mut seen_defaults);
