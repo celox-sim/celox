@@ -5236,3 +5236,61 @@ endmodule
         }
     }
 }
+
+#[test]
+fn frames_hold_unpacked_arrays_of_handles() {
+    // Each activation of the recursive `keep` holds objects and strings in
+    // unpacked arrays of its frame across delays, while another process
+    // allocates enough for the heap to collect: the collector scans each
+    // element of a saved frame's arrays as a handle slot.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int n);
+    class Item;
+        int v;
+        function new(int x);
+            v = x;
+        endfunction
+    endclass
+    task automatic keep(int depth, output int sum, output int chars);
+        Item items[3];
+        string names[2];
+        int below = 0;
+        int below_chars = 0;
+        // A loop of a run-time bound leaves no temporary holding all but
+        // the last element.
+        for (int i = 0; i < three; i++) begin
+            items[i] = new(depth * 10 + i);
+            names[i % 2] = $sformatf("d%0d_%0d", depth, i);
+        end
+        #2;
+        if (depth > 0) keep(depth - 1, below, below_chars);
+        #2;
+        sum = below + items[0].v + items[1].v + items[2].v;
+        chars = below_chars + names[0].len() + names[1].len();
+    endtask
+    int two = 2;
+    int three = 3;
+    int count = 3000;
+    initial keep(two, a, b);
+    initial begin
+        Item t;
+        #1;
+        for (int i = 0; i < count; i++) begin
+            t = new(i);
+            n += t.v % 2;
+            if (i % 500 == 0) #1;
+        end
+    end
+endmodule
+"#;
+    assert_eq!(function_units(source, false), 1);
+    for four_state in [false, true] {
+        for backend in backends() {
+            assert_eq!(
+                simulate(source, four_state, true, backend, 20, &["a", "b", "n"]),
+                Ok(vec![value(99), value(24), value(1500)]),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+}

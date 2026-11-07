@@ -512,12 +512,18 @@ impl OutOfLine {
                     )
                 }),
                 calls: function.calls.clone(),
+                // Each element of an unpacked array of handles is a handle
+                // slot, as in state memory.
                 handles: function
                     .slots
                     .iter()
                     .zip(&function.offsets)
                     .filter(|(slot, _)| slot.kind != celox_design::ValueKind::Bits)
-                    .map(|(slot, &offset)| (offset, slot.kind))
+                    .flat_map(|(slot, &offset)| {
+                        (0..slot.width / celox_design::HANDLE_WIDTH).map(move |index| {
+                            (offset + index * celox_heap::HANDLE_BYTES, slot.kind)
+                        })
+                    })
                     .collect(),
             })
             .collect()
