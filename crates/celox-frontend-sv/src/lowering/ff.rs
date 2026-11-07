@@ -1284,7 +1284,14 @@ impl<'p, 'a> Ff<'p, 'a> {
             let else_cond = slt_or(&mut arena, &mut consts, not_truth, unknown)?;
             let then_cond = self.lower_slt(&arena, then_cond)?;
             let else_cond = self.lower_slt(&arena, else_cond)?;
+            // Whether the else arm runs is decided before the then arm runs,
+            // and the then arm's calls may suspend the process or unit and
+            // resume it inside the arm. It is kept in a variable (a frame
+            // slot in a unit), as no register lives across a resumption.
+            let (decided, decided_name) = self.m.temp("else_runs", 1, false, false);
+            self.store(decided, SIROffset::Static(0), 1, else_cond);
             let then_result = self.when(then_cond, |this| then_f(this, state))?;
+            let (else_cond, _) = self.eval_truth(&sv::ir::Expr::Ident(decided_name))?;
             let else_result = self.when(else_cond, |this| else_f(this, state))?;
             return Ok((then_result, else_result));
         }

@@ -5294,3 +5294,163 @@ endmodule
         }
     }
 }
+
+#[test]
+fn unknown_conditions_run_both_arms_across_suspending_calls() {
+    // An unknown condition runs both arms of a conditional operator (IEEE
+    // 1800-2023 11.4.11). Whether the else arm runs is decided before the
+    // then arm, whose call may suspend the unit and resume it there.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int r, output int s, output int t);
+    logic c;
+    int fd;
+    function automatic int show(int x);
+        $fdisplay(fd, "show %0d", x);
+        return x + 1;
+    endfunction
+    function automatic int pick(logic c);
+        return c ? show(10) : show(20);
+    endfunction
+    initial begin
+        fd = 1;
+        c = 1'bx;
+        r = pick(c);
+        #1 c = 1;
+        s = pick(c);
+        #1 c = 0;
+        t = pick(c);
+    end
+endmodule
+"#;
+    same_as_inlined(source, 1, 3, &["r", "s", "t"]);
+}
+
+/// `body`, the body of a function that the design calls three times with
+/// `a` unknown, 1 and 0, runs as it does inlined. `show` makes a host
+/// request, which suspends the process or unit that calls it and resumes it
+/// there: no value the body holds across the call may live in a register.
+fn same_across_suspensions(declarations: &str, body: &str) {
+    let source = format!(
+        r#"`timescale 1ns/1ns
+module Top(output int r, output int s, output int t);
+    int fd = 1;
+    logic [7:0] a;
+    int q[$];
+    int d[];
+    function automatic int show(int x);
+        $fdisplay(fd, "show %0d", x);
+        return x;
+    endfunction
+    function automatic void run();
+        {declarations}
+        {body}
+    endfunction
+    initial begin
+        a = 8'bx;
+        q = '{{1, 2, 3}};
+        d = '{{4, 5, 6}};
+        r = 0;
+        s = 0;
+        t = 0;
+        run();
+        #1 a = 1;
+        run();
+        #1 a = 0;
+        run();
+    end
+endmodule
+"#
+    );
+    assert!(function_units(&source, true) > 0, "function units");
+    for four_state in [false, true] {
+        let inlined = simulate_run(
+            &source,
+            four_state,
+            false,
+            "interpreter",
+            3,
+            &["r", "s", "t"],
+        )
+        .expect("the inlined design runs");
+        for backend in backends() {
+            assert_eq!(
+                simulate_run(&source, four_state, true, backend, 3, &["r", "s", "t"]),
+                Ok(inlined.clone()),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+}
+
+#[test]
+fn short_circuits_across_suspending_calls() {
+    same_across_suspensions(
+        "",
+        "r = r * 4 + int'((a != 0) && (show(1) != 0));
+        s = s * 4 + int'((a == 0) || (show(2) != 0));
+        t = t * 4 + int'((show(3) > 2) && (show(4) > 3));",
+    );
+}
+
+#[test]
+fn inside_across_suspending_calls() {
+    same_across_suspensions(
+        "",
+        "r = r * 4 + int'(show(2) inside {1, show(2), [show(3):show(5)]});
+        s = s * 4 + int'(a inside {show(0), show(1)});
+        t = t * 4 + int'(show(int'(a)) inside {[show(0):show(1)]});",
+    );
+}
+
+#[test]
+fn case_selectors_across_suspending_calls() {
+    same_across_suspensions(
+        "",
+        "case (show(a == 1 ? 1 : 2))
+            show(1): r += 1;
+            show(2): r += 2;
+            default: r += 3;
+        endcase
+        case (a)
+            show(0): s += 1;
+            show(1): s += 2;
+            default: s += 5;
+        endcase
+        casez (show(t))
+            show(0): t += 1;
+            default: t += 7;
+        endcase",
+    );
+}
+
+#[test]
+fn loop_conditions_across_suspending_calls() {
+    same_across_suspensions(
+        "int j = 0;",
+        "for (int i = 0; i < show(3); i++) r += show(i);
+        while (show(j) < 2) j++;
+        s += j;
+        do t += 1; while (show(t) % 4 != 0);",
+    );
+}
+
+#[test]
+fn foreach_bounds_across_suspending_calls() {
+    same_across_suspensions(
+        "int m[3] = '{7, 8, 9};",
+        "foreach (q[i]) r += show(q[i]);
+        foreach (d[i]) s += show(d[i] + i);
+        foreach (m[i]) t += show(m[i]);",
+    );
+}
+
+#[test]
+fn compound_assignments_across_suspending_calls() {
+    same_across_suspensions(
+        "int m[3] = '{1, 2, 3};",
+        "r += show(4);
+        s *= show(2) + 1;
+        m[show(1)] += show(10);
+        t -= show(m[1]);",
+    );
+}
