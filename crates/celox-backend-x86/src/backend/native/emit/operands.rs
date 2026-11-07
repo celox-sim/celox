@@ -235,6 +235,26 @@ pub(super) fn emit_state_base(
     }
 }
 
+/// Load into `destination` the address of state offset `offset`: one the
+/// frame register addresses when the offset lies in a function unit's frame
+/// window, as [`mem_operand`] addresses it, otherwise one from the state
+/// base.
+pub(super) fn emit_state_address(
+    asm: &mut EmitAssembler,
+    destination: AsmRegister64,
+    offset: i32,
+) -> Result<(), IcedError> {
+    let context = asm.context;
+    if let Some((frame, offset)) = frame_operand(&context, BaseReg::SimState, offset) {
+        return asm.lea(destination, frame + offset);
+    }
+    emit_state_base(asm, destination)?;
+    if offset != 0 {
+        asm.add(destination, offset)?;
+    }
+    Ok(())
+}
+
 pub(super) fn mem_operand_ptr(ptr: AsmRegister64, offset: i32) -> AsmMemoryOperand {
     ptr + offset
 }
