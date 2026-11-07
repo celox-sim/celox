@@ -3599,3 +3599,39 @@ endmodule
     sim.run_until(10).expect("the design runs on");
     assert_eq!(sim.get(sim.signal("done")), 1u8.into());
 }
+
+#[test]
+fn units_whose_fork_branches_fail_stay_inlined() {
+    // A branch of a fork in `spawn`, here one of a nested fork, that cannot
+    // be lowered leaves the unit unlowered: the call is inlined and the
+    // design gets the diagnostic an inlined body gets, with and without
+    // out-of-line calls.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a);
+    bit [1:0] bus;
+    function automatic bit pick(int i);
+        a++;
+        return bus[i];
+    endfunction
+    function automatic void spawn(int i);
+        fork
+            begin
+                fork
+                    @(posedge pick(i));
+                join_none
+            end
+        join_none
+    endfunction
+    int zero = 0;
+    initial spawn(zero);
+endmodule
+"#;
+    for forced in [false, true] {
+        let run = simulate(source, false, forced, "interpreter", 10, &["a"]);
+        assert!(
+            run.as_ref()
+                .is_err_and(|error| error.contains("impure call `pick` in an event expression")),
+            "forced {forced}: {run:?}"
+        );
+    }
+}

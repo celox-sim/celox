@@ -1101,7 +1101,10 @@ impl Ff<'_, '_> {
         self.loops = loops;
         self.functions = functions;
         self.overlay = overlay;
-        self.b.switch_to_block(continuation);
+        // A branch that failed leaves its block open; the unit is dropped.
+        if result.is_ok() {
+            self.b.switch_to_block(continuation);
+        }
         result
     }
 
