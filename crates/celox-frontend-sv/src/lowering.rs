@@ -6828,9 +6828,15 @@ fn lower_comb_processes(
         let mut names = HashSet::default();
         procedural::written_names_with_calls(module, process.body(), &mut names);
         // Another process or a continuous assignment may drive other bits of
-        // the same variable, as of any symbolic definition.
+        // the same variable, as of any symbolic definition. A variable an
+        // `initial` block or declaration initializer writes keeps the guarded
+        // unit: its time-zero run changes that value, which observers and
+        // waiting processes see as a change.
         names.iter().all(|name| {
             drivers.writes.get(name.as_str()).is_none_or(|writes| {
+                if writes.iter().any(|write| write.initial.is_some()) {
+                    return false;
+                }
                 let bits = |write: &DriverWrite| write.range.or(write.element);
                 let (own, others): (Vec<_>, Vec<_>) =
                     writes.iter().partition(|write| write.local == Some(index));
