@@ -21,24 +21,25 @@ fn pattern(expression: &str) -> BoundPattern {
         .unwrap()
         .clone()
 }
-fn leaves(pattern: BoundPattern, dimensions: &str) -> Vec<i128> {
+fn analyze(pattern: BoundPattern, dimensions: &str) -> Result<crate::Ir, crate::AnalyzerError> {
     let child = ParsedSource::parse(
         &format!("module C#(parameter logic{dimensions} P='0);endmodule"),
         Path::new("native-pattern-child.sv"),
     )
     .unwrap();
     let packages = ParsedSource::analyze_packages(&[&child]).unwrap();
-    let ir = child
-        .analyze_module(
-            "C",
-            &HashMap::default(),
-            &[],
-            &[("P".into(), pattern)],
-            &ModuleInterfaces::default(),
-            &packages,
-            &mut packages.design(),
-        )
-        .unwrap();
+    child.analyze_module(
+        "C",
+        &HashMap::default(),
+        &[],
+        &[("P".into(), pattern)],
+        &ModuleInterfaces::default(),
+        &packages,
+        &mut packages.design(),
+    )
+}
+fn leaves(pattern: BoundPattern, dimensions: &str) -> Vec<i128> {
+    let ir = analyze(pattern, dimensions).unwrap();
     let statement = &ir.modules()[0].initial_processes()[0].body()[0];
     let crate::ir::Stmt::Assign { rhs, .. } = statement else {
         panic!("{statement:?}");
@@ -82,6 +83,19 @@ fn native_pattern_list_and_keyed_values_bind_in_the_caller() {
             "{expression}"
         );
     }
+}
+#[test]
+fn native_pattern_type_key_is_rejected_for_a_packed_integer_parameter() {
+    // A type key covers array or structure elements, not the bits of a
+    // packed integer parameter (10.9.1-2).
+    let error = analyze(pattern("'{bit:0}"), "[7:0]").unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("type key in an integer assignment pattern"),
+        "{error}"
+    );
+    assert!(analyze(pattern("'{7:1,default:0}"), "[7:0]").is_ok());
 }
 #[test]
 fn native_pattern_repetition_count_and_leaf_operators_drive_specialization() {

@@ -127,6 +127,7 @@ pub(in crate::ast) fn operands(
         StringOp::FromBits
         | StringOp::FromHandle
         | StringOp::Itoa(_)
+        | StringOp::Realtoa
         | StringOp::Format { .. }
         | StringOp::Pattern(_) => 0,
         StringOp::Concat => usize::MAX,

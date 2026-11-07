@@ -830,6 +830,10 @@ pub enum StringOp {
     Atoi(Radix),
     /// `str.itoa(i)` and its radix variants (6.16.11-14), as the new string.
     Itoa(Radix),
+    /// `str.atoreal()` (6.16.10): a `real`, held in 64 payload bits.
+    Atoreal,
+    /// `str.realtoa(r)` (6.16.15), as the new string.
+    Realtoa,
     /// `$sformatf(format, args...)` (21.3.3): the arguments formatted as
     /// `$display` formats them. A `%t` converts a value in the time unit of
     /// the calling scope, of which `ticks_per_unit` simulation time units
@@ -857,6 +861,7 @@ impl StringOp {
                 | Self::ToUpper
                 | Self::ToLower
                 | Self::Itoa(_)
+                | Self::Realtoa
                 | Self::Format { .. }
                 | Self::Pattern(_)
         )
@@ -868,6 +873,8 @@ impl StringOp {
         match self {
             Self::Compare | Self::ICompare | Self::Len | Self::Atoi(_) => (32, true),
             Self::Getc => (8, true),
+            // A `real` is carried in 64 payload bits (6.12).
+            Self::Atoreal => (64, false),
             _ => (32, false),
         }
     }
@@ -888,6 +895,8 @@ impl StringOp {
             "atohex" => (Self::Atoi(Radix::Hexadecimal), 0),
             "atooct" => (Self::Atoi(Radix::Octal), 0),
             "atobin" => (Self::Atoi(Radix::Binary), 0),
+            "atoreal" => (Self::Atoreal, 0),
+            "realtoa" => (Self::Realtoa, 1),
             "itoa" => (Self::Itoa(Radix::Decimal), 1),
             "hextoa" => (Self::Itoa(Radix::Hexadecimal), 1),
             "octtoa" => (Self::Itoa(Radix::Octal), 1),
@@ -899,7 +908,7 @@ impl StringOp {
     /// Whether the method updates the string it is called on instead of
     /// returning a value (`putc` and the `itoa` family).
     pub fn updates_receiver(self) -> bool {
-        matches!(self, Self::Putc | Self::Itoa(_))
+        matches!(self, Self::Putc | Self::Itoa(_) | Self::Realtoa)
     }
 }
 
@@ -922,6 +931,8 @@ impl fmt::Display for StringOp {
             Self::Atoi(Radix::Hexadecimal) => "atohex",
             Self::Atoi(Radix::Octal) => "atooct",
             Self::Atoi(Radix::Binary) => "atobin",
+            Self::Atoreal => "atoreal",
+            Self::Realtoa => "realtoa",
             Self::Itoa(Radix::Decimal) => "itoa",
             Self::Itoa(Radix::Hexadecimal) => "hextoa",
             Self::Itoa(Radix::Octal) => "octtoa",

@@ -27,11 +27,36 @@ struct Selected<'a> {
     default: bool,
     check: bool,
 }
+/// The type an assignment-pattern type key names (10.9).
+fn key_type(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    dims: &PackedDimensions,
+) -> Converted<semantic_types::TyId> {
+    expression_types::cast_type(tree, session, id, tree.declarations(), dims)
+        .ok_or_else(|| unsupported("assignment pattern type key"))
+}
+
+/// Whether a member or element of type `ty` matches type key `key`
+/// (10.9.1-2, by the matching-types rules of 6.22.1).
+fn type_matches(
+    session: &mut Session,
+    functions: &const_functions::ConstantFunctions,
+    dims: &PackedDimensions,
+    ty: &Type,
+    key: semantic_types::TyId,
+) -> bool {
+    semantic_types::of_type(&mut session.types, functions, ty, &dims.const_env)
+        .is_some_and(|element| session.types.matches(element, key))
+}
+
 fn indexed_items(
     kind: NativeKind,
     bindings: Vec<Pair>,
     count: usize,
     index_offset: impl Fn(i128) -> Option<usize>,
+    type_fill: Option<Pair>,
 ) -> Converted<Vec<(Pair, bool)>> {
     match kind {
         NativeKind::List => {
@@ -76,6 +101,9 @@ fn indexed_items(
                         *slot = Some((value, false));
                     }
                     Key::Default => default = Some((value, true)),
+                    Key::Type(_) => {
+                        return Err(unsupported("type key in an integer assignment pattern"));
+                    }
                     Key::Member(_) | Key::Name { .. } => {
                         return Err(unsupported("member key in an array assignment pattern"));
                     }
@@ -85,17 +113,66 @@ fn indexed_items(
                 .into_iter()
                 .enumerate()
                 .map(|(at, value)| {
-                    value.or(default).ok_or_else(|| {
-                        unsupported(format!(
-                            "assignment pattern without a value for element {at}"
-                        ))
-                    })
+                    // A type key that matches the element type fills the
+                    // elements no index key sets, before the default does
+                    // (10.9.1).
+                    value
+                        .or_else(|| type_fill.map(|value| (value, false)))
+                        .or(default)
+                        .ok_or_else(|| {
+                            unsupported(format!(
+                                "assignment pattern without a value for element {at}"
+                            ))
+                        })
                 })
                 .collect()
         }
     }
 }
+/// Split the type keys out of a keyed array pattern: the rest of the
+/// pattern, and the value of the last type key that matches the element
+/// type, which fills the elements no index key sets (10.9.1). A type key
+/// that matches no element type at this level sets nothing here; descent
+/// into subarrays and structure elements is not supported.
+fn extract_type_fill(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    functions: &const_functions::ConstantFunctions,
+    kind: NativeKind,
+    bindings: Vec<Pair>,
+    element: &VariableDimensions,
+    dims: &PackedDimensions,
+) -> Converted<(NativeKind, Vec<Pair>, Option<Pair>)> {
+    let NativeKind::Keyed(keys) = kind else {
+        return Ok((kind, bindings, None));
+    };
+    if !keys.iter().any(|key| matches!(key, Key::Type(_))) {
+        return Ok((NativeKind::Keyed(keys), bindings, None));
+    }
+    let element_type = element.type_id(&mut session.types, functions, &dims.const_env);
+    let mut kept = Vec::new();
+    let mut kept_bindings = Vec::new();
+    let mut fill = None;
+    for (key, value) in keys.into_iter().zip(bindings) {
+        match key {
+            Key::Type(id) => {
+                let key = key_type(tree, session, id, dims)?;
+                if element_type.is_some_and(|element| session.types.matches(element, key)) {
+                    fill = Some(value);
+                }
+            }
+            key => {
+                kept.push(key);
+                kept_bindings.push(value);
+            }
+        }
+    }
+    Ok((NativeKind::Keyed(kept), kept_bindings, fill))
+}
+
 fn select<'a>(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
     functions: &const_functions::ConstantFunctions,
     kind: NativeKind,
     bindings: Vec<Pair>,
@@ -106,7 +183,7 @@ fn select<'a>(
         && shape.unpacked.is_empty()
     {
         return Ok((
-            unpacked_struct_items(&aggregate, kind, bindings)?,
+            unpacked_struct_items(tree, session, functions, &aggregate, kind, bindings, dims)?,
             false,
             true,
         ));
@@ -122,12 +199,20 @@ fn select<'a>(
             unpacked: rest.to_vec(),
             ..(*shape).clone_shape()
         })));
-        let items = indexed_items(kind, bindings, count, |index| {
-            (left.min(right)..=left.max(right))
-                .contains(&index)
-                .then(|| usize::try_from(index.abs_diff(left)).ok())
-                .flatten()
-        })?;
+        let (kind, bindings, fill) =
+            extract_type_fill(tree, session, functions, kind, bindings, &sub, dims)?;
+        let items = indexed_items(
+            kind,
+            bindings,
+            count,
+            |index| {
+                (left.min(right)..=left.max(right))
+                    .contains(&index)
+                    .then(|| usize::try_from(index.abs_diff(left)).ok())
+                    .flatten()
+            },
+            fill,
+        )?;
         return Ok((
             items
                 .into_iter()
@@ -168,12 +253,20 @@ fn select<'a>(
                 .filter(|depth| *depth > 0),
             unpacked_struct: None,
         })));
-        let items = indexed_items(kind, bindings, count, |index| {
-            (left.min(right)..=left.max(right))
-                .contains(&index)
-                .then(|| usize::try_from(index.abs_diff(left)).ok())
-                .flatten()
-        })?;
+        let (kind, bindings, fill) =
+            extract_type_fill(tree, session, functions, kind, bindings, &sub, dims)?;
+        let items = indexed_items(
+            kind,
+            bindings,
+            count,
+            |index| {
+                (left.min(right)..=left.max(right))
+                    .contains(&index)
+                    .then(|| usize::try_from(index.abs_diff(left)).ok())
+                    .flatten()
+            },
+            fill,
+        )?;
         return Ok((
             items
                 .into_iter()
@@ -208,10 +301,14 @@ fn select<'a>(
             }
             NativeKind::Keyed(keys) => {
                 let mut named = Vec::new();
+                let mut typed = Vec::new();
                 let mut default = None;
                 for (key, value) in keys.into_iter().zip(bindings) {
                     match key {
                         Key::Member(name) => named.push((name, value)),
+                        Key::Type(id) => {
+                            typed.push((key_type(tree, session, id, dims)?, value));
+                        }
                         Key::Default => default = Some(value),
                         Key::Index(_) | Key::Name { .. } => {
                             return Err(unsupported("structure assignment pattern form"));
@@ -226,22 +323,35 @@ fn select<'a>(
                         "assignment pattern key `{name}` that is not a structure member"
                     )));
                 }
-                members
-                    .iter()
-                    .map(|member| {
-                        named
-                            .iter()
-                            .find(|(name, _)| name == member.name())
-                            .map(|(_, value)| (*value, false))
-                            .or(default.map(|value| (value, true)))
-                            .ok_or_else(|| {
-                                unsupported(format!(
-                                    "assignment pattern without a value for member `{}`",
-                                    member.name()
-                                ))
-                            })
-                    })
-                    .collect::<Converted<Vec<_>>>()?
+                // A member key sets its member; a type key sets each
+                // member of a matching type that no member key set, the
+                // last of a type winning; the default sets the rest
+                // (10.9.2).
+                let mut values = Vec::new();
+                for member in members {
+                    let value = named
+                        .iter()
+                        .find(|(name, _)| name == member.name())
+                        .map(|(_, value)| (*value, false))
+                        .or_else(|| {
+                            typed
+                                .iter()
+                                .rev()
+                                .find(|(key, _)| {
+                                    type_matches(session, functions, dims, member.r#type(), *key)
+                                })
+                                .map(|(_, value)| (*value, false))
+                        })
+                        .or(default.map(|value| (value, true)))
+                        .ok_or_else(|| {
+                            unsupported(format!(
+                                "assignment pattern without a value for member `{}`",
+                                member.name()
+                            ))
+                        })?;
+                    values.push(value);
+                }
+                values
             }
             _ => return Err(unsupported("structure assignment pattern form")),
         };
@@ -281,12 +391,18 @@ fn select<'a>(
         signed_element_depth: None,
         unpacked_struct: None,
     })));
-    let items = indexed_items(kind, bindings, width, |index| {
-        usize::try_from(index)
-            .ok()
-            .filter(|index| *index < width)
-            .map(|index| width - 1 - index)
-    })?;
+    let items = indexed_items(
+        kind,
+        bindings,
+        width,
+        |index| {
+            usize::try_from(index)
+                .ok()
+                .filter(|index| *index < width)
+                .map(|index| width - 1 - index)
+        },
+        None,
+    )?;
     Ok((
         items
             .into_iter()
@@ -390,8 +506,15 @@ pub(in crate::ast) fn bind_native(
         match job {
             Job::Pattern(id, shape) => {
                 let plan = bound_patterns::prepare_native(id, tree, session, dims, Some(&shape))?;
-                let (items, reverse, keep) =
-                    select(&tree.functions, plan.kind, plan.bindings, shape, dims)?;
+                let (items, reverse, keep) = select(
+                    tree,
+                    session,
+                    &tree.functions,
+                    plan.kind,
+                    plan.bindings,
+                    shape,
+                    dims,
+                )?;
                 jobs.push(Job::Finish {
                     count: items.len(),
                     reverse,
@@ -601,9 +724,13 @@ pub(in crate::ast) fn bind_native(
 /// The member values of an assignment pattern for an unpacked structure
 /// (IEEE 1800-2023 10.9.2), first declared first.
 fn unpacked_struct_items<'a>(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    functions: &const_functions::ConstantFunctions,
     aggregate: &unpacked_structs::UnpackedStruct,
     kind: NativeKind,
     bindings: Vec<Pair>,
+    dims: &PackedDimensions,
 ) -> Converted<Vec<Selected<'a>>> {
     let members = aggregate.members();
     let values = match kind {
@@ -617,11 +744,16 @@ fn unpacked_struct_items<'a>(
             }
             bindings.into_iter().map(|value| (value, false)).collect()
         }
-        NativeKind::Repeat(times) => {
-            indexed_items(NativeKind::Repeat(times), bindings, members.len(), |_| None)?
-        }
+        NativeKind::Repeat(times) => indexed_items(
+            NativeKind::Repeat(times),
+            bindings,
+            members.len(),
+            |_| None,
+            None,
+        )?,
         NativeKind::Keyed(keys) => {
             let mut named = Vec::new();
+            let mut typed = Vec::new();
             let mut default = None;
             for (key, value) in keys.into_iter().zip(bindings) {
                 match key {
@@ -633,28 +765,42 @@ fn unpacked_struct_items<'a>(
                             "assignment pattern key `{name}` that is not a structure member"
                         )));
                     }
+                    Key::Type(id) => {
+                        typed.push((key_type(tree, session, id, dims)?, value));
+                    }
                     Key::Default => default = Some(value),
                     Key::Index(_) | Key::Name { .. } => {
                         return Err(unsupported("structure assignment pattern form"));
                     }
                 }
             }
-            members
-                .iter()
-                .map(|member| {
-                    named
-                        .iter()
-                        .find(|(name, _)| *name == member.name)
-                        .map(|(_, value)| (*value, false))
-                        .or(default.map(|value| (value, true)))
-                        .ok_or_else(|| {
-                            unsupported(format!(
-                                "assignment pattern without a value for member `{}`",
-                                member.name
-                            ))
-                        })
-                })
-                .collect::<Converted<Vec<_>>>()?
+            // Member, then type, then default keys, as for a packed
+            // structure (10.9.2).
+            let mut values = Vec::new();
+            for member in members {
+                let value = named
+                    .iter()
+                    .find(|(name, _)| *name == member.name)
+                    .map(|(_, value)| (*value, false))
+                    .or_else(|| {
+                        typed
+                            .iter()
+                            .rev()
+                            .find(|(key, _)| {
+                                type_matches(session, functions, dims, &member.r#type, *key)
+                            })
+                            .map(|(_, value)| (*value, false))
+                    })
+                    .or(default.map(|value| (value, true)))
+                    .ok_or_else(|| {
+                        unsupported(format!(
+                            "assignment pattern without a value for member `{}`",
+                            member.name
+                        ))
+                    })?;
+                values.push(value);
+            }
+            values
         }
     };
     Ok(members
