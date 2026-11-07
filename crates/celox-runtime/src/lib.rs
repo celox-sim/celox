@@ -45,9 +45,9 @@ pub use simulation::{
     StepObserver, SuspendedProcess, UnitExecutor,
 };
 pub use state_file::{
-    ActivationRecord, BaselineRecord, CallStackRecord, FrameValueKind, FrameValueRecord, NbaRecord,
-    ProcessRecord, ProcessRef, ScheduleRecord, ScheduledEvent, StateDifference, StateFile,
-    StateFileError, StateObject, StateRole, WaiterRecord, format_state_value,
+    ActivationRecord, BaselineRecord, BoxRecord, CallStackRecord, FrameValueKind, FrameValueRecord,
+    NbaRecord, ProcessRecord, ProcessRef, ScheduleRecord, ScheduledEvent, StateDifference,
+    StateFile, StateFileError, StateObject, StateRole, WaiterRecord, format_state_value,
 };
 pub use testbench::bind_testbench_program;
 pub use timing::{

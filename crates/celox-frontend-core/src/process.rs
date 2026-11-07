@@ -39,7 +39,8 @@ const SWITCH_BITS: usize = 8;
 
 /// Width of a process's resume slot. Its high byte is zero until a process
 /// has more than 255 suspension points.
-pub const PROCESS_RESUME_WIDTH: usize = 2 * SWITCH_BITS;
+pub const PROCESS_RESUME_WIDTH: usize = celox_design::PROCESS_RESUME_WIDTH;
+const _: () = assert!(PROCESS_RESUME_WIDTH == 2 * SWITCH_BITS);
 
 /// Most suspension points one process kernel can have.
 pub const MAX_PROCESS_SUSPENSIONS: usize = (1 << PROCESS_RESUME_WIDTH) - 1;
@@ -259,6 +260,14 @@ impl<A: Copy> ProcessKernelBuilder<A> {
         self.slots.requires_timed_simulation = true;
         self.suspend(ProcessStatus::Fork)?;
         Ok((children, self.builder.current_block()))
+    }
+
+    /// Note that the kernel calls a function unit that forks (see
+    /// [`celox_design::PROCESS_FORK_RESUME_SHIFT`]): its children are
+    /// activations of this kernel, as those of [`Self::fork`] are.
+    pub fn forks_in_call(&mut self) {
+        self.slots.const_delays = false;
+        self.slots.requires_timed_simulation = true;
     }
 
     /// Wait for the calling process's immediate children (IEEE 1800-2023 9.6.1).
