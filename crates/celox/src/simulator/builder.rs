@@ -1512,6 +1512,7 @@ fn compile_mixed_to_sir_with_layout_mode(
 /// Write the settle plan a trace captured to `path`
 /// ([`SimulatorBuilder::settle_plan_output`]); a build without a partitioned
 /// settle writes nothing.
+#[cfg(feature = "host-runtime")]
 fn write_settle_plan_output(
     path: Option<&std::path::Path>,
     trace: &crate::debug::CompilationTrace,
