@@ -77,6 +77,7 @@ pub use celox_runtime::{
 pub use celox_runtime::{KernelSchedule, SchedulerMode, SchedulerStats};
 pub use celox_slt::scheduler::SchedulerError;
 pub use celox_state_layout::STATE_HEADER_SIZE;
+pub use celox_state_layout::SettleProfile;
 pub use debug::{CompilationTrace, NativeProfileBlock, TraceOptions};
 pub use diagnostics::RuntimeDiagnostics;
 pub use dpi::{DpiError, DpiSymbols};

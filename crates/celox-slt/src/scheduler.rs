@@ -2464,6 +2464,10 @@ pub struct SettlePartitioning<Addr> {
     /// changes on every edge, so such paths get partitions of their own: the
     /// logic sharing a partition with them would run on every edge too.
     pub clock_nets: HashSet<Addr>,
+    /// Whether the settle counts its work in run counters after the flags
+    /// (`celox_design::settle_profile_offset`); `waits` is the number of
+    /// wait flags, which the counters follow.
+    pub profile: Option<usize>,
 }
 
 /// One partition of a partitioned settle.
@@ -4213,6 +4217,12 @@ struct WorkLowering<'a, Addr: Clone + Eq + Hash> {
     partition_merge: Option<BlockId>,
     /// Where a group of clean, effect-free partitions can be skipped.
     partition_group_merge: Option<BlockId>,
+    /// The wait flags of a settle that counts its work, which its run
+    /// counters follow ([`SettlePartitioning::profile`]).
+    settle_profile_waits: Option<usize>,
+    /// The partitions of the settle and the byte offset of its run counters
+    /// among its flags, once the settle began and when it counts its work.
+    settle_profile: Option<(usize, usize)>,
     /// The open partition's watched chunks before it ran.
     partition_old: Vec<RegisterId>,
 }
@@ -4236,6 +4246,8 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
             in_partition: false,
             partition_merge: None,
             partition_group_merge: None,
+            settle_profile_waits: None,
+            settle_profile: None,
             partition_old: Vec::new(),
         }
     }
@@ -4244,6 +4256,13 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
     /// every partition to run: set every flag, so that the guards test
     /// nothing but their own flag.
     fn begin_settle(&mut self, flags: Addr, count: usize) {
+        if let Some(waits) = self.settle_profile_waits {
+            self.settle_profile = Some((count, celox_design::settle_profile_offset(count, waits)));
+            let one = self.builder.alloc_bit(64, false);
+            self.builder
+                .emit(SIRInstruction::Imm(one, SIRValue::new(1u64)));
+            self.count_work(flags, 2 * count, one);
+        }
         let untracked = self.builder.alloc_bit(8, false);
         self.builder.emit(SIRInstruction::Load(
             untracked,
@@ -4286,6 +4305,28 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
         self.builder.switch_to_block(start);
     }
 
+    /// Add `amount` (64 bits) to run counter `word` of a settle that counts
+    /// its work ([`SettlePartitioning::profile`]).
+    fn count_work(&mut self, flags: Addr, word: usize, amount: RegisterId) {
+        let Some((_, start)) = self.settle_profile else {
+            return;
+        };
+        let offset = SIROffset::Static((start + word * 8) * 8);
+        let [old, new] = std::array::from_fn(|_| self.builder.alloc_bit(64, false));
+        self.builder
+            .emit(SIRInstruction::Load(old, flags, offset.clone(), 64));
+        self.builder
+            .emit(SIRInstruction::Binary(new, old, BinaryOp::Add, amount));
+        self.builder.emit(SIRInstruction::Store(
+            flags,
+            offset,
+            64,
+            new,
+            Vec::new(),
+            Vec::new(),
+        ));
+    }
+
     /// Compare each chunk with its value before the partition ran (`old`),
     /// and set the flags of its `readers` when it changed. Readers with the
     /// same dependencies share a change test; adjacent readers share a
@@ -4295,7 +4336,7 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
         flags: Addr,
         one: RegisterId,
         chunks: Vec<(&WatchedChunk<Addr>, &[usize], RegisterId)>,
-    ) {
+    ) -> Option<RegisterId> {
         let mut set_changes: Vec<(&[usize], RegisterId)> = Vec::new();
         for (chunk, readers, old) in chunks {
             let new = self.builder.alloc_logic(chunk.width);
@@ -4317,6 +4358,21 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
                     *any = both;
                 }
                 None => set_changes.push((readers, changed)),
+            }
+        }
+        // Whether anything compared changed, for the run counters.
+        let mut any_changed = None;
+        if self.settle_profile.is_some() {
+            for &(_, changed) in &set_changes {
+                any_changed = Some(match any_changed {
+                    None => changed,
+                    Some(any) => {
+                        let both = self.builder.alloc_bit(1, false);
+                        self.builder
+                            .emit(SIRInstruction::Binary(both, any, BinaryOp::Or, changed));
+                        both
+                    }
+                });
             }
         }
         for (readers, changed) in set_changes {
@@ -4375,6 +4431,7 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
                 .seal_block(SIRTerminator::Jump(done, Vec::new()));
             self.builder.switch_to_block(done);
         }
+        any_changed
     }
 
     /// Skip a consecutive group without testing every individual clean flag.
@@ -4474,6 +4531,12 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
             Vec::new(),
             Vec::new(),
         ));
+        if self.settle_profile.is_some() {
+            let one = self.builder.alloc_bit(64, false);
+            self.builder
+                .emit(SIRInstruction::Imm(one, SIRValue::new(1u64)));
+            self.count_work(flags, index, one);
+        }
         self.partition_old.clear();
         for chunk in &partition.watched {
             let old = self.builder.alloc_logic(chunk.width);
@@ -4489,7 +4552,7 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
 
     /// Close a partition: set the flags of the partitions reading what it
     /// changed, then join the path that skipped it.
-    fn end_partition(&mut self, flags: Addr, partition: &PlannedPartition<Addr>) {
+    fn end_partition(&mut self, flags: Addr, index: usize, partition: &PlannedPartition<Addr>) {
         self.flush_pending_folds();
         if !partition.watched.is_empty() {
             let one = self.builder.alloc_bit(8, false);
@@ -4505,7 +4568,24 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
                 .zip(&old)
                 .map(|(chunk, &old)| (chunk, chunk.readers.as_slice(), old))
                 .collect();
-            self.mark_changed_readers(flags, one, all);
+            let changed = self.mark_changed_readers(flags, one, all);
+            if let (Some((count, _)), Some(changed)) = (self.settle_profile, changed) {
+                let [one, zero, amount] =
+                    std::array::from_fn(|_| self.builder.alloc_bit(64, false));
+                self.builder
+                    .emit(SIRInstruction::Imm(one, SIRValue::new(1u64)));
+                self.builder
+                    .emit(SIRInstruction::Imm(zero, SIRValue::new(0u64)));
+                self.builder
+                    .emit(SIRInstruction::Mux(amount, changed, one, zero));
+                self.count_work(flags, count + index, amount);
+            }
+        } else if let Some((count, _)) = self.settle_profile {
+            // Nothing compared: every run counts as changing something.
+            let one = self.builder.alloc_bit(64, false);
+            self.builder
+                .emit(SIRInstruction::Imm(one, SIRValue::new(1u64)));
+            self.count_work(flags, count + index, one);
         }
         if !partition.marks.is_empty() {
             let one = self.builder.alloc_bit(8, false);
@@ -5038,6 +5118,10 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
     }
     let mut runtime_errors: HashMap<i64, RuntimeErrorInfo<Addr>> = HashMap::default();
     let mut next_runtime_error_code = first_runtime_error_code;
+    lowering.settle_profile_waits = partitioning
+        .as_ref()
+        .filter(|_| ff.is_none())
+        .and_then(|partitioning| partitioning.profile);
     let plan = partitioning
         .filter(|_| ff.is_none())
         .and_then(|partitioning| {
@@ -5053,7 +5137,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
         if let Some((plan, flags)) = &plan {
             if let Some(partition) = plan.first_work.iter().position(|&first| first == index) {
                 if partition > 0 {
-                    lowering.end_partition(*flags, &plan.partitions[partition - 1]);
+                    lowering.end_partition(*flags, partition - 1, &plan.partitions[partition - 1]);
                 } else {
                     lowering.begin_settle(*flags, plan.partitions.len());
                 }
@@ -5078,7 +5162,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
     if let Some((plan, flags)) = &plan
         && let Some(last) = plan.partitions.last()
     {
-        lowering.end_partition(*flags, last);
+        lowering.end_partition(*flags, plan.partitions.len() - 1, last);
         lowering.end_partition_group();
     }
     // Flush the final exact grouped-fold run after the SCC loop.
@@ -5788,6 +5872,7 @@ mod tests {
                 target_cost: 1,
                 external_readers: crate::HashMap::default(),
                 clock_nets: crate::HashSet::default(),
+                profile: None,
             }),
         )
         .unwrap()
@@ -5887,6 +5972,7 @@ mod tests {
                     target_cost: 1,
                     external_readers: crate::HashMap::default(),
                     clock_nets: crate::HashSet::default(),
+                    profile: None,
                 }),
             )
             .unwrap();
@@ -5957,6 +6043,7 @@ mod tests {
                 target_cost: 1,
                 external_readers: [(11, vec![1])].into_iter().collect(),
                 clock_nets: crate::HashSet::default(),
+                profile: None,
             }),
         )
         .unwrap();
@@ -6893,6 +6980,7 @@ mod tests {
                 target_cost: 1,
                 external_readers: crate::HashMap::default(),
                 clock_nets: crate::HashSet::default(),
+                profile: None,
             }),
         ] {
             let result = super::sort_with_unpacked_element_widths(

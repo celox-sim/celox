@@ -282,6 +282,7 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
         Some(path) => builder.settle_plan_output(path),
         None => builder,
     };
+    let builder = builder.settle_profile(arguments.execution.settle_profile.is_some());
     let builder = if let Some(path) = &arguments.execution.vcd {
         builder.vcd(path)
     } else if let Some(path) = &arguments.execution.fst {
@@ -328,6 +329,11 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
                 arguments.execution.report,
             );
             $(if arguments.execution.report { $report_hotspots(&simulation, &arguments.design.top); })?
+            runner::write_settle_profile(
+                arguments.execution.settle_profile.as_deref(),
+                simulation.settle_profile(),
+            )
+            .map_err(|error| format!("cannot write the settle profile: {error}"))?;
             result
         }};
     }

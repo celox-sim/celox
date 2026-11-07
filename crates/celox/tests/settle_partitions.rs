@@ -190,6 +190,47 @@ fn traced_settle_plan_marks_only_readers_of_compared_bits() {
     );
 }
 
+/// The run counters leave the results alone (the settle cross-check still
+/// passes) and count consistently: every partition runs at the first settle,
+/// and no partition changed something in more runs than it had.
+fn check_settle_profile<B: celox::SimBackend>(mut sim: Simulator<B>) {
+    assert!(sim.settle_profile().is_some());
+    let outputs = trace!(sim);
+    assert_eq!(outputs, reference());
+    let profile = sim.settle_profile().expect("built with a settle profile");
+    assert!(profile.settles > 0);
+    assert!(profile.runs.iter().all(|&runs| runs > 0), "{profile:?}");
+    assert!(
+        profile
+            .runs
+            .iter()
+            .zip(&profile.changed)
+            .all(|(runs, changed)| changed <= runs),
+        "{profile:?}"
+    );
+    assert!(profile.unchanged_runs() <= profile.total_runs());
+    assert!(single_pass().build().unwrap().settle_profile().is_none());
+}
+
+#[test]
+fn settle_profile_counts_runs_interpreter() {
+    check_settle_profile(
+        partitioned()
+            .settle_profile(true)
+            .build_interpreter()
+            .unwrap(),
+    );
+}
+
+#[cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+))]
+#[test]
+fn settle_profile_counts_runs_native() {
+    check_settle_profile(partitioned().settle_profile(true).build_native().unwrap());
+}
+
 /// A count of dirty partitions says nothing about their share of the work:
 /// unrelated partitions can contain much wider expressions or larger processes.
 /// Updating one input must not promote its three readers to a full settle.

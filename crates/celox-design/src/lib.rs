@@ -1547,6 +1547,8 @@ pub struct SettlePartitions<A> {
     /// identity-store alias may merge their homes (nothing else marks the
     /// target's readers once its store is gone).
     pub copies: Vec<(A, A)>,
+    /// Whether the flags end with run counters ([`settle_profile_offset`]).
+    pub profile: bool,
 }
 
 /// The index of the untracked byte among the flags of a partitioned settle
@@ -1566,6 +1568,21 @@ pub const fn settle_wait_flag(partitions: usize, process: usize) -> usize {
 /// partitions and `waits` wait flags.
 pub const fn settle_flag_count(partitions: usize, waits: usize) -> usize {
     partitions + 1 + waits
+}
+
+/// The byte offset, among the flags of a partitioned settle, of its run
+/// counters when it counts its work: little-endian 64-bit words, first one
+/// per partition counting its runs, then one per partition counting the runs
+/// in which something it compares changed, then the settles. They follow the
+/// flags proper ([`settle_flag_count`]) at an 8-byte boundary.
+pub const fn settle_profile_offset(partitions: usize, waits: usize) -> usize {
+    settle_flag_count(partitions, waits).div_ceil(8) * 8
+}
+
+/// The bytes of the run counters of a settle of `partitions` partitions
+/// ([`settle_profile_offset`]).
+pub const fn settle_profile_bytes(partitions: usize) -> usize {
+    (2 * partitions + 1) * 8
 }
 
 /// The process units that run the edges of one event together with its

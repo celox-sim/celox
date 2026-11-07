@@ -115,6 +115,12 @@ unnecessary:
   compares after it ran and the partitions each chunk marks, headed by a
   lint of backward reader edges (rerun in the next settle pass) and of
   readers marked for bits they do not read, which must be none.
+  `SimulatorBuilder::settle_profile` (CLI: `--settle-profile FILE`) adds run
+  counters after the flags: each partition's runs, the runs in which
+  something it compares changed, and the settles (`settle_profile()` on the
+  simulation). A run that changed nothing compared is work the settle could
+  have skipped, such as unrelated logic sharing a partition with state that
+  changes every cycle.
 - in the time slots a compiled scheduler runs, a combinational settle waits
   until its results are read: it runs, where the reference loop last
   settled, before a process kernel or domain that reads combinational outputs

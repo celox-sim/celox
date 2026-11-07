@@ -178,6 +178,7 @@ pub struct OptimizeOptions {
     parallel_lanes: u32,
     parallel_partition: ParallelPartition,
     settle_partition: SettlePartition,
+    settle_profile: bool,
     value_change_objects: Vec<String>,
     pub diagnostics: SirDiagnostics,
 }
@@ -226,6 +227,7 @@ impl OptimizeOptions {
             parallel_lanes: 1,
             parallel_partition: ParallelPartition::Estimated,
             settle_partition: SettlePartition::Estimated,
+            settle_profile: false,
             value_change_objects: Vec::new(),
             diagnostics: SirDiagnostics::default(),
         }
@@ -305,6 +307,17 @@ impl OptimizeOptions {
 
     pub fn settle_partition(&self) -> SettlePartition {
         self.settle_partition
+    }
+
+    /// Count each settle partition's runs and the runs that changed
+    /// something it compares, for finding wasted work.
+    pub fn with_settle_profile(mut self, enable: bool) -> Self {
+        self.settle_profile = enable;
+        self
+    }
+
+    pub fn settle_profile(&self) -> bool {
+        self.settle_profile
     }
 
     /// Show the host each blocking update of the objects at these

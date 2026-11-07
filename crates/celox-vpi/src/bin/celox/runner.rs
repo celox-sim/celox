@@ -74,6 +74,10 @@ pub(super) struct ExecutionArgs {
     /// dependencies, to this file while compiling.
     #[arg(long, value_name = "FILE")]
     pub dump_settle_plan: Option<PathBuf>,
+    /// Count the partitioned settle's work and write, after the run, each
+    /// partition's runs and the runs that changed nothing it compares.
+    #[arg(long, value_name = "FILE")]
+    pub settle_profile: Option<PathBuf>,
     /// Record waveform changes at each simulation time step (VCD).
     #[arg(long, value_name = "FILE", conflicts_with = "compile_only")]
     pub vcd: Option<PathBuf>,
@@ -219,6 +223,7 @@ struct Options {
     backend: Backend,
     four_state: bool,
     dump_settle_plan: Option<PathBuf>,
+    settle_profile: Option<PathBuf>,
     vcd: Option<PathBuf>,
     fst: Option<PathBuf>,
     compile_only: bool,
@@ -323,6 +328,7 @@ pub(super) fn run(
         backend,
         four_state: design.four_state.unwrap_or(false),
         dump_settle_plan: cli.dump_settle_plan,
+        settle_profile: cli.settle_profile,
         vcd: cli.vcd,
         fst: cli.fst,
         compile_only: cli.compile_only,
@@ -588,6 +594,9 @@ pub(super) fn run(
     if let Some(path) = &opts.dump_settle_plan {
         builder = builder.settle_plan_output(path);
     }
+    if opts.settle_profile.is_some() {
+        builder = builder.settle_profile(true);
+    }
     if let Some(path) = &opts.vcd {
         builder = builder.vcd(path);
     }
@@ -779,6 +788,7 @@ pub(super) fn run(
                     (run_compiled_testbench(&mut sim, &testbench), 0, false)
                 };
                 sim.flush_vcd()?;
+                write_settle_profile(opts.settle_profile.as_deref(), sim.settle_profile())?;
                 #[cfg(any(
                     all(target_arch = "x86_64", not(feature = "arm64-codegen")),
                     all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
@@ -997,6 +1007,7 @@ pub(super) fn run(
                 (run_compiled_testbench(&mut sim, &testbench), 0, false)
             };
             sim.flush_vcd()?;
+            write_settle_profile(opts.settle_profile.as_deref(), sim.settle_profile())?;
             let jit_execute_elapsed = sim
                 .finish_native_execution_timing()
                 .map(|timing| timing.elapsed());
@@ -1036,6 +1047,7 @@ pub(super) fn run(
                 (run_compiled_testbench(&mut sim, &testbench), 0, false)
             };
             sim.flush_vcd()?;
+            write_settle_profile(opts.settle_profile.as_deref(), sim.settle_profile())?;
             (
                 result,
                 ticks,
@@ -1066,6 +1078,7 @@ pub(super) fn run(
                 (run_compiled_testbench(&mut sim, &testbench), 0, false)
             };
             sim.flush_vcd()?;
+            write_settle_profile(opts.settle_profile.as_deref(), sim.settle_profile())?;
             (
                 result,
                 ticks,
@@ -1097,6 +1110,7 @@ pub(super) fn run(
                 (run_compiled_testbench(&mut sim, &testbench), 0, false)
             };
             sim.flush_vcd()?;
+            write_settle_profile(opts.settle_profile.as_deref(), sim.settle_profile())?;
             (
                 result,
                 ticks,
@@ -1135,6 +1149,7 @@ pub(super) fn run(
             };
             let execute_elapsed = execute_start.elapsed();
             sim.flush_vcd()?;
+            write_settle_profile(opts.settle_profile.as_deref(), sim.settle_profile())?;
             let timing = sim.finish_tiered_execution_timing();
             let stats = sim.tiered_execution_stats();
             generated_code_exercised = stats.tier == TieredExecutionTier::Compiled
@@ -1249,6 +1264,37 @@ pub(super) fn run(
 
 /// When each tier ran: the background compilations, and the time and
 /// testbench tick at which generated code, then optimizing code, took over.
+/// Write the settle's work counters to `path`: a summary, then per
+/// partition its runs, the runs that changed something it compares, and the
+/// runs that changed nothing (`--settle-profile`). Partition numbers are
+/// those of `--dump-settle-plan`.
+pub(super) fn write_settle_profile(
+    path: Option<&std::path::Path>,
+    profile: Option<celox::SettleProfile>,
+) -> std::io::Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    let Some(profile) = profile else {
+        return fs::write(path, "# no partitioned settle\n");
+    };
+    let runs = profile.total_runs();
+    let unchanged = profile.unchanged_runs();
+    let mut out = format!(
+        "# settles {}, partition runs {runs} ({:.2} per settle), runs changing nothing compared {unchanged} ({:.1}%)\npartition\truns\tchanged\tunchanged\n",
+        profile.settles,
+        runs as f64 / profile.settles.max(1) as f64,
+        100.0 * unchanged as f64 / runs.max(1) as f64,
+    );
+    for (partition, (runs, changed)) in profile.runs.iter().zip(&profile.changed).enumerate() {
+        out.push_str(&format!(
+            "{partition}\t{runs}\t{changed}\t{}\n",
+            runs - changed
+        ));
+    }
+    fs::write(path, out)
+}
+
 fn print_tiered_timeline(report: bool, test: &str, timing: TieredExecutionTiming) {
     let optional = |value: Option<u128>| value.map_or_else(|| "NA".to_string(), |v| v.to_string());
     let compiles = timing
