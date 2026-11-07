@@ -286,10 +286,10 @@ impl Ff<'_, '_> {
                     // Places of properties that no wait watches share a
                     // function whichever property they are.
                     field: sv::ir::ObjectField {
-                        key: if self.m.id(&property_changes(field.key)).is_some() {
+                        key: if self.m.change_counter(field).is_some() {
                             field.key
                         } else {
-                            0
+                            sv::ir::ChangeKey::None
                         },
                         ..*field
                     },
@@ -1897,7 +1897,7 @@ impl Ff<'_, '_> {
                 four_state: variable.is_4state,
                 nullable: false,
                 real: variable.float.is_some(),
-                key: 0,
+                key: self.box_changes(),
             };
             let (handle_id, handle) =
                 self.m
@@ -1944,6 +1944,35 @@ impl Ff<'_, '_> {
             self.shared_boxes.push(shared);
         }
         Ok((body, count))
+    }
+
+    /// The property key of a new box's field, with a change count of its
+    /// own: a store into the box bumps it and a wait that reads the box
+    /// watches it, as for a watched class property (see `property_changes`),
+    /// so a child's write wakes the parent waiting on their shared variable.
+    /// The count is a module variable, which the unit and the units it
+    /// passes the box to write (see `ProcModule::box_changes`).
+    fn box_changes(&mut self) -> sv::ir::ChangeKey {
+        let (counter, _) = self.m.temp(
+            "box_changes",
+            super::super::ff::PROPERTY_CHANGES_WIDTH,
+            false,
+            false,
+        );
+        // Observed as #3284's counts are: not one of a process's hidden
+        // variables, whose changes nothing counts.
+        self.m
+            .variables
+            .get_mut(&counter)
+            .expect("a box count")
+            .hidden = false;
+        // The box's own namespace: no class property's count, and nothing
+        // that counts every property's stores, such as `randomize`.
+        self.m.box_changes.push(counter);
+        if let Some(resume) = self.resume_frame() {
+            resume.staging.insert(counter);
+        }
+        sv::ir::ChangeKey::Box(counter.0)
     }
 
     /// Make the box of `shared` (see [`SharedBox`]) holding the variable's
@@ -2211,6 +2240,7 @@ impl Ff<'_, '_> {
                         && !staging.contains(&addr.var_id)
                         && !in_place.contains(&addr.var_id)
                         && !referents.contains(&addr.var_id)
+                        && !self.m.box_changes.contains(&addr.var_id)
                     {
                         return Err(other("writes hidden module state"));
                     }
