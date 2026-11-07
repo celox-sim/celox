@@ -103,7 +103,8 @@ sv_backends! {
     }
     // `%m` names the subroutine that calls the task (IEEE 1800-2023
     // 21.2.1.5), wherever it is called from: a package subroutine or class
-    // method by its package and class, one of the compilation unit by
+    // method by its package and class (a specialization with its parameter
+    // values, as `$typename` names it), one of the compilation unit by
     // `$unit`, a module subroutine under the instance that declares it.
     fn scope_name_of_subroutines(sim) {
         @setup {
@@ -128,7 +129,17 @@ sv_backends! {
                             $display("[%M %%m]");
                         endtask
                     endclass
+                    class P #(int N = 1);
+                        function string where();
+                            return $sformatf("%m");
+                        endfunction
+                    endclass
                 endpackage
+                class U;
+                    function string where();
+                        return $sformatf("%m");
+                    endfunction
+                endclass
                 function automatic string unit_where();
                     return $sformatf("%m");
                 endfunction
@@ -142,6 +153,8 @@ sv_backends! {
                 endmodule
                 module Top;
                     pkg::C c;
+                    pkg::P #(3) p;
+                    U u;
                     Child first();
                     initial begin
                         #1;
@@ -151,6 +164,10 @@ sv_backends! {
                         $display("[%s]", c.where());
                         pkg::C::show();
                         $display("[%s]", unit_where());
+                        p = new;
+                        $display("[%s]", p.where());
+                        u = new;
+                        $display("[%s]", u.where());
                     end
                 endmodule
             "#;
@@ -164,6 +181,8 @@ sv_backends! {
             celox::RuntimeEvent::Display { message: b"[pkg::C::where]".to_vec() },
             celox::RuntimeEvent::Display { message: b"[pkg::C::show %m]".to_vec() },
             celox::RuntimeEvent::Display { message: b"[$unit::unit_where]".to_vec() },
+            celox::RuntimeEvent::Display { message: b"[pkg::P#(3)::where]".to_vec() },
+            celox::RuntimeEvent::Display { message: b"[$unit::U::where]".to_vec() },
         ]);
     }
 }

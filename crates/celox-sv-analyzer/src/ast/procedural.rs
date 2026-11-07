@@ -4385,6 +4385,7 @@ pub(super) fn lower_subroutine(
         Some(class) => classes::Class::subroutine_name(&class.name, &name),
         None => name.clone(),
     });
+    let scope = scope_name(tree, session, declaration_env, native.tokens, class, &name);
     let mut builder = BodyBuilder::new(
         tree,
         session,
@@ -4393,7 +4394,7 @@ pub(super) fn lower_subroutine(
         system_functions::Body::Subroutine,
     );
     builder.owner = Some(qualified_name.clone());
-    builder.dims.scope_name = Some(std::sync::Arc::new(scope_name(tree, class, &name)));
+    builder.dims.scope_name = Some(std::sync::Arc::new(scope));
     builder.task_timing = native.kind == celox_sv_syntax::SubroutineKind::Task;
     let first_local = builder.state.locals.len();
     builder.automatic = match native.lifetime.as_deref() {
@@ -6380,31 +6381,35 @@ fn default_conversion(string: bool, real: bool, radix: system_functions::Radix) 
 }
 
 /// The name `%m` prints in the subroutine `name`, a method of `class` if
-/// any, declared in the unit of `tree` (IEEE 1800-2023 21.2.1.5). A package's
-/// subroutines are named by the package, the compilation unit's by `$unit`
-/// (26.3), and a design element's under the instance that runs them. It does
-/// not depend on the caller.
+/// any, whose declaration spans `tokens` (IEEE 1800-2023 21.2.1.5). Names are
+/// the source's, as `$typename` prints them: a package's subroutines are
+/// named by the package, the compilation unit's by `$unit` (26.3), and a
+/// design element's under the instance that runs them. It does not depend
+/// on the caller.
 fn scope_name(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &SharedEnv,
+    tokens: celox_sv_syntax::TokenRange,
     class: Option<&classes::Class>,
     name: &str,
 ) -> expression_binding::ScopeName {
     use expression_binding::ScopeName;
-    let path = match class {
-        Some(class) => format!("{}::{name}", class.name),
-        None => name.to_string(),
+    let unit = classes::enclosing_unit(tree.declarations(), tokens);
+    let path = match class
+        .and_then(|class| type_names::class_scope_name(&class.name, tree, session, env))
+    {
+        Some(class) => format!("{class}::{name}"),
+        None => type_names::scoped_name(unit, name),
     };
-    match tree.root_unit() {
-        Ok(unit) if unit.kind == celox_sv_syntax::UnitKind::Package => {
-            let package = format!("{}::", instances::normalize_identifier(&unit.name.spelling));
-            if path.starts_with(&package) {
-                ScopeName::Absolute(path)
-            } else {
-                ScopeName::Absolute(package + &path)
-            }
+    // A design element's names are under the instance, which `%m` still
+    // names at run time.
+    match unit.filter(|unit| unit.kind != celox_sv_syntax::UnitKind::Package) {
+        Some(unit) => {
+            let element = format!("{}.", instances::normalize_identifier(&unit.name.spelling));
+            ScopeName::Relative(path.strip_prefix(&element).unwrap_or(&path).to_owned())
         }
-        Ok(_) => ScopeName::Relative(path),
-        Err(_) => ScopeName::Absolute(format!("$unit::{path}")),
+        None => ScopeName::Absolute(path),
     }
 }
 
