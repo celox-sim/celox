@@ -116,6 +116,8 @@ pub(super) struct Ff<'p, 'a> {
     /// sites, which the sites of the units it calls follow (see
     /// `Ff::function_wait_word`), set when the kernel is finished.
     wait_offset_patches: Vec<RegisterId>,
+    /// Likewise the number of its own NBA sites.
+    nba_offset_patches: Vec<RegisterId>,
     frame_locals: Vec<SourceVarId>,
     postponed_locals: HashSet<SourceVarId>,
     event_probes: Vec<celox_design::ProcessEventProbe<SourceVarId>>,
@@ -233,6 +235,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             binding_defaults: Vec::new(),
             shared_boxes: Vec::new(),
             wait_offset_patches: Vec::new(),
+            nba_offset_patches: Vec::new(),
             frame_locals: Vec::new(),
             postponed_locals: HashSet::default(),
             event_probes: Vec::new(),
@@ -4125,11 +4128,12 @@ impl<'p, 'a> Ff<'p, 'a> {
                 }
                 Ok(true)
             }
+            // A unit stages the update at a function NBA site.
             sv::ir::Stmt::Assign {
                 lhs,
                 rhs,
                 nonblocking: true,
-            } if self.kernel.is_some() => {
+            } if self.kernel.is_some() || self.can_suspend_unit() => {
                 self.nonblocking(std::slice::from_ref(lhs), rhs)?;
                 Ok(true)
             }
@@ -4137,7 +4141,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 parts,
                 rhs,
                 nonblocking: true,
-            } if self.kernel.is_some() => {
+            } if self.kernel.is_some() || self.can_suspend_unit() => {
                 self.nonblocking(parts, rhs)?;
                 Ok(true)
             }
@@ -7225,14 +7229,16 @@ impl Ff<'_, '_> {
         let slots = kernel.slots();
         let resume_count = kernel.resume_count();
         let mut unit = kernel.build();
-        if !self.wait_offset_patches.is_empty() {
-            let own = self.wait_sites.len() as u64;
+        if !self.wait_offset_patches.is_empty() || !self.nba_offset_patches.is_empty() {
+            let (waits, nbas) = (self.wait_sites.len() as u64, self.nba_sites.len() as u64);
             for block in unit.blocks.values_mut() {
                 for instruction in &mut block.instructions {
-                    if let SIRInstruction::Imm(dst, value) = instruction
-                        && self.wait_offset_patches.contains(dst)
-                    {
-                        *value = SIRValue::new(own);
+                    if let SIRInstruction::Imm(dst, value) = instruction {
+                        if self.wait_offset_patches.contains(dst) {
+                            *value = SIRValue::new(waits);
+                        } else if self.nba_offset_patches.contains(dst) {
+                            *value = SIRValue::new(nbas);
+                        }
                     }
                 }
             }
@@ -7353,6 +7359,14 @@ impl Ff<'_, '_> {
                 self.m
                     .temp("nba_part", width, false, self.m.var(id).is_4state);
             self.assign(&sv::ir::LValue::Ident(staged_name), &value)?;
+            // A unit stages the update in the objects of one of the
+            // module's function NBA sites, which the runtime reads as the
+            // unit suspends, as the kernel's own sites without a pending
+            // flag are read (see `ProcModule::function_nba_sites`).
+            if self.kernel.is_none() {
+                self.unit_nonblocking(delay, id, lsb, width, staged, position)?;
+                continue;
+            }
             // The staged value and position have objects of their own: a
             // value still staged from earlier in the time slot is queued
             // before they are replaced. Assembly keeps the staged or the

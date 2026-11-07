@@ -29,6 +29,7 @@ pub(super) struct Checkpoint {
     function_wait_sites: usize,
     event_assignments: usize,
     activation_copies: usize,
+    function_nba_sites: usize,
     runtime_errors: usize,
     extern_functions: usize,
     extern_calls: usize,
@@ -80,6 +81,9 @@ pub(super) struct ProcModule<'a> {
     /// with the number of the site among these, which the kernel's call
     /// turns into one among its process's sites.
     pub function_wait_sites: Vec<celox_design::WaitSite<SourceVarId>>,
+    /// The nonblocking assignment sites of the module's function units,
+    /// listed and numbered as [`Self::function_wait_sites`] are.
+    pub function_nba_sites: Vec<celox_design::NbaSite<SourceVarId>>,
     /// The runtime event site of the flush points of the units' waits
     /// (IEEE 1800-2023 16.4.2), made at the first.
     pub unit_flush_site: Option<u32>,
@@ -320,6 +324,7 @@ impl<'a> ProcModule<'a> {
             runtime_event_sites: Vec::new(),
             function_host_request_sites: Vec::new(),
             function_wait_sites: Vec::new(),
+            function_nba_sites: Vec::new(),
             unit_flush_site: None,
             runtime_errors: HashMap::default(),
             event_assignments: Vec::new(),
@@ -1067,6 +1072,7 @@ impl<'a> ProcModule<'a> {
             runtime_event_sites,
             function_host_request_sites,
             function_wait_sites,
+            function_nba_sites,
             // Restored with `runtime_event_sites`.
             unit_flush_site: _,
             runtime_errors,
@@ -1087,6 +1093,7 @@ impl<'a> ProcModule<'a> {
             runtime_event_sites: runtime_event_sites.len(),
             function_host_request_sites: function_host_request_sites.len(),
             function_wait_sites: function_wait_sites.len(),
+            function_nba_sites: function_nba_sites.len(),
             event_assignments: event_assignments.len(),
             activation_copies: activation_copies.len(),
             runtime_errors: runtime_errors.len(),
@@ -1111,6 +1118,7 @@ impl<'a> ProcModule<'a> {
             runtime_event_sites,
             function_host_request_sites,
             function_wait_sites,
+            function_nba_sites,
             event_assignments,
             activation_copies,
             runtime_errors,
@@ -1146,6 +1154,7 @@ impl<'a> ProcModule<'a> {
         self.function_wait_sites.truncate(function_wait_sites);
         self.event_assignments.truncate(event_assignments);
         self.activation_copies.truncate(activation_copies);
+        self.function_nba_sites.truncate(function_nba_sites);
         // Codes are numbered from one in registration order.
         self.runtime_errors
             .retain(|&code, _| code <= runtime_errors as i64);
