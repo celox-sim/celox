@@ -223,6 +223,8 @@ fn build(
             atomized_comb_blocks: false,
             flattened_comb_blocks: false,
             scheduled_units: false,
+            settle_plan: false,
+            settle_plan_output: None,
             pre_optimized_sir: false,
             post_optimized_sir: false,
             analyzer_ir: false,

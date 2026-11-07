@@ -2477,6 +2477,37 @@ pub struct SettlePartition<Addr> {
     /// Whether the partition runs on every settle, because it has effects
     /// beyond its stores.
     pub pinned: bool,
+    /// How the partition was planned, for diagnostics.
+    pub plan: SettlePartitionPlan<Addr>,
+}
+
+/// The plan of one partition of a partitioned settle: what it costs, which
+/// bits it reads, and what it compares after it ran and whom it marks.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SettlePartitionPlan<Addr> {
+    /// Approximate expression nodes of its paths.
+    pub cost: usize,
+    /// The bit ranges (`lsb`, `msb`) of each object it reads, `None` for
+    /// all of the object.
+    pub read_bits: Vec<(Addr, Option<Vec<(usize, usize)>>)>,
+    /// The chunks it compares after it ran, with the readers it marks when
+    /// one changed.
+    pub watched: Vec<SettleWatch<Addr>>,
+    /// The flags it sets whenever it runs.
+    pub marks: Vec<usize>,
+}
+
+/// A chunk of an object a partition compares after it ran
+/// ([`SettlePartitionPlan::watched`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SettleWatch<Addr> {
+    pub object: Addr,
+    /// First bit of the chunk in the object.
+    pub lsb: usize,
+    pub width: usize,
+    /// The flags it sets when the chunk changed: partitions, then wait
+    /// flags ([`celox_design::settle_wait_flag`]).
+    pub readers: Vec<usize>,
 }
 
 pub trait ClockFfLowering<Addr> {
@@ -3532,6 +3563,10 @@ struct PlannedPartition<Addr> {
     /// flags only when it changes the value.
     watched: Vec<WatchedChunk<Addr>>,
     pinned: bool,
+    /// Approximate expression nodes of its paths.
+    cost: usize,
+    /// The bits it reads ([`SettlePartitionPlan::read_bits`]).
+    read_bits: Vec<(Addr, ReadBits)>,
 }
 
 /// A chunk of an object a partition writes, compared before and after the
@@ -3539,6 +3574,8 @@ struct PlannedPartition<Addr> {
 struct WatchedChunk<Addr> {
     object: Addr,
     offset: SIROffset,
+    /// First bit of the chunk in the object.
+    lsb: usize,
     width: usize,
     readers: Vec<usize>,
 }
@@ -3761,6 +3798,7 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
         return None;
     }
     let mut partition_of_work = vec![0; prepared.scheduled_work.len()];
+    let mut costs = vec![0; first_work.len()];
     for (partition, &first) in first_work.iter().enumerate() {
         let end = first_work
             .get(partition + 1)
@@ -3787,6 +3825,7 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
         let partition = partition_of_work[index];
         for &path_index in work_paths(work) {
             let path = &input[path_index];
+            costs[partition] += path_cost(arena, path);
             pinned[partition] |= path_has_effects(path);
             let atoms = path
                 .sources
@@ -4030,18 +4069,26 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
                                 BitAccess::new(lsb, lsb + chunk - 1),
                                 unpacked_element_widths,
                             ),
+                            lsb,
                             width: chunk,
                             readers: targets.clone(),
                         });
                     }
                 }
             }
+            let mut bits: Vec<(Addr, ReadBits)> = read_bits[partition]
+                .iter()
+                .map(|(address, ranges)| (*address, ranges.clone()))
+                .collect();
+            bits.sort_unstable_by_key(|(address, _)| *address);
             PlannedPartition {
                 reads: reads[partition].iter().copied().collect(),
                 writes: writes[partition].iter().copied().collect(),
                 marks: marks.into_iter().collect(),
                 watched,
                 pinned: pinned[partition],
+                cost: costs[partition],
+                read_bits: bits,
             }
         })
         .collect();
@@ -5049,6 +5096,21 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
                 plan.partitions
                     .into_iter()
                     .map(|partition| SettlePartition {
+                        plan: SettlePartitionPlan {
+                            cost: partition.cost,
+                            read_bits: partition.read_bits,
+                            watched: partition
+                                .watched
+                                .into_iter()
+                                .map(|chunk| SettleWatch {
+                                    object: chunk.object,
+                                    lsb: chunk.lsb,
+                                    width: chunk.width,
+                                    readers: chunk.readers,
+                                })
+                                .collect(),
+                            marks: partition.marks,
+                        },
                         reads: partition.reads,
                         writes: partition.writes,
                         pinned: partition.pinned,

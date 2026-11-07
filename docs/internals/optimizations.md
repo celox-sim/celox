@@ -110,6 +110,11 @@ unnecessary:
   partition runs. `SimulatorBuilder::settle_check` runs each settle a second
   time with every partition flagged and panics where the two differ; effects
   of partitions that run twice, such as runtime events, then happen twice.
+  `SimulatorBuilder::settle_plan_output` (CLI: `--dump-settle-plan FILE`)
+  writes the plan: each partition's cost, the bits it reads, the chunks it
+  compares after it ran and the partitions each chunk marks, headed by a
+  lint of backward reader edges (rerun in the next settle pass) and of
+  readers marked for bits they do not read, which must be none.
 - in the time slots a compiled scheduler runs, a combinational settle waits
   until its results are read: it runs, where the reference loop last
   settled, before a process kernel or domain that reads combinational outputs
