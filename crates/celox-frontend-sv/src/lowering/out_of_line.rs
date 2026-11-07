@@ -282,6 +282,12 @@ pub(super) struct Function {
     /// The calls at which the unit can be suspended inside the callee, once
     /// the body is lowered.
     pub calls: Vec<celox_design::CallResume>,
+    /// The slot whose bit `p` says that a call omits argument `p`, and the
+    /// positions of the formals whose defaults the unit evaluates then (IEEE
+    /// 1800-2023 13.5.3), in its own frame, where the calls of a default are
+    /// calls of the unit: defaults that call each other then recurse at run
+    /// time, as any recursion, instead of expanding at the call forever.
+    pub omitted: Option<(usize, Vec<usize>)>,
 }
 
 impl Function {
@@ -323,9 +329,34 @@ pub(crate) struct OutOfLine {
     /// The subroutines that may call themselves, through any chain of
     /// calls (see [`ProcModule::mark_recursive`]).
     pub(super) recursive: HashSet<String>,
+    /// Whether every subroutine that can go out of line does, which a test
+    /// switch asks for (`AnalysisOptions::force_out_of_line_calls`);
+    /// otherwise only those of [`ProcModule::out_of_line_policy`] do.
+    pub(super) forced: bool,
+    /// The fully inlined size of each subroutine, in statements (see
+    /// [`ProcModule::mark_recursive`]).
+    inlined_sizes: HashMap<String, u64>,
 }
 
+/// The fully inlined size, in statements, above which a subroutine goes out
+/// of line (see [`ProcModule::out_of_line_policy`]).
+pub(super) const OUT_OF_LINE_STATEMENTS: u64 = 256;
+
 impl OutOfLine {
+    /// No functions yet, forced to take every subroutine out of line or
+    /// not.
+    pub(super) fn new(forced: bool) -> Self {
+        Self {
+            forced,
+            ..Self::default()
+        }
+    }
+
+    /// The fully inlined size of subroutine `name`, in statements.
+    pub(super) fn inlined_size(&self, name: &str) -> Option<u64> {
+        self.inlined_sizes.get(name).copied()
+    }
+
     /// Note how a call of `name` was lowered: going out of line once is
     /// what counts, else the first reason.
     pub(super) fn record(&mut self, name: &str, outcome: Outcome) {
@@ -492,6 +523,40 @@ impl OutOfLine {
         }
         lines
     }
+}
+
+/// The fully inlined size of each subroutine `node`, whose own statements
+/// are `own[node]` and whose calls, one entry per call, are `sites[node]`:
+/// its own statements and, at each of its calls, the size of the callee,
+/// unless the callee is a member of a recursive component (`members`) and
+/// so goes out of line. The callees that count form no cycle, so each size
+/// is the sum over a tree of calls, taken in post-order on a stack of its
+/// own: a chain of calls may be deeper than the host stack.
+fn fully_inlined_sizes(own: &[u64], sites: &[Vec<usize>], members: &HashSet<usize>) -> Vec<u64> {
+    let mut sizes: Vec<Option<u64>> = vec![None; own.len()];
+    for start in 0..own.len() {
+        let mut stack = vec![(start, 0)];
+        while let Some((node, next)) = stack.pop() {
+            if sizes[node].is_some() {
+                continue;
+            }
+            if let Some(&callee) = sites[node].get(next) {
+                stack.push((node, next + 1));
+                if !members.contains(&callee) && sizes[callee].is_none() {
+                    stack.push((callee, 0));
+                }
+                continue;
+            }
+            let total = sites[node]
+                .iter()
+                .filter(|callee| !members.contains(callee))
+                .fold(own[node], |total, &callee| {
+                    total.saturating_add(sizes[callee].expect("a callee is sized first"))
+                });
+            sizes[node] = Some(total);
+        }
+    }
+    sizes.into_iter().map(|size| size.unwrap_or(0)).collect()
 }
 
 /// The automatic storage of `subroutine` (IEEE 1800-2023 13.4.2): its
@@ -967,7 +1032,7 @@ impl ProcModule<'_> {
     /// on a cycle of the module's call graph: those whose bodies, the
     /// argument defaults of their calls included, may call themselves
     /// again (see [`ProcModule::single_activation`]).
-    pub(super) fn mark_recursive(&mut self) {
+    pub(super) fn mark_recursive(&mut self, module: &sv::ir::Module) {
         if self.out_of_line().is_none() {
             return;
         }
@@ -978,44 +1043,196 @@ impl ProcModule<'_> {
             .enumerate()
             .map(|(position, name)| (name.as_str(), position))
             .collect();
-        let calls: Vec<Vec<usize>> = names
+        // The call graph over calls: a node for each subroutine with each
+        // pattern of omitted arguments it is called with, one for each
+        // distinct pair however many call paths reach it. The node with
+        // nothing omitted is the body; a node omitting arguments is a call
+        // that runs the body and the defaults of those arguments (IEEE
+        // 1800-2023 13.5.3). Each node's sites are the nodes it calls, once
+        // per call, which size it; recursion is a cycle of this graph.
+        let mut nodes: HashMap<(usize, Vec<bool>), usize> = HashMap::default();
+        let mut keys: Vec<(usize, Vec<bool>)> = Vec::new();
+        let mut node = |key: (usize, Vec<bool>), keys: &mut Vec<_>| -> usize {
+            *nodes.entry(key.clone()).or_insert_with(|| {
+                keys.push(key);
+                keys.len() - 1
+            })
+        };
+        // The node a call makes: the omitted arguments that take a default.
+        let site = |(callee, args): (sv::ir::Callee, Vec<Option<sv::ir::Expr>>)| {
+            let sv::ir::Callee::Subroutine(callee) = callee else {
+                return None;
+            };
+            let &target = index.get(callee.as_str())?;
+            let mut omitted: Vec<bool> = self.subroutines[names[target]]
+                .params
+                .iter()
+                .enumerate()
+                .map(|(position, param)| {
+                    param.default.is_some() && matches!(args.get(position), None | Some(None))
+                })
+                .collect();
+            if !omitted.contains(&true) {
+                omitted.clear();
+            }
+            Some((target, omitted))
+        };
+        for target in 0..names.len() {
+            node((target, Vec::new()), &mut keys);
+        }
+        // The calls of the module's processes, continuous assignments and
+        // port connections, which reach the nodes of their omitted arguments.
+        let mut roots = Vec::new();
+        let bodies = module
+            .initial_processes()
             .iter()
-            .map(|name| {
-                let subroutine = &self.subroutines[*name];
-                let mut calls = Vec::new();
+            .map(|process| process.body())
+            .chain(module.ff_processes().iter().map(|process| process.body()))
+            .chain(
+                module
+                    .comb_processes()
+                    .iter()
+                    .flat_map(|process| [process.body(), process.sensitivity_body()]),
+            );
+        for body in bodies {
+            for stmt in body {
+                stmt.walk(&mut |stmt| stmt_calls(stmt, &mut roots));
+            }
+        }
+        for assignment in module.assignments().iter().chain(
+            module
+                .comb_processes()
+                .iter()
+                .flat_map(|process| process.assignments()),
+        ) {
+            collect_calls(assignment.rhs(), &mut roots);
+        }
+        for instance in module.instances() {
+            for connection in instance.port_connections() {
+                if let Some(actual) = connection.actual_expr() {
+                    collect_calls(actual, &mut roots);
+                }
+            }
+        }
+        for key in roots.into_iter().filter_map(site) {
+            node(key, &mut keys);
+        }
+        // Each node's own statements and sites, in the order nodes appear;
+        // a node's sites may add nodes, sized in turn.
+        let mut own: Vec<u64> = Vec::new();
+        let mut sites: Vec<Vec<usize>> = Vec::new();
+        while own.len() < keys.len() {
+            let (target, omitted) = keys[own.len()].clone();
+            let subroutine = &self.subroutines[names[target]];
+            let mut calls = Vec::new();
+            let mut statements = 0u64;
+            let mut own_sites = Vec::new();
+            if omitted.is_empty() {
                 for stmt in subroutine.body.iter().chain(&subroutine.sensitivity_body) {
-                    stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
+                    stmt.walk(&mut |stmt| {
+                        statements += 1;
+                        stmt_calls(stmt, &mut calls)
+                    });
                 }
-                let mut callees = Vec::new();
-                let mut defaults = HashSet::default();
-                while let Some((callee, args)) = calls.pop() {
-                    let sv::ir::Callee::Subroutine(callee) = callee else {
-                        continue;
-                    };
-                    let Some(&target) = index.get(callee.as_str()) else {
-                        continue;
-                    };
-                    callees.push(target);
-                    // The defaults a call uses are those of its omitted
-                    // arguments.
-                    let omitted: Vec<bool> = args.iter().map(Option::is_none).collect();
-                    if defaults.insert((target, omitted)) {
-                        default_calls(&self.subroutines[names[target]], &args, &mut calls);
-                    }
+            } else {
+                own_sites.push(node((target, Vec::new()), &mut keys));
+                for (param, _) in subroutine
+                    .params
+                    .iter()
+                    .zip(&omitted)
+                    .filter(|(_, omitted)| **omitted)
+                {
+                    statements += 1;
+                    collect_calls(
+                        param.default.as_ref().expect("a defaulted formal"),
+                        &mut calls,
+                    );
                 }
+            }
+            for key in calls.into_iter().filter_map(site) {
+                own_sites.push(node(key, &mut keys));
+            }
+            own.push(statements);
+            sites.push(own_sites);
+        }
+        let calls: Vec<Vec<usize>> = sites
+            .iter()
+            .map(|callees| {
+                let mut callees = callees.clone();
                 callees.sort_unstable();
                 callees.dedup();
                 callees
             })
             .collect();
-        let recursive: HashSet<String> = super::recursion::recursive_components(&calls)
+        let recursive_nodes: HashSet<usize> = super::recursion::recursive_components(&calls)
             .into_iter()
             .flatten()
-            .map(|node| names[node].clone())
+            .collect();
+        let recursive_targets: HashSet<usize> =
+            recursive_nodes.iter().map(|&node| keys[node].0).collect();
+        // A call of a recursive subroutine inlines nothing, whatever it omits.
+        let members: HashSet<usize> = (0..keys.len())
+            .filter(|&node| recursive_targets.contains(&keys[node].0))
+            .collect();
+        let sizes = fully_inlined_sizes(&own, &sites, &members);
+        // A subroutine's size is that of its largest call: one policy holds
+        // for all its calls, and a call that inlines its defaults inlines
+        // their calls too.
+        let mut inlined_sizes: HashMap<String, u64> = HashMap::default();
+        for (node, size) in sizes.into_iter().enumerate() {
+            let entry = inlined_sizes
+                .entry(names[keys[node].0].clone())
+                .or_default();
+            *entry = (*entry).max(size);
+        }
+        let recursive: HashSet<String> = recursive_targets
+            .iter()
+            .map(|&target| names[target].clone())
             .collect();
         if let Some(functions) = self.out_of_line() {
             functions.recursive = recursive;
+            functions.inlined_sizes = inlined_sizes;
         }
+    }
+
+    /// Whether a call of subroutine `name` goes out of line whatever its
+    /// arguments (see [`Self::out_of_line_policy`]), even constant ones,
+    /// which would otherwise keep it inlined to fold: when `name` is on a
+    /// cycle of the call graph, whose calls inlining cannot expand, or over
+    /// the size threshold, whose body does not fold smaller.
+    pub(super) fn out_of_line_whatever_arguments(&self, name: &str) -> bool {
+        self.calls
+            .as_deref()
+            .and_then(|graph| graph.out_of_line.as_ref())
+            .is_some_and(|functions| {
+                functions.recursive.contains(name)
+                    || (!functions.forced
+                        && functions
+                            .inlined_size(name)
+                            .is_some_and(|size| size > OUT_OF_LINE_STATEMENTS))
+            })
+    }
+
+    /// Whether a call of subroutine `name` may go out of line: always when
+    /// that is forced; otherwise when `name` is on a cycle of the call
+    /// graph, which inlining cannot expand, or when its fully inlined size
+    /// exceeds [`OUT_OF_LINE_STATEMENTS`]. Every other call is inlined, as
+    /// without out-of-line calls.
+    ///
+    /// The size is measured on the IR before anything is lowered (see
+    /// [`Self::mark_recursive`]), so the choice does not depend on the order
+    /// of lowering.
+    pub(super) fn out_of_line_policy(&self, name: &str) -> bool {
+        self.calls
+            .as_deref()
+            .and_then(|graph| graph.out_of_line.as_ref())
+            .is_some_and(|functions| {
+                functions.forced
+                    || functions.recursive.contains(name)
+                    || functions
+                        .inlined_size(name)
+                        .is_some_and(|size| size > OUT_OF_LINE_STATEMENTS)
+            })
     }
 
     /// Whether at most one activation of the unit of subroutine `name` can
@@ -1172,6 +1389,7 @@ impl ProcModule<'_> {
                     stmt_calls(stmt, &mut calls);
                 });
             }
+            let mut seen_defaults = super::procedural::SeenDefaults::default();
             while let Some((callee, args)) = calls.pop() {
                 match callee {
                     sv::ir::Callee::System(function) => {
@@ -1280,7 +1498,7 @@ impl ProcModule<'_> {
                         if self.dpi_imports.contains_key(&callee) {
                             note(Reason::HostRequest);
                         } else if let Some(subroutine) = self.subroutine(&callee) {
-                            default_calls(subroutine, &args, &mut calls);
+                            default_calls(subroutine, &args, &mut calls, &mut seen_defaults);
                             pending.push(callee);
                         } else {
                             note(Reason::Other(format!("no subroutine `{callee}`")));
@@ -1336,6 +1554,7 @@ impl ProcModule<'_> {
             stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
         }
         let mut visited = HashSet::default();
+        let mut seen_defaults = super::procedural::SeenDefaults::default();
         while let Some((callee, args)) = calls.pop() {
             let sv::ir::Callee::Subroutine(name) = callee else {
                 continue;
@@ -1351,12 +1570,14 @@ impl ProcModule<'_> {
             // variables, which a combinational process's call cannot share
             // with it (see `Ff::out_of_line_callee`).
             if subroutine.automatic
+                && self.out_of_line_policy(&name)
                 && self.out_of_line_reason(&name).is_none()
-                && !self.constant_arguments(&subroutine, &args)
+                && (self.out_of_line_whatever_arguments(&name)
+                    || !self.constant_arguments(&subroutine, &args))
             {
                 return true;
             }
-            default_calls(&subroutine, &args, &mut calls);
+            default_calls(&subroutine, &args, &mut calls, &mut seen_defaults);
             if visited.insert(name) {
                 for stmt in &subroutine.body {
                     stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
@@ -1364,5 +1585,48 @@ impl ProcModule<'_> {
             }
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sizes_sum_the_calls_that_inline() {
+        // 0 calls 1 twice and 2 once; 2 is recursive, so it counts nothing.
+        let own = [1, 10, 100];
+        let sites = [vec![1, 1, 2], vec![], vec![2]];
+        let members: HashSet<usize> = [2].into_iter().collect();
+        assert_eq!(
+            fully_inlined_sizes(&own, &sites, &members),
+            vec![21, 10, 100]
+        );
+    }
+
+    #[test]
+    fn deep_call_chains_are_sized_without_recursion() {
+        // A chain of a million calls on a small stack.
+        let depth = 1_000_000;
+        let sizes = std::thread::Builder::new()
+            .stack_size(256 << 10)
+            .spawn(move || {
+                let own = vec![1; depth];
+                let sites: Vec<Vec<usize>> = (0..depth)
+                    .map(|node| {
+                        if node + 1 < depth {
+                            vec![node + 1]
+                        } else {
+                            Vec::new()
+                        }
+                    })
+                    .collect();
+                fully_inlined_sizes(&own, &sites, &HashSet::default())
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(sizes[0], depth as u64);
+        assert_eq!(sizes[depth - 1], 1);
     }
 }

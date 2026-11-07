@@ -36,6 +36,10 @@ pub(super) struct FrameContext {
     /// Whether its automatic unpacked arrays stay module variables (see
     /// `ProcModule::single_activation`); otherwise they are slots.
     single: bool,
+    /// The variable of the omitted arguments of the call and the positions
+    /// of the formals whose defaults the unit evaluates (see
+    /// [`Function::omitted`]).
+    omitted: Option<(String, Vec<usize>)>,
 }
 
 /// The resume slots of a resumable unit being lowered, and its resume
@@ -66,7 +70,7 @@ impl Ff<'_, '_> {
         args: &[Option<sv::ir::Expr>],
         places: Option<&[Place]>,
     ) -> Result<Option<usize>, sv::AnalyzerError> {
-        if self.m.out_of_line().is_none() {
+        if !self.m.out_of_line_policy(name) {
             return Ok(None);
         }
         if let Some(reason) = self.m.out_of_line_reason(name) {
@@ -94,7 +98,13 @@ impl Ff<'_, '_> {
             );
             return Ok(None);
         }
-        if !recursive && self.m.constant_arguments(subroutine, args) {
+        // A call of a subroutine on a cycle of the call graph, or over the
+        // size threshold, goes out of line whatever its arguments: neither
+        // folds by inlining.
+        if !recursive
+            && !self.m.out_of_line_whatever_arguments(name)
+            && self.m.constant_arguments(subroutine, args)
+        {
             self.record_outcome(
                 name,
                 Outcome::Inlined(Reason::Other("constant arguments".to_string())),
@@ -546,6 +556,30 @@ impl Ff<'_, '_> {
             }
             place_slots.push(own);
         }
+        // The defaults of the input formals are evaluated by the unit, static
+        // or automatic (see [`Function::omitted`]).
+        let defaulted: Vec<usize> = subroutine
+            .params
+            .iter()
+            .enumerate()
+            .filter(|(position, param)| {
+                *position < 64
+                    && param.default.is_some()
+                    && param.direction.is_read()
+                    && !param.direction.is_written()
+                    && !param.direction.is_reference()
+                    && param.leaves.is_empty()
+            })
+            .map(|(position, _)| position)
+            .collect();
+        let mut omitted = None;
+        let mut omitted_slot = None;
+        if !defaulted.is_empty() {
+            let (id, name) = self.m.temp("call_omitted", 64, false, false);
+            omitted_slot = Some((slots.len(), defaulted.clone()));
+            slots.push(self.slot_of(id));
+            omitted = Some((name, defaulted));
+        }
         // An automatic unpacked array has no frame slot: it stays a module
         // variable when no two activations of the unit can be live at once
         // (see `ProcModule::single_activation`).
@@ -582,6 +616,7 @@ impl Ff<'_, '_> {
             dist_seed: process_slots.1,
             resume: resume_slot,
             calls: Vec::new(),
+            omitted: omitted_slot,
         });
         functions.by_name.insert(key.to_string(), index);
         functions.lowering += 1;
@@ -597,6 +632,7 @@ impl Ff<'_, '_> {
             aliases,
             start,
             single,
+            omitted,
         };
         let lowered = Ff::new(&mut *self.m, 0).lower_function_unit(subroutine, frame);
         let functions = self.m.out_of_line().expect("lowering out of line");
@@ -690,6 +726,29 @@ impl Ff<'_, '_> {
             })
             .unwrap_or_default();
         let mut body = subroutine.body.clone();
+        // A formal the call omits takes its default, evaluated here.
+        if let Some((mask, positions)) = self.frame.as_mut().and_then(|frame| frame.omitted.take())
+        {
+            let prologue = positions.into_iter().map(|position| {
+                let param = &subroutine.params[position];
+                let bit = sv::ir::ConstExpr::Literal(position.to_string());
+                sv::ir::Stmt::If {
+                    condition: sv::ir::Expr::Select {
+                        expr: Box::new(sv::ir::Expr::Ident(mask.clone())),
+                        msb: bit.clone(),
+                        lsb: bit,
+                        signed: false,
+                    },
+                    then_body: vec![sv::ir::Stmt::Assign {
+                        lhs: sv::ir::LValue::Ident(param.name.clone()),
+                        rhs: param.default.clone().expect("a defaulted formal"),
+                        nonblocking: false,
+                    }],
+                    else_body: Vec::new(),
+                }
+            });
+            body.splice(0..0, prologue);
+        }
         let (constants, parameter_types) = (self.m.constants, self.m.parameter_types);
         let constant = |position: &sv::ir::ConstExpr| {
             sv::typecheck::eval_const_expr_with_types(position, constants, parameter_types)

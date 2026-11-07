@@ -90,18 +90,21 @@ pub(crate) struct CallGraph {
     record: Record,
     /// The open attempts, innermost last.
     attempts: Vec<Record>,
-    /// The subroutines lowered out of line, when that is forced (see
-    /// [`super::out_of_line`]). They live with the graph because every
-    /// lowering of the module's processes receives it.
+    /// The subroutines lowered out of line (see [`super::out_of_line`]).
+    /// They live with the graph because every lowering of the module's
+    /// processes receives it.
     pub(super) out_of_line: Option<super::out_of_line::OutOfLine>,
+    /// Whether the calls and expansions are recorded, for the report.
+    recording: bool,
 }
 
 impl CallGraph {
     /// A graph with nothing recorded, which also keeps the out-of-line
     /// functions when `out_of_line` is set.
-    pub(super) fn new(out_of_line: bool) -> Self {
+    pub(super) fn new(forced: bool, recording: bool) -> Self {
         Self {
-            out_of_line: out_of_line.then(super::out_of_line::OutOfLine::default),
+            out_of_line: Some(super::out_of_line::OutOfLine::new(forced)),
+            recording,
             ..Self::default()
         }
     }
@@ -145,6 +148,9 @@ impl CallGraph {
     /// A call of `callee` from the innermost expanded subroutine of
     /// `active`, or from the current unit when none is being expanded.
     pub(super) fn call(&mut self, active: &[String], callee: &str) {
+        if !self.recording {
+            return;
+        }
         let caller = active.last().map_or(Caller::Unit(self.current), |name| {
             Caller::Subroutine(name.clone())
         });
@@ -153,6 +159,9 @@ impl CallGraph {
 
     /// An inline expansion of `callee` built `size`.
     pub(super) fn expanded(&mut self, callee: &str, size: Expansion) {
+        if !self.recording {
+            return;
+        }
         self.top().expanded(callee.to_string(), size);
     }
 
@@ -310,7 +319,7 @@ impl ProcModule<'_> {
         for arg in args.iter().flatten() {
             super::procedural::collect_calls(arg, &mut made);
         }
-        super::procedural::default_calls(subroutine, args, &mut made);
+        super::procedural::default_calls(subroutine, args, &mut made, &mut Default::default());
         for (callee, _) in made {
             if let sv::ir::Callee::Subroutine(name) = callee {
                 calls.call(active, &name);
@@ -380,6 +389,19 @@ pub(super) fn report(module: &sv::ir::Module, graph: &CallGraph) -> Vec<String> 
     symbolic.sort_unstable_by(|left, right| right.cmp(left));
     for (nodes, name) in symbolic.into_iter().take(5) {
         lines.push(format!("  expansion_nodes {nodes} : {name}"));
+    }
+    // Every imperative expansion with the inlined size the out-of-line
+    // policy estimates before lowering, which calibrates its threshold.
+    if let Some(functions) = &graph.out_of_line {
+        for (name, size) in &others {
+            if size.instructions > 0 {
+                lines.push(format!(
+                    "  calibration instructions {} estimate {} : {name}",
+                    size.instructions,
+                    functions.inlined_size(name).unwrap_or(0)
+                ));
+            }
+        }
     }
     let mut rows = Vec::new();
     for nodes in &recursive {
@@ -519,11 +541,18 @@ mod tests {
                always_ff @(posedge clk) r <= plain(a) + even(a);
              endmodule",
         );
-        assert!(error.is_some_and(|error| error.contains("recursive call of `even`")));
+        // The recursive pair goes out of line, which the report records.
+        assert!(error.is_none(), "{error:?}");
         let found = components(&lines);
         assert_eq!(found.len(), 1, "{lines:?}");
         assert!(
             found[0].ends_with("reaching_units 1 : even odd"),
+            "{lines:?}"
+        );
+        assert!(
+            ["  out_of_line : even", "  out_of_line : odd"]
+                .iter()
+                .all(|line| lines.iter().any(|recorded| recorded == line)),
             "{lines:?}"
         );
         assert!(
@@ -542,8 +571,9 @@ mod tests {
         let (lines, error) = record(
             "ignores",
             "module Top(input clk, input int a, output int r);
-               function automatic int f(int n, int x = g()); if (0) return f(n); return n + x; endfunction
-               function automatic int g(); return f(1, 2); endfunction
+               function automatic int f(int n, int x = g()); if (0) return h(n); return n + x; endfunction
+               function automatic int g(); return 2; endfunction
+               function automatic int h(int n); return n + 1; endfunction
                always_ff @(posedge clk) r <= f(a, 4);
              endmodule",
         );
@@ -709,14 +739,16 @@ mod tests {
 
     #[test]
     fn drops_the_calls_of_a_dropped_alternative() {
-        // The symbolic lowering folds `f(0)`; the imperative alternative
-        // kept for the wait rejects the recursive call and is dropped, and
+        // The symbolic lowering folds `f(s, 0)`; the imperative alternative
+        // kept for the wait rejects the recursive call, which an unpacked
+        // structure formal keeps from going out of line, and is dropped, and
         // its calls with it.
         let (lines, error) = record(
             "alternative",
             "module Top(input int a, output int r);
-               function automatic int f(int n); if (n == 0) return 0; return f(n - 1); endfunction
-               always_comb begin r = 0; r = f(0) + a; end
+               typedef struct { int v; } s_t;
+               function automatic int f(s_t s, int n); if (n == 0) return s.v; return f(s, n - 1); endfunction
+               always_comb begin r = 0; r = f('{v: 0}, 0) + a; end
                initial wait (r == 5);
              endmodule",
         );
