@@ -51,6 +51,7 @@ impl LocalSink {
         source: &str,
         r#type: Type,
         tree: &AnalysisContext<'_>,
+        session: &mut Session,
         dims: &PackedDimensions,
     ) -> String {
         let mut sink = self.0.lock().expect("locator locals");
@@ -61,12 +62,11 @@ impl LocalSink {
         sink.locals.push(LocalVariable {
             name: name.clone(),
             source_name: source.to_string(),
-            r#type: crate::ir::Type::from_ast(
+            r#type: super::ir_type(
+                session,
+                &tree.functions,
                 procedural::scoped_type(r#type, &dims.const_env),
-                &const_functions::Environment {
-                    constants: &*dims.const_env,
-                    functions: &tree.functions,
-                },
+                &dims.const_env,
             ),
         });
         name
@@ -446,6 +446,7 @@ pub(super) fn bind(
         &call.iterator,
         local_type,
         tree,
+        session,
         dims,
     );
     let index = sink.declare(
@@ -453,6 +454,7 @@ pub(super) fn bind(
         &call.index_method,
         call.array.index(),
         tree,
+        session,
         dims,
     );
     let (predicate, key) = match call.predicate {

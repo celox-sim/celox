@@ -355,7 +355,10 @@ pub(in crate::ast) fn aggregate_text(
         } else {
             return Ok(None);
         };
-        return container_text(tree, id, value, &container, &element, native, dimensions).map(Some);
+        return container_text(
+            tree, session, id, value, &container, &element, native, dimensions,
+        )
+        .map(Some);
     }
     let Some(aggregate) = unpacked_structs::native_struct(id, native, tree, session, dimensions)?
     else {
@@ -381,8 +384,10 @@ enum Element {
 
 /// The `%p` text of `container`, a container of `element` values bound as
 /// `value`, visited by an [`AggregatePattern`] loop.
+#[allow(clippy::too_many_arguments)]
 fn container_text(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     value: &Expr,
     container: &ContainerType,
@@ -436,15 +441,16 @@ fn container_text(
         }
     };
     let string = || type_binding::builtin_type("string", None).expect("string is a builtin type");
-    let item = sink.declare(&site, "item", item_type, tree, dimensions);
+    let item = sink.declare(&site, "item", item_type, tree, session, dimensions);
     let index = sink.declare(
         &site,
         "index",
         key.cloned().unwrap_or_else(procedural::int_type),
         tree,
+        session,
         dimensions,
     );
-    let text = sink.declare(&site, "text", string(), tree, dimensions);
+    let text = sink.declare(&site, "text", string(), tree, session, dimensions);
     let item_value = Expr::Ident(item);
     let leaves = match element {
         Element::Structure(aggregate) => aggregate.leaves(),

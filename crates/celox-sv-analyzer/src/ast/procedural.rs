@@ -595,12 +595,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         self.state.locals.push(LocalVariable {
             name: unique.clone(),
             source_name: source.to_string(),
-            r#type: crate::ir::Type::from_ast(
+            r#type: super::ir_type(
+                self.session,
+                &self.tree.functions,
                 scoped_type(r#type, &self.dims.const_env),
-                &const_functions::Environment {
-                    constants: &*self.dims.const_env,
-                    functions: &self.tree.functions,
-                },
+                &self.dims.const_env,
             ),
         });
         self.names
@@ -4435,12 +4434,11 @@ pub(super) fn lower_subroutine(
             name,
             source_name: source,
             direction,
-            r#type: crate::ir::Type::from_ast(
+            r#type: super::ir_type(
+                builder.session,
+                &tree.functions,
                 scoped_type(r#type, declaration_env),
-                &const_functions::Environment {
-                    constants: &*item.env,
-                    functions: &tree.functions,
-                },
+                &item.env,
             ),
             default,
             leaves: Vec::new(),
@@ -4632,12 +4630,11 @@ pub(super) fn lower_subroutine(
             .collect(),
         persistent_locals: Vec::new(),
         return_type: return_type.map(|r#type| {
-            crate::ir::Type::from_ast(
+            super::ir_type(
+                builder.session,
+                &tree.functions,
                 scoped_type(r#type, declaration_env),
-                &const_functions::Environment {
-                    constants: &*item.env,
-                    functions: &tree.functions,
-                },
+                &item.env,
             )
         }),
         params: lowered_params,
@@ -5154,6 +5151,7 @@ impl BodyBuilder<'_, '_, '_> {
                     "stream",
                     handle,
                     self.tree,
+                    self.session,
                     &self.dims,
                 );
                 let stream = Expr::Ident(name.clone());
@@ -5655,12 +5653,11 @@ fn lower_class(
     if !constructor && !class.is_interface {
         let handle = classes::handle_type(tree, session, name)
             .ok_or_else(|| unsupported(format!("class `{name}`")))?;
-        let ir_type = crate::ir::Type::from_ast(
+        let ir_type = super::ir_type(
+            session,
+            &tree.functions,
             scoped_type(handle.clone(), declaration_env),
-            &const_functions::Environment {
-                constants: &*item.env,
-                functions: &tree.functions,
-            },
+            &item.env,
         );
         let mut builder = BodyBuilder::new(
             tree,
@@ -5757,15 +5754,15 @@ fn lower_cast(
     state: &mut BodyState<'_>,
     item: &generate::Item,
 ) -> Converted<Subroutine> {
-    let environment = const_functions::Environment {
-        constants: &*item.env,
-        functions: &tree.functions,
-    };
     let handle = classes::handle_type(tree, session, name)
         .ok_or_else(|| unsupported(format!("class `{name}`")))?;
-    let ir_handle =
-        crate::ir::Type::from_ast(scoped_type(handle.clone(), declaration_env), &environment);
-    let ir_int = crate::ir::Type::from_ast(int_type(), &environment);
+    let ir_handle = super::ir_type(
+        session,
+        &tree.functions,
+        scoped_type(handle.clone(), declaration_env),
+        &item.env,
+    );
+    let ir_int = super::ir_type(session, &tree.functions, int_type(), &item.env);
     let mut labels = vec![0];
     labels.extend(classes::cast_targets(
         tree,

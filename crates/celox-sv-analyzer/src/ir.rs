@@ -913,6 +913,9 @@ pub struct Type {
     packed_ranges: Vec<PackedRange>,
     unpacked_ranges: Vec<UnpackedRange>,
     resolved_width: Option<usize>,
+    /// The bounds of `packed_ranges` as the analysis's type table resolved
+    /// them, outermost first; `None` for a type built without the table.
+    packed_bounds: Option<Box<[(i128, i128)]>>,
     signed_element_depth: Option<usize>,
     class: Option<String>,
     /// A `chandle`, held as 64 bits (IEEE 1800-2023 6.14).
@@ -984,6 +987,23 @@ impl Type {
         self.resolved_width
     }
 
+    /// The bounds of [`Self::packed_ranges`], outermost first, as the
+    /// analysis resolved them in its type table: the ranges may name
+    /// constants of scopes, such as a package, that a consumer of the IR
+    /// does not have.
+    pub fn packed_bounds(&self) -> Option<&[(i128, i128)]> {
+        self.packed_bounds.as_deref()
+    }
+
+    /// This type with resolved packed bounds `bounds` (see
+    /// [`Self::packed_bounds`]), when there is one per packed range.
+    pub(crate) fn with_packed_bounds(mut self, bounds: Option<Vec<(i128, i128)>>) -> Self {
+        self.packed_bounds = bounds
+            .filter(|bounds| bounds.len() == self.packed_ranges.len())
+            .map(Vec::into_boxed_slice);
+        self
+    }
+
     /// Preserve resolved layout while rebinding names in declaration contracts.
     pub(crate) fn map_range_expressions(
         mut self,
@@ -1052,6 +1072,7 @@ impl Type {
             )],
             unpacked_ranges: Vec::new(),
             resolved_width: Some(width),
+            packed_bounds: Some(Box::new([(width as i128 - 1, 0)])),
             signed_element_depth: None,
             class: None,
             chandle: false,
@@ -1087,6 +1108,7 @@ impl Type {
             packed_ranges,
             unpacked_ranges,
             resolved_width,
+            packed_bounds: None,
             signed_element_depth,
             class,
             chandle,
