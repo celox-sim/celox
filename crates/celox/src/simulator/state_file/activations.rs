@@ -553,11 +553,15 @@ impl<B: SimBackend> Simulator<B> {
                     Some(ProcessStatus::Fork) => {
                         let first = delay & 0xffff;
                         let count = (delay >> 16) & 0xffff;
-                        delay >> 32 <= 2
+                        // The entries of a unit's fork are resume points of
+                        // the unit, not of the kernel.
+                        let in_unit = delay >> celox_design::PROCESS_FORK_RESUME_SHIFT != 0;
+                        (delay >> 32) & 0b11 <= 2
                             && first > 0
                             && count > 0
-                            && first + count <= frame.resume_count as u64
-                            && !(first..first + count).any(is_probe)
+                            && (in_unit
+                                || first + count <= frame.resume_count as u64
+                                    && !(first..first + count).any(is_probe))
                     }
                     Some(ProcessStatus::Wait | ProcessStatus::Pending) => {
                         (delay & !celox_design::PROCESS_LEVEL_WAIT)

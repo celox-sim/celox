@@ -469,7 +469,9 @@ pub enum ProcessStatus {
     /// A program kernel called `$exit` (IEEE 1800-2023 24.7): it and every
     /// other kernel of its program instance ([`ProcessSlots::program`]) end.
     Exit,
-    /// Create child activations. The delay slot encodes their entry points and join mode.
+    /// Create child activations. The delay slot encodes their entry points
+    /// and join mode, and for a fork inside a function unit the stack
+    /// address of the unit's resume slot (see [`PROCESS_FORK_RESUME_SHIFT`]).
     Fork,
     /// Allocate a fresh automatic local cell before its declaration initializer.
     Local,
@@ -959,6 +961,18 @@ pub struct ProcessSlots<A> {
 
 /// Width of [`ProcessSlots::call_top`].
 pub const PROCESS_CALL_TOP_WIDTH: usize = 32;
+
+/// Width of a process's or a resumable function unit's resume slot.
+pub const PROCESS_RESUME_WIDTH: usize = 16;
+
+/// The bit of a [`ProcessStatus::Fork`] word where the byte address, in the
+/// call stack, of the resume slot of the function unit that forks starts;
+/// zero for a fork of the kernel itself. Below it: the first entry (16
+/// bits), the number of children (16 bits) and the join mode (2 bits). The
+/// entries of a unit's fork are resume points of the unit: each child
+/// continues the parent's call, its frames a copy of the parent's with that
+/// resume slot set to its entry.
+pub const PROCESS_FORK_RESUME_SHIFT: u32 = 34;
 
 /// A call at which a process kernel or a function unit can be suspended
 /// inside the callee: the resume point the caller stores there, and the

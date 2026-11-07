@@ -3045,3 +3045,298 @@ fn ref_formals_bind_the_locals_of_forked_processes() {
         }
     }
 }
+
+#[test]
+fn forks_in_functions_start_processes_that_outlive_the_call() {
+    // `spawn` forks a call of `work` and returns at once; the children
+    // run in copies of its frame after it returned (IEEE 1800-2023 9.3.2).
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c, output int d);
+    int hits[$];
+    task automatic work(int n);
+        #(n);
+        hits.push_back(n);
+    endtask
+    function automatic void spawn(int n);
+        fork
+            work(n);
+        join_none
+    endfunction
+    int three = 3, one = 1;
+    initial begin
+        spawn(three);
+        spawn(one);
+        a = hits.size();
+        #5;
+        b = hits.size();
+        c = hits[0];
+        d = hits[1];
+    end
+endmodule
+"#;
+    same_as_inlined(source, 2, 6, &["a", "b", "c", "d"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 6, &["a", "b", "c", "d"]),
+        Ok(vec![value(0), value(2), value(1), value(3)])
+    );
+}
+
+#[test]
+fn forks_in_a_loop_give_each_child_its_own_variable() {
+    // Each execution of the fork's declaration makes a new `k`, which the
+    // child started then keeps.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c, output int d);
+    int seen[$];
+    function automatic void spawn_all(int n);
+        for (int i = 0; i < n; i++) begin
+            fork
+                automatic int k = i;
+                begin
+                    #(n - k);
+                    seen.push_back(k * 10);
+                end
+            join_none
+        end
+    endfunction
+    int four = 4;
+    initial begin
+        spawn_all(four);
+        #5;
+        a = seen[0];
+        b = seen[1];
+        c = seen[2];
+        d = seen[3];
+    end
+endmodule
+"#;
+    same_as_inlined(source, 1, 6, &["a", "b", "c", "d"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 6, &["a", "b", "c", "d"]),
+        Ok(vec![value(30), value(20), value(10), value(0)])
+    );
+}
+
+#[test]
+fn forked_children_draw_on_their_own_process_state() {
+    // A child's `process::self()` is its own process, and `srandom` seeds
+    // its RNG, which its `$urandom` draws on: a unit's frames take the
+    // child's state as they continue. Two children seeded alike draw alike.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c, output int d, output bit same, output bit distinct);
+    int rands[$];
+    process procs[$];
+    function automatic void draws(int seed, bit reseed);
+        fork
+            begin
+                process p = process::self();
+                procs.push_back(p);
+                if (reseed) p.srandom(seed);
+                #1;
+                rands.push_back($urandom);
+            end
+            begin
+                #2;
+                rands.push_back($urandom_range(1000));
+            end
+        join_none
+        rands.push_back($urandom);
+    endfunction
+    int seed = 7;
+    bit yes = 1, no = 0;
+    initial begin
+        draws(seed, no);
+        draws(seed, yes);
+        draws(seed, yes);
+        #5;
+        a = rands[0];
+        b = rands[3];
+        c = rands[6];
+        d = rands[8];
+        same = rands[4] == rands[5];
+        distinct = procs[0] != procs[1] && procs[1] != procs[2];
+    end
+endmodule
+"#;
+    let names = ["a", "b", "c", "d", "same", "distinct"];
+    same_as_inlined(source, 1, 6, &names);
+    let run = simulate(source, false, true, "interpreter", 6, &names).expect("runs");
+    assert_eq!(run[4..], [value(1), value(1)]);
+}
+
+#[test]
+fn recursion_through_a_fork_goes_out_of_line() {
+    // `walk` forks a child at each level and recurses: out of line by
+    // default, where inlining cannot expand it.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c);
+    int seen[$];
+    function automatic void walk(int depth);
+        if (depth == 0) return;
+        fork
+            begin
+                #(depth);
+                seen.push_back(100 + depth);
+            end
+        join_none
+        walk(depth - 1);
+    endfunction
+    int three = 3;
+    initial begin
+        walk(three);
+        #5;
+        a = seen[0];
+        b = seen[1];
+        c = seen[2];
+    end
+endmodule
+"#;
+    assert_eq!(function_units(source, false), 1);
+    for four_state in [false, true] {
+        for forced in [false, true] {
+            assert_eq!(
+                simulate(
+                    source,
+                    four_state,
+                    forced,
+                    "interpreter",
+                    6,
+                    &["a", "b", "c"]
+                ),
+                Ok(vec![value(101), value(102), value(103)]),
+                "four_state {four_state} forced {forced}"
+            );
+        }
+    }
+}
+
+#[test]
+fn forked_children_share_the_variables_they_write() {
+    // `x` is the task's, which the parent and both children share, and `y`
+    // the fork's, which both children share: each sees the others' writes
+    // (IEEE 1800-2023 6.21, 9.3.2), through a box their frames hold.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c);
+    int got[$];
+    task automatic share(int start);
+        int x = start;
+        fork
+            automatic int y = 0;
+            begin
+                #1 x = x + 1; y = 5;
+            end
+            begin
+                #2 got.push_back(x); got.push_back(y);
+                x = x + 10;
+            end
+        join_none
+        #3 got.push_back(x);
+    endtask
+    int one = 1;
+    initial begin
+        share(one);
+        a = got[0];
+        b = got[1];
+        c = got[2];
+    end
+endmodule
+"#;
+    same_as_inlined(source, 1, 4, &["a", "b", "c"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 4, &["a", "b", "c"]),
+        Ok(vec![value(2), value(5), value(12)])
+    );
+}
+
+#[test]
+fn joins_and_fork_control_in_task_units() {
+    // `join`, `join_any`, `wait fork` and `disable fork` in a unit act on
+    // the children of the process it runs in.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c, output int d, output int e, output int f);
+    int log_[$];
+    task automatic joins(int base);
+        fork
+            #(base + 2) log_.push_back(1);
+            #(base + 1) log_.push_back(2);
+        join
+        a = $time;
+        fork
+            #3 log_.push_back(3);
+            #1 log_.push_back(4);
+        join_any
+        b = $time;
+        fork
+            #4 log_.push_back(5);
+        join_none
+        wait fork;
+        c = $time;
+        fork
+            #10 log_.push_back(99);
+        join_none
+        #1 disable fork;
+        d = $time;
+    endtask
+    int zero = 0;
+    initial begin
+        joins(zero);
+        #20;
+        e = log_.size();
+        f = log_[log_.size() - 1];
+    end
+endmodule
+"#;
+    let names = ["a", "b", "c", "d", "e", "f"];
+    same_as_inlined(source, 1, 30, &names);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 30, &names),
+        Ok(vec![
+            value(2),
+            value(3),
+            value(7),
+            value(8),
+            value(5),
+            value(5)
+        ])
+    );
+}
+
+#[test]
+fn boxes_of_forked_children_survive_collections() {
+    // Only the saved frames of the children hold the box of `x` after the
+    // parent returned; another process allocates enough for the heap to
+    // collect while they wait.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int n);
+    class Item;
+        int v;
+        function new(int x);
+            v = x;
+        endfunction
+    endclass
+    function automatic void spawn(int start);
+        int x = start;
+        fork
+            #2 x = x + 1;
+            #5 a = x;
+        join_none
+    endfunction
+    int seven = 7;
+    int count = 2000;
+    initial spawn(seven);
+    initial begin
+        Item t;
+        #1;
+        for (int i = 0; i < count; i++) begin
+            t = new(i);
+            n += t.v % 2;
+        end
+    end
+endmodule
+"#;
+    same_as_inlined(source, 2, 10, &["a", "n"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 10, &["a"]),
+        Ok(vec![value(8)])
+    );
+}
