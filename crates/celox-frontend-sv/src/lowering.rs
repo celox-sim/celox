@@ -1006,6 +1006,8 @@ fn lower_package_states(
     ff_parts: bool,
     properties: &BTreeSet<u32>,
     warnings: &mut Vec<crate::warning::PendingWarning>,
+    force_out_of_line: bool,
+    recursion_report: Option<&Path>,
 ) -> Result<Vec<(String, ModuleId, LoweredSvModule)>, sv::AnalyzerError> {
     let mut states = packages.specialized_state_modules(design);
     // The change counts of the watched class properties (see
@@ -1035,7 +1037,13 @@ fn lower_package_states(
         .into_iter()
         .enumerate()
         .map(|(index, module)| {
-            let mut lowered = lower_module(
+            // The subroutines that the package's initializers call go out of
+            // line as a module's do, recursive ones included.
+            let mut calls = Some(recursion::CallGraph::new(
+                force_out_of_line,
+                recursion_report.is_some(),
+            ));
+            let lowered = lower_module(
                 std::borrow::Cow::Borrowed(module),
                 four_state,
                 true,
@@ -1046,8 +1054,19 @@ fn lower_package_states(
                 &HashMap::default(),
                 &HashMap::default(),
                 SharedAlways::default(),
-                None,
-            )?;
+                calls.as_mut(),
+            );
+            if let (Some(graph), Some(path)) = (&calls, recursion_report) {
+                recursion::append(module, graph, path);
+            }
+            let mut lowered = lowered?;
+            if let Some(functions) = calls.as_ref().and_then(|graph| graph.out_of_line.as_ref()) {
+                out_of_line::attach_functions(
+                    &mut lowered.sim_module,
+                    functions.units(),
+                    functions.frames(),
+                );
+            }
             lowered.sim_module.time_precision = Some(
                 celox_design::TimePrecision::try_from(packages.global_time_precision())
                     .map_err(|reason| sv::AnalyzerError::Unsupported(reason.to_string()))?,
@@ -2730,6 +2749,7 @@ fn prepare_external_hierarchy_collecting(
     warnings: &mut Vec<crate::warning::PendingWarning>,
     analysis_options: sv::AnalysisOptions,
 ) -> Result<ExternalHierarchy, FrontendError> {
+    let force_out_of_line = analysis_options.force_out_of_line_calls;
     let (analyzed, bound_names) = analyze_sources_with_requests(
         sources,
         foreign,
@@ -3089,6 +3109,8 @@ fn prepare_external_hierarchy_collecting(
         false,
         &properties,
         warnings,
+        force_out_of_line,
+        None,
     )?;
     // How often the design instantiates these modules is not known here;
     // assembly checks the drivers of package variables across instances.
@@ -3869,6 +3891,8 @@ fn schedule_sources_collecting(
             parallel.enabled(),
             &properties,
             warnings,
+            analysis_options.force_out_of_line_calls,
+            analysis_options.recursion_report.as_deref(),
         )?;
         validate_package_variable_drivers([&root_key], &module_ids, &lowered_modules)?;
         let mut packages = Vec::new();
