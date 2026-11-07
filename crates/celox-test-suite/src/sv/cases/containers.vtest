@@ -2429,3 +2429,123 @@ endmodule
 "#)
   (top Top) (run_until 0)
   (assert_eq wide0 0x30123456789abcdeffedcba9876543210) (assert_eq wide1 5))
+
+; IEEE 1800-2023 7.6: elements of any type, not only integral ones, are
+; assigned from a dynamic array or queue element by element, from the left
+; index, and a source with a side effect is evaluated once.
+(case fixed_size_arrays_take_dynamic_arrays_of_any_element_type
+  (source "elements.sv" #"
+module Top(output bit strings, output bit handles, output bit structs,
+           output bit calls, output bit argument, output bit continuous);
+    class Cell;
+        int n;
+        function new(int n);
+            this.n = n;
+        endfunction
+    endclass
+    typedef struct { int a; byte b; } pair_t;
+    typedef string names_t [2];
+    typedef string queue_t [$];
+    string sd [] = '{"ab", "cd"};
+    string sf [2];
+    Cell cd [];
+    Cell cf [2];
+    pair_t pd [];
+    pair_t pf [2];
+    names_t made;
+    names_t cont;
+    int n;
+    function automatic int second(Cell x [2]);
+        return x[1].n;
+    endfunction
+    function automatic queue_t make();
+        queue_t q;
+        n++;
+        q.push_back("p");
+        q.push_back("q");
+        return q;
+    endfunction
+    assign cont = sd;
+    initial begin
+        sf = sd;
+        strings = sf[0] == "ab" && sf[1] == "cd";
+        cd = new[2];
+        cd[0] = new(3);
+        cd[1] = new(4);
+        cf = cd;
+        handles = cf[0] == cd[0] && cf[1].n == 4;
+        pd = new[2];
+        pd[0] = '{5, 7};
+        pd[1] = '{6, 8};
+        pf = pd;
+        structs = pf[0].a == 5 && pf[0].b == 7 && pf[1].a == 6 && pf[1].b == 8;
+        made = make();
+        calls = n == 1 && made[0] == "p" && made[1] == "q";
+        argument = second(cd) == 4;
+    end
+    always_comb continuous = cont[1] == "cd";
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq strings 1) (assert_eq handles 1) (assert_eq structs 1)
+  (assert_eq calls 1) (assert_eq argument 1) (assert_eq continuous 1))
+
+; IEEE 1800-2023 6.24.2, 7.6: `$cast` of a dynamically sized array to a
+; fixed-size one assigns it only when it has as many elements, and returns
+; whether it did; a failed cast leaves the destination unchanged.
+(case casts_of_dynamic_arrays_to_fixed_size_ones_check_the_size
+  (source "cast.sv" #"
+module Top(output int matched, output int first, output int last,
+           output int longer, output int kept, output int from_queue,
+           output bit from_call, output bit handles, output bit strings);
+    class Cell;
+        int n;
+        function new(int n);
+            this.n = n;
+        endfunction
+    endclass
+    typedef int queue_t [$];
+    int d [];
+    int q [$];
+    int f [2];
+    int calls;
+    Cell cd [];
+    Cell cf [2];
+    string sd [];
+    string sf [2];
+    function automatic queue_t make();
+        queue_t r;
+        calls++;
+        r.push_back(21);
+        r.push_back(23);
+        return r;
+    endfunction
+    initial begin
+        d = new[2];
+        d[0] = 5;
+        d[1] = 7;
+        matched = $cast(f, d);
+        first = f[0];
+        last = f[1];
+        d = new[3];
+        longer = $cast(f, d);
+        kept = f[1];
+        q.push_back(11);
+        q.push_back(13);
+        from_queue = $cast(f, q);
+        from_call = $cast(f, make()) && calls == 1 && f[0] == 21 && f[1] == 23;
+        cd = new[2];
+        cd[0] = new(3);
+        cd[1] = new(4);
+        handles = $cast(cf, cd) && cf[0] == cd[0] && cf[1].n == 4;
+        sd = new[2];
+        sd[0] = "ab";
+        sd[1] = "cd";
+        strings = $cast(sf, sd) && sf[0] == "ab" && sf[1] == "cd";
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq matched 1) (assert_eq first 5) (assert_eq last 7)
+  (assert_eq longer 0) (assert_eq kept 7) (assert_eq from_queue 1)
+  (assert_eq from_call 1) (assert_eq handles 1) (assert_eq strings 1))

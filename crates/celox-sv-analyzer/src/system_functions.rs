@@ -1151,6 +1151,15 @@ pub enum ContainerOp {
     Concat,
     /// A new queue containing the inclusive range of its source queue.
     Slice,
+    /// The value of a fixed-size unpacked array of `count` elements that
+    /// the dynamically sized array in the first argument is assigned (IEEE
+    /// 1800-2023 7.6): a run-time error unless it has `count` elements. The
+    /// second argument reads the value from the elements, each read naming
+    /// the container as the first argument does; the container is evaluated
+    /// once, and the reads take that value.
+    Fixed {
+        count: u32,
+    },
     /// The container in the first argument with each container at nesting
     /// depth `depth` (1: its elements) assigned to the operation's layout: a
     /// queue is kept to its capacity (IEEE 1800-2023 7.10.5).

@@ -354,6 +354,52 @@ enum Item {
 }
 
 /// The items of one operand of a stream.
+/// The field of the one-field record that holds each integral element
+/// wider than 64 bits of `container`, which a stream reads as the
+/// element's bits.
+fn wide_field(container: &ContainerType) -> Option<system_functions::ObjectField> {
+    match &container.record {
+        Some(record)
+            if container.element.unpacked_struct().is_none()
+                && container.element.class.is_none()
+                && container.element.container.is_none()
+                && record.fields.len() == 1
+                && record.fields[0].offset == 0
+                && record.fields[0].handle.is_none()
+                && !record.fields[0].real =>
+        {
+            Some(record.fields[0])
+        }
+        _ => None,
+    }
+}
+
+/// The stream items of all elements of `value`, a container of type
+/// `container`.
+fn container_items(value: Expr, container: &ContainerType) -> Converted<Vec<Item>> {
+    if let Some(field) = wide_field(container) {
+        return Ok(vec![Item::Dynamic(
+            StreamItem::WideContainer {
+                width: field.width,
+                four_state: field.four_state,
+            },
+            vec![value],
+        )]);
+    }
+    if container.layout.handle == Some(HandleProperty::Object) {
+        return Err(unsupported(
+            "streaming concatenation of class handles or structures in a container",
+        ));
+    }
+    Ok(vec![Item::Dynamic(
+        StreamItem::Container {
+            layout: container.layout,
+            range: None,
+        },
+        vec![value],
+    )])
+}
+
 fn operand(
     id: ExprId,
     native: &Declarations,
@@ -389,51 +435,20 @@ fn operand(
         if chandles::type_holds_chandle(&container.element) {
             return Err(chandle());
         }
-        // An integral element wider than 64 bits is held in a record of one
-        // field, which the stream reads as the element's bits.
-        let wide = match &container.record {
-            Some(record)
-                if container.element.unpacked_struct().is_none()
-                    && container.element.class.is_none()
-                    && container.element.container.is_none()
-                    && record.fields.len() == 1
-                    && record.fields[0].offset == 0
-                    && record.fields[0].handle.is_none()
-                    && !record.fields[0].real =>
-            {
-                Some(record.fields[0])
-            }
-            _ => None,
+        let value = bind_value(id, native, tree, session, dims, None)?;
+        let Some(range) = range else {
+            return container_items(value, &container);
         };
-        if layout.handle == Some(HandleProperty::Object) && wide.is_none() {
+        if wide_field(&container).is_some() {
+            return Err(unsupported(
+                "streaming concatenation with range of elements wider than 64 bits",
+            ));
+        }
+        if layout.handle == Some(HandleProperty::Object) {
             return Err(unsupported(
                 "streaming concatenation of class handles or structures in a container",
             ));
         }
-        let value = bind_value(id, native, tree, session, dims, None)?;
-        if let Some(field) = wide {
-            if range.is_some() {
-                return Err(unsupported(
-                    "streaming concatenation with range of elements wider than 64 bits",
-                ));
-            }
-            return Ok(vec![Item::Dynamic(
-                StreamItem::WideContainer {
-                    width: field.width,
-                    four_state: field.four_state,
-                },
-                vec![value],
-            )]);
-        }
-        let Some(range) = range else {
-            return Ok(vec![Item::Dynamic(
-                StreamItem::Container {
-                    layout,
-                    range: None,
-                },
-                vec![value],
-            )]);
-        };
         if matches!(layout.kind, ContainerKind::Associative { .. }) {
             return Err(unsupported(
                 "streaming concatenation with range on an associative array",
@@ -719,14 +734,30 @@ pub(in crate::ast) fn pack(
 /// fixed-size unpacked array `target` of equivalent elements: element `i`
 /// of the container is the target's element at the `i`th index from the
 /// left, and a container of another number of elements is a run-time error
-/// (IEEE 1800-2023 7.6). The elements travel as the stream `{>>{id}}`, which
-/// keeps that order (11.4.14.2).
+/// (IEEE 1800-2023 7.6). Integral elements travel as the stream `{>>{id}}`,
+/// which keeps that order (11.4.14.2); elements of any other type are read
+/// one by one from the container, which is evaluated once.
 pub(in crate::ast) fn assign_to_fixed(
     id: ExprId,
     target: &VariableDimensions,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<Expr> {
+    let container = containers::native_type(id, native, tree, session, dims)?
+        .ok_or_else(|| unsupported("assignment of an array that is not dynamically sized"))?;
+    let value = bind_value(id, native, tree, session, dims, None)?;
+    fixed_from_container(value, &container, target, tree, dims)
+}
+
+/// The value of fixed-size unpacked array `target` assigned `value`, a
+/// dynamically sized array of type `container` (see [`assign_to_fixed`]).
+pub(in crate::ast) fn fixed_from_container(
+    value: Expr,
+    container: &ContainerType,
+    target: &VariableDimensions,
+    tree: &AnalysisContext<'_>,
     dims: &PackedDimensions,
 ) -> Converted<Expr> {
     let elements = || {
@@ -739,10 +770,13 @@ pub(in crate::ast) fn assign_to_fixed(
         || target.virtual_interface.is_some()
         || chandles::holds_chandle(target)
     {
-        return Err(elements());
+        return element_reads(value, container, target, tree, dims)?.ok_or_else(elements);
+    }
+    if chandles::type_holds_chandle(&container.element) {
+        return Err(chandle());
     }
     let (element, count) = fixed_array(target, &tree.functions, dims)?.ok_or_else(elements)?;
-    let items = operand(id, native, tree, session, dims)?;
+    let items = container_items(value, container)?;
     Ok(convert(
         heap_stream(items, None, false, None),
         Receiver::Assignment(StreamArg {
@@ -751,6 +785,47 @@ pub(in crate::ast) fn assign_to_fixed(
             element: Some(element),
         }),
     ))
+}
+
+/// Container `source` of type `container` assigned to the one-dimensional
+/// fixed-size array `target` element by element, as [`ContainerOp::Fixed`]:
+/// the value of the elements read from the container, each to the target's
+/// element at the same index from the left, the last one in the least
+/// significant position as in an assignment pattern (10.9.1).
+fn element_reads(
+    source: Expr,
+    container: &ContainerType,
+    target: &VariableDimensions,
+    tree: &AnalysisContext<'_>,
+    dims: &PackedDimensions,
+) -> Converted<Option<Expr>> {
+    if target.unpacked.len() != 1 {
+        return Ok(None);
+    }
+    let Some(array) = array_compatibility::unpacked_array_type(&tree.functions, target, dims)
+    else {
+        return Ok(None);
+    };
+    let count = u32::try_from(array.dims[0])
+        .map_err(|_| unsupported("fixed-size array of too many elements"))?;
+    let reads = (0..count)
+        .rev()
+        .map(|at| {
+            containers::element_read(
+                container,
+                containers::call(
+                    ContainerOp::Get,
+                    container.layout,
+                    vec![source.clone(), Expr::Literal(at.to_string())],
+                ),
+            )
+        })
+        .collect();
+    Ok(Some(containers::call(
+        ContainerOp::Fixed { count },
+        container.layout,
+        vec![source, Expr::Concat(reads)],
+    )))
 }
 
 /// The stream `value` of fixed-size data `width` bits wide, which fits

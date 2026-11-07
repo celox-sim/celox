@@ -228,6 +228,10 @@ pub(super) enum CastPlan {
     /// A bit-stream cast between singular types that every value of the
     /// source fits: the source is packed into the destination (6.24.3).
     Pack,
+    /// A dynamically sized array to a fixed-size one of `count` elements,
+    /// assignment compatible only when it has that many (7.6): the
+    /// assignment when its size is checked to be `count` at run time.
+    Sized(u128),
     /// Class handles, checked at run time (8.16).
     Object,
     /// The types are not cast compatible, so the cast assigns no value.
@@ -490,9 +494,7 @@ impl BodyBuilder<'_, '_, '_> {
         let class = matches!(self.session.types.data(target), TyData::Class(_));
         let plan = match self.session.types.castable(source_type, target) {
             Ok(Castable::Assign(Assignable::Always)) => CastPlan::Assign,
-            Ok(Castable::Assign(Assignable::WhenSized(_))) => {
-                CastPlan::Unsupported("`$cast` of a dynamically sized array to a fixed-size one")
-            }
+            Ok(Castable::Assign(Assignable::WhenSized(count))) => CastPlan::Sized(count),
             // The run-time check of class handles also tells those that are
             // never cast compatible.
             _ if class => CastPlan::Object,
@@ -689,6 +691,9 @@ impl BodyBuilder<'_, '_, '_> {
             Some((_, _, plan @ (CastPlan::Pack | CastPlan::Fails))) => {
                 return self.cast_value(id, destination, source, plan, indices, stmts);
             }
+            Some((_, _, CastPlan::Sized(count))) => {
+                return self.cast_sized(id, destination, source, count, indices, stmts);
+            }
             Some((_, _, CastPlan::Unsupported(reason))) => return Err(unsupported(reason)),
             Some((_, _, CastPlan::Object)) | None => {}
         }
@@ -806,6 +811,88 @@ impl BodyBuilder<'_, '_, '_> {
         self.bind_effect(id, Expr::Ident(own_source));
         self.write_update(destination, id, stmts)?;
         self.bind_effect(id, Expr::Literal("1".into()));
+        Ok(())
+    }
+
+    /// `$cast(destination, source)` `id` of dynamically sized array `source`
+    /// to fixed-size array `destination` of `count` elements: the source is
+    /// assigned when it has `count` elements, and `id` binds to whether it
+    /// had (6.24.2, 7.6). The source is saved first, then the destination
+    /// is addressed whether or not the cast succeeds, as an assignment to
+    /// it is.
+    fn cast_sized(
+        &mut self,
+        id: ExprId,
+        destination: ExprId,
+        source: ExprId,
+        count: u128,
+        indices: Vec<ExprId>,
+        stmts: &mut Vec<Stmt>,
+    ) -> Converted<()> {
+        let native = self.tree.declarations();
+        let container =
+            containers::native_type(source, native, self.tree, self.session, &self.dims)?
+                .ok_or_else(|| unsupported("`$cast` of a dynamically sized array of this type"))?;
+        let shape = dimensions::operand_shape(destination, self.tree, self.session, &self.dims)?
+            .ok_or_else(|| unsupported("`$cast` to a fixed-size array of this type"))?;
+        // The source is saved once, before the destination's operands are
+        // evaluated, so the size checked is that of the elements copied.
+        // A variable or property has its declared type; any other source,
+        // such as a call returning a queue, the declared type of its value.
+        let (saved_source, saved) = match self.hidden_of(source) {
+            Ok(saved) => saved,
+            Err(error) => {
+                let ty = dimensions::operand_shape(source, self.tree, self.session, &self.dims)?
+                    .as_ref()
+                    .and_then(type_names::declared_type)
+                    .cloned()
+                    .ok_or(error)?;
+                self.hidden(ty)
+            }
+        };
+        let mut value =
+            expression_binding::value(source, native, self.tree, self.session, &self.dims)?;
+        self.rename_expr(&mut value);
+        stmts.push(Stmt::Assign {
+            lhs: LValue::Ident(saved.clone()),
+            rhs: value,
+            nonblocking: false,
+        });
+        let (succeeded_source, succeeded) = self.hidden(int_type());
+        stmts.push(Stmt::Assign {
+            lhs: LValue::Ident(succeeded),
+            rhs: Expr::Binary {
+                left: Box::new(containers::call(
+                    ContainerOp::Size,
+                    container.layout,
+                    vec![Expr::Ident(saved.clone())],
+                )),
+                op: BinaryOp::Eq,
+                right: Box::new(Expr::Literal(count.to_string())),
+            },
+            nonblocking: false,
+        });
+        self.save_operands(indices, stmts)?;
+        // The destination is written as `destination = id`, with `id`
+        // bound to the saved elements for the write.
+        let elements = expression_binding::fixed_from_container(
+            Expr::Ident(saved_source),
+            &container,
+            &shape,
+            self.tree,
+            &self.dims,
+        )?;
+        self.bind_effect(id, elements);
+        let mut write = Vec::new();
+        self.write_update(destination, id, &mut write)?;
+        let mut condition = Expr::Ident(succeeded_source.clone());
+        self.rename_expr(&mut condition);
+        stmts.push(Stmt::If {
+            condition,
+            then_body: write,
+            else_body: Vec::new(),
+        });
+        self.bind_effect(id, Expr::Ident(succeeded_source));
         Ok(())
     }
 

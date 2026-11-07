@@ -1091,10 +1091,12 @@ impl Ff<'_, '_> {
         }
         // A function may write the module's variables, static storage of
         // subroutines and static class properties among them, which every
-        // call shares, inlined or not; not the hidden ones the lowering
-        // keeps for a process, nor what is observed: assembly instruments
-        // the stores into that, which only the stores of the units the
-        // runtime runs can be.
+        // call shares, inlined or not; and the variables its `ref` formals
+        // name, which the caller passes, such as the locals of a process
+        // (the place selects the function, so only calls passing them reach
+        // it). Not the other hidden ones the lowering keeps for a process,
+        // nor what is observed: assembly instruments the stores into that,
+        // which only the stores of the units the runtime runs can be.
         let persistent = self.m.static_storage();
         let frame: HashMap<SourceVarId, (usize, SourceVarId, Option<usize>)> = slots
             .iter()
@@ -1168,6 +1170,7 @@ impl Ff<'_, '_> {
                         && !persistent.contains(&addr.var_id)
                         && !staging.contains(&addr.var_id)
                         && !in_place.contains(&addr.var_id)
+                        && !referents.contains(&addr.var_id)
                     {
                         return Err(other("writes hidden module state"));
                     }
