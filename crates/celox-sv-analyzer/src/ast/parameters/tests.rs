@@ -1642,3 +1642,41 @@ fn wide_enum_arithmetic_initializers_check_discarded_bits() {
         .unwrap();
     }
 }
+
+/// A `parameter` in a package is a local parameter (IEEE 1800-2023 6.20.4),
+/// as in a module with a parameter port list (6.20.1), so a range that
+/// names it folds; in a module without one a body parameter stays
+/// overridable.
+#[test]
+fn body_parameters_are_local_where_the_lrm_makes_them_so() {
+    for (source, local) in [
+        ("package p; parameter int W = 4; endpackage", true),
+        (
+            "module m #(parameter int A = 1); parameter int W = 4; endmodule",
+            true,
+        ),
+        ("module m #(); parameter int W = 4; endmodule", true),
+        ("module m; parameter int W = 4; endmodule", false),
+        ("module m; localparam int W = 4; endmodule", true),
+    ] {
+        let session = &mut Session::default();
+        let tree =
+            crate::source_tree::parse_scope_fixture(source, Path::new("locality.sv")).unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
+        let parameters = parameters_from_scope(
+            &tree,
+            session,
+            &HashMap::default(),
+            &ConstEnv::default(),
+            &HashMap::default(),
+        )
+        .unwrap();
+        let mut env = ConstEnv::default();
+        extend_const_env_with_parameters(&tree, session, &mut env, &parameters);
+        assert_eq!(
+            env.contains_key(&local_parameter_marker("W")),
+            local,
+            "{source}"
+        );
+    }
+}

@@ -9,6 +9,7 @@ sv_backends! {
     fn class_package_constant_class_defaults(sim) { @case "class::package_constant_class_defaults"; }
     fn class_waits_on_static_properties(sim) { @case "class::waits_on_static_properties"; }
     fn class_waits_on_instance_properties(sim) { @case "class::waits_on_instance_properties"; }
+    fn class_body_parameters_are_local(sim) { @case "class::body_parameters_are_local"; }
     fn class_waits_on_properties_in_package_subroutines(sim) { @case "class::waits_on_properties_in_package_subroutines"; }
     fn class_package_constant_type_arguments(sim) { @case "class::package_constant_type_arguments"; }
     fn class_named_aggregate_type_arguments(sim) { @case "class::named_aggregate_type_arguments"; }
