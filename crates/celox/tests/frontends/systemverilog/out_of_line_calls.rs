@@ -4245,3 +4245,64 @@ endmodule
         );
     }
 }
+
+#[test]
+fn rejected_units_leave_no_event_proxies() {
+    // The first wait of `t` makes the proxy of `(a && b)`; the second, on
+    // an item of the frame gated by module state, keeps the unit inlined:
+    // the lowering of the unit is undone, its proxy with it, and the inlined
+    // body makes its own.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int x, output int y);
+    bit a, b, en;
+    bit [1:0] bus;
+    task automatic t(int i, output int first, output int second);
+        @(posedge (a && b));
+        first = $time;
+        @(posedge bus[i] iff en);
+        second = $time;
+    endtask
+    int zero = 0;
+    initial t(zero, x, y);
+    initial begin
+        #1 a = 1;
+        #1 b = 1;
+        #1 en = 1;
+        #1 bus[0] = 1;
+    end
+endmodule
+"#;
+    same_as_inlined(source, 0, 10, &["x", "y"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 10, &["x", "y"]),
+        Ok(vec![value(2), value(4)])
+    );
+}
+
+#[test]
+fn gates_that_compare_equal_values_select_together() {
+    // `i == 1` and `i == 32'd1` are the same condition, though spelled
+    // apart: with `i` 1 both hold, so the unit waits at the site of both
+    // items.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b);
+    bit pa, pb;
+    task automatic either(int i, output int at);
+        @(posedge pa iff (i == 1) or posedge pb iff (i == 32'd1));
+        at = $time;
+    endtask
+    int one = 1;
+    initial either(one, a);
+    initial #3 either(one, b);
+    initial begin
+        #2 pb = 1;
+        #2 pa = 1;
+    end
+endmodule
+"#;
+    same_as_inlined(source, 1, 10, &["a", "b"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 10, &["a", "b"]),
+        Ok(vec![value(2), value(4)])
+    );
+}

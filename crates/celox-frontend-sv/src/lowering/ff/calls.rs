@@ -1140,12 +1140,26 @@ impl Ff<'_, '_> {
         }
         // The weight of each selected item in the number of the site: with
         // conditions that select at most one item, its rank; otherwise a bit.
-        let exclusive = exclusive_selection(selected.iter().map(|&position| {
-            items[position]
-                .iff
-                .as_ref()
-                .expect("a selected item has a condition")
-        }));
+        let (constants, parameter_types) = (self.m.constants, self.m.parameter_types);
+        let value = |expr: &sv::ir::Expr| {
+            let constant = match expr {
+                sv::ir::Expr::Literal(literal) => sv::ir::ConstExpr::Literal(literal.clone()),
+                sv::ir::Expr::Ident(name) if constants.contains_key(name) => {
+                    sv::ir::ConstExpr::Ident(name.clone())
+                }
+                _ => return None,
+            };
+            sv::typecheck::eval_const_expr_with_types(&constant, constants, parameter_types)
+        };
+        let exclusive = exclusive_selection(
+            selected.iter().map(|&position| {
+                items[position]
+                    .iff
+                    .as_ref()
+                    .expect("a selected item has a condition")
+            }),
+            value,
+        );
         if !exclusive && selected.len() > MAX_SELECTED_ITEMS {
             return self.unit_sampled_event(&items);
         }
@@ -2605,12 +2619,17 @@ fn edge_occurred(before: &str, after: &str, edge: sv::ir::EventEdge) -> sv::ir::
 const MAX_SELECTED_ITEMS: usize = 4;
 
 /// Whether at most one of `conditions` can hold at a time: each compares
-/// the same expression for equality with a distinct constant, as those
-/// that the analyzer makes for the instances a virtual interface may
-/// denote do.
-fn exclusive_selection<'a>(conditions: impl Iterator<Item = &'a sv::ir::Expr>) -> bool {
+/// the same expression for equality with a constant, the constants'
+/// values all distinct, as the conditions that the analyzer makes for the
+/// instances a virtual interface may denote are. `value` evaluates a
+/// constant; a condition whose constant has no value makes them not
+/// exclusive.
+fn exclusive_selection<'a>(
+    conditions: impl Iterator<Item = &'a sv::ir::Expr>,
+    value: impl Fn(&sv::ir::Expr) -> Option<i128>,
+) -> bool {
     let mut compared: Option<&sv::ir::Expr> = None;
-    let mut constants = HashSet::default();
+    let mut values = HashSet::default();
     for condition in conditions {
         let sv::ir::Expr::Binary {
             left,
@@ -2620,12 +2639,10 @@ fn exclusive_selection<'a>(conditions: impl Iterator<Item = &'a sv::ir::Expr>) -
         else {
             return false;
         };
-        let sv::ir::Expr::Literal(constant) = &**right else {
+        let Some(constant) = value(right) else {
             return false;
         };
-        if compared.is_some_and(|compared| compared != &**left)
-            || !constants.insert(constant.clone())
-        {
+        if compared.is_some_and(|compared| compared != &**left) || !values.insert(constant) {
             return false;
         }
         compared = Some(left);
