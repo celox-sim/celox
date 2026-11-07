@@ -350,6 +350,33 @@ endmodule
         assert_ne!(single.last().unwrap()[1], BigUint::from(0u8));
     }
 
+    /// `p` pulses and returns to 0 within one evaluation of its process,
+    /// so the settle sees no change of `p` itself, only of its occurrence
+    /// counters: those must still set the flag of the process waiting on it.
+    const PULSE: &str = r#"`timescale 1ns/1ns
+module Top (
+    output logic [7:0] seen
+);
+    logic go = 0;
+    logic p;
+    always @* begin p = 1'b0; if (go) begin p = 1'b1; p = 1'b0; end end
+    initial begin
+        seen = 8'd0;
+        forever begin
+            @(posedge p);
+            seen = seen + 8'd1;
+        end
+    end
+    always #2 go = ~go;
+endmodule
+"#;
+
+    #[test]
+    fn pulse_within_a_partition_wakes_its_edge_wait() {
+        let single = matches_single_pass(PULSE, &["seen"], 20);
+        assert_ne!(single.last().unwrap()[0], BigUint::from(0u8));
+    }
+
     #[test]
     fn multi_output_process_matches_single_pass() {
         let single = matches_single_pass(SPLIT, &["y", "b", "w", "n"], 10);
