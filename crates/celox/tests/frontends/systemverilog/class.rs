@@ -3575,3 +3575,39 @@ endmodule
         );
     }
 }
+
+sv_backends! {
+    // A class of the compilation unit has the compilation unit's time unit,
+    // which a `timescale directive does not set: the default, 1 ns (IEEE
+    // 1800-2023 3.14.2.3). Its precision, 1 ps, is finer than the global
+    // precision the directive gives the design (3.14.3), so its delays and
+    // `$time` round to whole steps of 1 ns.
+    fn compilation_unit_classes_count_time_in_the_default_unit(sim) {
+        @setup {
+            let source = r#"
+                `timescale 1ns/1ns
+                class C;
+                    static function time now(); return $time; endfunction
+                    static task wait_units(); #10; endtask
+                    static task wait_literal(); #3ns; endtask
+                endclass
+                module Top(output longint a, output longint b, output longint c, output longint d);
+                    initial begin
+                        #5 a = C::now();
+                        C::wait_units();
+                        b = $time;
+                        C::wait_literal();
+                        c = $time;
+                        d = C::now();
+                    end
+                endmodule
+            "#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("unit_class_time.sv"))], "Top");
+        sim.run_until(100).unwrap();
+        assert_eq!(sim.get(sim.signal("a")), 5u32.into());
+        assert_eq!(sim.get(sim.signal("b")), 15u32.into());
+        assert_eq!(sim.get(sim.signal("c")), 18u32.into());
+        assert_eq!(sim.get(sim.signal("d")), 18u32.into());
+    }
+}
