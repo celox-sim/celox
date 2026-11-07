@@ -1509,6 +1509,24 @@ fn compile_mixed_to_sir_with_layout_mode(
     }
 }
 
+/// Write the settle plan a trace captured to `path`
+/// ([`SimulatorBuilder::settle_plan_output`]); a build without a partitioned
+/// settle writes nothing.
+#[cfg(feature = "host-runtime")]
+fn write_settle_plan_output(
+    path: Option<&std::path::Path>,
+    trace: &crate::debug::CompilationTrace,
+) {
+    if let (Some(path), Some(plan)) = (path, &trace.settle_plan)
+        && let Err(error) = std::fs::write(path, plan)
+    {
+        tracing::warn!(
+            "cannot write the settle plan to {}: {error}",
+            path.display()
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 #[cfg(feature = "host-runtime")]
 fn compile_hdl_to_sir_with_layout_mode(
@@ -2767,6 +2785,22 @@ mod host {
             self
         }
 
+        /// Record the partitioned settle's plan with a lint of its
+        /// dependencies ([`crate::CompilationTrace::settle_plan`]).
+        pub fn trace_settle_plan(mut self) -> Self {
+            self.options.trace.settle_plan = true;
+            self
+        }
+
+        /// Write the partitioned settle's plan, with a lint of its
+        /// dependencies ([`crate::CompilationTrace::settle_plan`]), to
+        /// `path` while building. Nothing is written without a partitioned
+        /// settle.
+        pub fn settle_plan_output(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+            self.options.trace.settle_plan_output = Some(path.into());
+            self
+        }
+
         pub fn trace_pre_optimized_sir(mut self) -> Self {
             self.options.trace.pre_optimized_sir = true;
             self
@@ -3046,6 +3080,42 @@ mod host {
         /// ([`crate::settle::instrument_ff_units`]); VCD recording keeps the
         /// per-object commits it traces.
         fn into_laid_out_program_with_trace(
+            self,
+            layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
+            trace: Option<&mut crate::debug::CompilationTrace>,
+            defer_derived_edges: bool,
+            wide_commits: bool,
+        ) -> Result<
+            (
+                crate::ir::LaidOutProgram,
+                Vec<CompilationWarning>,
+                SimulatorOptions,
+                Option<(std::path::PathBuf, crate::WaveformFormat)>,
+                crate::InjectedComponents,
+            ),
+            SimulatorError,
+        > {
+            let Some(path) = self.options.trace.settle_plan_output.clone() else {
+                return self.into_laid_out_program_traced(
+                    layout_mode,
+                    trace,
+                    defer_derived_edges,
+                    wide_commits,
+                );
+            };
+            let mut local = crate::debug::CompilationTrace::default();
+            let trace = trace.unwrap_or(&mut local);
+            let result = self.into_laid_out_program_traced(
+                layout_mode,
+                Some(&mut *trace),
+                defer_derived_edges,
+                wide_commits,
+            );
+            write_settle_plan_output(Some(&path), trace);
+            result
+        }
+
+        fn into_laid_out_program_traced(
             mut self,
             layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
             trace: Option<&mut crate::debug::CompilationTrace>,
@@ -3917,6 +3987,7 @@ mod host {
                     )
                 };
 
+            write_settle_plan_output(self.options.trace.settle_plan_output.as_deref(), &trace);
             let program_res = program_res
                 .map_err(|error| error.apply_diagnostic_policy(&self.options.diagnostic_policy));
             let sim_res = program_res.and_then(|(program, mut warnings)| {
