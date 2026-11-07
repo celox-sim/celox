@@ -71,6 +71,44 @@ sv_backends! {
             celox::RuntimeEvent::Display { message: b"Top.second".to_vec() },
         ]);
     }
+    // A string variable or formal names a file by its text, and prints its
+    // text, not its handle, to a file and to standard output (IEEE
+    // 1800-2023 21.3.1, 21.3.2, 21.2.1.7).
+    fn file_output_prints_string_variables(sim) {
+        @setup {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("strings");
+            let source = format!(r#"
+                package p;
+                    function automatic void report(int fd, string m);
+                        $fdisplay(fd, "[%s]", m);
+                    endfunction
+                endpackage
+                module Top;
+                    string s = "abc";
+                    string path = "{}";
+                    string mode = "w";
+                    int fd;
+                    initial begin
+                        fd = $fopen(path, mode);
+                        $fdisplay(fd, "[%s]", s);
+                        $fwrite(fd, "<%s>%0d\n", s, s.len());
+                        p::report(fd, {{s, "def"}});
+                        $fclose(fd);
+                        $fdisplay(1, "[%s]", s);
+                        p::report(1, "lit");
+                    end
+                endmodule
+            "#, path.display());
+        }
+        @build celox::Simulation::from_sv_sources(vec![(&source, Path::new("file_strings.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"[abc]\n<abc>3\n[abcdef]\n");
+        assert_eq!(sim.drain_runtime_events(), vec![
+            celox::RuntimeEvent::Display { message: b"[abc]".to_vec() },
+            celox::RuntimeEvent::Display { message: b"[lit]".to_vec() },
+        ]);
+    }
     fn edge_procedures_execute_requests_in_statement_order(sim) { @case "file_io::edge_procedures_execute_requests_in_statement_order"; }
     fn stdout_preserves_format_and_call_order(sim) { @case "file_io::stdout_preserves_format_and_call_order"; }
     fn descriptors_distinguish_fd_mcd_and_reuse_channels(sim) {

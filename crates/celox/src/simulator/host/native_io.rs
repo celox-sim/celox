@@ -871,22 +871,29 @@ impl Scope<'_> {
             )
         };
         self.read_seq.store(read_seq, Ordering::Release);
-        // The active native backend installs its heap after code adoption;
-        // read the current pointer rather than retaining the earlier tier's.
-        let heap = unsafe {
-            self.state
-                .add(celox_state_layout::STATE_HEADER_HEAP_ADDR_OFFSET)
-                .cast::<*const celox_heap::Heap>()
-                .read_unaligned()
-                .as_ref()
-        }
-        .ok_or_else(|| Self::fault("native state has no active heap"))?;
+        let heap = self.heap()?;
         for event in &mut events {
             event.resolve_handles(heap);
         }
         pending.extend(events, layout.runtime_event_capacity);
         pending.resolve_deferred_handles(heap);
         Ok(())
+    }
+
+    /// The heap of the active native backend. It installs its heap after
+    /// code adoption, so the current pointer is read rather than retaining
+    /// the earlier tier's.
+    fn heap(&self) -> Result<&celox_heap::Heap, RuntimeErrorCode> {
+        // SAFETY: the backend keeps the heap it installs in this state
+        // image alive while the image runs.
+        unsafe {
+            self.state
+                .add(celox_state_layout::STATE_HEADER_HEAP_ADDR_OFFSET)
+                .cast::<*const celox_heap::Heap>()
+                .read_unaligned()
+                .as_ref()
+        }
+        .ok_or_else(|| Self::fault("native state has no active heap"))
     }
 
     fn capture_enabled(&self, site: usize) -> bool {
@@ -966,8 +973,13 @@ impl Scope<'_> {
             return Err(Self::fault("file I/O descriptor/address contains X or Z"));
         }
         let descriptor = descriptor.to_u32_digits().first().copied().unwrap_or(0);
-        let (args, message) =
-            super::file_io::formatted_file_write(&site.request, &values, &site.format, timestamp);
+        let (args, message) = super::file_io::formatted_file_write(
+            &site.request,
+            &values,
+            &site.format,
+            timestamp,
+            self.heap()?,
+        );
         let (stdout, result) = self.files.write_with_stdout(descriptor, &message);
         if stdout {
             let mut format = site.format.clone();
