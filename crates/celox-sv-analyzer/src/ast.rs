@@ -1692,7 +1692,34 @@ impl Module {
             // initializer of a process local may call the subroutine.
             static_initializers.splice(0..0, body_state.static_initializers.drain(..));
             locals.retain(|local| !kept.contains(&local.name));
+            // The package or compilation unit this scope is, whose variables
+            // are its own, not imported.
+            let own_package = syntax_tree
+                .root_unit()
+                .ok()
+                .filter(|unit| unit.kind == celox_sv_syntax::UnitKind::Package)
+                .map(|unit| instances::normalize_identifier(&unit.name.spelling))
+                .or_else(|| {
+                    (syntax_tree.scope_handle() == crate::source_tree::ScopeHandle::Compilation)
+                        .then(|| packages::UNIT.to_string())
+                });
             for name in kept {
+                // A static variable is named by its owner and declaration (see
+                // `BodyBuilder::declare_static`), so a scope that lowers a
+                // package subroutine again, such as a method of a class
+                // specialization an earlier analysis made, may import the
+                // same variable. Another package's is that variable; one of
+                // this scope's own package is this declaration.
+                if let Some(index) = signals.iter().position(|signal| signal.name == name) {
+                    let own = signals[index]
+                        .package_variable
+                        .as_ref()
+                        .is_some_and(|(package, _)| Some(package) == own_package.as_ref());
+                    if !own {
+                        continue;
+                    }
+                    signals.remove(index);
+                }
                 signals.push(Signal::new(name.clone(), statics[&name].clone()));
             }
             if !static_initializers.is_empty() {

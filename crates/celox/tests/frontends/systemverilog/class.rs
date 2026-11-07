@@ -3271,3 +3271,159 @@ fn static_class_casts_assign_upcasts_and_reject_downcasts() {
         assert!(error.contains(expected), "{cast}: {error}");
     }
 }
+
+/// The outputs `names` of `source` at time 2, in both state modes, with
+/// calls inlined and out of line.
+fn static_outputs(source: &str, names: &[&str]) -> Vec<Vec<BigUint>> {
+    let mut runs = Vec::new();
+    for four_state in [false, true] {
+        for forced in [false, true] {
+            let builder =
+                celox::Simulation::from_sv_sources(vec![(source, Path::new("statics.sv"))], "Top")
+                    .four_state(four_state);
+            let builder = if forced {
+                builder.force_out_of_line_calls()
+            } else {
+                builder
+            };
+            let mut sim = builder
+                .build()
+                .unwrap_or_else(|error| panic!("four-state {four_state} forced {forced}: {error}"));
+            sim.run_until(2).unwrap();
+            runs.push(names.iter().map(|name| sim.get(sim.signal(name))).collect());
+        }
+    }
+    runs
+}
+
+/// A static variable of a method is one per specialization of its class
+/// (IEEE 1800-2023 6.21, 8.25): two specializations of `counter` count
+/// apart, and each specialization of `registry` keeps its own singleton, as
+/// UVM's `uvm_object_registry#(T, Tname)::get` does.
+#[test]
+fn specializations_have_their_own_static_variables() {
+    let source = r#"`timescale 1ns/1ns
+package p;
+    class counter #(int ID = 0);
+        function int next();
+            static int count = 0;
+            count++;
+            return count * 10 + ID;
+        endfunction
+    endclass
+    class registry #(type T = int, string NAME = "");
+        typedef registry #(T, NAME) this_type;
+        int tag;
+        static function this_type get();
+            static this_type m_inst;
+            if (m_inst == null) begin
+                m_inst = new();
+                m_inst.tag = $bits(T);
+            end
+            return m_inst;
+        endfunction
+    endclass
+endpackage
+import p::*;
+module Top(output int a, output int b, output int c, output int d, output bit same,
+           output bit apart);
+    counter #(1) one = new;
+    counter #(2) two = new;
+    initial begin
+        a = one.next();
+        a = one.next();
+        b = two.next();
+        c = registry #(byte, "b")::get().tag;
+        d = registry #(int, "i")::get().tag;
+        same = registry #(byte, "b")::get() == registry #(byte, "b")::get();
+        apart = registry #(byte, "b")::get().tag != registry #(int, "i")::get().tag;
+    end
+endmodule
+"#;
+    for run in static_outputs(source, &["a", "b", "c", "d", "same", "apart"]) {
+        assert_eq!(run, [21u32, 12, 8, 32, 1, 1].map(BigUint::from).to_vec());
+    }
+}
+
+/// The static variables of subroutines of a package, of a class
+/// specialization in it and of `$unit` that have one name and the same
+/// position among their analyses' declarations are three variables: each
+/// is named by its owner and its declaration, not by a counter of the
+/// analysis that declares it.
+#[test]
+fn statics_of_package_and_unit_subroutines_are_their_own() {
+    let source = r#"`timescale 1ns/1ns
+function automatic int unit_next();
+    static int m_inst = 0;
+    m_inst++;
+    return m_inst;
+endfunction
+package p;
+    class registry #(type T = int);
+        static function int get();
+            static int m_inst = 0;
+            m_inst += 10;
+            return m_inst + $bits(T);
+        endfunction
+    endclass
+    function automatic int pkg_next();
+        static int m_inst = 0;
+        m_inst += 100;
+        return m_inst;
+    endfunction
+endpackage
+import p::*;
+module Top(output int a, output int b, output int c, output int d);
+    initial begin
+        a = unit_next();
+        a = unit_next();
+        b = registry #(byte)::get();
+        b = registry #(byte)::get();
+        c = registry #(int)::get();
+        d = pkg_next();
+    end
+endmodule
+"#;
+    for run in static_outputs(source, &["a", "b", "c", "d"]) {
+        assert_eq!(run, [2u32, 28, 42, 100].map(BigUint::from).to_vec());
+    }
+}
+
+/// A class specialization of a package that both the package and the
+/// compilation unit lower, here `registry #(byte)` through `base::f` and
+/// through `$unit`'s `env::g`, has one static variable `n` (IEEE 1800-2023
+/// 6.21): the compilation unit binds the package's, which the package
+/// declares once. UVM's `uvm_component_registry#(T, Tname)::get` stopped the
+/// elaboration so ("duplicate port or signal name `m_inst@1192`").
+#[test]
+fn statics_of_specializations_lowered_by_two_scopes_are_one() {
+    let source = r#"`timescale 1ns/1ns
+package p;
+    int seed = 1;
+    class registry #(type T = int);
+        static function int get();
+            static int n = 0;
+            n += p::seed;
+            return n;
+        endfunction
+    endclass
+    class base;
+        function int f(); return registry #(byte)::get(); endfunction
+    endclass
+endpackage
+import p::*;
+class env extends base;
+    function int g(); return registry #(byte)::get() + 100; endfunction
+endclass
+module Top(output int a, output int b);
+    env e = new;
+    initial begin
+        a = e.f();
+        b = e.g();
+    end
+endmodule
+"#;
+    for run in static_outputs(source, &["a", "b"]) {
+        assert_eq!(run, [1u32, 102].map(BigUint::from).to_vec());
+    }
+}
