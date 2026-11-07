@@ -1067,6 +1067,10 @@
       "title": "A real value assigned to an integral class property is stored unconverted: with `int value`, `m.b.value = 5.5` and `$cast(m.b.value, 7.5)` leave 5.5 and 7.5 in the property instead of rounding to 6 and 8",
       "standard": "IEEE 1800-2023 6.12.1, 6.24.2, 10.7"
     },
+    "sv_class_parameter_typedef_width": {
+      "title": "A typedef in a class body whose range names a parameter of the class body is one bit wide: with `parameter int CW = 5; typedef logic [CW-1:0] c_t;` in class C, `$bits` of a c_t variable is 1 (also with localparam)",
+      "standard": "IEEE 1800-2023 6.20.4, 8.25"
+    },
     "sv_vacuous_success_pass_action": {
       "title": "The pass action of a concurrent assertion does not run on a vacuous success: `assert property (@(posedge clk) a |-> b) passed++;` with `a` false at every tick leaves `passed` at 0",
       "standard": "IEEE 1800-2023 16.14.8, 20.11"
@@ -4683,6 +4687,14 @@
       "classification": "xezim_bug",
       "bug": "sv_vacuous_success_pass_action",
       "note": "By default the pass action runs on vacuous success (20.11; 16.14.8), so `c |-> eq`, vacuous at the one tick where c is 0, runs its pass action 4 times out of 5. The pinned xezim runs it 3 times, skipping the vacuous success. The plain `a iff b` assertion's counts agree (3 passes, 2 failures), X counting as false."
+    },
+    {
+      "suite": "sv",
+      "name": "class::body_parameters_are_local",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class_parameter_typedef_width",
+      "note": "The class body's `parameter int CW = 5` makes `typedef logic [CW-1:0] c_t` five bits wide (6.20.4), so setting bits 0 to 2 of a c_t variable gives 7. The pinned xezim makes c_t one bit wide (`$bits` is 1, also with localparam) and returns 1. Verilator 5.052 passes the case."
     },
     {
       "suite": "sv",
