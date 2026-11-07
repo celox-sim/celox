@@ -679,8 +679,8 @@ chapter-20/20.10--info.sv	2state	pass
 chapter-20/20.10--info.sv	4state	pass
 chapter-20/20.10--warning.sv	2state	pass
 chapter-20/20.10--warning.sv	4state	pass
-chapter-20/20.14--coverage.sv	2state	fail
-chapter-20/20.14--coverage.sv	4state	fail
+chapter-20/20.14--coverage.sv	2state	pass
+chapter-20/20.14--coverage.sv	4state	pass
 chapter-20/20.15--dist_chi_square.sv	2state	pass
 chapter-20/20.15--dist_chi_square.sv	4state	pass
 chapter-20/20.15--dist_erlang.sv	2state	pass

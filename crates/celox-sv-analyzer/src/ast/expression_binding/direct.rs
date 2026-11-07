@@ -1527,6 +1527,157 @@ fn bind_value_in(
                                 )));
                                 continue;
                             }
+                            if function.is_coverage() {
+                                // A constant function calls constant
+                                // system functions only (13.4.3), and a
+                                // coverage function is none (11.2.1).
+                                if dimensions.constant_function_bodies {
+                                    return Err(AnalyzerError::InvalidSystemTfCall {
+                                        name,
+                                        detail:
+                                            "a coverage function is not a constant system function"
+                                                .into(),
+                                    });
+                                }
+                                // Celox collects no code coverage, so the
+                                // Clause 40 functions fold to their
+                                // no-coverage results (40.3.2): `SV_COV_NOCOV
+                                // (0), `SV_COV_ERROR (-1) for bad arguments,
+                                // and `SV_COV_OK (1) for operations with
+                                // nothing to do. $get_coverage is 100.0 on a
+                                // design without covergroup instances
+                                // (19.11), which is every design Celox
+                                // elaborates. The scope and name arguments
+                                // name a hierarchy or a database, not a
+                                // value, so they are not bound; the
+                                // selectors before them are constant
+                                // expressions.
+                                let mut selectors = [None::<i128>; 3];
+                                let count = match function {
+                                    SystemFunction::CoverageControl => 3,
+                                    SystemFunction::CoverageGetMax
+                                    | SystemFunction::CoverageGet => 2,
+                                    SystemFunction::CoverageMerge
+                                    | SystemFunction::CoverageSave => 1,
+                                    _ => 0,
+                                };
+                                for (position, selector) in
+                                    selectors.iter_mut().enumerate().take(count)
+                                {
+                                    let Some(id) = args.get(position).and_then(|arg| arg.value)
+                                    else {
+                                        continue;
+                                    };
+                                    let value = match crate::ast::constant_binding::bind_in(
+                                        id, native, tree, session, dimensions,
+                                    ) {
+                                        Ok(value) => value,
+                                        Err(AnalyzerError::Unsupported(_)) => None,
+                                        Err(error) => return Err(error),
+                                    };
+                                    *selector = value.and_then(|value| {
+                                        eval_ast_const_expr(
+                                            &tree.functions,
+                                            &value,
+                                            &dimensions.const_env,
+                                        )
+                                    });
+                                }
+                                let constant = |position: usize| selectors[position];
+                                let valid_type = |v: i128| (20..=23).contains(&v);
+                                let valid_scope = |v: i128| v == 10 || v == 11;
+                                let result: Option<i128> = match function {
+                                    SystemFunction::CoverageControl => {
+                                        match (constant(0), constant(1), constant(2)) {
+                                            (Some(control), Some(ty), Some(scope))
+                                                if valid_type(ty) && valid_scope(scope) =>
+                                            {
+                                                Some(match control {
+                                                    // START and CHECK find no
+                                                    // coverage; STOP and RESET
+                                                    // have nothing to do.
+                                                    0 | 3 => 0,
+                                                    1 | 2 => 1,
+                                                    _ => -1,
+                                                })
+                                            }
+                                            (Some(_), Some(_), Some(_)) => Some(-1),
+                                            _ => None,
+                                        }
+                                    }
+                                    SystemFunction::CoverageGetMax
+                                    | SystemFunction::CoverageGet => {
+                                        match (constant(0), constant(1)) {
+                                            (Some(ty), Some(scope))
+                                                if valid_type(ty) && valid_scope(scope) =>
+                                            {
+                                                Some(0)
+                                            }
+                                            (Some(_), Some(_)) => Some(-1),
+                                            _ => None,
+                                        }
+                                    }
+                                    SystemFunction::CoverageMerge => {
+                                        // No database was ever saved.
+                                        constant(0).map(|_| -1)
+                                    }
+                                    // Without coverage nothing is saved
+                                    // (40.3.2.5).
+                                    SystemFunction::CoverageSave => match constant(0) {
+                                        Some(ty) if valid_type(ty) => Some(0),
+                                        Some(_) => Some(-1),
+                                        None => None,
+                                    },
+                                    _ => None,
+                                };
+                                // The scope and database name arguments are
+                                // not evaluated, so one that could do more
+                                // than name something is not dropped.
+                                if let Some(id) = args
+                                    .iter()
+                                    .skip(count)
+                                    .filter_map(|arg| arg.value)
+                                    .find(|id| {
+                                        !matches!(
+                                            native.expression(ungroup(*id, native)).kind,
+                                            ExprKind::Literal(_)
+                                                | ExprKind::Name(_)
+                                                | ExprKind::Member { .. }
+                                        )
+                                    })
+                                {
+                                    return Err(unsupported(format!(
+                                        "argument `{}` of `{name}`, which is not a literal or a name",
+                                        native.token_text(native.expression(id).tokens).trim()
+                                    )));
+                                }
+                                if function == SystemFunction::GetCoverage {
+                                    // The covergroups of a design are not
+                                    // elaborated, so its coverage is known
+                                    // only without any (19.11).
+                                    if native.tokens.iter().any(|token| token.text == "covergroup")
+                                    {
+                                        return Err(unsupported(
+                                            "`$get_coverage` in a source that declares a covergroup",
+                                        ));
+                                    }
+                                    values.push(Expr::Literal("100.0".into()));
+                                    continue;
+                                }
+                                let Some(result) = result else {
+                                    return Err(AnalyzerError::InvalidSystemTfCall {
+                                        name,
+                                        detail: "coverage selector arguments must be constant"
+                                            .into(),
+                                    });
+                                };
+                                values.push(Expr::Literal(match result {
+                                    -1 => "32'shffffffff".into(),
+                                    0 => "32'sh0".into(),
+                                    _ => "32'sh1".into(),
+                                }));
+                                continue;
+                            }
                             if args.iter().filter_map(|arg| arg.value).any(|id| {
                                 matches!(
                                     native.expression(ungroup(id, native)).kind,

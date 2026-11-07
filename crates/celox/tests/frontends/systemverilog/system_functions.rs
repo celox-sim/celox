@@ -973,6 +973,8 @@ sv_backends! {
     fn isunbounded_restores_procedural_parameter_bindings(sim) { @case "system_functions::isunbounded_restores_procedural_parameter_bindings"; }
     fn isunbounded_restores_procedural_parameter_type_metadata(sim) { @case "system_functions::isunbounded_restores_procedural_parameter_type_metadata"; }
     fn isunbounded_preserves_lexical_scopes_and_short_circuits(sim) { @case "system_functions::isunbounded_preserves_lexical_scopes_and_short_circuits"; }
+    fn coverage_without_instrumentation(sim) { @case "system_functions::coverage_without_instrumentation"; }
+    fn coverage_selectors_and_database_names(sim) { @case "system_functions::coverage_selectors_and_database_names"; }
     fn isunbounded_reports_bounded_parameters(sim) { @case "system_functions::isunbounded_reports_bounded_parameters"; }
     fn isunbounded_reports_bounded_array_parameters(sim) { @case "system_functions::isunbounded_reports_bounded_array_parameters"; }
     fn isunbounded_preserves_parameter_values_and_result_type(sim) { @case "system_functions::isunbounded_preserves_parameter_values_and_result_type"; }
@@ -1994,13 +1996,85 @@ fn rejects_unknown_system_functions_in_every_context() {
     }
 }
 
+/// A coverage function is no constant system function (IEEE 1800-2023
+/// 11.2.1), although Celox folds its calls to their no-coverage results.
+#[test]
+fn rejects_coverage_functions_in_constant_expressions() {
+    for declaration in [
+        "localparam int P = $coverage_get_max(`SV_COV_TOGGLE, `SV_COV_HIER, $root);",
+        "localparam real P = $get_coverage();",
+        "logic [$coverage_save(`SV_COV_TOGGLE, \"db\"):0] v;",
+        "function automatic int f(); return $coverage_get(`SV_COV_TOGGLE, `SV_COV_HIER, $root); endfunction
+         localparam int P = f();",
+    ] {
+        let source = format!(
+            "module Top(output logic y);
+                {declaration}
+                assign y = 1'b0;
+            endmodule"
+        );
+        let error = build_error(&source);
+        assert!(
+            error.contains("a coverage function is not a constant system function"),
+            "{declaration}: {error}"
+        );
+    }
+}
+
+/// The scope and database name arguments of a coverage function are not
+/// evaluated, so an argument that calls is not dropped, and the overall
+/// coverage of a source with covergroups, which are not elaborated, is not
+/// known (IEEE 1800-2023 19.11).
+#[test]
+fn rejects_coverage_calls_whose_result_is_not_known() {
+    for (body, want) in [
+        (
+            "function automatic string next_name(); return \"db\"; endfunction
+             int r; initial r = $coverage_save(`SV_COV_TOGGLE, next_name());",
+            "argument `next_name()` of `$coverage_save`",
+        ),
+        (
+            "function automatic string next_name(); return \"db\"; endfunction
+             int r; initial r = $coverage_merge(`SV_COV_TOGGLE, next_name());",
+            "argument `next_name()` of `$coverage_merge`",
+        ),
+        (
+            "covergroup cg; endgroup
+             real total; initial total = $get_coverage();",
+            "`$get_coverage` in a source that declares a covergroup",
+        ),
+    ] {
+        let source = format!("module Top(output logic y); {body} assign y = 1'b0; endmodule");
+        let error = build_error(&source);
+        assert!(error.contains(want), "{body}: {error}");
+    }
+}
+
+/// A constant function ignores its system task calls (IEEE 1800-2023
+/// 13.4.3), so a coverage database task in one does not evaluate its name.
+#[test]
+fn constant_functions_ignore_coverage_database_tasks() {
+    let source = "module Top(output logic [7:0] y);
+        function automatic string name(); return \"db\"; endfunction
+        function automatic int three();
+            $load_coverage_db(name());
+            $set_coverage_db_name(name());
+            return 3;
+        endfunction
+        localparam int P = three();
+        assign y = P;
+    endmodule";
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("system_functions.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 3u8.into());
+}
+
 #[test]
 fn reports_where_a_known_system_function_is_not_supported() {
     let cases = [
-        (
-            "system function `$get_coverage` in an expression",
-            "module Top(output logic [63:0] y); assign y = $get_coverage(); endmodule",
-        ),
         (
             "system function `$q_full` in an expression",
             "module Top(output logic y);
