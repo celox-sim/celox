@@ -26,6 +26,17 @@
     },
     {
       "category": "Sequential",
+      "detail": "Icarus build exit status: 10; see <case>/build.log\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Invalid module item.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:5: error: Invalid module instantiation\n<case>/source_0.sv:7: error: Invalid module item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Invalid module instantiation\n<case>/source_0.sv:7: error: generate else is missing matching if.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Error in property_spec of concurrent assertion item.\n",
+      "expectation": "Simulation",
+      "name": "concurrent_assertions::boolean_iff_properties",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "Icarus 13.0 rejects concurrent assertion items and property syntax. IEEE 1800-2023 16.5 and 16.14.1 permit these explicitly clocked Boolean assert/assume/cover properties and their actions. Assertions stay enabled; no -gno-assertions workaround is used.",
       "expectation": "Simulation",
       "known_issue": {

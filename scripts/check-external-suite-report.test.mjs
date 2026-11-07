@@ -345,6 +345,7 @@ test("every retained baseline accepts only its existing failures", () => {
                 "class::void_casts_of_class_handles",
                 "class::waits_on_instance_properties",
                 "class::waits_on_properties_in_package_subroutines",
+                "concurrent_assertions::boolean_iff_properties",
                 "concurrent_assertions::named_sequence_leading_clock",
                 "concurrent_assertions::named_sequences_and_properties",
                 "concurrent_assertions::sequence_values_over_sampled_ticks",

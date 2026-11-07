@@ -1174,6 +1174,10 @@ pub struct PropertySpec {
     /// A single-cycle antecedent for overlapped implication (`|->`).
     pub antecedent: Option<ExprId>,
     pub condition: ExprId,
+    /// The right operand of `condition iff equivalent` (IEEE 1800-2023
+    /// 16.12.8), a Boolean like `condition`: the property holds when both
+    /// are true or both are false.
+    pub equivalent: Option<ExprId>,
     /// A property over cycles: a linear sequence of fixed delays, or an
     /// implication of two, which `antecedent` and `condition` do not
     /// describe. `condition` is then its last step's expression.

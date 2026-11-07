@@ -253,6 +253,7 @@ region に関する逸脱2件は[意図的な逸脱](#intentional-deviations)に
 - 明示クロック付きの Boolean な `assert property`・`assume property`・
   `cover property`（モジュール・generate 項目）。固定クロック数だけ離れた
   ステップ列（`a ##1 b`、最大1024ティック）を `|->` または `|=>` で連結したもの。
+- 2 つの Boolean 式の `p iff q`。`|->` の後件にも書けます（`a |-> b iff c` は `a |-> (b iff c)`）。
 - 仮引数無しの名前付き property・sequence（同一モジュール、generate 外、
   本体が同部分集合内）。組み込み整数型のローカル変数と match 項目。
 - 時間無しのブロッキングアクション、報告・重大度タスク、停止・ノンブロッキング
@@ -262,6 +263,7 @@ region に関する逸脱2件は[意図的な逸脱](#intentional-deviations)に
 他スコープの名前付き property・sequence、サイクル遅延範囲、繰り返し、
 sequence 演算子（`and`、`or`、`intersect`、`throughout`）、複数サイクル
 sequence 内のインスタンス、複数サイクル sequence への `disable iff`、
+複数サイクルや名前付きの被演算子を持つ `iff`、
 述語や match 項目値中のユーザー関数呼び出し、時間付き・ノンブロッキングなアクション文。
 
 ### システムタスク・関数と I/O

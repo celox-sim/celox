@@ -320,6 +320,8 @@ concurrent assertions is unsupported:
   `assume property`, and `cover property` with an explicit clock, and
   sequences of steps a fixed number of clock ticks apart (`a ##1 b`),
   spanning at most 1024 ticks, joined by `|->` or `|=>`.
+- `p iff q` of two Boolean expressions, also as the consequent of `|->`
+  (`a |-> b iff c` is `a |-> (b iff c)`).
 - A named property or sequence without formal arguments, in the same module
   outside generate blocks, whose body stays within this subset; local
   variables of built-in integral types and match items.
@@ -331,7 +333,8 @@ Unsupported in particular: procedural concurrent assertions,
 implicit/default clocking, named properties and sequences with formal
 arguments or in other scopes, cycle-delay ranges, repetition, sequence
 operators (`and`, `or`, `intersect`, `throughout`), instances inside a
-multi-cycle sequence, `disable iff` with a multi-cycle sequence, user
+multi-cycle sequence, `disable iff` with a multi-cycle sequence, `iff`
+with an operand over cycles or a named operand, user
 function calls in predicates and match-item values, and timed or
 nonblocking action statements.
 
