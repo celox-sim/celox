@@ -2796,3 +2796,12 @@ pub(super) fn iff_truth(iff: sv::ir::Expr) -> sv::ir::Expr {
         sv::ir::Expr::Literal("1'b1".into()),
     )
 }
+
+/// [`edge_occurred`] for the frontend's other event lowerings.
+pub(super) fn edge_occurred_expr(
+    before: &str,
+    after: &str,
+    edge: sv::ir::EventEdge,
+) -> sv::ir::Expr {
+    edge_occurred(before, after, edge)
+}

@@ -4684,3 +4684,78 @@ fn randomize_counts_no_stores_of_shared_variables() {
         "{randomizing:?}"
     );
 }
+
+#[test]
+fn event_controls_on_class_properties_count_each_store() {
+    // `@(e.on)`, `@(posedge e.on)` and `@(negedge e.l)` (IEEE 1800-2023
+    // 9.4.2): each store of the property counts the stored object's
+    // occurrences, so a pulse within one step is an occurrence, another
+    // object's store is none, and a handle that comes to denote an object
+    // whose value differs is one. UVM's `uvm_event::wait_on` waits so on a
+    // property of `this`.
+    let source = r#"`timescale 1ns/1ns
+class ev_t;
+    bit on;
+    logic l;
+    int seen;
+    task wait_on();
+        @on;
+        seen = 1;
+    endtask
+endclass
+module Top(output int pulse, output int pos, output int neg, output int moved, output int other,
+           output int method);
+    ev_t a = new, b = new, c = new, h;
+    task automatic wait_any(ev_t e, output int at);
+        @(e.on);
+        at = $time;
+    endtask
+    task automatic wait_pos(ev_t e, output int at);
+        @(posedge e.on);
+        at = $time;
+    endtask
+    task automatic wait_neg(ev_t e, output int at);
+        @(negedge e.l);
+        at = $time;
+    endtask
+    task automatic wait_h(output int at);
+        @(h.on);
+        at = $time;
+    endtask
+    initial begin
+        h = c;
+        fork
+            wait_any(a, pulse);
+            wait_pos(a, pos);
+            wait_neg(a, neg);
+            wait_h(moved);
+            wait_pos(b, other);
+            a.wait_on();
+        join_none
+        #2 a.on = 1;
+        a.on = 0;
+        #2 a.l = 1;
+        #1 a.l = 0;
+        #2 b.on = 1;
+        #2 h = b;
+        #1 method = a.seen;
+    end
+endmodule
+"#;
+    let names = ["pulse", "pos", "neg", "moved", "other", "method"];
+    same_as_inlined(source, 6, 20, &names);
+    for four_state in [false, true] {
+        assert_eq!(
+            simulate(source, four_state, true, "interpreter", 20, &names),
+            Ok(vec![
+                value(2),
+                value(2),
+                value(5),
+                value(9),
+                value(7),
+                value(1)
+            ]),
+            "four_state {four_state}"
+        );
+    }
+}

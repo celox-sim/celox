@@ -7868,6 +7868,9 @@ impl Ff<'_, '_> {
     /// assignment reads and stores the expression's value, which the event
     /// control samples as it begins.
     fn wait_event(&mut self, items: &[sv::ir::EventItem]) -> Result<(), sv::AnalyzerError> {
+        if self.property_event(items)? {
+            return Ok(());
+        }
         if self.kernel.is_none() && self.can_suspend_unit() {
             return self.unit_wait_event(items);
         }
@@ -8894,12 +8897,15 @@ pub(crate) fn watched_properties(
             .find(|subroutine| subroutine.name == name)
     };
     let mut conditions = Vec::new();
+    let mut events = Vec::new();
     let mut visit = |stmts: &[sv::ir::Stmt]| {
         for stmt in stmts {
-            stmt.walk(&mut |stmt| {
-                if let sv::ir::Stmt::Wait(condition) = stmt {
-                    conditions.push(condition.clone());
+            stmt.walk(&mut |stmt| match stmt {
+                sv::ir::Stmt::Wait(condition) => conditions.push(condition.clone()),
+                sv::ir::Stmt::WaitEvent(items) => {
+                    events.extend(items.iter().map(|item| item.expr.clone()));
                 }
+                _ => {}
             });
         }
     };
@@ -8924,6 +8930,27 @@ pub(crate) fn watched_properties(
             }
         }
     }
+    // An event control on a property counts its occurrences in each object
+    // at the store (see `Ff::property_event`): the stores of its key are
+    // counted, which the key's edge marker says.
+    for expr in &events {
+        for op in heap_reads(subroutine, expr) {
+            if let sv::ir::ObjectOp::Load(field) = op
+                && field.key != 0
+            {
+                keys.insert(field.key);
+                keys.insert(property_edges(field.key));
+            }
+        }
+    }
+}
+
+/// The key whose [`property_changes`] variable marks that an event control
+/// watches the property with key `key`, so that each store of it counts the
+/// occurrences of the stored object (see `Ff::property_event`). A marker
+/// that is some other property's key only counts that property's stores too.
+pub(crate) fn property_edges(key: u32) -> u32 {
+    key.rotate_left(16) ^ 0x6564_6765
 }
 
 /// The name of the variable that counts the stores of the class property

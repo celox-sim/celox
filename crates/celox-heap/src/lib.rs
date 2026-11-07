@@ -122,6 +122,15 @@ pub struct Heap {
     /// whose post_randomize runs, see [`Heap::begin_solved_visits`].
     #[serde(default)]
     solved: Vec<Handle>,
+    /// The occurrences of the properties an event control watches, by
+    /// object and byte offset: changes, rises and falls of the value (IEEE
+    /// 1800-2023 9.4.2), counted at each store (see
+    /// [`ops::OBJECT_EDGE_END`]). An entry goes with its object.
+    #[serde(default)]
+    edges: HashMap<(Handle, u32), [u32; 3]>,
+    /// The bytes of the property a counted store is replacing.
+    #[serde(default)]
+    edge_before: Vec<u8>,
 }
 
 impl Default for Heap {
@@ -160,6 +169,8 @@ impl Heap {
             visits: Vec::new(),
             prepared: None,
             solved: Vec::new(),
+            edges: HashMap::default(),
+            edge_before: Vec::new(),
         }
     }
 
@@ -287,6 +298,7 @@ impl Heap {
             live
         });
         self.objects.retain(|handle, _| objects.contains(handle));
+        self.edges.retain(|(handle, _), _| objects.contains(handle));
         self.containers.retain(|handle, _| objects.contains(handle));
         self.container_lookup
             .retain(|_, handle| objects.contains(handle));
