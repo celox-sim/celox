@@ -12292,6 +12292,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn locator_locals_take_their_dimensions_from_the_type_table() {
+        // The iterator of `find` is a local the analyzer makes for the call
+        // (a locator local), of the element type `logic [W-1:0]`, whose range
+        // stays as written: it is typed through the type table as every
+        // declared local is.
+        let source = "module Top #(parameter int W = 8)(output int y);
+                      logic [W-1:0] q[$];
+                      initial begin
+                          int k = 2;
+                          q.push_back(8'h04);
+                          y = q.find(x) with (x[k] == 1'b1).size();
+                      end
+                      endmodule";
+        let ir = sv::analyze_source(source, Path::new("locator.sv")).unwrap();
+        let local = ir.modules()[0]
+            .locals()
+            .iter()
+            .find(|local| local.source_name == "x")
+            .expect("the iterator `x`");
+        let info =
+            signal_type_from_sv(&local.r#type, &HashMap::default(), &HashMap::default()).unwrap();
+        assert_eq!(info.packed_ranges, vec![(7, 0)]);
+    }
+
+    #[test]
     fn packed_dimensions_come_from_the_type_table() {
         // `W` is a parameter, not a local parameter, so the analyzer keeps
         // the local's range `[W-1:0]` as written: the frontend takes its
