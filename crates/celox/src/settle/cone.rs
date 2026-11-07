@@ -14,11 +14,15 @@
 use super::prune::Analysis;
 use crate::AbsoluteAddr;
 use crate::ir::{RegionedAbsoluteAddr, SIRInstruction};
+#[cfg(feature = "host-runtime")]
 use celox_design::BinaryOp;
-use celox_sir::{BlockId, ExecutionUnit, SIROffset, SIRTerminator};
+#[cfg(feature = "host-runtime")]
+use celox_sir::SIRTerminator;
+use celox_sir::{BlockId, ExecutionUnit, SIROffset};
 
 type Unit = ExecutionUnit<RegionedAbsoluteAddr>;
 
+#[cfg(feature = "host-runtime")]
 /// The settle `units` restricted to the closure of `seeds` under
 /// publishing, and the number of partitions it runs. `None` when a
 /// partition's marks cannot be decoded.
@@ -140,6 +144,7 @@ fn marked_by(analysis: &Analysis<'_>, block: BlockId) -> Option<Vec<usize>> {
     Some(marked)
 }
 
+#[cfg(feature = "host-runtime")]
 /// The first partition and the partition count of the group a test of
 /// `cond` covers (`Load flag word; Ne 0`).
 fn group_test(analysis: &Analysis<'_>, cond: celox_sir::RegisterId) -> Option<(usize, usize)> {
@@ -164,6 +169,7 @@ fn group_test(analysis: &Analysis<'_>, cond: celox_sir::RegisterId) -> Option<(u
     }
 }
 
+#[cfg(feature = "host-runtime")]
 fn remove_unreachable_blocks(unit: &mut Unit) {
     let mut reachable = crate::HashSet::from_iter([unit.entry_block_id]);
     let mut stack = vec![unit.entry_block_id];

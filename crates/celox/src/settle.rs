@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 mod cone;
 mod prune;
 
+#[cfg(feature = "host-runtime")]
 pub(crate) use cone::clock_cone;
 pub(crate) use prune::prune_stale_marks;
 
@@ -389,6 +390,7 @@ fn merge_straight_units(units: &mut Vec<ExecutionUnit<RegionedAbsoluteAddr>>) {
     *units = merged;
 }
 
+#[cfg(feature = "host-runtime")]
 /// Whether `instruction` is a raw state word of a wide commit
 /// ([`Marker::emit_wide_run`]): the only raw state access a unit outside
 /// the compiled scheduler makes, shadowed by typed commits of the registers
