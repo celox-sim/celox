@@ -214,6 +214,7 @@ use crate::{AnalyzerError, system_functions, typecheck};
 mod array_compatibility;
 mod array_parameters;
 mod assignment_analysis;
+mod assignments;
 mod bound_patterns;
 mod case;
 mod casts;
