@@ -247,7 +247,7 @@ pub(super) fn elaborate_parameterized_module(
                 comptime: Comptime::from_type(r#type, ClockDomain::None, token),
                 token,
             };
-            eval_const_assign(&mut header, (&property.kind).into(), &dst, &mut expr)
+            eval_const_assign(&mut header, (&property.kind).into(), &dst, &mut expr, false)
                 .map_err(|_| invalid())?;
         }
         Ok::<_, ParserError>((signature, override_map))
