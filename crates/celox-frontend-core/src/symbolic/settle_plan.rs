@@ -1,5 +1,5 @@
 //! A readable dump of a partitioned settle's plan, with a lint of its
-//! dependencies ([`format`]).
+//! dependencies ([`format()`]).
 //!
 //! Every partition is listed with its cost, the bits it reads, what it
 //! compares after it ran and whom each compared chunk marks. The summary
