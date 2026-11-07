@@ -534,6 +534,9 @@ fn execution_option_conflicts_are_rejected() {
             "unused",
             "--dump-ir-and-run",
         ],
+        // A settle profile needs a run to count.
+        vec!["--compile-only", "--settle-profile", "unused.tsv"],
+        vec!["--dump-ir-dir", "unused", "--settle-profile", "unused.tsv"],
     ] {
         let output = run(
             &[(

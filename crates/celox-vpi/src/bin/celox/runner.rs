@@ -76,7 +76,7 @@ pub(super) struct ExecutionArgs {
     pub dump_settle_plan: Option<PathBuf>,
     /// Count the partitioned settle's work and write, after the run, each
     /// partition's runs and the runs that changed nothing it compares.
-    #[arg(long, value_name = "FILE")]
+    #[arg(long, value_name = "FILE", conflicts_with = "compile_only")]
     pub settle_profile: Option<PathBuf>,
     /// Record waveform changes at each simulation time step (VCD).
     #[arg(long, value_name = "FILE", conflicts_with = "compile_only")]
@@ -415,6 +415,11 @@ pub(super) fn run(
     if opts.dump_ir_and_run && opts.dump_ir_dir.is_none() {
         return Err(RunError::InvalidConfiguration {
             message: "--dump-ir-and-run requires --dump-ir-dir",
+        });
+    }
+    if opts.settle_profile.is_some() && opts.dump_ir_dir.is_some() && !opts.dump_ir_and_run {
+        return Err(RunError::InvalidConfiguration {
+            message: "--settle-profile with --dump-ir-dir requires --dump-ir-and-run",
         });
     }
     #[cfg(any(
@@ -788,7 +793,11 @@ pub(super) fn run(
                     (run_compiled_testbench(&mut sim, &testbench), 0, false)
                 };
                 sim.flush_vcd()?;
-                write_settle_profile(opts.settle_profile.as_deref(), sim.settle_profile())?;
+                write_settle_profile(
+                    opts.settle_profile.as_deref(),
+                    sim.layout(),
+                    sim.settle_profile(),
+                )?;
                 #[cfg(any(
                     all(target_arch = "x86_64", not(feature = "arm64-codegen")),
                     all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
@@ -1007,7 +1016,11 @@ pub(super) fn run(
                 (run_compiled_testbench(&mut sim, &testbench), 0, false)
             };
             sim.flush_vcd()?;
-            write_settle_profile(opts.settle_profile.as_deref(), sim.settle_profile())?;
+            write_settle_profile(
+                opts.settle_profile.as_deref(),
+                sim.layout(),
+                sim.settle_profile(),
+            )?;
             let jit_execute_elapsed = sim
                 .finish_native_execution_timing()
                 .map(|timing| timing.elapsed());
@@ -1047,7 +1060,11 @@ pub(super) fn run(
                 (run_compiled_testbench(&mut sim, &testbench), 0, false)
             };
             sim.flush_vcd()?;
-            write_settle_profile(opts.settle_profile.as_deref(), sim.settle_profile())?;
+            write_settle_profile(
+                opts.settle_profile.as_deref(),
+                sim.layout(),
+                sim.settle_profile(),
+            )?;
             (
                 result,
                 ticks,
@@ -1078,7 +1095,11 @@ pub(super) fn run(
                 (run_compiled_testbench(&mut sim, &testbench), 0, false)
             };
             sim.flush_vcd()?;
-            write_settle_profile(opts.settle_profile.as_deref(), sim.settle_profile())?;
+            write_settle_profile(
+                opts.settle_profile.as_deref(),
+                sim.layout(),
+                sim.settle_profile(),
+            )?;
             (
                 result,
                 ticks,
@@ -1110,7 +1131,11 @@ pub(super) fn run(
                 (run_compiled_testbench(&mut sim, &testbench), 0, false)
             };
             sim.flush_vcd()?;
-            write_settle_profile(opts.settle_profile.as_deref(), sim.settle_profile())?;
+            write_settle_profile(
+                opts.settle_profile.as_deref(),
+                sim.layout(),
+                sim.settle_profile(),
+            )?;
             (
                 result,
                 ticks,
@@ -1149,7 +1174,11 @@ pub(super) fn run(
             };
             let execute_elapsed = execute_start.elapsed();
             sim.flush_vcd()?;
-            write_settle_profile(opts.settle_profile.as_deref(), sim.settle_profile())?;
+            write_settle_profile(
+                opts.settle_profile.as_deref(),
+                sim.layout(),
+                sim.settle_profile(),
+            )?;
             let timing = sim.finish_tiered_execution_timing();
             let stats = sim.tiered_execution_stats();
             generated_code_exercised = stats.tier == TieredExecutionTier::Compiled
@@ -1270,13 +1299,22 @@ pub(super) fn run(
 /// those of `--dump-settle-plan`.
 pub(super) fn write_settle_profile(
     path: Option<&std::path::Path>,
+    layout: &celox::MemoryLayout,
     profile: Option<celox::SettleProfile>,
 ) -> std::io::Result<()> {
     let Some(path) = path else {
         return Ok(());
     };
     let Some(profile) = profile else {
-        return fs::write(path, "# no partitioned settle\n");
+        // A loaded native image keeps the code it was compiled with.
+        return fs::write(
+            path,
+            if layout.settle.is_some() {
+                "# the partitioned settle has no run counters: its code was compiled without --settle-profile\n"
+            } else {
+                "# no partitioned settle\n"
+            },
+        );
     };
     let runs = profile.total_runs();
     let unchanged = profile.unchanged_runs();

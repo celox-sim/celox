@@ -331,6 +331,7 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
             $(if arguments.execution.report { $report_hotspots(&simulation, &arguments.design.top); })?
             runner::write_settle_profile(
                 arguments.execution.settle_profile.as_deref(),
+                simulation.layout(),
                 simulation.settle_profile(),
             )
             .map_err(|error| format!("cannot write the settle profile: {error}"))?;
