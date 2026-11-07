@@ -3272,3 +3272,82 @@ fn static_class_casts_assign_upcasts_and_reject_downcasts() {
         assert!(error.contains(expected), "{cast}: {error}");
     }
 }
+
+/// The value of output `a` of `source` at time 1, in both state modes.
+fn output_a(source: &str) -> Vec<BigUint> {
+    [false, true]
+        .map(|four_state| {
+            let mut sim =
+                celox::Simulation::from_sv_sources(vec![(source, Path::new("statics.sv"))], "Top")
+                    .four_state(four_state)
+                    .build()
+                    .unwrap_or_else(|error| panic!("four-state {four_state}: {error}"));
+            sim.run_until(1).unwrap();
+            sim.get(sim.signal("a"))
+        })
+        .to_vec()
+}
+
+/// The initializer of a static property is bound in the scope of its class
+/// (IEEE 1800-2023 8.9, 8.25), in a package and in a module: a static
+/// property it reads is the class's, not the module's port of the same
+/// name, and a call of a static method calls that method.
+#[test]
+fn static_property_initializers_see_their_class() {
+    let in_package = |body: &str| {
+        format!(
+            "`timescale 1ns/1ns\npackage p;\n    class reg_t;\n{body}\n    endclass\nendpackage\n\
+             import p::*;\nmodule Top(output int a);\n    initial a = reg_t::get();\nendmodule\n"
+        )
+    };
+    let in_module = |body: &str| {
+        format!(
+            "`timescale 1ns/1ns\nmodule Top(output int a);\n    class reg_t;\n{body}\n    endclass\n\
+             initial a = reg_t::get();\nendmodule\n"
+        )
+    };
+    let property = "static int a = 4;\nstatic int b = a + 1;\n\
+                    static function int get(); return b; endfunction";
+    let call = "static function int init(); return 7; endfunction\nstatic int a = init();\n\
+                static function int get(); return a; endfunction";
+    for (source, expected) in [
+        (in_package(property), 5u32),
+        (in_module(property), 5),
+        (in_package(call), 7),
+        (in_module(call), 7),
+    ] {
+        assert_eq!(
+            output_a(&source),
+            vec![BigUint::from(expected); 2],
+            "{source}"
+        );
+    }
+}
+
+/// UVM's `uvm_registry_common`: each specialization registers itself once,
+/// through the initializer `local static bit m__initialized =
+/// __deferred_init();`, which calls the specialization's own static method.
+#[test]
+fn specializations_initialize_their_static_properties_through_their_methods() {
+    let source = r#"`timescale 1ns/1ns
+package p;
+    int registered[$];
+    class registry #(type T = int);
+        static function bit __deferred_init();
+            registered.push_back($bits(T));
+            return 1;
+        endfunction
+        local static bit m__initialized = __deferred_init();
+        static function bit initialized(); return m__initialized; endfunction
+    endclass
+endpackage
+import p::*;
+module Top(output int a);
+    initial begin
+        a = registry #(byte)::initialized() + registry #(shortint)::initialized();
+        a = a * 100 + p::registered.sum();
+    end
+endmodule
+"#;
+    assert_eq!(output_a(source), vec![BigUint::from(224u32); 2]);
+}
