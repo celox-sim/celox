@@ -1626,3 +1626,87 @@ fn native_raw_state_write_preserves_packed_field_comparisons() {
         );
     }
 }
+
+/// `copy()`: copies its 128-bit two-state slot 0 to slot 1 as two 64-bit
+/// halves, which the native code copies as one block of memory within the
+/// frame.
+fn copying() -> FunctionUnit<RegionedAbsoluteAddr> {
+    let half = |dst: usize, from: u32, at: usize| {
+        SIRInstruction::Load(reg(dst), slot(from), SIROffset::Static(at), 64)
+    };
+    let put = |to: u32, at: usize, src: usize| {
+        SIRInstruction::Store(
+            slot(to),
+            SIROffset::Static(at),
+            64,
+            reg(src),
+            vec![],
+            vec![],
+        )
+    };
+    let unit = ExecutionUnit {
+        entry_block_id: crate::BlockId(0),
+        blocks: [block(
+            0,
+            vec![half(0, 0, 0), put(1, 0, 0), half(1, 0, 64), put(1, 64, 1)],
+            SIRTerminator::Return,
+        )]
+        .into_iter()
+        .collect(),
+        register_map: [(reg(0), bit(64)), (reg(1), bit(64))].into_iter().collect(),
+    };
+    unit.verify();
+    let slot_of = |index: u32| FrameSlot {
+        addr: slot(index),
+        offset: index as usize * 16,
+        width: 128,
+        four_state: false,
+        handle: false,
+        element_width: None,
+    };
+    FunctionUnit {
+        unit,
+        effects: Arc::default(),
+        frame: FrameLayout {
+            size: 32,
+            slots: vec![slot_of(0), slot_of(1)],
+        },
+    }
+}
+
+#[test]
+fn copies_within_a_frame_as_blocks_of_memory() {
+    // The halves of `copy()` are one memory copy, both of whose ranges are in
+    // the frame: the frame register addresses them as it addresses a load or
+    // a store.
+    let value = (BigUint::from(0x0123_4567_89ab_cdefu64) << 64u32)
+        | BigUint::from(0x0f1e_2d3c_4b5a_6978u64);
+    for four_state in [false, true] {
+        let layout = layout(four_state);
+        let caller = ExecutionUnit {
+            entry_block_id: crate::BlockId(0),
+            blocks: [block(
+                0,
+                vec![
+                    imm(0, 16),
+                    SIRInstruction::Imm(reg(1), SIRValue::new(value.clone())),
+                    call(0, vec![(0, reg(1))], vec![1], 2),
+                    store(state(PAIR), 128, 2),
+                ],
+                SIRTerminator::Return,
+            )]
+            .into_iter()
+            .collect(),
+            register_map: [(reg(0), bit(32)), (reg(1), bit(128)), (reg(2), bit(128))]
+                .into_iter()
+                .collect(),
+        };
+        caller.verify();
+        let program = compile(&[copying()], &caller, &layout, &[]);
+        let (status, memory) = program.run_with(|_| {});
+        assert_eq!(status, 0);
+        let offset = layout.offsets[&object(PAIR)];
+        assert_eq!(read(&memory, offset, 16), value, "four-state {four_state}");
+        assert_eq!(depth(&layout, &memory), 0);
+    }
+}
