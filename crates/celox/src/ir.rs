@@ -871,10 +871,9 @@ impl OptimizedSir {
 
     /// As [`Self::into_laid_out_with_mode`]; with `defer_instrumentation`,
     /// the units outside the settle are left for the caller to instrument
-    /// ([`LaidOutProgram::prune_stale_marks`],
-    /// [`crate::settle::instrument_processes_from`],
-    /// [`crate::settle::instrument_ff_units`]), after its dead-store
-    /// elimination.
+    /// (`LaidOutProgram::prune_stale_marks`,
+    /// `settle::instrument_processes_from`, `settle::instrument_ff_units`),
+    /// after its dead-store elimination.
     pub fn into_laid_out_with_options(
         self,
         four_state: bool,
