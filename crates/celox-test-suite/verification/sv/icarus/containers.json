@@ -645,6 +645,17 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:10: sorry: Unpacked structs not supported.\n",
+      "expectation": "Simulation",
+      "name": "containers::fixed_size_arrays_take_dynamic_arrays_of_any_element_type",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

@@ -1070,6 +1070,10 @@
     "sv_vacuous_success_pass_action": {
       "title": "The pass action of a concurrent assertion does not run on a vacuous success: `assert property (@(posedge clk) a |-> b) passed++;` with `a` false at every tick leaves `passed` at 0",
       "standard": "IEEE 1800-2023 16.14.8, 20.11"
+    },
+    "sv_dynamic_struct_arrays_to_fixed": {
+      "title": "Assigning a dynamic array of unpacked structures to a fixed-size array of them leaves the destination zero: with typedef struct { int a; byte b; } pair_t, pair_t pd [] = {'{5, 7}, '{6, 8}} and pair_t pf [2], pf = pd gives pf[0].a == 0, while copying pd[0] and pd[1] one by one gives the values",
+      "standard": "IEEE 1800-2023 7.6"
     }
   },
   "cases": [
@@ -5742,6 +5746,14 @@
       "classification": "xezim_bug",
       "bug": "sv_container_expression_values",
       "note": "An ambiguous conditional of queues compared without a target merges first (11.4.11), so (c ? a : a) == a is 1 and (c ? a : b) == a with a = '{1, 2}, b = '{1, 3} is 0; inner queues compare by their elements (7.6, 11.4.5). The pinned xezim prints x for all three comparisons of conditionals, still finds two queues of queues equal after an inner element changed (1 1 instead of 0 0), and gives 0 instead of x for equal outer queues whose inner queue holds 4'b1x00. Celox prints the expected output; Verilator 5.052 does not run four-state cases."
+    },
+    {
+      "suite": "sv",
+      "name": "containers::fixed_size_arrays_take_dynamic_arrays_of_any_element_type",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_dynamic_struct_arrays_to_fixed",
+      "note": "pd is a two-element dynamic array of pair_t {'{5, 7}, '{6, 8}} and pf is pair_t [2], so pf = pd assigns the elements (7.6) and structs is 1. xezim 0.11.4 leaves every member of pf at 0 (assert_eq structs: expected 0x1, got 0x0); a standalone probe prints pd as 5 7 6 8, pf after pf = pd as 0 0 0 0, and a fixed array assigned pd[0] and pd[1] one by one as 5 7 6 8. The string and class handle elements of the same case pass."
     }
   ]
 }
