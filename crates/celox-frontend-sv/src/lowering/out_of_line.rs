@@ -1462,7 +1462,9 @@ impl ProcModule<'_> {
                             ) => state.suspends = true,
                             // `suspend()` of the calling process parks it
                             // until another process resumes it, `await()`
-                            // until another ends, and the blocking methods of
+                            // until another ends, an event control on named
+                            // events or a wait for a trigger until one is
+                            // triggered, and the blocking methods of
                             // semaphores and mailboxes until they can be
                             // served; the frames stay with the activation
                             // meanwhile, and a mailbox method retries when the
@@ -1471,6 +1473,8 @@ impl ProcModule<'_> {
                                 celox_design::ProcessOp::Suspend
                                 | celox_design::ProcessOp::Await
                                 | celox_design::ProcessOp::SemaphoreGet
+                                | celox_design::ProcessOp::WaitEvent
+                                | celox_design::ProcessOp::WaitTriggered
                                 | celox_design::ProcessOp::MailboxPut
                                 | celox_design::ProcessOp::MailboxGet
                                 | celox_design::ProcessOp::MailboxPeek,

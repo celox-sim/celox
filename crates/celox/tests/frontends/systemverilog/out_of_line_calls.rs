@@ -4306,3 +4306,117 @@ endmodule
         Ok(vec![value(2), value(4)])
     );
 }
+
+#[test]
+fn units_wait_for_named_events() {
+    // `@e` in a recursion, `@` on an event a class property holds, and
+    // `wait (e.triggered)` park the process in units as in an inlined body
+    // (IEEE 1800-2023 15.5.2, 15.5.3): UVM's objections and sequences wait
+    // so inside its phase traversal.
+    let source = r#"`timescale 1ns/1ns
+class obj_t;
+    event raised;
+    int waiters;
+endclass
+module Top(output int got, output int waiting, output int at);
+    event e;
+    obj_t o = new;
+    task automatic wait_named(int n);
+        if (n == 0) return;
+        @e;
+        got = got + 1;
+        wait_named(n - 1);
+    endtask
+    task automatic wait_prop(obj_t x);
+        x.waiters++;
+        @(x.raised);
+        x.waiters--;
+    endtask
+    task automatic wait_trig();
+        wait (e.triggered);
+    endtask
+    int two = 2;
+    initial begin
+        wait_named(two);
+        wait_prop(o);
+        wait_trig();
+        waiting = o.waiters;
+        at = $time;
+    end
+    initial begin
+        #1 -> e;
+        #1 -> e;
+        #1 -> o.raised;
+        #1 -> e;
+    end
+endmodule
+"#;
+    assert_eq!(function_units(source, false), 1, "wait_named");
+    for four_state in [false, true] {
+        for forced in [false, true] {
+            assert_eq!(
+                simulate(
+                    source,
+                    four_state,
+                    forced,
+                    "interpreter",
+                    10,
+                    &["got", "waiting", "at"]
+                ),
+                Ok(vec![value(2), value(0), value(4)]),
+                "four_state {four_state} forced {forced}"
+            );
+        }
+    }
+}
+
+#[test]
+fn resuming_from_named_event_waits_flushes_deferred_assertions() {
+    // A resume from `@e` or from `wait (e.triggered)` that suspended is a
+    // flush point (IEEE 1800-2023 16.4.2): the failing deferred assertion
+    // queued before it is discarded, in a kernel and in a unit alike. A
+    // `wait (e.triggered)` that does not suspend is none, so the failure
+    // queued before it is reported.
+    let flushed = |wait: &str, call: bool| {
+        let body = if call { "wait_it();" } else { wait };
+        format!(
+            "`timescale 1ns/1ns\nmodule Top(output int done);\n    event e;\n    bit c;\n    task automatic wait_it();\n        {wait}\n    endtask\n    initial begin\n        assert #0 (c) else $fatal(1, \"not flushed\");\n        {body}\n        done = 1;\n    end\n    initial #0 -> e;\nendmodule\n"
+        )
+    };
+    for wait in ["@e;", "wait (e.triggered);"] {
+        for call in [false, true] {
+            let source = flushed(wait, call);
+            for four_state in [false, true] {
+                for forced in [false, true] {
+                    assert_eq!(
+                        simulate(&source, four_state, forced, "interpreter", 5, &["done"]),
+                        Ok(vec![value(1)]),
+                        "{wait} call {call} four_state {four_state} forced {forced}"
+                    );
+                }
+            }
+        }
+    }
+    let unsuspended = r#"`timescale 1ns/1ns
+module Top(output int done);
+    event e;
+    bit c;
+    task automatic wait_it();
+        wait (e.triggered);
+    endtask
+    initial begin
+        -> e;
+        assert #0 (c) else $fatal(1, "reported");
+        wait_it();
+        done = 1;
+    end
+endmodule
+"#;
+    for forced in [false, true] {
+        assert_eq!(
+            simulate(unsuspended, false, forced, "interpreter", 5, &["done"]),
+            Err("reported".to_string()),
+            "forced {forced}"
+        );
+    }
+}
