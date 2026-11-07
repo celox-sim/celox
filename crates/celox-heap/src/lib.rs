@@ -17,6 +17,7 @@ use std::sync::Arc;
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 pub mod containers;
+mod edges;
 mod objects;
 pub mod ops;
 pub mod randomization;
@@ -122,6 +123,11 @@ pub struct Heap {
     /// whose post_randomize runs, see [`Heap::begin_solved_visits`].
     #[serde(default)]
     solved: Vec<Handle>,
+    /// The properties that event controls watch and their occurrences, by
+    /// object (IEEE 1800-2023 9.4.2; see the `edges` module). An entry goes
+    /// with its object.
+    #[serde(default)]
+    edges: HashMap<Handle, Vec<edges::Watch>>,
 }
 
 impl Default for Heap {
@@ -160,6 +166,7 @@ impl Heap {
             visits: Vec::new(),
             prepared: None,
             solved: Vec::new(),
+            edges: HashMap::default(),
         }
     }
 
@@ -217,6 +224,8 @@ impl Heap {
             && self.containers == other.containers
             && self.uvm == other.uvm
             && self.programs == other.programs
+            // The occurrences of watched properties decide the waits.
+            && self.edges == other.edges
     }
 
     /// The number of live strings, including `""`.
@@ -287,6 +296,7 @@ impl Heap {
             live
         });
         self.objects.retain(|handle, _| objects.contains(handle));
+        self.edges.retain(|handle, _| objects.contains(handle));
         self.containers.retain(|handle, _| objects.contains(handle));
         self.container_lookup
             .retain(|_, handle| objects.contains(handle));
@@ -301,7 +311,7 @@ impl Heap {
         self.live_after_collection = self.len() + self.objects.len() + self.containers.len();
     }
 
-    fn new_buffer(&mut self, bytes: Vec<u8>) -> u64 {
+    pub(crate) fn new_buffer(&mut self, bytes: Vec<u8>) -> u64 {
         match self.free_buffers.pop() {
             Some(buffer) => {
                 self.buffers[buffer as usize] = Some(bytes);
@@ -321,7 +331,7 @@ impl Heap {
             .unwrap_or_else(|| panic!("heap buffer {buffer} is not live"))
     }
 
-    fn take_buffer(&mut self, buffer: u64) -> Vec<u8> {
+    pub(crate) fn take_buffer(&mut self, buffer: u64) -> Vec<u8> {
         let bytes = std::mem::take(self.buffer(buffer));
         self.buffers[buffer as usize] = None;
         self.free_buffers.push(buffer);

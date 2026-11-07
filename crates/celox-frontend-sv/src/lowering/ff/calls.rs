@@ -1349,7 +1349,7 @@ impl Ff<'_, '_> {
     /// Whether `expr` reads only the frame of the unit being lowered and
     /// constants, and calls nothing: its value does not change while the
     /// process waits, since only the process writes its frame.
-    fn frame_only(&self, expr: &sv::ir::Expr) -> bool {
+    pub(super) fn frame_only(&self, expr: &sv::ir::Expr) -> bool {
         let mut calls = Vec::new();
         collect_calls(expr, &mut calls);
         let mut names = HashSet::default();
@@ -1533,6 +1533,15 @@ impl Ff<'_, '_> {
         self.b.switch_to_block(continuation);
         self.unit_flush_point();
         Ok(())
+    }
+
+    /// Stage module variable `id` in the resumable unit being lowered: a
+    /// count or gate that every process shares, which the unit reads and
+    /// writes in place.
+    pub(super) fn stage(&mut self, id: SourceVarId) {
+        if let Some(resume) = self.resume_frame() {
+            resume.staging.insert(id);
+        }
     }
 
     fn resume_frame(&mut self) -> Option<&mut ResumeFrame> {
@@ -2795,4 +2804,13 @@ pub(super) fn iff_truth(iff: sv::ir::Expr) -> sv::ir::Expr {
         sv::ir::BinaryOp::EqCase,
         sv::ir::Expr::Literal("1'b1".into()),
     )
+}
+
+/// [`edge_occurred`] for the frontend's other event lowerings.
+pub(super) fn edge_occurred_expr(
+    before: &str,
+    after: &str,
+    edge: sv::ir::EventEdge,
+) -> sv::ir::Expr {
+    edge_occurred(before, after, edge)
 }

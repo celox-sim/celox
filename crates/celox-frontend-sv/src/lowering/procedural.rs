@@ -46,6 +46,10 @@ impl Checkpoint {
     }
 }
 
+/// The name of [`ProcModule::held_gate`], which is no SystemVerilog
+/// identifier.
+pub(super) const HELD_GATE: &str = "$event_held";
+
 /// The variables and subroutines of the module being lowered.
 pub(super) struct ProcModule<'a> {
     pub variables: &'a mut HashMap<SourceVarId, SvVariable>,
@@ -1242,6 +1246,20 @@ impl<'a> ProcModule<'a> {
             self.hidden(TIME_SLOT.to_string(), TIME_SLOT_WIDTH, false, false);
         }
         TIME_SLOT.to_string()
+    }
+
+    /// The one-bit module variable that holds 1 (see [`HELD_GATE`]): the gate of an event item
+    /// without `iff` whose occurrences a process counts itself (see
+    /// `Ff::property_event`). Each wait that uses it stores the 1 before it
+    /// suspends. It is no hidden variable, so the writes of a waited
+    /// variable judge it, and its name is no SystemVerilog identifier.
+    pub fn held_gate(&mut self) -> SourceVarId {
+        if let Some(id) = self.id(HELD_GATE) {
+            return id;
+        }
+        let id = self.hidden(HELD_GATE.to_string(), 1, false, false);
+        self.variables.get_mut(&id).expect("the held gate").hidden = false;
+        id
     }
 
     fn hidden(&mut self, name: String, width: usize, signed: bool, is_4state: bool) -> SourceVarId {
