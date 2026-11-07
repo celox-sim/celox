@@ -1,6 +1,1 @@
-Revision history for #3365:
-
-rev 2 (rebase) 2026-11-07 18:39 UTC — Address Codex review findings: atoreal fraction, realtoa hoist width, external-constraint package scope, type-key coverage
-rev 1 (initial) 2026-11-07 18:39 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":3365,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"a7d74501a6f0a9b989cfae0225557eca989313c8","timestamp_iso":"2026-11-07T18:39:44Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"a7d74501a6f0a9b989cfae0225557eca989313c8","new_sha":"dc39db93b8c93ab1d82f9c24f527f811f0e35f61","timestamp_iso":"2026-11-07T18:39:44Z","reason":"Address Codex review findings: atoreal fraction, realtoa hoist width, external-constraint package scope, type-key coverage","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/a7d74501a6f0a9b989cfae0225557eca989313c8...dc39db93b8c93ab1d82f9c24f527f811f0e35f61"}]} -->
+Address Codex re-review: nested class scope, atoreal underscore, integer-pattern type keys
