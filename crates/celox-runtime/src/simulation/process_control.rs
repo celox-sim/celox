@@ -2,6 +2,8 @@
 use super::{SimulationExecutor, SimulationState, SuspendedProcess, wait::wake_in_region};
 use crate::{SignalRef, SimulatorErrorCode, backend::SimBackend, timing::Halt};
 use celox_design::{HostRequestSite, PROCESS_LEVEL_WAIT, ProcessOp};
+// The class of the heap objects the scheduler owns, semaphores and mailboxes.
+use celox_heap::SCHEDULER_CLASS;
 
 fn error(message: impl Into<String>) -> Halt {
     SimulatorErrorCode::Runtime {
@@ -1108,8 +1110,3 @@ impl MailboxQueues<'_> {
         }
     }
 }
-
-/// The class of the heap objects the scheduler owns, semaphores and
-/// mailboxes: no class identifier, which hashes names to nonzero values, is
-/// all ones.
-const SCHEDULER_CLASS: u32 = u32::MAX;

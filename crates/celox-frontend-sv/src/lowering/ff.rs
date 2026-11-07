@@ -108,6 +108,10 @@ pub(super) struct Ff<'p, 'a> {
     /// default would bind that default again, forever, so it is a
     /// recursive call, which inlining cannot expand.
     binding_defaults: Vec<String>,
+    /// The variables of the bodies being lowered into a unit that a fork
+    /// shares with its parent and siblings, each in a box (see
+    /// [`calls::SharedBox`]), innermost body last.
+    shared_boxes: Vec<calls::SharedBox>,
     frame_locals: Vec<SourceVarId>,
     postponed_locals: HashSet<SourceVarId>,
     event_probes: Vec<celox_design::ProcessEventProbe<SourceVarId>>,
@@ -223,6 +227,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             process_control: false,
             process_predicate: false,
             binding_defaults: Vec::new(),
+            shared_boxes: Vec::new(),
             frame_locals: Vec::new(),
             postponed_locals: HashSet::default(),
             event_probes: Vec::new(),
@@ -1465,6 +1470,21 @@ impl<'p, 'a> Ff<'p, 'a> {
             *msb = self.hoist_const(msb, &mut calls)?;
         }
         Ok(lvalue)
+    }
+
+    /// A variable of the type of property `field`, through which an
+    /// assignment to part of a property formal writes (see
+    /// [`references::Alias::rewrite`]). One that a unit's lowering makes is
+    /// a slot of the unit's frame, so each activation has its own.
+    fn part_scratch(&mut self, field: &sv::ir::ObjectField) -> String {
+        self.m
+            .temp(
+                "ref_part",
+                field.width as usize,
+                field.signed,
+                field.four_state,
+            )
+            .1
     }
 
     /// A copy of a position for [`Self::freeze_const`].
@@ -4148,6 +4168,21 @@ impl<'p, 'a> Ff<'p, 'a> {
                     .map_err(kernel_error)?;
                 Ok(true)
             }
+            sv::ir::Stmt::WaitFork | sv::ir::Stmt::DisableFork
+                if self.kernel.is_none() && self.can_suspend_unit() =>
+            {
+                // A unit acts on the children of the process it runs in.
+                let status = if matches!(stmt, sv::ir::Stmt::WaitFork) {
+                    celox_design::ProcessStatus::WaitFork
+                } else {
+                    celox_design::ProcessStatus::DisableFork
+                };
+                let request = self.b.alloc_bit(PROCESS_DELAY_WIDTH, false);
+                self.b
+                    .emit(SIRInstruction::Imm(request, SIRValue::new(0u64)));
+                self.suspend_unit_with(status, request)?;
+                Ok(true)
+            }
             sv::ir::Stmt::WaitFork | sv::ir::Stmt::DisableFork => {
                 if self.kernel.is_none() {
                     return if matches!(stmt, sv::ir::Stmt::DisableFork) {
@@ -4163,6 +4198,12 @@ impl<'p, 'a> Ff<'p, 'a> {
                     self.with_kernel(ProcessKernelBuilder::disable_fork)
                         .map_err(kernel_error)?;
                 }
+                Ok(true)
+            }
+            sv::ir::Stmt::Fork { join, branches }
+                if self.kernel.is_none() && self.can_suspend_unit() =>
+            {
+                self.fork_in_unit(*join, branches)?;
                 Ok(true)
             }
             sv::ir::Stmt::Fork { join, branches } => {
@@ -4212,6 +4253,17 @@ impl<'p, 'a> Ff<'p, 'a> {
                 match init {
                     Some(init) => self.assign(&sv::ir::LValue::Ident(name.clone()), init)?,
                     None => self.init_default(id),
+                }
+                // Each execution of the declaration makes a new variable,
+                // in a new box when a fork shares it.
+                if let Some(shared) = self
+                    .shared_boxes
+                    .iter()
+                    .rev()
+                    .find(|shared| shared.var == *name)
+                    .cloned()
+                {
+                    self.open_box(&shared)?;
                 }
                 Ok(true)
             }
@@ -5036,7 +5088,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         args: &[Option<sv::ir::Expr>],
         arg_order: &[usize],
     ) -> Result<Option<String>, sv::AnalyzerError> {
-        let subroutine = self
+        let mut subroutine = self
             .m
             .subroutine(name)
             .cloned()
@@ -5447,18 +5499,22 @@ impl<'p, 'a> Ff<'p, 'a> {
                     return_var: subroutine.return_var.clone(),
                     loop_depth: self.loops.len(),
                 });
-                let mut body = subroutine.body;
+                let mut body = std::mem::take(&mut subroutine.body);
                 let (constants, parameter_types) = (self.m.constants, self.m.parameter_types);
                 let constant = |position: &sv::ir::ConstExpr| {
                     sv::typecheck::eval_const_expr_with_types(position, constants, parameter_types)
                 };
                 self.split_property_concats(&mut body, &aliases);
                 for alias in &aliases {
-                    body = alias.rewrite(body, &constant)?;
+                    body = alias.rewrite(body, &constant, &mut |field| self.part_scratch(field))?;
                 }
+                // A fork of a body inlined into a unit shares variables as
+                // the unit's own body does.
+                let (body, shared) = self.share_forked(&subroutine, body)?;
                 let built = self.b.built();
                 self.active_calls.push(name.to_string());
                 let falls = self.exec_block(&body);
+                self.shared_boxes.truncate(self.shared_boxes.len() - shared);
                 self.active_calls.pop();
                 let after = self.b.built();
                 self.m.expanded_call(

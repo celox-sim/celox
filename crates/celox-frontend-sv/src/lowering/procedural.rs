@@ -3065,7 +3065,42 @@ pub(super) fn written_names_with_calls(
         names,
         &mut HashSet::default(),
         0,
+        &mut None,
     );
+}
+
+impl ProcModule<'_> {
+    /// The names `body` writes, by assignments and through the written
+    /// arguments of the system tasks, functions and subroutines it calls.
+    /// The actual of a `ref` formal is written when the callee writes the
+    /// formal, also by passing it on to another `ref` formal it writes
+    /// (formals have module-unique names).
+    pub(super) fn written_names(&self, body: &[sv::ir::Stmt]) -> HashSet<String> {
+        let mut names = HashSet::default();
+        let mut refs = Some(Vec::new());
+        super::kernel_written_names(
+            self,
+            body,
+            &mut names,
+            &mut HashSet::default(),
+            0,
+            &mut refs,
+        );
+        let refs = refs.unwrap_or_default();
+        loop {
+            let mut grew = false;
+            for (formal, actuals) in &refs {
+                if names.contains(formal) {
+                    for actual in actuals {
+                        grew |= names.insert(actual.clone());
+                    }
+                }
+            }
+            if !grew {
+                return names;
+            }
+        }
+    }
 }
 
 /// The lvalue an output argument writes back to.

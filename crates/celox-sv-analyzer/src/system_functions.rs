@@ -967,7 +967,7 @@ pub struct Record {
 
 impl Record {
     /// The run-time class of a record, which no class shares.
-    pub const CLASS: u32 = u32::MAX;
+    pub const CLASS: u32 = celox_heap::RECORD_CLASS;
 
     /// Bits of the flat structure value.
     pub fn width(&self) -> usize {

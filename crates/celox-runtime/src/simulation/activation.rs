@@ -64,6 +64,9 @@ impl Activation {
         }
     }
 }
+/// The bytes of the resume slot of a function unit.
+const UNIT_RESUME_BYTES: usize = celox_design::PROCESS_RESUME_WIDTH.div_ceil(8);
+
 fn write<B: SimBackend>(backend: &mut B, signal: SignalRef, value: &Value) {
     backend.set_four_state(signal, value.0.clone(), value.1.clone());
 }
@@ -179,11 +182,31 @@ impl<B: SimBackend> SimulationState<B> {
     ) -> Result<bool, Halt> {
         let first = (encoded & 0xffff) as usize;
         let count = ((encoded >> 16) & 0xffff) as usize;
-        let join = match encoded >> 32 {
+        let join = match (encoded >> 32) & 0b11 {
             0 => ForkJoin::All,
             1 => ForkJoin::Any,
             2 => ForkJoin::None,
             _ => return Err(SimulatorErrorCode::InternalError.into()),
+        };
+        // A fork of a function unit the process is suspended inside: each
+        // child continues the call the kernel is suspended in, through a
+        // copy of the parent's frames whose forking unit resumes at the
+        // child's entry (see `celox_design::PROCESS_FORK_RESUME_SHIFT`).
+        let unit_resume = (encoded >> celox_design::PROCESS_FORK_RESUME_SHIFT) as usize;
+        let frames = if unit_resume == 0 {
+            None
+        } else {
+            let slot = self.model.processes[process]
+                .call_top
+                .ok_or(SimulatorErrorCode::InternalError)?;
+            let top: u32 = backend.get_as(slot);
+            if unit_resume + UNIT_RESUME_BYTES > top as usize {
+                return Err(SimulatorErrorCode::InternalError.into());
+            }
+            let mut stack = Vec::with_capacity(top as usize);
+            backend.save_call_stack(top as usize, &mut stack);
+            let resume = backend.get_as::<u64>(self.model.processes[process].resume);
+            Some((stack, resume))
         };
         self.save_activation(backend, process);
         let frame = self.model.processes[process]
@@ -218,7 +241,9 @@ impl<B: SimBackend> SimulationState<B> {
             child.parent = Some(process);
             child.pending.clear();
             child.join = None;
-            child.private[resume] = ((entry as u64).into(), 0u8.into());
+            if frames.is_none() {
+                child.private[resume] = ((entry as u64).into(), 0u8.into());
+            }
             child.private[status] = (0u8.into(), 0u8.into());
             let reusable = (self.kernel_count..self.process_state.activations.len()).find(|&id| {
                 !self.process_state.activations[id].live
@@ -238,6 +263,20 @@ impl<B: SimBackend> SimulationState<B> {
             } else {
                 self.process_state.activations[id] = child;
                 self.model.processes[id] = self.model.processes[process].clone();
+            }
+            if let Some((stack, resume)) = &frames {
+                let mut stack = stack.clone();
+                stack[unit_resume..unit_resume + UNIT_RESUME_BYTES]
+                    .copy_from_slice(&(entry as u64).to_le_bytes()[..UNIT_RESUME_BYTES]);
+                self.process_state.call_stacks.insert(
+                    id,
+                    super::SavedCalls {
+                        resume: *resume,
+                        stack,
+                    },
+                );
+            } else {
+                self.process_state.call_stacks.remove(&id);
             }
             children.push(id);
         }

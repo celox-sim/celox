@@ -60,11 +60,16 @@
 //! processes suspended inside a call: count u32, then per stack: process |
 //! resume point u64 | stack bytes. A string handle in a saved frame is
 //! written like the value of a string object.
+//! Version 8 adds, after the call stacks, the boxes the saved frames hold
+//! (see `celox_heap::BOX_CLASS`): count u32, then per box: kind u8 (0 bits,
+//! 1 string) | bytes, a string written like the value of a string object. A
+//! box handle in a saved frame is written as one more than the index of its
+//! box.
 
 use std::io::{self, Read, Write};
 
 const MAGIC: &[u8; 8] = b"CXSTATE\0";
-const VERSION: u16 = 7;
+const VERSION: u16 = 8;
 
 mod activations;
 use activations::*;
@@ -172,6 +177,19 @@ pub struct ProcessRecord {
     pub finished: bool,
     /// The frames of the calls processes are suspended inside.
     pub call_stacks: Vec<CallStackRecord>,
+    /// The values of the boxes the saved frames hold: a box handle in a
+    /// frame is written as one more than the index of its box here, so the
+    /// frames that shared a box share it again when the file is loaded.
+    pub boxes: Vec<BoxRecord>,
+}
+
+/// The value of a box (see `celox_heap::BOX_CLASS`): its bytes, a string
+/// handle among them written as the value of a string object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoxRecord {
+    /// [`FrameValueKind::String`] when the value is a string.
+    pub kind: FrameValueKind,
+    pub bytes: Vec<u8>,
 }
 
 /// The frames of the calls a process is suspended inside (see
@@ -280,7 +298,9 @@ impl StateFile {
             .map(|schedule| &schedule.processes)
             .filter(|processes| **processes != ProcessRecord::default());
         let version = processes.map_or(1, |p| {
-            if !p.call_stacks.is_empty() {
+            if !p.boxes.is_empty() {
+                8
+            } else if !p.call_stacks.is_empty() {
                 7
             } else if !p.delayed_nba.is_empty() || !p.deferred_ready.is_empty() {
                 6
@@ -679,6 +699,13 @@ fn put_processes(w: &mut impl Write, processes: &ProcessRecord, version: u16) ->
             put_bytes(w, &saved.stack)?;
         }
     }
+    if version >= 8 {
+        put_len(w, processes.boxes.len())?;
+        for saved in &processes.boxes {
+            w.write_all(&[u8::from(saved.kind == FrameValueKind::String)])?;
+            put_bytes(w, &saved.bytes)?;
+        }
+    }
     Ok(())
 }
 
@@ -798,6 +825,21 @@ fn get_processes(r: &mut impl Read, version: u16) -> Result<ProcessRecord, State
                     process: get_process(r, version)?,
                     resume: get_u64(r)?,
                     stack: get_len_bytes(r)?,
+                })
+            })
+            .collect::<Result<_, StateFileError>>()?;
+    }
+    if version >= 8 {
+        result.boxes = (0..get_u32(r)?)
+            .map(|_| {
+                let kind = if get_flag(r)? {
+                    FrameValueKind::String
+                } else {
+                    FrameValueKind::Bits
+                };
+                Ok(BoxRecord {
+                    kind,
+                    bytes: get_len_bytes(r)?,
                 })
             })
             .collect::<Result<_, StateFileError>>()?;
