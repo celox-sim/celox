@@ -5294,3 +5294,33 @@ endmodule
         }
     }
 }
+
+#[test]
+fn unknown_conditions_run_both_arms_across_suspending_calls() {
+    // An unknown condition runs both arms of a conditional operator (IEEE
+    // 1800-2023 11.4.11). Whether the else arm runs is decided before the
+    // then arm, whose call may suspend the unit and resume it there.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int r, output int s, output int t);
+    logic c;
+    int fd;
+    function automatic int show(int x);
+        $fdisplay(fd, "show %0d", x);
+        return x + 1;
+    endfunction
+    function automatic int pick(logic c);
+        return c ? show(10) : show(20);
+    endfunction
+    initial begin
+        fd = 1;
+        c = 1'bx;
+        r = pick(c);
+        #1 c = 1;
+        s = pick(c);
+        #1 c = 0;
+        t = pick(c);
+    end
+endmodule
+"#;
+    same_as_inlined(source, 1, 3, &["r", "s", "t"]);
+}
