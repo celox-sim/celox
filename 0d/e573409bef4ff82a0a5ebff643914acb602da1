@@ -1,1 +1,7 @@
-Also rewrite README SystemVerilog framing to deviations model and fix stale project-scope claims
+Revision history for #3309:
+
+rev 3 (content) 2026-11-07 04:34 UTC — Also rewrite README SystemVerilog framing to deviations model and fix stale project-scope claims
+rev 2 (content) 2026-11-07 04:19 UTC — Fix Japanese out-of-range part-select entry: distinguish supported partial writes to plain packed vectors from rejected reads and array/inner-dimension writes
+rev 1 (initial) 2026-11-07 04:19 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3309,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"a3d344e8ac4978ddf384f942378d1275c8516364","timestamp_iso":"2026-11-07T04:19:31Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"a3d344e8ac4978ddf384f942378d1275c8516364","new_sha":"e006edb1ddd1a8e8c9b0b1a4c4c2e1ec9067caaa","timestamp_iso":"2026-11-07T04:19:31Z","reason":"Fix Japanese out-of-range part-select entry: distinguish supported partial writes to plain packed vectors from rejected reads and array/inner-dimension writes","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/a3d344e8ac4978ddf384f942378d1275c8516364...e006edb1ddd1a8e8c9b0b1a4c4c2e1ec9067caaa"},{"number":3,"change_type":"content","old_sha":"e006edb1ddd1a8e8c9b0b1a4c4c2e1ec9067caaa","new_sha":"0de573409bef4ff82a0a5ebff643914acb602da1","timestamp_iso":"2026-11-07T04:34:12Z","reason":"Also rewrite README SystemVerilog framing to deviations model and fix stale project-scope claims","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/e006edb1ddd1a8e8c9b0b1a4c4c2e1ec9067caaa...0de573409bef4ff82a0a5ebff643914acb602da1"}]} -->
