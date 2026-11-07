@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794048870499,
+  "lastUpdate": 1794050962180,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -439847,6 +439847,69 @@ window.BENCHMARK_DATA = {
             "unit": "ns",
             "value": 829368871,
             "range": "815699014–832801488",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"verylVersion\":\"0.22.0\",\"cache\":\"cold\",\"revision\":\"6179df1cd15e13600a36621fc6b57de521a93d9f\",\"sourceSha256\":\"bda69213cec0a967b56060e819a9e6c9bf943ce6b7d6da84c57acd0946a2a1a1\",\"workload\":\"roundtrip-streams-v1\",\"testbench\":\"collection-roundtrip-streams-v1\",\"testbenchSha256\":\"c107718bd22b2b3d2013739babd039c967166f9ddc61ba4433bbd90a0b52196c\",\"workUnits\":2944,\"stateModel\":\"two-state\",\"optimization\":\"default-tiered\",\"threads\":1,\"runner\":\"veryl-tiered\",\"frontend\":\"veryl\",\"backend\":\"tiered\",\"phase\":\"total\"}"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "5ac6da4074e35aecacb3e51beabd46ed60d6af16",
+          "message": "feat(sv): property iff between Boolean expressions (#3321)",
+          "timestamp": "2026-11-07T06:28:27Z",
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "url": "https://github.com/celox-sim/celox/commit/5ac6da4074e35aecacb3e51beabd46ed60d6af16"
+        },
+        "date": 1794050962180,
+        "cpu": "AMD EPYC 7763 64-Core Processor",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "collection-celox-tiered/collection_sha256_32e20b483104_x64_total",
+            "unit": "ns",
+            "value": 419306406,
+            "range": "418780019–427685750",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"verylVersion\":\"0.22.0\",\"cache\":\"cold\",\"revision\":\"6179df1cd15e13600a36621fc6b57de521a93d9f\",\"sourceSha256\":\"042fdbd77b877b1d680d14a8bafc2b59dcaf9f1895ebfd7a9844f8a0deb3193f\",\"workload\":\"nist-pairs-v1\",\"testbench\":\"collection-nist-pairs-v1\",\"testbenchSha256\":\"ca41757671d4fba6fc3550dab980806d3226b43c3578f466d7e9335145cf878c\",\"workUnits\":8192,\"stateModel\":\"two-state\",\"optimization\":\"default-tiered\",\"threads\":1,\"runner\":\"celox-tiered\",\"frontend\":\"veryl\",\"backend\":\"tiered\",\"phase\":\"total\"}"
+          },
+          {
+            "name": "collection-veryl-tiered/collection_sha256_32e20b483104_x64_total",
+            "unit": "ns",
+            "value": 588658026,
+            "range": "581708865–616214266",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"verylVersion\":\"0.22.0\",\"cache\":\"cold\",\"revision\":\"6179df1cd15e13600a36621fc6b57de521a93d9f\",\"sourceSha256\":\"042fdbd77b877b1d680d14a8bafc2b59dcaf9f1895ebfd7a9844f8a0deb3193f\",\"workload\":\"nist-pairs-v1\",\"testbench\":\"collection-nist-pairs-v1\",\"testbenchSha256\":\"ca41757671d4fba6fc3550dab980806d3226b43c3578f466d7e9335145cf878c\",\"workUnits\":8192,\"stateModel\":\"two-state\",\"optimization\":\"default-tiered\",\"threads\":1,\"runner\":\"veryl-tiered\",\"frontend\":\"veryl\",\"backend\":\"tiered\",\"phase\":\"total\"}"
+          },
+          {
+            "name": "collection-celox-tiered/collection_fft_6334240922e2_x64_total",
+            "unit": "ns",
+            "value": 2298863301,
+            "range": "2286400661–2304266252",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"verylVersion\":\"0.22.0\",\"cache\":\"cold\",\"revision\":\"6179df1cd15e13600a36621fc6b57de521a93d9f\",\"sourceSha256\":\"a60ff7a502095599849773376fb2452336a0b8532ee29dd51bd4945a7efd5079\",\"workload\":\"three-tones-v1\",\"testbench\":\"collection-three-tones-v1\",\"testbenchSha256\":\"f385417fc911372b12f6f8a343b672dac418d6a7eda1c794b707387ee4aa7445\",\"workUnits\":3072,\"stateModel\":\"two-state\",\"optimization\":\"default-tiered\",\"threads\":1,\"runner\":\"celox-tiered\",\"frontend\":\"veryl\",\"backend\":\"tiered\",\"phase\":\"total\"}"
+          },
+          {
+            "name": "collection-veryl-tiered/collection_fft_6334240922e2_x64_total",
+            "unit": "ns",
+            "value": 4012354858,
+            "range": "3668412938–5139900846",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"verylVersion\":\"0.22.0\",\"cache\":\"cold\",\"revision\":\"6179df1cd15e13600a36621fc6b57de521a93d9f\",\"sourceSha256\":\"a60ff7a502095599849773376fb2452336a0b8532ee29dd51bd4945a7efd5079\",\"workload\":\"three-tones-v1\",\"testbench\":\"collection-three-tones-v1\",\"testbenchSha256\":\"f385417fc911372b12f6f8a343b672dac418d6a7eda1c794b707387ee4aa7445\",\"workUnits\":3072,\"stateModel\":\"two-state\",\"optimization\":\"default-tiered\",\"threads\":1,\"runner\":\"veryl-tiered\",\"frontend\":\"veryl\",\"backend\":\"tiered\",\"phase\":\"total\"}"
+          },
+          {
+            "name": "collection-celox-tiered/collection_lz77_173e86f7a6ea_x64_total",
+            "unit": "ns",
+            "value": 653634200,
+            "range": "651085429–654459197",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"verylVersion\":\"0.22.0\",\"cache\":\"cold\",\"revision\":\"6179df1cd15e13600a36621fc6b57de521a93d9f\",\"sourceSha256\":\"bda69213cec0a967b56060e819a9e6c9bf943ce6b7d6da84c57acd0946a2a1a1\",\"workload\":\"roundtrip-streams-v1\",\"testbench\":\"collection-roundtrip-streams-v1\",\"testbenchSha256\":\"c107718bd22b2b3d2013739babd039c967166f9ddc61ba4433bbd90a0b52196c\",\"workUnits\":2944,\"stateModel\":\"two-state\",\"optimization\":\"default-tiered\",\"threads\":1,\"runner\":\"celox-tiered\",\"frontend\":\"veryl\",\"backend\":\"tiered\",\"phase\":\"total\"}"
+          },
+          {
+            "name": "collection-veryl-tiered/collection_lz77_173e86f7a6ea_x64_total",
+            "unit": "ns",
+            "value": 775727129,
+            "range": "770528409–793391812",
             "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"verylVersion\":\"0.22.0\",\"cache\":\"cold\",\"revision\":\"6179df1cd15e13600a36621fc6b57de521a93d9f\",\"sourceSha256\":\"bda69213cec0a967b56060e819a9e6c9bf943ce6b7d6da84c57acd0946a2a1a1\",\"workload\":\"roundtrip-streams-v1\",\"testbench\":\"collection-roundtrip-streams-v1\",\"testbenchSha256\":\"c107718bd22b2b3d2013739babd039c967166f9ddc61ba4433bbd90a0b52196c\",\"workUnits\":2944,\"stateModel\":\"two-state\",\"optimization\":\"default-tiered\",\"threads\":1,\"runner\":\"veryl-tiered\",\"frontend\":\"veryl\",\"backend\":\"tiered\",\"phase\":\"total\"}"
           }
         ]
