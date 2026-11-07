@@ -656,6 +656,7 @@ mod host {
                 let site = *site_id as u32;
                 match *deferred {
                     celox_design::DeferredSite::FlushPoint => self.flush(site),
+                    celox_design::DeferredSite::ProcessFlushPoint => self.flush_process(),
                     celox_design::DeferredSite::Action { queue, region } => {
                         self.deferred.waiting.push(DeferredReport {
                             queue,
@@ -712,6 +713,18 @@ mod host {
             if self.deferred_owners.current.is_some() {
                 self.deferred.missed.remove(&owner);
             }
+        }
+
+        /// A flush point of the process running now, whatever its queue: a
+        /// function unit's, which serves every process (16.4.2). Only a
+        /// dynamic execution has one process.
+        fn flush_process(&mut self) {
+            if self.deferred_owners.current.is_none() {
+                return;
+            }
+            let owner = self.deferred_owners.owner();
+            self.deferred.waiting.retain(|report| report.owner != owner);
+            self.deferred.missed.remove(&owner);
         }
 
         /// Mature one region. Matured actions leave the process queue and

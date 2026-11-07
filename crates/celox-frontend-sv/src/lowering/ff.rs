@@ -112,6 +112,10 @@ pub(super) struct Ff<'p, 'a> {
     /// shares with its parent and siblings, each in a box (see
     /// [`calls::SharedBox`]), innermost body last.
     shared_boxes: Vec<calls::SharedBox>,
+    /// The registers of the kernel holding the number of its own wait
+    /// sites, which the sites of the units it calls follow (see
+    /// `Ff::function_wait_word`), set when the kernel is finished.
+    wait_offset_patches: Vec<RegisterId>,
     frame_locals: Vec<SourceVarId>,
     postponed_locals: HashSet<SourceVarId>,
     event_probes: Vec<celox_design::ProcessEventProbe<SourceVarId>>,
@@ -228,6 +232,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             process_predicate: false,
             binding_defaults: Vec::new(),
             shared_boxes: Vec::new(),
+            wait_offset_patches: Vec::new(),
             frame_locals: Vec::new(),
             postponed_locals: HashSet::default(),
             event_probes: Vec::new(),
@@ -4064,7 +4069,10 @@ impl<'p, 'a> Ff<'p, 'a> {
                 | sv::ir::Stmt::WaitImplicit { .. }
                 | sv::ir::Stmt::Wait(_)
         ) && (self.kernel.is_none()
-            && !(matches!(stmt, sv::ir::Stmt::Delay { .. }) && self.can_request())
+            && !(matches!(
+                stmt,
+                sv::ir::Stmt::Delay { .. } | sv::ir::Stmt::WaitEvent(_) | sv::ir::Stmt::Wait(_)
+            ) && self.can_request())
             || self
                 .active_calls
                 .iter()
@@ -7217,6 +7225,18 @@ impl Ff<'_, '_> {
         let slots = kernel.slots();
         let resume_count = kernel.resume_count();
         let mut unit = kernel.build();
+        if !self.wait_offset_patches.is_empty() {
+            let own = self.wait_sites.len() as u64;
+            for block in unit.blocks.values_mut() {
+                for instruction in &mut block.instructions {
+                    if let SIRInstruction::Imm(dst, value) = instruction
+                        && self.wait_offset_patches.contains(dst)
+                    {
+                        *value = SIRValue::new(own);
+                    }
+                }
+            }
+        }
         prune_unreachable_blocks(&mut unit);
         let frame = self.forked.then(|| {
             let mut private = self.m.created[first_created..].to_vec();
@@ -7829,6 +7849,9 @@ impl Ff<'_, '_> {
     /// assignment reads and stores the expression's value, which the event
     /// control samples as it begins.
     fn wait_event(&mut self, items: &[sv::ir::EventItem]) -> Result<(), sv::AnalyzerError> {
+        if self.kernel.is_none() && self.can_suspend_unit() {
+            return self.unit_wait_event(items);
+        }
         let mut terms = Vec::new();
         let mut gates = Vec::new();
         let mut samples = Vec::new();
@@ -8015,13 +8038,22 @@ impl Ff<'_, '_> {
         mut gates: Vec<Option<WaitGate<SourceVarId>>>,
         samples: Vec<(String, sv::ir::Expr)>,
     ) -> Result<(), sv::AnalyzerError> {
-        for (target, value) in samples {
-            self.assign(&sv::ir::LValue::Ident(target), &value)?;
+        if self.kernel.is_none() {
+            self.unit_samples(samples)?;
+        } else {
+            for (target, value) in samples {
+                self.assign(&sv::ir::LValue::Ident(target), &value)?;
+            }
         }
         if gates.iter().all(Option::is_none) {
             gates.clear();
         }
         let site = self.wait_site(terms, gates);
+        if self.kernel.is_none() {
+            self.unit_wait(u64::from(site))?;
+            self.unit_flush_point();
+            return Ok(());
+        }
         self.with_kernel(|kernel| -> Result<(), ProcessKernelError> {
             kernel.suspend_wait(site)?;
             let woken = kernel.builder().alloc_bit(1, false);
@@ -8054,11 +8086,10 @@ impl Ff<'_, '_> {
         {
             return Ok((id, true));
         }
-        let not = |expr| sv::ir::Expr::Unary {
-            op: sv::ir::UnaryOp::LogicNot,
-            expr: Box::new(expr),
-        };
-        Ok((self.event_expression(&not(not(iff)), samples)?, false))
+        Ok((
+            self.event_expression(&calls::iff_truth(iff), samples)?,
+            false,
+        ))
     }
 
     /// The counters of a new gated term ([`GateCounters`]): `$event[k]`
@@ -8102,11 +8133,7 @@ impl Ff<'_, '_> {
         expr: &sv::ir::Expr,
         samples: &mut Vec<(String, sv::ir::Expr)>,
     ) -> Result<SourceVarId, sv::AnalyzerError> {
-        if let Some(name) = impure_call(self.m, expr) {
-            return Err(unsupported(format!(
-                "impure call `{name}` in an event expression"
-            )));
-        }
+        self.check_event_purity(expr)?;
         // A real expression keeps its payload bits, so a change too small
         // to survive an integer conversion still wakes the process.
         let float = self.m.expr_float_precision(expr);
@@ -8196,6 +8223,18 @@ impl Ff<'_, '_> {
             }],
         ));
         Ok(event)
+    }
+
+    /// An event expression is evaluated whenever the host looks for its
+    /// occurrences, as often as it likes: one that calls something with an
+    /// effect is unsupported, in a kernel and in a unit alike.
+    pub(super) fn check_event_purity(&self, expr: &sv::ir::Expr) -> Result<(), sv::AnalyzerError> {
+        match impure_call(self.m, expr) {
+            Some(name) => Err(unsupported(format!(
+                "impure call `{name}` in an event expression"
+            ))),
+            None => Ok(()),
+        }
     }
 
     /// An activation-local expression cannot use a module-wide continuous
@@ -8400,6 +8439,105 @@ impl Ff<'_, '_> {
     /// if the condition holds, and otherwise checks it again whenever a
     /// variable it reads changes.
     fn wait_level(&mut self, condition: &sv::ir::Expr) -> Result<(), sv::AnalyzerError> {
+        let ids = self.level_terms(condition)?;
+        let site = self.wait_site(
+            ids.into_iter()
+                .map(|id| (id, CounterKind::Changes))
+                .collect(),
+            Vec::new(),
+        );
+        // A predicate that reads the status of a process or the trigger
+        // state of an event observes them, which it tells the host, and its
+        // site is a level wait's, which those wake.
+        let observe = if self.kernel.is_some() {
+            self.process_control
+        } else {
+            reads_process_state(self.m, condition)
+        };
+        // Keep the kernel available while evaluating the predicate: functions
+        // may perform synchronous process control such as disable fork.
+        let direct = std::mem::replace(&mut self.direct, true);
+        let predicate = std::mem::replace(&mut self.process_predicate, true);
+        let result = (|| {
+            if observe {
+                self.process_call(celox_design::ProcessOp::Observe, &[])?;
+            }
+            let (holds, _) = self.eval_truth(condition)?;
+            let join = self.b.new_block();
+            let wait = self.b.new_block();
+            self.b.seal_block(SIRTerminator::Branch {
+                cond: holds,
+                true_block: (join, Vec::new()),
+                false_block: (wait, Vec::new()),
+            });
+            self.b.switch_to_block(wait);
+            let point = self.suspend_at(site, observe)?;
+            if observe {
+                self.process_call(celox_design::ProcessOp::Observe, &[])?;
+            }
+            let (holds, _) = self.eval_truth(condition)?;
+            self.wake_at(point, holds)?;
+            self.b.seal_block(SIRTerminator::Jump(join, Vec::new()));
+            self.b.switch_to_block(join);
+            Ok(())
+        })();
+        self.direct = direct;
+        self.process_predicate = predicate;
+        result
+    }
+
+    /// Suspend the process at wait site `site` of the kernel or the unit
+    /// being lowered, a level wait's if `level` (see
+    /// [`celox_design::PROCESS_LEVEL_WAIT`]). The open block afterwards is
+    /// the resume point, which [`Self::wake_at`] ends.
+    fn suspend_at(&mut self, site: u32, level: bool) -> Result<WaitPoint, sv::AnalyzerError> {
+        if self.kernel.is_none() {
+            let word = u64::from(site)
+                | if level {
+                    celox_design::PROCESS_LEVEL_WAIT
+                } else {
+                    0
+                };
+            let point = self.unit_wait(word)?;
+            return Ok(WaitPoint::Unit { point, word });
+        }
+        self.with_kernel(|kernel| {
+            if level {
+                kernel.suspend_level_wait(site)
+            } else {
+                kernel.suspend_wait(site)
+            }
+        })
+        .map_err(kernel_error)?;
+        Ok(WaitPoint::Kernel)
+    }
+
+    /// At the resume point `point` of a wait: continue when `woken`, a
+    /// one-bit register, holds, at a flush point of the process's deferred
+    /// assertions (IEEE 1800-2023 16.4.2); otherwise wait at the same site
+    /// again. The continuation is open afterwards.
+    fn wake_at(&mut self, point: WaitPoint, woken: RegisterId) -> Result<(), sv::AnalyzerError> {
+        match point {
+            WaitPoint::Kernel => {
+                self.with_kernel(|kernel| kernel.wake_if(woken));
+                Ok(())
+            }
+            WaitPoint::Unit { point, word } => {
+                self.unit_wake_if(woken, point, word)?;
+                self.unit_flush_point();
+                Ok(())
+            }
+        }
+    }
+
+    /// The variables whose changes may change `condition`: the module
+    /// variables it reads, also through the functions it calls, and the
+    /// change counts of the class properties it reads (see
+    /// `property_changes`), which a store of the property bumps.
+    fn level_terms(
+        &mut self,
+        condition: &sv::ir::Expr,
+    ) -> Result<Vec<SourceVarId>, sv::AnalyzerError> {
         let names = level_reads(self.m, condition);
         // Static task formals can change when another caller copies arguments
         // in, but hidden local storage has no observable change counters yet.
@@ -8454,50 +8592,7 @@ impl Ff<'_, '_> {
             .collect();
         ids.sort_unstable();
         ids.dedup();
-        let site = self.wait_site(
-            ids.into_iter()
-                .map(|id| (id, CounterKind::Changes))
-                .collect(),
-            Vec::new(),
-        );
-        // Keep the kernel available while evaluating the predicate: functions
-        // may perform synchronous process control such as disable fork.
-        let direct = std::mem::replace(&mut self.direct, true);
-        let predicate = std::mem::replace(&mut self.process_predicate, true);
-        let result = (|| {
-            if self.process_control {
-                self.process_call(celox_design::ProcessOp::Observe, &[])?;
-            }
-            let (holds, _) = self.eval_truth(condition)?;
-            let join = self.b.new_block();
-            let wait = self.b.new_block();
-            self.b.seal_block(SIRTerminator::Branch {
-                cond: holds,
-                true_block: (join, Vec::new()),
-                false_block: (wait, Vec::new()),
-            });
-            self.b.switch_to_block(wait);
-            let process_control = self.process_control;
-            self.with_kernel(|kernel| {
-                if process_control {
-                    kernel.suspend_level_wait(site)
-                } else {
-                    kernel.suspend_wait(site)
-                }
-            })
-            .map_err(kernel_error)?;
-            if self.process_control {
-                self.process_call(celox_design::ProcessOp::Observe, &[])?;
-            }
-            let (holds, _) = self.eval_truth(condition)?;
-            self.with_kernel(|kernel| kernel.wake_if(holds));
-            self.b.seal_block(SIRTerminator::Jump(join, Vec::new()));
-            self.b.switch_to_block(join);
-            Ok(())
-        })();
-        self.direct = direct;
-        self.process_predicate = predicate;
-        result
+        Ok(ids)
     }
 
     /// Declare a wait site of the process with the given terms and return
@@ -8507,6 +8602,17 @@ impl Ff<'_, '_> {
         terms: Vec<(SourceVarId, CounterKind)>,
         gates: Vec<Option<WaitGate<SourceVarId>>>,
     ) -> u32 {
+        // A unit's site is one of the module's function sites, which the
+        // kernels that call it list after their own.
+        if self.kernel.is_none() {
+            let index = self.m.function_wait_sites.len() as u32;
+            self.m.function_wait_sites.push(WaitSite {
+                process: 0,
+                terms,
+                gates,
+            });
+            return index;
+        }
         let index = self.wait_sites.len() as u32;
         self.wait_sites.push(WaitSite {
             process: self.process,
@@ -9642,4 +9748,43 @@ struct SystemPlace {
     load: sv::ir::Expr,
     store: sv::ir::Expr,
     guards: Vec<sv::ir::Expr>,
+}
+
+/// Where a wait of a kernel or a unit resumes (see `Ff::suspend_at`).
+#[derive(Clone, Copy)]
+enum WaitPoint {
+    Kernel,
+    /// The unit's resume point and the delay word of its wait.
+    Unit {
+        point: u32,
+        word: u64,
+    },
+}
+
+/// Whether `condition` reads, also through the subroutines it calls, the
+/// state of a process or of an event that only the host knows, such as a
+/// process's `status()` or an event's `triggered` (IEEE 1800-2023 9.7,
+/// 15.5.3).
+fn reads_process_state(pm: &ProcModule<'_>, condition: &sv::ir::Expr) -> bool {
+    let mut calls = Vec::new();
+    collect_calls(condition, &mut calls);
+    let mut visited = HashSet::default();
+    while let Some((callee, args)) = calls.pop() {
+        match callee {
+            sv::ir::Callee::System(sv::ir::SystemFunction::Process(_)) => return true,
+            sv::ir::Callee::Subroutine(name) => {
+                let Some(subroutine) = pm.subroutine(&name) else {
+                    continue;
+                };
+                default_calls(subroutine, &args, &mut calls, &mut Default::default());
+                if visited.insert(name) {
+                    for stmt in &subroutine.body {
+                        stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }

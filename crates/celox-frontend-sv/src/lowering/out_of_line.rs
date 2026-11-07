@@ -48,6 +48,14 @@
 //! `calls::SharedBox`). `wait fork` and `disable fork` act on the children
 //! of the process the unit runs in.
 //!
+//! An event control or a level wait in a unit suspends it at one of the
+//! module's function wait sites, which every kernel that can suspend
+//! inside a call lists after its own; the kernel's call turns the unit's
+//! site number into the process's. The unit evaluates a level wait's
+//! condition again at each resume, and an event control that reads its
+//! frame keeps samples there that it compares at each resume (see
+//! `Ff::unit_wait_event`).
+//!
 //! A `ref` formal is a place (see [`Place`]): the call passes its static
 //! part, which selects the function, so one subroutine has a function for
 //! each binding its calls make (a variable the unit names itself, the field
@@ -102,7 +110,8 @@ pub(super) enum Reason {
     /// two `ref` formals to one automatic of the calling unit, which the
     /// call copies (see [`Place::Frame`]).
     RefFormal,
-    /// It, or a subroutine it calls, has an event control or a wait.
+    /// It, or a subroutine it calls, has an `@*`, a deferred action, a
+    /// delayed nonblocking assignment or a concurrent assertion region.
     MaySuspend,
     /// It, or a subroutine it calls, makes a host request a unit cannot
     /// make: `$exit`, monitors, strobes, VCD tasks, or a DPI-C import; or a caller that cannot suspend calls a
@@ -159,6 +168,11 @@ pub(super) struct ProcessState {
     /// [`celox_design::PROCESS_FORK_RESUME_SHIFT`]); the calling kernel
     /// keeps a process frame, as one that forks itself.
     pub forks: bool,
+    /// Whether it waits, for an event control or a level wait: a unit
+    /// suspends at one of the module's function wait sites, which every
+    /// kernel that calls it lists after its own (see
+    /// `ProcModule::function_wait_sites`).
+    pub waits: bool,
     /// Whether it reads `e.triggered` (IEEE 1800-2023 15.5.3) or a process's
     /// `status()` (9.7), which a level wait's predicate reads as an
     /// observation of the event or process, so that a predicate's call of
@@ -1354,9 +1368,14 @@ impl ProcModule<'_> {
                             state.suspends = true;
                             state.forks = true;
                         }
-                        sv::ir::Stmt::WaitEvent(_)
-                        | sv::ir::Stmt::WaitImplicit { .. }
-                        | sv::ir::Stmt::Wait(_)
+                        // A wait suspends the process with the unit's
+                        // frames until the occurrence it waits for.
+                        sv::ir::Stmt::WaitEvent(_) | sv::ir::Stmt::Wait(_) => {
+                            state.suspends = true;
+                            state.yields = true;
+                            state.waits = true;
+                        }
+                        sv::ir::Stmt::WaitImplicit { .. }
                         | sv::ir::Stmt::DelayedNonblocking { .. }
                         | sv::ir::Stmt::DeferActive
                         | sv::ir::Stmt::AssertionRegion { .. } => note(Reason::MaySuspend),

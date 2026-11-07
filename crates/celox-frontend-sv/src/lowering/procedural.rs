@@ -26,6 +26,9 @@ pub(super) struct Checkpoint {
     capture_counter: u64,
     runtime_event_sites: usize,
     function_host_request_sites: usize,
+    function_wait_sites: usize,
+    event_assignments: usize,
+    activation_copies: usize,
     runtime_errors: usize,
     extern_functions: usize,
     extern_calls: usize,
@@ -72,6 +75,14 @@ pub(super) struct ProcModule<'a> {
     /// process of the module lists after its own (see
     /// [`celox_design::SiteProcess`]), numbered per family.
     pub function_host_request_sites: Vec<celox_design::HostRequestSite<SourceVarId>>,
+    /// The wait sites of the module's function units, which every process
+    /// that can suspend inside a call lists after its own; a unit suspends
+    /// with the number of the site among these, which the kernel's call
+    /// turns into one among its process's sites.
+    pub function_wait_sites: Vec<celox_design::WaitSite<SourceVarId>>,
+    /// The runtime event site of the flush points of the units' waits
+    /// (IEEE 1800-2023 16.4.2), made at the first.
+    pub unit_flush_site: Option<u32>,
     /// Runtime errors (fatal assertions) of the module, by local code.
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
     /// The continuous assignments `$event[k] = expr` of the event
@@ -308,6 +319,8 @@ impl<'a> ProcModule<'a> {
             capture_counter: 0,
             runtime_event_sites: Vec::new(),
             function_host_request_sites: Vec::new(),
+            function_wait_sites: Vec::new(),
+            unit_flush_site: None,
             runtime_errors: HashMap::default(),
             event_assignments: Vec::new(),
             unpacked_bounds,
@@ -1030,19 +1043,57 @@ impl<'a> ProcModule<'a> {
 
     /// The lowering state, for [`Self::rollback`].
     pub fn checkpoint(&self) -> Checkpoint {
+        // Every field, so that a new one cannot be left out: what a
+        // lowering grows, which a rollback restores, and what it never
+        // changes or only caches.
+        let ProcModule {
+            // Restored through `next_id`.
+            variables: _,
+            name_to_id: _,
+            next_id,
+            constants: _,
+            parameter_types: _,
+            subroutines: _,
+            constant_functions: _,
+            dpi_imports: _,
+            extern_functions,
+            extern_calls,
+            four_state: _,
+            program: _,
+            forceable: _,
+            created,
+            temp_counter,
+            capture_counter,
+            runtime_event_sites,
+            function_host_request_sites,
+            function_wait_sites,
+            // Restored with `runtime_event_sites`.
+            unit_flush_site: _,
+            runtime_errors,
+            event_assignments,
+            // Filled before any lowering.
+            unpacked_bounds: _,
+            warnings,
+            calls,
+            // Facts of subroutines, the same whatever was lowered.
+            requesting_subroutines: _,
+            activation_copies,
+        } = self;
         Checkpoint {
-            next_id: self.next_id,
-            created: self.created.len(),
-            temp_counter: self.temp_counter,
-            capture_counter: self.capture_counter,
-            runtime_event_sites: self.runtime_event_sites.len(),
-            function_host_request_sites: self.function_host_request_sites.len(),
-            runtime_errors: self.runtime_errors.len(),
-            extern_functions: self.extern_functions.len(),
-            extern_calls: self.extern_calls,
-            warnings: self.warnings.len(),
-            functions: self
-                .calls
+            next_id: *next_id,
+            created: created.len(),
+            temp_counter: *temp_counter,
+            capture_counter: *capture_counter,
+            runtime_event_sites: runtime_event_sites.len(),
+            function_host_request_sites: function_host_request_sites.len(),
+            function_wait_sites: function_wait_sites.len(),
+            event_assignments: event_assignments.len(),
+            activation_copies: activation_copies.len(),
+            runtime_errors: runtime_errors.len(),
+            extern_functions: extern_functions.len(),
+            extern_calls: *extern_calls,
+            warnings: warnings.len(),
+            functions: calls
                 .as_deref()
                 .and_then(|calls| calls.out_of_line.as_ref())
                 .map_or(0, super::out_of_line::OutOfLine::len),
@@ -1052,7 +1103,23 @@ impl<'a> ProcModule<'a> {
     /// Forget everything lowered since `checkpoint`, so that the module
     /// lowers as if it had never been.
     pub fn rollback(&mut self, checkpoint: Checkpoint) {
-        for id in checkpoint.next_id.0..self.next_id.0 {
+        let Checkpoint {
+            next_id,
+            created,
+            temp_counter,
+            capture_counter,
+            runtime_event_sites,
+            function_host_request_sites,
+            function_wait_sites,
+            event_assignments,
+            activation_copies,
+            runtime_errors,
+            extern_functions,
+            extern_calls,
+            warnings,
+            functions,
+        } = checkpoint;
+        for id in next_id.0..self.next_id.0 {
             let Some(variable) = self.variables.remove(&SourceVarId(id)) else {
                 continue;
             };
@@ -1062,22 +1129,31 @@ impl<'a> ProcModule<'a> {
                 self.name_to_id.remove(name);
             }
         }
-        self.next_id = checkpoint.next_id;
-        self.created.truncate(checkpoint.created);
-        self.temp_counter = checkpoint.temp_counter;
-        self.capture_counter = checkpoint.capture_counter;
-        self.runtime_event_sites
-            .truncate(checkpoint.runtime_event_sites);
+        self.next_id = next_id;
+        self.created.truncate(created);
+        self.temp_counter = temp_counter;
+        self.capture_counter = capture_counter;
+        self.runtime_event_sites.truncate(runtime_event_sites);
+        // A flush site made since then is gone with it.
+        if self
+            .unit_flush_site
+            .is_some_and(|site| site as usize >= runtime_event_sites)
+        {
+            self.unit_flush_site = None;
+        }
         self.function_host_request_sites
-            .truncate(checkpoint.function_host_request_sites);
+            .truncate(function_host_request_sites);
+        self.function_wait_sites.truncate(function_wait_sites);
+        self.event_assignments.truncate(event_assignments);
+        self.activation_copies.truncate(activation_copies);
         // Codes are numbered from one in registration order.
         self.runtime_errors
-            .retain(|&code, _| code <= checkpoint.runtime_errors as i64);
-        self.extern_functions.truncate(checkpoint.extern_functions);
-        self.extern_calls = checkpoint.extern_calls;
-        self.warnings.truncate(checkpoint.warnings);
-        if let Some(functions) = self.out_of_line() {
-            functions.truncate(checkpoint.functions);
+            .retain(|&code, _| code <= runtime_errors as i64);
+        self.extern_functions.truncate(extern_functions);
+        self.extern_calls = extern_calls;
+        self.warnings.truncate(warnings);
+        if let Some(out_of_line) = self.out_of_line() {
+            out_of_line.truncate(functions);
         }
     }
 
