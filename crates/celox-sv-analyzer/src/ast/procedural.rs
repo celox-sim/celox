@@ -4934,7 +4934,7 @@ fn dispatch_body(
             four_state: false,
             nullable: false,
             real: false,
-            key: 0,
+            key: crate::system_functions::ChangeKey::None,
         }),
         vec![this.clone()],
     );

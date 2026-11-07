@@ -14,7 +14,7 @@ pub use crate::procedural::{
     SystemTaskArg,
 };
 pub use crate::system_functions::{
-    AccessCheck, AggregatePattern, ArrayQuery, Callee, ContainerConcat, ContainerKind,
+    AccessCheck, AggregatePattern, ArrayQuery, Callee, ChangeKey, ContainerConcat, ContainerKind,
     ContainerLayout, ContainerOp, HandleProperty, Locator, LocatorKey, LocatorMethod,
     LocatorSource, MemoryFormat, ObjectField, ObjectOp, Radix, Record, Severity, Stream, StreamArg,
     StreamItem, StreamOp, StreamPack, StreamRange, StreamSize, StringOp, SystemFunction,

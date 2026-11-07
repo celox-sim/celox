@@ -1096,7 +1096,9 @@ pub(super) fn shared_class(
                     let mut field = field(&tree.functions, &leaf.r#type, env, size)?;
                     size = field.offset + field.storage();
                     let leaf_name = leaf.name(&property_name);
-                    field.key = property_key(name, &leaf_name);
+                    field.key = crate::system_functions::ChangeKey::Property(property_key(
+                        name, &leaf_name,
+                    ));
                     properties.push(Property {
                         name: leaf_name,
                         owner: name.to_owned(),
@@ -1129,7 +1131,7 @@ pub(super) fn shared_class(
             let name = property_name;
             let mut field = field(&tree.functions, &ty, env, size)?;
             size = field.offset + field.storage();
-            field.key = property_key(&owner, &name);
+            field.key = crate::system_functions::ChangeKey::Property(property_key(&owner, &name));
             properties.push(Property {
                 name,
                 owner,
@@ -1563,7 +1565,7 @@ pub(super) fn field(
             ),
         nullable: false,
         real: matches!(ty.kind(), TypeKind::Real | TypeKind::Shortreal),
-        key: 0,
+        key: crate::system_functions::ChangeKey::None,
     })
 }
 

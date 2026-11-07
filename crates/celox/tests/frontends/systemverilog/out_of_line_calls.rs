@@ -3370,7 +3370,9 @@ module Top(output int a, output int b);
     initial owner(zero, a, b);
 endmodule
 "#;
-    same_as_inlined(source, 3, 10, &["a", "b"]);
+    // `spawn2` has a function for each box it binds: a box's field is a
+    // watched property, whose place selects the function.
+    same_as_inlined(source, 4, 10, &["a", "b"]);
     assert_eq!(
         simulate(source, false, true, "interpreter", 10, &["a", "b"]),
         Ok(vec![value(11), value(11)])
@@ -4499,4 +4501,186 @@ fn nonblocking_assignments_in_units_are_those_of_the_inlined_body() {
         .replace("REPEAT begin", "for (int k = n; k > 0; k--) begin")
         .replace("NEXT", "");
     same_as_inlined(&source, 2, 10, &["a", "b", "c", "d"]);
+}
+
+/// UVM's `uvm_sequencer_base::m_select_sequence` shape: a child of a fork
+/// sets a variable it shares with the parent, which waits for it. `REPEAT`
+/// chooses a recursion or a loop.
+const SELECT_LEVELS: &str = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c);
+    int log_[$];
+    task automatic select(int n);
+        REPEAT begin
+            automatic int completed = 0;
+            fork
+                begin
+                    #(m);
+                    completed = 1;
+                end
+            join_none
+            wait (completed > 0);
+            log_.push_back(m * 100 + int'($time));
+            NEXT
+        end
+    endtask
+    int three = 3;
+    initial begin
+        select(three);
+        a = log_[0];
+        b = log_[1];
+        c = log_[2];
+    end
+endmodule
+"#;
+
+#[test]
+fn waits_on_variables_forked_children_share() {
+    // The shared variable is in a box, whose stores bump a change count of
+    // its own, which the parent's wait watches as it watches a class
+    // property's: the child's store wakes it. Out of line by default, as its
+    // recursion, `select` gives the results of the loop that inlines.
+    let recursive = SELECT_LEVELS
+        .replace(
+            "REPEAT begin",
+            "if (n > 0) begin\n            automatic int m = n;",
+        )
+        .replace("NEXT", "select(n - 1);");
+    let looped = SELECT_LEVELS
+        .replace("REPEAT begin", "for (int m = n; m > 0; m--) begin")
+        .replace("NEXT", "");
+    assert_eq!(function_units(&recursive, false), 1, "select");
+    let names = ["a", "b", "c"];
+    for four_state in [false, true] {
+        let expected =
+            simulate(&looped, four_state, false, "interpreter", 20, &names).expect("the loop runs");
+        for forced in [false, true] {
+            assert_eq!(
+                simulate(&recursive, four_state, forced, "interpreter", 20, &names),
+                Ok(expected.clone()),
+                "four_state {four_state} forced {forced}"
+            );
+        }
+    }
+    assert_eq!(
+        simulate(&looped, false, false, "interpreter", 20, &names),
+        Ok(vec![value(303), value(205), value(106)])
+    );
+    same_as_inlined(&looped, 1, 20, &names);
+}
+
+#[test]
+fn rejected_units_leave_no_box_counts() {
+    // `spawn` boxes `a`, then is rejected for sharing its output `out` with
+    // its children, and is inlined: the box's count is gone with the
+    // rejected lowering, so `randomize`, which counts the stores of the
+    // properties, finds none of it.
+    let source = r#"`timescale 1ns/1ns
+class r_t;
+    rand bit [7:0] v;
+endclass
+module Top(output int got, output int ok);
+    r_t r = new;
+    task automatic spawn(output int out);
+        int a = 1;
+        fork
+            #1 begin a = a + 1; out = a; end
+        join
+    endtask
+    initial begin
+        spawn(got);
+        ok = r.randomize();
+    end
+endmodule
+"#;
+    for forced in [false, true] {
+        assert_eq!(
+            simulate(source, false, forced, "interpreter", 5, &["got", "ok"]),
+            Ok(vec![value(2), value(1)]),
+            "forced {forced}"
+        );
+    }
+}
+
+/// The variables each process kernel of `source` stores, by name, with
+/// calls forced out of line, and the names of all the variables; a variable
+/// the module no longer has is `?<id>`.
+fn kernel_stores(
+    source: &str,
+) -> (
+    Vec<std::collections::BTreeSet<String>>,
+    std::collections::BTreeSet<String>,
+) {
+    use celox_sir::SIRInstruction;
+    let result = SimulatorBuilder::<Simulator>::from_sv_sources(
+        vec![(source, Path::new("calls.sv"))],
+        "Top",
+    )
+    .force_out_of_line_calls()
+    .trace_sim_modules()
+    .build_with_trace();
+    let mut kernels = Vec::new();
+    let mut variables = std::collections::BTreeSet::new();
+    for module in result
+        .trace
+        .sim_modules
+        .as_ref()
+        .expect("traced modules")
+        .values()
+    {
+        variables.extend(
+            module
+                .variables
+                .values()
+                .map(|variable| variable.path.join(".")),
+        );
+        for process in &module.processes {
+            let mut stores = std::collections::BTreeSet::new();
+            for block in process.kernel.blocks.values() {
+                for instruction in &block.instructions {
+                    if let SIRInstruction::Store(addr, ..) = instruction {
+                        stores.insert(module.variables.get(&addr.var_id).map_or_else(
+                            || format!("?{}", addr.var_id.0),
+                            |variable| variable.path.join("."),
+                        ));
+                    }
+                }
+            }
+            kernels.push(stores);
+        }
+    }
+    (kernels, variables)
+}
+
+#[test]
+fn randomize_counts_no_stores_of_shared_variables() {
+    // `completed` lives in a box whose stores count apart from the class
+    // properties': the kernel that randomizes, which counts a store of
+    // every watched property, bumps none of the box's counts.
+    let source = SELECT_LEVELS
+        .replace(
+            "REPEAT begin",
+            "if (n > 0) begin\n            automatic int m = n;",
+        )
+        .replace("NEXT", "select(n - 1);")
+        .replace(
+            "module Top(output int a, output int b, output int c);",
+            "class r_t;\n    rand bit [7:0] v;\nendclass\nmodule Top(output int a, output int b, output int c, output int ok);\n    r_t r = new;",
+        )
+        // Lowered after `select`, whose unit makes the box.
+        .replace("endmodule", "    initial #1 ok = r.randomize();\nendmodule");
+    let (kernels, variables) = kernel_stores(&source);
+    assert!(
+        variables.iter().any(|name| name.starts_with("box_changes")),
+        "the box has a count: {variables:?}"
+    );
+    let randomizing = kernels
+        .iter()
+        .find(|stores| stores.contains("ok"))
+        .expect("the kernel that randomizes");
+    assert!(
+        !randomizing
+            .iter()
+            .any(|name| name.starts_with("box_changes")),
+        "{randomizing:?}"
+    );
 }
