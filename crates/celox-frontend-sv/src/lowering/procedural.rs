@@ -26,6 +26,7 @@ pub(super) struct Checkpoint {
     capture_counter: u64,
     runtime_event_sites: usize,
     function_host_request_sites: usize,
+    function_wait_sites: usize,
     runtime_errors: usize,
     extern_functions: usize,
     extern_calls: usize,
@@ -72,6 +73,14 @@ pub(super) struct ProcModule<'a> {
     /// process of the module lists after its own (see
     /// [`celox_design::SiteProcess`]), numbered per family.
     pub function_host_request_sites: Vec<celox_design::HostRequestSite<SourceVarId>>,
+    /// The wait sites of the module's function units, which every process
+    /// that can suspend inside a call lists after its own; a unit suspends
+    /// with the number of the site among these, which the kernel's call
+    /// turns into one among its process's sites.
+    pub function_wait_sites: Vec<celox_design::WaitSite<SourceVarId>>,
+    /// The runtime event site of the flush points of the units' waits
+    /// (IEEE 1800-2023 16.4.2), made at the first.
+    pub unit_flush_site: Option<u32>,
     /// Runtime errors (fatal assertions) of the module, by local code.
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
     /// The continuous assignments `$event[k] = expr` of the event
@@ -308,6 +317,8 @@ impl<'a> ProcModule<'a> {
             capture_counter: 0,
             runtime_event_sites: Vec::new(),
             function_host_request_sites: Vec::new(),
+            function_wait_sites: Vec::new(),
+            unit_flush_site: None,
             runtime_errors: HashMap::default(),
             event_assignments: Vec::new(),
             unpacked_bounds,
@@ -1026,6 +1037,7 @@ impl<'a> ProcModule<'a> {
             capture_counter: self.capture_counter,
             runtime_event_sites: self.runtime_event_sites.len(),
             function_host_request_sites: self.function_host_request_sites.len(),
+            function_wait_sites: self.function_wait_sites.len(),
             runtime_errors: self.runtime_errors.len(),
             extern_functions: self.extern_functions.len(),
             extern_calls: self.extern_calls,
@@ -1057,8 +1069,17 @@ impl<'a> ProcModule<'a> {
         self.capture_counter = checkpoint.capture_counter;
         self.runtime_event_sites
             .truncate(checkpoint.runtime_event_sites);
+        // A flush site made since then is gone with it.
+        if self
+            .unit_flush_site
+            .is_some_and(|site| site as usize >= checkpoint.runtime_event_sites)
+        {
+            self.unit_flush_site = None;
+        }
         self.function_host_request_sites
             .truncate(checkpoint.function_host_request_sites);
+        self.function_wait_sites
+            .truncate(checkpoint.function_wait_sites);
         // Codes are numbered from one in registration order.
         self.runtime_errors
             .retain(|&code, _| code <= checkpoint.runtime_errors as i64);

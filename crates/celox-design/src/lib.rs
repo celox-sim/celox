@@ -167,6 +167,11 @@ pub enum DeferredSite {
     /// actions its queue holds are discarded. The events of this site are
     /// not shown.
     FlushPoint,
+    /// A flush point of whichever process runs it, as a function unit's
+    /// wait is, which serves every process: the actions waiting in that
+    /// process's queue are discarded. The events of this site are not
+    /// shown.
+    ProcessFlushPoint,
     /// The action of a deferred assertion: its event waits in the queue of
     /// the flush-point site `queue` of the same instance, numbered like the
     /// sites of its module, until `region` of the time slot.

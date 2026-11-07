@@ -6722,6 +6722,13 @@ fn lower_initial_processes(
     if let Ok(processes) = &processes {
         for (index, process) in processes.iter().enumerate() {
             if process.slots.call_top.is_some() {
+                // And its waits, after its own (see `Ff::function_wait_word`).
+                wait_sites.extend(pm.function_wait_sites.iter().map(|site| {
+                    celox_design::WaitSite {
+                        process: index,
+                        ..site.clone()
+                    }
+                }));
                 host_request_sites.extend(pm.function_host_request_sites.iter().map(|site| {
                     celox_design::HostRequestSite {
                         process: celox_design::SiteProcess::function(index),

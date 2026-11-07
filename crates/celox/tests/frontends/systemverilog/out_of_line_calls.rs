@@ -1207,8 +1207,8 @@ endmodule
 #[test]
 fn units_store_into_what_waits_and_logic_observe() {
     // As UVM's objections push to a static queue that a task waits on,
-    // `schedule` pushes to `Sched::pending`, which `drain` (inlined, since it
-    // waits) waits for with a level wait; `note` stores `last`, which an event control waits on and
+    // `schedule` pushes to `Sched::pending`, which `drain` waits for with a
+    // level wait at a function wait site; `note` stores `last`, which an event control waits on and
     // a continuous assignment reads. `pulse` changes `blip` and changes it
     // back, which an event control on it sees only as the stores' own
     // changes (IEEE 1800-2023 9.4.2). Assembly counts these stores in the
@@ -1263,7 +1263,7 @@ module Top(output int got, output int seen_at, output int follow, output int y, 
 endmodule
 "#;
     let names = ["got", "seen_at", "follow", "y", "z", "pulsed_at"];
-    same_as_inlined(source, 4, 5, &names);
+    same_as_inlined(source, 5, 5, &names);
     assert_eq!(
         simulate(source, false, true, "interpreter", 5, &names),
         Ok(vec![
@@ -3793,5 +3793,360 @@ endmodule
                 );
             }
         }
+    }
+}
+
+/// A design whose task `step` waits at each level of a recursion for a
+/// clock edge, an element of a queue and a state of an object, with
+/// `RECURSE` choosing how it repeats: by recursion, out of line by default,
+/// or by a loop, which inlines.
+const WAITING_LEVELS: &str = r#"`timescale 1ns/1ns
+class state_t;
+    int state;
+endclass
+module Top(output int a, output int b, output int c, output int d, output int e, output int f);
+    bit clk;
+    int q[$];
+    int log_[$];
+    state_t st = new;
+    initial forever #5 clk = ~clk;
+    task automatic step(int n, state_t s);
+        for (int m = n; m > 0; m = RECURSE) begin
+            @(posedge clk);
+            log_.push_back(int'($time));
+            wait (q.size() != 0);
+            log_.push_back(q.pop_front() * 100 + int'($time));
+            wait (s.state >= 4 - m);
+            log_.push_back(int'($time));
+        end
+    endtask
+    int three = 3;
+    initial begin
+        step(three, st);
+        a = log_[0];
+        b = log_[1];
+        c = log_[2];
+        d = log_[4];
+        e = log_[7];
+        f = log_[8];
+    end
+    initial begin
+        #12 q.push_back(1);
+        #10 st.state = 1;
+        #20 q.push_back(2);
+        q.push_back(3);
+        #3 st.state = 2;
+        #2 st.state = 3;
+    end
+endmodule
+"#;
+
+#[test]
+fn waits_in_recursive_units() {
+    // Each level of `step` waits for a posedge of `clk`, for an element of
+    // `q` and for a state of the object: out of line by default, as its
+    // recursion, it waits at the module's function wait sites, the same as
+    // the loop that inlines.
+    let recursive = WAITING_LEVELS.replace(
+        "for (int m = n; m > 0; m = RECURSE) begin",
+        "if (n > 0) begin\n            automatic int m = n;",
+    );
+    let recursive = recursive.replace(
+        "            log_.push_back(int'($time));\n        end\n    endtask",
+        "            log_.push_back(int'($time));\n            step(n - 1, s);\n        end\n    endtask",
+    );
+    let looped = WAITING_LEVELS.replace("RECURSE", "m - 1");
+    assert_eq!(function_units(&recursive, false), 1, "step");
+    let names = ["a", "b", "c", "d", "e", "f"];
+    for four_state in [false, true] {
+        let expected = simulate(&looped, four_state, false, "interpreter", 200, &names)
+            .expect("the loop runs");
+        for forced in [false, true] {
+            assert_eq!(
+                simulate(&recursive, four_state, forced, "interpreter", 200, &names),
+                Ok(expected.clone()),
+                "four_state {four_state} forced {forced}"
+            );
+        }
+    }
+    assert_eq!(
+        simulate(&looped, false, false, "interpreter", 200, &names),
+        Ok(vec![
+            value(5),
+            value(112),
+            value(22),
+            value(242),
+            value(355),
+            value(55)
+        ])
+    );
+}
+
+#[test]
+fn waits_in_units_are_those_of_the_inlined_body() {
+    // A level wait on a module queue, one on a class property and an event
+    // control, in units that waiting processes share.
+    let source = r#"`timescale 1ns/1ns
+class state_t;
+    int state;
+endclass
+module Top(output int a, output int b, output int c, output int d);
+    bit clk;
+    int q[$];
+    state_t st = new;
+    initial forever #5 clk = ~clk;
+    task automatic take(output int v);
+        wait (q.size() != 0);
+        v = q.pop_front();
+    endtask
+    task automatic until_state(state_t s, int want, output int at);
+        wait (s.state == want);
+        at = $time;
+    endtask
+    task automatic edges(int k, output int at);
+        repeat (k) @(negedge clk);
+        at = $time;
+    endtask
+    int two = 2, three = 3;
+    initial begin
+        fork
+            take(a);
+            until_state(st, two, b);
+            edges(three, c);
+            edges(two, d);
+        join
+    end
+    initial begin
+        #12 q.push_back(7);
+        #10 st.state = 1;
+        #10 st.state = 2;
+    end
+endmodule
+"#;
+    same_as_inlined(source, 4, 60, &["a", "b", "c", "d"]);
+    assert_eq!(
+        simulate(
+            source,
+            false,
+            true,
+            "interpreter",
+            60,
+            &["a", "b", "c", "d"]
+        ),
+        Ok(vec![value(7), value(32), value(30), value(20)])
+    );
+}
+
+#[test]
+fn units_wait_on_virtual_interface_clocks() {
+    // Two processes wait at the same site of `count` on the clocks of two
+    // interfaces, which the unit's frame selects: each keeps its own sample
+    // of its clock and counts its own edges.
+    let source = r#"`timescale 1ns/1ns
+interface clk_if();
+    bit clk;
+endinterface
+module Top(output int a, output int b, output int c);
+    clk_if x();
+    clk_if y();
+    initial forever #5 x.clk = ~x.clk;
+    initial forever #3 y.clk = ~y.clk;
+    task automatic count(virtual clk_if v, int k, output int at);
+        repeat (k) @(posedge v.clk);
+        at = $time;
+    endtask
+    task automatic changes(virtual clk_if v, int k, output int at);
+        repeat (k) @(v.clk);
+        at = $time;
+    endtask
+    int three = 3, four = 4;
+    initial fork
+        count(x, three, a);
+        count(y, three, b);
+        changes(y, four, c);
+    join
+endmodule
+"#;
+    same_as_inlined(source, 2, 40, &["a", "b", "c"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 40, &["a", "b", "c"]),
+        Ok(vec![value(25), value(15), value(12)])
+    );
+}
+
+#[test]
+fn units_count_each_edge_of_a_virtual_interface_member() {
+    // `pulse` raises and lowers the clock of `x` in one run: the rise is an
+    // event (IEEE 1800-2023 9.4.2), though the clock ends as it began. The
+    // unit selects at the start of the wait the member the handle denotes,
+    // and waits at the site that counts its rises where they happen.
+    let source = r#"`timescale 1ns/1ns
+interface clk_if();
+    bit clk;
+endinterface
+module Top(output int a, output int b);
+    clk_if x();
+    clk_if y();
+    task automatic rises(virtual clk_if v, int k, output int at);
+        repeat (k) @(posedge v.clk);
+        at = $time;
+    endtask
+    task automatic pulse();
+        x.clk = 1;
+        x.clk = 0;
+    endtask
+    int one = 1, two = 2;
+    initial fork
+        rises(x, one, a);
+        rises(y, two, b);
+    join
+    initial begin
+        #3 pulse();
+        #2 y.clk = 1;
+        #1 y.clk = 0;
+        #1 y.clk = 1;
+    end
+endmodule
+"#;
+    same_as_inlined(source, 2, 20, &["a", "b"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 20, &["a", "b"]),
+        Ok(vec![value(3), value(7)])
+    );
+}
+
+#[test]
+fn units_wait_on_the_status_of_a_process() {
+    // A level wait on `p.status()` in a unit observes `p`, as an inlined
+    // one does: `p` ending wakes it (IEEE 1800-2023 9.7).
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a);
+    task automatic until_done(process p, output int at);
+        wait (p.status() == process::FINISHED);
+        at = $time;
+    endtask
+    process child;
+    initial begin
+        fork
+            begin
+                child = process::self();
+                #5;
+            end
+        join_none
+        #1 until_done(child, a);
+    end
+endmodule
+"#;
+    same_as_inlined(source, 1, 20, &["a"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 20, &["a"]),
+        Ok(vec![value(5)])
+    );
+}
+
+#[test]
+fn waits_in_units_are_flush_points_of_deferred_assertions() {
+    // The deferred assertion queued before the call fails, but the wait in
+    // `wait_rise` ends before the Observed region: its resume is a flush
+    // point, which discards the queued `$fatal` (IEEE 1800-2023 16.4.2).
+    let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    bit sig;
+    bit c;
+    task automatic wait_rise();
+        @(posedge sig);
+    endtask
+    initial begin
+        assert #0 (c) else $fatal(1, "not flushed");
+        wait_rise();
+        done = 1;
+    end
+    initial #0 sig = 1;
+endmodule
+"#;
+    for four_state in [false, true] {
+        for forced in [false, true] {
+            assert_eq!(
+                simulate(source, four_state, forced, "interpreter", 5, &["done"]),
+                Ok(vec![value(1)]),
+                "four_state {four_state} forced {forced}"
+            );
+        }
+    }
+    assert!(function_units(source, true) >= 1);
+}
+
+#[test]
+fn iff_gates_of_unit_waits_hold_at_the_occurrence() {
+    // An occurrence of `posedge bus[i] iff ...` counts only if the gate holds
+    // when it happens (IEEE 1800-2023 9.4.2.3), which a comparison at the
+    // waiter's resume cannot judge. `edge_en`, whose item reads the frame
+    // and whose gate is module state that other processes change between
+    // the edge and the resume, stays inlined, where the kernel judges the
+    // gate when it observes the occurrence; `edge_k`, gated by its own
+    // argument, which cannot change during the wait, goes out of line and
+    // drops every edge while the argument is 0.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c);
+    bit [1:0] bus;
+    bit en;
+    task automatic edge_en(int i, output int at);
+        @(posedge bus[i] iff en);
+        at = $time;
+    endtask
+    task automatic edge_k(int i, int k, output int at);
+        @(posedge bus[i] iff (k > 0));
+        at = $time;
+    endtask
+    initial begin
+        #5 bus[0] = 1;
+        #5 bus[0] = 0;
+        #5 bus[0] = 1;
+    end
+    initial #5 en = 1;
+    int zero = 0, one = 1;
+    initial edge_en(zero, a);
+    initial edge_k(zero, one, b);
+    initial edge_k(zero, zero, c);
+endmodule
+"#;
+    let names = ["a", "b", "c"];
+    same_as_inlined(source, 1, 30, &names);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 30, &names),
+        Ok(vec![value(5), value(5), value(0)])
+    );
+}
+
+#[test]
+fn impure_event_expressions_are_unsupported_in_units_too() {
+    // The unit evaluates the item `pick(i)`, which reads its frame, at each
+    // resume, as the kernel evaluates an event expression whenever it looks
+    // for occurrences: a call with an effect is unsupported in both, with
+    // the same diagnostic, with and without out-of-line calls.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a);
+    bit [1:0] bus;
+    int count;
+    function automatic bit pick(int i);
+        count++;
+        return bus[i];
+    endfunction
+    task automatic edge_of(int i, output int at);
+        @(posedge pick(i));
+        at = $time;
+    endtask
+    int zero = 0;
+    initial edge_of(zero, a);
+    initial #5 bus[0] = 1;
+endmodule
+"#;
+    for forced in [false, true] {
+        let run = simulate(source, false, forced, "interpreter", 10, &["a"]);
+        assert!(
+            run.as_ref()
+                .is_err_and(|error| error.contains("impure call `pick` in an event expression")),
+            "forced {forced}: {run:?}"
+        );
     }
 }
