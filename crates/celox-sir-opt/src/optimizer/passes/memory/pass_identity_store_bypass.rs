@@ -595,10 +595,9 @@ fn collect_global_facts(
         // this whole table.
         let use_counts = register_use_counts(eu);
         let must_execute = must_execute_blocks(eu, settle_flags);
-        let compare_only = if settle_loads.is_some() {
-            compare_only_registers(eu)
-        } else {
-            HashSet::default()
+        let compare_only = match settle_flags {
+            Some(flags) if settle_loads.is_some() => compare_only_registers(eu, flags),
+            _ => HashSet::default(),
         };
 
         for block in eu.blocks.values() {
@@ -974,33 +973,100 @@ fn reads_follow_store(facts: &GlobalIdentityFacts, store: &StoreCandidate) -> bo
         })
 }
 
-/// The registers of `eu` every use of which is a case comparison
-/// (`NeCase`, `EqCase`): the values the settle compares for change.
-fn compare_only_registers(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> HashSet<RegisterId> {
-    let mut compared = HashSet::default();
-    let mut other = HashSet::default();
+/// The registers of `eu` that are only the settle's change snapshots: every
+/// use is a `NeCase` whose result decides nothing but whether to publish,
+/// through `Or`s into a branch whose taken edge only stores `flags`. A case
+/// comparison that controls design logic reads its operands like any load.
+fn compare_only_registers(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    flags: AbsoluteAddr,
+) -> HashSet<RegisterId> {
+    enum Use<'a> {
+        Instruction(&'a SIRInstruction<RegionedAbsoluteAddr>),
+        Terminator(&'a SIRTerminator),
+    }
+    let mut users: HashMap<RegisterId, Vec<Use<'_>>> = HashMap::default();
     let mut uses = Vec::new();
     for block in eu.blocks.values() {
         for instruction in &block.instructions {
             uses.clear();
             instruction_uses(instruction, &mut uses);
-            let compares = matches!(
-                instruction,
-                SIRInstruction::Binary(_, _, BinaryOp::NeCase | BinaryOp::EqCase, _)
-            );
             for &register in &uses {
-                if compares {
-                    compared.insert(register);
-                } else {
-                    other.insert(register);
-                }
+                users
+                    .entry(register)
+                    .or_default()
+                    .push(Use::Instruction(instruction));
             }
         }
         uses.clear();
         terminator_uses(&block.terminator, &mut uses);
-        other.extend(uses.iter().copied());
+        for &register in &uses {
+            users
+                .entry(register)
+                .or_default()
+                .push(Use::Terminator(&block.terminator));
+        }
     }
-    compared.retain(|register| !other.contains(register));
+    // A block that stores only flags and rejoins.
+    let publishes_flags =
+        |target: BlockId| {
+            eu.blocks.get(&target).is_some_and(|block| {
+            matches!(&block.terminator, SIRTerminator::Jump(_, arguments) if arguments.is_empty())
+                && block.instructions.iter().all(|instruction| match instruction {
+                    SIRInstruction::Imm(..) => true,
+                    SIRInstruction::Store(address, ..) => {
+                        address.region == STABLE_REGION && address.absolute_addr() == flags
+                    }
+                    _ => false,
+                })
+        })
+        };
+    // Whether `register` only decides publishing; memoized, acyclic in SSA.
+    fn decides_publishing(
+        register: RegisterId,
+        users: &HashMap<RegisterId, Vec<Use<'_>>>,
+        publishes_flags: &dyn Fn(BlockId) -> bool,
+        memo: &mut HashMap<RegisterId, bool>,
+    ) -> bool {
+        if let Some(&known) = memo.get(&register) {
+            return known;
+        }
+        memo.insert(register, false);
+        let result = users.get(&register).is_some_and(|list| {
+            list.iter().all(|user| match user {
+                Use::Instruction(SIRInstruction::Binary(dst, _, BinaryOp::Or, _)) => {
+                    decides_publishing(*dst, users, publishes_flags, memo)
+                }
+                Use::Terminator(SIRTerminator::Branch {
+                    cond,
+                    true_block,
+                    false_block,
+                }) => {
+                    *cond == register
+                        && true_block.1.is_empty()
+                        && false_block.1.is_empty()
+                        && publishes_flags(true_block.0)
+                }
+                _ => false,
+            })
+        });
+        memo.insert(register, result);
+        result
+    }
+    let mut memo = HashMap::default();
+    let mut compared = HashSet::default();
+    for (&register, list) in &users {
+        let snapshot = list.iter().all(|user| {
+            matches!(
+                user,
+                Use::Instruction(SIRInstruction::Binary(dst, _, BinaryOp::NeCase, _))
+                    if decides_publishing(*dst, &users, &publishes_flags, &mut memo)
+            )
+        });
+        if snapshot {
+            compared.insert(register);
+        }
+    }
     compared
 }
 
@@ -2853,6 +2919,93 @@ mod tests {
             units[0].blocks[&BlockId(0)].instructions[1],
             SIRInstruction::Store(..)
         ));
+    }
+
+    /// Only the settle's change snapshot (`NeCase` into a branch that only
+    /// publishes flags) may read an alias before its copy; a case
+    /// comparison that controls design logic is an ordinary read.
+    #[test]
+    fn only_settle_snapshot_compares_are_compare_only() {
+        let flags = address(9);
+        let block = |id: usize,
+                     instructions: Vec<SIRInstruction<RegionedAbsoluteAddr>>,
+                     terminator: SIRTerminator| {
+            (
+                BlockId(id),
+                BasicBlock {
+                    id: BlockId(id),
+                    params: Vec::new(),
+                    instructions,
+                    terminator,
+                },
+            )
+        };
+        let unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [
+                // Settle snapshot of object 1: r1 old, r2 new.
+                block(
+                    0,
+                    vec![
+                        load(1, address(1), 8),
+                        load(2, address(1), 8),
+                        SIRInstruction::Binary(
+                            RegisterId(3),
+                            RegisterId(1),
+                            BinaryOp::NeCase,
+                            RegisterId(2),
+                        ),
+                    ],
+                    SIRTerminator::Branch {
+                        cond: RegisterId(3),
+                        true_block: (BlockId(1), Vec::new()),
+                        false_block: (BlockId(2), Vec::new()),
+                    },
+                ),
+                block(
+                    1,
+                    vec![
+                        SIRInstruction::Imm(RegisterId(4), SIRValue::new(1u8)),
+                        store(flags, 4, 8),
+                    ],
+                    SIRTerminator::Jump(BlockId(2), Vec::new()),
+                ),
+                // Design `a === b` deciding a design store.
+                block(
+                    2,
+                    vec![
+                        load(5, address(2), 8),
+                        load(6, address(3), 8),
+                        SIRInstruction::Binary(
+                            RegisterId(7),
+                            RegisterId(5),
+                            BinaryOp::EqCase,
+                            RegisterId(6),
+                        ),
+                    ],
+                    SIRTerminator::Branch {
+                        cond: RegisterId(7),
+                        true_block: (BlockId(3), Vec::new()),
+                        false_block: (BlockId(4), Vec::new()),
+                    },
+                ),
+                block(
+                    3,
+                    vec![store(address(4), 5, 8)],
+                    SIRTerminator::Jump(BlockId(4), Vec::new()),
+                ),
+                block(4, Vec::new(), SIRTerminator::Return),
+            ]
+            .into_iter()
+            .collect(),
+            register_map: register_map(&[(1, 8), (2, 8), (3, 1), (4, 8), (5, 8), (6, 8), (7, 1)]),
+        };
+        assert!(unit.verify_result().is_ok());
+        let compared = compare_only_registers(&unit, flags.absolute_addr());
+        assert!(compared.contains(&RegisterId(1)));
+        assert!(compared.contains(&RegisterId(2)));
+        assert!(!compared.contains(&RegisterId(5)));
+        assert!(!compared.contains(&RegisterId(6)));
     }
 
     #[test]
