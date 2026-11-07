@@ -128,9 +128,6 @@ pub struct Heap {
     /// with its object.
     #[serde(default)]
     edges: HashMap<Handle, Vec<edges::Watch>>,
-    /// The write of a watched property in progress.
-    #[serde(default)]
-    edge_write: Option<edges::EdgeWrite>,
 }
 
 impl Default for Heap {
@@ -170,7 +167,6 @@ impl Heap {
             prepared: None,
             solved: Vec::new(),
             edges: HashMap::default(),
-            edge_write: None,
         }
     }
 
@@ -268,7 +264,6 @@ impl Heap {
     /// Free every unpinned entry that `roots` cannot reach through the
     /// handle properties of objects. Roots that name no entry are ignored.
     pub fn collect(&mut self, roots: impl IntoIterator<Item = Root>) {
-        self.finish_edge_write();
         let mut strings = HashSet::default();
         let mut objects = HashSet::default();
         let mut pending: Vec<Root> = roots.into_iter().collect();
@@ -314,7 +309,7 @@ impl Heap {
         self.live_after_collection = self.len() + self.objects.len() + self.containers.len();
     }
 
-    fn new_buffer(&mut self, bytes: Vec<u8>) -> u64 {
+    pub(crate) fn new_buffer(&mut self, bytes: Vec<u8>) -> u64 {
         match self.free_buffers.pop() {
             Some(buffer) => {
                 self.buffers[buffer as usize] = Some(bytes);
@@ -334,7 +329,7 @@ impl Heap {
             .unwrap_or_else(|| panic!("heap buffer {buffer} is not live"))
     }
 
-    fn take_buffer(&mut self, buffer: u64) -> Vec<u8> {
+    pub(crate) fn take_buffer(&mut self, buffer: u64) -> Vec<u8> {
         let bytes = std::mem::take(self.buffer(buffer));
         self.buffers[buffer as usize] = None;
         self.free_buffers.push(buffer);

@@ -4942,3 +4942,50 @@ endmodule
 "#;
     waits_end_at(source, 2, 10, &["at"], &[2]);
 }
+
+#[test]
+fn wide_property_stores_are_one_write_each() {
+    // A 100-bit 4-state property is stored by one heap call with all its
+    // words and both planes, which the heap counts once: the pulse at 2 is
+    // a rise and a fall, and 1 -> x at 4 a fall only (IEEE 1800-2023 Table
+    // 9-2).
+    let source = r#"`timescale 1ns/1ns
+class w_t;
+    logic [99:0] w;
+endclass
+module Top(output int pos, output int neg, output int any_at, output int x_neg);
+    w_t o = new, p = new;
+    task automatic wait_pos(w_t e, output int at);
+        @(posedge e.w);
+        at = $time;
+    endtask
+    task automatic wait_neg(w_t e, output int at);
+        @(negedge e.w);
+        at = $time;
+    endtask
+    task automatic wait_any(w_t e, output int at);
+        @(e.w);
+        at = $time;
+    endtask
+    initial begin
+        o.w = 0;
+        p.w = 1;
+        fork
+            wait_pos(o, pos);
+            wait_neg(o, neg);
+            wait_any(o, any_at);
+            wait_neg(p, x_neg);
+        join_none
+        #2 o.w = {1'b1, 99'h1};
+        o.w = 0;
+        #2 p.w = 'x;
+    end
+endmodule
+"#;
+    let names = ["pos", "neg", "any_at", "x_neg"];
+    same_as_inlined(source, 4, 10, &names);
+    assert_eq!(
+        simulate(source, true, true, "interpreter", 10, &names),
+        Ok(vec![value(2), value(2), value(2), value(4)])
+    );
+}

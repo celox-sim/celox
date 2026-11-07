@@ -1,16 +1,14 @@
 //! The occurrences of the class properties that event controls watch (IEEE
 //! 1800-2023 9.4.2), counted where every write of an object goes:
-//! [`Heap::store`]. Whatever writes a property, an assignment, `randomize`,
+//! [`Heap::write`]. Whatever writes a property, an assignment, `randomize`,
 //! a container method writing a handle back or a DPI-C call, counts its
 //! changes, so no write can pass a waiting process by.
 //!
 //! A process waiting on a property of an object registers it with
-//! [`Heap::watch_edges`] and samples its counts. One write of a property may
-//! take several stores, one per word and plane, so a write is counted as a
-//! whole: the first store keeps the property's bytes, and the write ends
-//! when a store reaches a word it already wrote (the next write of the
-//! property), another property, or when the counts are read or the heap
-//! collected.
+//! [`Heap::watch_edges`] and samples its counts. A write of a property is
+//! one call with the whole value, both planes of a 4-state value included
+//! (wider ones go through a buffer, see [`crate::ops::OBJECT_STORE_BYTES`]),
+//! so each call that changes a watched property is one occurrence.
 
 use crate::{Handle, Heap};
 
@@ -38,24 +36,11 @@ impl Watch {
     }
 }
 
-/// A write of a watched property in progress (see the module).
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct EdgeWrite {
-    object: Handle,
-    /// The index of the property among the object's watches.
-    watch: usize,
-    /// Its bytes before the write.
-    before: Vec<u8>,
-    /// The offsets of the stores the write made.
-    stored: Vec<u32>,
-}
-
 impl Heap {
     /// Watch the property at `offset` of `object`, `value_bytes` bytes and,
     /// when `four_state`, as many of its mask: from now on its writes count
     /// (see [`Self::edge_count`]). Watching it again changes nothing.
     pub fn watch_edges(&mut self, object: Handle, offset: u32, value_bytes: u32, four_state: bool) {
-        self.finish_edge_write();
         if self.object_bytes(object).is_none() {
             return;
         }
@@ -73,8 +58,7 @@ impl Heap {
     /// The occurrences counted for the watched property at `offset` of
     /// `object`: its changes (`kind` 0), rises (1) or falls (2) of its least
     /// significant bit; 0 for a property no one watches.
-    pub fn edge_count(&mut self, object: Handle, offset: u32, kind: usize) -> u32 {
-        self.finish_edge_write();
+    pub fn edge_count(&self, object: Handle, offset: u32, kind: usize) -> u32 {
         self.edges
             .get(&object)
             .and_then(|watches| watches.iter().find(|watch| watch.offset == offset))
@@ -83,51 +67,43 @@ impl Heap {
             .unwrap_or(0)
     }
 
-    /// Before a store of `count` bytes at `offset` of `object`: continue
-    /// the write in progress, or end it and begin one of the watched
-    /// property the store writes into.
-    pub(crate) fn edge_store(&mut self, object: Handle, offset: usize, count: usize) {
-        if self.edges.is_empty() {
-            return;
-        }
-        let found = self
-            .edges
-            .get(&object)
-            .and_then(|watches| watches.iter().position(|watch| watch.covers(offset, count)));
-        if let (Some(write), Some(watch)) = (&mut self.edge_write, found)
-            && write.object == object
-            && write.watch == watch
-            && !write.stored.contains(&(offset as u32))
-        {
-            write.stored.push(offset as u32);
-            return;
-        }
-        self.finish_edge_write();
-        let Some(watch) = found else {
-            return;
-        };
-        let watch = &self.edges[&object][watch..][0];
-        let start = watch.offset as usize;
-        let range = start..start + watch.storage();
-        let Some(before) = self.object_bytes(object).and_then(|bytes| bytes.get(range)) else {
-            return;
-        };
-        self.edge_write = Some(EdgeWrite {
-            object,
-            watch: found.expect("a watch"),
-            before: before.to_vec(),
-            stored: vec![offset as u32],
-        });
-    }
-
-    /// Count the write in progress, if any: a change of the property's
+    /// Write `bytes` into `object` at `offset`: one write of each property
+    /// it covers. A watched property it changes counts a change of its
     /// value, and a rise or a fall of its least significant bit by Table 9-2
     /// of IEEE 1800-2023. A 4-state property holds the complements of its
     /// value and of its mask, so that zeroed bytes read as x.
-    pub(crate) fn finish_edge_write(&mut self) {
-        let Some(write) = self.edge_write.take() else {
+    pub(crate) fn write(&mut self, object: Handle, offset: usize, bytes: &[u8]) {
+        let range = offset..offset + bytes.len();
+        let watched: Vec<(usize, Vec<u8>)> =
+            match (self.edges.get(&object), self.object_bytes(object)) {
+                (Some(watches), Some(contents)) => watches
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, watch)| watch.covers(offset, bytes.len()))
+                    .filter_map(|(index, watch)| {
+                        let start = watch.offset as usize;
+                        Some((
+                            index,
+                            contents.get(start..start + watch.storage())?.to_vec(),
+                        ))
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+        let Some(contents) = self.object_bytes_mut(object) else {
             return;
         };
+        if let Some(target) = contents.get_mut(range) {
+            target.copy_from_slice(bytes);
+        }
+        for (index, before) in watched {
+            self.count_write(object, index, &before);
+        }
+    }
+
+    /// Count the write of the watch `index` of `object` that replaced
+    /// `before` (see [`Self::write`]).
+    fn count_write(&mut self, object: Handle, index: usize, before: &[u8]) {
         let Some(&Watch {
             offset,
             value_bytes,
@@ -135,19 +111,19 @@ impl Heap {
             ..
         }) = self
             .edges
-            .get(&write.object)
-            .and_then(|watches| watches.get(write.watch))
+            .get(&object)
+            .and_then(|watches| watches.get(index))
         else {
             return;
         };
         let start = offset as usize;
         let Some(after) = self
-            .object_bytes(write.object)
-            .and_then(|bytes| bytes.get(start..start + write.before.len()))
+            .object_bytes(object)
+            .and_then(|bytes| bytes.get(start..start + before.len()))
         else {
             return;
         };
-        if after == &write.before[..] {
+        if after == before {
             return;
         }
         let value_bytes = value_bytes as usize;
@@ -161,7 +137,7 @@ impl Heap {
             }
             Some(bytes[0] & 1 != 0)
         };
-        let (old, new) = (bit(&write.before), bit(after));
+        let (old, new) = (bit(before), bit(after));
         let rise = matches!(
             (old, new),
             (Some(false), Some(true) | None) | (None, Some(true))
@@ -170,7 +146,7 @@ impl Heap {
             (old, new),
             (Some(true), Some(false) | None) | (None, Some(false))
         );
-        let watch = &mut self.edges.get_mut(&write.object).expect("a watch")[write.watch];
+        let watch = &mut self.edges.get_mut(&object).expect("a watch")[index];
         let counts = &mut watch.counts;
         counts[0] = counts[0].wrapping_add(1);
         counts[1] = counts[1].wrapping_add(u32::from(rise));
@@ -209,20 +185,38 @@ mod tests {
 
     #[test]
     fn a_write_of_both_planes_is_one_occurrence() {
-        // A 4-state bit holds complemented planes: 0 is value 0xff, mask
-        // 0xff; 1 is value 0xfe; x is mask 0xfe. Writing 1 -> x stores the
-        // value then the mask: one fall, not a fall and a rise through the
-        // intermediate state.
+        // A 4-state bit holds complemented planes: value byte then mask
+        // byte. 1 is value 0xfe, mask 0xff; x is mask 0xfe. One store of
+        // both planes, 1 -> x, is one fall.
         let mut heap = Heap::new();
         let object = heap.new_object(7, 2);
-        heap.store(object, 0, 1, 0xfe);
-        heap.store(object, 1, 1, 0xff);
+        heap.store(object, 0, 2, 0xfffe);
         heap.watch_edges(object, 0, 1, true);
-        heap.store(object, 0, 1, 0xff);
-        heap.store(object, 1, 1, 0xfe);
+        heap.store(object, 0, 2, 0xfeff);
         assert_eq!(
             [0, 1, 2].map(|kind| heap.edge_count(object, 0, kind)),
             [1, 0, 1]
+        );
+    }
+
+    #[test]
+    fn a_wide_write_is_one_occurrence() {
+        // Sixteen bytes through a buffer, most significant first: one change
+        // and one rise of bit 0, however many words it spans.
+        let mut heap = Heap::new();
+        let object = heap.new_object(7, 16);
+        heap.watch_edges(object, 0, 16, false);
+        let mut bytes = vec![0u8; 16];
+        bytes[0] = 1;
+        bytes[15] = 0x80;
+        bytes.reverse();
+        let buffer = heap.new_buffer(bytes);
+        heap.store_bytes(object, 0, buffer);
+        assert_eq!(heap.load(object, 0, 1), 1);
+        assert_eq!(heap.load(object, 15, 1), 0x80);
+        assert_eq!(
+            [0, 1, 2].map(|kind| heap.edge_count(object, 0, kind)),
+            [1, 1, 0]
         );
     }
 }

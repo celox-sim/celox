@@ -103,6 +103,11 @@ pub const OBJECT_EDGE_WATCH: u64 = 141;
 /// falls (2) counted for the watched property at `offset` of `object`; 0
 /// for `null`.
 pub const OBJECT_EDGE_COUNT: u64 = 142;
+/// `store_bytes(object, offset, buffer)`: write the bytes of `buffer`, most
+/// significant first as [`APPEND_BYTES`] appends them, into `object` at
+/// `offset`, as one write: a property wider than a word, or both planes of
+/// a 4-state one, is stored by one call. The buffer is consumed.
+pub const OBJECT_STORE_BYTES: u64 = 143;
 /// `copy(object)`: a new object with a copy of the properties of `object`.
 pub const OBJECT_COPY: u64 = 63;
 /// Solve the scalar constraint program in string b for object a; c selects check-only.
@@ -317,6 +322,10 @@ impl Heap {
             }
             OBJECT_EDGE_WATCH => {
                 self.watch_edges(a as Handle, b as u32, (b >> 32) as u32, c != 0);
+                0
+            }
+            OBJECT_STORE_BYTES => {
+                self.store_bytes(a as Handle, b as usize, c);
                 0
             }
             OBJECT_EDGE_COUNT => self.edge_count(a as Handle, b as u32, c as usize).into(),
