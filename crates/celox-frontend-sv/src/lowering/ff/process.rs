@@ -33,6 +33,7 @@ impl Ff<'_, '_> {
                     | ProcessOp::SemaphoreTryGet
                     | ProcessOp::SemaphoreGet
                     | ProcessOp::Await
+                    | ProcessOp::Observe
             ))
         {
             // A function unit suspends the process for the methods that
