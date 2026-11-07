@@ -1172,12 +1172,21 @@ impl Parser<'_> {
                                 None
                             };
                             let concurrent = matches!(self.peek(), "property" | "sequence");
+                            // `expect ( property_spec ) action_block` (16.17)
+                            // has neither a deferral nor `property`.
+                            if word == "expect" && (deferred.is_some() || concurrent) {
+                                return Err(self.error(
+                                    "expect takes `( property_spec )` without `#0`, `final`, `property` or `sequence` (IEEE 1800-2023 16.17)",
+                                ));
+                            }
                             let property = self.peek() == "property";
                             if concurrent {
                                 self.at += 1;
                             }
-                            let typed_property =
-                                property && self.peek() == "(" && self.boolean_property_header();
+                            // `expect (property_spec)` (16.17) has no `property`.
+                            let typed_property = (property || word == "expect")
+                                && self.peek() == "("
+                                && self.boolean_property_header();
                             let property_header = if typed_property {
                                 self.expect("(")?;
                                 let property = self.property_spec(false, Vec::new())?;

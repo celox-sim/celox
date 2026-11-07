@@ -1764,6 +1764,24 @@ fn deep_foreach_statements_and_long_slot_lists_parse_clone_and_drop_on_default_s
     drop(syntax);
 }
 
+/// `expect ( property_spec ) action_block` (IEEE 1800-2023 16.17) has no
+/// deferral and no `property` or `sequence` keyword.
+#[test]
+fn expect_takes_only_a_parenthesized_property_spec() {
+    for statement in [
+        "expect property (@(posedge clk) a);",
+        "expect sequence (@(posedge clk) a);",
+        "expect #0 (@(posedge clk) a);",
+        "expect final (@(posedge clk) a);",
+    ] {
+        let source = format!("module M; initial {statement} endmodule");
+        let error = Declarations::parse(&source, Path::new("expect.sv")).expect_err(statement);
+        assert!(
+            error.to_string().contains("expect takes"),
+            "{statement}: {error}"
+        );
+    }
+}
 #[test]
 fn assertion_headers_distinguish_typed_immediate_predicates_from_property_boundaries() {
     let syntax = parse(
@@ -1796,11 +1814,18 @@ fn assertion_headers_distinguish_typed_immediate_predicates_from_property_bounda
         assert!(tokens.start < expression.tokens.start && expression.tokens.end < tokens.end);
     }
     assert!(
-        headers
+        headers[3..5]
             .iter()
-            .skip(3)
             .all(|header| matches!(header, AssertionHeader::Unconverted(_)))
     );
+    // `expect (property_spec)` takes a property without `property` (16.17).
+    assert!(matches!(
+        headers[5],
+        AssertionHeader::Concurrent {
+            module_item: false,
+            ..
+        }
+    ));
 }
 #[test]
 fn malformed_immediate_predicates_cannot_use_an_opaque_header_path() {

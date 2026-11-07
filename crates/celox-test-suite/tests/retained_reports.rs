@@ -1331,6 +1331,15 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "execute",
                             "assert_eq body: expected 0x7, got 0x1",
                         ),
+                        ("verilator", "concurrent_assertions::expect_statements") => {
+                            ("compile_error", "compile", "Unsupported: expect")
+                        }
+                        ("icarus", "concurrent_assertions::expect_statements") => {
+                            ("compile_error", "compile", "source_0.sv:6: syntax error")
+                        }
+                        ("xezim", "concurrent_assertions::expect_statements") => {
+                            ("mismatch", "execute", "assert_eq r2: expected 0x1, got 0x2")
+                        }
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

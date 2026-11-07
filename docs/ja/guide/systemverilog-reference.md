@@ -254,6 +254,10 @@ region に関する逸脱2件は[意図的な逸脱](#intentional-deviations)に
   `cover property`（モジュール・generate 項目）。固定クロック数だけ離れた
   ステップ列（`a ##1 b`、最大1024ティック）を `|->` または `|=>` で連結したもの。
 - 2 つの Boolean 式の `p iff q`。`|->` の後件にも書けます（`a |-> b iff c` は `a |-> (b iff c)`）。
+- プロセスや task 内の明示クロック付き `expect (property_spec) action_block`（16.17）。
+  次のクロックイベントから 1 回だけ評価し、各ステップをサンプル値で判定した後、Reactive
+  領域で成功・失敗の文（既定は `$error`）を実行して続行します。property は Boolean、
+  含意、固定遅延の sequence（名前付きも可）で、`disable iff`・ローカル変数・match 項目は未対応です。
 - 仮引数無しの名前付き property・sequence（同一モジュール、generate 外、
   本体が同部分集合内）。組み込み整数型のローカル変数と match 項目。
 - 時間無しのブロッキングアクション、報告・重大度タスク、停止・ノンブロッキング

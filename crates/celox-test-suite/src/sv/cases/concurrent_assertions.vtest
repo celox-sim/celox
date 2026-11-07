@@ -434,3 +434,35 @@ endmodule"#)
 endmodule"#)
  (top Top) (four_state) (run_until 11)
  (assert_eq p1 3) (assert_eq f1 2) (assert_eq p2 4) (assert_eq f2 1))
+
+; IEEE 1800-2023 16.17: `expect` blocks the process for one attempt that
+; starts at the next clocking event, decides each step on sampled values,
+; then runs its pass or fail statement and goes on: after a match, after a
+; vacuous implication, in an automatic task with an argument, and failing
+; on a sampled value that a nonblocking assignment changes at that edge,
+; and through a named sequence.
+(case expect_statements
+ (source "expect.sv" #"module Top(output int r1, r2, r3, r4, t1, nb);
+ bit clk;
+ logic a, b, c;
+ always @(posedge clk) nb <= nb + 1;
+ task automatic wait_for(int value, output bit ok);
+  expect (@(posedge clk) ##1 nb == value) ok = 1; else ok = 0;
+ endtask
+ sequence a2b;
+  a ##2 b;
+ endsequence
+ initial begin
+  a = 1; b = 0; c = 0;
+  #1 expect (@(posedge clk) a ##1 b) r1 = 1; else r1 = 2;
+  t1 = int'($time);
+  expect (@(posedge clk) c |-> a) r2 = 1; else r2 = 2;
+  begin bit ok; wait_for(5, ok); r3 = ok ? 1 : 2; end
+  expect (@(posedge clk) a2b) r4 = 1; else r4 = 2;
+ end
+ initial begin #12 b = 1; #10 b = 0; end
+ initial repeat (20) begin #5 clk = 1; #5 clk = 0; end
+endmodule"#)
+ (top Top) (run_until 200)
+ (assert_eq r1 1) (assert_eq r2 1) (assert_eq r3 2) (assert_eq r4 2)
+ (assert_eq t1 15) (assert_eq nb 20))
