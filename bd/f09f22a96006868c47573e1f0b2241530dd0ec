@@ -1,0 +1,1 @@
+Names in expect resolve in the analyzer from the expect's scope (a local or formal shadows a module property/sequence); expect follows 16.17 grammar, rejecting property/sequence/#0/final
