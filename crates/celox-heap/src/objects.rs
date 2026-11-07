@@ -409,6 +409,17 @@ impl Heap {
         handle
     }
 
+    /// The bytes of the properties of `object`, recording a fault when
+    /// there is none.
+    pub(crate) fn object_bytes_mut(&mut self, object: Handle) -> Option<&mut [u8]> {
+        self.object_mut(object).map(|object| &mut object.bytes[..])
+    }
+
+    /// The bytes of the properties of `object`, if it is live.
+    pub(crate) fn object_bytes(&self, object: Handle) -> Option<&[u8]> {
+        self.objects.get(&object).map(|object| &object.bytes[..])
+    }
+
     /// The class `object` was created as, or 0 for `null`.
     pub fn class_of(&self, object: Handle) -> u32 {
         self.objects.get(&object).map_or(0, |object| object.class)
@@ -430,13 +441,16 @@ impl Heap {
 
     /// Write the low `count` bytes of `value` into `object` at `offset`.
     pub fn store(&mut self, object: Handle, offset: usize, count: usize, value: u64) {
-        let Some(object) = self.object_mut(object) else {
-            return;
-        };
-        let count = count.min(8);
-        if let Some(target) = object.bytes.get_mut(offset..offset + count) {
-            target.copy_from_slice(&value.to_le_bytes()[..count]);
-        }
+        self.write(object, offset, &value.to_le_bytes()[..count.min(8)]);
+    }
+
+    /// Write the bytes of `buffer`, which holds them most significant first,
+    /// into `object` at `offset`, as one write (see
+    /// [`crate::ops::OBJECT_STORE_BYTES`]); the buffer is consumed.
+    pub fn store_bytes(&mut self, object: Handle, offset: usize, buffer: u64) {
+        let mut bytes = self.take_buffer(buffer);
+        bytes.reverse();
+        self.write(object, offset, &bytes);
     }
 
     /// The object behind `handle`, recording a fault when there is none.

@@ -7248,10 +7248,12 @@ impl Ff<'_, '_> {
             let mut private = self.m.created[first_created..].to_vec();
             private.extend([slots.resume, slots.status, slots.delay]);
             // The change counts of boxes are the module's, which every
-            // activation bumps and every waiter watches.
+            // activation bumps and every waiter watches; so is the gate that
+            // holds 1, which the writes of the activations judge.
             private.retain(|id| {
                 !self.frame_locals.contains(id)
                     && Some(*id) != self.m.id(TIME_SLOT)
+                    && Some(*id) != self.m.id(super::procedural::HELD_GATE)
                     && !self.m.box_changes.contains(id)
             });
             celox_design::ProcessFrame {
@@ -7868,6 +7870,9 @@ impl Ff<'_, '_> {
     /// assignment reads and stores the expression's value, which the event
     /// control samples as it begins.
     fn wait_event(&mut self, items: &[sv::ir::EventItem]) -> Result<(), sv::AnalyzerError> {
+        if self.property_event(items)? {
+            return Ok(());
+        }
         if self.kernel.is_none() && self.can_suspend_unit() {
             return self.unit_wait_event(items);
         }
@@ -7980,6 +7985,26 @@ impl Ff<'_, '_> {
         self.suspend_on(terms, gates, samples)
     }
 
+    /// Reject an edge of event expression `expr` when it is real: an edge
+    /// is of the least significant bit of an integral value (IEEE 1800-2023
+    /// 9.4.2).
+    pub(super) fn check_event_edge(
+        &self,
+        edge: sv::ir::EventEdge,
+        expr: &sv::ir::Expr,
+    ) -> Result<(), sv::AnalyzerError> {
+        let edge = match edge {
+            sv::ir::EventEdge::Any => return Ok(()),
+            sv::ir::EventEdge::Pos => "posedge",
+            sv::ir::EventEdge::Neg => "negedge",
+            sv::ir::EventEdge::Both => "edge",
+        };
+        if self.m.expr_float_precision(expr).is_some() {
+            return Err(sv::AnalyzerError::RealEdgeEvent { edge });
+        }
+        Ok(())
+    }
+
     /// The counter terms of `items`, their `iff` gates, and the samples the
     /// process takes of their expressions before it suspends.
     fn event_terms(
@@ -7991,17 +8016,7 @@ impl Ff<'_, '_> {
     ) -> Result<(), sv::AnalyzerError> {
         for item in items {
             let expr = self.propagate(&item.expr);
-            let edge = match item.edge {
-                sv::ir::EventEdge::Any => None,
-                sv::ir::EventEdge::Pos => Some("posedge"),
-                sv::ir::EventEdge::Neg => Some("negedge"),
-                sv::ir::EventEdge::Both => Some("edge"),
-            };
-            if let Some(edge) = edge
-                && self.m.expr_float_precision(&expr).is_some()
-            {
-                return Err(sv::AnalyzerError::RealEdgeEvent { edge });
-            }
+            self.check_event_edge(item.edge, &expr)?;
             let mut variable = false;
             let id = match &expr {
                 sv::ir::Expr::Ident(name) => match self.m.id(name) {
@@ -8114,7 +8129,7 @@ impl Ff<'_, '_> {
     /// The counters of a new gated term ([`GateCounters`]): `$event[k]`
     /// counts the occurrences while the gate holds, `$event[k].all` all
     /// of them.
-    fn gate_counters(&mut self) -> GateCounters<SourceVarId> {
+    pub(super) fn gate_counters(&mut self) -> GateCounters<SourceVarId> {
         let index = self.m.next_event_index();
         let counter = SvVariable {
             float: None,
@@ -8444,7 +8459,7 @@ impl Ff<'_, '_> {
 
     /// Whether `id` is a static formal of a task, which keeps one
     /// module-wide address for every call.
-    fn is_static_task_formal(&self, id: SourceVarId) -> bool {
+    pub(super) fn is_static_task_formal(&self, id: SourceVarId) -> bool {
         self.m.subroutines.values().any(|subroutine| {
             subroutine.is_task
                 && subroutine.params.iter().any(|param| {
@@ -8894,12 +8909,15 @@ pub(crate) fn watched_properties(
             .find(|subroutine| subroutine.name == name)
     };
     let mut conditions = Vec::new();
+    let mut events = Vec::new();
     let mut visit = |stmts: &[sv::ir::Stmt]| {
         for stmt in stmts {
-            stmt.walk(&mut |stmt| {
-                if let sv::ir::Stmt::Wait(condition) = stmt {
-                    conditions.push(condition.clone());
+            stmt.walk(&mut |stmt| match stmt {
+                sv::ir::Stmt::Wait(condition) => conditions.push(condition.clone()),
+                sv::ir::Stmt::WaitEvent(items) => {
+                    events.extend(items.iter().map(|item| item.expr.clone()));
                 }
+                _ => {}
             });
         }
     };
@@ -8917,6 +8935,17 @@ pub(crate) fn watched_properties(
     }
     for condition in &conditions {
         for op in heap_reads(subroutine, condition) {
+            if let sv::ir::ObjectOp::Load(field) = op
+                && let sv::ir::ChangeKey::Property(key) = field.key
+            {
+                keys.insert(key);
+            }
+        }
+    }
+    // An event control on a property waits for the stores of its key (see
+    // `Ff::property_event`); the heap counts the occurrences in each object.
+    for expr in &events {
+        for op in heap_reads(subroutine, expr) {
             if let sv::ir::ObjectOp::Load(field) = op
                 && let sv::ir::ChangeKey::Property(key) = field.key
             {
