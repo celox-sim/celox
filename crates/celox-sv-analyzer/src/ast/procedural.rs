@@ -1484,6 +1484,21 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         ids.extend(kept_ids);
     }
 
+    /// Name the subroutine in each `%m` of the format of a display or write
+    /// task (IEEE 1800-2023 21.2.1.5). The formats that follow the first are
+    /// already merged into it.
+    fn scope_display_format(&self, task: SystemTask, args: &mut [SystemTaskArg<Expr>]) {
+        if let Some(template) = template_index(task, args)
+            && let Some(SystemTaskArg::Str(text)) = args.get_mut(template)
+        {
+            let scoped = expression_binding::scoped_template(
+                text.as_bytes(),
+                self.dims.scope_name.as_deref(),
+            );
+            *text = String::from_utf8(scoped).expect("names and formats are UTF-8");
+        }
+    }
+
     /// Rewrite each `%p` of the format of a display or write task into a
     /// conversion of the value it prints (IEEE 1800-2023 21.2.1.6).
     fn rewrite_display_patterns(
@@ -3217,6 +3232,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 ids.push(id);
                 values.push(value);
             }
+            text = expression_binding::scoped_template(&text, self.dims.scope_name.as_deref());
             if expression_binding::has_pattern(&text) {
                 text = expression_binding::rewrite_format(
                     &text,
@@ -3358,6 +3374,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         // The native expression of each argument, kept in step with `args`.
         let mut ids = arguments.iter().map(|arg| arg.value).collect::<Vec<_>>();
         self.merge_display_formats(task, &mut args, &mut ids);
+        self.scope_display_format(task, &mut args);
         self.rewrite_display_patterns(task, &mut args, &ids)?;
         for arg in &mut args {
             if let SystemTaskArg::Expr(value) = arg {
@@ -4368,6 +4385,7 @@ pub(super) fn lower_subroutine(
         Some(class) => classes::Class::subroutine_name(&class.name, &name),
         None => name.clone(),
     });
+    let scope = scope_name(tree, session, declaration_env, native.tokens, class, &name);
     let mut builder = BodyBuilder::new(
         tree,
         session,
@@ -4376,6 +4394,7 @@ pub(super) fn lower_subroutine(
         system_functions::Body::Subroutine,
     );
     builder.owner = Some(qualified_name.clone());
+    builder.dims.scope_name = Some(std::sync::Arc::new(scope));
     builder.task_timing = native.kind == celox_sv_syntax::SubroutineKind::Task;
     let first_local = builder.state.locals.len();
     builder.automatic = match native.lifetime.as_deref() {
@@ -6358,6 +6377,39 @@ fn default_conversion(string: bool, real: bool, radix: system_functions::Radix) 
         "%s".into()
     } else {
         format!("%{}", radix.letter())
+    }
+}
+
+/// The name `%m` prints in the subroutine `name`, a method of `class` if
+/// any, whose declaration spans `tokens` (IEEE 1800-2023 21.2.1.5). Names are
+/// the source's, as `$typename` prints them: a package's subroutines are
+/// named by the package, the compilation unit's by `$unit` (26.3), and a
+/// design element's under the instance that runs them. It does not depend
+/// on the caller.
+fn scope_name(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &SharedEnv,
+    tokens: celox_sv_syntax::TokenRange,
+    class: Option<&classes::Class>,
+    name: &str,
+) -> expression_binding::ScopeName {
+    use expression_binding::ScopeName;
+    let unit = classes::enclosing_unit(tree.declarations(), tokens);
+    let path = match class
+        .and_then(|class| type_names::class_scope_name(&class.name, tree, session, env))
+    {
+        Some(class) => format!("{class}::{name}"),
+        None => type_names::scoped_name(unit, name),
+    };
+    // A design element's names are under the instance, which `%m` still
+    // names at run time.
+    match unit.filter(|unit| unit.kind != celox_sv_syntax::UnitKind::Package) {
+        Some(unit) => {
+            let element = format!("{}.", instances::normalize_identifier(&unit.name.spelling));
+            ScopeName::Relative(path.strip_prefix(&element).unwrap_or(&path).to_owned())
+        }
+        None => ScopeName::Absolute(path),
     }
 }
 

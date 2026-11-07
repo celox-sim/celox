@@ -101,6 +101,90 @@ sv_backends! {
             celox::RuntimeEvent::Display { message: b"[Top.first]".to_vec() },
         ]);
     }
+    // `%m` names the subroutine that calls the task (IEEE 1800-2023
+    // 21.2.1.5), wherever it is called from: a package subroutine or class
+    // method by its package and class (a specialization with its parameter
+    // values, as `$typename` names it), one of the compilation unit by
+    // `$unit`, a module subroutine under the instance that declares it.
+    fn scope_name_of_subroutines(sim) {
+        @setup {
+            let source = r#"
+                `timescale 1ns/1ns
+                package pkg;
+                    function automatic string where();
+                        string s;
+                        $swrite(s, "%m");
+                        return s;
+                    endfunction
+                    function automatic void show();
+                        $display("[%m] %s", $sformatf("<%m>"));
+                    endfunction
+                    class C;
+                        function string where();
+                            string s;
+                            $swrite(s, "%m");
+                            return s;
+                        endfunction
+                        static task show();
+                            $display("[%M %%m]");
+                        endtask
+                    endclass
+                    class P #(int N = 1);
+                        function string where();
+                            return $sformatf("%m");
+                        endfunction
+                    endclass
+                endpackage
+                class U;
+                    function string where();
+                        return $sformatf("%m");
+                    endfunction
+                endclass
+                function automatic string unit_where();
+                    return $sformatf("%m");
+                endfunction
+                module Child;
+                    task t();
+                        string s;
+                        $swrite(s, "%m");
+                        $display("[%s]", s);
+                    endtask
+                    initial t();
+                endmodule
+                module Top;
+                    pkg::C c;
+                    pkg::P #(3) p;
+                    U u;
+                    Child first();
+                    initial begin
+                        #1;
+                        $display("[%s]", pkg::where());
+                        pkg::show();
+                        c = new;
+                        $display("[%s]", c.where());
+                        pkg::C::show();
+                        $display("[%s]", unit_where());
+                        p = new;
+                        $display("[%s]", p.where());
+                        u = new;
+                        $display("[%s]", u.where());
+                    end
+                endmodule
+            "#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("subroutine_scope.sv"))], "Top");
+        sim.run_until(1).unwrap();
+        assert_eq!(sim.drain_runtime_events(), vec![
+            celox::RuntimeEvent::Display { message: b"[Top.first.t]".to_vec() },
+            celox::RuntimeEvent::Display { message: b"[pkg::where]".to_vec() },
+            celox::RuntimeEvent::Display { message: b"[pkg::show] <pkg::show>".to_vec() },
+            celox::RuntimeEvent::Display { message: b"[pkg::C::where]".to_vec() },
+            celox::RuntimeEvent::Display { message: b"[pkg::C::show %m]".to_vec() },
+            celox::RuntimeEvent::Display { message: b"[$unit::unit_where]".to_vec() },
+            celox::RuntimeEvent::Display { message: b"[pkg::P#(3)::where]".to_vec() },
+            celox::RuntimeEvent::Display { message: b"[$unit::U::where]".to_vec() },
+        ]);
+    }
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
