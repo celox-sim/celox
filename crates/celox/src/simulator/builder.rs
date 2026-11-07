@@ -1509,6 +1509,23 @@ fn compile_mixed_to_sir_with_layout_mode(
     }
 }
 
+/// Write the settle plan a trace captured to `path`
+/// ([`SimulatorBuilder::settle_plan_output`]); a build without a partitioned
+/// settle writes nothing.
+fn write_settle_plan_output(
+    path: Option<&std::path::Path>,
+    trace: &crate::debug::CompilationTrace,
+) {
+    if let (Some(path), Some(plan)) = (path, &trace.settle_plan)
+        && let Err(error) = std::fs::write(path, plan)
+    {
+        tracing::warn!(
+            "cannot write the settle plan to {}: {error}",
+            path.display()
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 #[cfg(feature = "host-runtime")]
 fn compile_hdl_to_sir_with_layout_mode(
@@ -3093,14 +3110,7 @@ mod host {
                 defer_derived_edges,
                 wide_commits,
             );
-            if let Some(plan) = &trace.settle_plan
-                && let Err(error) = std::fs::write(&path, plan)
-            {
-                tracing::warn!(
-                    "cannot write the settle plan to {}: {error}",
-                    path.display()
-                );
-            }
+            write_settle_plan_output(Some(&path), trace);
             result
         }
 
@@ -3976,6 +3986,7 @@ mod host {
                     )
                 };
 
+            write_settle_plan_output(self.options.trace.settle_plan_output.as_deref(), &trace);
             let program_res = program_res
                 .map_err(|error| error.apply_diagnostic_policy(&self.options.diagnostic_policy));
             let sim_res = program_res.and_then(|(program, mut warnings)| {

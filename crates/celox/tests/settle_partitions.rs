@@ -152,12 +152,28 @@ fn partitioned_native_matches_single_pass() {
 /// `s2[3:0]` and `s1[7:4]`, so neither whole variable makes it a reader.
 #[test]
 fn traced_settle_plan_marks_only_readers_of_compared_bits() {
-    let result = partitioned().trace_settle_plan().build_with_trace();
+    let path = std::env::temp_dir().join(format!("celox-settle-plan-{}.txt", std::process::id()));
+    let result = partitioned()
+        .trace_settle_plan()
+        .settle_plan_output(&path)
+        .build_with_trace();
     let plan = result
         .trace
         .settle_plan
         .clone()
         .expect("a partitioned settle has a plan");
+    // The traced build writes the requested file and prints the plan with
+    // the other artifacts.
+    let written = std::fs::read_to_string(&path).expect("the plan file is written");
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(written, plan);
+    let mut printed = Vec::new();
+    result.trace.write_to(&mut printed).unwrap();
+    assert!(
+        String::from_utf8(printed)
+            .unwrap()
+            .contains("=== Settle plan ===\nsettle plan: ")
+    );
     result.expect("the design builds");
     assert!(plan.starts_with("settle plan: "), "{plan}");
     assert!(
