@@ -117,6 +117,7 @@ impl Ff<'_, '_> {
             return Ok(false);
         }
         let mut terms = Vec::new();
+        let mut gated = Vec::new();
         let mut watched = Vec::new();
         for (item, expr) in items.iter().zip(exprs) {
             self.check_event_edge(item.edge, &expr)?;
@@ -169,52 +170,124 @@ impl Ff<'_, '_> {
                 } else {
                     None
                 };
+                // An occurrence happens inside a store, where no `iff` can be
+                // evaluated: only a condition that cannot change while the
+                // process waits is judged, by its value at the start.
+                let gate = match &item.iff {
+                    Some(iff) => {
+                        let iff = self.propagate(iff);
+                        if !self.frozen_condition(&iff) {
+                            return Err(unsupported(
+                                "an `iff` that the process does not hold alone on an event \
+                                 control on a class property",
+                            ));
+                        }
+                        let sample = self.event_sample("event_gate", 1, false, false, None)?;
+                        Some((Box::new(super::calls::iff_truth(iff)), sample))
+                    }
+                    None => None,
+                };
                 watched.push(Watched::Property {
                     field,
-                    handle,
+                    handle: Box::new(handle),
                     edge: item.edge,
                     object,
                     count,
                     value,
+                    gate,
                 });
             } else {
-                self.check_event_purity(&expr)?;
-                terms.extend(
-                    self.level_terms(&expr)?
-                        .into_iter()
-                        .map(|id| (id, CounterKind::Changes)),
-                );
-                let width = sv_expr_natural_width(
-                    &self.m.typed_calls(&expr),
-                    self.m.variables,
-                    self.m.name_to_id,
-                    self.m.constants,
-                    self.m.parameter_types,
-                )
-                .ok_or_else(|| unsupported("event expression of unknown width"))?;
-                let signed = self.expr_signed(&expr);
-                let four_state = self.m.four_state;
-                let sample = self.event_sample("event_value", width, signed, four_state, float)?;
-                let now = self.event_sample("event_value", width, signed, four_state, float)?;
-                watched.push(Watched::Value { expr, sample, now });
+                // Any other item is counted where its variable is written,
+                // as the edges of a kernel's items are (IEEE 1800-2023
+                // 9.4.2): a pulse within one step is an occurrence. Only a
+                // variable has such counts.
+                let id = match &expr {
+                    sv::ir::Expr::Ident(name) => self.m.id(name).filter(|&id| {
+                        !self.m.is_hidden(id) && self.m.var(id).array_dims.is_empty()
+                    }),
+                    _ => None,
+                }
+                .ok_or_else(|| {
+                    unsupported("an event control on a class property and an expression")
+                })?;
+                let (signal, held) = match &item.iff {
+                    None => {
+                        let held = self.m.held_gate();
+                        (held, Some(held))
+                    }
+                    Some(iff) => {
+                        let iff = self.propagate(iff);
+                        let signal = match &iff {
+                            sv::ir::Expr::Ident(name) => self.m.id(name).filter(|&id| {
+                                let variable = self.m.var(id);
+                                !self.m.is_hidden(id)
+                                    && variable.width == 1
+                                    && variable.float.is_none()
+                                    && variable.array_dims.is_empty()
+                            }),
+                            _ => None,
+                        }
+                        .ok_or_else(|| {
+                            unsupported(
+                                "an `iff` other than a one-bit variable on an event control \
+                                 with a class property",
+                            )
+                        })?;
+                        (signal, None)
+                    }
+                };
+                let kinds: &[CounterKind] = match item.edge {
+                    sv::ir::EventEdge::Any => &[CounterKind::Changes],
+                    sv::ir::EventEdge::Pos => &[CounterKind::Rises],
+                    sv::ir::EventEdge::Neg => &[CounterKind::Falls],
+                    sv::ir::EventEdge::Both => &[CounterKind::Rises, CounterKind::Falls],
+                };
+                let mut counts = Vec::new();
+                // The counts and the held gate are the module's, which every
+                // process's writes bump and judge; a unit stages them.
+                if let Some(held) = held {
+                    self.stage(held);
+                }
+                for &kind in kinds {
+                    let counters = self.gate_counters();
+                    self.stage(counters.gated);
+                    self.stage(counters.all);
+                    gated.push((
+                        (id, kind),
+                        WaitGate {
+                            signal,
+                            at_write: true,
+                            counters: Some(counters),
+                        },
+                    ));
+                    let sample = self.event_sample(
+                        "event_count",
+                        celox_design::EVENT_COUNTER_WIDTH,
+                        false,
+                        false,
+                        None,
+                    )?;
+                    counts.push((counters.gated, sample));
+                }
+                watched.push(Watched::Counted { counts, held });
             }
         }
         self.sample_watched(&watched)?;
         terms.sort_unstable();
         terms.dedup();
-        let site = self.wait_site(terms, Vec::new());
+        let mut gates: Vec<_> = terms.iter().map(|_| None).collect();
+        for (term, gate) in gated {
+            terms.push(term);
+            gates.push(Some(gate));
+        }
+        if gates.iter().all(Option::is_none) {
+            gates.clear();
+        }
+        let site = self.wait_site(terms, gates);
         let point = self.suspend_at(site, false)?;
         let mut occurred: Option<RegisterId> = None;
         for (item, watched) in items.iter().zip(&watched) {
-            let mut happened = self.watched_occurred(watched, item.edge)?;
-            if let Some(iff) = &item.iff {
-                let iff = self.propagate(iff);
-                let (holds, _) = self.eval_truth(&super::calls::iff_truth(iff))?;
-                let both = self.b.alloc_bit(1, false);
-                self.b
-                    .emit(SIRInstruction::Binary(both, happened, BinaryOp::And, holds));
-                happened = both;
-            }
+            let happened = self.watched_occurred(watched, item.edge)?;
             occurred = Some(match occurred {
                 Some(any) => {
                     let either = self.b.alloc_bit(1, false);
@@ -256,6 +329,7 @@ impl Ff<'_, '_> {
                 object,
                 count,
                 value,
+                gate,
                 ..
             } => {
                 let id = self.m.id(count).expect("a count");
@@ -270,18 +344,35 @@ impl Ff<'_, '_> {
                 let advanced = self.b.alloc_bit(1, false);
                 self.b
                     .emit(SIRInstruction::Binary(advanced, now, BinaryOp::Ne, before));
+                let advanced = match gate {
+                    Some((_, sample)) => {
+                        let id = self.m.id(sample).expect("a gate sample");
+                        let holds = self.b.alloc_bit(1, false);
+                        self.b.emit(SIRInstruction::Load(
+                            holds,
+                            stable(id),
+                            SIROffset::Static(0),
+                            1,
+                        ));
+                        let both = self.b.alloc_bit(1, false);
+                        self.b
+                            .emit(SIRInstruction::Binary(both, advanced, BinaryOp::And, holds));
+                        both
+                    }
+                    None => advanced,
+                };
                 let Some((value, current)) = value else {
                     return Ok(advanced);
                 };
                 // Another object now: the change of the value decides.
                 let load = self.sampled_value(sv::ir::Expr::Call {
                     callee: sv::ir::Callee::Object(Box::new(ObjectOp::Load(*field))),
-                    args: vec![Some(handle.clone())],
+                    args: vec![Some((**handle).clone())],
                     arg_order: Vec::new(),
                 });
                 self.assign(&sv::ir::LValue::Ident(current.clone()), &load)?;
                 let switched = sv::ir::Expr::Binary {
-                    left: Box::new(handle.clone()),
+                    left: handle.clone(),
                     op: sv::ir::BinaryOp::Ne,
                     right: Box::new(sv::ir::Expr::Ident(object.clone())),
                 };
@@ -304,14 +395,68 @@ impl Ff<'_, '_> {
                 ));
                 Ok(either)
             }
-            Watched::Value { expr, sample, now } => {
-                let value = self.sampled_value(expr.clone());
-                self.assign(&sv::ir::LValue::Ident(now.clone()), &value)?;
-                let (changed, _) =
-                    self.eval_truth(&super::calls::edge_occurred_expr(sample, now, edge))?;
-                Ok(changed)
+            Watched::Counted { counts, .. } => {
+                let mut any: Option<RegisterId> = None;
+                for (counter, sample) in counts {
+                    let width = celox_design::EVENT_COUNTER_WIDTH;
+                    let now = self.b.alloc_bit(width, false);
+                    self.b.emit(SIRInstruction::Load(
+                        now,
+                        stable(*counter),
+                        SIROffset::Static(0),
+                        width,
+                    ));
+                    let id = self.m.id(sample).expect("a count sample");
+                    let before = self.b.alloc_bit(width, false);
+                    self.b.emit(SIRInstruction::Load(
+                        before,
+                        stable(id),
+                        SIROffset::Static(0),
+                        width,
+                    ));
+                    let advanced = self.b.alloc_bit(1, false);
+                    self.b
+                        .emit(SIRInstruction::Binary(advanced, now, BinaryOp::Ne, before));
+                    any = Some(match any {
+                        Some(either) => {
+                            let both = self.b.alloc_bit(1, false);
+                            self.b.emit(SIRInstruction::Binary(
+                                both,
+                                either,
+                                BinaryOp::Or,
+                                advanced,
+                            ));
+                            both
+                        }
+                        None => advanced,
+                    });
+                }
+                Ok(any.expect("a count"))
             }
         }
+    }
+
+    /// Whether `condition` reads only what the waiting process alone writes,
+    /// and constants, and calls nothing: the frame of a unit, or a process's
+    /// own variables, of a kernel that does not fork (the children of a fork
+    /// share its variables). Its value at the start of a wait is its value
+    /// at every occurrence.
+    fn frozen_condition(&self, condition: &sv::ir::Expr) -> bool {
+        if self.kernel.is_none() {
+            return self.frame_only(condition);
+        }
+        let mut calls = Vec::new();
+        collect_calls(condition, &mut calls);
+        let mut names = HashSet::default();
+        super::super::procedural::expr_idents(condition, &mut names);
+        calls.is_empty()
+            && names.iter().all(|name| {
+                self.m.constants.contains_key(name)
+                    || !self.forked
+                        && self.m.id(name).is_some_and(|id| {
+                            self.m.is_hidden(id) && !self.is_static_task_formal(id)
+                        })
+            })
     }
 
     /// Sample each of `watched` (see [`Self::property_event`]).
@@ -325,8 +470,22 @@ impl Ff<'_, '_> {
                     object,
                     count,
                     value,
+                    gate,
                 } => {
                     self.assign(&sv::ir::LValue::Ident(object.clone()), handle)?;
+                    // The property is read as the item reads it, so a null
+                    // handle faults here as there (IEEE 1800-2023 8.4).
+                    self.eval(
+                        &sv::ir::Expr::Call {
+                            callee: sv::ir::Callee::Object(Box::new(ObjectOp::Load(*field))),
+                            args: vec![Some(sv::ir::Expr::Ident(object.clone()))],
+                            arg_order: Vec::new(),
+                        },
+                        None,
+                    )?;
+                    if let Some((iff, sample)) = gate {
+                        self.assign(&sv::ir::LValue::Ident(sample.clone()), iff)?;
+                    }
                     let register = self.handle(&sv::ir::Expr::Ident(object.clone()))?;
                     let place =
                         self.constant64(u64::from(field.offset) | u64::from(field.bytes()) << 32);
@@ -345,9 +504,24 @@ impl Ff<'_, '_> {
                         self.assign(&sv::ir::LValue::Ident(value.clone()), &load)?;
                     }
                 }
-                Watched::Value { expr, sample, .. } => {
-                    let value = self.sampled_value(expr.clone());
-                    self.assign(&sv::ir::LValue::Ident(sample.clone()), &value)?;
+                Watched::Counted { counts, held } => {
+                    if let Some(held) = held {
+                        let one = self.b.alloc_bit(1, false);
+                        self.b.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+                        self.store(*held, SIROffset::Static(0), 1, one);
+                    }
+                    for (counter, sample) in counts {
+                        let width = celox_design::EVENT_COUNTER_WIDTH;
+                        let now = self.b.alloc_bit(width, false);
+                        self.b.emit(SIRInstruction::Load(
+                            now,
+                            stable(*counter),
+                            SIROffset::Static(0),
+                            width,
+                        ));
+                        let id = self.m.id(sample).expect("a count sample");
+                        self.store(id, SIROffset::Static(0), width, now);
+                    }
                 }
             }
         }
@@ -1076,17 +1250,23 @@ enum Watched {
     /// the handle denotes at a resume is read.
     Property {
         field: sv::ir::ObjectField,
-        handle: sv::ir::Expr,
+        handle: Box<sv::ir::Expr>,
         edge: sv::ir::EventEdge,
         object: String,
         count: String,
         value: Option<(String, String)>,
+        /// The item's `iff`, which reads only what the process alone
+        /// writes, and the sample of its truth taken at the start of the
+        /// wait: its value at every occurrence.
+        gate: Option<(Box<sv::ir::Expr>, String)>,
     },
-    /// Any other expression: its value, and where the value at a resume is
-    /// evaluated.
-    Value {
-        expr: sv::ir::Expr,
-        sample: String,
-        now: String,
+    /// A variable, whose occurrences of each of the item's edges the writes
+    /// count where they happen, while its gate holds (see
+    /// `celox_design::GateCounters`): the gated count of each, and its
+    /// sample.
+    Counted {
+        counts: Vec<(SourceVarId, String)>,
+        /// The variable holding 1 that gates an item without `iff`.
+        held: Option<SourceVarId>,
     },
 }

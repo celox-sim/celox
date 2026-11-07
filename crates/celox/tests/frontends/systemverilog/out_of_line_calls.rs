@@ -4989,3 +4989,103 @@ endmodule
         Ok(vec![value(2), value(2), value(2), value(4)])
     );
 }
+
+#[test]
+fn iff_of_property_items_is_taken_at_the_start_of_the_wait() {
+    // An occurrence on a property happens inside a store, where an `iff` is
+    // not evaluated: a condition that only the waiting process writes, here
+    // the task's `go`, has its value of the start at every occurrence.
+    let source = r#"`timescale 1ns/1ns
+class ev_t;
+    bit on;
+endclass
+module Top(output int yes, output int no);
+    ev_t o = new;
+    task automatic wait_on(bit go, output int at);
+        at = 0;
+        @(posedge o.on iff go);
+        at = $time;
+    endtask
+    initial wait_on(1, yes);
+    initial wait_on(0, no);
+    initial #2 o.on = 1;
+endmodule
+"#;
+    same_as_inlined(source, 2, 10, &["yes", "no"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 10, &["yes", "no"]),
+        Ok(vec![value(2), value(0)])
+    );
+    // A condition other processes write cannot be judged at the store.
+    let shared = source
+        .replace("output int no);", "output int no);\n    bit en = 1;")
+        .replace("iff go", "iff en");
+    for forced in [false, true] {
+        let run = simulate(&shared, false, forced, "interpreter", 10, &["yes"]);
+        assert!(
+            run.as_ref()
+                .is_err_and(|error| error.contains("an event control on a class property")),
+            "forced {forced}: {run:?}"
+        );
+    }
+}
+
+#[test]
+fn signals_listed_with_properties_count_each_edge() {
+    // `clk` rises and falls in one run of another process: the rise is an
+    // occurrence of `posedge clk` (IEEE 1800-2023 9.4.2), though `clk` ends
+    // as it began; the writes count it where they happen.
+    let source = r#"`timescale 1ns/1ns
+class ev_t;
+    bit on;
+endclass
+module Top(output int at);
+    ev_t o = new;
+    bit clk;
+    task automatic wait_any(output int at);
+        @(o.on or posedge clk);
+        at = $time;
+    endtask
+    initial begin
+        fork
+            wait_any(at);
+        join_none
+        #3 begin
+            clk = 1;
+            clk = 0;
+        end
+    end
+endmodule
+"#;
+    same_as_inlined(source, 2, 10, &["at"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 10, &["at"]),
+        Ok(vec![value(3)])
+    );
+}
+
+#[test]
+fn waits_on_properties_of_null_handles_fault() {
+    // The wait reads the property as the item does: through a null handle
+    // it is a null dereference, not a wait that never ends.
+    let source = r#"`timescale 1ns/1ns
+class ev_t;
+    bit on;
+endclass
+module Top(output int at);
+    ev_t none;
+    task automatic wait_on(ev_t e, output int at);
+        @(e.on);
+        at = $time;
+    endtask
+    initial wait_on(none, at);
+endmodule
+"#;
+    for forced in [false, true] {
+        let run = simulate(source, false, forced, "interpreter", 5, &["at"]);
+        assert!(
+            run.as_ref().is_err_and(|error| error.contains("null")),
+            "forced {forced}: {run:?}"
+        );
+    }
+}

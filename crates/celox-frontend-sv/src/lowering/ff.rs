@@ -7248,10 +7248,12 @@ impl Ff<'_, '_> {
             let mut private = self.m.created[first_created..].to_vec();
             private.extend([slots.resume, slots.status, slots.delay]);
             // The change counts of boxes are the module's, which every
-            // activation bumps and every waiter watches.
+            // activation bumps and every waiter watches; so is the gate that
+            // holds 1, which the writes of the activations judge.
             private.retain(|id| {
                 !self.frame_locals.contains(id)
                     && Some(*id) != self.m.id(TIME_SLOT)
+                    && Some(*id) != self.m.id(super::procedural::HELD_GATE)
                     && !self.m.box_changes.contains(id)
             });
             celox_design::ProcessFrame {
@@ -8127,7 +8129,7 @@ impl Ff<'_, '_> {
     /// The counters of a new gated term ([`GateCounters`]): `$event[k]`
     /// counts the occurrences while the gate holds, `$event[k].all` all
     /// of them.
-    fn gate_counters(&mut self) -> GateCounters<SourceVarId> {
+    pub(super) fn gate_counters(&mut self) -> GateCounters<SourceVarId> {
         let index = self.m.next_event_index();
         let counter = SvVariable {
             float: None,
@@ -8457,7 +8459,7 @@ impl Ff<'_, '_> {
 
     /// Whether `id` is a static formal of a task, which keeps one
     /// module-wide address for every call.
-    fn is_static_task_formal(&self, id: SourceVarId) -> bool {
+    pub(super) fn is_static_task_formal(&self, id: SourceVarId) -> bool {
         self.m.subroutines.values().any(|subroutine| {
             subroutine.is_task
                 && subroutine.params.iter().any(|param| {

@@ -224,6 +224,8 @@ impl Heap {
             && self.containers == other.containers
             && self.uvm == other.uvm
             && self.programs == other.programs
+            // The occurrences of watched properties decide the waits.
+            && self.edges == other.edges
     }
 
     /// The number of live strings, including `""`.

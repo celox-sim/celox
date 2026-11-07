@@ -14,7 +14,7 @@ use crate::{Handle, Heap};
 
 /// A property of an object that an event control watches, and its
 /// occurrences.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Watch {
     offset: u32,
     /// The bytes of its value; a 4-state property's mask follows them.
@@ -218,5 +218,23 @@ mod tests {
             [0, 1, 2].map(|kind| heap.edge_count(object, 0, kind)),
             [1, 1, 0]
         );
+    }
+
+    #[test]
+    fn heaps_with_other_occurrences_differ() {
+        // Two heaps whose objects hold the same bytes differ when a watched
+        // property's occurrences differ: they decide the waits.
+        let build = |pulse: bool| {
+            let mut heap = Heap::new();
+            let object = heap.new_object(7, 1);
+            heap.watch_edges(object, 0, 1, false);
+            if pulse {
+                heap.store(object, 0, 1, 1);
+            }
+            heap.store(object, 0, 1, 0);
+            heap
+        };
+        assert!(build(false).same_contents(&build(false)));
+        assert!(!build(true).same_contents(&build(false)));
     }
 }
