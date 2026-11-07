@@ -3522,3 +3522,49 @@ endmodule
     sim.run_until(10).expect("the design runs on");
     assert_eq!(sim.get(sim.signal("a")), 1u8.into());
 }
+
+#[test]
+fn ref_formals_bind_elements_of_the_callers_arrays() {
+    // `owner` passes an element of its array to `spawn2`, whose two
+    // children write it in turn, and to `bump`: the array is the caller's
+    // whole variable, shared as any is (IEEE 1800-2023 13.5.2). A unit
+    // names the element's array by the caller's storage for it, here the
+    // copy an inlined activation of `owner` has; an array in the frame of
+    // the calling unit keeps the call inlined.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c);
+    task automatic spawn2(ref int x);
+        fork
+            #1 x = x + 1;
+            #2 x = x + 10;
+        join
+    endtask
+    task automatic bump(ref int x);
+        x = x + 1;
+    endtask
+    task automatic owner(input int start, output int r, output int s);
+        int v[2];
+        v[0] = start;
+        v[1] = start;
+        spawn2(v[0]);
+        bump(v[1]);
+        bump(v[1]);
+        r = v[0];
+        s = v[1];
+    endtask
+    int zero = 0;
+    initial begin
+        owner(zero, a, b);
+        #1 owner(zero + 5, c, b);
+    end
+endmodule
+"#;
+    let names = ["a", "b", "c"];
+    // A function for each of `spawn2` and `bump` per array they bind: each
+    // inlined call of `owner` has its own copy of `v`.
+    same_as_inlined(source, 4, 20, &names);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 20, &names),
+        Ok(vec![value(11), value(7), value(16)])
+    );
+}

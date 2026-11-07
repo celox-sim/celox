@@ -304,6 +304,19 @@ impl Ff<'_, '_> {
                     let sv::ir::LValue::Select { name, msb, lsb, .. } = &**element else {
                         return None;
                     };
+                    // The array is the caller's variable, which the callee
+                    // names by its own name: an inlined activation's copy of
+                    // a local is not the variable the local's name declares.
+                    // An array in the frame of this activation has no name a
+                    // call can pass: the call stays inlined.
+                    let id = self.m.id(name)?;
+                    if self.frame_array(id, name) {
+                        return None;
+                    }
+                    let own = self.m.var(id).path.first().filter(|own| {
+                        self.m.var(id).path.len() == 1 && *own != name && self.m.id(own) == Some(id)
+                    });
+                    let array = own.cloned().unwrap_or_else(|| name.clone());
                     // The positions the call fixed are hidden variables; the
                     // static part names them by their order.
                     let mut names = HashSet::default();
@@ -328,7 +341,8 @@ impl Ff<'_, '_> {
                         .map(|(k, position)| (position.clone(), format!("#{k}")))
                         .collect();
                     let mut element = (**element).clone();
-                    if let sv::ir::LValue::Select { msb, lsb, .. } = &mut element {
+                    if let sv::ir::LValue::Select { name, msb, lsb, .. } = &mut element {
+                        *name = array;
                         *msb = super::rename_const_idents(msb, &renames);
                         *lsb = super::rename_const_idents(lsb, &renames);
                     }
@@ -532,6 +546,12 @@ impl Ff<'_, '_> {
                     total,
                     positions,
                 } => {
+                    // The array is the caller's, which the unit writes.
+                    if let sv::ir::LValue::Select { name, .. } = &**element
+                        && let Some(id) = self.m.id(name)
+                    {
+                        referents.insert(id);
+                    }
                     let mut names = HashMap::default();
                     for (k, caller) in positions.iter().enumerate() {
                         let position = self
@@ -1128,10 +1148,12 @@ impl Ff<'_, '_> {
                         continue;
                     };
                     for (position, arg) in args.iter().enumerate() {
-                        if let Some(sv::ir::Expr::Ident(name)) = arg
+                        // An element of an array reaches the array: the
+                        // variable is shared whatever part the call binds.
+                        if let Some(name) = arg.as_ref().and_then(actual_root)
                             && forks_through_ref(self.m, &callee, position)
                         {
-                            passed.insert(name.clone());
+                            passed.insert(name.to_string());
                         }
                     }
                 }
@@ -2021,7 +2043,7 @@ fn forks_through_ref(m: &ProcModule<'_>, name: &str, position: usize) -> bool {
                         continue;
                     };
                     for (next, arg) in args.iter().enumerate() {
-                        if matches!(arg, Some(sv::ir::Expr::Ident(actual)) if actual == formal) {
+                        if arg.as_ref().and_then(actual_root) == Some(formal.as_str()) {
                             pending.push((callee.clone(), next));
                         }
                     }
@@ -2033,4 +2055,14 @@ fn forks_through_ref(m: &ProcModule<'_>, name: &str, position: usize) -> bool {
         }
     }
     false
+}
+
+/// The variable a `ref` actual names, whole or in part: an element or
+/// another select of it.
+fn actual_root(actual: &sv::ir::Expr) -> Option<&str> {
+    match actual {
+        sv::ir::Expr::Ident(name) => Some(name),
+        sv::ir::Expr::Select { expr, .. } => actual_root(expr),
+        _ => None,
+    }
 }
