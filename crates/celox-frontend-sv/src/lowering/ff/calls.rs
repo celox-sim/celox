@@ -1109,19 +1109,30 @@ impl Ff<'_, '_> {
             }),
             _ => false,
         };
-        let frame_only = |this: &Self, expr: &sv::ir::Expr| this.frame_only(expr);
+        // Items that read no slot of the frame are those of a kernel's event
+        // control, over module storage, static storage of subroutines
+        // included: the kernel's terms, gates and proxies serve them.
+        if items.iter().all(|item| {
+            !self.reads_frame(&item.expr)
+                && item.iff.as_ref().is_none_or(|iff| !self.reads_frame(iff))
+        }) {
+            let mut terms = Vec::new();
+            let mut gates = Vec::new();
+            let mut samples = Vec::new();
+            self.event_terms(&items, &mut terms, &mut gates, &mut samples)?;
+            return self.suspend_on(terms, gates, samples);
+        }
         // The items whose condition the frame decides, by position.
         let mut selected = Vec::new();
         let counted = items.iter().enumerate().all(|(position, item)| {
             shared(self, &item.expr, false)
                 && match &item.iff {
                     None => true,
-                    Some(iff) if shared(self, iff, true) => true,
-                    Some(iff) if frame_only(self, iff) => {
+                    Some(iff) if self.frame_only(iff) => {
                         selected.push(position);
                         true
                     }
-                    Some(_) => false,
+                    Some(iff) => !self.reads_frame(iff),
                 }
         });
         if !counted {
@@ -1153,6 +1164,7 @@ impl Ff<'_, '_> {
                 .collect()
         };
         let mut first = None;
+        let mut samples = Vec::new();
         for chosen in &selections {
             let site_items: Vec<sv::ir::EventItem> = items
                 .iter()
@@ -1170,15 +1182,14 @@ impl Ff<'_, '_> {
                 .collect();
             let mut terms = Vec::new();
             let mut gates = Vec::new();
-            let mut samples = Vec::new();
             self.event_terms(&site_items, &mut terms, &mut gates, &mut samples)?;
-            debug_assert!(samples.is_empty());
             if gates.iter().all(Option::is_none) {
                 gates.clear();
             }
             let site = self.wait_site(terms, gates);
             first.get_or_insert(site);
         }
+        self.unit_samples(std::mem::take(&mut samples))?;
         let first = first.expect("one site at least");
         // The number of the site the frame selects now.
         let mut index = sv::ir::Expr::Literal("64'd0".into());
@@ -1188,12 +1199,12 @@ impl Ff<'_, '_> {
                 index,
                 sv::ir::BinaryOp::Add,
                 sv::ir::Expr::Mux {
-                    condition: Box::new(
+                    condition: Box::new(iff_truth(
                         items[position]
                             .iff
                             .clone()
                             .expect("a selected item has a condition"),
-                    ),
+                    )),
                     then_expr: Box::new(sv::ir::Expr::Literal(format!("64'd{weight}"))),
                     else_expr: Box::new(sv::ir::Expr::Literal("64'd0".into())),
                 },
@@ -1211,6 +1222,16 @@ impl Ff<'_, '_> {
         Ok(())
     }
 
+    /// Whether variable `name` is a slot of the frame of the unit being
+    /// lowered: an automatic of the unit or of a body it expands, or a
+    /// temporary of its lowering. A static formal or local of a static
+    /// subroutine is module-wide storage, which another call may change.
+    fn frame_slot(&self, name: &str) -> bool {
+        self.m
+            .id(name)
+            .is_some_and(|id| self.m.is_hidden(id) && self.automatic_of_unit(id, name))
+    }
+
     /// Whether `expr` reads only the frame of the unit being lowered and
     /// constants, and calls nothing: its value does not change while the
     /// process waits, since only the process writes its frame.
@@ -1220,10 +1241,49 @@ impl Ff<'_, '_> {
         let mut names = HashSet::default();
         super::super::procedural::expr_idents(expr, &mut names);
         calls.is_empty()
-            && names.iter().all(|name| {
-                self.m.constants.contains_key(name)
-                    || self.m.id(name).is_some_and(|id| self.m.is_hidden(id))
-            })
+            && names
+                .iter()
+                .all(|name| self.m.constants.contains_key(name) || self.frame_slot(name))
+    }
+
+    /// Whether `expr` reads a slot of the frame of the unit being lowered.
+    fn reads_frame(&self, expr: &sv::ir::Expr) -> bool {
+        let mut names = HashSet::default();
+        super::super::procedural::expr_idents(expr, &mut names);
+        names.iter().any(|name| self.frame_slot(name))
+    }
+
+    /// Whether `expr` reads a hidden variable that is not a slot of the
+    /// frame: static storage of a subroutine, which a concurrent call may
+    /// change.
+    fn reads_static_storage(&self, expr: &sv::ir::Expr) -> bool {
+        let mut names = HashSet::default();
+        super::super::procedural::expr_idents(expr, &mut names);
+        names.iter().any(|name| {
+            self.m
+                .id(name)
+                .is_some_and(|id| self.m.is_hidden(id) && !self.frame_slot(name))
+        })
+    }
+
+    /// Take `samples` of an event control of the unit being lowered, as a
+    /// kernel takes them before it suspends (see `Ff::event_expression`):
+    /// the proxies and their operand copies are module variables, which
+    /// every process waiting there may share, since the operands are the
+    /// module's storage, never the frame's.
+    pub(super) fn unit_samples(
+        &mut self,
+        samples: Vec<(String, sv::ir::Expr)>,
+    ) -> Result<(), sv::AnalyzerError> {
+        for (target, value) in samples {
+            if let Some(id) = self.m.id(&target)
+                && let Some(resume) = self.resume_frame()
+            {
+                resume.staging.insert(id);
+            }
+            self.assign(&sv::ir::LValue::Ident(target), &value)?;
+        }
+        Ok(())
     }
 
     /// The event control `items` by samples in the frame (see
@@ -1256,6 +1316,14 @@ impl Ff<'_, '_> {
             // a kernel's activation probe and gate counters do. A condition
             // on the frame alone cannot change during the wait: its value at
             // the start is its value at every occurrence.
+            // An operand in the static storage of a subroutine, which a
+            // concurrent call may change, neither wakes the unit nor is in
+            // its frame: the unit stays inlined, where a kernel watches it.
+            if self.reads_static_storage(&expr) {
+                return Err(unsupported(
+                    "an event control on the frame of a unit reading static storage",
+                ));
+            }
             if item.iff.as_ref().is_some_and(|iff| !self.frame_only(iff)) {
                 return Err(unsupported(
                     "an event control on the frame of a unit gated by module state",
@@ -1302,7 +1370,10 @@ impl Ff<'_, '_> {
         for (sample, _, expr, _, iff, gate) in &samples {
             self.assign(&sv::ir::LValue::Ident(sample.clone()), expr)?;
             if let (Some(iff), Some(gate)) = (iff, gate) {
-                self.assign(&sv::ir::LValue::Ident(gate.clone()), iff)?;
+                self.assign(
+                    &sv::ir::LValue::Ident(gate.clone()),
+                    &iff_truth(iff.clone()),
+                )?;
             }
         }
         let word = u64::from(site);
@@ -2560,4 +2631,19 @@ fn exclusive_selection<'a>(conditions: impl Iterator<Item = &'a sv::ir::Expr>) -
         compared = Some(left);
     }
     true
+}
+
+/// Whether the `iff` condition `iff` of an event item holds: a known
+/// nonzero value, x and z not (IEEE 1800-2023 9.4.2.3), as one bit that a
+/// kernel's gate and a unit's selection and samples alike take.
+pub(super) fn iff_truth(iff: sv::ir::Expr) -> sv::ir::Expr {
+    let not = |expr| sv::ir::Expr::Unary {
+        op: sv::ir::UnaryOp::LogicNot,
+        expr: Box::new(expr),
+    };
+    binary(
+        not(not(iff)),
+        sv::ir::BinaryOp::EqCase,
+        sv::ir::Expr::Literal("1'b1".into()),
+    )
 }

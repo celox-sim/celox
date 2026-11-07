@@ -8038,8 +8038,12 @@ impl Ff<'_, '_> {
         mut gates: Vec<Option<WaitGate<SourceVarId>>>,
         samples: Vec<(String, sv::ir::Expr)>,
     ) -> Result<(), sv::AnalyzerError> {
-        for (target, value) in samples {
-            self.assign(&sv::ir::LValue::Ident(target), &value)?;
+        if self.kernel.is_none() {
+            self.unit_samples(samples)?;
+        } else {
+            for (target, value) in samples {
+                self.assign(&sv::ir::LValue::Ident(target), &value)?;
+            }
         }
         if gates.iter().all(Option::is_none) {
             gates.clear();
@@ -8082,11 +8086,10 @@ impl Ff<'_, '_> {
         {
             return Ok((id, true));
         }
-        let not = |expr| sv::ir::Expr::Unary {
-            op: sv::ir::UnaryOp::LogicNot,
-            expr: Box::new(expr),
-        };
-        Ok((self.event_expression(&not(not(iff)), samples)?, false))
+        Ok((
+            self.event_expression(&calls::iff_truth(iff), samples)?,
+            false,
+        ))
     }
 
     /// The counters of a new gated term ([`GateCounters`]): `$event[k]`

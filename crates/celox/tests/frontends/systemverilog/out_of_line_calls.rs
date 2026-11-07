@@ -4150,3 +4150,98 @@ endmodule
         );
     }
 }
+
+#[test]
+fn iff_gates_of_units_hold_only_when_known_true() {
+    // A gate holds when its value is known nonzero (IEEE 1800-2023
+    // 9.4.2.3): an x gate never does and leaves the definite one's site in
+    // place, and a multi-bit gate holds on any set bit, not its least
+    // significant one. The gates are frame values that select the unit's
+    // wait site, or that its samples keep.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b);
+    bit pa, pb;
+    bit [1:0] bus;
+    task automatic either(logic gx, logic g1, output int at);
+        @(posedge pa iff gx or posedge pb iff g1);
+        at = $time;
+    endtask
+    task automatic masked(int i, logic [1:0] mask, output int at);
+        @(posedge bus[i] iff mask);
+        at = $time;
+    endtask
+    int zero = 0;
+    initial either(1'bx, 1'b1, a);
+    initial masked(zero, 2'b10, b);
+    initial begin
+        #2 pa = 1;
+        #2 pb = 1;
+        #2 bus[0] = 1;
+    end
+endmodule
+"#;
+    same_as_inlined(source, 2, 10, &["a", "b"]);
+    for four_state in [false, true] {
+        assert_eq!(
+            simulate(source, four_state, true, "interpreter", 10, &["a", "b"]),
+            Ok(vec![value(4), value(6)]),
+            "four_state {four_state}"
+        );
+    }
+}
+
+#[test]
+fn units_watch_static_storage_as_kernels_do() {
+    // A static task's formals and locals are module-wide storage, which a
+    // concurrent call may change while the process waits: an event control
+    // reading them gets a kernel's treatment, here the diagnostic for a
+    // static formal in an event expression and the proxy of a static local,
+    // with and without out-of-line calls.
+    let formal = r#"`timescale 1ns/1ns
+module Top(output int a);
+    bit clk;
+    task gated(input bit g, output int at);
+        @(posedge clk iff g);
+        at = $time;
+    endtask
+    bit no = 0, yes = 1;
+    initial gated(no, a);
+    initial #1 gated(yes, a);
+    initial #3 clk = 1;
+endmodule
+"#;
+    for forced in [false, true] {
+        let run = simulate(formal, false, forced, "interpreter", 10, &["a"]);
+        assert!(
+            run.as_ref()
+                .is_err_and(|error| error.contains("static task argument")),
+            "forced {forced}: {run:?}"
+        );
+    }
+    let local = r#"`timescale 1ns/1ns
+module Top(output int a, output int b);
+    task toggle(input bit on, output int at);
+        static bit flag;
+        if (on) begin
+            #2 flag = 1;
+            at = $time;
+        end else begin
+            @(posedge flag);
+            at = $time;
+        end
+    endtask
+    bit no = 0, yes = 1;
+    initial toggle(no, a);
+    initial #1 toggle(yes, b);
+endmodule
+"#;
+    let names = ["a", "b"];
+    for four_state in [false, true] {
+        let inlined = simulate(local, four_state, false, "interpreter", 10, &names);
+        assert_eq!(
+            simulate(local, four_state, true, "interpreter", 10, &names),
+            inlined,
+            "four_state {four_state}"
+        );
+    }
+}
