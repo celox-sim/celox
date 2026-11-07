@@ -332,6 +332,9 @@ fn parse_waveform_option(options: &NapiOptions) -> Result<Option<(String, celox:
 }
 
 impl ParsedOptionsCommon {
+    /// The waveform destination for native handles; WASM handles do not
+    /// take a host file.
+    #[cfg(not(target_arch = "wasm32"))]
     fn waveform_arg(&self) -> Option<(&str, celox::WaveformFormat)> {
         self.waveform
             .as_ref()

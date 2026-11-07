@@ -71,7 +71,7 @@ pub use celox_runtime::{
     BaselineRecord, DesignReflection, NbaRecord, ProcessRecord, ReflectionScope, ReflectionScopeId,
     ReflectionSignal, ReflectionSignalId, ScheduleRecord, ScheduledEvent, SignalDirection,
     StateDifference, StateFile, StateFileError, StateObject, StateRole, WaiterRecord,
-    format_state_value,
+    WaveformFormat, format_state_value,
 };
 #[doc(hidden)]
 pub use celox_runtime::{KernelSchedule, SchedulerMode, SchedulerStats};
@@ -144,8 +144,8 @@ mod host_api {
     pub use celox_runtime::{
         BackendExecutor, DerivedTickPlan, DerivedTickPlans, DerivedTickScratch, Edge, EdgeOutcome,
         EventEdge, EventEdges, FstWriter, Halt, SignalWrite, VcdSignalDesc, VcdStatistics,
-        VcdWriter, WaveformFormat, WaveformStatistics, WaveformWriter, move_signal, run_edge,
-        run_edges, run_tick, set_level,
+        VcdWriter, WaveformStatistics, WaveformWriter, move_signal, run_edge, run_edges, run_tick,
+        set_level,
     };
 
     pub struct IOContext<'a, B: SimBackend = DefaultBackend> {
