@@ -1,0 +1,6 @@
+Revision history for #3321:
+
+rev 2 (content) 2026-11-07 05:42 UTC — Drop a stray empty tmp.txt
+rev 1 (initial) 2026-11-07 05:42 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3321,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"001c769cdeee6b775e7fbf15e5a6f34030fa9873","timestamp_iso":"2026-11-07T05:42:46Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"001c769cdeee6b775e7fbf15e5a6f34030fa9873","new_sha":"feff9392da754d590fbdf498d103f9151205a356","timestamp_iso":"2026-11-07T05:42:46Z","reason":"Drop a stray empty tmp.txt","replay_sha":"67537224a900911936801877bd0c51c475af66f0","compare_url":"https://github.com/celox-sim/celox/compare/001c769cdeee6b775e7fbf15e5a6f34030fa9873...67537224a900911936801877bd0c51c475af66f0"}]} -->
