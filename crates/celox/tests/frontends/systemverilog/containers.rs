@@ -602,3 +602,48 @@ fn fixed_size_arrays_of_other_elements_check_dynamic_array_sizes() {
     let error = sim.run_until(1).unwrap_err().to_string();
     assert!(error.contains("differ in size"), "{error}");
 }
+
+#[test]
+fn fixed_size_arrays_of_container_typedefs_are_unsupported() {
+    // A fixed-size array whose elements are queues, dynamic or associative
+    // arrays has no lowering yet; declared through a typedef it is rejected
+    // with that reason, as `int a [2][$]` is, rather than typed as an array
+    // of integers.
+    for body in [
+        "typedef int queue_t [$]; queue_t f [2]; int x; initial x = $size(f);",
+        "typedef int dyn_t []; dyn_t f [2];",
+        "typedef int map_t [int]; map_t f [2];",
+        "typedef int queue_t [$]; typedef queue_t pair_t [2]; pair_t f;",
+        "typedef int queue_t [$]; initial begin queue_t f [2]; end",
+    ] {
+        let source = format!("module Top; {body} endmodule");
+        let Err(error) = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("arrays.sv"))],
+            "Top",
+        )
+        .build() else {
+            panic!("a fixed-size array of containers was accepted: {body}");
+        };
+        let error = error
+            .to_string()
+            .replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            error.contains("fixed-size unpacked array of dynamically sized arrays"),
+            "{body}: {error}"
+        );
+    }
+    // Containers of containers stay supported.
+    let source = "module Top(output int out);
+        typedef int queue_t [$];
+        queue_t m [int];
+        initial begin m[3].push_back(7); out = m[3][0]; end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("arrays.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("out")), 7u32.into());
+}
