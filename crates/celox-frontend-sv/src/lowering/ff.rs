@@ -103,6 +103,11 @@ pub(super) struct Ff<'p, 'a> {
     frame_positions: bool,
     process_control: bool,
     process_predicate: bool,
+    /// The subroutines whose inlined calls are binding a default argument
+    /// that calls, innermost last: such a call reached again inside its own
+    /// default would bind that default again, forever, so it is a
+    /// recursive call, which inlining cannot expand.
+    binding_defaults: Vec<String>,
     frame_locals: Vec<SourceVarId>,
     postponed_locals: HashSet<SourceVarId>,
     event_probes: Vec<celox_design::ProcessEventProbe<SourceVarId>>,
@@ -217,6 +222,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             frame_positions: false,
             process_control: false,
             process_predicate: false,
+            binding_defaults: Vec::new(),
             frame_locals: Vec::new(),
             postponed_locals: HashSet::default(),
             event_probes: Vec::new(),
@@ -295,12 +301,13 @@ impl<'p, 'a> Ff<'p, 'a> {
         let body_calls = calls.len();
         let mut visited = HashSet::default();
         let mut index = 0;
+        let mut seen_defaults = super::procedural::SeenDefaults::default();
         while index < calls.len() {
             if let (sv::ir::Callee::Subroutine(name), args) = calls[index].clone()
                 && let Some(subroutine) = self.m.subroutine(&name).cloned()
             {
                 // The defaults of omitted arguments run at the call.
-                default_calls(&subroutine, &args, &mut calls);
+                default_calls(&subroutine, &args, &mut calls, &mut seen_defaults);
                 if visited.insert(name) {
                     for stmt in &subroutine.body {
                         stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
@@ -646,22 +653,12 @@ impl<'p, 'a> Ff<'p, 'a> {
                     found = true;
                 }
                 stmt_calls(stmt, &mut calls);
-                // Timing controls evaluate their expressions too.
-                match stmt {
-                    sv::ir::Stmt::Wait(condition) => collect_calls(condition, &mut calls),
-                    sv::ir::Stmt::WaitEvent(items) => {
-                        for item in items {
-                            collect_calls(&item.expr, &mut calls);
-                        }
-                    }
-                    sv::ir::Stmt::Delay { amount, .. } => collect_calls(amount, &mut calls),
-                    _ => {}
-                }
             });
         }
         if found {
             return true;
         }
+        let mut seen_defaults = super::procedural::SeenDefaults::default();
         while let Some((callee, args)) = calls.pop() {
             let sv::ir::Callee::Subroutine(name) = callee else {
                 continue;
@@ -669,7 +666,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             let Some(subroutine) = self.m.subroutine(&name).cloned() else {
                 continue;
             };
-            default_calls(&subroutine, &args, &mut calls);
+            default_calls(&subroutine, &args, &mut calls, &mut seen_defaults);
             if visited.insert(name) && self.has_deferred_assertions(&subroutine.body, visited) {
                 return true;
             }
@@ -840,6 +837,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         }
         let mut assigned = HashSet::default();
         let mut visited = HashSet::default();
+        let mut seen_defaults = super::procedural::SeenDefaults::default();
         while let Some((callee, args)) = calls.pop() {
             if let sv::ir::Callee::Object(op) = &callee {
                 assigned.extend(
@@ -854,7 +852,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             let Some(subroutine) = self.m.subroutine(&name) else {
                 continue;
             };
-            default_calls(subroutine, &args, &mut calls);
+            default_calls(subroutine, &args, &mut calls, &mut seen_defaults);
             if !visited.insert(name) {
                 continue;
             }
@@ -907,6 +905,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         for stmt in stmts {
             stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
         }
+        let mut seen_defaults = super::procedural::SeenDefaults::default();
         while let Some((callee, args)) = calls.pop() {
             if let sv::ir::Callee::Object(op) = &callee {
                 for lhs in written_object_arguments(op, &args) {
@@ -967,7 +966,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             let Some(subroutine) = self.m.subroutine(&name).cloned() else {
                 continue;
             };
-            default_calls(&subroutine, &args, &mut calls);
+            default_calls(&subroutine, &args, &mut calls, &mut seen_defaults);
             for (param, arg) in subroutine.params.iter().zip(args.iter()) {
                 if param.direction.is_written()
                     && let Some(lvalues) = arg.as_ref().and_then(lvalue_from_expr)
@@ -5228,6 +5227,14 @@ impl<'p, 'a> Ff<'p, 'a> {
                         .is_some_and(|actual| self.m.makes_host_request(&actual))
             })
         });
+        // An out-of-line call passes the arguments it omits for the unit to
+        // evaluate their defaults (see `out_of_line::Function::omitted`).
+        let omitted = out_of_line.and_then(|index| {
+            self.m
+                .out_of_line()
+                .and_then(|functions| functions.functions[index].omitted.clone())
+        });
+        let mut omitted_bits = 0u64;
         for (index, position) in positions.into_iter().enumerate() {
             let keep = last_request.is_some_and(|last| index < last);
             let param = subroutine
@@ -5235,6 +5242,13 @@ impl<'p, 'a> Ff<'p, 'a> {
                 .get(position)
                 .ok_or_else(|| unsupported(format!("argument position of `{name}`")))?;
             if param.direction.is_reference() {
+                continue;
+            }
+            if let Some((_, defaulted)) = &omitted
+                && defaulted.contains(&position)
+                && matches!(args.get(position), None | Some(None))
+            {
+                omitted_bits |= 1 << position;
                 continue;
             }
             let id = self
@@ -5301,8 +5315,19 @@ impl<'p, 'a> Ff<'p, 'a> {
                     ))
                 })?;
                 let actual = self.string_conversion(id, actual);
+                let defaulted = matches!(args.get(position), None | Some(None));
                 let actual = if self.m.calls(&actual) {
-                    self.hoist(&actual)?
+                    if defaulted {
+                        if self.binding_defaults.iter().any(|active| active == name) {
+                            return Err(unsupported(format!("recursive call of `{name}`")));
+                        }
+                        self.binding_defaults.push(name.to_string());
+                    }
+                    let hoisted = self.hoist(&actual);
+                    if defaulted {
+                        self.binding_defaults.pop();
+                    }
+                    hoisted?
                 } else {
                     actual
                 };
@@ -5352,6 +5377,14 @@ impl<'p, 'a> Ff<'p, 'a> {
                 let value = self.default_reg(id);
                 inputs.push((id, self.kept_input(id, value, keep)));
             }
+        }
+        if let (Some(index), Some((slot, _))) = (out_of_line, &omitted) {
+            let functions = self.m.out_of_line().expect("calling out of line");
+            let id = functions.functions[index].slots[*slot].id;
+            let bits = self.b.alloc_bit(64, false);
+            self.b
+                .emit(SIRInstruction::Imm(bits, SIRValue::new(omitted_bits)));
+            inputs.push((id, Ok(bits)));
         }
         // The dynamic parts of the places pass through the frame: the
         // handle of a property, the positions of an element, and the value
@@ -6958,16 +6991,6 @@ impl Ff<'_, '_> {
                 stmt.walk(&mut |stmt| {
                     found |= matches!(stmt, sv::ir::Stmt::Fork { .. } | sv::ir::Stmt::WaitFork);
                     stmt_calls(stmt, &mut calls);
-                    match stmt {
-                        sv::ir::Stmt::Wait(condition) => collect_calls(condition, &mut calls),
-                        sv::ir::Stmt::WaitEvent(items) => {
-                            for item in items {
-                                collect_calls(&item.expr, &mut calls);
-                            }
-                        }
-                        sv::ir::Stmt::Delay { amount, .. } => collect_calls(amount, &mut calls),
-                        _ => {}
-                    }
                 });
             }
             if found {
@@ -7052,16 +7075,6 @@ impl Ff<'_, '_> {
             for stmt in body {
                 stmt.walk(&mut |stmt| {
                     stmt_calls(stmt, &mut calls);
-                    match stmt {
-                        sv::ir::Stmt::Wait(condition) => collect_calls(condition, &mut calls),
-                        sv::ir::Stmt::WaitEvent(items) => {
-                            for item in items {
-                                collect_calls(&item.expr, &mut calls);
-                            }
-                        }
-                        sv::ir::Stmt::Delay { amount, .. } => collect_calls(amount, &mut calls),
-                        _ => {}
-                    }
                 });
             }
             while let Some((callee, args)) = calls.pop() {
