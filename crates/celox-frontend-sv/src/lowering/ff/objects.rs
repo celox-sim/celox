@@ -19,8 +19,8 @@ impl Ff<'_, '_> {
     }
 
     /// The property and the object handle of event expression `expr` when it
-    /// is a property of an object whose stores count (see
-    /// [`property_changes`]): the heap counts its occurrences in each object
+    /// is a property of an object, or a box, whose stores count (see
+    /// `ProcModule::change_counter`): the heap counts its occurrences in each object
     /// an event control watches (see `celox_heap::ops::OBJECT_EDGE_WATCH`).
     fn watched_property(&self, expr: &sv::ir::Expr) -> Option<(sv::ir::ObjectField, sv::ir::Expr)> {
         let sv::ir::Expr::Call {
@@ -34,8 +34,9 @@ impl Ff<'_, '_> {
         let (ObjectOp::Load(field), [Some(handle)]) = (&**op, args.as_slice()) else {
             return None;
         };
-        (field.key != 0 && self.m.id(&property_changes(field.key)).is_some())
-            .then(|| (*field, handle.clone()))
+        self.m
+            .change_counter(field)
+            .map(|_| (*field, handle.clone()))
     }
 
     /// A variable holding a sample of an event control's item at a wait, of
@@ -122,10 +123,7 @@ impl Ff<'_, '_> {
             let float = self.m.expr_float_precision(&expr);
             if let Some((field, handle)) = self.watched_property(&expr) {
                 self.check_event_purity(&handle)?;
-                let changes = self
-                    .m
-                    .id(&property_changes(field.key))
-                    .expect("a watched property");
+                let changes = self.m.change_counter(&field).expect("a watched property");
                 terms.push((changes, CounterKind::Changes));
                 // A handle in the frame or in the process cannot change while
                 // the process waits; one in module storage can.

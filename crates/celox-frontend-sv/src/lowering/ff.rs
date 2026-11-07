@@ -8945,9 +8945,9 @@ pub(crate) fn watched_properties(
     for expr in &events {
         for op in heap_reads(subroutine, expr) {
             if let sv::ir::ObjectOp::Load(field) = op
-                && field.key != 0
+                && let sv::ir::ChangeKey::Property(key) = field.key
             {
-                keys.insert(field.key);
+                keys.insert(key);
             }
         }
     }
