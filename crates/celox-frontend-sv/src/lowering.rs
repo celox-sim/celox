@@ -6729,6 +6729,14 @@ fn lower_initial_processes(
                         ..site.clone()
                     }
                 }));
+                nba_sites.extend(
+                    pm.function_nba_sites
+                        .iter()
+                        .map(|site| celox_design::NbaSite {
+                            process: index,
+                            ..site.clone()
+                        }),
+                );
                 host_request_sites.extend(pm.function_host_request_sites.iter().map(|site| {
                     celox_design::HostRequestSite {
                         process: celox_design::SiteProcess::function(index),
