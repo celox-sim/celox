@@ -2,7 +2,7 @@
 //! and the lowering of a subroutine body into its function unit.
 
 use super::super::out_of_line::{
-    Function, Outcome, Reason, Slot, automatic_names, frame_addr, layout,
+    Function, Outcome, Place, Reason, Slot, automatic_names, frame_addr, function_key, layout,
 };
 use super::*;
 
@@ -24,6 +24,22 @@ pub(super) struct FrameContext {
     /// Registers holding a frame size not known yet (see
     /// [`Function::size_patches`]).
     size_patches: Vec<(RegisterId, usize)>,
+    /// The `ref` formals the body names as variables of the module (see
+    /// [`Place::Variable`]), each with the variable.
+    renames: Vec<(String, SourceVarId)>,
+    /// The `ref` formals bound to a property or an element, whose handle
+    /// or positions are slots of the frame.
+    aliases: Vec<super::references::Alias>,
+    /// The first variable the lowering of the unit created: those from it
+    /// on that the unit touches are slots of its frame.
+    start: SourceVarId,
+    /// Whether its automatic unpacked arrays stay module variables (see
+    /// `ProcModule::single_activation`); otherwise they are slots.
+    single: bool,
+    /// The variable of the omitted arguments of the call and the positions
+    /// of the formals whose defaults the unit evaluates (see
+    /// [`Function::omitted`]).
+    omitted: Option<(String, Vec<usize>)>,
 }
 
 /// The resume slots of a resumable unit being lowered, and its resume
@@ -45,14 +61,16 @@ struct ResumeFrame {
 }
 
 impl Ff<'_, '_> {
-    /// The function a call of `name` enters, when the call goes out of line.
+    /// The function a call of `name` enters, when the call goes out of line,
+    /// with its `ref` formals bound to `places`.
     pub(super) fn out_of_line_callee(
         &mut self,
         name: &str,
         subroutine: &sv::ir::Subroutine,
         args: &[Option<sv::ir::Expr>],
+        places: Option<&[Place]>,
     ) -> Result<Option<usize>, sv::AnalyzerError> {
-        if self.m.out_of_line().is_none() {
+        if !self.m.out_of_line_policy(name) {
             return Ok(None);
         }
         if let Some(reason) = self.m.out_of_line_reason(name) {
@@ -70,23 +88,44 @@ impl Ff<'_, '_> {
             );
             return Ok(None);
         }
-        if !recursive && self.m.constant_arguments(subroutine, args) {
+        // A level wait's predicate observes the events whose `triggered` it
+        // reads, which the inlined body tells the host (see
+        // `ProcessState::observes_events`).
+        if self.process_predicate && self.m.process_state(name).observes_events {
+            self.record_outcome(
+                name,
+                Outcome::Inlined(Reason::Other("level wait observes its events".to_string())),
+            );
+            return Ok(None);
+        }
+        // A call of a subroutine on a cycle of the call graph, or over the
+        // size threshold, goes out of line whatever its arguments: neither
+        // folds by inlining.
+        if !recursive
+            && !self.m.out_of_line_whatever_arguments(name)
+            && self.m.constant_arguments(subroutine, args)
+        {
             self.record_outcome(
                 name,
                 Outcome::Inlined(Reason::Other("constant arguments".to_string())),
             );
             return Ok(None);
         }
+        let Some(places) = places else {
+            self.record_outcome(name, Outcome::Inlined(Reason::RefFormal));
+            return Ok(None);
+        };
+        let key = function_key(name, places);
         let Some(functions) = self.m.out_of_line() else {
             return Ok(None);
         };
-        if let Some(reason) = functions.rejected.get(name).cloned() {
+        if let Some(reason) = functions.rejected.get(&key).cloned() {
             self.record_outcome(name, Outcome::Inlined(reason));
             return Ok(None);
         }
-        let index = match functions.by_name.get(name).copied() {
+        let index = match functions.by_name.get(&key).copied() {
             Some(index) => index,
-            None => match self.lower_function(name) {
+            None => match self.lower_function(name, &key, places) {
                 Ok(index) => index,
                 Err(reason) => {
                     self.record_outcome(name, Outcome::Inlined(reason));
@@ -138,8 +177,8 @@ impl Ff<'_, '_> {
             let function = &functions.functions[index];
             let in_frame = storage.iter().all(|&id| function.slot(id).is_some());
             let touched = functions.transitive(index);
-            let private = touched.is_none_or(|(reads, writes)| {
-                reads.iter().chain(&writes).any(|&id| self.m.is_hidden(id))
+            let private = touched.as_ref().is_none_or(|(reads, writes)| {
+                reads.iter().chain(writes).any(|&id| self.m.is_hidden(id))
             });
             if !in_frame || private {
                 self.record_outcome(
@@ -150,9 +189,183 @@ impl Ff<'_, '_> {
                 );
                 return Ok(None);
             }
+            // The process's outputs are the variables its own statements
+            // assign: a function may write only the static storage of
+            // subroutines, which the process does not own, and none that
+            // assembly instruments, which it does in the process's own
+            // stores only (comb-observer captures).
+            let persistent = self.m.static_storage();
+            if touched.is_some_and(|(_, writes)| {
+                writes
+                    .iter()
+                    .any(|id| !persistent.contains(id) || self.m.is_observed(*id))
+            }) {
+                self.record_outcome(
+                    name,
+                    Outcome::Inlined(Reason::Other(
+                        "module state in a combinational process".to_string(),
+                    )),
+                );
+                return Ok(None);
+            }
         }
         self.record_outcome(name, Outcome::OutOfLine);
         Ok(Some(index))
+    }
+
+    /// The places of the `ref` formals of `subroutine` for a call that binds
+    /// them as `references` (the formals that name a variable, with it)
+    /// and `aliases` (the others), in the order of the formals; `None` when
+    /// one has no place an out-of-line call can pass: a formal of unpacked
+    /// structure type, or one automatic of the calling unit bound to two
+    /// formals, which the call copies.
+    pub(super) fn ref_places(
+        &self,
+        subroutine: &sv::ir::Subroutine,
+        references: &[(String, SourceVarId, SourceVarId)],
+        aliases: &[super::references::Alias],
+        actual_names: &HashMap<String, String>,
+    ) -> Option<Vec<Place>> {
+        let mut places = Vec::new();
+        let mut copied = HashSet::default();
+        for param in subroutine
+            .params
+            .iter()
+            .filter(|param| param.direction.is_reference())
+        {
+            if !param.leaves.is_empty() {
+                return None;
+            }
+            if let Some(&(_, _, target)) = references
+                .iter()
+                .find(|(formal, _, _)| *formal == param.name)
+            {
+                let name = actual_names.get(&param.name)?;
+                // An array in the frame of this activation has no place a
+                // call can pass: the call stays inlined, where the formal
+                // names the slot.
+                if self.frame_array(target, name) {
+                    return None;
+                }
+                if self.frame_variable(target, name) {
+                    if !copied.insert(target) {
+                        return None;
+                    }
+                    places.push(Place::Frame {
+                        id: target,
+                        name: name.clone(),
+                    });
+                } else {
+                    places.push(Place::Variable(target));
+                }
+                continue;
+            }
+            let alias = aliases.iter().find(|alias| alias.formal == param.name)?;
+            places.push(match &alias.target {
+                super::references::Target::Property { handle, field } => Place::Property {
+                    // Places of properties that no wait watches share a
+                    // function whichever property they are.
+                    field: sv::ir::ObjectField {
+                        key: if self.m.id(&property_changes(field.key)).is_some() {
+                            field.key
+                        } else {
+                            0
+                        },
+                        ..*field
+                    },
+                    handle: handle.clone(),
+                },
+                super::references::Target::Element {
+                    element,
+                    signed,
+                    width,
+                    total,
+                } => {
+                    let sv::ir::LValue::Select { name, msb, lsb, .. } = &**element else {
+                        return None;
+                    };
+                    // The positions the call fixed are hidden variables; the
+                    // static part names them by their order.
+                    let mut names = HashSet::default();
+                    let read = sv::ir::Expr::Select {
+                        expr: Box::new(sv::ir::Expr::Literal("1'b0".into())),
+                        msb: msb.clone(),
+                        lsb: lsb.clone(),
+                        signed: false,
+                    };
+                    super::super::procedural::expr_idents(&read, &mut names);
+                    let mut positions: Vec<String> = names
+                        .into_iter()
+                        .filter(|position| position != name)
+                        .filter(|position| {
+                            self.m.id(position).is_some_and(|id| self.m.is_hidden(id))
+                        })
+                        .collect();
+                    positions.sort_unstable();
+                    let renames: HashMap<String, String> = positions
+                        .iter()
+                        .enumerate()
+                        .map(|(k, position)| (position.clone(), format!("#{k}")))
+                        .collect();
+                    let mut element = (**element).clone();
+                    if let sv::ir::LValue::Select { msb, lsb, .. } = &mut element {
+                        *msb = super::rename_const_idents(msb, &renames);
+                        *lsb = super::rename_const_idents(lsb, &renames);
+                    }
+                    Place::Element {
+                        element: Box::new(element),
+                        signed: *signed,
+                        width: *width,
+                        total: *total,
+                        positions,
+                    }
+                }
+            });
+        }
+        Some(places)
+    }
+
+    /// Whether variable `id`, named `name`, is an automatic of the unit
+    /// being lowered that a call copies into a callee's frame and back (see
+    /// [`Place::Frame`]): one that is not an unpacked array, which is a
+    /// module variable that a callee names, or a slot (see
+    /// [`Self::frame_array`]).
+    fn frame_variable(&self, id: SourceVarId, name: &str) -> bool {
+        self.m.var(id).array_dims.is_empty() && self.automatic_of_unit(id, name)
+    }
+
+    /// Whether variable `id`, named `name`, is an automatic unpacked array
+    /// that is a slot of the frame of the unit being lowered: one of a unit
+    /// that can have several live activations.
+    fn frame_array(&self, id: SourceVarId, name: &str) -> bool {
+        !self.m.var(id).array_dims.is_empty()
+            && self.frame.as_ref().is_some_and(|frame| !frame.single)
+            && self.automatic_of_unit(id, name)
+    }
+
+    /// Whether variable `id`, named `name`, is an automatic of the unit
+    /// being lowered: a slot of its own, an automatic of a subroutine whose
+    /// body it expands, or a variable its lowering created.
+    fn automatic_of_unit(&self, id: SourceVarId, name: &str) -> bool {
+        let Some(frame) = &self.frame else {
+            return false;
+        };
+        let own = self
+            .m
+            .calls
+            .as_deref()
+            .and_then(|graph| graph.out_of_line.as_ref())
+            .is_some_and(|functions| functions.functions[frame.function].slot(id).is_some());
+        own || id.0 >= frame.start.0
+            || self.active_calls.iter().any(|active| {
+                self.m.subroutine(active).is_some_and(|subroutine| {
+                    automatic_names(subroutine).any(|local| local == name)
+                        && !subroutine
+                            .params
+                            .iter()
+                            .any(|param| param.direction.is_reference() && param.name == name)
+                })
+            })
     }
 
     fn record_outcome(&mut self, name: &str, outcome: Outcome) {
@@ -164,7 +377,7 @@ impl Ff<'_, '_> {
     /// Lower subroutine `name` into a new function unit, or say why it
     /// cannot be. A failed lowering leaves nothing behind, so the call is
     /// inlined as if it had never been tried.
-    fn lower_function(&mut self, name: &str) -> Result<usize, Reason> {
+    fn lower_function(&mut self, name: &str, key: &str, places: &[Place]) -> Result<usize, Reason> {
         let subroutine = self
             .m
             .subroutine(name)
@@ -172,7 +385,7 @@ impl Ff<'_, '_> {
             .ok_or_else(|| Reason::Other(format!("no subroutine `{name}`")))?;
         let checkpoint = self.m.checkpoint();
         let names = self.m.declare_names();
-        let lowered = self.lower_function_from(&subroutine);
+        let lowered = self.lower_function_from(&subroutine, key, places);
         self.m.restore_names(names);
         match lowered {
             Ok(index) => {
@@ -183,14 +396,19 @@ impl Ff<'_, '_> {
             Err(reason) => {
                 self.m.rollback(checkpoint);
                 if let Some(functions) = self.m.out_of_line() {
-                    functions.rejected.insert(name.to_string(), reason.clone());
+                    functions.rejected.insert(key.to_string(), reason.clone());
                 }
                 Err(reason)
             }
         }
     }
 
-    fn lower_function_from(&mut self, subroutine: &sv::ir::Subroutine) -> Result<usize, Reason> {
+    fn lower_function_from(
+        &mut self,
+        subroutine: &sv::ir::Subroutine,
+        key: &str,
+        places: &[Place],
+    ) -> Result<usize, Reason> {
         let process = self.m.process_state(&subroutine.name);
         // The simulation time is a module variable, which the unit reads.
         if process.time {
@@ -250,6 +468,122 @@ impl Ff<'_, '_> {
             slots.push(self.slot_of(seed.0));
             dist_seed = Some(seed);
         }
+        // The dynamic parts of the places of the `ref` formals (see
+        // [`Place`]), which the caller passes.
+        let mut place_slots = Vec::new();
+        let mut renames = Vec::new();
+        let mut aliases = Vec::new();
+        let mut referents = HashSet::default();
+        let references = subroutine
+            .params
+            .iter()
+            .filter(|param| param.direction.is_reference());
+        for (param, place) in references.zip(places) {
+            let mut own = Vec::new();
+            match place {
+                Place::Variable(id) => {
+                    renames.push((param.name.clone(), *id));
+                    referents.insert(*id);
+                }
+                Place::Property { field, .. } => {
+                    let (handle, handle_name) =
+                        self.m
+                            .temp(super::references::OBJECT_TEMP, 32, false, false);
+                    self.m
+                        .variables
+                        .get_mut(&handle)
+                        .expect("a temp")
+                        .value_kind = celox_design::ValueKind::ObjRef;
+                    own.push(slots.len());
+                    slots.push(self.slot_of(handle));
+                    aliases.push(super::references::Alias {
+                        formal: param.name.clone(),
+                        source_name: param.source_name.clone(),
+                        target: super::references::Target::Property {
+                            handle: handle_name,
+                            field: *field,
+                        },
+                    });
+                }
+                Place::Element {
+                    element,
+                    signed,
+                    width,
+                    total,
+                    positions,
+                } => {
+                    let mut names = HashMap::default();
+                    for (k, caller) in positions.iter().enumerate() {
+                        let position = self
+                            .m
+                            .id(caller)
+                            .map(|id| self.m.var(id).clone())
+                            .ok_or_else(|| Reason::Other(format!("position `{caller}`")))?;
+                        let (temp, temp_name) = self.m.temp(
+                            "position",
+                            position.width,
+                            position.signed,
+                            position.is_4state,
+                        );
+                        own.push(slots.len());
+                        slots.push(self.slot_of(temp));
+                        names.insert(format!("#{k}"), temp_name);
+                    }
+                    let mut element = (**element).clone();
+                    if let sv::ir::LValue::Select { msb, lsb, .. } = &mut element {
+                        *msb = super::rename_const_idents(msb, &names);
+                        *lsb = super::rename_const_idents(lsb, &names);
+                    }
+                    aliases.push(super::references::Alias {
+                        formal: param.name.clone(),
+                        source_name: param.source_name.clone(),
+                        target: super::references::Target::Element {
+                            element: Box::new(element),
+                            signed: *signed,
+                            width: *width,
+                            total: *total,
+                        },
+                    });
+                }
+                Place::Frame { .. } => {
+                    let id = self
+                        .m
+                        .id(&param.name)
+                        .ok_or_else(|| Reason::Other(format!("formal `{}`", param.name)))?;
+                    own.push(slots.len());
+                    slots.push(self.slot_of(id));
+                }
+            }
+            place_slots.push(own);
+        }
+        // The defaults of the input formals are evaluated by the unit, static
+        // or automatic (see [`Function::omitted`]).
+        let defaulted: Vec<usize> = subroutine
+            .params
+            .iter()
+            .enumerate()
+            .filter(|(position, param)| {
+                *position < 64
+                    && param.default.is_some()
+                    && param.direction.is_read()
+                    && !param.direction.is_written()
+                    && !param.direction.is_reference()
+                    && param.leaves.is_empty()
+            })
+            .map(|(position, _)| position)
+            .collect();
+        let mut omitted = None;
+        let mut omitted_slot = None;
+        if !defaulted.is_empty() {
+            let (id, name) = self.m.temp("call_omitted", 64, false, false);
+            omitted_slot = Some((slots.len(), defaulted.clone()));
+            slots.push(self.slot_of(id));
+            omitted = Some((name, defaulted));
+        }
+        // An automatic unpacked array has no frame slot: it stays a module
+        // variable when no two activations of the unit can be live at once
+        // (see `ProcModule::single_activation`).
+        let single = self.m.single_activation(&subroutine.name);
         for name in automatic_names(subroutine) {
             let Some(id) = self.m.id(name) else {
                 continue;
@@ -258,14 +592,18 @@ impl Ff<'_, '_> {
                 continue;
             }
             if !self.m.var(id).array_dims.is_empty() {
-                return Err(Reason::Other("unpacked array in the frame".to_string()));
+                if single {
+                    continue;
+                }
+                array_slot(self.m.var(id))?;
             }
             slots.push(self.slot_of(id));
         }
         let functions = self.m.out_of_line().expect("lowering out of line");
         let index = functions.functions.len();
         functions.functions.push(Function {
-            name: subroutine.name.clone(),
+            key: key.to_string(),
+            places: place_slots,
             slots,
             unit: None,
             size: 0,
@@ -278,8 +616,9 @@ impl Ff<'_, '_> {
             dist_seed: process_slots.1,
             resume: resume_slot,
             calls: Vec::new(),
+            omitted: omitted_slot,
         });
-        functions.by_name.insert(subroutine.name.clone(), index);
+        functions.by_name.insert(key.to_string(), index);
         functions.lowering += 1;
         let frame = FrameContext {
             function: index,
@@ -289,13 +628,26 @@ impl Ff<'_, '_> {
             dist_seed,
             resume,
             size_patches: Vec::new(),
+            renames,
+            aliases,
+            start,
+            single,
+            omitted,
         };
         let lowered = Ff::new(&mut *self.m, 0).lower_function_unit(subroutine, frame);
         let functions = self.m.out_of_line().expect("lowering out of line");
         functions.lowering -= 1;
         let (unit, size_patches, staging, calls) =
             lowered.map_err(|error| Reason::Other(error.to_string()))?;
-        self.finish_function(index, unit, size_patches, start, &staging)?;
+        self.finish_function(
+            index,
+            unit,
+            size_patches,
+            start,
+            &staging,
+            &referents,
+            single,
+        )?;
         let functions = self.m.out_of_line().expect("lowering out of line");
         functions.functions[index].calls = calls;
         Ok(index)
@@ -315,6 +667,7 @@ impl Ff<'_, '_> {
             width: variable.width,
             four_state: variable.is_4state && self.m.four_state,
             kind: variable.value_kind,
+            element_width: super::super::unpacked_element_width(variable),
         }
     }
 
@@ -359,8 +712,69 @@ impl Ff<'_, '_> {
                 .ok_or_else(|| unsupported(format!("result of `{}`", subroutine.name)))?;
             self.init_default(id);
         }
+        // The body names the variable of each `ref` formal bound to one,
+        // and reads and writes the property or element of the others
+        // through the slots of the handle and positions.
+        let (renames, aliases) = self
+            .frame
+            .as_mut()
+            .map(|frame| {
+                (
+                    std::mem::take(&mut frame.renames),
+                    std::mem::take(&mut frame.aliases),
+                )
+            })
+            .unwrap_or_default();
+        let mut body = subroutine.body.clone();
+        // A formal the call omits takes its default, evaluated here.
+        if let Some((mask, positions)) = self.frame.as_mut().and_then(|frame| frame.omitted.take())
+        {
+            let prologue = positions.into_iter().map(|position| {
+                let param = &subroutine.params[position];
+                let bit = sv::ir::ConstExpr::Literal(position.to_string());
+                sv::ir::Stmt::If {
+                    condition: sv::ir::Expr::Select {
+                        expr: Box::new(sv::ir::Expr::Ident(mask.clone())),
+                        msb: bit.clone(),
+                        lsb: bit,
+                        signed: false,
+                    },
+                    then_body: vec![sv::ir::Stmt::Assign {
+                        lhs: sv::ir::LValue::Ident(param.name.clone()),
+                        rhs: param.default.clone().expect("a defaulted formal"),
+                        nonblocking: false,
+                    }],
+                    else_body: Vec::new(),
+                }
+            });
+            body.splice(0..0, prologue);
+        }
+        let (constants, parameter_types) = (self.m.constants, self.m.parameter_types);
+        let constant = |position: &sv::ir::ConstExpr| {
+            sv::typecheck::eval_const_expr_with_types(position, constants, parameter_types)
+        };
+        self.split_property_concats(&mut body, &aliases);
+        for alias in &aliases {
+            body = alias.rewrite(body, &constant)?;
+        }
+        let originals: Vec<(String, Option<SourceVarId>)> = renames
+            .iter()
+            .map(|(formal, target)| {
+                (
+                    formal.clone(),
+                    self.m.name_to_id.insert(formal.clone(), *target),
+                )
+            })
+            .collect();
         self.active_calls.push(subroutine.name.clone());
-        if self.exec_block(&subroutine.body)? {
+        let falls = self.exec_block(&body);
+        for (formal, original) in originals {
+            match original {
+                Some(id) => self.m.name_to_id.insert(formal, id),
+                None => self.m.name_to_id.remove(&formal),
+            };
+        }
+        if falls? {
             self.jump(return_block);
         }
         self.b.switch_to_block(return_block);
@@ -626,6 +1040,8 @@ impl Ff<'_, '_> {
         size_patches: Vec<(RegisterId, usize)>,
         start: SourceVarId,
         staging: &HashSet<SourceVarId>,
+        referents: &HashSet<SourceVarId>,
+        single: bool,
     ) -> Result<(), Reason> {
         let end = self.m.next_id;
         let functions = self.m.out_of_line().expect("lowering out of line");
@@ -642,8 +1058,14 @@ impl Ff<'_, '_> {
         // The automatic storage of the subroutines inlined into the body:
         // each activation needs its own as much as the function's.
         let automatic = self.m.automatic_storage();
+        // The automatic arrays that stay module variables.
+        let mut in_place = HashSet::default();
         for id in accessed {
-            if slots.iter().any(|slot| slot.id == id) || staging.contains(&id) {
+            // The variable a `ref` formal names is the caller's.
+            if slots.iter().any(|slot| slot.id == id)
+                || staging.contains(&id)
+                || referents.contains(&id)
+            {
                 continue;
             }
             let created = (start.0..end.0).contains(&id.0);
@@ -657,18 +1079,26 @@ impl Ff<'_, '_> {
                 ));
             }
             if !variable.array_dims.is_empty() {
-                return Err(Reason::Other("unpacked array in the frame".to_string()));
+                // The automatic arrays of the bodies the unit inlines too:
+                // they are live only within an activation of the unit.
+                if single && !created {
+                    in_place.insert(id);
+                    continue;
+                }
+                array_slot(variable)?;
             }
             slots.push(self.slot_of(id));
         }
-        // Static storage of subroutines is the only module state a function
-        // may write: it is shared by every call, inlined or not. Assembly
-        // instruments the stores into what is observed, which only the
-        // stores of the units the runtime runs can be.
+        // A function may write the module's variables, static storage of
+        // subroutines and static class properties among them, which every
+        // call shares, inlined or not; not the hidden ones the lowering
+        // keeps for a process, nor what is observed: assembly instruments
+        // the stores into that, which only the stores of the units the
+        // runtime runs can be.
         let persistent = self.m.static_storage();
-        let frame: HashMap<SourceVarId, (usize, SourceVarId)> = slots
+        let frame: HashMap<SourceVarId, (usize, SourceVarId, Option<usize>)> = slots
             .iter()
-            .map(|slot| (slot.id, (slot.width, slot.address)))
+            .map(|slot| (slot.id, (slot.width, slot.address, slot.element_width)))
             .collect();
         let mut reads = HashSet::default();
         let mut writes = HashSet::default();
@@ -704,19 +1134,44 @@ impl Ff<'_, '_> {
                     }
                     _ => continue,
                 };
-                if let Some(&(slot_width, address)) = frame.get(&addr.var_id) {
-                    match offset {
-                        SIROffset::Static(offset) if offset + width <= slot_width => {}
+                if let Some(&(slot_width, address, element)) = frame.get(&addr.var_id) {
+                    // A slot holding an array is also accessed at positions
+                    // computed at run time, within one element, as the
+                    // lowering accesses an array of the state.
+                    match (offset, element) {
+                        (SIROffset::Static(offset), _)
+                        | (
+                            SIROffset::PackedElements {
+                                bit_offset: offset, ..
+                            },
+                            Some(_),
+                        ) if offset + width <= slot_width => {}
+                        (
+                            SIROffset::Element {
+                                element_width,
+                                bit_offset,
+                                dynamic_bit_offset,
+                                ..
+                            },
+                            Some(element),
+                        ) if *element_width == element
+                            && width <= element
+                            && (dynamic_bit_offset.is_some() || bit_offset + width <= element) => {}
+                        (SIROffset::Dynamic(_), Some(element)) if width <= element => {}
                         _ => return Err(other("dynamic frame access")),
                     }
                     *addr = frame_addr(address);
                 } else if addr.region != STABLE_REGION {
                     return Err(other("non-stable state access"));
                 } else if store {
-                    if !persistent.contains(&addr.var_id) && !staging.contains(&addr.var_id) {
-                        return Err(other("writes module state"));
+                    if self.m.is_hidden(addr.var_id)
+                        && !persistent.contains(&addr.var_id)
+                        && !staging.contains(&addr.var_id)
+                        && !in_place.contains(&addr.var_id)
+                    {
+                        return Err(other("writes hidden module state"));
                     }
-                    if self.m.is_observed(addr.var_id) {
+                    if self.m.is_excluded(addr.var_id) {
                         return Err(other("stores into observed storage"));
                     }
                     writes.insert(addr.var_id);
@@ -1088,4 +1543,15 @@ impl Ff<'_, '_> {
         self.b.seal_block(SIRTerminator::Error(code));
         self.b.switch_to_block(next);
     }
+}
+
+/// Check that unpacked array `variable` can be a slot of a frame: one of
+/// bits, which the collector need not scan element by element.
+fn array_slot(variable: &SvVariable) -> Result<(), Reason> {
+    if variable.value_kind != celox_design::ValueKind::Bits {
+        return Err(Reason::Other(
+            "unpacked array of handles in the frame".to_string(),
+        ));
+    }
+    Ok(())
 }

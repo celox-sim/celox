@@ -15,6 +15,7 @@ mod references;
 mod selected;
 mod streams;
 mod strings;
+pub(super) mod type_references;
 pub(super) mod value_selects;
 pub(super) use calls::{statement as call_statement, statement_root as call_statement_root};
 pub(super) use chandles::{
@@ -25,8 +26,8 @@ pub(super) use chandles::{
 pub(super) use direct::bind_argument;
 pub(super) use direct::{
     arguments, bind_chandle_value, bind_value, call_name as native_name, callable_name,
-    cast_target_native, formal_arguments, format_arguments, member_context, real_value,
-    remove_real_division_guards, string_literal_bytes, targets_tagged_union, ungroup,
+    cast_target_class, cast_target_native, formal_arguments, format_arguments, member_context,
+    real_value, remove_real_division_guards, string_literal_bytes, targets_tagged_union, ungroup,
 };
 pub(super) use enums::{domain as enum_domain, membership as enum_membership};
 pub(super) use format_patterns::{
@@ -48,8 +49,8 @@ pub(super) use objects::{
     static_property_declaration as object_static_property_declaration, this as object_this,
 };
 pub(super) use streams::{
-    Unpack as StreamUnpack, free as stream_free, is_stream, take as stream_take,
-    unpack as stream_unpack,
+    Receiver as StreamReceiver, Unpack as StreamUnpack, free as stream_free, is_stream,
+    pack as pack_stream, take as stream_take, unpack as stream_unpack,
 };
 pub(super) use strings::{
     call as string_call, fixed_array_element as fixed_string_array_element,

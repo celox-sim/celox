@@ -95,6 +95,7 @@ fn strobe_rejects_unsupported_late_evaluation_contexts() {
     for body in [
         "int i; initial $strobe(i++);",
         "int i; initial $strobe((i=2));",
+        "int i; real r = 1.5; initial $strobe($cast(i, r), i);",
         "int i; function int f(); return i; endfunction initial $strobe(f());",
         "task t(input int i); $strobe(i); endtask initial t(1);",
         "initial begin automatic int i=2; $strobe(i); end",

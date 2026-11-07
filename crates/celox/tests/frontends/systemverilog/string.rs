@@ -157,3 +157,48 @@ fn nonblocking_string_array_character_assignments_remain_unsupported() {
         "{error}"
     );
 }
+
+#[test]
+fn string_literals_replicated_by_a_variable_count() {
+    // A replication of string literals by a count that is not constant is a
+    // string replication (IEEE 1800-2023 Table 6-9, 11.4.12.2): the result
+    // is that many copies, none for a zero count. A negative count, which
+    // the multiplier must not be, gives none too. A constant count keeps the
+    // integral replication.
+    let source = r#"
+        module Top(output bit ok, output int dash_len, output bit [23:0] packed_value);
+            int three = 3;
+            int zero = 0;
+            int negative = -2;
+            initial begin
+                string dash = {three{"-"}};
+                string pair = {three{"ab", "c"}};
+                string none = {zero{"x"}};
+                string below = {negative{"x"}};
+                string framed = {"<", {three - 1{" "}}, ">"};
+                packed_value = {3{"a"}};
+                dash_len = dash.len();
+                ok = dash == "---" && pair == "abcabcabc" && none == "" && below == ""
+                    && framed == "<  >";
+            end
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("strings.sv"))], "Top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        sim.run_until(0).unwrap();
+        let ok = sim.signal("ok");
+        let dash_len = sim.signal("dash_len");
+        let packed_value = sim.signal("packed_value");
+        assert_eq!(sim.get(ok), 1u8.into(), "four-state {four_state}");
+        assert_eq!(sim.get(dash_len), 3u8.into(), "four-state {four_state}");
+        assert_eq!(
+            sim.get(packed_value),
+            0x61_61_61u32.into(),
+            "four-state {four_state}"
+        );
+    }
+}

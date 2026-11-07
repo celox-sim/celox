@@ -156,8 +156,8 @@ impl Parser<'_> {
                         return true;
                     }
                 }
-                "|->" if depth == 1 && !implication => implication = true,
-                "|->" => return false,
+                "|->" | "|=>" if depth == 1 && !implication => implication = true,
+                "|->" | "|=>" => return false,
                 word if self.temporal(word, offset) => return false,
                 _ => {}
             }
@@ -810,11 +810,13 @@ impl Parser<'_> {
     }
 
     pub(super) fn declaration_name_cursor(&self) -> Option<usize> {
+        // A keyword names no type, module or interface, such as the `var`
+        // of `var type(e) v;` (IEEE 1800-2023 6.23, A.9.3).
         if !self.token().is_some_and(|token| {
             matches!(
                 token.kind,
                 TokenKind::Identifier | TokenKind::EscapedIdentifier
-            )
+            ) && !self.reserved_identifier(token)
         }) {
             return None;
         }
@@ -1176,7 +1178,7 @@ impl Parser<'_> {
                                 property && self.peek() == "(" && self.boolean_property_header();
                             let property_header = if typed_property {
                                 self.expect("(")?;
-                                let property = self.property_spec(false)?;
+                                let property = self.property_spec(false, Vec::new())?;
                                 self.expect(")")?;
                                 Some(AssertionHeader::Concurrent {
                                     property,

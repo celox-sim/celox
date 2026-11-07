@@ -114,6 +114,10 @@ sv_backends! {
     fn local_typedefs(sim) {
         @case "types::local_typedefs";
     }
+
+    fn type_operator(sim) {
+        @case "types::type_operator";
+    }
 }
 
 // Receivers, counts and contexts that the external simulators of the shared

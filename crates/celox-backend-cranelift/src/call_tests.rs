@@ -207,6 +207,7 @@ pub(crate) fn factorial(fail: bool) -> FunctionUnit<RegionedAbsoluteAddr> {
                     width: 32,
                     four_state: false,
                     handle: false,
+                    element_width: None,
                 })
                 .collect(),
         },
@@ -276,6 +277,7 @@ pub(crate) fn identity() -> FunctionUnit<RegionedAbsoluteAddr> {
                     width: 100,
                     four_state: true,
                     handle: false,
+                    element_width: None,
                 })
                 .collect(),
         },
@@ -494,6 +496,7 @@ fn reads_a_slot_at_the_end_of_the_stack_within_the_image() {
                     width: 99,
                     four_state: false,
                     handle: false,
+                    element_width: None,
                 },
                 FrameSlot {
                     addr: slot(1),
@@ -501,6 +504,7 @@ fn reads_a_slot_at_the_end_of_the_stack_within_the_image() {
                     width: 100,
                     four_state: false,
                     handle: false,
+                    element_width: None,
                 },
             ],
         },

@@ -949,6 +949,11 @@ pub struct ObjectField {
     /// A `real` (64 bits) or `shortreal` (32 bits) value, as its IEEE 754
     /// bits (IEEE 1800-2023 6.12).
     pub real: bool,
+    /// Which class property this is, the same in every class that inherits
+    /// it: a hash of the declaring class and the property name, never 0. A
+    /// record member, and any other field that is no property, has 0. Two
+    /// properties may share a key.
+    pub key: u32,
 }
 
 /// The layout of an immutable heap record that holds the value of an
@@ -1316,15 +1321,28 @@ pub struct AggregatePattern {
 /// An operation on the heap stream of a streaming concatenation that holds
 /// dynamically sized data (IEEE 1800-2023 11.4.14). A stream is a handle that
 /// lives until the operation that converts it last, or [`StreamOp::Free`].
+/// Which widths a stream converted to a fixed number of bits may have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StreamSize {
+    /// At most the target's: a fixed-size target takes the stream aligned
+    /// to its left (11.4.14.3).
+    Fits,
+    /// Exactly the type's, for a bit-stream cast (6.24.3).
+    Cast,
+    /// Exactly the target's, for a dynamically sized array assigned to a
+    /// fixed-size one (7.6).
+    Assignment,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StreamOp {
     /// A new stream of the items in the arguments, see [`StreamPack`].
     Pack(Box<StreamPack>),
     /// The stream in the argument as `width` bits, aligned to the left and
-    /// filled with zeros; a stream wider than `width` bits, or for a
-    /// bit-stream cast (`exact`) of another width, is a fault. The stream is
-    /// freed.
-    ToBits { width: usize, exact: bool },
+    /// filled with zeros; a stream wider than `width` bits, or one of
+    /// another width where `size` requires exactly `width`, is a fault. The
+    /// stream is freed.
+    ToBits { width: usize, size: StreamSize },
     /// The stream in the argument as a new container, in as few elements as
     /// hold it; the stream is freed.
     ToContainer(ContainerLayout),
@@ -1390,6 +1408,10 @@ pub enum StreamItem {
         layout: ContainerLayout,
         range: Option<StreamRange>,
     },
+    /// The elements of a container of integral values wider than 64 bits,
+    /// each held in a record of one field of `width` bits, 4-state when
+    /// `four_state`.
+    WideContainer { width: u32, four_state: bool },
     /// The unread bits of another stream, which is freed.
     Stream,
 }

@@ -8,6 +8,8 @@ sv_backends! {
     fn class_imported_member_type_inheritance(sim) { @case "class::imported_member_type_inheritance"; }
     fn class_package_constant_class_defaults(sim) { @case "class::package_constant_class_defaults"; }
     fn class_waits_on_static_properties(sim) { @case "class::waits_on_static_properties"; }
+    fn class_waits_on_instance_properties(sim) { @case "class::waits_on_instance_properties"; }
+    fn class_waits_on_properties_in_package_subroutines(sim) { @case "class::waits_on_properties_in_package_subroutines"; }
     fn class_package_constant_type_arguments(sim) { @case "class::package_constant_type_arguments"; }
     fn class_named_aggregate_type_arguments(sim) { @case "class::named_aggregate_type_arguments"; }
     fn class_enumeration_constants_of_classes(sim) { @case "class::enumeration_constants_of_classes"; }
@@ -297,6 +299,75 @@ sv_backends! {
         for (name, value) in [("t", 0u8), ("l", 0), ("k", 0b1000)] {
             let signal = sim.signal(name);
             assert_eq!(sim.get(signal), BigUint::from(value), "{name}");
+        }
+    }
+}
+
+/// The members of an enumeration type that a property declares in place are
+/// constants of the class scope, as those of a typedef in the class are
+/// (IEEE 1800-2023 6.19, 8.3): the class's methods and a derived class's name
+/// them, and `C::NAME` reads them outside, as UVM's `uvm_cmdline_verbosity`
+/// does with `enum {STANDARD, NON_STANDARD, ILLEGAL} src`.
+#[test]
+fn members_of_enumerations_declared_by_properties() {
+    let source = r#"
+    module Top(output int non_standard, output int illegal, output int marked, output bit [1:0] mode_bits);
+        class Setting;
+            enum {STANDARD, NON_STANDARD, ILLEGAL} src;
+            enum bit [1:0] {OFF = 1, ON = 2} mode;
+            static Setting settings[$];
+            function void mark(bit legal);
+                src = legal ? NON_STANDARD : ILLEGAL;
+                mode = ON;
+            endfunction
+            static function int count(int which);
+                int n = 0;
+                foreach (settings[i])
+                    if (which == 0 ? settings[i].src == NON_STANDARD : settings[i].src == ILLEGAL)
+                        n++;
+                return n;
+            endfunction
+        endclass
+        class Marked extends Setting;
+            function bit standard();
+                return src == STANDARD && mode != OFF;
+            endfunction
+        endclass
+        initial begin
+            Setting a = new;
+            Setting b = new;
+            Marked c = new;
+            a.mark(1);
+            b.mark(0);
+            c.mode = Setting::ON;
+            Setting::settings.push_back(a);
+            Setting::settings.push_back(b);
+            Setting::settings.push_back(c);
+            non_standard = Setting::count(0);
+            illegal = Setting::count(1);
+            marked = c.standard();
+            mode_bits = a.mode;
+        end
+    endmodule"#;
+    for four_state in [false, true] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        sim.run_until(0).unwrap();
+        for (name, expected) in [
+            ("non_standard", 1u8),
+            ("illegal", 1),
+            ("marked", 1),
+            ("mode_bits", 2),
+        ] {
+            let signal = sim.signal(name);
+            assert_eq!(
+                sim.get(signal),
+                BigUint::from(expected),
+                "{name}, four-state {four_state}"
+            );
         }
     }
 }
@@ -685,12 +756,42 @@ fn two_state_members_of_packed_structure_properties_drop_unknown_bits() {
     assert_eq!((value, mask), (BigUint::from(1u8), BigUint::from(0u8)));
 }
 
-/// A write of a class property does not wake a process waiting on it, so a
-/// wait whose condition reads one is rejected instead of never waking. The
-/// condition reads it in a method through `this`, through a handle, through
-/// a queue held in a property and through a function.
+/// A store of a class property wakes a process waiting on it (IEEE
+/// 1800-2023 9.4.3), whose condition reads it in a method through `this`,
+/// through a handle, through a queue held in a property and through a
+/// function. The random mode of a property has no such count, so a wait on
+/// it is rejected instead of never waking. A store of the same property of
+/// another object or of its own value checks the condition again, so a
+/// condition that reads a property must be a value of what it reads: one
+/// with an effect or reading a mailbox or the time is rejected.
 #[test]
-fn waits_on_class_properties_are_unsupported() {
+fn waits_on_class_properties_wake_on_stores() {
+    let source = |wait: &str| {
+        format!(
+            "`timescale 1ns/1ns
+            class C;
+                int m_state;
+                int q[$];
+                rand int r;
+                int calls;
+                mailbox #(int) mb = new;
+                C other;
+                function bit reached(int s); return m_state >= s; endfunction
+                function bit counted(int s); calls++; return m_state >= s; endfunction
+                task wait_for(int s); {wait} endtask
+            endclass
+            module Top(output int t);
+                initial begin
+                    automatic C c = new;
+                    c.other = c;
+                    fork
+                        begin c.wait_for(2); t = $time; end
+                        begin #1 c.m_state = 1; #1 c.m_state = 2; c.q.push_back(1); end
+                    join
+                end
+            endmodule"
+        )
+    };
     let waits = [
         "wait (m_state >= s);",
         "wait (other.m_state >= s);",
@@ -698,25 +799,7 @@ fn waits_on_class_properties_are_unsupported() {
         "wait (reached(s));",
     ];
     for wait in waits {
-        let source = format!(
-            "class C;
-                int m_state;
-                int q[$];
-                C other;
-                function bit reached(int s); return m_state >= s; endfunction
-                task wait_for(int s); {wait} $display(\"reached %0d at %0d\", s, $time); endtask
-            endclass
-            module Top;
-                initial begin
-                    automatic C c = new;
-                    c.other = c;
-                    fork
-                        c.wait_for(2);
-                        begin #1 c.m_state = 1; #1 c.m_state = 2; c.q.push_back(1); end
-                    join
-                end
-            endmodule"
-        );
+        let source = source(wait);
         for four_state in [false, true] {
             let builder = || {
                 celox::Simulation::from_sv_sources(
@@ -725,24 +808,52 @@ fn waits_on_class_properties_are_unsupported() {
                 )
                 .four_state(four_state)
             };
-            let errors = [
-                builder().build_native().err(),
-                builder().build_cranelift().err(),
-                builder().build_wasm().err(),
-                builder().build_interpreter().err(),
-            ];
-            for error in errors {
-                let error = error
-                    .unwrap_or_else(|| panic!("{wait} must be rejected"))
-                    .to_string();
-                assert!(error.contains("in a wait condition"), "{wait}: {error}");
+            fn check<B: celox::SimBackend>(
+                sim: Result<celox::Simulation<B>, celox::SimulatorError>,
+                case: &str,
+            ) {
+                let mut sim = sim.unwrap_or_else(|error| panic!("{case}: {error}"));
+                sim.run_until(5).unwrap();
+                let t = sim.signal("t");
+                assert_eq!(sim.get(t), BigUint::from(2u8), "{case}");
             }
+            let case = format!("{wait}, four-state {four_state}");
+            check(builder().build_native(), &case);
+            check(builder().build_cranelift(), &case);
+            check(builder().build_wasm(), &case);
+            check(builder().build_interpreter(), &case);
         }
+    }
+    for (wait, construct) in [
+        ("wait (r.rand_mode() == 0);", "in a wait condition"),
+        (
+            "wait (counted(s));",
+            "property write in a wait condition that reads a class property",
+        ),
+        (
+            "wait (mb.num() > 0);",
+            "in a wait condition that reads a class property",
+        ),
+        (
+            "wait (m_state >= s && $time > 0);",
+            "$time in a wait condition that reads a class property",
+        ),
+    ] {
+        let source = source(wait);
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build_interpreter()
+        .expect_err(wait)
+        .to_string();
+        assert!(error.contains(construct), "{wait}: {error}");
     }
 }
 
 /// The default of an argument is read only where a call omits the argument,
-/// so a property-reading default does not reject a wait that supplies it.
+/// so a wait that supplies it wakes on the argument, and one that omits it
+/// on stores of the property the default reads.
 #[test]
 fn waits_read_property_defaults_only_when_omitted() {
     let source = |call: &str| {
@@ -771,15 +882,15 @@ fn waits_read_property_defaults_only_when_omitted() {
     sim.run_until(5).unwrap();
     let seen = sim.signal("seen");
     assert_eq!(sim.get(seen), BigUint::from(2u8));
-    let omitted = source("ready()");
-    let Err(error) =
+    // A default that reads a property makes the wait watch the property.
+    let omitted = source("ready()").replace("#2 signal = 1;", "#3 c.state = 1;");
+    let mut sim =
         celox::Simulation::from_sv_sources(vec![(omitted.as_str(), Path::new("class.sv"))], "Top")
             .build_interpreter()
-    else {
-        panic!("a wait reading a property through a default is rejected");
-    };
-    let error = error.to_string();
-    assert!(error.contains("in a wait condition"), "{error}");
+            .unwrap();
+    sim.run_until(5).unwrap();
+    let seen = sim.signal("seen");
+    assert_eq!(sim.get(seen), BigUint::from(3u8));
 }
 
 /// The defaults of a method use the object it is called on, as the call
@@ -2793,4 +2904,370 @@ fn class_handle_actuals_are_assigned_to_their_formals() {
         .unwrap();
     sim.run_until(0).unwrap();
     assert_eq!(sim.get(sim.signal("seen")), 2u32.into());
+}
+
+#[test]
+fn class_handle_results_take_handles_of_their_class() {
+    // IEEE 1800-2023 13.4.1: a returned value is assigned to the function's
+    // result, as assigning to the function's name is (8.16).
+    for body in [
+        "function A f(); B x; x = new; return x; endfunction initial begin A y; y = f(); end",
+        "function A f(); B x; x = new; f = x; endfunction initial begin A y; y = f(); end",
+        "class H; function A f(); B x; x = new; return x; endfunction endclass
+         initial begin H h; A y; h = new; y = h.f(); end",
+        // Arms of unrelated classes have no common type (11.4.11); each
+        // arm is the value, and one is no `A`.
+        "bit s; function A f(); A a; B x; a = new; x = new; return s ? a : x; endfunction
+         initial begin A y; y = f(); end",
+        "bit s; initial begin A a, y; B x; a = new; x = new; y = s ? a : (s ? x : a); end",
+    ] {
+        let source = format!("module Top; class A; endclass class B; endclass {body} endmodule");
+        let Err(error) = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build() else {
+            panic!("a function of class `A` returned an unrelated class's handle: {body}");
+        };
+        assert!(
+            error.to_string().contains("a handle of class `B` is not"),
+            "{error}"
+        );
+    }
+    let source = "module Top;
+        class A; virtual function int id(); return 1; endfunction endclass
+        class B extends A; virtual function int id(); return 2; endfunction endclass
+        int seen;
+        function A f(); B x; x = new; return x; endfunction
+        initial begin A a; a = f(); seen = a.id(); end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 2u32.into());
+}
+
+#[test]
+fn class_handle_defaults_take_handles_of_their_formals_class() {
+    // IEEE 1800-2023 13.5.3: a default is assigned to its formal as an
+    // actual is (8.16).
+    for body in [
+        "B gb; function void f(A x = gb); endfunction initial f();",
+        "B gb; class H; function void f(A x = gb); endfunction endclass
+         initial begin H h; h = new; h.f(); end",
+    ] {
+        let source = format!("module Top; class A; endclass class B; endclass {body} endmodule");
+        let Err(error) = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build() else {
+            panic!("a default of an unrelated class's handle was accepted: {body}");
+        };
+        let error = error.to_string();
+        assert!(
+            error.contains("default of `x`") && error.contains("a handle of class `B` is not"),
+            "{error}"
+        );
+    }
+    let source = "module Top;
+        class A; virtual function int id(); return 1; endfunction endclass
+        class B extends A; virtual function int id(); return 2; endfunction endclass
+        int seen, none;
+        B gb;
+        function int f(A x = gb); return x == null ? 0 : x.id(); endfunction
+        function int g(A x = null); return x == null ? 7 : 0; endfunction
+        initial begin gb = new; seen = f(); none = g(); end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 2u32.into());
+    assert_eq!(sim.get(sim.signal("none")), 7u32.into());
+}
+
+#[test]
+fn class_handle_outputs_are_assigned_back_to_their_actuals() {
+    // IEEE 1800-2023 13.5.1: an output or inout formal is assigned to its
+    // actual when the call returns, so the actual's class must take a handle
+    // of the formal's (8.16).
+    for body in [
+        "task t(output A x); x = null; endtask initial begin B y; t(y); end",
+        "task t(inout A x); endtask initial begin B y; t(y); end",
+        "class H; task t(output A x); x = null; endtask endclass
+         initial begin H h; B y; h = new; h.t(y); end",
+    ] {
+        let source =
+            format!("module Top; class A; endclass class B extends A; endclass {body} endmodule");
+        let Err(error) = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build() else {
+            panic!("an output of a base class was copied to a derived class's variable: {body}");
+        };
+        assert!(
+            error.to_string().contains("a handle of class `A` is not"),
+            "{error}"
+        );
+    }
+    let source = "module Top;
+        class A; virtual function int id(); return 1; endfunction endclass
+        class B extends A; virtual function int id(); return 2; endfunction endclass
+        int seen;
+        task t(output B x); x = new; endtask
+        initial begin A a; t(a); seen = a.id(); end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 2u32.into());
+}
+#[test]
+fn class_handle_array_patterns_check_their_elements() {
+    // IEEE 1800-2023 10.9.1: each item of an array pattern is assigned to
+    // its element, so an element of class `A` takes only a handle its class
+    // takes (8.16), whether listed, given by `default` or initializing.
+    for body in [
+        "A arr [2]; initial begin b = new; arr = '{b, null}; end",
+        "initial begin A arr [2]; b = new; arr = '{null, b}; end",
+        "B gb = new; A arr [2] = '{gb, null};",
+        "A arr [2]; initial begin b = new; arr = '{default: b}; end",
+        "A arr [2][2]; initial begin b = new; arr = '{'{null, null}, '{b, null}}; end",
+    ] {
+        let source =
+            format!("module Top; class A; endclass class B; endclass B b; {body} endmodule");
+        let Err(error) = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build() else {
+            panic!("an array pattern took an unrelated class's handle: {body}");
+        };
+        let error = error.to_string();
+        assert!(
+            error.contains("assignment pattern member")
+                && error.contains("a handle of class `B` is not"),
+            "{error}"
+        );
+    }
+    // An item of a level that selects subarrays is assigned to a subarray,
+    // which takes no single handle (10.9.1, 7.6).
+    for body in [
+        "A arr [2][2]; initial begin a = new; arr = '{a, '{null, null}}; end",
+        "A arr [2][2]; initial begin a = new; arr = '{'{null, null}, a}; end",
+        "A arr [2][2]; initial begin a = new; arr = '{1: a, default: '{null, null}}; end",
+    ] {
+        let source = format!("module Top; class A; endclass A a; {body} endmodule");
+        let Err(error) = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build() else {
+            panic!("a subarray took a single handle: {body}");
+        };
+        let error = error
+            .to_string()
+            .replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            error.contains("assignment pattern item")
+                && error.contains("not an unpacked array is not assignment compatible"),
+            "{body}: {error}"
+        );
+    }
+    // A default that is an array of the selected element's type is
+    // assigned as an item is: an array of `B` handles is no array of `A`
+    // handles (7.6), and one of `A` handles fills each element.
+    let source = "module Top; class A; endclass class B; endclass
+        A dst [2][2]; B src [2]; initial dst = '{default: src}; endmodule";
+    let Err(error) =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top").build()
+    else {
+        panic!("an array default of unrelated handles was assigned");
+    };
+    let error = error
+        .to_string()
+        .replace('│', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        error.contains("assignment pattern item") && error.contains("not assignment compatible"),
+        "{error}"
+    );
+    // A call returning a subarray of the element type fills it.
+    let source = "module Top;
+        class A; virtual function int id(); return 3; endfunction endclass
+        typedef A pair_t [2];
+        int listed, defaulted;
+        A dst [2][2];
+        function pair_t make(); make[1] = new; endfunction
+        initial begin
+            dst = '{'{null, null}, make()};
+            listed = dst[1][1].id();
+            dst = '{default: make()};
+            defaulted = dst[0][1].id();
+        end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("listed")), 3u32.into());
+    assert_eq!(sim.get(sim.signal("defaulted")), 3u32.into());
+    // An item of any expression form is typed, a call by its declared
+    // result: an array of `B` handles is no subarray of `A` handles.
+    for body in [
+        "A dst [2][2]; initial dst = '{make(), '{null, null}};",
+        "A dst [2][2]; initial dst = '{default: make()};",
+        "A dst [2][2]; initial dst = '{1: make(), default: '{null, null}};",
+    ] {
+        let source = format!(
+            "module Top; class A; endclass class B; endclass
+            typedef B pair_t [2];
+            function pair_t make(); return '{{null, null}}; endfunction
+            {body} endmodule"
+        );
+        let Err(error) = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build() else {
+            panic!("a call's array of unrelated handles was assigned: {body}");
+        };
+        let error = error
+            .to_string()
+            .replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            error.contains("assignment pattern item")
+                && error.contains("not assignment compatible"),
+            "{body}: {error}"
+        );
+    }
+    let source = "module Top;
+        class A; virtual function int id(); return 1; endfunction endclass
+        int corner;
+        A dst [2][2]; A src [2];
+        initial begin src[1] = new; dst = '{default: src}; corner = dst[1][1].id(); end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("corner")), 1u32.into());
+    let source = "module Top;
+        class A; virtual function int id(); return 1; endfunction endclass
+        class B extends A; virtual function int id(); return 2; endfunction endclass
+        int first, second, rest;
+        A arr [3];
+        initial begin
+            A a; B b;
+            a = new; b = new;
+            arr = '{b, a, null};
+            first = arr[0].id();
+            second = arr[1].id();
+            rest = arr[2] == null;
+        end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("first")), 2u32.into());
+    assert_eq!(sim.get(sim.signal("second")), 1u32.into());
+    assert_eq!(sim.get(sim.signal("rest")), 1u32.into());
+}
+
+#[test]
+fn static_class_casts_assign_upcasts_and_reject_downcasts() {
+    // IEEE 1800-2023 6.24.1: a static cast of an assignment compatible
+    // operand is the assignment; a downcast needs `$cast` (8.16), and a
+    // class is no destination of a bit-stream cast (6.24.3).
+    let source = "module Top(output int id, output int none);
+        class C; virtual function int id(); return 1; endfunction endclass
+        class D extends C; virtual function int id(); return 2; endfunction endclass
+        initial begin
+            D d; C c;
+            d = new;
+            c = C'(d);
+            id = c.id();
+            c = C'(null);
+            none = c == null;
+        end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("id")), 2u32.into());
+    assert_eq!(sim.get(sim.signal("none")), 1u32.into());
+    // The target is any class type: a specialization or a class of a
+    // package; the cast has the target's type, whose methods it calls.
+    let source =
+        "package p; class Q; virtual function int id(); return 7; endfunction endclass endpackage
+        module Top(output int special, output int called, output int packaged);
+        class Box #(int N = 1); virtual function int id(); return N; endfunction endclass
+        class Big extends Box #(4); virtual function int id(); return 40; endfunction endclass
+        class R extends p::Q; virtual function int id(); return 8; endfunction endclass
+        initial begin
+            Big b; Box #(4) x; R r;
+            b = new; r = new;
+            x = Box#(4)'(b);
+            special = x.id();
+            called = Box#(4)'(b).id();
+            packaged = p::Q'(r).id();
+        end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("special")), 40u32.into());
+    assert_eq!(sim.get(sim.signal("called")), 40u32.into());
+    assert_eq!(sim.get(sim.signal("packaged")), 8u32.into());
+    for (cast, expected) in [
+        ("d = D'(c);", "a downcast needs"),
+        ("c = C'(i);", "no class handle"),
+        ("c = C'(o);", "is not assignment compatible"),
+        (
+            "begin Box #(2) b2; b2 = Box#(2)'(c); end",
+            "is not assignment compatible",
+        ),
+        // The operand's type must be known: arms of a class handle and an
+        // int have no common type (11.4.11).
+        ("c = C'(i ? c : 1);", "has no common type"),
+        // Each arm of a conditional is a value the destination may take,
+        // and an int is no handle (8.16).
+        ("c = i ? c : 1;", "is no handle of class `C`"),
+        ("c = 1;", "is no handle of class `C`"),
+    ] {
+        let source = format!(
+            "module Top; class C; endclass class D extends C; endclass class O; endclass
+             class Box #(int N = 1); endclass
+             initial begin C c; D d; O o; int i; c = new; o = new; {cast} end endmodule"
+        );
+        let Err(error) = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("class.sv"))],
+            "Top",
+        )
+        .build() else {
+            panic!("`{cast}` was accepted");
+        };
+        let error = error
+            .to_string()
+            .replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(error.contains(expected), "{cast}: {error}");
+    }
 }

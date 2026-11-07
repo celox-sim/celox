@@ -265,6 +265,44 @@ impl SimModule {
     ///
     /// Assembly adds what only the hierarchy shows: the signals that the
     /// clock and reset ports of other instances alias.
+    /// The part of [`Self::instrumented_storage`] whose stores assembly
+    /// instruments in the units of processes and flip-flops only, which a
+    /// function unit must not store into: what flip-flops' pending counts
+    /// and nonblocking assignments stage, and the events of flip-flops.
+    /// Assembly instruments a function unit's stores for the counters of
+    /// waits and event controls as a process kernel's, and a combinational
+    /// process calls none that stores into what combinational observers
+    /// capture.
+    pub fn function_excluded_storage(&self) -> HashSet<SourceVarId> {
+        let domains = self
+            .eval_only_ff_blocks
+            .keys()
+            .chain(self.apply_ff_blocks.keys())
+            .chain(self.eval_apply_ff_blocks.keys())
+            .chain(self.split_commit_ff_blocks.keys())
+            .chain(self.parallel_ff_parts.keys())
+            .flat_map(|triggers| {
+                std::iter::once(triggers.clock).chain(triggers.resets.iter().copied())
+            });
+        let declared = self.variables.iter().filter_map(|(&id, variable)| {
+            matches!(
+                variable.metadata.kind,
+                celox_design::DomainKind::ClockPosedge
+                    | celox_design::DomainKind::ClockNegedge
+                    | celox_design::DomainKind::ResetAsyncHigh
+                    | celox_design::DomainKind::ResetAsyncLow
+            )
+            .then_some(id)
+        });
+        self.pending_slots
+            .iter()
+            .map(|slots| slots.signal)
+            .chain(self.nba_sites.iter().map(|site| site.target))
+            .chain(domains)
+            .chain(declared)
+            .collect()
+    }
+
     pub fn instrumented_storage(&self) -> HashSet<SourceVarId> {
         let domains = self
             .eval_only_ff_blocks

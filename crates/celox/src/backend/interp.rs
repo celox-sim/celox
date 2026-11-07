@@ -235,18 +235,56 @@ impl Frames<'_> {
         Ok((slot, base + slot.offset))
     }
 
-    /// The static bit offset of an access of `slot`, which the verifier
-    /// requires and which must lie within the slot.
+    /// The bit offset of an access of `slot`, which must lie within the
+    /// slot: static, or for a slot holding an unpacked array also computed
+    /// at run time, in the array's logical packed layout.
     fn bit_offset(
         slot: &FrameSlot<RegionedAbsoluteAddr>,
         access: &ResolvedAccess<'_>,
         bits: usize,
     ) -> Result<usize, InterpError> {
-        match access.offset {
-            SIROffset::Static(offset) if offset + bits <= slot.width => Ok(*offset),
-            offset => Err(InterpError::Machine(format!(
-                "{bits}-bit frame slot access at {offset} outside its {}-bit slot",
-                slot.width
+        let dynamic =
+            |position: usize| access.dynamics[position].and_then(|value| value.payload.to_usize());
+        let offset = match (access.offset, slot.element_width) {
+            (SIROffset::Static(offset), _)
+            | (
+                SIROffset::PackedElements {
+                    bit_offset: offset, ..
+                },
+                Some(_),
+            ) => Some(*offset),
+            (SIROffset::Dynamic(_), Some(_)) => dynamic(0),
+            (
+                SIROffset::Element {
+                    element_width,
+                    bit_offset,
+                    dynamic_bit_offset,
+                    ..
+                },
+                Some(_),
+            ) => {
+                let extra = match dynamic_bit_offset {
+                    Some(_) => dynamic(1),
+                    None => Some(0),
+                };
+                dynamic(0)
+                    .and_then(|index| index.checked_mul(*element_width))
+                    .zip(extra)
+                    .and_then(|(start, extra)| start.checked_add(bit_offset + extra))
+            }
+            _ => None,
+        };
+        match offset {
+            Some(offset)
+                if offset
+                    .checked_add(bits)
+                    .is_some_and(|end| end <= slot.width) =>
+            {
+                Ok(offset)
+            }
+            _ => Err(InterpError::Machine(format!(
+                "{bits}-bit frame slot access at {} outside its {}-bit slot",
+                access.offset, slot.width
             ))),
         }
     }
@@ -2880,6 +2918,7 @@ endmodule
             width: 12,
             four_state: true,
             handle: false,
+            element_width: None,
         };
         let slots = [(slot.addr, slot.clone())].into_iter().collect();
         let mut stack = vec![0xffu8; 16];

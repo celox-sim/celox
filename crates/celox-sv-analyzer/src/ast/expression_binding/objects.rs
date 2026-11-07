@@ -915,24 +915,71 @@ pub(in crate::ast) fn check_assignment(
     native: &Declarations,
     dimensions: &PackedDimensions,
     target: &str,
+    context: impl Fn() -> String,
+) -> Converted<()> {
+    let mut pending = vec![id];
+    while let Some(id) = pending.pop() {
+        // A value an effect bound in its place, such as the handle a `$cast`
+        // to a property writes, is checked where it was made.
+        if dimensions.effect_values.contains_key(&id) {
+            continue;
+        }
+        let Ok(source_type) = expression_types::type_of(tree, session, id, native, dimensions)
+        else {
+            // A conditional whose arms have no common class (11.4.11) is
+            // judged by its arms, either of which may be the value.
+            if let ExprKind::Conditional {
+                then_expression,
+                else_expression,
+                ..
+            } = &native.expression(ungroup(id, native)).kind
+            {
+                pending.extend([*else_expression, *then_expression]);
+            }
+            continue;
+        };
+        // Each value is a handle of a class or `null`, also an arm of
+        // another type (8.16).
+        match session.types.data(source_type) {
+            semantic_types::TyData::Null => continue,
+            semantic_types::TyData::Class(_) => {}
+            _ => {
+                return Err(AnalyzerError::NotClassHandle {
+                    context: context(),
+                    actual: session.types.spell(source_type),
+                    target: target.to_owned(),
+                });
+            }
+        }
+        let Some(source) = expression_types::class_name(&session.types, source_type) else {
+            continue;
+        };
+        check_class_assignment(tree, session, dimensions, &source, target, &context)?;
+    }
+    Ok(())
+}
+
+/// Check that a handle of class `source` may be assigned to a variable of
+/// class `target` (IEEE 1800-2023 8.16, 8.26.5).
+pub(in crate::ast) fn check_class_assignment(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+    source: &str,
+    target: &str,
     context: impl FnOnce() -> String,
 ) -> Converted<()> {
-    let Ok(source_type) = expression_types::type_of(tree, session, id, native, dimensions) else {
-        return Ok(());
-    };
-    let Some(source) = expression_types::class_name(&session.types, source_type) else {
-        return Ok(());
-    };
     if source == target {
         return Ok(());
     }
-    if !classes::builtin(&source) && !classes::builtin(target) {
-        class(tree, session, dimensions, &source)?.record_lineage(
+    if !classes::builtin(source) && !classes::builtin(target) {
+        class(tree, session, dimensions, source)?.record_lineage(
             tree,
             session,
             &dimensions.const_env,
             &dimensions.type_aliases,
         );
+        let source_type = classes::handle_type_id(&mut session.types, source);
         let target_type = classes::handle_type_id(&mut session.types, target);
         if session
             .types
@@ -944,7 +991,7 @@ pub(in crate::ast) fn check_assignment(
     }
     Err(AnalyzerError::IncompatibleClassHandle {
         context: context(),
-        actual: source,
+        actual: source.to_owned(),
         target: target.to_owned(),
     })
 }
@@ -1030,16 +1077,24 @@ pub(in crate::ast) fn cast_to(
     let Some(target) = native_class(tree, session, destination, native, dimensions) else {
         return Ok(None);
     };
-    class(tree, session, dimensions, &target)?;
+    let target_class = class(tree, session, dimensions, &target)?;
     // The source's class may be a base of the destination's, or an interface
     // class, whose object the call checks; any other class's cannot be
     // assigned (8.16).
     if let Some(source_class) = native_class(tree, session, source, native, dimensions)
-        && !derives_from(tree, session, dimensions, &source_class, &target)?
-        && !derives_from(tree, session, dimensions, &target, &source_class)?
-        && !class(tree, session, dimensions, &source_class)?.is_interface
+        && source_class != target
     {
-        return Ok(Some(Cast::Fails));
+        // A process or event handle casts only to its own class.
+        let castable = !classes::builtin(&source_class) && !classes::builtin(&target) && {
+            let (env, aliases) = (&dimensions.const_env, &dimensions.type_aliases);
+            let source_type = class(tree, session, dimensions, &source_class)?
+                .record_lineage(tree, session, env, aliases);
+            let target_type = target_class.record_lineage(tree, session, env, aliases);
+            session.types.castable(source_type, target_type).is_ok()
+        };
+        if !castable {
+            return Ok(Some(Cast::Fails));
+        }
     }
     Ok(Some(Cast::Call {
         name: Class::cast_name(&target),

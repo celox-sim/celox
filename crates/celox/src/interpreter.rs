@@ -2512,6 +2512,7 @@ mod tests {
                         width: 32,
                         four_state: false,
                         handle: false,
+                        element_width: None,
                     })
                     .collect(),
             },
@@ -2644,6 +2645,7 @@ mod tests {
                         width: 100,
                         four_state: true,
                         handle: false,
+                        element_width: None,
                     })
                     .collect(),
             },

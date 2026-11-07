@@ -447,6 +447,13 @@ fn casting_type(
         .and_then(|name| dims.type_aliases.get(&name))
     {
         ty.clone()
+    } else if let Ok(Some(class)) =
+        expression_binding::named_class(tree, session, target, native, dims)
+    {
+        // A class, a specialization `C#(...)`, a class of a package or of a
+        // class scope, as a type name resolves them (8.25, 26.3).
+        let id = classes::handle_type_id(&mut session.types, &class);
+        return Some(Cast::Declared(id));
     } else {
         // The cast size is a constant, unlike the value being cast. Resolve
         // it in an isolated session, as for constant selection bounds.
