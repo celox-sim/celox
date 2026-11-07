@@ -4684,3 +4684,497 @@ fn randomize_counts_no_stores_of_shared_variables() {
         "{randomizing:?}"
     );
 }
+
+#[test]
+fn event_controls_on_class_properties_count_each_store() {
+    // `@(e.on)`, `@(posedge e.on)` and `@(negedge e.l)` (IEEE 1800-2023
+    // 9.4.2): each store of the property counts the stored object's
+    // occurrences, so a pulse within one step is an occurrence, another
+    // object's store is none, and a handle that comes to denote an object
+    // whose value differs is one. UVM's `uvm_event::wait_on` waits so on a
+    // property of `this`.
+    let source = r#"`timescale 1ns/1ns
+class ev_t;
+    bit on;
+    logic l;
+    int seen;
+    task wait_on();
+        @on;
+        seen = 1;
+    endtask
+endclass
+module Top(output int pulse, output int pos, output int neg, output int moved, output int other,
+           output int method);
+    ev_t a = new, b = new, c = new, h;
+    task automatic wait_any(ev_t e, output int at);
+        @(e.on);
+        at = $time;
+    endtask
+    task automatic wait_pos(ev_t e, output int at);
+        @(posedge e.on);
+        at = $time;
+    endtask
+    task automatic wait_neg(ev_t e, output int at);
+        @(negedge e.l);
+        at = $time;
+    endtask
+    task automatic wait_h(output int at);
+        @(h.on);
+        at = $time;
+    endtask
+    initial begin
+        h = c;
+        fork
+            wait_any(a, pulse);
+            wait_pos(a, pos);
+            wait_neg(a, neg);
+            wait_h(moved);
+            wait_pos(b, other);
+            a.wait_on();
+        join_none
+        #2 a.on = 1;
+        a.on = 0;
+        #2 a.l = 1;
+        #1 a.l = 0;
+        #2 b.on = 1;
+        #2 h = b;
+        #1 method = a.seen;
+    end
+endmodule
+"#;
+    let names = ["pulse", "pos", "neg", "moved", "other", "method"];
+    same_as_inlined(source, 6, 20, &names);
+    for four_state in [false, true] {
+        assert_eq!(
+            simulate(source, four_state, true, "interpreter", 20, &names),
+            Ok(vec![
+                value(2),
+                value(2),
+                value(5),
+                value(9),
+                value(7),
+                value(1)
+            ]),
+            "four_state {four_state}"
+        );
+    }
+}
+
+/// The time each of `names` holds at `until`, inlined and out of line in
+/// both state modes, which must be the same everywhere.
+fn waits_end_at(source: &str, units: usize, until: u64, names: &[&str], expected: &[u64]) {
+    same_as_inlined(source, units, until, names);
+    for four_state in [false, true] {
+        assert_eq!(
+            simulate(source, four_state, true, "interpreter", until, names),
+            Ok(expected.iter().map(|&at| value(at)).collect()),
+            "four_state {four_state}"
+        );
+    }
+}
+
+#[test]
+fn randomize_stores_are_occurrences_of_watched_properties() {
+    // `randomize` writes `v` through the heap's store, which counts it like
+    // an assignment does.
+    let source = r#"`timescale 1ns/1ns
+class r_t;
+    rand bit [7:0] v;
+    constraint big { v > 10; }
+endclass
+module Top(output int at, output int ok);
+    r_t r = new;
+    task automatic wait_v(r_t o, output int at);
+        @(o.v);
+        at = $time;
+    endtask
+    initial begin
+        fork
+            wait_v(r, at);
+        join_none
+        #3 ok = r.randomize();
+    end
+endmodule
+"#;
+    waits_end_at(source, 3, 10, &["at", "ok"], &[3, 1]);
+}
+
+#[test]
+fn container_write_backs_are_occurrences_of_watched_properties() {
+    // `push_back` writes the queue property's new handle back through the
+    // heap's store, which counts it.
+    let source = r#"`timescale 1ns/1ns
+class q_t;
+    int q[$];
+endclass
+module Top(output int at);
+    q_t o = new;
+    task automatic wait_q(q_t e, output int at);
+        @(e.q);
+        at = $time;
+    endtask
+    initial begin
+        fork
+            wait_q(o, at);
+        join_none
+        #4 o.q.push_back(5);
+    end
+endmodule
+"#;
+    waits_end_at(source, 2, 10, &["at"], &[4]);
+}
+
+#[test]
+fn waits_on_properties_follow_a_switched_handle() {
+    // `h` comes to denote `b`, whose `on` is 0 where `a`'s was 1: no rise,
+    // and the wait goes on with `b`, whose later rise is the occurrence.
+    let source = r#"`timescale 1ns/1ns
+class ev_t;
+    bit on;
+endclass
+module Top(output int at);
+    ev_t a = new, b = new, h;
+    task automatic wait_h(output int at);
+        @(posedge h.on);
+        at = $time;
+    endtask
+    initial begin
+        a.on = 1;
+        h = a;
+        fork
+            wait_h(at);
+        join_none
+        #2 h = b;
+        #2 b.on = 1;
+    end
+endmodule
+"#;
+    waits_end_at(source, 2, 10, &["at"], &[4]);
+}
+
+#[test]
+fn event_lists_mix_properties_and_signals() {
+    // Each item is waited on as what it is: a property by its object's
+    // count, a signal by its value's edge.
+    let source = r#"`timescale 1ns/1ns
+class ev_t;
+    bit on;
+endclass
+module Top(output int any_at, output int pos_at, output int neg_at);
+    ev_t o = new, other = new;
+    bit clk;
+    task automatic wait_any(output int at);
+        @(o.on or clk);
+        at = $time;
+    endtask
+    task automatic wait_pos(output int at);
+        @(posedge clk or other.on);
+        at = $time;
+    endtask
+    task automatic wait_neg(output int at);
+        @(negedge clk or other.on);
+        at = $time;
+    endtask
+    initial begin
+        fork
+            wait_any(any_at);
+            wait_pos(pos_at);
+            wait_neg(neg_at);
+        join_none
+        #1 o.on = 1;
+        #2 clk = 1;
+        #2 clk = 0;
+    end
+endmodule
+"#;
+    waits_end_at(source, 4, 10, &["any_at", "pos_at", "neg_at"], &[1, 3, 5]);
+}
+
+#[test]
+fn edges_of_real_properties_are_rejected() {
+    // An edge is of the least significant bit of an integral value (IEEE
+    // 1800-2023 9.4.2): as for any real expression.
+    let source = r#"`timescale 1ns/1ns
+class r_t;
+    real r;
+endclass
+module Top(output int at);
+    r_t o = new;
+    initial begin
+        @(posedge o.r);
+        at = $time;
+    end
+endmodule
+"#;
+    for forced in [false, true] {
+        let run = simulate(source, false, forced, "interpreter", 5, &["at"]);
+        assert!(
+            run.as_ref().is_err_and(|error| error.contains("posedge")),
+            "forced {forced}: {run:?}"
+        );
+    }
+}
+
+#[test]
+fn switched_handles_compare_real_properties_as_reals() {
+    // `h` comes to denote an object whose `r` differs by an eighth: a
+    // change, which an integer sample would round away (both round to 1).
+    let source = r#"`timescale 1ns/1ns
+class r_t;
+    real r;
+endclass
+module Top(output int at);
+    r_t a = new, b = new, h;
+    task automatic wait_h(output int at);
+        @(h.r);
+        at = $time;
+    endtask
+    initial begin
+        a.r = 1.25;
+        b.r = 1.375;
+        h = a;
+        fork
+            wait_h(at);
+        join_none
+        #2 h = b;
+    end
+endmodule
+"#;
+    waits_end_at(source, 2, 10, &["at"], &[2]);
+}
+
+#[test]
+fn wide_property_stores_are_one_write_each() {
+    // A 100-bit 4-state property is stored by one heap call with all its
+    // words and both planes, which the heap counts once: the pulse at 2 is
+    // a rise and a fall, and 1 -> x at 4 a fall only (IEEE 1800-2023 Table
+    // 9-2).
+    let source = r#"`timescale 1ns/1ns
+class w_t;
+    logic [99:0] w;
+endclass
+module Top(output int pos, output int neg, output int any_at, output int x_neg);
+    w_t o = new, p = new;
+    task automatic wait_pos(w_t e, output int at);
+        @(posedge e.w);
+        at = $time;
+    endtask
+    task automatic wait_neg(w_t e, output int at);
+        @(negedge e.w);
+        at = $time;
+    endtask
+    task automatic wait_any(w_t e, output int at);
+        @(e.w);
+        at = $time;
+    endtask
+    initial begin
+        o.w = 0;
+        p.w = 1;
+        fork
+            wait_pos(o, pos);
+            wait_neg(o, neg);
+            wait_any(o, any_at);
+            wait_neg(p, x_neg);
+        join_none
+        #2 o.w = {1'b1, 99'h1};
+        o.w = 0;
+        #2 p.w = 'x;
+    end
+endmodule
+"#;
+    let names = ["pos", "neg", "any_at", "x_neg"];
+    same_as_inlined(source, 4, 10, &names);
+    assert_eq!(
+        simulate(source, true, true, "interpreter", 10, &names),
+        Ok(vec![value(2), value(2), value(2), value(4)])
+    );
+}
+
+#[test]
+fn iff_of_property_items_is_taken_at_the_start_of_the_wait() {
+    // An occurrence on a property happens inside a store, where an `iff` is
+    // not evaluated: a condition that only the waiting process writes, here
+    // the task's `go`, has its value of the start at every occurrence.
+    let source = r#"`timescale 1ns/1ns
+class ev_t;
+    bit on;
+endclass
+module Top(output int yes, output int no);
+    ev_t o = new;
+    task automatic wait_on(bit go, output int at);
+        at = 0;
+        @(posedge o.on iff go);
+        at = $time;
+    endtask
+    initial wait_on(1, yes);
+    initial wait_on(0, no);
+    initial #2 o.on = 1;
+endmodule
+"#;
+    same_as_inlined(source, 2, 10, &["yes", "no"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 10, &["yes", "no"]),
+        Ok(vec![value(2), value(0)])
+    );
+    // A condition other processes write cannot be judged at the store.
+    let shared = source
+        .replace("output int no);", "output int no);\n    bit en = 1;")
+        .replace("iff go", "iff en");
+    for forced in [false, true] {
+        let run = simulate(&shared, false, forced, "interpreter", 10, &["yes"]);
+        assert!(
+            run.as_ref()
+                .is_err_and(|error| error.contains("an event control on a class property")),
+            "forced {forced}: {run:?}"
+        );
+    }
+}
+
+#[test]
+fn signals_listed_with_properties_count_each_edge() {
+    // `clk` rises and falls in one run of another process: the rise is an
+    // occurrence of `posedge clk` (IEEE 1800-2023 9.4.2), though `clk` ends
+    // as it began; the writes count it where they happen.
+    let source = r#"`timescale 1ns/1ns
+class ev_t;
+    bit on;
+endclass
+module Top(output int at);
+    ev_t o = new;
+    bit clk;
+    task automatic wait_any(output int at);
+        @(o.on or posedge clk);
+        at = $time;
+    endtask
+    initial begin
+        fork
+            wait_any(at);
+        join_none
+        #3 begin
+            clk = 1;
+            clk = 0;
+        end
+    end
+endmodule
+"#;
+    same_as_inlined(source, 2, 10, &["at"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 10, &["at"]),
+        Ok(vec![value(3)])
+    );
+}
+
+#[test]
+fn waits_on_properties_of_null_handles_fault() {
+    // The wait reads the property as the item does: through a null handle
+    // it is a null dereference, not a wait that never ends.
+    let source = r#"`timescale 1ns/1ns
+class ev_t;
+    bit on;
+endclass
+module Top(output int at);
+    ev_t none;
+    task automatic wait_on(ev_t e, output int at);
+        @(e.on);
+        at = $time;
+    endtask
+    initial wait_on(none, at);
+endmodule
+"#;
+    for forced in [false, true] {
+        let run = simulate(source, false, forced, "interpreter", 5, &["at"]);
+        assert!(
+            run.as_ref().is_err_and(|error| error.contains("null")),
+            "forced {forced}: {run:?}"
+        );
+    }
+}
+
+#[test]
+fn iff_of_property_items_gates_handle_switches() {
+    // `h` comes to denote `y`, whose `on` is 1 where `x`'s was 0: a rise by
+    // the switch, which the `iff` sampled at the start gates as it gates a
+    // rise by a store.
+    let source = r#"`timescale 1ns/1ns
+class ev_t;
+    bit on;
+endclass
+module Top(output int closed, output int open);
+    ev_t x = new, y = new, h;
+    initial begin
+        y.on = 1;
+        h = x;
+    end
+    initial begin
+        bit go = 0;
+        closed = 0;
+        @(posedge h.on iff go);
+        closed = $time;
+    end
+    initial begin
+        bit go = 1;
+        open = 0;
+        @(posedge h.on iff go);
+        open = $time;
+    end
+    initial #2 h = y;
+endmodule
+"#;
+    for forced in [false, true] {
+        assert_eq!(
+            simulate(source, false, forced, "interpreter", 5, &["closed", "open"]),
+            Ok(vec![value(0), value(2)]),
+            "forced {forced}"
+        );
+    }
+}
+
+#[test]
+fn handle_switches_are_seen_as_expression_events_are() {
+    // An expression event sees a process's writes when the process reaches a
+    // timing control or ends (docs/guide/systemverilog-reference.md): the
+    // pulse `a = 1; a = 0;` is no edge of `a & b`, and the switches
+    // `h = y; h = x;` are no edge of `h.on`, though `y.on` is 1.
+    let expression = r#"`timescale 1ns/1ns
+module Top(output int at);
+    bit a, b = 1;
+    initial begin
+        at = 0;
+        @(posedge (a & b));
+        at = $time;
+    end
+    initial #2 begin
+        a = 1;
+        a = 0;
+    end
+endmodule
+"#;
+    let handle = r#"`timescale 1ns/1ns
+class ev_t;
+    bit on;
+endclass
+module Top(output int at);
+    ev_t x = new, y = new, h;
+    initial begin
+        y.on = 1;
+        h = x;
+        at = 0;
+        @(posedge h.on);
+        at = $time;
+    end
+    initial #2 begin
+        h = y;
+        h = x;
+    end
+endmodule
+"#;
+    for source in [expression, handle] {
+        for forced in [false, true] {
+            assert_eq!(
+                simulate(source, false, forced, "interpreter", 5, &["at"]),
+                Ok(vec![value(0)]),
+                "forced {forced}: {source}"
+            );
+        }
+    }
+}
