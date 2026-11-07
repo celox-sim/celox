@@ -3543,6 +3543,25 @@ struct WatchedChunk<Addr> {
     readers: Vec<usize>,
 }
 
+/// The bit ranges of an object a partition reads, `None` for all of it.
+type ReadBits = Option<Vec<(usize, usize)>>;
+
+/// Note that a partition reads bits `range` (`lsb`, `msb`) of `address`,
+/// `None` for all of them.
+fn note_read_bits<Addr: Eq + Hash>(
+    bits: &mut HashMap<Addr, ReadBits>,
+    address: Addr,
+    range: Option<(usize, usize)>,
+) {
+    match (
+        bits.entry(address).or_insert_with(|| Some(Vec::new())),
+        range,
+    ) {
+        (Some(ranges), Some(range)) => ranges.push(range),
+        (entry, _) => *entry = None,
+    }
+}
+
 /// The widest chunk of a written object compared at once.
 const MAX_WATCHED_WIDTH: usize = 4096;
 
@@ -3758,6 +3777,9 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
         vec![HashMap::default(); count];
     let mut previous = vec![BTreeSet::new(); count];
     let mut pinned = vec![false; count];
+    // The bits of each object each partition reads, `None` for all of
+    // them: a write marks only the readers of the bits it changed.
+    let mut read_bits: Vec<HashMap<Addr, ReadBits>> = vec![HashMap::default(); count];
     for (index, work) in prepared.scheduled_work.iter().enumerate() {
         if skipped_work.contains(&index) {
             continue;
@@ -3771,7 +3793,14 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
                 .iter()
                 .chain(&path.address_sources)
                 .chain(&path.previous_sources);
-            reads[partition].extend(atoms.map(|atom| atom.id));
+            for atom in atoms {
+                reads[partition].insert(atom.id);
+                note_read_bits(
+                    &mut read_bits[partition],
+                    atom.id,
+                    Some((atom.access.lsb, atom.access.msb)),
+                );
+            }
             // A process's activation guard reads its occurrence counters and
             // startup slots as well.
             if let LogicPathTarget::Process {
@@ -3791,6 +3820,7 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
                         match instruction {
                             SIRInstruction::Load(_, address, ..) => {
                                 reads[partition].insert(*address);
+                                note_read_bits(&mut read_bits[partition], *address, None);
                             }
                             SIRInstruction::Store(address, offset, width, ..) => {
                                 writes[partition].insert(*address);
@@ -3798,6 +3828,7 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
                             }
                             SIRInstruction::Commit(source, target, offset, width, _) => {
                                 reads[partition].insert(*source);
+                                note_read_bits(&mut read_bits[partition], *source, None);
                                 writes[partition].insert(*target);
                                 unit_writes.push((*target, static_written_range(offset, *width)));
                             }
@@ -3818,17 +3849,22 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
                         range.filter(|_| !unknown),
                     );
                 }
+                let mut whole = Vec::new();
                 for (atom, counter) in sensitivity_counters {
-                    reads[partition].extend([atom.id, *counter]);
+                    whole.extend([atom.id, *counter]);
                 }
                 if let Some(startup) = startup {
-                    reads[partition].insert(startup.initialized);
+                    whole.push(startup.initialized);
                     for (atom, slot) in &startup.inputs {
-                        reads[partition].extend([atom.id, *slot]);
+                        whole.extend([atom.id, *slot]);
                     }
                     for (counter, slot) in &startup.counters {
-                        reads[partition].extend([*counter, *slot]);
+                        whole.extend([*counter, *slot]);
                     }
+                }
+                for address in whole {
+                    reads[partition].insert(address);
+                    note_read_bits(&mut read_bits[partition], address, None);
                 }
             }
             previous[partition].extend(path.previous_sources.iter().map(|atom| atom.id));
@@ -3845,13 +3881,13 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
     // Reading a copy's target reads its source: the copy may become an
     // alias of its source, whose changes then reach the target without the
     // copy running.
-    for read in &mut reads {
+    for (read, bits) in reads.iter_mut().zip(&mut read_bits) {
         let mut sources = Vec::new();
         for &addr in read.iter() {
             let mut current = addr;
             let mut steps = 0;
             while let Some(&source) = copy_source.get(&current) {
-                sources.push(source);
+                sources.push((source, addr));
                 current = source;
                 steps += 1;
                 if steps > copy_source.len() {
@@ -3859,7 +3895,18 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
                 }
             }
         }
-        read.extend(sources);
+        // A whole-variable copy keeps every bit where it is.
+        for (source, target) in sources {
+            read.insert(source);
+            match bits.get(&target).cloned() {
+                Some(Some(ranges)) => {
+                    for range in ranges {
+                        note_read_bits(bits, source, Some(range));
+                    }
+                }
+                _ => note_read_bits(bits, source, None),
+            }
+        }
     }
     let mut readers: HashMap<Addr, Vec<usize>> = HashMap::default();
     for (partition, read) in reads.iter().enumerate() {
@@ -3957,6 +4004,25 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
                 for (start, end) in ranges {
                     for lsb in (start..end).step_by(step) {
                         let chunk = (end - lsb).min(step);
+                        // The readers of these bits; another reader of the
+                        // object does not depend on them.
+                        let targets: Vec<usize> = targets
+                            .iter()
+                            .copied()
+                            .filter(|&reader| {
+                                read_bits
+                                    .get(reader)
+                                    .is_none_or(|bits| match bits.get(addr) {
+                                        Some(Some(ranges)) => ranges
+                                            .iter()
+                                            .any(|&(low, high)| low < lsb + chunk && lsb <= high),
+                                        _ => true,
+                                    })
+                            })
+                            .collect();
+                        if targets.is_empty() {
+                            continue;
+                        }
                         watched.push(WatchedChunk {
                             object: *addr,
                             offset: static_access_offset(
@@ -5724,14 +5790,25 @@ mod tests {
 
     /// A partition that writes a slice of a wide variable compares that
     /// slice before marking the readers, not the whole variable; an unpacked
-    /// array is compared in whole elements.
+    /// array is compared in whole elements. A reader of other bits of the
+    /// variable is no reader of the slice.
     #[test]
     fn settle_partitions_compare_only_the_written_bits() {
-        let loads_of_13 = |element_width: Option<usize>| {
+        let loads_of_13 = |element_width: Option<usize>, read: (usize, usize)| {
             let mut arena = SLTNodeArena::new();
             let mut slice = simple_path(&mut arena, 13, Some(12));
             slice.target = LogicPathTarget::Var(VarAtomBase::new(13, 8, 15));
-            let paths = vec![simple_path(&mut arena, 14, Some(13)), slice];
+            let mut reader = simple_path(&mut arena, 14, Some(13));
+            reader.expr = arena
+                .alloc(SLTNode::Input {
+                    variable: 13,
+                    signed: false,
+                    index: Vec::new(),
+                    access: BitAccess::new(read.0, read.1),
+                })
+                .unwrap();
+            reader.sources = [VarAtomBase::new(13, read.0, read.1)].into_iter().collect();
+            let paths = vec![reader, slice];
             let widths = [(12, 8), (13, 64), (14, 8)].into_iter().collect();
             let elements = element_width.map(|width| (13, width)).into_iter().collect();
             let result = super::sort_with_unpacked_element_widths(
@@ -5767,16 +5844,23 @@ mod tests {
         };
         // The reader's input, and the written slice before and after.
         assert_eq!(
-            loads_of_13(None),
-            vec![
-                (SIROffset::Static(0), 8),
-                (SIROffset::Static(8), 8),
-                (SIROffset::Static(8), 8),
-            ]
+            loads_of_13(None, (8, 15)),
+            vec![(SIROffset::Static(8), 8); 3]
         );
         // The slice lies in the first 16-bit element.
         assert_eq!(
-            loads_of_13(Some(16)),
+            loads_of_13(Some(16), (8, 15)),
+            vec![
+                (SIROffset::Static(0), 16),
+                (SIROffset::Static(0), 16),
+                (SIROffset::Static(8), 8),
+            ]
+        );
+        // A reader of the other byte: only its input; the element holding
+        // both bytes is still compared.
+        assert_eq!(loads_of_13(None, (0, 7)), vec![(SIROffset::Static(0), 8)]);
+        assert_eq!(
+            loads_of_13(Some(16), (0, 7)),
             vec![
                 (SIROffset::Static(0), 8),
                 (SIROffset::Static(0), 16),
