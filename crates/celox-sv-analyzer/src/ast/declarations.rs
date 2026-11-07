@@ -238,7 +238,7 @@ pub(super) fn parameters_from_scope(
         .scope_handle()
         .unit(syntax_tree.declarations())
         .and_then(|unit| unit.parameters.as_ref());
-    let body_parameters_are_local = header.is_some();
+    let body_parameters_are_local = parameters::body_parameters_are_local(syntax_tree);
     if let Some(header) = header {
         let values = header
             .iter()
