@@ -345,8 +345,8 @@ chapter-16/16.15--property-iff-uvm.sv	2state	fail
 chapter-16/16.15--property-iff-uvm.sv	4state	fail
 chapter-16/16.17--expect-uvm.sv	2state	fail
 chapter-16/16.17--expect-uvm.sv	4state	fail
-chapter-16/16.17--expect.sv	2state	fail
-chapter-16/16.17--expect.sv	4state	fail
+chapter-16/16.17--expect.sv	2state	pass
+chapter-16/16.17--expect.sv	4state	pass
 chapter-16/16.2--assert-final-uvm.sv	2state	fail
 chapter-16/16.2--assert-final-uvm.sv	4state	fail
 chapter-16/16.2--assert-final.sv	2state	pass

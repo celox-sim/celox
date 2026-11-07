@@ -84,6 +84,7 @@ enum Job {
         concurrent: Option<Option<Expr>>,
         condition: Expr,
         stages: Option<assertions::SequenceMonitor>,
+        expect: Option<ExpectAttempt>,
         keyword: String,
         assertion: celox_design::AssertionSite,
         span: Option<crate::procedural::SourceSpan>,
@@ -94,12 +95,24 @@ enum Job {
         concurrent: Option<Option<Expr>>,
         condition: Expr,
         stages: Option<assertions::SequenceMonitor>,
+        expect: Option<ExpectAttempt>,
         then_body: Vec<Stmt>,
         assertion: celox_design::AssertionSite,
         default_failure: Option<(String, Option<crate::procedural::SourceSpan>)>,
         start: usize,
     },
 }
+/// The one evaluation attempt of an `expect` statement (IEEE 1800-2023
+/// 16.17), which the executing process makes itself: from the next tick of
+/// `clock`, each step at its offset in ticks, until a step misses or the
+/// last one matches.
+struct ExpectAttempt {
+    clock: Stmt,
+    /// The steps by offset: whether each matches at its tick, sampled, and
+    /// whether it is an antecedent step, whose miss succeeds vacuously.
+    steps: Vec<(u32, Expr, bool)>,
+}
+
 impl BodyBuilder<'_, '_, '_> {
     pub(in crate::ast) fn native_body(
         &mut self,
@@ -465,12 +478,19 @@ impl BodyBuilder<'_, '_, '_> {
                         failure,
                     } => {
                         let mut stages = None;
+                        let mut expect = None;
                         let (condition, deferred, concurrent) = match header {
                             celox_sv_syntax::AssertionHeader::Immediate { deferred, .. } => (
                                 self.native_assertion_condition(keyword, header)?,
                                 deferred,
                                 None,
                             ),
+                            celox_sv_syntax::AssertionHeader::Concurrent { property, .. }
+                                if keyword == "expect" =>
+                            {
+                                expect = Some(self.expect_attempt(property)?);
+                                (Expr::Literal("1'b1".into()), &None, None)
+                            }
                             celox_sv_syntax::AssertionHeader::Concurrent {
                                 property:
                                     celox_sv_syntax::PropertySpec {
@@ -586,6 +606,7 @@ impl BodyBuilder<'_, '_, '_> {
                             concurrent,
                             condition,
                             stages,
+                            expect,
                             keyword: keyword.clone(),
                             assertion: celox_design::AssertionSite {
                                 label: statement
@@ -701,6 +722,7 @@ impl BodyBuilder<'_, '_, '_> {
                     concurrent,
                     condition,
                     stages,
+                    expect,
                     keyword,
                     assertion,
                     span,
@@ -712,6 +734,7 @@ impl BodyBuilder<'_, '_, '_> {
                         concurrent,
                         condition,
                         stages,
+                        expect,
                         then_body,
                         assertion,
                         default_failure: if failure.is_none() && keyword != "cover" {
@@ -729,6 +752,7 @@ impl BodyBuilder<'_, '_, '_> {
                     concurrent,
                     condition,
                     stages,
+                    expect,
                     mut then_body,
                     assertion,
                     default_failure,
@@ -752,6 +776,10 @@ impl BodyBuilder<'_, '_, '_> {
                         &assertion,
                         celox_design::AssertionOutcome::Fail,
                     );
+                    if let Some(attempt) = expect {
+                        output.extend(self.expect_statements(attempt, then_body, else_body));
+                        continue;
+                    }
                     if concurrent.is_some() {
                         // `timed_tasks::classify` checks the actions once
                         // every subroutine is known.
@@ -1502,6 +1530,258 @@ impl BodyBuilder<'_, '_, '_> {
 /// The most ticks a sequence may span: each value a later tick reads is
 /// kept in a register per tick.
 const MAX_SEQUENCE_TICKS: u32 = 1024;
+
+impl BodyBuilder<'_, '_, '_> {
+    /// The attempt of `expect (property)` (IEEE 1800-2023 16.17): a
+    /// Boolean property, an implication or a sequence of steps a fixed
+    /// number of ticks apart, with an explicit clock, without `disable iff`,
+    /// local variables or match items.
+    fn expect_attempt(
+        &mut self,
+        property: &celox_sv_syntax::PropertySpec,
+    ) -> Converted<ExpectAttempt> {
+        // A named sequence or property of the module stands for its body
+        // (16.8, 16.12), unless the expect's scope declares the name too.
+        let named = |this: &Self, id: Option<celox_sv_syntax::ExprId>| {
+            id.and_then(|id| this.expect_instance(id))
+        };
+        let resolved;
+        let mut declared = false;
+        let mut body_clock = false;
+        let property = match named(self, Some(property.condition)) {
+            Some(body)
+                if property.sequence.is_none()
+                    && property.antecedent.is_none()
+                    && property.equivalent.is_none() =>
+            {
+                if [body.antecedent, Some(body.condition), body.equivalent]
+                    .into_iter()
+                    .any(|id| named(self, id).is_some())
+                    || property.disable.is_some() && body.disable.is_some()
+                {
+                    return Err(unsupported(
+                        "instance in the body of a named sequence or property in an expect statement",
+                    ));
+                }
+                declared = true;
+                body_clock = body.clock.is_some();
+                resolved = celox_sv_syntax::PropertySpec {
+                    clock: body.clock.or(property.clock),
+                    disable: body.disable.or(property.disable),
+                    ..body
+                };
+                &resolved
+            }
+            Some(_) => {
+                return Err(unsupported(
+                    "named sequence or property as an operand in an expect statement",
+                ));
+            }
+            None => {
+                if [property.antecedent, property.equivalent]
+                    .into_iter()
+                    .any(|id| named(self, id).is_some())
+                {
+                    return Err(unsupported(
+                        "named sequence or property as an operand in an expect statement",
+                    ));
+                }
+                property
+            }
+        };
+        let clock = property
+            .clock
+            .ok_or_else(|| unsupported("expect statement without a clocking event"))?;
+        if property.disable.is_some() {
+            return Err(unsupported("disable iff in an expect statement"));
+        }
+        // The body of a named sequence or property binds in its
+        // declaration's scope, the expect's own clock in the expect's.
+        let steps = if declared {
+            self.in_declaration_scope(|this| this.expect_steps(property))?
+        } else {
+            self.expect_steps(property)?
+        };
+        let clock = if declared && body_clock {
+            self.in_declaration_scope(|this| this.native_timing_control(clock))?
+        } else {
+            self.native_timing_control(clock)?
+        };
+        Ok(ExpectAttempt { clock, steps })
+    }
+
+    /// The steps of `property` by offset, each with whether it matches,
+    /// sampled, and whether it is an antecedent step (see
+    /// [`ExpectAttempt::steps`]).
+    fn expect_steps(
+        &mut self,
+        property: &celox_sv_syntax::PropertySpec,
+    ) -> Converted<Vec<(u32, Expr, bool)>> {
+        let mut steps = Vec::new();
+        let mut step = |this: &mut Self, offset: u32, id, antecedent| -> Converted<()> {
+            let value = this.native_value(id)?;
+            assertions::concurrent_operand(&value)?;
+            steps.push((
+                offset,
+                procedural_truth_condition(assertions::sampled(value)),
+                antecedent,
+            ));
+            Ok(())
+        };
+        match property.sequence {
+            None => {
+                if let Some(antecedent) = property.antecedent {
+                    step(self, 0, antecedent, true)?;
+                }
+                match property.equivalent {
+                    // `p iff q` holds when both are true or both false
+                    // (16.12.8).
+                    Some(equivalent) => {
+                        let left = self.native_value(property.condition)?;
+                        assertions::concurrent_operand(&left)?;
+                        let right = self.native_value(equivalent)?;
+                        assertions::concurrent_operand(&right)?;
+                        steps.push((
+                            0,
+                            Expr::Binary {
+                                left: Box::new(procedural_truth_condition(assertions::sampled(
+                                    left,
+                                ))),
+                                op: BinaryOp::Eq,
+                                right: Box::new(procedural_truth_condition(assertions::sampled(
+                                    right,
+                                ))),
+                            },
+                            false,
+                        ));
+                    }
+                    None => step(self, 0, property.condition, false)?,
+                }
+            }
+            Some(id) => {
+                let sequence = self.tree.declarations().sequence(id).clone();
+                if !sequence.locals.is_empty() {
+                    return Err(unsupported(
+                        "local variable of a sequence in an expect statement",
+                    ));
+                }
+                let mut offset = 0u32;
+                let parts = [
+                    (true, sequence.antecedent.unwrap_or_default()),
+                    (false, sequence.consequent),
+                ];
+                for (antecedent, part) in parts {
+                    for native in part {
+                        if !native.items.is_empty() {
+                            return Err(unsupported("match item in an expect statement"));
+                        }
+                        offset = offset
+                            .checked_add(native.delay)
+                            .filter(|&offset| offset <= MAX_SEQUENCE_TICKS)
+                            .ok_or_else(|| {
+                                unsupported(format!(
+                                    "sequence longer than {MAX_SEQUENCE_TICKS} ticks"
+                                ))
+                            })?;
+                        step(self, offset, native.expression, antecedent)?;
+                    }
+                }
+            }
+        }
+        Ok(steps)
+    }
+
+    /// The body of the named sequence or property of the module that
+    /// expression `id`, a bare name, instantiates, if no local or formal of
+    /// the current scope has the name.
+    fn expect_instance(
+        &self,
+        id: celox_sv_syntax::ExprId,
+    ) -> Option<celox_sv_syntax::PropertySpec> {
+        let native = self.tree.declarations();
+        let id = expression_binding::ungroup(id, native);
+        let celox_sv_syntax::ExprKind::Name(name) = &native.expression(id).kind else {
+            return None;
+        };
+        let name = name.value();
+        let shadowed = self
+            .names
+            .scopes
+            .iter()
+            .any(|scope| scope.entries.iter().any(|entry| entry.source == name));
+        if shadowed {
+            return None;
+        }
+        let unit = self.tree.root_unit().ok()?.tokens;
+        native
+            .assertion_declarations
+            .iter()
+            .find(|declaration| {
+                declaration.name.value() == name
+                    && unit.start <= declaration.tokens.start
+                    && declaration.tokens.end <= unit.end
+            })
+            .map(|declaration| declaration.body)
+    }
+
+    /// The statements of an `expect`: the process waits for each tick of
+    /// the attempt in turn and decides that tick's steps on their sampled
+    /// values in the Observed region, until one misses or the last matches.
+    /// It then runs `then_body` or `else_body` in the Reactive region and
+    /// goes on (IEEE 1800-2023 16.17).
+    fn expect_statements(
+        &mut self,
+        attempt: ExpectAttempt,
+        then_body: Vec<Stmt>,
+        else_body: Vec<Stmt>,
+    ) -> Vec<Stmt> {
+        let alive = self.declare("$expect_alive", super::int_type());
+        let passed = self.declare("$expect_passed", super::int_type());
+        let assign = |name: &str, value: &str| Stmt::Assign {
+            lhs: LValue::Ident(name.to_owned()),
+            rhs: Expr::Literal(value.into()),
+            nonblocking: false,
+        };
+        let is_alive = || Expr::Ident(alive.clone());
+        let mut output = vec![assign(&alive, "1"), assign(&passed, "1")];
+        let length = attempt.steps.last().map_or(0, |(offset, ..)| *offset);
+        let mut steps = attempt.steps.into_iter().peekable();
+        for tick in 0..=length {
+            let mut body = vec![
+                attempt.clock.clone(),
+                Stmt::AssertionRegion { reactive: false },
+            ];
+            while let Some((_, matched, antecedent)) = steps.next_if(|(offset, ..)| *offset == tick)
+            {
+                // A missed antecedent step succeeds vacuously (16.12.7).
+                body.push(Stmt::If {
+                    condition: is_alive(),
+                    then_body: vec![Stmt::If {
+                        condition: matched,
+                        then_body: Vec::new(),
+                        else_body: vec![
+                            assign(&alive, "0"),
+                            assign(&passed, if antecedent { "1" } else { "0" }),
+                        ],
+                    }],
+                    else_body: Vec::new(),
+                });
+            }
+            output.push(Stmt::If {
+                condition: is_alive(),
+                then_body: body,
+                else_body: Vec::new(),
+            });
+        }
+        output.push(Stmt::AssertionRegion { reactive: true });
+        output.push(Stmt::If {
+            condition: Expr::Ident(passed),
+            then_body,
+            else_body,
+        });
+        output
+    }
+}
 
 /// How a match-item call passes an argument (16.11).
 #[derive(Clone, Copy, PartialEq, Eq)]
