@@ -13,6 +13,17 @@
     },
     {
       "category": "Sequential",
+      "detail": "concurrent_assertions::expect_statements at 444:19: assert_eq r2: expected 0x1, got 0x2",
+      "expectation": "Simulation",
+      "name": "concurrent_assertions::expect_statements",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "concurrent_assertions::named_sequence_leading_clock at 323:2: assert_eq low_passed: expected 0x1, got 0x2",
       "expectation": "Simulation",
       "name": "concurrent_assertions::named_sequence_leading_clock",
