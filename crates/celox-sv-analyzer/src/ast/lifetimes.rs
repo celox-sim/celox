@@ -459,9 +459,11 @@ fn argument_widths(subroutine: &Subroutine) -> HashMap<String, usize> {
         .collect()
 }
 
-/// The name a unique local name `x@N` was declared with.
+/// The name a unique local name `x@N`, or `x%<owner>@N` of a static
+/// variable (see `BodyBuilder::declare_static`), was declared with.
 fn source_name(name: &str) -> &str {
-    name.rsplit_once('@').map_or(name, |(source, _)| source)
+    let source = name.rsplit_once('@').map_or(name, |(source, _)| source);
+    source.rsplit_once('%').map_or(source, |(source, _)| source)
 }
 
 fn constant_initializer(

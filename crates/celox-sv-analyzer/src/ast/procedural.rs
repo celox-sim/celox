@@ -99,6 +99,9 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
     /// Whether the function's result is a chandle, `None` without a result.
     return_chandle: Option<bool>,
     pub(super) sensitivity_body: Vec<Stmt>,
+    /// The name of the subroutine whose body this is, which the names of
+    /// its static variables carry (see [`Self::declare_static`]).
+    owner: Option<String>,
 }
 
 /// The names a body declares: its scopes of locals, innermost last, and
@@ -462,6 +465,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             reference_formals: HashSet::default(),
             return_chandle: None,
             sensitivity_body: Vec::new(),
+            owner: None,
             tree,
             session,
             dims,
@@ -580,6 +584,36 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     /// Declare a local in the innermost scope and return its unique name.
     pub(super) fn declare(&mut self, source: &str, r#type: Type) -> String {
         let unique = format!("{source}@{}", *self.state.counter);
+        self.declare_as(source, r#type, unique)
+    }
+
+    /// Declare a local with a static lifetime, declared at token
+    /// `declaration` of its syntax tree. A static variable is one object per
+    /// declaration and owner (IEEE 1800-2023 6.21, 8.25): in a subroutine,
+    /// its unique name is keyed by the subroutine's qualified name, which
+    /// tells apart the package, class specialization and method, and by the
+    /// declaration, so every analysis that declares it, of the package, of
+    /// its state or of a module importing it, names the same variable, and
+    /// no other owner's. A counter numbers the declarations of one analysis
+    /// only. The key is a hash, since a name with `::` would read as a
+    /// package item: `x%<key>@<declaration>`.
+    pub(super) fn declare_static(
+        &mut self,
+        source: &str,
+        r#type: Type,
+        declaration: usize,
+    ) -> String {
+        let unique = match &self.owner {
+            Some(owner) => format!(
+                "{source}%{:016x}@{declaration}",
+                fxhash::hash64(&(owner.as_str(), declaration))
+            ),
+            None => format!("{source}@{}", *self.state.counter),
+        };
+        self.declare_as(source, r#type, unique)
+    }
+
+    fn declare_as(&mut self, source: &str, r#type: Type, unique: String) -> String {
         *self.state.counter += 1;
         let shape = bound_dimensions_from_type(
             &r#type,
@@ -2545,10 +2579,19 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     init,
                     automatic,
                     explicit,
+                    assignment.tokens.start,
                 )?);
                 continue;
             }
-            let name = self.declare(signal.name(), signal.r#type().clone());
+            let name = if automatic {
+                self.declare(signal.name(), signal.r#type().clone())
+            } else {
+                self.declare_static(
+                    signal.name(),
+                    signal.r#type().clone(),
+                    assignment.tokens.start,
+                )
+            };
             if signal.is_const {
                 let mut shape = self.dims.get(signal.name()).unwrap().clone();
                 shape.randomizable = false;
@@ -2577,6 +2620,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         init: Option<Expr>,
         automatic: bool,
         explicit: bool,
+        declaration: usize,
     ) -> Result<Vec<Stmt>, AnalyzerError> {
         if signal.is_const {
             return Err(unsupported("const variable of unpacked structure type"));
@@ -2595,7 +2639,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 &self.dims,
             )?;
         }
-        let leaves = self.declare_aggregate(signal.name(), signal.r#type())?;
+        let leaves = self.declare_aggregate(
+            signal.name(),
+            signal.r#type(),
+            (!automatic).then_some(declaration),
+        )?;
         // A static variable is initialized once, not on each entry: each leaf
         // keeps its part of the initializer, which is hoisted with it.
         let aggregate = signal
@@ -2665,6 +2713,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         &mut self,
         source: &str,
         r#type: &Type,
+        static_declaration: Option<usize>,
     ) -> Result<Vec<(String, Type)>, AnalyzerError> {
         if !r#type.unpacked_ranges.is_empty() {
             return Err(unsupported("array of unpacked structures"));
@@ -2693,7 +2742,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             .leaves()
             .into_iter()
             .map(|leaf| {
-                let name = self.declare(&leaf.name(source), leaf.r#type.clone());
+                let name = if let Some(declaration) = static_declaration {
+                    self.declare_static(&leaf.name(source), leaf.r#type.clone(), declaration)
+                } else {
+                    self.declare(&leaf.name(source), leaf.r#type.clone())
+                };
                 (name, leaf.r#type)
             })
             .collect())
@@ -4291,6 +4344,11 @@ pub(super) fn lower_subroutine(
     {
         return Err(unsupported("function returning an event"));
     }
+    let qualified_name = item.name(&match class {
+        Some(class) if dispatch.is_some() => classes::Class::dispatcher_name(&class.name, &name),
+        Some(class) => classes::Class::subroutine_name(&class.name, &name),
+        None => name.clone(),
+    });
     let mut builder = BodyBuilder::new(
         tree,
         session,
@@ -4298,6 +4356,7 @@ pub(super) fn lower_subroutine(
         state,
         system_functions::Body::Subroutine,
     );
+    builder.owner = Some(qualified_name.clone());
     builder.task_timing = native.kind == celox_sv_syntax::SubroutineKind::Task;
     let first_local = builder.state.locals.len();
     builder.automatic = match native.lifetime.as_deref() {
@@ -4471,7 +4530,7 @@ pub(super) fn lower_subroutine(
         && !constructor
     {
         let leaves = builder
-            .declare_aggregate(&name, r#type)?
+            .declare_aggregate(&name, r#type, None)?
             .into_iter()
             .map(|(leaf, _)| leaf)
             .collect::<Vec<_>>();
@@ -4497,7 +4556,7 @@ pub(super) fn lower_subroutine(
             continue;
         }
         let leaves = builder
-            .declare_aggregate(&source, r#type)?
+            .declare_aggregate(&source, r#type, None)?
             .into_iter()
             .map(|(leaf, _)| leaf)
             .collect::<Vec<_>>();
@@ -4609,13 +4668,7 @@ pub(super) fn lower_subroutine(
         }
     }
     let mut subroutine = Subroutine {
-        name: item.name(&match class {
-            Some(class) if dispatch.is_some() => {
-                classes::Class::dispatcher_name(&class.name, &name)
-            }
-            Some(class) => classes::Class::subroutine_name(&class.name, &name),
-            None => name,
-        }),
+        name: qualified_name,
         is_task: native.kind == celox_sv_syntax::SubroutineKind::Task,
         automatic: builder.automatic,
         automatic_locals: builder.state.locals[first_local..]
