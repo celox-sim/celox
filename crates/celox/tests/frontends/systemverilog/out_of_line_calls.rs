@@ -2955,3 +2955,93 @@ endmodule
     sim.finish().expect("the host finishes");
     assert!(sim.save_state().is_ok(), "{:?}", sim.save_state().err());
 }
+
+/// The classes of the tests of `ref` formals bound to the locals of the
+/// caller: `recurse` collects the nodes of a tree into the queue its `ref`
+/// formal names, recursively, so it goes out of line by default, and its
+/// unit writes the caller's variable.
+const TREE: &str = r#"`timescale 1ns/1ns
+class node;
+    node kids[$];
+endclass
+class root;
+    int offs[$];
+    function void find_all(node n, ref node out[$]);
+        recurse(out, n);
+    endfunction
+    function void recurse(ref node out[$], input node n = null);
+        out.push_back(n);
+        foreach (n.kids[i]) this.recurse(out, n.kids[i]);
+    endfunction
+    function void depth(node n, ref int d);
+        d = d + 1;
+        foreach (n.kids[i]) this.depth(n.kids[i], d);
+    endfunction
+"#;
+
+#[test]
+fn ref_formals_bind_the_locals_of_a_process() {
+    // An automatic queue of an `initial` process, and an automatic `int`,
+    // which the recursive units write through their `ref` formals.
+    let source = format!(
+        "{TREE}endclass\nmodule Top(output int a, output int b, output int d);\n    initial begin\n        automatic root r = new;\n        automatic node x = new, y = new;\n        automatic node q[$];\n        automatic int n = 0;\n        x.kids.push_back(y);\n        r.find_all(x, q);\n        a = q.size();\n        r.find_all(x, q);\n        b = q.size();\n        r.depth(x, n);\n        d = n;\n    end\nendmodule\n"
+    );
+    for four_state in [false, true] {
+        for forced in [false, true] {
+            assert_eq!(
+                simulate(
+                    &source,
+                    four_state,
+                    forced,
+                    "interpreter",
+                    0,
+                    &["a", "b", "d"]
+                ),
+                Ok(vec![value(2), value(4), value(2)]),
+                "four_state {four_state} forced {forced}"
+            );
+        }
+    }
+}
+
+#[test]
+fn ref_formals_bind_the_locals_of_subroutines() {
+    // The shapes of UVM's `uvm_root::find` (an automatic local of a
+    // function), `uvm_root::m_do_timeout_settings` (a local of a `foreach`
+    // body after a delay, in a task) and `uvm_utils::find_all` (a local of
+    // a static method), and a local of static lifetime.
+    let source = format!(
+        "{TREE}    function int find(node a);\n        node list[$];\n        find_all(a, list);\n        return list.size();\n    endfunction\n    task timeouts(node a, output int sizes[$]);\n        foreach (offs[i]) begin\n            node comps[$];\n            #(offs[i]);\n            find_all(a, comps);\n            sizes.push_back(comps.size());\n        end\n    endtask\n    static function int count(node a);\n        node list[$];\n        root r = new;\n        r.find_all(a, list);\n        return list.size();\n    endfunction\n    function int kept(node a);\n        static node list[$];\n        find_all(a, list);\n        return list.size();\n    endfunction\nendclass\nmodule Top(output int a, output int b, output int c, output int d, output int e);\n    initial begin\n        automatic root r = new;\n        automatic node x = new, y = new, z = new;\n        automatic int sizes[$];\n        x.kids.push_back(y);\n        y.kids.push_back(z);\n        r.offs.push_back(1);\n        r.offs.push_back(2);\n        a = r.find(x);\n        b = root::count(y);\n        void'(r.kept(z));\n        e = r.kept(y);\n        r.timeouts(x, sizes);\n        c = sizes[0];\n        d = sizes[1];\n    end\nendmodule\n"
+    );
+    // The delays of the class's task are in the default time unit: a
+    // `timescale` does not set that of the compilation unit (IEEE 1800-2023
+    // 3.14.2.3).
+    let names = ["a", "b", "c", "d", "e"];
+    for four_state in [false, true] {
+        for forced in [false, true] {
+            assert_eq!(
+                simulate(&source, four_state, forced, "interpreter", 10_000, &names),
+                Ok(vec![value(3), value(2), value(3), value(3), value(3)]),
+                "four_state {four_state} forced {forced}"
+            );
+        }
+    }
+}
+
+#[test]
+fn ref_formals_bind_the_locals_of_forked_processes() {
+    // Each forked process has its own automatic queue, which the units fill
+    // while the other process is suspended.
+    let source = format!(
+        "{TREE}endclass\nmodule Top(output int a, output int b);\n    root r = new;\n    node x = new, y = new, z = new;\n    initial begin\n        x.kids.push_back(y);\n        y.kids.push_back(z);\n        for (int k = 0; k < 2; k++) begin\n            fork\n                automatic int kk = k;\n                begin\n                    automatic node q[$];\n                    #(kk + 1);\n                    r.find_all(kk == 0 ? x : y, q);\n                    #1;\n                    if (kk == 0) a = q.size(); else b = q.size();\n                end\n            join_none\n        end\n    end\nendmodule\n"
+    );
+    for four_state in [false, true] {
+        for forced in [false, true] {
+            assert_eq!(
+                simulate(&source, four_state, forced, "interpreter", 5, &["a", "b"]),
+                Ok(vec![value(3), value(2)]),
+                "four_state {four_state} forced {forced}"
+            );
+        }
+    }
+}
