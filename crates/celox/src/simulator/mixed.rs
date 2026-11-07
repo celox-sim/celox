@@ -1729,6 +1729,7 @@ pub(crate) fn specialize_foreign_module(
                     (&property.kind).into(),
                     &destination,
                     &mut expression,
+                    false,
                 )
                 .map_err(|_| invalid())?;
             }
