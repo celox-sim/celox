@@ -3753,3 +3753,45 @@ endmodule
         Ok(vec![value(0xc5a1)])
     );
 }
+
+#[test]
+fn joined_children_read_ref_arrays_without_sharing_them() {
+    // `show`'s child only reads `arr`, and `show` joins it: the caller waits
+    // in the call, so the child reads the caller's array through the copied
+    // frame and nothing is shared. The recursive `walk`, whose array could
+    // not be shared, stays out of line.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a);
+    task automatic show(ref int arr[3], input int depth);
+        fork
+            begin
+                #1 a += arr[0] + arr[1] + arr[2] + depth;
+            end
+        join
+    endtask
+    task automatic walk(int depth);
+        int arr[3] = '{depth, depth * 10, depth * 100};
+        if (depth == 0) return;
+        show(arr, depth);
+        walk(depth - 1);
+    endtask
+    int two = 2;
+    initial begin
+        a = 0;
+        walk(two);
+    end
+endmodule
+"#;
+    assert!(function_units(source, false) > 0, "out of line");
+    for four_state in [false, true] {
+        for forced in [false, true] {
+            for backend in backends() {
+                assert_eq!(
+                    simulate(source, four_state, forced, backend, 5, &["a"]),
+                    Ok(vec![value(336)]),
+                    "{backend}, four-state {four_state}, forced {forced}"
+                );
+            }
+        }
+    }
+}

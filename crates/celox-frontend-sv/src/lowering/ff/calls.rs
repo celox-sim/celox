@@ -1969,11 +1969,15 @@ fn array_slot(variable: &SvVariable) -> Result<(), Reason> {
 }
 
 /// Whether formal `position` of subroutine `name` is a `ref` formal that a
-/// branch of a fork in its body names, also by passing it on to such a
-/// formal of another subroutine: the children of that fork, which run in
-/// copies of the frames, then reach the caller's variable through it.
+/// branch of a fork in its body writes (see `ProcModule::written_names`),
+/// also by passing it on to such a formal of another subroutine: the
+/// children of that fork, which run in copies of the frames, then write the
+/// caller's variable through it. A child that only reads it reads the
+/// caller's variable while the caller waits in the call: a `ref` formal
+/// cannot be named in a fork the call can return before (IEEE 1800-2023
+/// 9.3.2).
 fn forks_through_ref(m: &ProcModule<'_>, name: &str, position: usize) -> bool {
-    use super::super::procedural::expr_idents;
+    let mut writes = false;
     let mut pending = vec![(name.to_string(), position)];
     let mut visited = HashSet::default();
     while let Some((name, position)) = pending.pop() {
@@ -1991,24 +1995,12 @@ fn forks_through_ref(m: &ProcModule<'_>, name: &str, position: usize) -> bool {
             continue;
         };
         let formal = &param.name;
-        let mut named = false;
         for stmt in &subroutine.body {
             stmt.walk(&mut |stmt| {
                 if let sv::ir::Stmt::Fork { branches, .. } = stmt {
-                    for stmt in branches.iter().flatten() {
-                        let mut names = HashSet::default();
-                        let mut targets = HashSet::default();
-                        let mut stmt = stmt.clone();
-                        stmt.visit_mut(
-                            &mut |expr| expr_idents(expr, &mut names),
-                            &mut |lvalue| {
-                                targets.insert(lvalue.name().to_string());
-                            },
-                            &mut |_| {},
-                        );
-                        named |= targets.contains(formal);
-                        named |= names.contains(formal);
-                    }
+                    writes |= branches
+                        .iter()
+                        .any(|branch| m.written_names(branch).contains(formal));
                 }
                 let mut calls = Vec::new();
                 stmt_calls(stmt, &mut calls);
@@ -2024,7 +2016,7 @@ fn forks_through_ref(m: &ProcModule<'_>, name: &str, position: usize) -> bool {
                 }
             });
         }
-        if named {
+        if writes {
             return true;
         }
     }

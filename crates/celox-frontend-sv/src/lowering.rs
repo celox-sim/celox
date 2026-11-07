@@ -1831,6 +1831,7 @@ fn kernel_window_writes(
             &mut names,
             &mut HashSet::default(),
             0,
+            &mut None,
         );
     }
     names.extend(foreign_writes.keys().cloned());
@@ -1874,12 +1875,17 @@ fn stmt_may_suspend(subroutines: &[sv::ir::Subroutine], stmt: &sv::ir::Stmt) -> 
 
 /// Adds the names of the variables `body` writes, directly or in the
 /// subroutines it calls, to `names` (see [`DriverScan`]).
+///
+/// With `refs`, an actual of a `ref` formal is not written by the call but
+/// recorded there with the formal: it is written when the formal is (see
+/// `ProcModule::written_names`).
 fn kernel_written_names(
     scan: &impl CallDefinitions,
     body: &[sv::ir::Stmt],
     names: &mut HashSet<String>,
     visited: &mut HashSet<String>,
     depth: usize,
+    refs: &mut Option<Vec<(String, Vec<String>)>>,
 ) {
     if depth > procedural::MAX_CALL_DEPTH {
         return;
@@ -1945,11 +1951,17 @@ fn kernel_written_names(
             if param.direction.is_written()
                 && let Some(lvalues) = arg.as_ref().and_then(procedural::lvalue_from_expr)
             {
-                names.extend(lvalues.iter().map(|lvalue| lvalue.name().to_string()));
+                let actuals = lvalues.iter().map(|lvalue| lvalue.name().to_string());
+                match refs {
+                    Some(refs) if param.direction.is_reference() => {
+                        refs.push((param.name.clone(), actuals.collect()));
+                    }
+                    _ => names.extend(actuals),
+                }
             }
         }
         if visited.insert(name) {
-            kernel_written_names(scan, &subroutine.body, names, visited, depth + 1);
+            kernel_written_names(scan, &subroutine.body, names, visited, depth + 1, refs);
         }
     }
 }
