@@ -808,3 +808,27 @@ Boundaries: pattern type keys do not descend into subarrays or nested
 structures and integer patterns reject them. `20.6--isunbounded` stays
 failing: the case calls `$isunbounded(1)`, but 20.6.3 requires a parameter
 name, which Celox's reviewed strictness enforces.
+
+Wildcard associative indices (7.8.1) and pull/supply nets (6.6.5–6.6.6, with
+`vectored` / `scalared` declarations) update fourteen reviewed expectations.
+Seven cases pass in both state modes in focused official invocations:
+`6.9.2--vector_scalared`, `6.9.2--vector_vectored`,
+`arrays/associative/wildcard`, and the generated `tri0`, `tri1`, `supply0`
+and `supply1` net cases (verified against the prepared corpus; the
+generated files differ from a template materialization only by a trailing
+newline). Shared regressions cover minimal-length wildcard key identity
+across index widths, and undriven pull/supply values. Boundaries: wildcard
+keys are held at 64 bits (wider indices truncate, and index-returning
+traversal restrictions are not enforced); a pull net with an authored or
+instance driver gets no implicit pull driver, so released bits read Z
+instead of the pulled value, and general strength resolution remains
+unimplemented; `trireg` charge storage stays rejected.
+
+Wildcard port connections (`.*`, 23.3.2.2) expand to implicit same-name
+connections for ports without an explicit (including empty) connection. No
+official expectation rows change: the only pinned case using `.*`,
+`chapter-10/10.6.2--force-release.sv`, still fails on procedural `force`,
+which remains unsupported. A focused official run over 281 instance-heavy
+cases (chapters 6, 10, 23, generic and BlackParrot) reports no changed
+verdicts. The shared regression covers expansion, an explicit override and
+an explicitly empty connection.

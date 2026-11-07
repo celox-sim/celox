@@ -412,6 +412,7 @@ pub(super) fn member_signals(declarations: &VirtualInterfaces) -> Vec<Signal> {
             r#type: member.r#type.clone(),
             is_net: false,
             unresolved_net: false,
+            net_drive: NetDrive::None,
             is_const: false,
             package_variable: None,
             hierarchical: None,
@@ -431,6 +432,7 @@ pub(super) fn member_signals(declarations: &VirtualInterfaces) -> Vec<Signal> {
             }),
             is_net: false,
             unresolved_net: false,
+            net_drive: NetDrive::None,
             is_const: false,
             package_variable: None,
         });
@@ -448,6 +450,7 @@ pub(super) fn member_signals(declarations: &VirtualInterfaces) -> Vec<Signal> {
                 r#type: member.r#type.clone(),
                 is_net: member.is_net,
                 unresolved_net: false,
+                net_drive: NetDrive::None,
                 is_const: false,
                 package_variable: None,
             }
@@ -900,6 +903,7 @@ pub(super) fn identity_signal(state: &Session, handle: &str, interface: &str) ->
         }),
         is_net: false,
         unresolved_net: false,
+        net_drive: NetDrive::None,
         is_const: false,
         package_variable: None,
         hierarchical: None,

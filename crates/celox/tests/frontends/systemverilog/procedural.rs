@@ -50,6 +50,8 @@ fn native_merged_optimization_preserves_large_and_wide_array_boundaries() {
 }
 
 sv_backends! {
+    fn pull_and_supply_nets(sim) { @case "procedural::pull_and_supply_nets"; }
+
     fn level_processes_share_a_written_variable(sim) {
         @case "procedural::level_processes_share_a_written_variable";
     }

@@ -1933,3 +1933,21 @@ module Top;
 endmodule
 "#)
   (top Top) (run_to_finish))
+
+(case wildcard_ports
+  (source "wildcard_ports.sv" #"
+module Child(input logic a, input logic b, output logic y, output logic z);
+  assign y = a & b;
+  assign z = a | b;
+endmodule
+module Top(output bit ok);
+  logic a = 0, b = 1, y, z, y2;
+  Child child (.*);
+  Child overridden (.*, .b(1'b0), .y(y2), .z());
+  always_comb ok = (y == (a & b)) && (z == (a | b)) && (y2 == 1'b0);
+  initial begin
+    #1 a = 1;
+  end
+endmodule
+"#)
+  (top Top) (run_until 2) (assert_eq ok 1))

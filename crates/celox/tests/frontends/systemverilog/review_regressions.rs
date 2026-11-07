@@ -5685,13 +5685,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "wildcard port connection",
-            r#"
-            module Child(input logic a, output logic y); assign y = a; endmodule
-            module Top(input logic a, output logic y); Child child (.*); endmodule
-        "#,
-        ),
-        (
             "delayed continuous assignment",
             r#"
             module Top(input logic a, output wire y); assign #(5,6) y = a; endmodule
@@ -5967,12 +5960,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
                 Child child(.y(missing));
                 assign y = missing;
             endmodule
-        "#,
-        ),
-        (
-            "pull or supply net type",
-            r#"
-            module Top(output tri1 y); endmodule
         "#,
         ),
         (
