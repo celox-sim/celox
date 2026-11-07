@@ -339,6 +339,20 @@ impl<'a> ParameterEnvironment<'a> {
     }
 }
 
+/// Whether a `parameter` declared in the body of the scope of `tree` is a
+/// local parameter, as `localparam` is: in the compilation-unit scope, a
+/// package, a generate block or a class body `parameter` is a synonym for
+/// `localparam` (IEEE 1800-2023 6.20.4), and so is it in a module,
+/// interface or program with a parameter port list (6.20.1). Generate
+/// blocks and class bodies declare their parameters local themselves.
+pub(super) fn body_parameters_are_local(tree: &AnalysisContext<'_>) -> bool {
+    match tree.scope_handle().unit(tree.declarations()) {
+        None => true,
+        Some(unit) if unit.external => true,
+        Some(unit) => unit.kind == celox_sv_syntax::UnitKind::Package || unit.parameters.is_some(),
+    }
+}
+
 pub(super) fn parameters_from_native_with_environment(
     authored: &[&celox_sv_syntax::Parameter],
     syntax_tree: &AnalysisContext<'_>,
@@ -1111,7 +1125,8 @@ pub(super) fn enum_member_constants_from_items(
     for &id in declarations {
         if let BodyItemKind::Parameter(_) = native.body_item(id).kind {
             let authored = ownership::body(id, syntax_tree)?;
-            let local = authored.first().is_some_and(|parameter| parameter.local);
+            let local = body_parameters_are_local(syntax_tree)
+                || authored.first().is_some_and(|parameter| parameter.local);
             parameters_from_native(
                 &authored,
                 syntax_tree,
