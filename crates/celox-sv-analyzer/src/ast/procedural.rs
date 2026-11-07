@@ -25,6 +25,7 @@ use crate::procedural::{
 };
 
 /// One lexical scope: the locals it declares and the bindings they shadow.
+#[derive(Clone)]
 struct Scope {
     entries: Vec<ScopeEntry>,
     /// The types that the typedefs of the scope shadow, in declaration
@@ -32,6 +33,7 @@ struct Scope {
     shadowed_types: Vec<(String, Option<Type>)>,
 }
 
+#[derive(Clone)]
 struct ScopeEntry {
     source: String,
     unique: Option<String>,
@@ -501,6 +503,24 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             entries: Vec::new(),
             shadowed_types: Vec::new(),
         });
+    }
+
+    /// `bind` in the scope of the design element, as if none of the
+    /// body's blocks and formals were declared: the bindings of a named
+    /// sequence or property body are those of its declaration (IEEE
+    /// 1800-2023 16.8).
+    fn in_declaration_scope<T>(&mut self, bind: impl FnOnce(&mut Self) -> T) -> T {
+        let dims = self.dims.clone();
+        let type_aliases = self.type_aliases.clone();
+        let scopes = self.names.scopes.clone();
+        while !self.names.scopes.is_empty() {
+            self.pop_scope();
+        }
+        let result = bind(self);
+        self.dims = dims;
+        self.type_aliases = type_aliases;
+        self.names.scopes = scopes;
+        result
     }
 
     fn pop_scope(&mut self) {

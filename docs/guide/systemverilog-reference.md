@@ -322,6 +322,12 @@ concurrent assertions is unsupported:
   spanning at most 1024 ticks, joined by `|->` or `|=>`.
 - `p iff q` of two Boolean expressions, also as the consequent of `|->`
   (`a |-> b iff c` is `a |-> (b iff c)`).
+- `expect (property_spec) action_block` (16.17) in a process or task, with an
+  explicit clock: the process makes one attempt from the next clocking
+  event, deciding each step on sampled values, then runs the pass or fail
+  statement (by default `$error`) in the Reactive region and goes on. The
+  property is a Boolean one, an implication or a sequence of fixed delays,
+  also a named one, without `disable iff`, local variables or match items.
 - A named property or sequence without formal arguments, in the same module
   outside generate blocks, whose body stays within this subset; local
   variables of built-in integral types and match items.
