@@ -1,0 +1,1 @@
+Rebased; a named property/sequence body binds in its declaration scope (task formals no longer capture its names)
