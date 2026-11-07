@@ -3507,3 +3507,71 @@ endmodule
 "#;
     assert_eq!(output_a(source), vec![BigUint::from(224u32); 2]);
 }
+
+/// The initializers of a package's variables and of the static properties
+/// of its classes run before every process (IEEE 1800-2023 6.8, 10.5) and
+/// call subroutines as any process does: out of line, recursive ones
+/// included. UVM's registries reach the recursive `uvm_coreservice_t::get`
+/// so.
+#[test]
+fn package_initializers_call_recursive_subroutines() {
+    let variable = r#"`timescale 1ns/1ns
+package p;
+    function automatic int fact(int n);
+        if (n <= 1) return 1;
+        return n * fact(n - 1);
+    endfunction
+    int value = fact(4);
+endpackage
+module Top(output int a);
+    initial #1 a = p::value;
+endmodule
+"#;
+    let property = r#"`timescale 1ns/1ns
+package p;
+    class reg_t;
+        static function int fact(int n);
+            if (n <= 1) return 1;
+            return n * fact(n - 1);
+        endfunction
+        static int value = fact(4);
+        static function int get(); return value; endfunction
+    endclass
+endpackage
+import p::*;
+module Top(output int a);
+    initial a = reg_t::get();
+endmodule
+"#;
+    // A singleton whose `get` calls itself while it makes the instance.
+    let singleton = r#"`timescale 1ns/1ns
+package p;
+    class cs_t;
+        static cs_t inst;
+        int depth;
+        static function cs_t get();
+            if (inst == null) begin
+                inst = new;
+                inst.depth = 1 + (get() == inst);
+            end
+            return inst;
+        endfunction
+    endclass
+    class user_t;
+        static cs_t cs = cs_t::get();
+        static function int depth(); return cs.depth; endfunction
+    endclass
+endpackage
+import p::*;
+module Top(output int a);
+    initial #1 a = user_t::depth();
+endmodule
+"#;
+    for (source, expected) in [(variable, 24u32), (property, 24), (singleton, 2)] {
+        assert_eq!(
+            output_a(source),
+            vec![BigUint::from(expected); 2],
+            "{source}"
+        );
+    }
+}
