@@ -631,11 +631,8 @@ impl Ff<'_, '_> {
             if slots.iter().any(|slot| slot.id == id) {
                 continue;
             }
-            if !self.m.var(id).array_dims.is_empty() {
-                if single {
-                    continue;
-                }
-                array_slot(self.m.var(id))?;
+            if !self.m.var(id).array_dims.is_empty() && single {
+                continue;
             }
             slots.push(self.slot_of(id));
         }
@@ -2156,14 +2153,11 @@ impl Ff<'_, '_> {
                     "module state created in a function".to_string(),
                 ));
             }
-            if !variable.array_dims.is_empty() {
-                // The automatic arrays of the bodies the unit inlines too:
-                // they are live only within an activation of the unit.
-                if single && !created {
-                    in_place.insert(id);
-                    continue;
-                }
-                array_slot(variable)?;
+            // The automatic arrays of the bodies the unit inlines too: they
+            // are live only within an activation of the unit.
+            if !variable.array_dims.is_empty() && single && !created {
+                in_place.insert(id);
+                continue;
             }
             slots.push(self.slot_of(id));
         }
@@ -2632,17 +2626,6 @@ impl Ff<'_, '_> {
         self.b.seal_block(SIRTerminator::Error(code));
         self.b.switch_to_block(next);
     }
-}
-
-/// Check that unpacked array `variable` can be a slot of a frame: one of
-/// bits, which the collector need not scan element by element.
-fn array_slot(variable: &SvVariable) -> Result<(), Reason> {
-    if variable.value_kind != celox_design::ValueKind::Bits {
-        return Err(Reason::Other(
-            "unpacked array of handles in the frame".to_string(),
-        ));
-    }
-    Ok(())
 }
 
 /// Whether formal `position` of subroutine `name` is a `ref` formal that a
