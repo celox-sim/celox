@@ -13,6 +13,7 @@ pub(in crate::optimizer) mod pass_branchify_mux;
 pub(in crate::optimizer) mod pass_control_flow_simplify;
 pub(in crate::optimizer) mod pass_effect_case_dispatch;
 pub(in crate::optimizer) mod pass_guarded_region_sinking;
+pub(in crate::optimizer) mod pass_if_conversion;
 pub(in crate::optimizer) mod pass_optimize_blocks;
 pub(in crate::optimizer) mod pass_phi_outcome_compression;
 pub(in crate::optimizer) mod pass_sparse_case_dispatch;

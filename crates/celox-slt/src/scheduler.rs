@@ -2432,6 +2432,10 @@ pub struct ScheduleResult<Addr> {
     /// known per path: capture events, and partitioned settles, whose flags
     /// keep what changed since the last one.
     pub stateful_targets: Option<Vec<VarAtomBase<Addr>>>,
+    /// The whole-variable copies of a partitioned settle, target then
+    /// source: a reader of the target counts as a reader of the source in
+    /// [`SettlePartition::reads`], so an alias may replace the copy.
+    pub copies: Vec<(Addr, Addr)>,
 }
 
 /// Request to split a combinational schedule into partitions that run only
@@ -2442,15 +2446,24 @@ pub struct ScheduleResult<Addr> {
 /// A partition that runs sets the flags of the partitions reading what it
 /// changed; every other writer of state a partition reads must set its flag
 /// too ([`SettlePartition::reads`]). Byte `N` (for `N` partitions) is the
-/// untracked byte, which runs every partition on every settle. Byte `N + 1`
-/// is computed when the settle starts: it runs every partition of this
-/// settle when the untracked byte or enough flags are set, and the
-/// partitions then skip comparing what they wrote.
-#[derive(Clone, Copy, Debug)]
+/// untracked byte ([`celox_design::settle_untracked_flag`]): when it is
+/// set, the settle starts by setting every partition's flag, so that every
+/// partition runs on every settle.
+#[derive(Clone, Debug)]
 pub struct SettlePartitioning<Addr> {
     pub flags: Addr,
     /// Approximate expression nodes per partition.
     pub target_cost: usize,
+    /// Readers outside the settle of the state it writes, by the index of
+    /// their flag byte after the untracked byte
+    /// ([`celox_design::settle_wait_flag`]): the partitions changing the
+    /// state set those flags as they set the flags of the partitions reading
+    /// it.
+    pub external_readers: HashMap<Addr, Vec<usize>>,
+    /// The event signals and their aliases. A path reading or writing one
+    /// changes on every edge, so such paths get partitions of their own: the
+    /// logic sharing a partition with them would run on every edge too.
+    pub clock_nets: HashSet<Addr>,
 }
 
 /// One partition of a partitioned settle.
@@ -3538,6 +3551,8 @@ struct PartitionPlan<Addr> {
     /// The first scheduled work of each partition.
     first_work: Vec<usize>,
     partitions: Vec<PlannedPartition<Addr>>,
+    /// The whole-variable copies, target then source.
+    copies: Vec<(Addr, Addr)>,
 }
 
 /// The paths of one piece of scheduled combinational work.
@@ -3690,16 +3705,34 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
             skipped_work.insert(index);
         }
     }
+    // Whether a piece of work reads or writes a clock net.
+    let clocked = |work: &ScheduledWork| {
+        work_paths(work).iter().any(|&path| {
+            let path = &input[path];
+            path.target
+                .var()
+                .is_some_and(|target| partitioning.clock_nets.contains(&target.id))
+                || path
+                    .sources
+                    .iter()
+                    .chain(&path.address_sources)
+                    .any(|atom| partitioning.clock_nets.contains(&atom.id))
+        })
+    };
     let mut first_work = Vec::new();
     let mut cost = 0;
+    let mut previous_clocked = false;
     for (index, work) in prepared.scheduled_work.iter().enumerate() {
         if skipped_work.contains(&index) {
             continue;
         }
-        if first_work.is_empty() || cost >= partitioning.target_cost {
+        let clocked = clocked(work);
+        if first_work.is_empty() || cost >= partitioning.target_cost || clocked != previous_clocked
+        {
             first_work.push(index);
             cost = 0;
         }
+        previous_clocked = clocked;
         cost += work_paths(work)
             .iter()
             .map(|&path| path_cost(arena, &input[path]))
@@ -3719,6 +3752,10 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
     let count = first_work.len();
     let mut reads = vec![BTreeSet::new(); count];
     let mut writes = vec![BTreeSet::new(); count];
+    // The bits each partition writes of each object, `None` once a write
+    // has no static range: only those bits are compared after it ran.
+    let mut written: Vec<HashMap<Addr, Option<Vec<(usize, usize)>>>> =
+        vec![HashMap::default(); count];
     let mut previous = vec![BTreeSet::new(); count];
     let mut pinned = vec![false; count];
     for (index, work) in prepared.scheduled_work.iter().enumerate() {
@@ -3747,22 +3784,39 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
                 // The unit may read more than its listed sources, such as
                 // force controls. It runs at its process's first projection
                 // and writes every output there.
+                let mut unit_writes = Vec::new();
+                let mut unknown = false;
                 for block in unit.blocks.values() {
                     for instruction in &block.instructions {
                         match instruction {
                             SIRInstruction::Load(_, address, ..) => {
                                 reads[partition].insert(*address);
                             }
-                            SIRInstruction::Store(address, ..) => {
+                            SIRInstruction::Store(address, offset, width, ..) => {
                                 writes[partition].insert(*address);
+                                unit_writes.push((*address, static_written_range(offset, *width)));
                             }
-                            SIRInstruction::Commit(source, target, ..) => {
+                            SIRInstruction::Commit(source, target, offset, width, _) => {
                                 reads[partition].insert(*source);
                                 writes[partition].insert(*target);
+                                unit_writes.push((*target, static_written_range(offset, *width)));
                             }
                             _ => {}
                         }
+                        // A callee's writes have no range here.
+                        if let Some(effects) = instruction.call_effects() {
+                            unit_writes
+                                .extend(effects.writes.iter().map(|address| (*address, None)));
+                        }
+                        unknown |= instruction.accesses_unknown_state();
                     }
+                }
+                for (address, range) in unit_writes {
+                    note_written_range(
+                        &mut written[partition],
+                        address,
+                        range.filter(|_| !unknown),
+                    );
                 }
                 for (atom, counter) in sensitivity_counters {
                     reads[partition].extend([atom.id, *counter]);
@@ -3780,6 +3834,11 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
             previous[partition].extend(path.previous_sources.iter().map(|atom| atom.id));
             if let Some(target) = path.target.var() {
                 writes[partition].insert(target.id);
+                note_written_range(
+                    &mut written[partition],
+                    target.id,
+                    Some((target.access.lsb, target.access.msb)),
+                );
             }
         }
     }
@@ -3808,11 +3867,66 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
             readers.entry(addr).or_default().push(partition);
         }
     }
+    // An external reader of a copy's target reads its source too.
+    for (addr, flags) in &partitioning.external_readers {
+        let mut current = *addr;
+        let mut steps = 0;
+        loop {
+            let readers = readers.entry(current).or_default();
+            readers.extend(
+                flags
+                    .iter()
+                    .map(|flag| celox_design::settle_wait_flag(count, *flag)),
+            );
+            readers.sort_unstable();
+            readers.dedup();
+            match copy_source.get(&current) {
+                Some(&source) if steps <= copy_source.len() => {
+                    current = source;
+                    steps += 1;
+                }
+                _ => break,
+            }
+        }
+    }
+    // A whole-variable copy's target changes only when its source does,
+    // whose writer marks the target's readers as readers of the source
+    // (above): the copy need not compare what it wrote, when nothing else
+    // writes its target.
+    let mut writers: HashMap<Addr, usize> = HashMap::default();
+    for path in input {
+        if let Some(target) = path.target.var() {
+            *writers.entry(target.id).or_default() += 1;
+        }
+        if let LogicPathTarget::Process { unit, .. } = &path.target {
+            for block in unit.blocks.values() {
+                for instruction in &block.instructions {
+                    match instruction {
+                        SIRInstruction::Store(address, ..) => {
+                            *writers.entry(*address).or_default() += 1;
+                        }
+                        SIRInstruction::Commit(_, target, ..) => {
+                            *writers.entry(*target).or_default() += 1;
+                        }
+                        _ => {}
+                    }
+                    if let Some(effects) = instruction.call_effects() {
+                        for address in &effects.writes {
+                            *writers.entry(*address).or_default() += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
     let partitions = (0..count)
         .map(|partition| {
             let mut marks = BTreeSet::new();
             let mut watched = Vec::new();
             for addr in &writes[partition] {
+                if copy_source.contains_key(addr) && writers.get(addr) == Some(&1) {
+                    continue;
+                }
                 let targets: Vec<usize> = readers
                     .get(addr)
                     .into_iter()
@@ -3834,18 +3948,26 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
                     .filter(|&element| element != 0 && width.is_multiple_of(element))
                     .unwrap_or(1);
                 let step = (MAX_WATCHED_WIDTH / element).max(1) * element;
-                for lsb in (0..width).step_by(step) {
-                    let chunk = (width - lsb).min(step);
-                    watched.push(WatchedChunk {
-                        object: *addr,
-                        offset: static_access_offset(
-                            addr,
-                            BitAccess::new(lsb, lsb + chunk - 1),
-                            unpacked_element_widths,
-                        ),
-                        width: chunk,
-                        readers: targets.clone(),
-                    });
+                // Only the bits the partition writes can change while it
+                // runs: compare those, in whole elements.
+                let ranges = match written[partition].get(addr) {
+                    Some(Some(ranges)) => written_spans(ranges, width, element),
+                    _ => vec![(0, width)],
+                };
+                for (start, end) in ranges {
+                    for lsb in (start..end).step_by(step) {
+                        let chunk = (end - lsb).min(step);
+                        watched.push(WatchedChunk {
+                            object: *addr,
+                            offset: static_access_offset(
+                                addr,
+                                BitAccess::new(lsb, lsb + chunk - 1),
+                                unpacked_element_widths,
+                            ),
+                            width: chunk,
+                            readers: targets.clone(),
+                        });
+                    }
                 }
             }
             PlannedPartition {
@@ -3857,13 +3979,67 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
             }
         })
         .collect();
+    let mut copies: Vec<(Addr, Addr)> = copy_source.into_iter().collect();
+    copies.sort_unstable();
     Some((
         PartitionPlan {
             first_work,
             partitions,
+            copies,
         },
         partitioning.flags,
     ))
+}
+
+/// The inclusive bit range a store of `width` bits at `offset` writes, if
+/// the offset is static.
+fn static_written_range(offset: &SIROffset, width: usize) -> Option<(usize, usize)> {
+    let lsb = match offset {
+        SIROffset::Static(bit)
+        | SIROffset::PackedElements {
+            bit_offset: bit, ..
+        } => *bit,
+        SIROffset::Dynamic(_) | SIROffset::Element { .. } => return None,
+    };
+    Some((lsb, lsb + width.max(1) - 1))
+}
+
+/// Record a write of `range` (`None` when its bits are unknown) to `addr`.
+fn note_written_range<Addr: Eq + Hash>(
+    written: &mut HashMap<Addr, Option<Vec<(usize, usize)>>>,
+    addr: Addr,
+    range: Option<(usize, usize)>,
+) {
+    let ranges = written.entry(addr).or_insert_with(|| Some(Vec::new()));
+    match (ranges, range) {
+        (Some(ranges), Some(range)) => ranges.push(range),
+        (ranges, None) => *ranges = None,
+        (None, _) => {}
+    }
+}
+
+/// The disjoint half-open spans covering the inclusive bit `ranges` of an
+/// object `width` bits wide, each widened to whole elements of `element`
+/// bits.
+fn written_spans(ranges: &[(usize, usize)], width: usize, element: usize) -> Vec<(usize, usize)> {
+    let mut spans: Vec<(usize, usize)> = ranges
+        .iter()
+        .filter(|&&(lsb, _)| lsb < width)
+        .map(|&(lsb, msb)| {
+            let start = lsb / element * element;
+            let end = (msb + 1).div_ceil(element) * element;
+            (start, end.min(width))
+        })
+        .collect();
+    spans.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in spans {
+        match merged.last_mut() {
+            Some((_, last)) if start <= *last => *last = (*last).max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    merged
 }
 
 /// The `(target, source)` of a path that copies one whole variable into
@@ -3952,15 +4128,14 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
     }
 
     /// Start a settle of `count` partitions. An untracked raw view requires
-    /// every partition to run. When all individual flags are already set,
-    /// their own guards suffice; counting them would scan the complete flag
-    /// array on every settle without changing which partitions execute.
+    /// every partition to run: set every flag, so that the guards test
+    /// nothing but their own flag.
     fn begin_settle(&mut self, flags: Addr, count: usize) {
         let untracked = self.builder.alloc_bit(8, false);
         self.builder.emit(SIRInstruction::Load(
             untracked,
             flags,
-            SIROffset::Static(count * 8),
+            SIROffset::Static(celox_design::settle_untracked_flag(count) * 8),
             8,
         ));
         let zero = self.builder.alloc_bit(8, false);
@@ -3969,24 +4144,39 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
         let raw = self.builder.alloc_bit(1, false);
         self.builder
             .emit(SIRInstruction::Binary(raw, untracked, BinaryOp::Ne, zero));
-        let one = self.builder.alloc_bit(8, false);
+        let fill = self.builder.new_block();
+        let start = self.builder.new_block();
+        self.builder.seal_block(SIRTerminator::Branch {
+            cond: raw,
+            true_block: (fill, Vec::new()),
+            false_block: (start, Vec::new()),
+        });
+        self.builder.switch_to_block(fill);
+        for first in (0..count).step_by(8) {
+            let bytes = (count - first).min(8);
+            let ones = self.builder.alloc_bit(bytes * 8, false);
+            self.builder.emit(SIRInstruction::Imm(
+                ones,
+                SIRValue::new(0x0101_0101_0101_0101u64 & (u64::MAX >> (64 - bytes * 8))),
+            ));
+            self.builder.emit(SIRInstruction::Store(
+                flags,
+                SIROffset::Static(first * 8),
+                bytes * 8,
+                ones,
+                Vec::new(),
+                Vec::new(),
+            ));
+        }
         self.builder
-            .emit(SIRInstruction::Imm(one, SIRValue::new(1u64)));
-        let byte = self.builder.alloc_bit(8, false);
-        self.builder.emit(SIRInstruction::Mux(byte, raw, one, zero));
-        self.builder.emit(SIRInstruction::Store(
-            flags,
-            SIROffset::Static((count + 1) * 8),
-            8,
-            byte,
-            Vec::new(),
-            Vec::new(),
-        ));
+            .seal_block(SIRTerminator::Jump(start, Vec::new()));
+        self.builder.switch_to_block(start);
     }
 
     /// Compare each chunk with its value before the partition ran (`old`),
     /// and set the flags of its `readers` when it changed. Readers with the
-    /// same dependencies share a change test and packed flag stores.
+    /// same dependencies share a change test; adjacent readers share a
+    /// constant flag store.
     fn mark_changed_readers(
         &mut self,
         flags: Addr,
@@ -4025,46 +4215,48 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
                 false_block: (done, Vec::new()),
             });
             self.builder.switch_to_block(publish);
-            let mut words = BTreeMap::<usize, u64>::new();
-            for &reader in readers {
-                *words.entry(reader / 8).or_default() |= 1u64 << ((reader % 8) * 8);
-            }
-            for (word, mask) in words {
-                if mask.count_ones() == 1 {
+            // Adjacent flags are set by one constant store of 1, 2, 4 or 8
+            // bytes; a run of another length splits into those. Flags are
+            // never read back and ORed in: a word of another width costs the
+            // backend a masked read-modify-write for every flag it sets.
+            let mut bytes: Vec<usize> = readers.to_vec();
+            bytes.sort_unstable();
+            bytes.dedup();
+            let mut index = 0;
+            while index < bytes.len() {
+                let first = bytes[index];
+                let mut run = 1;
+                while index + run < bytes.len() && bytes[index + run] == first + run {
+                    run += 1;
+                }
+                index += run;
+                let mut at = first;
+                let mut left = run;
+                while left > 0 {
+                    let piece = [8, 4, 2, 1]
+                        .into_iter()
+                        .find(|&piece| piece <= left)
+                        .unwrap();
+                    let marked = if piece == 1 {
+                        one
+                    } else {
+                        let constant = self.builder.alloc_bit(piece * 8, false);
+                        let ones = 0x0101_0101_0101_0101u64 & (u64::MAX >> (64 - piece * 8));
+                        self.builder
+                            .emit(SIRInstruction::Imm(constant, SIRValue::new(ones)));
+                        constant
+                    };
                     self.builder.emit(SIRInstruction::Store(
                         flags,
-                        SIROffset::Static(word * 64 + mask.trailing_zeros() as usize),
-                        8,
-                        one,
+                        SIROffset::Static(at * 8),
+                        piece * 8,
+                        marked,
                         Vec::new(),
                         Vec::new(),
                     ));
-                    continue;
+                    at += piece;
+                    left -= piece;
                 }
-                let width = (64 - mask.leading_zeros() as usize).div_ceil(8) * 8;
-                let offset = SIROffset::Static(word * 64);
-                let constant = self.builder.alloc_bit(width, false);
-                self.builder
-                    .emit(SIRInstruction::Imm(constant, SIRValue::new(mask)));
-                let marked = if mask.count_ones() as usize == width / 8 {
-                    constant
-                } else {
-                    let old = self.builder.alloc_bit(width, false);
-                    self.builder
-                        .emit(SIRInstruction::Load(old, flags, offset.clone(), width));
-                    let marked = self.builder.alloc_bit(width, false);
-                    self.builder
-                        .emit(SIRInstruction::Binary(marked, old, BinaryOp::Or, constant));
-                    marked
-                };
-                self.builder.emit(SIRInstruction::Store(
-                    flags,
-                    offset,
-                    width,
-                    marked,
-                    Vec::new(),
-                    Vec::new(),
-                ));
             }
             self.builder
                 .seal_block(SIRTerminator::Jump(done, Vec::new()));
@@ -4078,7 +4270,6 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
         &mut self,
         flags: Addr,
         first: usize,
-        count: usize,
         partitions: &[PlannedPartition<Addr>],
     ) {
         if partitions.len() < 4 || partitions.iter().any(|partition| partition.pinned) {
@@ -4097,22 +4288,12 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
             SIROffset::Static(first * 8),
             width,
         ));
-        let full = self.builder.alloc_bit(8, false);
-        self.builder.emit(SIRInstruction::Load(
-            full,
-            flags,
-            SIROffset::Static((count + 1) * 8),
-            8,
-        ));
-        let any = self.builder.alloc_bit(width, false);
-        self.builder
-            .emit(SIRInstruction::Binary(any, word, BinaryOp::Or, full));
         let zero = self.builder.alloc_bit(width, false);
         self.builder
             .emit(SIRInstruction::Imm(zero, SIRValue::new(0u64)));
         let dirty = self.builder.alloc_bit(1, false);
         self.builder
-            .emit(SIRInstruction::Binary(dirty, any, BinaryOp::Ne, zero));
+            .emit(SIRInstruction::Binary(dirty, word, BinaryOp::Ne, zero));
         let body = self.builder.new_block();
         let done = self.builder.new_block();
         self.builder.seal_block(SIRTerminator::Branch {
@@ -4133,17 +4314,10 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
         self.lower_cache.clear();
     }
 
-    /// Open partition `index` of `count`: run it only when its flag or the
-    /// full byte is set, and clear its flag. Values computed before it may
-    /// be reused inside, but not the other way round, so the expression
-    /// cache starts over.
-    fn begin_partition(
-        &mut self,
-        flags: Addr,
-        index: usize,
-        count: usize,
-        partition: &PlannedPartition<Addr>,
-    ) {
+    /// Open partition `index`: run it only when its flag is set, and clear
+    /// its flag. Values computed before it may be reused inside, but not the
+    /// other way round, so the expression cache starts over.
+    fn begin_partition(&mut self, flags: Addr, index: usize, partition: &PlannedPartition<Addr>) {
         self.flush_pending_folds();
         if self.partition_group_merge.is_none()
             && self.context.split_large_units
@@ -4160,22 +4334,12 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
             let own = self.builder.alloc_bit(8, false);
             self.builder
                 .emit(SIRInstruction::Load(own, flags, offset.clone(), 8));
-            let all = self.builder.alloc_bit(8, false);
-            self.builder.emit(SIRInstruction::Load(
-                all,
-                flags,
-                SIROffset::Static((count + 1) * 8),
-                8,
-            ));
-            let flag = self.builder.alloc_bit(8, false);
-            self.builder
-                .emit(SIRInstruction::Binary(flag, own, BinaryOp::Or, all));
             let zero = self.builder.alloc_bit(8, false);
             self.builder
                 .emit(SIRInstruction::Imm(zero, SIRValue::new(0u64)));
             let dirty = self.builder.alloc_bit(1, false);
             self.builder
-                .emit(SIRInstruction::Binary(dirty, flag, BinaryOp::Ne, zero));
+                .emit(SIRInstruction::Binary(dirty, own, BinaryOp::Ne, zero));
             let body = self.builder.new_block();
             let merge = self.builder.new_block();
             self.builder.seal_block(SIRTerminator::Branch {
@@ -4210,10 +4374,9 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
         }
     }
 
-    /// Close a partition of a settle of `count`: set the flags of the
-    /// partitions reading what it changed, then join the path that skipped
-    /// it.
-    fn end_partition(&mut self, flags: Addr, _count: usize, partition: &PlannedPartition<Addr>) {
+    /// Close a partition: set the flags of the partitions reading what it
+    /// changed, then join the path that skipped it.
+    fn end_partition(&mut self, flags: Addr, partition: &PlannedPartition<Addr>) {
         self.flush_pending_folds();
         if !partition.watched.is_empty() {
             let one = self.builder.alloc_bit(8, false);
@@ -4777,11 +4940,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
         if let Some((plan, flags)) = &plan {
             if let Some(partition) = plan.first_work.iter().position(|&first| first == index) {
                 if partition > 0 {
-                    lowering.end_partition(
-                        *flags,
-                        plan.partitions.len(),
-                        &plan.partitions[partition - 1],
-                    );
+                    lowering.end_partition(*flags, &plan.partitions[partition - 1]);
                 } else {
                     lowering.begin_settle(*flags, plan.partitions.len());
                 }
@@ -4790,16 +4949,10 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
                     lowering.begin_partition_group(
                         *flags,
                         partition,
-                        plan.partitions.len(),
                         &plan.partitions[partition..(partition + 8).min(plan.partitions.len())],
                     );
                 }
-                lowering.begin_partition(
-                    *flags,
-                    partition,
-                    plan.partitions.len(),
-                    &plan.partitions[partition],
-                );
+                lowering.begin_partition(*flags, partition, &plan.partitions[partition]);
             }
         }
         lowering.lower(
@@ -4812,7 +4965,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
     if let Some((plan, flags)) = &plan
         && let Some(last) = plan.partitions.last()
     {
-        lowering.end_partition(*flags, plan.partitions.len(), last);
+        lowering.end_partition(*flags, last);
         lowering.end_partition_group();
     }
     // Flush the final exact grouped-fold run after the SCC loop.
@@ -4824,12 +4977,9 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
     }
     // Partition flags carry what changed from one settle to the next.
     let stateful_targets = stateful_targets.filter(|_| plan.is_none());
-    Ok(ScheduleResult {
-        execution_units: lowering.finish(),
-        runtime_errors,
-        direct_ff_writes,
-        partitions: plan
-            .map(|(plan, _)| {
+    let (partitions, copies) = plan
+        .map(|(plan, _)| {
+            (
                 plan.partitions
                     .into_iter()
                     .map(|partition| SettlePartition {
@@ -4837,10 +4987,18 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
                         writes: partition.writes,
                         pinned: partition.pinned,
                     })
-                    .collect()
-            })
-            .unwrap_or_default(),
+                    .collect(),
+                plan.copies,
+            )
+        })
+        .unwrap_or_default();
+    Ok(ScheduleResult {
+        execution_units: lowering.finish(),
+        runtime_errors,
+        direct_ff_writes,
+        partitions,
         stateful_targets,
+        copies,
     })
 }
 
@@ -5500,6 +5658,8 @@ mod tests {
             Some(super::SettlePartitioning {
                 flags: 99,
                 target_cost: 1,
+                external_readers: crate::HashMap::default(),
+                clock_nets: crate::HashSet::default(),
             }),
         )
         .unwrap()
@@ -5528,9 +5688,9 @@ mod tests {
             ]
         );
         assert!(result.partitions.iter().all(|partition| !partition.pinned));
-        // The settle starts by reading the untracked byte (24) to decide the
-        // full byte (32). Each partition loads its own flag and the full
-        // byte, and sets its reader's flag when it changed what it wrote.
+        // The settle starts by reading the untracked byte (24). Each
+        // partition loads its own flag, and sets its reader's flag when it
+        // changed what it wrote.
         let mut loaded = Vec::new();
         let mut stored = Vec::new();
         let mut compares = 0;
@@ -5552,14 +5712,129 @@ mod tests {
         }
         loaded.sort_unstable();
         stored.sort_unstable();
-        // The three guards read their flags and the full byte. Publication
-        // stores 1 directly without reading an individual reader's flag.
-        assert_eq!(loaded, vec![0, 8, 16, 24, 32, 32, 32]);
-        // The clears of all three flags, the marks of partitions 1 and 2,
-        // and the full byte.
-        assert_eq!(stored, vec![0, 8, 8, 16, 16, 32]);
+        // The three guards read their flags. Publication stores 1 directly
+        // without reading an individual reader's flag.
+        assert_eq!(loaded, vec![0, 8, 16, 24]);
+        // The clears of all three flags and the marks of partitions 1 and
+        // 2; the untracked path fills the three flags with one wider store.
+        assert_eq!(stored, vec![0, 8, 8, 16, 16]);
         // 11 and 12 are compared before their readers are marked.
         assert_eq!(compares, 2);
+    }
+
+    /// A partition that writes a slice of a wide variable compares that
+    /// slice before marking the readers, not the whole variable; an unpacked
+    /// array is compared in whole elements.
+    #[test]
+    fn settle_partitions_compare_only_the_written_bits() {
+        let loads_of_13 = |element_width: Option<usize>| {
+            let mut arena = SLTNodeArena::new();
+            let mut slice = simple_path(&mut arena, 13, Some(12));
+            slice.target = LogicPathTarget::Var(VarAtomBase::new(13, 8, 15));
+            let paths = vec![simple_path(&mut arena, 14, Some(13)), slice];
+            let widths = [(12, 8), (13, 64), (14, 8)].into_iter().collect();
+            let elements = element_width.map(|width| (13, width)).into_iter().collect();
+            let result = super::sort_with_unpacked_element_widths(
+                paths,
+                &arena,
+                &crate::HashSet::default(),
+                &crate::HashMap::default(),
+                false,
+                &widths,
+                &elements,
+                1,
+                Some(super::SettlePartitioning {
+                    flags: 99,
+                    target_cost: 1,
+                    external_readers: crate::HashMap::default(),
+                    clock_nets: crate::HashSet::default(),
+                }),
+            )
+            .unwrap();
+            assert_eq!(result.partitions.len(), 2);
+            let mut loads = Vec::new();
+            for unit in &result.execution_units {
+                for block in unit.blocks.values() {
+                    for instruction in &block.instructions {
+                        if let SIRInstruction::Load(_, 13, offset, width) = instruction {
+                            loads.push((offset.clone(), *width));
+                        }
+                    }
+                }
+            }
+            loads.sort_unstable();
+            loads
+        };
+        // The reader's input, and the written slice before and after.
+        assert_eq!(
+            loads_of_13(None),
+            vec![
+                (SIROffset::Static(0), 8),
+                (SIROffset::Static(8), 8),
+                (SIROffset::Static(8), 8),
+            ]
+        );
+        // The slice lies in the first 16-bit element.
+        assert_eq!(
+            loads_of_13(Some(16)),
+            vec![
+                (SIROffset::Static(0), 8),
+                (SIROffset::Static(0), 16),
+                (SIROffset::Static(0), 16),
+            ]
+        );
+    }
+
+    /// A partition that changes state an external reader watches sets the
+    /// reader's flag, which follows the partitions' bytes and the untracked
+    /// byte.
+    #[test]
+    fn settle_partitions_mark_external_readers() {
+        let mut arena = SLTNodeArena::new();
+        let paths = vec![
+            simple_path(&mut arena, 13, Some(12)),
+            simple_path(&mut arena, 12, Some(11)),
+            simple_path(&mut arena, 11, Some(10)),
+        ];
+        let widths = (10..14).map(|id| (id, 8)).collect();
+        let result = super::sort_with_unpacked_element_widths(
+            paths,
+            &arena,
+            &crate::HashSet::default(),
+            &crate::HashMap::default(),
+            false,
+            &widths,
+            &crate::HashMap::default(),
+            1,
+            Some(super::SettlePartitioning {
+                flags: 99,
+                target_cost: 1,
+                external_readers: [(11, vec![1])].into_iter().collect(),
+                clock_nets: crate::HashSet::default(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(result.partitions.len(), 3);
+        let mut stored = Vec::new();
+        for unit in &result.execution_units {
+            for block in unit.blocks.values() {
+                for instruction in &block.instructions {
+                    if let SIRInstruction::Store(99, SIROffset::Static(bit), width, ..) =
+                        instruction
+                    {
+                        stored.push((*bit, *width));
+                    }
+                }
+            }
+        }
+        stored.sort_unstable();
+        // The three clears, the untracked fill, the mark of partition 2,
+        // and the byte stores of partition 1's flag and of external flag 1
+        // at byte 3 + 1 + 1, both set when 11 changed.
+        assert_eq!(
+            stored,
+            vec![(0, 8), (0, 24), (8, 8), (8, 8), (16, 8), (16, 8), (40, 8)]
+        );
     }
 
     #[test]
@@ -6470,6 +6745,8 @@ mod tests {
             Some(super::SettlePartitioning {
                 flags: 99,
                 target_cost: 1,
+                external_readers: crate::HashMap::default(),
+                clock_nets: crate::HashSet::default(),
             }),
         ] {
             let result = super::sort_with_unpacked_element_widths(

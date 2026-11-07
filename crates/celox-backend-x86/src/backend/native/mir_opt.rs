@@ -195,14 +195,20 @@ pub(crate) fn compact_vregs(func: &mut MFunction) -> VRegCompaction {
     VRegCompaction { before, after }
 }
 
-/// Select x86 direct-memory updates for exact local load/ALU/store chains.
+/// Select x86 direct-memory updates for exact local load/ALU/store chains,
+/// and immediate stores for stores of constant registers.
 ///
 /// The SSA temporaries must have no other users. Keeping the match local
 /// also fixes the memory observation point: there is no intervening effect to
 /// justify with instruction reordering. Wider immediates are truncated to the
 /// access width, exactly as the original final store truncates the register.
+/// A store of a constant register becomes `mov [mem], imm`: the constant is
+/// usually defined once for the whole function and would otherwise be
+/// rematerialized into a register before each store. Constants left without
+/// a use are removed.
 pub(crate) fn fold_direct_immediate_stores(func: &mut MFunction) -> usize {
     let mut use_counts = HashMap::<VReg, usize>::default();
+    let mut constants = HashMap::<VReg, u64>::default();
     for block in &func.blocks {
         for phi in &block.phis {
             for (_, source) in &phi.sources {
@@ -213,6 +219,52 @@ pub(crate) fn fold_direct_immediate_stores(func: &mut MFunction) -> usize {
             for source in inst.uses() {
                 *use_counts.entry(source).or_default() += 1;
             }
+            if let MInst::LoadImm { dst, value } = inst {
+                constants.insert(*dst, *value);
+            }
+        }
+    }
+    let mut folded_constants = 0usize;
+    for block in &mut func.blocks {
+        for inst in &mut block.insts {
+            let MInst::Store {
+                base,
+                offset,
+                src,
+                size,
+            } = *inst
+            else {
+                continue;
+            };
+            let Some(&value) = constants.get(&src) else {
+                continue;
+            };
+            let imm = match size {
+                OpSize::S8 => value & u64::from(u8::MAX),
+                OpSize::S16 => value & u64::from(u16::MAX),
+                OpSize::S32 => value & u64::from(u32::MAX),
+                OpSize::S64 => {
+                    if sign_extended_i32(value).is_none() {
+                        continue;
+                    }
+                    value
+                }
+            };
+            *inst = MInst::StoreImm {
+                base,
+                offset,
+                size,
+                imm,
+            };
+            *use_counts.get_mut(&src).expect("counted store source") -= 1;
+            folded_constants += 1;
+        }
+    }
+    if folded_constants > 0 {
+        for block in &mut func.blocks {
+            block.insts.retain(|inst| {
+                !matches!(inst, MInst::LoadImm { dst, .. } if use_counts.get(dst).copied().unwrap_or(0) == 0)
+            });
         }
     }
 
@@ -309,7 +361,7 @@ pub(crate) fn fold_direct_immediate_stores(func: &mut MFunction) -> usize {
         }
         block.insts = rewritten;
     }
-    folded
+    folded + folded_constants
 }
 
 /// Fold single-use byte displacements and power-of-two indexes into x86
@@ -866,6 +918,45 @@ fn fold_branch_predicates(func: &mut MFunction, class: BranchPredicateClass) -> 
         if block.insts.len() < 2 {
             continue;
         }
+        let adjacent = block.insts.len() - 2;
+        // A zero test of a direct load whose only use is the branch: the
+        // register-class fold of an earlier stage leaves `load; test; jcc`,
+        // which the machine compares in memory.
+        if let BranchPredicateClass::Memory = class
+            && let MInst::BranchPred {
+                predicate:
+                    BranchPredicate::CompareImm {
+                        lhs,
+                        imm: 0,
+                        kind: kind @ (CmpKind::Eq | CmpKind::Ne),
+                    },
+                true_bb,
+                false_bb,
+            } = block.insts[block.insts.len() - 1].clone()
+            && use_counts[lhs.0 as usize] == 1
+            && let MInst::Load {
+                dst,
+                base,
+                offset,
+                size,
+            } = block.insts[adjacent].clone()
+            && dst == lhs
+        {
+            let (true_bb, false_bb) = if kind == CmpKind::Ne {
+                (true_bb, false_bb)
+            } else {
+                (false_bb, true_bb)
+            };
+            block.insts.pop();
+            block.insts.remove(adjacent);
+            block.insts.push(MInst::BranchPred {
+                predicate: BranchPredicate::MemoryNonZero { base, offset, size },
+                true_bb,
+                false_bb,
+            });
+            folded += 1;
+            continue;
+        }
         let MInst::Branch {
             cond,
             true_bb,
@@ -878,7 +969,6 @@ fn fold_branch_predicates(func: &mut MFunction, class: BranchPredicateClass) -> 
             continue;
         }
 
-        let adjacent = block.insts.len() - 2;
         let definition = if matches!(class, BranchPredicateClass::Register) {
             let Some(index) = block.insts[..=adjacent]
                 .iter()

@@ -780,6 +780,15 @@ pub enum MInst {
         size: OpSize,
         imm: u64,
     },
+    /// `memory = immediate` over simulator-owned direct memory, selected from
+    /// a store of a constant register. `imm` is truncated to the access width
+    /// by construction.
+    StoreImm {
+        base: BaseReg,
+        offset: i32,
+        size: OpSize,
+        imm: u64,
+    },
     /// dst = load [ptr + offset] in the runtime-owned indirect-memory domain.
     /// This domain is disjoint from SimState and StackFrame.
     LoadPtr {
@@ -1211,6 +1220,12 @@ impl fmt::Display for MInst {
                 size,
                 imm,
             } => write!(f, "or_store_imm.{size} [{base} + {offset}], {imm:#x}"),
+            MInst::StoreImm {
+                base,
+                offset,
+                size,
+                imm,
+            } => write!(f, "store_imm.{size} [{base} + {offset}], {imm:#x}"),
             MInst::LoadPtr {
                 dst,
                 ptr,
@@ -1618,6 +1633,7 @@ impl MInst {
             | MInst::X86Simd(_)
             | MInst::AndStoreImm { .. }
             | MInst::OrStoreImm { .. }
+            | MInst::StoreImm { .. }
             | MInst::StorePtr { .. }
             | MInst::ReleaseStorePtr { .. }
             | MInst::StoreIndexed { .. }
@@ -1710,6 +1726,7 @@ impl MInst {
             | MInst::X86Simd(_)
             | MInst::AndStoreImm { .. }
             | MInst::OrStoreImm { .. }
+            | MInst::StoreImm { .. }
             | MInst::StorePtr { .. }
             | MInst::ReleaseStorePtr { .. }
             | MInst::StoreIndexed { .. }
@@ -1749,6 +1766,7 @@ impl MInst {
             | MInst::Load { .. }
             | MInst::AndStoreImm { .. }
             | MInst::OrStoreImm { .. }
+            | MInst::StoreImm { .. }
             | MInst::MemCopy { .. }
             | MInst::MemFill { .. }
             | MInst::SparseCommit { .. }
@@ -2165,6 +2183,7 @@ impl MInst {
             | MInst::Load { .. }
             | MInst::AndStoreImm { .. }
             | MInst::OrStoreImm { .. }
+            | MInst::StoreImm { .. }
             | MInst::MemCopy { .. }
             | MInst::MemFill { .. }
             | MInst::SparseCommit { .. }

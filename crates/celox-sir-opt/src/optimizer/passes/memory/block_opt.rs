@@ -147,6 +147,65 @@ fn ranges_alias(
     }
 }
 
+/// The earlier accesses of a scheduling window by object: those with a
+/// static offset by their start bit, those with a dynamic offset apart.
+struct AccessIndex<A> {
+    objects: HashMap<A, ObjectAccesses>,
+}
+
+#[derive(Default)]
+struct ObjectAccesses {
+    /// The accesses at each static start bit, as instruction index and width.
+    fixed: std::collections::BTreeMap<usize, Vec<(usize, usize)>>,
+    /// The widest static access, which bounds how far below a start bit an
+    /// aliasing access can begin.
+    max_width: usize,
+    /// Instruction indices of the accesses with a dynamic offset.
+    dynamic: Vec<usize>,
+}
+
+impl<A> Default for AccessIndex<A> {
+    fn default() -> Self {
+        Self {
+            objects: HashMap::default(),
+        }
+    }
+}
+
+impl<A: Clone + PartialEq + Eq + std::hash::Hash> AccessIndex<A> {
+    fn insert(&mut self, addr: A, off: Option<usize>, width: usize, index: usize) {
+        let accesses = self.objects.entry(addr).or_default();
+        match off {
+            Some(off) => {
+                accesses.fixed.entry(off).or_default().push((index, width));
+                accesses.max_width = accesses.max_width.max(width);
+            }
+            None => accesses.dynamic.push(index),
+        }
+    }
+
+    /// Append the indices of the recorded accesses of `addr` that may alias
+    /// the range `off`/`width` (see `ranges_alias`) to `out`.
+    fn aliasing(&self, addr: &A, off: Option<usize>, width: usize, out: &mut Vec<usize>) {
+        let Some(accesses) = self.objects.get(addr) else {
+            return;
+        };
+        out.extend_from_slice(&accesses.dynamic);
+        match off {
+            Some(off) => {
+                let first = off.saturating_sub(accesses.max_width.saturating_sub(1));
+                let last = off.saturating_add(width.max(1) - 1);
+                for (&start, accesses) in accesses.fixed.range(first..=last) {
+                    out.extend(accesses.iter().filter_map(|&(index, access_width)| {
+                        ranges_alias(Some(start), access_width, Some(off), width).then_some(index)
+                    }));
+                }
+            }
+            None => out.extend(accesses.fixed.values().flatten().map(|&(index, _)| index)),
+        }
+    }
+}
+
 fn schedule_block_interleaved<A: Clone + PartialEq + Eq + std::hash::Hash>(
     window: &[SIRInstruction<A>],
     max_inflight_loads: usize,
@@ -181,10 +240,13 @@ fn schedule_block_interleaved<A: Clone + PartialEq + Eq + std::hash::Hash>(
         }
     };
 
-    // Track memory accesses indexed by address for O(n*k) instead of O(n²).
-    // In large designs, most addresses are distinct so only a few entries per bucket.
-    let mut mem_writes: HashMap<A, Vec<usize>> = HashMap::default();
-    let mut mem_reads: HashMap<A, Vec<usize>> = HashMap::default();
+    // Track memory accesses by address, and within an address by static
+    // offset, so that a window of thousands of static accesses of one object
+    // (a memory initialization, the partition flags of a settle) finds only
+    // the accesses that can alias each one instead of every earlier access of
+    // the object.
+    let mut mem_writes: AccessIndex<A> = AccessIndex::default();
+    let mut mem_reads: AccessIndex<A> = AccessIndex::default();
 
     // Pre-extract memory access info to avoid redundant pattern matching
     let mem_infos: Vec<Option<(A, Option<usize>, usize, bool)>> = window
@@ -195,6 +257,7 @@ fn schedule_block_interleaved<A: Clone + PartialEq + Eq + std::hash::Hash>(
         })
         .collect();
 
+    let mut aliasing = Vec::new();
     for j in 0..n {
         // Data dependencies: for each register used by j, add edge from its def
         for reg in &uses[j] {
@@ -207,43 +270,23 @@ fn schedule_block_interleaved<A: Clone + PartialEq + Eq + std::hash::Hash>(
         }
 
         // Memory dependencies — only check entries with the same address
-        if let Some(ref info_j) = mem_infos[j] {
-            let j_write = info_j.3;
-
-            if j_write {
-                // WAW: depend on previous writes to the same address that alias
-                if let Some(prev_writes) = mem_writes.get(&info_j.0) {
-                    for &prev in prev_writes {
-                        if let Some(ref info_prev) = mem_infos[prev] {
-                            if ranges_alias(info_prev.1, info_prev.2, info_j.1, info_j.2) {
-                                add_edge(prev, j, &mut succs, &mut indeg);
-                            }
-                        }
-                    }
-                }
-                // WAR: depend on previous reads to the same address that alias
-                if let Some(prev_reads) = mem_reads.get(&info_j.0) {
-                    for &prev in prev_reads {
-                        if let Some(ref info_prev) = mem_infos[prev] {
-                            if ranges_alias(info_prev.1, info_prev.2, info_j.1, info_j.2) {
-                                add_edge(prev, j, &mut succs, &mut indeg);
-                            }
-                        }
-                    }
-                }
-                mem_writes.entry(info_j.0.clone()).or_default().push(j);
+        if let Some((addr, off, width, j_write)) = &mem_infos[j] {
+            // Every earlier write of an aliasing range orders a read (RAW) or
+            // a write (WAW); every earlier read orders a write (WAR). An
+            // instruction is a read or a write, so no source repeats.
+            aliasing.clear();
+            mem_writes.aliasing(addr, *off, *width, &mut aliasing);
+            if *j_write {
+                mem_reads.aliasing(addr, *off, *width, &mut aliasing);
+            }
+            aliasing.sort_unstable();
+            for &prev in &aliasing {
+                add_edge(prev, j, &mut succs, &mut indeg);
+            }
+            if *j_write {
+                mem_writes.insert(addr.clone(), *off, *width, j);
             } else {
-                // RAW: depend on previous writes to the same address that alias
-                if let Some(prev_writes) = mem_writes.get(&info_j.0) {
-                    for &prev in prev_writes {
-                        if let Some(ref info_prev) = mem_infos[prev] {
-                            if ranges_alias(info_prev.1, info_prev.2, info_j.1, info_j.2) {
-                                add_edge(prev, j, &mut succs, &mut indeg);
-                            }
-                        }
-                    }
-                }
-                mem_reads.entry(info_j.0.clone()).or_default().push(j);
+                mem_reads.insert(addr.clone(), *off, *width, j);
             }
         }
     }

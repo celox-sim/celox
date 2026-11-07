@@ -1504,10 +1504,10 @@ pub struct RuntimeSchema<A> {
 /// they read changed since they last ran.
 ///
 /// Byte `p` of `flags` is partition `p`'s dirty flag. The byte after the
-/// last partition's is the untracked byte, set once state may change
-/// without anyone setting flags (a retained raw view), after which every
-/// partition always runs. The next one says whether the current settle runs
-/// every partition, decided at its start.
+/// last partition's is the untracked byte ([`settle_untracked_flag`]), set
+/// once state may change without anyone setting flags (a retained raw
+/// view), after which every partition always runs; the wait flags follow
+/// it ([`settle_wait_flag`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SettlePartitions<A> {
     pub flags: A,
@@ -1517,6 +1517,36 @@ pub struct SettlePartitions<A> {
     /// its writers as well, so that, as in a single pass, the settle
     /// recomputes it.
     pub marks: Vec<(A, Vec<u32>)>,
+    /// After the untracked byte, one flag byte per process of
+    /// [`RuntimeSchema::processes`]: the compiled scheduler checks a
+    /// process's edge wait only when its flag is set, and `marks` list the
+    /// flag ([`settle_wait_flag`]) for the signals and counters the wait
+    /// watches. Zero when the flags have no such bytes.
+    pub waits: u32,
+    /// The whole-variable copies of the settle, target then source: the plan
+    /// counts a reader of the target as a reader of the source, so an
+    /// identity-store alias may merge their homes (nothing else marks the
+    /// target's readers once its store is gone).
+    pub copies: Vec<(A, A)>,
+}
+
+/// The index of the untracked byte among the flags of a partitioned settle
+/// of `partitions` partitions: it follows the partitions' bytes.
+pub const fn settle_untracked_flag(partitions: usize) -> usize {
+    partitions
+}
+
+/// The index of the wait flag of `process` among the flags of a partitioned
+/// settle of `partitions` partitions: the wait flags follow the untracked
+/// byte.
+pub const fn settle_wait_flag(partitions: usize, process: usize) -> usize {
+    partitions + 1 + process
+}
+
+/// The number of flag bytes of a partitioned settle of `partitions`
+/// partitions and `waits` wait flags.
+pub const fn settle_flag_count(partitions: usize, waits: usize) -> usize {
+    partitions + 1 + waits
 }
 
 /// The process units that run the edges of one event together with its
@@ -1619,6 +1649,11 @@ pub struct SchedulerSlots<A> {
     /// The kernels ready to run in the current slot, one bit per kernel in
     /// kernel order.
     pub ready: A,
+    /// The kernels waiting for their wake time, one bit per kernel in kernel
+    /// order: those whose [`Self::waiting`] is set with a delay status. The
+    /// scheduler recomputes it when it enters and keeps it up to date as
+    /// kernels suspend, so a slot scans only the kernels that can be due.
+    pub timed: A,
     /// The time each process kernel resumes at, in kernel order, valid
     /// where [`Self::waiting`] is set and the kernel's status is a delay.
     pub wake: Vec<A>,
@@ -1660,6 +1695,7 @@ impl<A> SchedulerSlots<A> {
             levels: map(self.levels),
             unknown_levels: map(self.unknown_levels),
             ready: map(self.ready),
+            timed: map(self.timed),
             wake: self.wake.into_iter().map(&mut map).collect(),
             waiting: self.waiting.into_iter().map(&mut map).collect(),
             baseline: self.baseline.into_iter().map(&mut map).collect(),
@@ -1689,6 +1725,7 @@ impl<A> SchedulerSlots<A> {
             &self.levels,
             &self.unknown_levels,
             &self.ready,
+            &self.timed,
             &self.clock_next,
             &self.clock_period,
             &self.clock_value,

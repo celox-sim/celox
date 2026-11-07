@@ -324,7 +324,7 @@ fn interface_signatures_collecting(
         .map(|prototype| {
             warnings.extend(crate::warning::analyzer_warnings(&prototype.warnings));
             let lowered = lower_module(
-                &prototype.module,
+                std::borrow::Cow::Borrowed(&prototype.module),
                 false,
                 true,
                 false,
@@ -1036,7 +1036,7 @@ fn lower_package_states(
         .enumerate()
         .map(|(index, module)| {
             let mut lowered = lower_module(
-                module,
+                std::borrow::Cow::Borrowed(module),
                 four_state,
                 true,
                 ff_parts,
@@ -2938,6 +2938,7 @@ fn prepare_external_hierarchy_collecting(
                 discovery: true,
                 ..HierarchicalNames::default()
             },
+            None,
         )?;
         ff::watched_properties(&lowered.source, &mut properties);
         for instance in &lowered.instances {
@@ -2985,6 +2986,7 @@ fn prepare_external_hierarchy_collecting(
                         properties: &properties,
                         ..HierarchicalNames::default()
                     },
+                    None,
                 )?,
             ))
         })
@@ -3411,7 +3413,18 @@ fn schedule_sources_collecting(
     force_signals: &[String],
 ) -> Result<ScheduledRtlOutput, FrontendError> {
     let found_warnings = warnings.len();
+    let frontend_timing = trace_options.phase_timing;
+    let mut checkpoint = std::time::Instant::now();
+    macro_rules! checkpoint {
+        ($label:expr) => {
+            if frontend_timing {
+                tracing::debug!("[sv-frontend] {}: {:?}", $label, checkpoint.elapsed());
+                checkpoint = std::time::Instant::now();
+            }
+        };
+    }
     let analyzed = analyze_sources(sources, &[top], analysis_options.clone())?;
+    checkpoint!("analyze_sources");
     package_warnings(&analyzed, warnings);
     // The specializations that the modules request of package class
     // templates, shared by all of their analyses.
@@ -3516,6 +3529,7 @@ fn schedule_sources_collecting(
 
     // The ids of interface instances depend on the elaborated hierarchy, which
     // the virtual interface accesses do not change: analyze again with them.
+    checkpoint!("discovery");
     let virtual_instances = match &virtual_interfaces {
         Some(declarations) => {
             let instances = virtual_interfaces::Instances::elaborate(
@@ -3643,6 +3657,7 @@ fn schedule_sources_collecting(
         }
     }
     drop(virtual_sources);
+    checkpoint!("hierarchy");
 
     // A store of a class property that a level wait reads, in any module,
     // wakes the wait (see `ff::property_changes`).
@@ -3704,7 +3719,7 @@ fn schedule_sources_collecting(
                 HierarchicalNames {
                     signals: &signals,
                     foreign_writes: foreign_writes.get(&module_id).unwrap_or(&no_foreign_writes),
-                    analyzed: analyses.get(&module_id).or(discovery_analysis.as_ref()),
+                    analyzed: analyses.get(&module_id),
                     recursion_report: analysis_options.recursion_report.as_deref(),
                     force_out_of_line: analysis_options.force_out_of_line_calls,
                     properties: &properties,
@@ -3716,6 +3731,7 @@ fn schedule_sources_collecting(
                             .unwrap_or(&no_foreign_references),
                     },
                 },
+                discovery_analysis,
             )?)
         };
         for (key, &module_id) in &module_ids {
@@ -3725,6 +3741,7 @@ fn schedule_sources_collecting(
                 entry.insert(specialize(key, module_id)?);
             }
         }
+        checkpoint!("specialize_modules");
         resolve_inout_drivers(&module_ids, &mut lowered_modules);
         validate_specialized_instance_net_drivers(&module_ids, &lowered_modules)?;
         let root = &lowered_modules[&root_id];
@@ -3746,6 +3763,7 @@ fn schedule_sources_collecting(
 
         // Waits and flip-flop domains of other modules may watch the
         // signals that hierarchical names reach.
+        checkpoint!("validate_graph");
         let mut hierarchical_targets: HashMap<ModuleId, HashSet<String>> = HashMap::default();
         for reference in references
             .values()
@@ -3814,6 +3832,7 @@ fn schedule_sources_collecting(
             modules.insert(module_id, sim_module);
         }
 
+        checkpoint!("instance_glue");
         let package_states = lower_package_states(
             &analyzed[&top].packages,
             &design,
@@ -3847,6 +3866,7 @@ fn schedule_sources_collecting(
             packages,
             instance_values,
         };
+        checkpoint!("packages");
         let mut loop_members = Vec::new();
         let scheduled =
             celox_frontend_core::symbolic::assembly::schedule_symbolic_rtl_reporting_loops(
@@ -3860,6 +3880,7 @@ fn schedule_sources_collecting(
                 trace.as_deref_mut(),
                 &mut loop_members,
             );
+        checkpoint!("schedule_symbolic_rtl");
         let error = match scheduled {
             Ok(scheduled) => return Ok(scheduled),
             Err(error) => error,
@@ -4105,45 +4126,68 @@ fn specialize_module(
     warnings: &mut Vec<crate::warning::PendingWarning>,
     level_lists: LevelLists<'_>,
     hierarchical: HierarchicalNames<'_>,
+    owned_analysis: Option<sv::Ir>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     #[cfg(test)]
     tests::record_specialization(key, level_lists);
-    let analyzed;
-    let ir = match hierarchical.analyzed {
-        Some(ir) => {
+    let unsupported = || sv::AnalyzerError::Unsupported(format!("module `{}`", module.name));
+    fn find<'i>(ir: &'i sv::Ir, name: &str) -> Option<&'i sv::ir::Module> {
+        ir.modules()
+            .iter()
+            .find(|candidate| candidate.name() == name)
+    }
+    // The module lowered, and the same module when the recursion report
+    // needs it after a failed lowering (it keeps the shared analysis then).
+    let owned;
+    let (specialized, reported): (
+        std::borrow::Cow<'_, sv::ir::Module>,
+        Option<&sv::ir::Module>,
+    ) = match (hierarchical.analyzed, owned_analysis) {
+        (Some(ir), _) => {
             warnings.extend(crate::warning::analyzer_warnings(ir.warnings()));
-            ir
+            let specialized = find(ir, &module.name).ok_or_else(unsupported)?;
+            (std::borrow::Cow::Borrowed(specialized), Some(specialized))
         }
-        None => {
-            analyzed = analyze_specialization(module, design, key, hierarchical.signals, warnings)?;
-            &analyzed
+        (None, Some(ir)) if hierarchical.recursion_report.is_some() => {
+            owned = ir;
+            warnings.extend(crate::warning::analyzer_warnings(owned.warnings()));
+            let specialized = find(&owned, &module.name).ok_or_else(unsupported)?;
+            (std::borrow::Cow::Borrowed(specialized), Some(specialized))
+        }
+        (None, owned_analysis) => {
+            let ir = match owned_analysis {
+                Some(ir) => ir,
+                None => {
+                    analyze_specialization(module, design, key, hierarchical.signals, warnings)?
+                }
+            };
+            warnings.extend(crate::warning::analyzer_warnings(ir.warnings()));
+            let specialized = ir
+                .into_modules()
+                .into_iter()
+                .find(|candidate| candidate.name() == module.name)
+                .ok_or_else(unsupported)?;
+            (std::borrow::Cow::Owned(specialized), None)
         }
     };
-    let specialized = ir
-        .modules()
-        .iter()
-        .find(|candidate| candidate.name() == module.name)
-        .ok_or_else(|| sv::AnalyzerError::Unsupported(format!("module `{}`", module.name)))?;
     // Each module may store or wait on a watched property.
     let own;
     let properties = if hierarchical.discovery {
         let mut keys = hierarchical.properties.clone();
-        ff::watched_properties(specialized, &mut keys);
+        ff::watched_properties(&specialized, &mut keys);
         own = keys;
         &own
     } else {
         hierarchical.properties
     };
-    let counted;
     let specialized = if properties.is_empty() {
         specialized
     } else {
-        counted = specialized.clone().with_shared_variables(
+        std::borrow::Cow::Owned(specialized.into_owned().with_shared_variables(
             ff::PROPERTY_CHANGES,
             &property_change_names(properties),
             ff::PROPERTY_CHANGES_WIDTH,
-        );
-        &counted
+        ))
     };
     let local_forces = key
         .force_signals
@@ -4182,14 +4226,14 @@ fn specialize_module(
         hierarchical.shared,
         calls.as_mut(),
     );
-    let mut lowered = match (lowered, &calls, hierarchical.recursion_report) {
-        (Ok(lowered), _, _) => lowered,
+    let mut lowered = match (lowered, &calls, hierarchical.recursion_report, reported) {
+        (Ok(lowered), _, _, _) => lowered,
         // Report the graph recorded up to the error.
-        (Err(error), Some(graph), Some(path)) => {
+        (Err(error), Some(graph), Some(path), Some(specialized)) => {
             recursion::append(specialized, graph, path);
             return Err(error);
         }
-        (Err(error), _, _) => return Err(error),
+        (Err(error), ..) => return Err(error),
     };
     lowered.calls = calls;
     propagate_force_signals(&mut lowered.instances, &key.force_signals);
@@ -4319,7 +4363,7 @@ fn scope_time_scale(
 
 #[allow(clippy::too_many_arguments)]
 fn lower_module(
-    module: &sv::ir::Module,
+    module: std::borrow::Cow<'_, sv::ir::Module>,
     four_state: bool,
     implicit_nets_allowed: bool,
     ff_parts: bool,
@@ -4419,7 +4463,7 @@ struct FfEventRole {
 /// independently evaluated part, for lane-partitioned builds.
 #[allow(clippy::too_many_arguments)]
 fn lower_module_with_overrides(
-    module: &sv::ir::Module,
+    module: std::borrow::Cow<'_, sv::ir::Module>,
     parameter_overrides: &[LoweredSvParameterOverride],
     four_state: bool,
     implicit_nets_allowed: bool,
@@ -4432,39 +4476,45 @@ fn lower_module_with_overrides(
     shared: SharedAlways<'_>,
     mut calls: Option<&mut recursion::CallGraph>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
-    let parameter_types = module_parameter_types(module);
-    let constants = module_constants_with_overrides(module, parameter_overrides);
-    let demoted_stars = match level_lists {
-        LevelLists::Lowered { demoted }
-            if module.comb_processes().iter().any(|process| {
-                process.kind() == sv::ir::CombProcessKind::AlwaysStar
-                    && demoted.contains(&process.creation_order())
-            }) =>
-        {
-            Some(
-                module
-                    .clone()
-                    .run_comb_processes_as_processes(|_, process| {
-                        demoted.contains(&process.creation_order())
-                    }),
-            )
+    let parameter_types = module_parameter_types(&module);
+    let constants = module_constants_with_overrides(&module, parameter_overrides);
+    // The module's processes are rewritten in place when the lowering owns
+    // the module; a shared module is copied for the first rewrite.
+    let mut module = module;
+    if let LevelLists::Lowered { demoted } = level_lists
+        && module.comb_processes().iter().any(|process| {
+            process.kind() == sv::ir::CombProcessKind::AlwaysStar
+                && demoted.contains(&process.creation_order())
+        })
+    {
+        module = std::borrow::Cow::Owned(module.into_owned().run_comb_processes_as_processes(
+            |_, process| demoted.contains(&process.creation_order()),
+        ));
+    }
+    let sharing = share_always_variables(&module, &constants, &parameter_types, shared, warnings);
+    let shared_process_variables = match sharing {
+        Some((shared_module, names)) => {
+            module = std::borrow::Cow::Owned(shared_module);
+            Some(names)
         }
-        _ => None,
+        None => None,
     };
-    let module = demoted_stars.as_ref().unwrap_or(module);
-    let sharing = share_always_variables(module, &constants, &parameter_types, shared, warnings);
-    let module = sharing.as_ref().map_or(module, |(module, _)| module);
-    let shared_process_variables = sharing.as_ref().map(|(_, names)| names);
+    let shared_process_variables = shared_process_variables.as_ref();
+    // The rewrite visits the edge processes in order, once each.
     let fallbacks = module
         .ff_processes()
         .iter()
-        .any(|process| runs_as_process(module, process, &constants, &parameter_types))
-        .then(|| {
-            module.clone().run_edge_processes_as_processes(|process| {
-                runs_as_process(module, process, &constants, &parameter_types)
-            })
-        });
-    let module = fallbacks.as_ref().unwrap_or(module);
+        .map(|process| runs_as_process(&module, process, &constants, &parameter_types))
+        .collect::<Vec<_>>();
+    if fallbacks.contains(&true) {
+        let mut fallbacks = fallbacks.into_iter();
+        module = std::borrow::Cow::Owned(
+            module
+                .into_owned()
+                .run_edge_processes_as_processes(|_| fallbacks.next().unwrap_or(false)),
+        );
+    }
+    let module: &sv::ir::Module = &module;
     let mut ff_event_roles = Vec::new();
     for process in module.ff_processes() {
         let clock = clock_event_from_ff_process(process)
@@ -4497,6 +4547,8 @@ fn lower_module_with_overrides(
         .collect();
     validate_variable_driver_ranges(module, &drivers, &shared_all)?;
     validate_foreign_drivers(module, &drivers, &shared_memories, foreign_writes)?;
+    // The drivers above were scanned before the scheduled edges move, as
+    // the roles were: the rare rewrite works on a copy.
     let scheduled = module
         .ff_processes()
         .iter()
@@ -6767,6 +6819,42 @@ fn lower_comb_processes(
     let redundant = redundant_net_drivers(module);
     let watchable =
         watch_seeds.map(|seeds| watchable_variables(&pm, module, port_assignments, seeds));
+    // In two-state mode an `always @*` runs once at time zero like an
+    // `always_comb` (#2021), and its sensitivity is its implicit reads. One
+    // whose written variables have no other driver therefore defines the same
+    // function as an `always_comb`: it gets the symbolic form, and the guarded
+    // unit only when the symbolic lowering refuses it.
+    let mut drivers = None;
+    let mut symbolic_star = |index: usize, process: &sv::ir::CombProcess| {
+        if four_state || process.kind() != sv::ir::CombProcessKind::AlwaysStar {
+            return false;
+        }
+        let drivers =
+            drivers.get_or_insert_with(|| ModuleDrivers::new(module, constants, parameter_types));
+        let mut names = HashSet::default();
+        procedural::written_names_with_calls(module, process.body(), &mut names);
+        // Another process or a continuous assignment may drive other bits of
+        // the same variable, as of any symbolic definition. A variable an
+        // `initial` block or declaration initializer writes keeps the guarded
+        // unit: its time-zero run changes that value, which observers and
+        // waiting processes see as a change.
+        names.iter().all(|name| {
+            drivers.writes.get(name.as_str()).is_none_or(|writes| {
+                if writes.iter().any(|write| write.initial.is_some()) {
+                    return false;
+                }
+                let bits = |write: &DriverWrite| write.range.or(write.element);
+                let (own, others): (Vec<_>, Vec<_>) =
+                    writes.iter().partition(|write| write.local == Some(index));
+                others.iter().all(|other| {
+                    (other.local.is_none() && other.continuous.is_none())
+                        || own
+                            .iter()
+                            .all(|mine| !net_driver_ranges_overlap(bits(mine), bits(other)))
+                })
+            })
+        })
+    };
     for (index, process) in module.comb_processes().iter().enumerate() {
         if redundant.contains(&index) {
             continue;
@@ -6787,7 +6875,8 @@ fn lower_comb_processes(
         // A wildcard control waits for its first source event even when
         // every output is assigned. A symbolic combinational definition
         // would instead execute during the initial fixed-point evaluation.
-        if process.kind() == sv::ir::CombProcessKind::AlwaysStar
+        let symbolic_star = symbolic_star(index, process);
+        if (process.kind() == sv::ir::CombProcessKind::AlwaysStar && !symbolic_star)
             || pm.reads_simulation_state(process.body())
             // The symbolic form would expand every call.
             || pm.calls_out_of_line(process.body())
@@ -6815,18 +6904,21 @@ fn lower_comb_processes(
         comb.site_base = sites.len() as u32;
         comb.continuous = process.kind() == sv::ir::CombProcessKind::ContinuousAssign;
         let lowered = comb.lower_process(process.body());
-        let fallback = matches!(
-            &lowered,
-            Err(sv::AnalyzerError::Unsupported(reason))
-                if reason.starts_with("latch inference inside always_comb")
-                    && process.kind() != sv::ir::CombProcessKind::ContinuousAssign
-                    && (allow_inferred_latches
-                        || matches!(
-                            process.kind(),
-                            sv::ir::CombProcessKind::AlwaysLatch
-                                | sv::ir::CombProcessKind::AlwaysStar
-                        ))
-        );
+        // The guarded unit accepts whatever the symbolic form refuses of an
+        // `always @*`, as it did before the symbolic attempt.
+        let fallback = (symbolic_star && lowered.is_err())
+            || matches!(
+                &lowered,
+                Err(sv::AnalyzerError::Unsupported(reason))
+                    if reason.starts_with("latch inference inside always_comb")
+                        && process.kind() != sv::ir::CombProcessKind::ContinuousAssign
+                        && (allow_inferred_latches
+                            || matches!(
+                                process.kind(),
+                                sv::ir::CombProcessKind::AlwaysLatch
+                                    | sv::ir::CombProcessKind::AlwaysStar
+                            ))
+            );
         comb.m.end_attempt_calls(!fallback);
         match lowered {
             // In a design with a wait, a variable the process stores twice
@@ -6834,7 +6926,7 @@ fn lower_comb_processes(
             // A process with runtime events keeps only its symbolic form.
             Ok(paths)
                 if waits
-                    && process.kind() == sv::ir::CombProcessKind::AlwaysComb
+                    && (process.kind() == sv::ir::CombProcessKind::AlwaysComb || symbolic_star)
                     && comb.observers.is_empty()
                     && comb.sites.is_empty() =>
             {
@@ -12726,10 +12818,13 @@ endmodule
     /// The targets of the `always_comb` alternatives the modules of `source`
     /// lowered, by name.
     fn comb_alternatives(source: &str) -> BTreeSet<String> {
-        try_comb_alternatives(source).unwrap_or_else(|error| panic!("{error}"))
+        try_comb_alternatives(source, false).unwrap_or_else(|error| panic!("{error}"))
     }
 
-    fn try_comb_alternatives(source: &str) -> Result<BTreeSet<String>, FrontendError> {
+    fn try_comb_alternatives(
+        source: &str,
+        four_state: bool,
+    ) -> Result<BTreeSet<String>, FrontendError> {
         let mut trace = FrontendTrace::default();
         schedule_sources(
             &[(source, Path::new("top.sv"))],
@@ -12737,7 +12832,7 @@ endmodule
             &[],
             &[],
             &[],
-            false,
+            four_state,
             &celox_frontend_core::ParallelScheduleOptions::default(),
             &FrontendTraceOptions {
                 sim_modules: true,
@@ -12759,6 +12854,56 @@ endmodule
                 })
             })
             .collect())
+    }
+
+    /// In two-state mode an `always @*` whose variables it alone drives is
+    /// lowered symbolically like an `always_comb`, with the imperative
+    /// alternative for a watched target; in four-state mode, where it waits
+    /// for its first source event, and where it refuses the symbolic form,
+    /// it stays the guarded unit, which has no alternative.
+    #[test]
+    fn wildcard_always_is_combinational_in_two_state() {
+        let watched = |process: &str| {
+            format!(
+                "module Top(input bit [7:0] s);
+                   bit [7:0] y;
+                   {process}
+                   initial forever @(y) ;
+                 endmodule"
+            )
+        };
+        let wildcard = watched("always @* begin y = 0; if (s[0]) y = s; end");
+        assert!(
+            try_comb_alternatives(&wildcard, false)
+                .unwrap()
+                .contains("y")
+        );
+        assert!(
+            !try_comb_alternatives(&wildcard, true)
+                .unwrap()
+                .contains("y")
+        );
+        let list = watched("always @(s) begin y = 0; if (s[0]) y = s; end");
+        assert!(try_comb_alternatives(&list, false).unwrap().contains("y"));
+        let latching = watched("always @* if (s[0]) y = s;");
+        assert!(
+            !try_comb_alternatives(&latching, false)
+                .unwrap()
+                .contains("y")
+        );
+        let wildcard_labels = watched(
+            "always @* begin y = 0; casez (s) 8'b1???????: y = 1; 8'b01??????: y = 2; endcase end",
+        );
+        assert!(
+            try_comb_alternatives(&wildcard_labels, false)
+                .unwrap()
+                .contains("y")
+        );
+        let parts = watched(
+            "always @* begin y[3:0] = 0; if (s[0]) y[3:0] = s[3:0]; end
+             always @(s) y[7:4] = s[7:4];",
+        );
+        assert!(try_comb_alternatives(&parts, false).unwrap().contains("y"));
     }
 
     /// An `always_comb` that stores a variable twice gets its imperative
@@ -12853,6 +12998,32 @@ endmodule
             comb_alternatives(&format!("{child}\n{hierarchical}")).contains("y"),
             "hierarchical name"
         );
+    }
+
+    /// A level list naming the bits of the implicit event expression in
+    /// other pieces is that expression, whatever the body does with its
+    /// targets; a list of more bits than the body reads is not, once the
+    /// body reads a variable it writes.
+    #[test]
+    fn level_lists_equal_to_the_implicit_reads_bitwise_are_combinational() {
+        let same_bits = "module Top(input bit [31:0] w, input bit [1:0] a, output bit [7:0] y);
+               always @(w[7:0] or w[31:8] or a) begin
+                 y = 8'd0;
+                 case (a)
+                   2'd0: y = w[7:0];
+                   2'd1: y = w[15:8];
+                   2'd2: y = w[23:16];
+                   2'd3: y = w[31:24];
+                 endcase
+               end
+               initial begin #1; end
+             endmodule";
+        assert_eq!(procedure_kernels(same_bits), 1);
+        let more_bits = "module Top(input bit [31:0] w, input bit [1:0] a, output bit [7:0] y);
+               always @(w[7:0] or w[31:8] or a) y = y ^ w[15:8] ^ {6'd0, a};
+               initial begin #1; end
+             endmodule";
+        assert_eq!(procedure_kernels(more_bits), 2);
     }
 
     /// Only the `always @(list)` processes of a combinational loop stay

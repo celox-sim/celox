@@ -7,7 +7,7 @@
 //! non-escaping, definitely-defined combinational slots and removes their stores.
 
 use super::shared::{batch_replace_in_inst, batch_replace_in_terminator};
-use super::state_ssa::{StateFragment, StateSsa};
+use super::state_ssa::{StateFragment, StateSsa, StateSsaSlot};
 use crate::ir::cfg::SirCfg;
 use crate::ir::*;
 use crate::{HashMap, HashSet};
@@ -191,13 +191,15 @@ fn rewrite_analyzed_static_slots(
                 && !slot.has_kill
                 && !slot.escapes
                 && !slot.live_in_entry;
-            (!slot.phi_blocks.contains(&0)).then_some(SlotPlan {
-                analysis_slot,
-                fragment: slot.fragment,
-                ty: slot.ty.clone(),
-                phi_blocks: slot.phi_blocks.clone(),
-                promote,
-            })
+            (!slot.phi_blocks.contains(&0) && !carried_through_large_loop(cfg, slot)).then_some(
+                SlotPlan {
+                    analysis_slot,
+                    fragment: slot.fragment,
+                    ty: slot.ty.clone(),
+                    phi_blocks: slot.phi_blocks.clone(),
+                    promote,
+                },
+            )
         })
         .collect::<Vec<_>>();
     candidates.sort_by_key(|candidate| candidate.fragment);
@@ -861,6 +863,22 @@ pub(crate) fn promote_eval_apply_working_round_trips(
     promote_eval_apply_working_round_trips_with_mode(eu, false)
 }
 
+/// The largest cyclic region a forwarded value may be carried around as a
+/// block parameter; see [`carried_through_large_loop`].
+const LOOP_CARRIED_FORWARDING_BLOCKS: usize = 64;
+
+/// Whether forwarding `slot` places a phi in a large cyclic region. The value
+/// is then carried around that loop as a block parameter of every edge in
+/// it, and the copies on those edges cost more than the loads the forwarding
+/// saves: the compiled scheduler's slot loop carried 36 kernel-local values
+/// at about 109 instructions per jump.
+fn carried_through_large_loop(cfg: &SirCfg, slot: &StateSsaSlot) -> bool {
+    slot.phi_blocks.iter().any(|&block| {
+        let scc = &cfg.sccs[cfg.scc_for_block[block]];
+        scc.cyclic && scc.blocks.len() > LOOP_CARRIED_FORWARDING_BLOCKS
+    })
+}
+
 /// Whether a call can consume pending values or publish working state: it
 /// reads or writes the working or sparse region.
 fn touches_pending_state(effects: &celox_sir::CallEffects<RegionedAbsoluteAddr>) -> bool {
@@ -1047,6 +1065,7 @@ pub(crate) fn promote_eval_apply_working_round_trips_with_mode(
                 && !slot.escapes
                 && !slot.live_in_entry
                 && !slot.phi_blocks.contains(&0)
+                && !carried_through_large_loop(&preview_cfg, slot)
         })
         .map(|slot| slot.fragment)
         .collect::<HashSet<_>>();

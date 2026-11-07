@@ -349,6 +349,9 @@ pub(crate) fn writes(inst: &MInst) -> MemoryEffects {
         }
         | MInst::OrStoreImm {
             base, offset, size, ..
+        }
+        | MInst::StoreImm {
+            base, offset, size, ..
         } => checked_range(*base, *offset, size.bytes() as usize)
             .map(|range| MemoryEffects::static_ranges(&[range]))
             .unwrap_or_else(|| MemoryEffects::unknown(UnknownMemory::Direct(*base))),

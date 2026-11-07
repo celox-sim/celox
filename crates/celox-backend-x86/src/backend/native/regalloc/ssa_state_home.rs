@@ -83,6 +83,7 @@ pub(super) fn select(
     func: &MFunction,
     cfg: &NormalizedCfg,
     plan: &mut SpillPlan,
+    check_recipes: bool,
 ) -> Result<(), StateHomeError> {
     plan.state_homes.clear();
     plan.state_reload_recipes.clear();
@@ -99,8 +100,9 @@ pub(super) fn select(
     // removes.
     let first = build_probe(func, cfg, plan, &candidates, &reloads)?;
     let requested = first.points.values().copied().collect::<BTreeSet<_>>();
-    let analysis = super::reload::analyze_with_queries(&first.func, cfg, &requested)
-        .map_err(StateHomeError::reload)?;
+    let analysis =
+        super::reload::analyze_with_queries_checked(&first.func, cfg, &requested, check_recipes)
+            .map_err(StateHomeError::reload)?;
     let individually_valid = candidates
         .iter()
         .filter_map(|(&home, &physical)| {
@@ -143,8 +145,13 @@ pub(super) fn select(
         .values()
         .copied()
         .collect::<BTreeSet<_>>();
-    let final_analysis = super::reload::analyze_with_queries(&final_probe.func, cfg, &requested)
-        .map_err(StateHomeError::reload)?;
+    let final_analysis = super::reload::analyze_with_queries_checked(
+        &final_probe.func,
+        cfg,
+        &requested,
+        check_recipes,
+    )
+    .map_err(StateHomeError::reload)?;
     let mut recipes = BTreeMap::<ReloadKey, ResolvedRecipe>::new();
     for (&home, &physical) in &selected {
         let uses = &reloads[&home];
@@ -875,7 +882,7 @@ mod tests {
             ),
         ];
 
-        select(&func, &cfg, &mut plan).unwrap();
+        select(&func, &cfg, &mut plan, true).unwrap();
         assert_eq!(plan.state_homes.get(&spill_home), Some(&home(0, 0)));
         assert_eq!(plan.state_reload_recipes.len(), 1);
 
@@ -980,7 +987,7 @@ mod tests {
                 },
             ),
         ];
-        select(&func, &cfg, &mut plan).unwrap();
+        select(&func, &cfg, &mut plan, true).unwrap();
         assert!(plan.state_homes.contains_key(&spill_home));
 
         fallback_to_stack(&func, &cfg, &mut plan, &BTreeSet::from([spill_home])).unwrap();
@@ -1071,7 +1078,7 @@ mod tests {
             ),
         ];
 
-        select(&func, &cfg, &mut plan).unwrap();
+        select(&func, &cfg, &mut plan, true).unwrap();
         assert!(plan.state_homes.is_empty());
         assert!(plan.state_reload_recipes.is_empty());
     }

@@ -15,11 +15,11 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
 fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
     let mut module_table = ModuleTable::default();
     let mut modules = Vec::new();
-    for module in source.modules() {
+    for mut module in source.into_modules() {
         let syntax = crate::source_tree::SourceTree::empty();
         let tree = &module.constant_context(&syntax);
         let session = &mut ast::Session::default();
-        let id = module_table.insert(module)?;
+        let id = module_table.insert(&module)?;
         let mut constants = crate::ast::ConstEnv::default();
         let mut parameter_types = HashMap::default();
         let mut parameter_signedness = HashMap::default();
@@ -40,7 +40,7 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
             )
         {
             if !imported {
-                parameter_table.insert(module, parameter)?;
+                parameter_table.insert(&module, parameter)?;
             }
             let value: Option<ir::ConstExpr> = parameter.value().cloned().map(Into::into);
             let (resolved_value, literal) = parameter.resolved_value_and_literal(
@@ -120,7 +120,7 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
         let mut port_table = PortTable::default();
         let mut ports = Vec::new();
         for port in module.ports() {
-            port_table.insert(module, port)?;
+            port_table.insert(&module, port)?;
             ports.push(
                 ir::Port::new(
                     port.name().to_string(),
@@ -243,24 +243,12 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                 )
             })
             .collect();
-        let assignments = module
-            .assignments()
-            .iter()
-            .cloned()
-            .map(Into::into)
-            .collect();
-        let comb_processes = module
-            .comb_processes()
-            .iter()
-            .cloned()
-            .map(Into::into)
-            .collect();
-        let ff_processes = module
-            .ff_processes()
-            .iter()
-            .cloned()
-            .map(Into::into)
-            .collect();
+        // The source module is consumed: its bodies move into the IR instead
+        // of being copied.
+        let bodies = module.take_bodies();
+        let assignments = bodies.assignments.into_iter().map(Into::into).collect();
+        let comb_processes = bodies.comb_processes.into_iter().map(Into::into).collect();
+        let ff_processes = bodies.ff_processes.into_iter().map(Into::into).collect();
         modules.push(
             ir::Module::new(
                 id,
@@ -272,17 +260,15 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                 assignments,
                 comb_processes,
                 ff_processes,
-                module
-                    .initial_processes()
-                    .iter()
-                    .cloned()
+                bodies
+                    .initial_processes
+                    .into_iter()
                     .map(Into::into)
                     .collect(),
                 module.locals().to_vec(),
-                module
-                    .subroutines()
-                    .iter()
-                    .cloned()
+                bodies
+                    .subroutines
+                    .into_iter()
                     .map(|subroutine| subroutine.map(&mut Into::into, &mut Into::into, &mut |t| t))
                     .collect(),
             )

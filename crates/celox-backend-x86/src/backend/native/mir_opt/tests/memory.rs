@@ -1018,3 +1018,101 @@ fn direct_memory_and_requires_exclusive_ssa_temporaries() {
 
     assert_eq!(fold_direct_immediate_stores(&mut func), 0);
 }
+
+/// Stores of a constant register become immediate stores, and a constant
+/// left without a use goes away; a qword constant outside the sign-extended
+/// imm32 range, or one with another use, keeps its register.
+#[test]
+fn folds_stores_of_constant_registers_into_immediate_stores() {
+    let mut func = make_func(
+        vec![
+            MInst::LoadImm {
+                dst: VReg(0),
+                value: 0x1_01,
+            },
+            MInst::LoadImm {
+                dst: VReg(1),
+                value: 0x1_0000_0000,
+            },
+            MInst::LoadImm {
+                dst: VReg(2),
+                value: 1,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 37,
+                src: VReg(0),
+                size: OpSize::S8,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 40,
+                src: VReg(0),
+                size: OpSize::S64,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 48,
+                src: VReg(1),
+                size: OpSize::S64,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 56,
+                src: VReg(2),
+                size: OpSize::S32,
+            },
+            MInst::Mov {
+                dst: VReg(3),
+                src: VReg(2),
+            },
+            MInst::Return,
+        ],
+        4,
+    );
+
+    assert_eq!(fold_direct_immediate_stores(&mut func), 3);
+    assert_eq!(
+        func.blocks[0].insts,
+        vec![
+            MInst::LoadImm {
+                dst: VReg(1),
+                value: 0x1_0000_0000,
+            },
+            MInst::LoadImm {
+                dst: VReg(2),
+                value: 1,
+            },
+            MInst::StoreImm {
+                base: BaseReg::SimState,
+                offset: 37,
+                size: OpSize::S8,
+                imm: 0x01,
+            },
+            MInst::StoreImm {
+                base: BaseReg::SimState,
+                offset: 40,
+                size: OpSize::S64,
+                imm: 0x1_01,
+            },
+            MInst::Store {
+                base: BaseReg::SimState,
+                offset: 48,
+                src: VReg(1),
+                size: OpSize::S64,
+            },
+            MInst::StoreImm {
+                base: BaseReg::SimState,
+                offset: 56,
+                size: OpSize::S32,
+                imm: 1,
+            },
+            MInst::Mov {
+                dst: VReg(3),
+                src: VReg(2),
+            },
+            MInst::Return,
+        ]
+    );
+    assert_eq!(func.verify_result(), Ok(()));
+}

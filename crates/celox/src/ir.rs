@@ -680,6 +680,9 @@ pub struct LaidOutProgram {
     /// compilation at a time; `sir.processes` reserves their stable indices.
     #[cfg(feature = "host-runtime")]
     pub(crate) deferred_derived_edges: HashMap<usize, crate::derived_edge::DeferredEdge>,
+    /// The cone sources of the settle ([`crate::settle::cone_source_homes`]),
+    /// once the kernels are instrumented with them.
+    pub(crate) cone_homes: Option<HashSet<usize>>,
 }
 
 impl LaidOutProgram {
@@ -750,6 +753,13 @@ impl LaidOutProgram {
 
     pub fn layout(&self) -> &crate::backend::MemoryLayout {
         &self.layout
+    }
+
+    /// Drop the settle marks of partitions whose bodies no longer touch the
+    /// marked state ([`crate::settle::prune_stale_marks`]); before the units
+    /// outside the settle are instrumented.
+    pub(crate) fn prune_stale_marks(&mut self) {
+        crate::settle::prune_stale_marks(&mut self.sir, &mut self.layout, &self.runtime);
     }
 
     /// Cross-check every partitioned settle (see
@@ -856,6 +866,20 @@ impl OptimizedSir {
         four_state: bool,
         mode: crate::backend::memory_layout::MemoryLayoutMode,
     ) -> LaidOutProgram {
+        self.into_laid_out_with_options(four_state, mode, false)
+    }
+
+    /// As [`Self::into_laid_out_with_mode`]; with `defer_instrumentation`,
+    /// the units outside the settle are left for the caller to instrument
+    /// (`LaidOutProgram::prune_stale_marks`,
+    /// `settle::instrument_processes_from`, `settle::instrument_ff_units`),
+    /// after its dead-store elimination.
+    pub fn into_laid_out_with_options(
+        self,
+        four_state: bool,
+        mode: crate::backend::memory_layout::MemoryLayoutMode,
+        defer_instrumentation: bool,
+    ) -> LaidOutProgram {
         let mut program = self;
         if !program.runtime_schema.comb_observers.is_empty()
             && !program.layout_requirements.is_empty()
@@ -941,8 +965,12 @@ impl OptimizedSir {
             layout,
             #[cfg(feature = "host-runtime")]
             deferred_derived_edges: HashMap::default(),
+            cone_homes: None,
         };
-        crate::settle::instrument(&mut laid_out);
+        if !defer_instrumentation {
+            laid_out.prune_stale_marks();
+            crate::settle::instrument(&mut laid_out);
+        }
         laid_out
     }
 }
@@ -1550,17 +1578,57 @@ impl OptimizedSir {
     /// Rank of every state home in the order the per-tick code first
     /// accesses it.
     ///
-    /// Lane-partitioned kernels are visited lane by lane, so the homes one
-    /// lane works on are contiguous. The sequential kernels follow, which
-    /// ranks homes only they touch and orders single-threaded programs.
+    /// The homes the FF units commit come first, in commit order, so that
+    /// the registers an apply unit commits one after the other are
+    /// contiguous, and in the same order, in the stable and the working
+    /// region ([`crate::settle::instrument_ff_units`] then commits them word by
+    /// word). Lane-partitioned kernels are visited lane by lane, so the
+    /// homes one lane works on are contiguous. The sequential kernels
+    /// follow, which ranks homes only they touch and orders single-threaded
+    /// programs.
     pub(crate) fn access_rank(&self) -> HashMap<AbsoluteAddr, u32> {
+        fn ordered_blocks(
+            unit: &ExecutionUnit<RegionedAbsoluteAddr>,
+        ) -> Vec<&celox_sir::BasicBlock<RegionedAbsoluteAddr>> {
+            let mut blocks = unit.blocks.iter().collect::<Vec<_>>();
+            blocks.sort_unstable_by_key(|(id, _)| (**id != unit.entry_block_id, **id));
+            blocks.into_iter().map(|(_, block)| block).collect()
+        }
+        // Within a unit, registers with the same readers in the partitioned
+        // settle are neighbours: a word of them needs one change test.
+        let readers: HashMap<AbsoluteAddr, &[u32]> = self
+            .runtime_schema
+            .settle_partitions
+            .as_ref()
+            .map(|settle| {
+                settle
+                    .marks
+                    .iter()
+                    .map(|(address, partitions)| (*address, partitions.as_slice()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let visit_commits = |unit: &ExecutionUnit<RegionedAbsoluteAddr>,
+                             rank: &mut HashMap<AbsoluteAddr, u32>| {
+            let mut committed: Vec<AbsoluteAddr> = ordered_blocks(unit)
+                .into_iter()
+                .flat_map(|block| &block.instructions)
+                .filter_map(|instruction| match instruction {
+                    SIRInstruction::Commit(_, destination, ..) => Some(destination.absolute_addr()),
+                    _ => None,
+                })
+                .collect();
+            committed.sort_by_key(|address| readers.get(address).copied().unwrap_or(&[]));
+            for address in committed {
+                let next = u32::try_from(rank.len()).unwrap_or(u32::MAX);
+                rank.entry(address).or_insert(next);
+            }
+        };
         fn visit(
             unit: &ExecutionUnit<RegionedAbsoluteAddr>,
             rank: &mut HashMap<AbsoluteAddr, u32>,
         ) {
-            let mut blocks = unit.blocks.iter().collect::<Vec<_>>();
-            blocks.sort_unstable_by_key(|(id, _)| (**id != unit.entry_block_id, **id));
-            for (_, block) in blocks {
+            for block in ordered_blocks(unit) {
                 for instruction in &block.instructions {
                     // A call ranks what it reads, then what it writes.
                     let reads = known_objects(instruction.state_reads());
@@ -1589,6 +1657,13 @@ impl OptimizedSir {
                     visit(&unit.unit, &mut rank);
                 }
             }
+        }
+        for unit in sorted_values(&self.sir.eval_apply_ffs)
+            .chain(sorted_values(&self.sir.eval_comb_apply_ffs))
+            .chain(sorted_values(&self.sir.apply_ffs))
+            .flatten()
+        {
+            visit_commits(unit, &mut rank);
         }
         for unit in self
             .sir

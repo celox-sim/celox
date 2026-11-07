@@ -391,7 +391,8 @@ export interface SimulatorOptions {
 	 * bit_extract_peephole, optimize_blocks, split_wide_commits, commit_sinking,
 	 * inline_commit_forwarding, eliminate_dead_working_stores, reschedule,
 	 * coalesce_stores, gvn, concat_folding, xor_chain_folding, vectorize_concat,
-	 * split_coalesced_stores, partial_forward, identity_store_bypass, tail_call_split,
+	 * split_coalesced_stores, partial_forward, identity_store_bypass, if_conversion
+	 * (small pure if/else diamonds of clocked processes become muxes), tail_call_split,
 	 * derived_edge_units (generated units for the edges of gated and divided
 	 * clocks; "-sir:derived_edge_units" walks their plans instead, which
 	 * builds faster and ticks slower), partitioned_settle (settle only the

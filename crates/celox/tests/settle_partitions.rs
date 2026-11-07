@@ -173,7 +173,7 @@ module Top (
         let (memory, _) = sim.memory_as_ptr();
         // SAFETY: these offsets describe this simulator's state allocation.
         unsafe {
-            std::slice::from_raw_parts(memory.add(settle.flags_offset), settle.partitions + 2)
+            std::slice::from_raw_parts(memory.add(settle.flags_offset), settle.flags().len())
                 .to_vec()
         }
     };
@@ -190,12 +190,16 @@ module Top (
     assert_eq!(dirty, 3);
     assert_eq!(settle.partitions, 9);
     sim.eval_comb().unwrap();
+    let untracked = settle.flags_offset + celox_design::settle_untracked_flag(settle.partitions);
     let (memory, _) = sim.memory_as_ptr();
     assert_eq!(
-        unsafe { *memory.add(settle.flags_offset + settle.partitions + 1) },
+        unsafe { *memory.add(untracked) },
         0,
         "a partial update promoted unrelated partitions to a full settle"
     );
+    let pending =
+        unsafe { std::slice::from_raw_parts(memory.add(settle.flags_offset), settle.partitions) };
+    assert!(pending.iter().all(|&flag| flag == 0));
     let a2 = sim.signal("a2");
     let b2 = sim.signal("b2");
     assert_eq!(sim.get(a2), BigUint::from(10u8));
@@ -207,10 +211,7 @@ module Top (
     unsafe { *memory.add(a.offset) = 11 };
     sim.eval_comb().unwrap();
     assert_eq!(sim.get(a2), BigUint::from(14u8));
-    assert_eq!(
-        unsafe { *memory.add(settle.flags_offset + settle.partitions + 1) },
-        1
-    );
+    assert_eq!(unsafe { *memory.add(untracked) }, 1);
 }
 
 /// Loading a state file writes every object, so every partition reading one
@@ -347,6 +348,33 @@ endmodule
         let single = matches_single_pass(GATED, &["fast", "gated", "view"], 200);
         // The gated domain must have run.
         assert_ne!(single.last().unwrap()[1], BigUint::from(0u8));
+    }
+
+    /// `p` pulses and returns to 0 within one evaluation of its process,
+    /// so the settle sees no change of `p` itself, only of its occurrence
+    /// counters: those must still set the flag of the process waiting on it.
+    const PULSE: &str = r#"`timescale 1ns/1ns
+module Top (
+    output logic [7:0] seen
+);
+    logic go = 0;
+    logic p;
+    always @* begin p = 1'b0; if (go) begin p = 1'b1; p = 1'b0; end end
+    initial begin
+        seen = 8'd0;
+        forever begin
+            @(posedge p);
+            seen = seen + 8'd1;
+        end
+    end
+    always #2 go = ~go;
+endmodule
+"#;
+
+    #[test]
+    fn pulse_within_a_partition_wakes_its_edge_wait() {
+        let single = matches_single_pass(PULSE, &["seen"], 20);
+        assert_ne!(single.last().unwrap()[0], BigUint::from(0u8));
     }
 
     #[test]

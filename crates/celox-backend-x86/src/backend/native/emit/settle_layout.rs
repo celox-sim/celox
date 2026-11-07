@@ -166,6 +166,9 @@ pub(super) fn cluster_clean_guards(func: &MFunction, order: Vec<usize>) -> Vec<u
             }
             | MInst::OrStoreImm {
                 base, offset, size, ..
+            }
+            | MInst::StoreImm {
+                base, offset, size, ..
             } => {
                 stores = true;
                 is_flag(base, offset, size)

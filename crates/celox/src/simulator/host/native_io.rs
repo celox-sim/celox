@@ -744,8 +744,8 @@ impl Scope<'_> {
         let header = &mut self.arena.header;
         header.guard_timestamp(timestamp);
         if request == SCHEDULER_RUN {
-            header.recent[header.recent_next as usize] = process;
-            header.recent_next = (header.recent_next + 1) % header.recent.len() as u64;
+            header.recent[(header.recent_next % header.recent.len() as u64) as usize] = process;
+            header.recent_next = header.recent_next.saturating_add(1);
             header.work = header.work.saturating_add(1);
             // Ordinary suspensions do not consume the process-return budget.
             // This separate bound covers cycling through the native work list.

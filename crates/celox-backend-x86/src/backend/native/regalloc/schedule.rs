@@ -1280,6 +1280,7 @@ fn is_pressure_schedulable_kind(inst: &MInst) -> bool {
         | MInst::ReleaseStorePtrIndexed { .. }
         | MInst::AndStoreImm { .. }
         | MInst::OrStoreImm { .. }
+        | MInst::StoreImm { .. }
         | MInst::MemCopy { .. }
         | MInst::SparseCommit { .. }
         | MInst::SparseCommitWorklist { .. }

@@ -997,3 +997,87 @@ fn selected_indexed_load_sinking_requires_one_shared_index() {
         2
     );
 }
+
+fn zero_test_of_direct_load(kind: CmpKind) -> MFunction {
+    let mut function = make_func(
+        vec![
+            MInst::Load {
+                dst: VReg(0),
+                base: BaseReg::SimState,
+                offset: 4,
+                size: OpSize::S8,
+            },
+            MInst::CmpImm {
+                dst: VReg(1),
+                lhs: VReg(0),
+                imm: 0,
+                kind,
+            },
+            MInst::Branch {
+                cond: VReg(1),
+                true_bb: BlockId(1),
+                false_bb: BlockId(2),
+            },
+        ],
+        2,
+    );
+    for (block, code) in [(1, 1), (2, 2)] {
+        let mut body = MBlock::new(BlockId(block));
+        body.push(MInst::ReturnError { code });
+        function.blocks.push(body);
+    }
+    function
+}
+
+/// The register selection leaves `load; test; jcc`; the late memory
+/// selection compares the byte in memory, inverting the targets of an
+/// equality test.
+#[test]
+fn folds_zero_test_of_direct_load_after_register_selection() {
+    for (kind, true_bb, false_bb) in [
+        (CmpKind::Ne, BlockId(1), BlockId(2)),
+        (CmpKind::Eq, BlockId(2), BlockId(1)),
+    ] {
+        let mut func = zero_test_of_direct_load(kind);
+        assert_eq!(fold_register_branch_predicates(&mut func), 1);
+        assert_eq!(fold_memory_branch_predicates(&mut func), 1);
+        assert_eq!(
+            func.blocks[0].insts,
+            vec![MInst::BranchPred {
+                predicate: BranchPredicate::MemoryNonZero {
+                    base: BaseReg::SimState,
+                    offset: 4,
+                    size: OpSize::S8,
+                },
+                true_bb,
+                false_bb,
+            }]
+        );
+        assert_eq!(func.verify_result(), Ok(()));
+    }
+
+    // A loaded value with another use stays in a register.
+    let mut shared = zero_test_of_direct_load(CmpKind::Ne);
+    shared.blocks[0].insts.insert(
+        2,
+        MInst::Store {
+            base: BaseReg::SimState,
+            offset: 8,
+            src: VReg(0),
+            size: OpSize::S8,
+        },
+    );
+    assert_eq!(fold_register_branch_predicates(&mut shared), 1);
+    assert_eq!(fold_memory_branch_predicates(&mut shared), 0);
+
+    // A nonzero immediate is not a nonzero test of the memory.
+    let mut nonzero = zero_test_of_direct_load(CmpKind::Ne);
+    nonzero.blocks[0].insts[1] = MInst::CmpImm {
+        dst: VReg(1),
+        lhs: VReg(0),
+        imm: 3,
+        kind: CmpKind::Ne,
+    };
+    assert_eq!(fold_register_branch_predicates(&mut nonzero), 1);
+    assert_eq!(fold_memory_branch_predicates(&mut nonzero), 0);
+}
