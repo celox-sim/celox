@@ -907,7 +907,7 @@ pub(in crate::ast) fn method_call<'a>(
 /// Check that the handle native expression `id` evaluates to may be
 /// assigned to a variable of class `target`: its class derives from or
 /// implements `target`, or it is `null` or of a class not known before
-/// binding (IEEE 1800-2023 8.16, 8.26.5).
+/// binding (IEEE 1800-2023 8.16, 8.26.5), by [`assignments::check_assign`].
 pub(in crate::ast) fn check_assignment(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
@@ -917,46 +917,8 @@ pub(in crate::ast) fn check_assignment(
     target: &str,
     context: impl Fn() -> String,
 ) -> Converted<()> {
-    let mut pending = vec![id];
-    while let Some(id) = pending.pop() {
-        // A value an effect bound in its place, such as the handle a `$cast`
-        // to a property writes, is checked where it was made.
-        if dimensions.effect_values.contains_key(&id) {
-            continue;
-        }
-        let Ok(source_type) = expression_types::type_of(tree, session, id, native, dimensions)
-        else {
-            // A conditional whose arms have no common class (11.4.11) is
-            // judged by its arms, either of which may be the value.
-            if let ExprKind::Conditional {
-                then_expression,
-                else_expression,
-                ..
-            } = &native.expression(ungroup(id, native)).kind
-            {
-                pending.extend([*else_expression, *then_expression]);
-            }
-            continue;
-        };
-        // Each value is a handle of a class or `null`, also an arm of
-        // another type (8.16).
-        match session.types.data(source_type) {
-            semantic_types::TyData::Null => continue,
-            semantic_types::TyData::Class(_) => {}
-            _ => {
-                return Err(AnalyzerError::NotClassHandle {
-                    context: context(),
-                    actual: session.types.spell(source_type),
-                    target: target.to_owned(),
-                });
-            }
-        }
-        let Some(source) = expression_types::class_name(&session.types, source_type) else {
-            continue;
-        };
-        check_class_assignment(tree, session, dimensions, &source, target, &context)?;
-    }
-    Ok(())
+    let target = classes::handle_type_id(&mut session.types, target);
+    assignments::check_assign(tree, session, id, native, dimensions, target, context)
 }
 
 /// Check that a handle of class `source` may be assigned to a variable of
@@ -967,33 +929,11 @@ pub(in crate::ast) fn check_class_assignment(
     dimensions: &PackedDimensions,
     source: &str,
     target: &str,
-    context: impl FnOnce() -> String,
+    context: impl Fn() -> String,
 ) -> Converted<()> {
-    if source == target {
-        return Ok(());
-    }
-    if !classes::builtin(source) && !classes::builtin(target) {
-        class(tree, session, dimensions, source)?.record_lineage(
-            tree,
-            session,
-            &dimensions.const_env,
-            &dimensions.type_aliases,
-        );
-        let source_type = classes::handle_type_id(&mut session.types, source);
-        let target_type = classes::handle_type_id(&mut session.types, target);
-        if session
-            .types
-            .assignable_handle(source_type, target_type)
-            .is_ok()
-        {
-            return Ok(());
-        }
-    }
-    Err(AnalyzerError::IncompatibleClassHandle {
-        context: context(),
-        actual: source.to_owned(),
-        target: target.to_owned(),
-    })
+    let source = classes::handle_type_id(&mut session.types, source);
+    let target = classes::handle_type_id(&mut session.types, target);
+    assignments::check_types(tree, session, dimensions, source, target, &context)
 }
 
 /// Whether class `class_name` derives from or implements `ancestor`.

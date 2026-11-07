@@ -200,6 +200,14 @@ pub enum AnalyzerError {
         "{context}: a value that is not an unpacked array is not assignment compatible with `{target}`"
     )]
     NotUnpackedArray { context: String, target: String },
+    /// A value of type `actual` given to a place of type `target` that it is
+    /// not assignment compatible with (IEEE 1800-2023 6.22.3, 10.8).
+    #[error("{context}: a value of type `{actual}` is not assignment compatible with `{target}`")]
+    IncompatibleAssignment {
+        context: String,
+        actual: String,
+        target: String,
+    },
     /// A handle of class `actual` assigned to a variable of class `target`
     /// that `actual` neither derives from nor implements; only `$cast` may
     /// assign it (IEEE 1800-2023 8.16, 8.26.5).
