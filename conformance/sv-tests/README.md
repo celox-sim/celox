@@ -892,3 +892,11 @@ a source that declares one. A coverage function is no constant system
 function (11.2.1): its call in a constant expression or in a constant
 function is rejected, and a constant function ignores the database tasks
 (13.4.3).
+
+In elaboration mode the driver now elaborates every module root in turn when
+no `--top` is given, as tools that elaborate all top-level modules do;
+simulation still requires a single root. Four reviewed expectations update:
+`5.12-attributes-module` and `5.6.4--compiler-directives-celldefine` pass in
+both state modes in a focused official invocation, with no other verdict
+changed among 172 cases of chapters 5, 20 and 22. Multi-root simulation
+cases (for example `20.4--printtimescale-hier`) remain unsupported.

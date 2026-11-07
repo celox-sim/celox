@@ -1005,8 +1005,8 @@ chapter-5/5.12-attributes-case.sv	2state	pass
 chapter-5/5.12-attributes-case.sv	4state	pass
 chapter-5/5.12-attributes-conditional.sv	2state	pass
 chapter-5/5.12-attributes-conditional.sv	4state	pass
-chapter-5/5.12-attributes-module.sv	2state	fail
-chapter-5/5.12-attributes-module.sv	4state	fail
+chapter-5/5.12-attributes-module.sv	2state	pass
+chapter-5/5.12-attributes-module.sv	4state	pass
 chapter-5/5.12-attributes-operator.sv	2state	pass
 chapter-5/5.12-attributes-operator.sv	4state	pass
 chapter-5/5.12-attributes-variable.sv	2state	pass
@@ -1027,8 +1027,8 @@ chapter-5/5.6.3--system-functions.sv	2state	pass
 chapter-5/5.6.3--system-functions.sv	4state	pass
 chapter-5/5.6.4--compiler-directives-begin-keywords.sv	2state	pass
 chapter-5/5.6.4--compiler-directives-begin-keywords.sv	4state	pass
-chapter-5/5.6.4--compiler-directives-celldefine.sv	2state	fail
-chapter-5/5.6.4--compiler-directives-celldefine.sv	4state	fail
+chapter-5/5.6.4--compiler-directives-celldefine.sv	2state	pass
+chapter-5/5.6.4--compiler-directives-celldefine.sv	4state	pass
 chapter-5/5.6.4--compiler-directives-debug-line.sv	2state	pass
 chapter-5/5.6.4--compiler-directives-debug-line.sv	4state	pass
 chapter-5/5.6.4--compiler-directives-debug.sv	2state	pass
