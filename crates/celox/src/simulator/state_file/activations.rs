@@ -134,7 +134,7 @@ impl<B: SimBackend> Simulator<B> {
         state: &ProcessState,
         process: impl Fn(usize) -> ProcessRef,
         strings: &mut Vec<Vec<u8>>,
-        boxes: &mut Vec<Vec<u8>>,
+        boxes: &mut Vec<celox_runtime::BoxRecord>,
     ) -> Result<Vec<CallStackRecord>, StateError> {
         let kernel = |index: usize| state.activations.get(index).map_or(index, |a| a.kernel);
         let mut records = Vec::new();
@@ -156,15 +156,29 @@ impl<B: SimBackend> Simulator<B> {
                         if handle == celox_heap::NULL {
                             continue;
                         }
-                        // A box a fork shares is saved by its contents; a
-                        // class object is not.
-                        let Some(contents) = self.backend.heap().box_contents(handle) else {
-                            return Err(StateError::Objects("class handles in call frames".into()));
-                        };
+                        // A box a fork shares is saved by its value, a
+                        // string by its contents; a class object is not.
                         let id = match numbered.get(&handle) {
                             Some(&id) => id,
                             None => {
-                                boxes.push(contents.to_vec());
+                                let (bytes, kind) = match self.backend.heap().box_contents(handle) {
+                                    Some((bytes, None)) => (bytes.to_vec(), FrameValueKind::Bits),
+                                    Some((bytes, Some(celox_heap::HandleKind::String))) => {
+                                        let mut bytes = bytes.to_vec();
+                                        let element: &mut [u8; celox_heap::HANDLE_BYTES] =
+                                            (&mut bytes[..celox_heap::HANDLE_BYTES])
+                                                .try_into()
+                                                .expect("one handle");
+                                        self.capture_string(element, strings)?;
+                                        (bytes, FrameValueKind::String)
+                                    }
+                                    _ => {
+                                        return Err(StateError::Objects(
+                                            "class handles in call frames".into(),
+                                        ));
+                                    }
+                                };
+                                boxes.push(celox_runtime::BoxRecord { kind, bytes });
                                 let id = u32::try_from(boxes.len())
                                     .map_err(|_| mismatch("too many boxes"))?;
                                 numbered.insert(handle, id);
@@ -874,8 +888,30 @@ impl<B: SimBackend> Simulator<B> {
                     let Some(position) = id.checked_sub(1) else {
                         continue;
                     };
-                    let handle = *made[position]
-                        .get_or_insert_with(|| self.backend.heap_mut().new_box(&boxes[position]));
+                    let handle = match made[position] {
+                        Some(handle) => handle,
+                        None => {
+                            let saved = &boxes[position];
+                            let mut bytes = saved.bytes.clone();
+                            let kind = (saved.kind == FrameValueKind::String).then(|| {
+                                let element = &mut bytes[..celox_heap::HANDLE_BYTES];
+                                let id =
+                                    u32::from_le_bytes((&*element).try_into().expect("one handle"))
+                                        as usize;
+                                let content = id
+                                    .checked_sub(1)
+                                    .and_then(|i| strings.get(i))
+                                    .map_or(&[][..], Vec::as_slice);
+                                element.copy_from_slice(
+                                    &self.backend.heap_mut().intern(content).to_le_bytes(),
+                                );
+                                celox_heap::HandleKind::String
+                            });
+                            let handle = self.backend.heap_mut().new_box(&bytes, kind);
+                            made[position] = Some(handle);
+                            handle
+                        }
+                    };
                     element.copy_from_slice(&handle.to_le_bytes());
                     continue;
                 }

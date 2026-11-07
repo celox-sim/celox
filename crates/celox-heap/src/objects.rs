@@ -14,7 +14,7 @@ pub const NULL: Handle = 0;
 /// The class of a box: an object no class declares, which holds an
 /// automatic variable that a fork shares between the frames of its parent
 /// and children. Its bytes are the variable's value, and state files save
-/// a box of plain bits by its contents (see [`Heap::box_contents`]).
+/// a box by its value, a string by its contents (see [`Heap::box_contents`]).
 pub const BOX_CLASS: u32 = u32::MAX;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -339,20 +339,30 @@ impl Heap {
         }
     }
 
-    /// The bytes of box `object` (see [`BOX_CLASS`]) when it holds plain
-    /// bits, no handle; `None` for any other object.
-    pub fn box_contents(&self, object: Handle) -> Option<&[u8]> {
-        self.objects
+    /// The bytes of box `object` (see [`BOX_CLASS`]), and what its value
+    /// refers to when it is a handle; `None` for any other object.
+    pub fn box_contents(&self, object: Handle) -> Option<(&[u8], Option<HandleKind>)> {
+        let object = self
+            .objects
             .get(&object)
-            .filter(|object| object.class == BOX_CLASS && object.handles.is_empty())
-            .map(|object| &*object.bytes)
+            .filter(|object| object.class == BOX_CLASS)?;
+        let kind = match object.handles.as_slice() {
+            [] => None,
+            [(0, kind)] => Some(*kind),
+            _ => return None,
+        };
+        Some((&object.bytes, kind))
     }
 
-    /// A new box (see [`BOX_CLASS`]) holding `bytes`.
-    pub fn new_box(&mut self, bytes: &[u8]) -> Handle {
+    /// A new box (see [`BOX_CLASS`]) holding `bytes`, a handle of `kind`
+    /// if any.
+    pub fn new_box(&mut self, bytes: &[u8], kind: Option<HandleKind>) -> Handle {
         let handle = self.new_object(BOX_CLASS, bytes.len());
         if let Some(object) = self.object_mut(handle) {
             object.bytes.copy_from_slice(bytes);
+        }
+        if let Some(kind) = kind {
+            self.declare_handle(handle, 0, kind);
         }
         handle
     }

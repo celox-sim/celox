@@ -61,8 +61,10 @@
 //! resume point u64 | stack bytes. A string handle in a saved frame is
 //! written like the value of a string object.
 //! Version 8 adds, after the call stacks, the boxes the saved frames hold
-//! (see `celox_heap::BOX_CLASS`): count u32, then per box: its bytes. A box
-//! handle in a saved frame is written as one more than the index of its box.
+//! (see `celox_heap::BOX_CLASS`): count u32, then per box: kind u8 (0 bits,
+//! 1 string) | bytes, a string written like the value of a string object. A
+//! box handle in a saved frame is written as one more than the index of its
+//! box.
 
 use std::io::{self, Read, Write};
 
@@ -175,10 +177,19 @@ pub struct ProcessRecord {
     pub finished: bool,
     /// The frames of the calls processes are suspended inside.
     pub call_stacks: Vec<CallStackRecord>,
-    /// The contents of the boxes the saved frames hold: a box handle in a
+    /// The values of the boxes the saved frames hold: a box handle in a
     /// frame is written as one more than the index of its box here, so the
     /// frames that shared a box share it again when the file is loaded.
-    pub boxes: Vec<Vec<u8>>,
+    pub boxes: Vec<BoxRecord>,
+}
+
+/// The value of a box (see `celox_heap::BOX_CLASS`): its bytes, a string
+/// handle among them written as the value of a string object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoxRecord {
+    /// [`FrameValueKind::String`] when the value is a string.
+    pub kind: FrameValueKind,
+    pub bytes: Vec<u8>,
 }
 
 /// The frames of the calls a process is suspended inside (see
@@ -690,8 +701,9 @@ fn put_processes(w: &mut impl Write, processes: &ProcessRecord, version: u16) ->
     }
     if version >= 8 {
         put_len(w, processes.boxes.len())?;
-        for contents in &processes.boxes {
-            put_bytes(w, contents)?;
+        for saved in &processes.boxes {
+            w.write_all(&[u8::from(saved.kind == FrameValueKind::String)])?;
+            put_bytes(w, &saved.bytes)?;
         }
     }
     Ok(())
@@ -819,8 +831,18 @@ fn get_processes(r: &mut impl Read, version: u16) -> Result<ProcessRecord, State
     }
     if version >= 8 {
         result.boxes = (0..get_u32(r)?)
-            .map(|_| get_len_bytes(r))
-            .collect::<Result<_, _>>()?;
+            .map(|_| {
+                let kind = if get_flag(r)? {
+                    FrameValueKind::String
+                } else {
+                    FrameValueKind::Bits
+                };
+                Ok(BoxRecord {
+                    kind,
+                    bytes: get_len_bytes(r)?,
+                })
+            })
+            .collect::<Result<_, StateFileError>>()?;
     }
     Ok(result)
 }

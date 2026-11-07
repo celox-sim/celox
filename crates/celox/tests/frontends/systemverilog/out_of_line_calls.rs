@@ -3440,3 +3440,85 @@ endmodule
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     resumes!(build_native);
 }
+
+#[test]
+fn state_files_keep_shared_strings_and_refuse_shared_containers() {
+    // A string the children of `spawn` share is a value: the file holds
+    // its contents with the box, and the frames share the box again after
+    // a load on any backend. A shared queue is a container, which state
+    // files do not record in a variable either.
+    let strings = r#"`timescale 1ns/1ns
+module Top(output int a);
+    function automatic void spawn(int start);
+        string s = "ab";
+        fork
+            #2 s = {s, "c"};
+            #4 s = {s, "de"};
+            #6 a = s.len() * 100 + start;
+        join_none
+    endfunction
+    int seven = 7;
+    initial spawn(seven);
+endmodule
+"#;
+    let build = || {
+        Simulation::from_sv_sources(vec![(strings, Path::new("calls.sv"))], "Top")
+            .force_out_of_line_calls()
+    };
+    let mut origin = build().build_interpreter().expect("builds");
+    origin.run_until(3).expect("the design runs");
+    let mut bytes = Vec::new();
+    origin
+        .save_state()
+        .expect("the string box saves")
+        .write_to(&mut bytes)
+        .expect("the file writes");
+    let file = celox::StateFile::read_from(bytes.as_slice()).expect("the file reads");
+    let boxes = &file.schedule.as_ref().expect("a schedule").processes.boxes;
+    assert_eq!(boxes.len(), 1, "one box, which three frames share");
+    assert_eq!(boxes[0].kind, celox_runtime::FrameValueKind::String);
+    origin.run_until(10).expect("the saved run continues");
+    assert_eq!(origin.get(origin.signal("a")), 507u16.into());
+    macro_rules! resumes {
+        ($build:ident) => {{
+            let mut target = build().$build().expect("builds");
+            target.load_state(&file).expect("the box loads");
+            target.run_until(10).expect("the loaded design runs");
+            assert_eq!(
+                target.get(target.signal("a")),
+                507u16.into(),
+                stringify!($build)
+            );
+        }};
+    }
+    resumes!(build_interpreter);
+    resumes!(build_cranelift);
+    resumes!(build_wasm);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    resumes!(build_native);
+
+    let queues = r#"`timescale 1ns/1ns
+module Top(output int a);
+    function automatic void spawn(int start);
+        int q[$];
+        fork
+            #2 q.push_back(start);
+            #4 a = q.size();
+        join_none
+    endfunction
+    int seven = 7;
+    initial spawn(seven);
+endmodule
+"#;
+    let mut sim = Simulation::from_sv_sources(vec![(queues, Path::new("calls.sv"))], "Top")
+        .force_out_of_line_calls()
+        .build_interpreter()
+        .expect("builds");
+    sim.run_until(3).expect("the design runs");
+    assert!(
+        matches!(sim.save_state(), Err(celox::StateError::Objects(_))),
+        "a container in a frame"
+    );
+    sim.run_until(10).expect("the design runs on");
+    assert_eq!(sim.get(sim.signal("a")), 1u8.into());
+}
