@@ -5957,6 +5957,48 @@ pub(super) fn substitute_stmt_constants(
 }
 
 /// Every `initial` process of the active generate items.
+/// The value of the initializer `native` of static property `target` of
+/// class `owner`, bound in the scope of the class as its methods are (IEEE
+/// 1800-2023 8.9, 8.25): its properties and methods hide the names of the
+/// scope around it, a static property names the variable that holds it, and
+/// a call of a static method calls that method. `dimensions` is the scope of
+/// the class's bodies.
+#[allow(clippy::too_many_arguments)]
+fn static_initializer(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    state: &mut BodyState<'_>,
+    item: &generate::Item,
+    owner: &str,
+    type_aliases: &HashMap<String, Type>,
+    dimensions: &PackedDimensions,
+    native: celox_sv_syntax::ExprId,
+    target: &LValue,
+) -> Result<Expr, AnalyzerError> {
+    let (env, aliases) = classes::specializations::scope(session, owner, &item.env, type_aliases);
+    let class = classes::class(tree, session, owner, &env, &aliases)?;
+    let mut builder = BodyBuilder::new(
+        tree,
+        session,
+        dimensions,
+        state,
+        system_functions::Body::Initial,
+    );
+    builder.push_scope();
+    builder.enter_class_scope(&class);
+    let mut value = expression_binding::expression(
+        native,
+        tree.declarations(),
+        target,
+        tree,
+        builder.session,
+        &builder.dims,
+    )?;
+    builder.rename_expr(&mut value);
+    builder.pop_scope();
+    Ok(value)
+}
+
 pub(super) fn initial_processes_from_scope(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
@@ -6051,8 +6093,8 @@ pub(super) fn initial_processes_from_scope(
                     });
                     continue;
                 };
-                let scoped = owner.map(|owner| {
-                    classes::specializations::body_scope(session, &owner, item_dimensions, literals)
+                let scoped = owner.as_ref().map(|owner| {
+                    classes::specializations::body_scope(session, owner, item_dimensions, literals)
                 });
                 let (item_dimensions, literals) = match &scoped {
                     Some((dimensions, literals)) => (dimensions, literals),
@@ -6080,14 +6122,27 @@ pub(super) fn initial_processes_from_scope(
                     session,
                 )?;
                 let lhs = LValue::Ident(name);
-                let rhs = expression_binding::expression(
-                    native,
-                    tree.declarations(),
-                    &lhs,
-                    tree,
-                    session,
-                    item_dimensions,
-                )?;
+                let rhs = match &owner {
+                    Some(owner) => static_initializer(
+                        tree,
+                        session,
+                        state,
+                        item,
+                        owner,
+                        &type_aliases,
+                        item_dimensions,
+                        native,
+                        &lhs,
+                    )?,
+                    None => expression_binding::expression(
+                        native,
+                        tree.declarations(),
+                        &lhs,
+                        tree,
+                        session,
+                        item_dimensions,
+                    )?,
+                };
                 let LValue::Ident(name) = lhs else {
                     unreachable!("an initializer target is a variable")
                 };
