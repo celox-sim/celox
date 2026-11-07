@@ -411,3 +411,26 @@ endmodule"#)
  (assert_eq marks 5) (assert_eq n_passed 18) (assert_eq n_failed 2)
  (assert_eq kept 55) (assert_eq f_failed 0) (assert_eq r_failed 0)
  (assert_eq r_negated 5) (assert_eq r_single 5))
+
+; IEEE 1800-2023 16.12.8: `p iff q` holds when both Booleans are true or
+; both false, X counting as false; it binds tighter than `|->` (Table
+; 16-3), also as the body of a named property behind an implication.
+(case boolean_iff_properties
+ (source "iff.sv" #"module Top(output int p1, f1, p2, f2);
+ bit clk;
+ logic a, b, c;
+ property eq;
+  a iff b;
+ endproperty
+ assert property (@(posedge clk) a iff b) p1++; else f1++;
+ assert property (@(posedge clk) c |-> eq) p2++; else f2++;
+ initial begin
+  {a, b, c} = 3'b001; #1 clk = 1; #1 clk = 0;
+  {a, b, c} = 3'b111; #1 clk = 1; #1 clk = 0;
+  {a, b, c} = 3'b100; #1 clk = 1; #1 clk = 0;
+  {a, b, c} = 3'b011; #1 clk = 1; #1 clk = 0;
+  a = 1'bx; b = 0; c = 1; #1 clk = 1; #1 clk = 0;
+ end
+endmodule"#)
+ (top Top) (four_state) (run_until 11)
+ (assert_eq p1 3) (assert_eq f1 2) (assert_eq p2 4) (assert_eq f2 1))

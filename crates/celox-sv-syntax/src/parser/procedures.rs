@@ -158,6 +158,8 @@ impl Parser<'_> {
                 }
                 "|->" | "|=>" if depth == 1 && !implication => implication = true,
                 "|->" | "|=>" => return false,
+                // A top-level `iff` between Booleans (16.12.8).
+                "iff" if depth == 1 => {}
                 word if self.temporal(word, offset) => return false,
                 _ => {}
             }

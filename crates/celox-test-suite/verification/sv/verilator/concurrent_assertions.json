@@ -2,6 +2,17 @@
   "cases": [
     {
       "category": "Sequential",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "concurrent_assertions::boolean_iff_properties",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "Verilator 5.052 runs a concurrent assertion action before its clocked NBA update (action_value=0 instead of 1), and fails an assertion whose disable iff becomes true in NBA (failed=1 instead of 0). IEEE 1800-2023 16.5/16.5.1/16.12/16.14.1 require the unsampled disable condition after NBA and actions in Reactive. Standalone Top and Wrapped reproduce both results; installed xezim agrees with the strict expectations for these cases. The sampled-history case similarly skips a newly enabled evaluation after NBA (passed=1 instead of 2); pinned xezim 0.11.4 gives passed=2, failed=1.",
       "expectation": "Simulation",
       "known_issue": {
