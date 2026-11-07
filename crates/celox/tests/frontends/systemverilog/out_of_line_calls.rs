@@ -4420,3 +4420,83 @@ endmodule
         );
     }
 }
+
+/// A design whose task `bump` makes, at each level of a recursion or of a
+/// loop as `REPEAT` chooses, nonblocking assignments to a module variable
+/// and a static class property, waits for the first, and calls `wait_nba`,
+/// the shape of UVM's `uvm_wait_for_nba_region`: a nonblocking assignment
+/// to a static local, then an event control on it.
+const NBA_LEVELS: &str = r#"`timescale 1ns/1ns
+class cfg_t;
+    static int level;
+endclass
+module Top(output int a, output int b, output int c, output int d);
+    int m;
+    int log_[$];
+    task wait_nba;
+        static int nba;
+        static int next_nba;
+        next_nba++;
+        nba <= next_nba;
+        @(nba);
+    endtask
+    task automatic bump(int n);
+        REPEAT begin
+            m <= m + 1;
+            @(m);
+            cfg_t::level <= cfg_t::level + 10;
+            wait_nba();
+            log_.push_back(m * 100 + cfg_t::level);
+            NEXT
+        end
+    endtask
+    int three = 3;
+    initial begin
+        bump(three);
+        a = log_[0];
+        b = log_[1];
+        c = log_[2];
+        d = $time;
+    end
+endmodule
+"#;
+
+#[test]
+fn nonblocking_assignments_in_recursive_units() {
+    // Out of line by default, as its recursion, `bump` stages each update
+    // at a function NBA site, which the calling kernel lists after its own:
+    // the results are those of the loop that inlines.
+    let recursive = NBA_LEVELS
+        .replace("REPEAT begin", "if (n > 0) begin")
+        .replace("NEXT", "bump(n - 1);");
+    let looped = NBA_LEVELS
+        .replace("REPEAT begin", "for (int k = n; k > 0; k--) begin")
+        .replace("NEXT", "");
+    assert_eq!(function_units(&recursive, false), 1, "bump");
+    let names = ["a", "b", "c", "d"];
+    for four_state in [false, true] {
+        let expected =
+            simulate(&looped, four_state, false, "interpreter", 10, &names).expect("the loop runs");
+        for forced in [false, true] {
+            assert_eq!(
+                simulate(&recursive, four_state, forced, "interpreter", 10, &names),
+                Ok(expected.clone()),
+                "four_state {four_state} forced {forced}"
+            );
+        }
+    }
+    assert_eq!(
+        simulate(&looped, false, false, "interpreter", 10, &names),
+        Ok(vec![value(110), value(220), value(330), value(0)])
+    );
+}
+
+#[test]
+fn nonblocking_assignments_in_units_are_those_of_the_inlined_body() {
+    // The same updates from units that the inlined design makes in its
+    // kernels, through every backend.
+    let source = NBA_LEVELS
+        .replace("REPEAT begin", "for (int k = n; k > 0; k--) begin")
+        .replace("NEXT", "");
+    same_as_inlined(&source, 2, 10, &["a", "b", "c", "d"]);
+}

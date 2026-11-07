@@ -879,41 +879,141 @@ impl Ff<'_, '_> {
     /// The delay word `word` of a suspension with status `code` from a call
     /// of the kernel being lowered, as the process's: a wait at function
     /// wait site `k` is a wait at the process's site `own + k`, `own` the
-    /// number of the kernel's own sites, which is patched in when the
-    /// kernel is finished (see `Ff::wait_offset_patches`).
-    fn function_wait_word(&mut self, code: RegisterId, word: RegisterId) -> RegisterId {
-        let status = |b: &mut SIRBuilder<Addr>, status: celox_design::ProcessStatus| {
-            let value = b.alloc_bit(celox_design::PROCESS_STATUS_WIDTH, false);
-            b.emit(SIRInstruction::Imm(value, SIRValue::new(status.code())));
-            let equal = b.alloc_bit(1, false);
-            b.emit(SIRInstruction::Binary(equal, code, BinaryOp::Eq, value));
-            equal
-        };
-        let wait = status(&mut self.b, celox_design::ProcessStatus::Wait);
-        let pending = status(&mut self.b, celox_design::ProcessStatus::Pending);
-        let waits = self.b.alloc_bit(1, false);
-        self.b
-            .emit(SIRInstruction::Binary(waits, wait, BinaryOp::Or, pending));
+    /// number of the kernel's own wait sites, and a nonblocking assignment
+    /// at function NBA site `k` one at its NBA site `own + k`, `own` the
+    /// number of its own NBA sites; each number is patched in when the
+    /// kernel is finished (see `Ff::wait_offset_patches`). `waits` and
+    /// `nbas` say which the callee can suspend for.
+    fn function_site_word(
+        &mut self,
+        code: RegisterId,
+        mut word: RegisterId,
+        waits: bool,
+        nbas: bool,
+    ) -> RegisterId {
         let width = celox_design::PROCESS_DELAY_WIDTH;
-        let zeros = self.b.alloc_bit(width - 1, false);
-        self.b.emit(SIRInstruction::Imm(zeros, SIRValue::new(0u8)));
-        let factor = self.b.alloc_bit(width, false);
+        let shift = |this: &mut Self,
+                     statuses: &[celox_design::ProcessStatus],
+                     nba: bool,
+                     word: RegisterId| {
+            let mut matched: Option<RegisterId> = None;
+            for status in statuses {
+                let value = this.b.alloc_bit(celox_design::PROCESS_STATUS_WIDTH, false);
+                this.b
+                    .emit(SIRInstruction::Imm(value, SIRValue::new(status.code())));
+                let equal = this.b.alloc_bit(1, false);
+                this.b
+                    .emit(SIRInstruction::Binary(equal, code, BinaryOp::Eq, value));
+                matched = Some(match matched {
+                    Some(any) => {
+                        let either = this.b.alloc_bit(1, false);
+                        this.b
+                            .emit(SIRInstruction::Binary(either, any, BinaryOp::Or, equal));
+                        either
+                    }
+                    None => equal,
+                });
+            }
+            let matched = matched.expect("a status");
+            let zeros = this.b.alloc_bit(width - 1, false);
+            this.b.emit(SIRInstruction::Imm(zeros, SIRValue::new(0u8)));
+            let factor = this.b.alloc_bit(width, false);
+            this.b
+                .emit(SIRInstruction::Concat(factor, vec![zeros, matched]));
+            let own = this.b.alloc_bit(width, false);
+            this.b.emit(SIRInstruction::Imm(own, SIRValue::new(0u8)));
+            if nba {
+                this.nba_offset_patches.push(own);
+            } else {
+                this.wait_offset_patches.push(own);
+            }
+            let offset = this.b.alloc_bit(width, false);
+            this.b
+                .emit(SIRInstruction::Binary(offset, factor, BinaryOp::Mul, own));
+            let translated = this.b.alloc_bit(width, false);
+            this.b.emit(SIRInstruction::Binary(
+                translated,
+                word,
+                BinaryOp::Add,
+                offset,
+            ));
+            translated
+        };
+        if waits {
+            word = shift(
+                self,
+                &[
+                    celox_design::ProcessStatus::Wait,
+                    celox_design::ProcessStatus::Pending,
+                ],
+                false,
+                word,
+            );
+        }
+        if nbas {
+            word = shift(self, &[celox_design::ProcessStatus::Nba], true, word);
+        }
+        word
+    }
+
+    /// A nonblocking update of bits `lsb..lsb + width` of `target`, its
+    /// value in variable `staged` and its run-time position, if any, in
+    /// `position`, from the unit being lowered: the value and position go
+    /// into the staging objects of a new function NBA site, and the unit
+    /// suspends with [`celox_design::ProcessStatus::Nba`], whose word the
+    /// calling kernel turns into its process's site.
+    pub(super) fn unit_nonblocking(
+        &mut self,
+        delay: u64,
+        target: SourceVarId,
+        lsb: usize,
+        width: usize,
+        staged: SourceVarId,
+        position: Option<NbaPosition<SourceVarId>>,
+    ) -> Result<(), sv::AnalyzerError> {
+        use celox_frontend_core::process::NBA_POSITION_WIDTH;
+        if !self.can_suspend_unit() {
+            return Err(unsupported(
+                "a nonblocking assignment in a unit that cannot suspend",
+            ));
+        }
+        let four_state = self.m.var(staged).is_4state;
+        let (value, _) = self.m.temp("nba_value", width, false, four_state);
+        self.copy_variable(staged, value);
+        let slots = match position {
+            Some(position) => {
+                let offset = self
+                    .m
+                    .temp("nba_offset", NBA_POSITION_WIDTH, false, false)
+                    .0;
+                let width = self.m.temp("nba_width", NBA_POSITION_WIDTH, false, false).0;
+                self.copy_variable(position.offset, offset);
+                self.copy_variable(position.width, width);
+                Some(NbaPosition { offset, width })
+            }
+            None => None,
+        };
+        if let Some(resume) = self.resume_frame() {
+            resume.staging.insert(value);
+            if let Some(slots) = slots {
+                resume.staging.extend([slots.offset, slots.width]);
+            }
+        }
+        let index = self.m.function_nba_sites.len() as u64;
+        self.m.function_nba_sites.push(NbaSite {
+            delay,
+            process: 0,
+            target,
+            lsb,
+            width,
+            value,
+            position: slots,
+            pending: None,
+        });
+        let request = self.b.alloc_bit(celox_design::PROCESS_DELAY_WIDTH, false);
         self.b
-            .emit(SIRInstruction::Concat(factor, vec![zeros, waits]));
-        let own = self.b.alloc_bit(width, false);
-        self.b.emit(SIRInstruction::Imm(own, SIRValue::new(0u8)));
-        self.wait_offset_patches.push(own);
-        let offset = self.b.alloc_bit(width, false);
-        self.b
-            .emit(SIRInstruction::Binary(offset, factor, BinaryOp::Mul, own));
-        let translated = self.b.alloc_bit(width, false);
-        self.b.emit(SIRInstruction::Binary(
-            translated,
-            word,
-            BinaryOp::Add,
-            offset,
-        ));
-        translated
+            .emit(SIRInstruction::Imm(request, SIRValue::new(index)));
+        self.suspend_unit_with(celox_design::ProcessStatus::Nba, request)
     }
 
     /// Whether a unit with resume slots is being lowered, which can
@@ -1892,7 +1992,7 @@ impl Ff<'_, '_> {
     }
 
     /// Store variable `from` into variable `to`, of the same shape.
-    fn copy_variable(&mut self, from: SourceVarId, to: SourceVarId) {
+    pub(super) fn copy_variable(&mut self, from: SourceVarId, to: SourceVarId) {
         let variable = self.m.var(from);
         let width = variable.width;
         let value = if variable.is_4state && self.m.four_state {
@@ -2285,10 +2385,12 @@ impl Ff<'_, '_> {
             let code = load(&mut self.b, status);
             let mut word = load(&mut self.b, request);
             let end = load(&mut self.b, top);
-            // A unit waits at a function wait site, which the process lists
+            // A unit waits at a function wait site, and makes a nonblocking
+            // assignment at a function NBA site, which the process lists
             // after the kernel's own sites.
-            if self.kernel.is_some() && self.m.process_state(&subroutine.name).waits {
-                word = self.function_wait_word(code, word);
+            let state = self.m.process_state(&subroutine.name);
+            if self.kernel.is_some() && (state.waits || state.nbas) {
+                word = self.function_site_word(code, word, state.waits, state.nbas);
             }
             if self.kernel.is_some() {
                 let call_top = match self.call_top {

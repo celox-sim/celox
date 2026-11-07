@@ -168,6 +168,10 @@ pub(super) struct ProcessState {
     /// [`celox_design::PROCESS_FORK_RESUME_SHIFT`]); the calling kernel
     /// keeps a process frame, as one that forks itself.
     pub forks: bool,
+    /// Whether it makes a nonblocking assignment: a unit stages the value
+    /// at one of the module's function NBA sites and suspends, as a kernel
+    /// does at its own (see `ProcModule::function_nba_sites`).
+    pub nbas: bool,
     /// Whether it waits, for an event control or a level wait: a unit
     /// suspends at one of the module's function wait sites, which every
     /// kernel that calls it lists after its own (see
@@ -1379,12 +1383,17 @@ impl ProcModule<'_> {
                         | sv::ir::Stmt::DelayedNonblocking { .. }
                         | sv::ir::Stmt::DeferActive
                         | sv::ir::Stmt::AssertionRegion { .. } => note(Reason::MaySuspend),
+                        // A nonblocking assignment hands the runtime its
+                        // update by suspending; the process goes on at once.
                         sv::ir::Stmt::Assign {
                             nonblocking: true, ..
                         }
                         | sv::ir::Stmt::AssignConcat {
                             nonblocking: true, ..
-                        } => note(Reason::Other("instrumented store".to_string())),
+                        } => {
+                            state.suspends = true;
+                            state.nbas = true;
+                        }
                         // Prints, messages and Veryl's assertion calls are
                         // runtime events, which a unit raises as an inlined
                         // body does; a message carries the time. `$finish`
