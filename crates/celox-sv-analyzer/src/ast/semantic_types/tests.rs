@@ -271,6 +271,43 @@ fn diagnostics_spell_element_types_and_element_counts() {
 }
 
 #[test]
+fn virtual_interfaces_take_their_interface_without_or_with_their_modport() {
+    // IEEE 1800-2023 25.9: a virtual interface is assigned one of its
+    // interface with no modport or with its own modport.
+    let mut table = TyTable::default();
+    let mut vif = |interface: &str, modport: Option<&str>| {
+        table.intern(TyData::VirtualInterface {
+            interface: Decl::Interface(interface.into()),
+            modport: modport.map(Into::into),
+        })
+    };
+    let (bus, bus_m, bus_s, other) = (
+        vif("bus", None),
+        vif("bus", Some("m")),
+        vif("bus", Some("s")),
+        vif("other", None),
+    );
+    let null = table.intern(TyData::Null);
+    for (source, target, expected) in [
+        (bus, bus, Ok(())),
+        (bus, bus_m, Ok(())),
+        (bus_m, bus_m, Ok(())),
+        (bus_m, bus, Err(Mismatch::VirtualInterface)),
+        (bus_m, bus_s, Err(Mismatch::VirtualInterface)),
+        (other, bus, Err(Mismatch::VirtualInterface)),
+        (null, bus_m, Ok(())),
+    ] {
+        assert_eq!(
+            table.assignable_handle(source, target),
+            expected,
+            "{} to {}",
+            table.spell(source),
+            table.spell(target)
+        );
+    }
+}
+
+#[test]
 fn class_handles_assign_to_their_classes_bases_and_interfaces() {
     // IEEE 1800-2023 8.16: `class E extends C`; 8.26.5: `class Fifo extends
     // Base implements PutImp`; 6.11.1: `null` to any handle.
