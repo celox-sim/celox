@@ -148,7 +148,10 @@ def commands(engine, state, spec, files, build, binaries, plusargs, contract='rt
     if engine == 'xezim':
         if state != 'four-state':
             raise ValueError('xezim has no global two-state mode; zero initialization is not equivalent')
-        return [[binaries[engine], '--error-exit', '--verbose', '--max-time', '60s', '-s', spec['top'],
+        if contract == 'rtlmeter-steady-state-v1':
+            return [[binaries[engine], '--error-exit', '--verbose', '--max-time', '60s', '-s', spec['top'],
+                     '-f', files, *includes, *defines, *plusargs]]
+        return [[binaries[engine], '--error-exit', '--max-time', '1s', '-s', spec['top'],
                  '-f', files, *includes, *defines, *plusargs]]
     model = build / 'sim'
     flags = ['--fourstate'] if state == 'four-state' else ['--no-fourstate', '--x-initial', '0', '--x-assign', '0']

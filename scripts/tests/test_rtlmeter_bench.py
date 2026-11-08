@@ -140,6 +140,14 @@ configurations:
         cmd_xezim = bench.commands('xezim', 'four-state', spec, Path('/files.f'), Path('/build'), binaries, [],
                                    contract='rtlmeter-steady-state-v1')[0]
         self.assertIn('--verbose', cmd_xezim)
+        self.assertIn('--max-time', cmd_xezim)
+        self.assertEqual(cmd_xezim[cmd_xezim.index('--max-time') + 1], '60s')
+
+        cmd_xezim_cold = bench.commands('xezim', 'four-state', spec, Path('/files.f'), Path('/build'), binaries, [],
+                                        contract='rtlmeter-cold-process-v1')[0]
+        self.assertNotIn('--verbose', cmd_xezim_cold)
+        self.assertIn('--max-time', cmd_xezim_cold)
+        self.assertEqual(cmd_xezim_cold[cmd_xezim_cold.index('--max-time') + 1], '1s')
 
     def test_extract_sim_ns_parses_simulator_output_correctly(self):
         outcome = {'elapsedNs': 5000000000, 'commands': [{'elapsedNs': 3000000000}, {'elapsedNs': 2000000000}]}
