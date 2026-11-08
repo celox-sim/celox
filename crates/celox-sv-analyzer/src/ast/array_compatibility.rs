@@ -314,15 +314,23 @@ fn check_assignment(
     // expression, such as a call returning an array, by its own type.
     let actual = native_unpacked_type(id, tree, session, dims)
         .or_else(|| expression_types::type_of(tree, session, id, tree.declarations(), dims).ok());
-    let Some((actual, target)) = target
-        .zip(actual)
-        .and_then(|(target, actual)| incompatible_types(&session.types, actual, target))
-    else {
+    let Some((actual, target)) = actual.zip(target) else {
         return Ok(());
     };
-    Err(AnalyzerError::IncompatibleUnpackedArray {
-        context: context(),
-        actual,
-        target,
-    })
+    // An array value given to a fixed-size array is judged by the type
+    // table (see `assignments::check_types`); other values are checked by
+    // their own kind.
+    let table = &session.types;
+    let array = matches!(table.data(actual), semantic_types::TyData::Array { .. });
+    let fixed = matches!(
+        table.data(target),
+        semantic_types::TyData::Array {
+            kind: semantic_types::ArrayKind::Fixed(_),
+            ..
+        }
+    );
+    if !(array && fixed) {
+        return Ok(());
+    }
+    assignments::check_types(tree, session, dims, actual, target, context)
 }

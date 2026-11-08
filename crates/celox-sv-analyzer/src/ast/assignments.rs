@@ -95,6 +95,11 @@ fn diagnostic(
             actual: format!("a `{}`", table.spell(source)),
             target: table.spell(target),
         },
+        (_, TyData::Array { .. }) => AnalyzerError::IncompatibleUnpackedArray {
+            context: context(),
+            actual: table.spell(source),
+            target: table.spell(target),
+        },
         (_, TyData::Class(_)) => AnalyzerError::NotClassHandle {
             context: context(),
             actual: table.spell(source),

@@ -667,11 +667,9 @@ fn check_compatible(
         &dims.const_env,
     )
     .ok_or_else(|| unsupported("type of a container"))?;
-    session
-        .types
-        .assignable_array(source, target)
-        .map(|_| ())
-        .map_err(|_| unsupported("incompatible dynamic container assignment"))
+    assignments::check_types(tree, session, dims, source, target, &|| {
+        "container assignment".into()
+    })
 }
 
 fn element_value(
@@ -1527,7 +1525,7 @@ mod tests {
             ),
             (
                 "module Top; class C; int q[$]; byte a[]; endclass C c; initial begin c=new; c.q=c.a; end endmodule",
-                "incompatible",
+                "not assignment compatible",
             ),
             (
                 "module Top; class C; int q[$]; endclass C c; initial begin c=new; c.q[0]<=1; end endmodule",
