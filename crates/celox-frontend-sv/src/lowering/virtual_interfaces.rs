@@ -139,19 +139,17 @@ impl Instances {
         })
     }
 
-    /// `declarations` with the ids of the instances of each interface.
-    pub(super) fn table(&self, declarations: &sv::VirtualInterfaces) -> sv::VirtualInterfaces {
-        let mut table = declarations.clone();
-        for declaration in table.interfaces.values_mut() {
-            declaration.instances.clear();
-        }
+    /// The ids of the instances of each interface, in id order, which the
+    /// analyzed modules' virtual interface accesses are expanded for (see
+    /// `sv::ir::Module::expand_virtual_interface_instances`).
+    pub(super) fn ids(&self) -> HashMap<String, Vec<u32>> {
+        let mut ids: HashMap<String, Vec<u32>> = HashMap::default();
         for (index, instance) in self.instances.iter().enumerate() {
-            if let Some(declaration) = table.interfaces.get_mut(&instance.interface) {
-                declaration.instances.push(index as u32 + 1);
-            }
+            ids.entry(instance.interface.clone())
+                .or_default()
+                .push(index as u32 + 1);
         }
-        table.elaborated = true;
-        table
+        ids
     }
 
     /// The references of the signals of `module` that denote a member of an
