@@ -163,10 +163,19 @@ pub(super) fn check_actual(
             "ref argument of `{name}` binding queues with different bounds"
         )));
     }
-    if formal.is_some_and(|formal| !equivalent(tree, formal, &shape, &dimensions.const_env)) {
-        return Err(invalid(
-            "the actual's type is not equivalent to the formal's (IEEE 1800-2023 6.22.2)",
-        ));
+    // The type table decides (6.22.2): integral types by their bits,
+    // states and signing, a named type only with itself, arrays by their
+    // dimensions and equivalent elements.
+    if let Some(formal) = formal {
+        let env = &dimensions.const_env;
+        let types = formal
+            .type_id(&mut session.types, &tree.functions, env)
+            .zip(shape.type_id(&mut session.types, &tree.functions, env));
+        if !types.is_some_and(|(formal, actual)| session.types.equivalent(actual, formal)) {
+            return Err(invalid(
+                "the actual's type is not equivalent to the formal's (IEEE 1800-2023 6.22.2)",
+            ));
+        }
     }
     Ok(())
 }
@@ -190,79 +199,4 @@ fn property_shape(
         return Ok(None);
     };
     Ok(Some(procedural::dimensions_from_type(&aggregate.r#type)))
-}
-
-/// Whether variables of shapes `a` and `b` have equivalent types (IEEE
-/// 1800-2023 6.22.2). Integral types compare by total width, signedness and
-/// state count; an enumeration only by its members; an unpacked structure
-/// only with the same structure type; a virtual interface only with one of
-/// the same interface and modport (25.9), not with its number.
-fn equivalent(
-    tree: &AnalysisContext<'_>,
-    a: &VariableDimensions,
-    b: &VariableDimensions,
-    env: &ConstEnv,
-) -> bool {
-    let functions = &tree.functions;
-    // A chandle is equivalent only to a chandle (IEEE 1800-2023 6.14).
-    if a.virtual_interface != b.virtual_interface || a.chandle != b.chandle {
-        return false;
-    }
-    let count = |width: &ConstExpr| eval_ast_const_expr(functions, width, env);
-    match (&a.container, &b.container) {
-        (None, None) => {}
-        (Some(a), Some(b)) => {
-            use system_functions::ContainerKind;
-            let same_kind = match (a.layout.kind, b.layout.kind) {
-                (ContainerKind::Dynamic, ContainerKind::Dynamic)
-                | (ContainerKind::Queue { .. }, ContainerKind::Queue { .. }) => true,
-                (ContainerKind::Associative { .. }, ContainerKind::Associative { .. }) => {
-                    match (&a.key, &b.key) {
-                        (Some(x), Some(y)) => equivalent(
-                            tree,
-                            &procedural::dimensions_from_type(x),
-                            &procedural::dimensions_from_type(y),
-                            env,
-                        ),
-                        (None, None) => true,
-                        _ => false,
-                    }
-                }
-                _ => false,
-            };
-            return same_kind
-                && equivalent(
-                    tree,
-                    &procedural::dimensions_from_type(&a.element),
-                    &procedural::dimensions_from_type(&b.element),
-                    env,
-                );
-        }
-        _ => return false,
-    }
-    if a.unpacked.len() != b.unpacked.len()
-        || a.unpacked
-            .iter()
-            .zip(&b.unpacked)
-            .any(|(a, b)| count(&a.width).is_none() || count(&a.width) != count(&b.width))
-    {
-        return false;
-    }
-    if a.real != b.real || a.string != b.string || a.class != b.class {
-        return false;
-    }
-    match (&a.unpacked_struct, &b.unpacked_struct) {
-        (None, None) => {}
-        (Some(a), Some(b)) if a.same_type(b) => {}
-        _ => return false,
-    }
-    if (a.enum_domain.is_some() || b.enum_domain.is_some()) && a.enum_domain != b.enum_domain {
-        return false;
-    }
-    let width = |shape: &VariableDimensions| {
-        shape.packed.iter().try_fold(1i128, |width, dimension| {
-            Some(width * count(&dimension.width)?)
-        })
-    };
-    width(a).is_some() && width(a) == width(b) && a.signed == b.signed && a.is_2state == b.is_2state
 }
