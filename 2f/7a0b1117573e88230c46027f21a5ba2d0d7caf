@@ -1,0 +1,1 @@
+Drop the name-collecting fallback; the binder reports undeclared type names (simple, C::T, virtual interface) for uses and eagerly bound typedefs; forward typedef completeness; interface-based typedefs unsupported; 25__bad left (needs expression resolution)
