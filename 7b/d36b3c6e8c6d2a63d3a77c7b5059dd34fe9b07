@@ -1,0 +1,1 @@
+Resolve package-qualified type names through the package's declared types: P::T that the package declares as no type is undeclared
