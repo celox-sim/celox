@@ -6746,6 +6746,7 @@ fn lower_initial_processes(
                             amount: sv::ir::Expr::Literal("0".to_string()),
                             ticks_per_unit: 1,
                             ticks_per_precision: 1,
+                            precision_steps_per_tick: 1,
                         },
                         sv::ir::Stmt::Loop {
                             kind: sv::ir::LoopKind::Forever,
