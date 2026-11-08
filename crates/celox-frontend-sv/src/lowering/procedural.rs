@@ -1238,9 +1238,30 @@ impl<'a> ProcModule<'a> {
         self.variables.get(&id).is_some_and(|var| var.hidden)
     }
 
-    /// A fresh hidden variable of the given shape. Its name cannot clash with
-    /// a SystemVerilog identifier.
+    /// A fresh hidden variable of the given shape that holds a value of the
+    /// activation that computes it, such as an operand kept across a
+    /// suspension: in a process with a frame, each activation has its own
+    /// (see `SvVariable::activation_scratch`). Its name cannot clash with a
+    /// SystemVerilog identifier.
     pub fn temp(
+        &mut self,
+        purpose: &str,
+        width: usize,
+        signed: bool,
+        is_4state: bool,
+    ) -> (SourceVarId, String) {
+        let (id, name) = self.module_temp(purpose, width, signed, is_4state);
+        self.variables
+            .get_mut(&id)
+            .expect("a new temporary")
+            .activation_scratch = true;
+        (id, name)
+    }
+
+    /// A fresh hidden variable of the given shape that is the module's,
+    /// shared by every activation of the process that makes it, such as a
+    /// count other processes watch.
+    pub fn module_temp(
         &mut self,
         purpose: &str,
         width: usize,
@@ -1306,6 +1327,7 @@ impl<'a> ProcModule<'a> {
                 force_control: None,
                 sampled_from: None,
                 history_of: None,
+                activation_scratch: false,
             },
         );
         self.name_to_id.insert(name, id);
@@ -1355,6 +1377,7 @@ impl<'a> ProcModule<'a> {
         variable.path = vec![name.clone()];
         variable.source = None;
         variable.hidden = true;
+        variable.activation_scratch = false;
         variable.domain_kind = DomainKind::Other;
         if two_state {
             variable.is_4state = false;
@@ -1404,6 +1427,7 @@ impl<'a> ProcModule<'a> {
             force_control: None,
             sampled_from: None,
             history_of: None,
+            activation_scratch: false,
         };
         let id = next_var_id(&mut self.next_id);
         self.variables.insert(id, variable);
@@ -1436,6 +1460,7 @@ impl<'a> ProcModule<'a> {
                 force_control: None,
                 sampled_from: None,
                 history_of: None,
+                activation_scratch: false,
                 ..variable
             },
         );
@@ -2003,6 +2028,7 @@ pub(super) fn register_locals(
                 force_control: None,
                 sampled_from: None,
                 history_of: None,
+                activation_scratch: false,
             },
         );
         name_to_id.insert(local.name.clone(), id);
