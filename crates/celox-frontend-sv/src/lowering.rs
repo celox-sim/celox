@@ -100,6 +100,11 @@ struct SvVariable {
     /// The variable whose past sampled values this hidden register holds;
     /// it starts with the variable's value (`SimModule::initial_copies`).
     history_of: Option<SourceVarId>,
+    /// A variable a process's lowering made to hold a value of one
+    /// activation, such as an operand kept across a suspension. In a process
+    /// with a frame (`celox_design::ProcessFrame::private`) each activation
+    /// has its own; every other variable is the module's.
+    activation_scratch: bool,
 }
 
 impl SvVariable {
@@ -2810,6 +2815,7 @@ fn prepare_external_hierarchy_collecting(
                         force_control: None,
                         sampled_from: None,
                         history_of: None,
+                        activation_scratch: false,
                     },
                 )
             })
@@ -4670,6 +4676,7 @@ fn lower_module_with_overrides(
             force_control: None,
             sampled_from: None,
             history_of: None,
+            activation_scratch: false,
         };
         name_to_id.insert(port.name().to_string(), id);
         port_order.push(id);
@@ -4762,6 +4769,7 @@ fn lower_module_with_overrides(
             force_control: None,
             sampled_from: None,
             history_of: None,
+            activation_scratch: false,
         };
         name_to_id.insert(signal.name().to_string(), id);
         // The package's object, or the other instance's, has its own
@@ -4852,6 +4860,7 @@ fn lower_module_with_overrides(
                 force_control: None,
                 sampled_from: None,
                 history_of: None,
+                activation_scratch: false,
             },
         );
     }
@@ -6674,6 +6683,7 @@ fn lower_initial_processes(
                         force_control: None,
                         sampled_from: None,
                         history_of: None,
+                        activation_scratch: false,
                     },
                 );
                 id
@@ -7430,6 +7440,7 @@ fn ensure_parent_output_signals(
             force_control: None,
             sampled_from: None,
             history_of: None,
+            activation_scratch: false,
         };
         parent
             .variables
