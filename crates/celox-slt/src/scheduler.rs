@@ -4014,15 +4014,16 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
             let mut marks = BTreeSet::new();
             let mut watched = Vec::new();
             for addr in &writes[partition] {
-                if copy_source.contains_key(addr) && writers.get(addr) == Some(&1) {
-                    continue;
-                }
+                let copy_only = copy_source.contains_key(addr) && writers.get(addr) == Some(&1);
                 let targets: Vec<usize> = readers
                     .get(addr)
                     .into_iter()
                     .flatten()
                     .copied()
-                    .filter(|&reader| reader != partition || previous[partition].contains(addr))
+                    .filter(|&reader| {
+                        (!copy_only || reader >= count)
+                            && (reader != partition || previous[partition].contains(addr))
+                    })
                     .collect();
                 if targets.is_empty() {
                     continue;
@@ -6095,6 +6096,60 @@ mod tests {
                 (vec![11], vec![12]),
                 (vec![11, 12], vec![13]),
             ]
+        );
+    }
+
+    /// An external reader watching the target of a whole-variable copy must
+    /// still receive its wake flag when the copy partition runs, even though
+    /// internal partition-to-partition change checks on the copy target are
+    /// skipped.
+    #[test]
+    fn settle_copy_partitions_mark_external_readers() {
+        let mut arena = SLTNodeArena::new();
+        let mut copy = simple_path(&mut arena, 12, Some(11));
+        copy.transparent_copy = true;
+        let paths = vec![
+            simple_path(&mut arena, 13, Some(12)),
+            copy,
+            simple_path(&mut arena, 11, Some(10)),
+        ];
+        let widths = (10..14).map(|id| (id, 8)).collect();
+        let result = super::sort_with_unpacked_element_widths(
+            paths,
+            &arena,
+            &crate::HashSet::default(),
+            &crate::HashMap::default(),
+            false,
+            &widths,
+            &crate::HashMap::default(),
+            1,
+            Some(super::SettlePartitioning {
+                flags: 99,
+                target_cost: 1,
+                external_readers: [(12, vec![1])].into_iter().collect(),
+                clock_nets: crate::HashSet::default(),
+                profile: None,
+            }),
+        )
+        .unwrap();
+        assert_eq!(result.partitions.len(), 3);
+        let mut stored = Vec::new();
+        for unit in &result.execution_units {
+            for block in unit.blocks.values() {
+                for instruction in &block.instructions {
+                    if let SIRInstruction::Store(99, SIROffset::Static(bit), width, ..) =
+                        instruction
+                    {
+                        stored.push((*bit, *width));
+                    }
+                }
+            }
+        }
+        stored.sort_unstable();
+        // External flag 1 at byte 3 + 1 + 1 (bit 40) is marked when 12 is written.
+        assert!(
+            stored.contains(&(40, 8)),
+            "external reader flag must be marked by the copy partition: {stored:?}"
         );
     }
 
