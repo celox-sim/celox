@@ -1,0 +1,1 @@
+Scoped visibility instead of a source-wide token scan; forward typedef kinds; type operator operands; unit typedefs checked when the unit's analysis stops at an unsupported item; marked breaking (new public AnalyzerError variant)
