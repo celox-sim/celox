@@ -1,0 +1,1 @@
+Reject typedefs of type references as unsupported, keep checking later typedefs after an unsupported one, and export only a package's own type declarations
