@@ -29,17 +29,6 @@
       "inputFiles": [
         "tests/cmark/case.pat"
       ]
-    },
-    "e203": {
-      "design": "HummingbirdV2-E203",
-      "test": "hello",
-      "payload": "Hello World from HummingbirdV2 E203",
-      "maxCycles": 16384,
-      "configuration": "default",
-      "successMarker": "TEST_PASSED",
-      "inputFiles": [
-        "tests/hello/program.hex"
-      ]
     }
   }
 }

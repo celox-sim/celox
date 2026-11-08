@@ -27,7 +27,7 @@ CONFIGURATION = {
 STEADY_CONFIGURATION = {
     'celox': 'native O2; threads=1; steady-state simulation',
     'verilator': '--binary --timing --assert; -O3; C++ -O3; -j1; steady-state simulation',
-    'xezim': 'release default VM; persistent caches disabled; full four-state',
+    'xezim': 'release default VM; persistent caches disabled; full four-state; --verbose; --max-time 60s',
 }
 
 

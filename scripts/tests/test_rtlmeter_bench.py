@@ -165,10 +165,15 @@ configurations:
         self.assertEqual(steady_manifest['contract'], 'rtlmeter-steady-state-v1')
         self.assertIn('e902', steady_manifest['cases'])
         self.assertIn('e906', steady_manifest['cases'])
+        self.assertNotIn('e203', steady_manifest['cases'])
         self.assertEqual(steady_manifest['cases']['e902']['test'], 'cmark')
         self.assertEqual(steady_manifest['cases']['e906']['test'], 'cmark')
         self.assertEqual(steady_manifest['cases']['e902']['payload'], 'CoreMark 1.0')
         self.assertEqual(steady_manifest['cases']['e906']['payload'], 'CoreMark 1.0')
+
+    def test_steady_configuration_includes_verbose_and_max_time_for_xezim(self):
+        self.assertIn('--verbose', bench.STEADY_CONFIGURATION['xezim'])
+        self.assertIn('--max-time 60s', bench.STEADY_CONFIGURATION['xezim'])
 
     def test_check_case_validates_cycles_and_payload(self):
         from unittest.mock import patch

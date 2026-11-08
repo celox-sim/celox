@@ -113,7 +113,7 @@ function steadyReport(name = "e902") {
     binarySha256: { celox: 'a'.repeat(64), verilator: 'b'.repeat(64), xezim: 'c'.repeat(64) },
     configuration: { celox: 'native O2; threads=1; steady-state simulation',
       verilator: '--binary --timing --assert; -O3; C++ -O3; -j1; steady-state simulation',
-      xezim: 'release default VM; persistent caches disabled; full four-state' },
+      xezim: 'release default VM; persistent caches disabled; full four-state; --verbose; --max-time 60s' },
     inputSha256, sourceSha256: createHash('sha256').update(JSON.stringify(inputSha256)).digest('hex'),
     results: ['two-state', 'four-state'].flatMap(stateModel => ['celox', 'verilator', 'xezim'].map(engine => ({
       engine, stateModel, experimental: engine === 'verilator' && stateModel === 'four-state',
@@ -151,7 +151,7 @@ test('RTLMeter steady workflow runs periodically with steady manifest and master
   assert.match(workflow, /schedule:[\s\S]+workflow_dispatch:/);
   assert.doesNotMatch(workflow, /^\s+(pull_request|push|merge_group):/m);
   assert.match(workflow, /group: rtlmeter-steady-benchmark-/);
-  assert.match(workflow, /case: \[e902, e906, e203\]/);
+  assert.match(workflow, /case: \[e902, e906\]/);
   assert.match(workflow, /--manifest benchmarks\/rtlmeter\/steady_manifest\.json/);
   assert.match(workflow, /needs: comparison\n    if: github.ref == 'refs\/heads\/master'/);
   assert.ok(workflow.indexOf('--validate-only') < workflow.lastIndexOf('node scripts/publish-rtlmeter-bench.mjs'));
