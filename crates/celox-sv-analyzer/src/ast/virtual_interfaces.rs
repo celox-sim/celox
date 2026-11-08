@@ -35,12 +35,12 @@ pub struct VirtualInterface {
 }
 
 impl VirtualInterface {
-    /// Whether a value of type `source` may be assigned to a variable of this
-    /// type: the same interface, and a modport only from no modport or the
-    /// same one (IEEE 1800-2023 25.9).
-    pub(super) fn accepts(&self, source: &VirtualInterface) -> bool {
-        self.interface == source.interface
-            && (source.modport.is_none() || source.modport == self.modport)
+    /// The semantic type of a virtual interface of this type.
+    pub(super) fn type_id(&self, table: &mut semantic_types::TyTable) -> semantic_types::TyId {
+        table.intern(semantic_types::TyData::VirtualInterface {
+            interface: semantic_types::Decl::Interface(self.interface.as_str().into()),
+            modport: self.modport.as_deref().map(Into::into),
+        })
     }
 
     /// How the type is spelled in source.
@@ -1091,17 +1091,23 @@ pub(super) fn check_assignment(
         check_assignment(tree, session, *then_expression, native, dimensions, target)?;
         return check_assignment(tree, session, *else_expression, native, dimensions, target);
     }
-    let actual = match native_value_type(tree, session, id, native, dimensions) {
-        Ok(None) => return Ok(()),
-        Ok(Some(source)) if target.accepts(&source) => return Ok(()),
-        Ok(Some(source)) => format!("a `{}`", source.spelling()),
-        Err(actual) => actual,
-    };
-    Err(AnalyzerError::IncompatibleVirtualInterface {
-        context: "assignment".into(),
-        actual,
-        target: target.spelling(),
-    })
+    // The value is typed here, as an interface instance has no expression
+    // type; the type table decides (see `assignments::check_types`).
+    match native_value_type(tree, session, id, native, dimensions) {
+        Ok(None) => Ok(()),
+        Ok(Some(source)) => {
+            let source = source.type_id(&mut session.types);
+            let target = target.type_id(&mut session.types);
+            assignments::check_types(tree, session, dimensions, source, target, &|| {
+                "assignment".into()
+            })
+        }
+        Err(actual) => Err(AnalyzerError::IncompatibleVirtualInterface {
+            context: "assignment".into(),
+            actual,
+            target: target.spelling(),
+        }),
+    }
 }
 
 /// The error for operator `op` applied to a virtual interface of type `ty`,
@@ -1125,22 +1131,27 @@ pub(super) fn check_copy_out(
     dimensions: &PackedDimensions,
     formal: &VirtualInterface,
 ) -> Converted<()> {
-    let actual = match native_type(tree, session, id, native, dimensions) {
-        Some(actual) if actual.accepts(formal) => return Ok(()),
-        Some(actual) => actual.spelling(),
-        None => "the argument".to_owned(),
-    };
-    Err(AnalyzerError::IncompatibleVirtualInterface {
-        context: "output argument".into(),
-        actual: format!("a `{}`", formal.spelling()),
-        target: actual,
-    })
+    match native_type(tree, session, id, native, dimensions) {
+        Some(actual) => {
+            let source = formal.type_id(&mut session.types);
+            let target = actual.type_id(&mut session.types);
+            assignments::check_types(tree, session, dimensions, source, target, &|| {
+                "output argument".into()
+            })
+        }
+        None => Err(AnalyzerError::IncompatibleVirtualInterface {
+            context: "output argument".into(),
+            actual: format!("a `{}`", formal.spelling()),
+            target: "the argument".to_owned(),
+        }),
+    }
 }
 
 /// Check that native expression `id` may be assigned to an unpacked array
 /// of virtual interfaces of type `target`: an array variable of a virtual
 /// interface type that `target` accepts (IEEE 1800-2023 25.9, 7.6).
 pub(super) fn check_array_assignment(
+    session: &mut Session,
     id: celox_sv_syntax::ExprId,
     native: &celox_sv_syntax::Declarations,
     dimensions: &PackedDimensions,
@@ -1155,15 +1166,21 @@ pub(super) fn check_array_assignment(
             else_expression,
             ..
         } => {
-            check_array_assignment(*then_expression, native, dimensions, target)?;
-            return check_array_assignment(*else_expression, native, dimensions, target);
+            check_array_assignment(session, *then_expression, native, dimensions, target)?;
+            return check_array_assignment(session, *else_expression, native, dimensions, target);
         }
         celox_sv_syntax::ExprKind::Name(name) => {
             let name = instances::normalize_identifier(&name.spelling);
             match dimensions.get(&name) {
                 Some(shape) => match shape.virtual_interface.as_deref() {
-                    Some(source) if target.accepts(source) => return Ok(()),
-                    Some(source) => format!("an array of `{}`", source.spelling()),
+                    Some(source) => {
+                        let source_type = source.type_id(&mut session.types);
+                        let target_type = target.type_id(&mut session.types);
+                        if session.types.assignable(source_type, target_type).is_ok() {
+                            return Ok(());
+                        }
+                        format!("an array of `{}`", source.spelling())
+                    }
                     None => format!("`{name}`"),
                 },
                 None => return Ok(()),

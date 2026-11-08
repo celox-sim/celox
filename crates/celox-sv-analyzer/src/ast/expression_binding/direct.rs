@@ -674,7 +674,9 @@ fn bind_value_in(
                         .as_deref()
                         .filter(|_| !shape.unpacked.is_empty() && shape.container.is_none())
                 }) {
-                    virtual_interfaces::check_array_assignment(id, native, dimensions, ty)?;
+                    virtual_interfaces::check_array_assignment(
+                        session, id, native, dimensions, ty,
+                    )?;
                 }
                 if let Some(shape) = target.as_deref()
                     && shape
