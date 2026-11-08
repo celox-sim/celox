@@ -8000,8 +8000,8 @@ fn container_formals_copy_only_what_container_assignment_represents() {
         ("output int q[$][$]", "nb", "another queue bound"),
         ("inout int q[$][$:3]", "na", "another queue bound"),
         ("output int q[$]", "x", "compatible container"),
-        ("inout int q[$]", "m", "incompatible dynamic container"),
-        ("int q[$]", "m", "incompatible dynamic container"),
+        ("inout int q[$]", "m", "not assignment compatible"),
+        ("int q[$]", "m", "not assignment compatible"),
     ] {
         let source = format!(
             "module Top; typedef int q_t[$]; int a[$]; int b[$:3]; int x; int m[string]; \
@@ -8012,8 +8012,13 @@ fn container_formals_copy_only_what_container_assignment_represents() {
         );
         let error = analyze_source(&source, Path::new("container_formal.sv"))
             .expect_err("an actual the copy cannot represent must be rejected");
+        // A copy the heap cannot represent is unsupported; an actual of
+        // another container type is not assignment compatible (7.6).
         assert!(
-            matches!(error, AnalyzerError::Unsupported(_)) && error.to_string().contains(detail),
+            matches!(
+                error,
+                AnalyzerError::Unsupported(_) | AnalyzerError::IncompatibleUnpackedArray { .. }
+            ) && error.to_string().contains(detail),
             "{formal} <- {actual}: {error}"
         );
     }
