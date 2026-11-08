@@ -461,6 +461,55 @@ endmodule
         assert_ne!(single.last().unwrap()[0], BigUint::from(0u8));
     }
 
+    /// An `always_comb` calling a function that reads a module variable it
+    /// is not passed: IEEE 1800-2023 9.2.2.2.1 makes the process sensitive
+    /// to what the function reads, so a change of `k` must recompute `y`,
+    /// also when the call goes out of line.
+    const CALLEE_READ: &str = r#"`timescale 1ns/1ns
+module Top (
+    output logic [7:0] y
+);
+    logic [7:0] a = 8'd1;
+    logic [7:0] k = 8'd0;
+    function automatic logic [7:0] f(input logic [7:0] x);
+        return x + k;
+    endfunction
+    always_comb y = f(a);
+    always #2 k = k + 8'd3;
+endmodule
+"#;
+
+    #[test]
+    fn callee_reads_mark_the_calling_process() {
+        let run = |settle: Option<SettlePartition>, out_of_line: bool| {
+            let builder =
+                Simulation::from_sv_sources(vec![(CALLEE_READ, Path::new("top.sv"))], "Top");
+            let builder = if out_of_line {
+                builder.force_out_of_line_calls()
+            } else {
+                builder
+            };
+            let builder = match settle {
+                Some(settle) => builder.settle_partition(settle).settle_check(true),
+                None => builder.disable_pass(SirPass::PartitionedSettle),
+            };
+            let mut sim = builder.build().unwrap();
+            let y = sim.signal("y");
+            (0..12)
+                .map(|time| {
+                    sim.run_until(time).unwrap();
+                    sim.get(y)
+                })
+                .collect::<Vec<_>>()
+        };
+        let single = run(None, false);
+        // y follows k: 1, then 1 + 3 * n.
+        assert_eq!(single.last().unwrap(), &BigUint::from(1u8 + 3 * 5));
+        assert_eq!(run(Some(SettlePartition::Always), false), single);
+        assert_eq!(run(None, true), single);
+        assert_eq!(run(Some(SettlePartition::Always), true), single);
+    }
+
     #[test]
     fn multi_output_process_matches_single_pass() {
         let single = matches_single_pass(SPLIT, &["y", "b", "w", "n"], 10);
