@@ -5454,3 +5454,48 @@ fn compound_assignments_across_suspending_calls() {
         t -= show(m[1]);",
     );
 }
+
+#[test]
+fn units_driving_clocks_of_other_instances() {
+    // `Gen`'s task stores the variable that clocks `Top`'s flip-flop through
+    // `Gen`'s output port, and a variable that is only wired to a port. A
+    // unit a process calls stores an event as the process would: the store
+    // is counted as the flip-flop's occurrence. So the task goes out of line
+    // and the flip-flop sees every edge it makes.
+    let source = r#"`timescale 1ns/1ns
+module Gen(output logic clk, output logic [7:0] w);
+    logic c = 0;
+    logic [7:0] w_r = 0;
+    assign clk = c;
+    assign w = w_r;
+    task automatic tick(input logic [7:0] v);
+        #1 c = 1;
+        w_r = v;
+        #1 c = 0;
+    endtask
+    logic [7:0] n = 3;
+    initial repeat (3) begin
+        tick(n);
+        n = n + 8'd1;
+    end
+endmodule
+module Top(output logic [7:0] q, output logic [7:0] w);
+    logic clk;
+    Gen gen(.clk(clk), .w(w));
+    always_ff @(posedge clk) q <= q + 8'd1;
+    initial q = 0;
+endmodule
+"#;
+    assert_eq!(function_units(source, true), 1, "function units");
+    for four_state in [false, true] {
+        let inlined = simulate_run(source, four_state, false, "interpreter", 10, &["q", "w"])
+            .expect("the inlined design runs");
+        for backend in backends() {
+            assert_eq!(
+                simulate_run(source, four_state, true, backend, 10, &["q", "w"]),
+                Ok(inlined.clone()),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+}
