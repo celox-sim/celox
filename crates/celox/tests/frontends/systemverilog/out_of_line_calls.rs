@@ -1383,10 +1383,10 @@ fn large_subroutines_go_out_of_line_by_default() {
 }
 
 #[test]
-fn units_never_store_the_events_of_flip_flops() {
-    // `tick` drives the clock of an `always_ff` process, whose stores
-    // assembly gives the triggers of the flip-flop's domain, which only a
-    // process kernel carries: the task stays inlined.
+fn units_store_the_events_of_flip_flops_as_processes() {
+    // `tick` drives the clock of an `always_ff` process. A process's store
+    // into the clock is counted as the domain's occurrence, and so is the
+    // store of a unit it calls: the task goes out of line.
     let source = r#"`timescale 1ns/1ns
 module Top(output int count);
     logic clk = 0;
@@ -1400,7 +1400,7 @@ module Top(output int count);
     initial repeat (3) tick(one);
 endmodule
 "#;
-    same_as_inlined(source, 0, 7, &["count"]);
+    same_as_inlined(source, 1, 7, &["count"]);
     assert_eq!(
         simulate(source, false, true, "interpreter", 7, &["count"]),
         Ok(vec![value(3)])
@@ -5498,4 +5498,44 @@ endmodule
             );
         }
     }
+}
+
+#[test]
+fn units_driving_clocks_and_resets_of_their_module() {
+    // A task only processes call toggles the clock and the asynchronous
+    // reset of its own module's flip-flop: its stores are counted as the
+    // flip-flop's events, as the process's own would be.
+    let source = r#"`timescale 1ns/1ns
+module Top(output logic [7:0] q);
+    logic clk = 0;
+    logic rst = 0;
+    logic [7:0] q_r = 0;
+    logic [7:0] n = 2;
+    assign q = q_r;
+    task automatic pulse(input logic [7:0] k);
+        repeat (k) begin
+            #1 clk = 1;
+            #1 clk = 0;
+        end
+        #1 rst = 1;
+        #1 rst = 0;
+    endtask
+    always_ff @(posedge clk or posedge rst)
+        if (rst) q_r <= 8'd100;
+        else q_r <= q_r + 8'd1;
+    initial begin
+        pulse(n);
+        n = 3;
+        pulse(n);
+    end
+endmodule
+"#;
+    same_as_inlined(source, 1, 9, &["q"]);
+    let until_reset =
+        simulate(source, false, true, "interpreter", 5, &["q"]).expect("the design runs");
+    assert_eq!(
+        until_reset,
+        vec![value(100)],
+        "the reset reached the flip-flop"
+    );
 }
