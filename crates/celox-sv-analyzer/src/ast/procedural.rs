@@ -2660,12 +2660,10 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             return Err(unsupported("const variable of unpacked structure type"));
         }
         if let Some(root) = root {
-            let aggregate = signal
-                .r#type()
-                .unpacked_struct()
-                .expect("an unpacked structure local");
+            let structure =
+                unpacked_structs::type_id(signal.r#type(), self.tree, self.session, &self.dims)?;
             unpacked_structs::check_value(
-                aggregate,
+                structure,
                 root,
                 self.tree.declarations(),
                 self.tree,
@@ -5601,8 +5599,10 @@ impl BodyBuilder<'_, '_, '_> {
             .unpacked_struct()
             .expect("an unpacked structure property")
             .clone();
+        let structure_type =
+            unpacked_structs::type_id(&aggregate.r#type, self.tree, self.session, &self.dims)?;
         unpacked_structs::check_value(
-            &structure,
+            structure_type,
             right,
             native,
             self.tree,

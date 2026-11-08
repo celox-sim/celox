@@ -602,44 +602,58 @@ pub(in crate::ast) fn check_assignment(
 ) -> Converted<()> {
     let target = dims
         .get(name)
-        .and_then(|shape| shape.unpacked_struct.clone())
+        .filter(|shape| shape.unpacked_struct.is_some())
+        .and_then(|shape| shape.type_id(&mut session.types, &tree.functions, &dims.const_env))
         .ok_or_else(|| unsupported("unpacked structure target"))?;
-    check_value(&target, right, tree.declarations(), tree, session, dims)
+    check_value(target, right, tree.declarations(), tree, session, dims)
 }
 
-/// Check that `value` is an assignment pattern or a value of type `target`.
+/// The semantic type of a place of unpacked structure type `ty`.
+pub(in crate::ast) fn type_id(
+    ty: &Type,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<semantic_types::TyId> {
+    semantic_types::of_type(&mut session.types, &tree.functions, ty, &dims.const_env)
+        .ok_or_else(|| unsupported("unpacked structure target"))
+}
+
+/// Check that `value` is an assignment pattern or a value assignment
+/// compatible with `target`, an unpacked structure type (6.22.3), by
+/// [`assignments::check_assign`]. An untyped pattern takes the target's
+/// type; a value whose type is not resolved is not one of the structure's.
 pub(in crate::ast) fn check_value(
-    target: &UnpackedStruct,
+    target: semantic_types::TyId,
     value: ExprId,
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<()> {
-    let value = expression_binding::ungroup(value, native);
-    // An untyped pattern takes the target's type; a typed one, `T'{...}`,
-    // must name it.
-    if matches!(
-        native.expression(value).kind,
-        ExprKind::Pattern { target: None, .. }
-    ) {
-        return Ok(());
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        let value = expression_binding::ungroup(value, native);
+        match &native.expression(value).kind {
+            ExprKind::Pattern { target: None, .. } => {}
+            ExprKind::Conditional {
+                then_expression,
+                else_expression,
+                ..
+            } => pending.extend([*else_expression, *then_expression]),
+            _ if !dims.effect_values.contains_key(&value)
+                && expression_types::type_of(tree, session, value, native, dims).is_err() =>
+            {
+                return Err(unsupported(
+                    "assignment to an unpacked structure of a value that is not of its type",
+                ));
+            }
+            _ => {}
+        }
     }
-    if let ExprKind::Conditional {
-        then_expression,
-        else_expression,
-        ..
-    } = &native.expression(value).kind
-    {
-        check_value(target, *then_expression, native, tree, session, dims)?;
-        return check_value(target, *else_expression, native, tree, session, dims);
-    }
-    match native_struct(value, native, tree, session, dims)? {
-        Some(actual) if actual.same_type(target) => Ok(()),
-        _ => Err(unsupported(
-            "assignment to an unpacked structure of a value that is not of its type",
-        )),
-    }
+    assignments::check_assign(tree, session, value, native, dims, target, || {
+        "assignment to an unpacked structure".into()
+    })
 }
 
 /// Reject an operator applied to a whole unpacked structure value: only the
