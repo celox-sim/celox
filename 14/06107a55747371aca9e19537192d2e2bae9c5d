@@ -1,1 +1,6 @@
-Scoped visibility instead of a source-wide token scan; forward typedef kinds; type operator operands; unit typedefs checked when the unit's analysis stops at an unsupported item; marked breaking (new public AnalyzerError variant)
+Revision history for #3374:
+
+rev 2 (content) 2026-11-08 00:33 UTC — Scoped visibility instead of a source-wide token scan; forward typedef kinds; type operator operands; unit typedefs checked when the unit's analysis stops at an unsupported item; marked breaking (new public AnalyzerError variant)
+rev 1 (initial) 2026-11-08 00:33 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3374,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"cf045d3a9b81fa40a18bb68518b6fe48b61f3cb1","timestamp_iso":"2026-11-08T00:33:33Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"cf045d3a9b81fa40a18bb68518b6fe48b61f3cb1","new_sha":"1406107a55747371aca9e19537192d2e2bae9c5d","timestamp_iso":"2026-11-08T00:33:33Z","reason":"Scoped visibility instead of a source-wide token scan; forward typedef kinds; type operator operands; unit typedefs checked when the unit's analysis stops at an unsupported item; marked breaking (new public AnalyzerError variant)","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/cf045d3a9b81fa40a18bb68518b6fe48b61f3cb1...1406107a55747371aca9e19537192d2e2bae9c5d"}]} -->
