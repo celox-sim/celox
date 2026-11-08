@@ -339,12 +339,78 @@ def measure_case(name, source, celox, xezim, output, build_root, timeout=1800, s
     return report
 
 
+def check_case(case_name, source, celox, states=('two-state',), timeout=300, output=None):
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    verify_source(source)
+    spec = specification(case_name, source)
+    out_dir = Path(output).resolve() if output is not None else None
+    if out_dir is not None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    cpu = min(os.sched_getaffinity(0))
+    celox_bin = shutil.which(str(celox))
+    if not celox_bin:
+        raise ValueError(f'Celox binary not found: {celox}')
+    binaries = {'celox': celox_bin}
+    results = []
+    with tempfile.TemporaryDirectory(prefix=f'rtlmeter-{case_name}-check-') as temp_dir:
+        temp_path = Path(temp_dir)
+        files = temp_path / 'sources.f'
+        files.write_text(''.join(json.dumps(str(p)) + '\n' for p in spec['sources']))
+        plusargs = [*spec['args'], f'+max_cycles={spec["maxCycles"]}']
+        for state in states:
+            work_dir = temp_path / state
+            work_dir.mkdir()
+            for path in spec['files']:
+                shutil.copyfile(path, work_dir / path.name)
+            logs = work_dir / 'logs'
+            cmds = commands('celox', state, spec, files, work_dir, binaries, plusargs)
+            outcome = run_commands(cmds, work_dir, logs, timeout, cpu)
+            log_files = sorted(logs.glob('*.log'))
+            stdout = ''.join(p.read_text(errors='replace') for p in log_files)
+            if out_dir is not None:
+                (out_dir / f'{case_name}-{state}.log').write_text(stdout)
+            cycles_file = work_dir / '_rtlmeter_cycles.txt'
+            cycles_text = cycles_file.read_text() if cycles_file.exists() else ''
+            success_marker = spec.get('successMarker', 'TEST PASSED')
+            payload = spec['payload']
+            try:
+                cycles = accept(stdout, cycles_text, outcome, payload, success_marker)
+            except ValueError as error:
+                tail = ''.join(stdout.splitlines(keepends=True)[-30:])
+                raise ValueError(
+                    f"RTLMeter {case_name} ({state}) failed: {error} (exitCode={outcome['exitCode']}, timedOut={outcome['timedOut']})\n"
+                    f"Tail of stdout:\n{tail}"
+                ) from error
+            expected = spec.get('expectedCycles')
+            if isinstance(expected, dict):
+                expected = expected.get(state)
+            if expected is not None and cycles != expected:
+                tail = ''.join(stdout.splitlines(keepends=True)[-30:])
+                raise ValueError(
+                    f"RTLMeter {case_name} ({state}) cycle mismatch: expected {expected}, got {cycles}\n"
+                    f"Tail of stdout:\n{tail}"
+                )
+            elapsed_s = outcome['elapsedNs'] / 1e9
+            print(f"RTLMeter check PASSED: {case_name} ({state}) in {elapsed_s:.2f}s ({cycles} cycles)")
+            results.append({'case': case_name, 'state': state, 'cycles': cycles, 'elapsedNs': outcome['elapsedNs']})
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     prepare_parser = sub.add_parser('prepare')
     prepare_parser.add_argument('destination', type=Path)
     prepare_parser.add_argument('--manifest', type=Path, default=DEFAULT_MANIFEST_PATH)
+    check = sub.add_parser('check')
+    check.add_argument('case', choices=[*MANIFEST['cases'], 'all'])
+    check.add_argument('source', type=Path)
+    check.add_argument('celox', type=Path)
+    check.add_argument('--states', default='two-state,four-state',
+                       help='Comma-separated state models (default: two-state,four-state)')
+    check.add_argument('--output', type=Path, default=None,
+                       help='Optional output directory to retain simulation logs')
+    check.add_argument('--timeout', type=int, default=300)
     run = sub.add_parser('run')
     run.add_argument('case')
     run.add_argument('source', type=Path)
@@ -357,9 +423,18 @@ def main():
     run.add_argument('--timeout', type=int, default=1800)
     run.add_argument('--samples', type=int, default=None)
     args = parser.parse_args()
-    manifest = json.loads(args.manifest.read_text())
+    manifest = json.loads(args.manifest.read_text()) if hasattr(args, 'manifest') else MANIFEST
     if args.command == 'prepare':
         prepare(args.destination, manifest)
+    elif args.command == 'check':
+        states = [s.strip() for s in args.states.split(',') if s.strip()]
+        for s in states:
+            if s not in STATES:
+                parser.error(f'unknown state model: {s}')
+        cases = list(MANIFEST['cases'].keys()) if args.case == 'all' else [args.case]
+        for c in cases:
+            check_case(c, args.source.resolve(), args.celox.resolve(),
+                       states=states, timeout=args.timeout, output=args.output)
     else:
         if args.case not in manifest['cases']:
             parser.error(f"unknown case '{args.case}', expected one of {list(manifest['cases'])}")

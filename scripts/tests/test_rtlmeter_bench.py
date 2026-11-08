@@ -162,6 +162,50 @@ configurations:
         self.assertEqual(steady_manifest['cases']['e902']['payload'], 'CoreMark 1.0')
         self.assertEqual(steady_manifest['cases']['e906']['payload'], 'CoreMark 1.0')
 
+    def test_check_case_validates_cycles_and_payload(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            design = root / 'designs/XuanTie-E906'
+            (design / 'src').mkdir(parents=True)
+            (root / 'rtl').mkdir()
+            (design / 'src/tb.v').write_text('test fixture')
+            for path in ['__rtlmeter_utils.sv', '__rtlmeter_top_include.vh']:
+                (root / 'rtl' / path).write_text('test fixture')
+            (design / 'descriptor.yaml').write_text("""
+compile:
+  verilogSourceFiles: [src/tb.v]
+  topModule: tb
+  mainClock: tb.clk
+execute:
+  tests:
+    hello: {}
+""")
+            with patch.object(bench, 'verify_source'), patch('shutil.which', return_value='/bin/celox'):
+                def fake_run(cmds, work_dir, logs, timeout, cpu):
+                    logs.mkdir(parents=True, exist_ok=True)
+                    (logs / '0.log').write_text('Hello Friend!\nTEST PASSED\n')
+                    (work_dir / '_rtlmeter_cycles.txt').write_text('9816\n')
+                    return {'exitCode': 0, 'timedOut': False, 'elapsedNs': 1000}
+                with patch.object(bench, 'run_commands', side_effect=fake_run):
+                    results = bench.check_case('e906', root, '/bin/celox', states=['two-state'])
+                    self.assertEqual(len(results), 1)
+                    self.assertEqual(results[0]['cycles'], 9816)
+
+                def fake_mismatch(cmds, work_dir, logs, timeout, cpu):
+                    logs.mkdir(parents=True, exist_ok=True)
+                    (logs / '0.log').write_text('Hello Friend!\nTEST PASSED\n')
+                    (work_dir / '_rtlmeter_cycles.txt').write_text('9846\n')
+                    return {'exitCode': 0, 'timedOut': False, 'elapsedNs': 1000}
+                with patch.object(bench, 'run_commands', side_effect=fake_mismatch):
+                    with self.assertRaisesRegex(ValueError, 'cycle mismatch: expected 9816, got 9846'):
+                        bench.check_case('e906', root, '/bin/celox', states=['two-state'])
+
+                with patch.dict(bench.MANIFEST['cases']['e906'], {'expectedCycles': {'two-state': 9816, 'four-state': 9817}}):
+                    with patch.object(bench, 'run_commands', side_effect=fake_run):
+                        results = bench.check_case('e906', root, '/bin/celox', states=['two-state'])
+                        self.assertEqual(results[0]['cycles'], 9816)
+
 
 if __name__ == '__main__':
     unittest.main()
