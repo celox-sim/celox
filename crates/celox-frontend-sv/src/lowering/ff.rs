@@ -5269,6 +5269,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     copy,
                     SvVariable {
                         path: vec![copy_name],
+                        activation_scratch: true,
                         ..variable
                     },
                 );
@@ -6087,6 +6088,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     copy,
                     SvVariable {
                         path: vec![name],
+                        activation_scratch: true,
                         ..variable
                     },
                 );
@@ -6241,6 +6243,14 @@ impl<'p, 'a> Ff<'p, 'a> {
             .map(|id| {
                 let (value, value_name) = self.m.shadow(id, "nba_value", false);
                 let (mask, mask_name) = self.m.shadow(id, "nba_mask", true);
+                // Staging of one activation's update.
+                for staging in [value, mask] {
+                    self.m
+                        .variables
+                        .get_mut(&staging)
+                        .expect("a new staging copy")
+                        .activation_scratch = true;
+                }
                 NbaStage {
                     id,
                     name: self.m.var(id).path.join("."),
@@ -7258,23 +7268,18 @@ impl Ff<'_, '_> {
         }
         prune_unreachable_blocks(&mut unit);
         let frame = self.forked.then(|| {
-            let mut private = self.m.created[first_created..].to_vec();
+            // Each activation has its own scratch: the values its lowering
+            // keeps across its own suspensions. Lexical locals are cells of
+            // `locals`, not frame state; every other variable the lowering
+            // made, such as the time slot, the held gate, the change counts
+            // of boxes, or the sampled copies and `$past` histories the
+            // runtime maintains, is the module's.
+            let mut private: Vec<_> = self.m.created[first_created..]
+                .iter()
+                .copied()
+                .filter(|id| self.m.var(*id).activation_scratch && !self.frame_locals.contains(id))
+                .collect();
             private.extend([slots.resume, slots.status, slots.delay]);
-            // The change counts of boxes are the module's, which every
-            // activation bumps and every waiter watches; so is the gate that
-            // holds 1, which the writes of the activations judge. The
-            // sampled copies and `$past` histories are the runtime's, which
-            // samples the copies at each time step and commits the histories
-            // (IEEE 1800-2023 16.5.1, 16.9.3).
-            private.retain(|id| {
-                let variable = self.m.var(*id);
-                !self.frame_locals.contains(id)
-                    && Some(*id) != self.m.id(TIME_SLOT)
-                    && Some(*id) != self.m.id(super::procedural::HELD_GATE)
-                    && !self.m.box_changes.contains(id)
-                    && variable.sampled_from.is_none()
-                    && variable.history_of.is_none()
-            });
             celox_design::ProcessFrame {
                 resume_count,
                 private,
@@ -8226,6 +8231,7 @@ impl Ff<'_, '_> {
             value_kind: Default::default(),
             sampled_from: None,
             history_of: None,
+            activation_scratch: false,
         };
         let (gated, _) = self.m.event_variable(index, None, counter.clone());
         let (all, _) = self
@@ -8306,6 +8312,7 @@ impl Ff<'_, '_> {
                 force_control: None,
                 sampled_from: None,
                 history_of: None,
+                activation_scratch: false,
                 value_kind: Default::default(),
             },
         );
@@ -8448,6 +8455,7 @@ impl Ff<'_, '_> {
                 copy,
                 SvVariable {
                     path: vec![copy_name],
+                    activation_scratch: true,
                     ..variable
                 },
             );
