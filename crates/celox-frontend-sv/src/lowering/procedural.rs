@@ -717,6 +717,22 @@ impl<'a> ProcModule<'a> {
         found
     }
 
+    /// Whether the functions an `always @*` calls read a variable its implicit
+    /// event expression does not include: `always @*` is sensitive only to
+    /// the arguments of a called function, `always_comb` to what its body
+    /// reads too (IEEE 1800-2023 9.2.2.2.2), so then the two differ.
+    pub fn callees_read_beyond_wildcard(&self, process: &sv::ir::CombProcess) -> bool {
+        let ids = |include_functions: bool| -> HashSet<SourceVarId> {
+            self.implicit_reads(process.body(), include_functions)
+                .into_iter()
+                .chain(self.implicit_reads(process.sensitivity_body(), include_functions))
+                .map(|atom| atom.id)
+                .collect()
+        };
+        let wildcard = ids(false);
+        ids(true).iter().any(|id| !wildcard.contains(id))
+    }
+
     /// Syntactic implicit sensitivity, including branches that constant folding
     /// will remove. `always @*` sees arguments; `always_comb` also sees function bodies.
     /// The out-of-line eligibility of subroutines counts their stores into

@@ -106,6 +106,38 @@
   (assert_eq y 15)
   (assert_eq z 5))
 
+; `always @*` is sensitive to the arguments of the functions it calls, not
+; to the variables their bodies read; `always_comb` is sensitive to both
+; (IEEE 1800-2023 9.2.2.2.2). A change of `k` alone must not run `y`'s
+; procedure.
+(case wildcard_ignores_variables_read_inside_called_functions
+  (source "callee_reads.sv" #"
+        module Top(
+            input logic [7:0] a,
+            input logic [7:0] k,
+            output logic [7:0] y,
+            output logic [7:0] z
+        );
+            function automatic logic [7:0] f(input logic [7:0] x);
+                return x + k;
+            endfunction
+            always @* y = f(a);
+            always_comb z = f(a);
+        endmodule
+    "#)
+  (top Top)
+  (modify
+    (set a 1)
+    (set k 2))
+  (assert_eq y 3)
+  (assert_eq z 3)
+  (modify (set k 10))
+  (assert_eq y 3)
+  (assert_eq z 11)
+  (modify (set a 2))
+  (assert_eq y 12)
+  (assert_eq z 12))
+
 ; In two-state mode, `always @*` and a sensitivity list run once at time
 ; zero, after the initial blocks, as Verilator settles them: C906's memory
 ; enable would otherwise start as a real 0, a write enable (#2021). IEEE

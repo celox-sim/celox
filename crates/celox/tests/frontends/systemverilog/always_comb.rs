@@ -31,6 +31,12 @@ sv_backends! {
 }
 
 sv_backends! {
+    fn wildcard_ignores_variables_read_inside_called_functions(sim) {
+        @case "always_comb::wildcard_ignores_variables_read_inside_called_functions";
+    }
+}
+
+sv_backends! {
     fn two_state_sensitivity_lists_run_at_time_zero(sim) {
         @case "always_comb::two_state_sensitivity_lists_run_at_time_zero";
     }
