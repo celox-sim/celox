@@ -1,0 +1,1 @@
+Type-name exemptions from structured declarations only (typedefs, type parameters, recorded covergroup headers, imports); no unit or token scans; class forwards completed only by a typedef binding to a class; virtual interfaces looked up design-wide
