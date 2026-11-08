@@ -58,6 +58,13 @@ impl Ir {
     }
 
     /// The modules, to lower them from their own bodies.
+    /// See [`Module::expand_virtual_interface_instances`], for each module.
+    pub fn expand_virtual_interface_instances(&mut self, ids: &crate::HashMap<String, Vec<u32>>) {
+        for module in &mut self.modules {
+            module.expand_virtual_interface_instances(ids);
+        }
+    }
+
     pub fn into_modules(self) -> Vec<Module> {
         self.modules
     }
@@ -2770,5 +2777,358 @@ impl DpiImport {
 
     pub fn arguments(&self) -> &[DpiArgument] {
         &self.arguments
+    }
+}
+
+/// `expr` with `f` applied to each of its operands (not to the constant
+/// expressions of its selects).
+fn map_operands(expr: Expr, f: &mut impl FnMut(Expr) -> Expr) -> Expr {
+    let mut boxed = |expr: Box<Expr>| Box::new(f(*expr));
+    match expr {
+        Expr::Ident(_) | Expr::Literal(_) => expr,
+        Expr::Select {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => Expr::Select {
+            expr: boxed(expr),
+            msb,
+            lsb,
+            signed,
+        },
+        Expr::Concat(parts) => Expr::Concat(parts.into_iter().map(&mut *f).collect()),
+        Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
+            count,
+            parts: parts.into_iter().map(&mut *f).collect(),
+        },
+        Expr::Resize {
+            expr,
+            width,
+            signed,
+        } => Expr::Resize {
+            expr: boxed(expr),
+            width,
+            signed,
+        },
+        Expr::Unary { op, expr } => Expr::Unary {
+            op,
+            expr: boxed(expr),
+        },
+        Expr::Binary { left, op, right } => Expr::Binary {
+            left: boxed(left),
+            op,
+            right: boxed(right),
+        },
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => Expr::Mux {
+            condition: boxed(condition),
+            then_expr: boxed(then_expr),
+            else_expr: boxed(else_expr),
+        },
+        Expr::Call {
+            callee,
+            args,
+            arg_order,
+        } => Expr::Call {
+            callee,
+            args: args.into_iter().map(|arg| arg.map(&mut *f)).collect(),
+            arg_order,
+        },
+        Expr::Inside { expr, items } => Expr::Inside {
+            expr: boxed(expr),
+            items: items
+                .iter()
+                .map(|item| item.map(&mut |expr| f(expr.clone())))
+                .collect(),
+        },
+    }
+}
+
+/// The placeholders of the virtual interface accesses of a module, which
+/// the frontend replaces with the signals of each interface instance of the
+/// elaborated design (see [`Module::expand_virtual_interface_instances`]).
+mod virtual_instances {
+    use super::*;
+    use crate::HashMap;
+    use crate::ast::virtual_interfaces::{VirtualInterfaceSignal, placeholder_interface};
+
+    /// Bit width of a virtual interface value (an instance id).
+    const WIDTH: usize = 32;
+
+    fn id_literal(id: u32) -> Expr {
+        Expr::Literal(format!("{WIDTH}'d{id}"))
+    }
+
+    /// The interface whose instance id placeholder `expr` is.
+    fn instance(expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Ident(name) => match VirtualInterfaceSignal::of(name)? {
+                VirtualInterfaceSignal::Instance { interface } => Some(interface),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The interface whose placeholders `expr` reads, if any.
+    fn mentioned(expr: &Expr) -> Option<String> {
+        let mut found = None;
+        let _ = map_operands(expr.clone(), &mut |child| {
+            if found.is_none() {
+                found = mentioned(&child);
+            }
+            child
+        });
+        match expr {
+            Expr::Ident(name) => placeholder_interface(name),
+            _ => found,
+        }
+    }
+
+    /// `name` with the member placeholder of interface `interface` replaced
+    /// by the signal of the member of its instance `id`.
+    fn member_name(name: &str, interface: &str, id: u32) -> Option<String> {
+        match VirtualInterfaceSignal::of(name)? {
+            VirtualInterfaceSignal::Placeholder {
+                interface: of,
+                member,
+            } if of == interface => Some(VirtualInterfaceSignal::Member { id, member }.name()),
+            _ => None,
+        }
+    }
+
+    /// `expr` for instance `id` of interface `interface`.
+    pub(super) fn for_instance(expr: Expr, interface: &str, id: u32) -> Expr {
+        match expr {
+            Expr::Ident(name) => {
+                if instance(&Expr::Ident(name.clone())).is_some_and(|of| of == interface) {
+                    return id_literal(id);
+                }
+                Expr::Ident(member_name(&name, interface, id).unwrap_or(name))
+            }
+            expr => map_operands(expr, &mut |child| for_instance(child, interface, id)),
+        }
+    }
+
+    fn lvalue_for_instance(lvalue: &mut LValue, interface: &str, id: u32) {
+        let (LValue::Ident(name) | LValue::Select { name, .. }) = lvalue;
+        if let Some(renamed) = member_name(name, interface, id) {
+            *name = renamed;
+        }
+    }
+
+    fn stmt_for_instance(mut stmt: Stmt, interface: &str, id: u32) -> Stmt {
+        stmt.visit_mut(
+            &mut |expr| {
+                *expr = for_instance(
+                    std::mem::replace(expr, Expr::Literal(String::new())),
+                    interface,
+                    id,
+                );
+            },
+            &mut |lvalue| lvalue_for_instance(lvalue, interface, id),
+            &mut |_| {},
+        );
+        stmt
+    }
+
+    /// `expr` with each selection arm that compares a handle with the id
+    /// placeholder of an interface repeated for each of its instances in
+    /// `ids`, in id order.
+    pub(super) fn expand_expr(expr: Expr, ids: &HashMap<String, Vec<u32>>) -> Expr {
+        let expr = map_operands(expr, &mut |child| expand_expr(child, ids));
+        let Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } = expr
+        else {
+            return expr;
+        };
+        let interface = match &*condition {
+            Expr::Binary {
+                op: BinaryOp::Eq,
+                right,
+                ..
+            } => instance(right),
+            _ => None,
+        };
+        let Some(interface) = interface else {
+            return Expr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            };
+        };
+        let mut value = *else_expr;
+        for &id in ids.get(&interface).into_iter().flatten().rev() {
+            value = Expr::Mux {
+                condition: Box::new(for_instance((*condition).clone(), &interface, id)),
+                then_expr: Box::new(for_instance((*then_expr).clone(), &interface, id)),
+                else_expr: Box::new(value),
+            };
+        }
+        value
+    }
+
+    pub(super) fn expand_stmts(stmts: &mut [Stmt], ids: &HashMap<String, Vec<u32>>) {
+        for stmt in stmts {
+            expand_stmt(stmt, ids);
+        }
+    }
+
+    /// Statement `stmt` with selections expanded as [`expand_expr`] does,
+    /// each case item labelled with an id placeholder repeated for each
+    /// instance, and each event item that watches a placeholder repeated for
+    /// each instance.
+    fn expand_stmt(stmt: &mut Stmt, ids: &HashMap<String, Vec<u32>>) {
+        stmt.visit_mut(
+            &mut |expr| {
+                *expr = expand_expr(std::mem::replace(expr, Expr::Literal(String::new())), ids);
+            },
+            &mut |_| {},
+            &mut |_| {},
+        );
+        stmt.walk_mut(&mut |stmt| match stmt {
+            Stmt::Case { items, .. } => {
+                let placeholder = |item: &crate::procedural::CaseItemBase<Expr, LValue>| {
+                    item.labels.iter().find_map(|label| match label {
+                        crate::procedural::CaseLabel::Value(value) => instance(value),
+                        _ => None,
+                    })
+                };
+                if !items.iter().any(|item| placeholder(item).is_some()) {
+                    return;
+                }
+                let mut expanded = Vec::new();
+                for item in std::mem::take(items) {
+                    let Some(interface) = placeholder(&item) else {
+                        expanded.push(item);
+                        continue;
+                    };
+                    for &id in ids.get(&interface).into_iter().flatten() {
+                        expanded.push(crate::procedural::CaseItemBase {
+                            labels: vec![crate::procedural::CaseLabel::Value(id_literal(id))],
+                            body: item
+                                .body
+                                .iter()
+                                .cloned()
+                                .map(|stmt| stmt_for_instance(stmt, &interface, id))
+                                .collect(),
+                        });
+                    }
+                }
+                *items = expanded;
+            }
+            Stmt::WaitEvent(events) => {
+                let watched = |event: &crate::procedural::EventItemBase<Expr>| {
+                    mentioned(&event.expr).or_else(|| event.iff.as_ref().and_then(mentioned))
+                };
+                if !events.iter().any(|event| watched(event).is_some()) {
+                    return;
+                }
+                let mut expanded = Vec::new();
+                for event in std::mem::take(events) {
+                    let Some(interface) = watched(&event) else {
+                        expanded.push(event);
+                        continue;
+                    };
+                    for &id in ids.get(&interface).into_iter().flatten() {
+                        expanded.push(crate::procedural::EventItemBase {
+                            edge: event.edge,
+                            expr: for_instance(event.expr.clone(), &interface, id),
+                            iff: event
+                                .iff
+                                .clone()
+                                .map(|iff| for_instance(iff, &interface, id)),
+                        });
+                    }
+                }
+                *events = expanded;
+            }
+            _ => {}
+        });
+    }
+
+    /// The signals of the members of each instance in `ids` of the
+    /// interfaces whose member placeholders `signals` declares.
+    pub(super) fn instance_signals(
+        signals: &[Signal],
+        ids: &HashMap<String, Vec<u32>>,
+    ) -> Vec<Signal> {
+        let mut found = Vec::new();
+        for signal in signals {
+            let Some(VirtualInterfaceSignal::Placeholder { interface, member }) =
+                VirtualInterfaceSignal::of(&signal.name)
+            else {
+                continue;
+            };
+            for &id in ids.get(&interface).into_iter().flatten() {
+                let name = VirtualInterfaceSignal::Member {
+                    id,
+                    member: member.clone(),
+                }
+                .name();
+                found.push(Signal {
+                    hierarchical: Some(name.clone()),
+                    name,
+                    ..signal.clone()
+                });
+            }
+        }
+        found
+    }
+}
+
+impl Module {
+    /// Replace the placeholders through which this module's virtual
+    /// interface accesses reach the selected interface instance with the
+    /// instances of the elaborated design, `ids` mapping each interface to
+    /// the ids of its instances (IEEE 1800-2023 25.9). Analysis builds each
+    /// access once, independently of the elaborated hierarchy; this repeats
+    /// it for each instance, and declares the signals of the instances'
+    /// members in place of the placeholders.
+    pub fn expand_virtual_interface_instances(&mut self, ids: &crate::HashMap<String, Vec<u32>>) {
+        use virtual_instances::{expand_expr, expand_stmts};
+        let expand = |expr: &mut Expr| {
+            *expr = expand_expr(std::mem::replace(expr, Expr::Literal(String::new())), ids);
+        };
+        for assignment in &mut self.assignments {
+            expand(&mut assignment.rhs);
+        }
+        for process in &mut self.comb_processes {
+            for assignment in &mut process.assignments {
+                expand(&mut assignment.rhs);
+            }
+            expand_stmts(&mut process.body, ids);
+            expand_stmts(&mut process.sensitivity_body, ids);
+        }
+        for process in &mut self.ff_processes {
+            expand_stmts(&mut process.body, ids);
+        }
+        for process in &mut self.initial_processes {
+            expand_stmts(&mut process.body, ids);
+        }
+        for subroutine in self
+            .subroutines
+            .iter_mut()
+            .chain(&mut self.declaration_subroutines)
+        {
+            expand_stmts(&mut subroutine.body, ids);
+            expand_stmts(&mut subroutine.sensitivity_body, ids);
+            for param in &mut subroutine.params {
+                if let Some(default) = &mut param.default {
+                    expand(default);
+                }
+            }
+        }
+        let members = virtual_instances::instance_signals(&self.signals, ids);
+        self.signals
+            .retain(|signal| !crate::ast::virtual_interfaces::is_placeholder_signal(&signal.name));
+        self.signals.extend(members);
     }
 }
