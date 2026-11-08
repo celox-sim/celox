@@ -396,6 +396,15 @@ required rejection. The broader review recheck covered 1,478 pinned files in
 both modes (2,956 verdicts), excluding 172 source/path UVM-related cases.
 After the two reviewed expectation updates, all selected verdicts match.
 
+Assignments to enum variables (6.19.3, 6.19.4) update four rows: both
+modes of `6.19.3--enum_type_checking_inv.sv` and
+`6.19.4--enum_numerical_expr_no_cast.sv` now pass by rejecting the
+invalid assignments. A value assigned, passed, returned or given as a
+pattern item to an enumerated place must be of the enumeration's type,
+and compound assignments, increments and decrements of an enum variable
+need a cast. Explicit casts, enum methods, members of unions and packed
+selects keep their behavior.
+
 ## Running locally
 
 Use the locked development shell and install the pinned [`requirements.txt`](requirements.txt) in a Python environment.

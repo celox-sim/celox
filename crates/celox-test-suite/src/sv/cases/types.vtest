@@ -461,6 +461,70 @@
   (assert_eq y 0)
   (assert_eq array_values 0))
 
+(case enum_explicit_integral_assignments
+  (source "enum_assignments.sv" #"
+    module Top(output bit [15:0] result);
+      typedef enum bit [1:0] {A, B, C} E;
+      typedef E Alias;
+      E value, copy, values[2];
+      function automatic E identity(E arg); return arg; endfunction
+      initial begin
+        value = A;
+        value = E'(value + 1);
+        copy = Alias'(3);
+        values[0] = value;
+        values[1] = E'(2);
+        value = 1'b1 ? values[0] : values[1];
+        value = identity(value);
+        result = {value, copy, values[0], values[1], 8'b0};
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 0) (assert_eq result 30208))
+
+(case enum_wide_parameters_preserve_declared_types
+  (source "enum_parameters.sv" #"
+    package WideEnumParameters;
+      typedef enum logic [127:0] {A=0, B=1} E;
+      localparam E Imported=B;
+    endpackage
+    module WideEnumParameterChild #(
+      parameter WideEnumParameters::E P=WideEnumParameters::Imported
+    )(output bit [127:0] result);
+      WideEnumParameters::E value;
+      initial value=P;
+      assign result=value;
+    endmodule
+    module Top(output bit [127:0] module_value, local_value, imported_value,
+               generated_value, child_value, overridden_value);
+      import WideEnumParameters::*;
+      typedef E Alias;
+      localparam Alias Q=Imported;
+      E value, imported;
+      initial begin value=Q; imported=Imported; end
+      assign module_value=value;
+      assign imported_value=imported;
+      initial begin
+        localparam E P=Q;
+        E value;
+        value=P;
+        local_value=value;
+      end
+      if (1) begin : gen_scope
+        localparam E P=Q;
+        E value;
+        initial value=P;
+        assign generated_value=value;
+      end
+      WideEnumParameterChild child_instance(child_value);
+      WideEnumParameterChild #(.P(A)) override_instance(overridden_value);
+    endmodule
+  "#)
+  (top Top) (run_until 0)
+  (assert_eq module_value 1) (assert_eq local_value 1)
+  (assert_eq imported_value 1) (assert_eq generated_value 1)
+  (assert_eq child_value 1) (assert_eq overridden_value 0))
+
 (case enum_methods_iterate_members
   (source "enum_methods.sv" #"
     module Top(output bit done);

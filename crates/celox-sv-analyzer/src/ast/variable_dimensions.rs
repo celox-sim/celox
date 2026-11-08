@@ -24,6 +24,17 @@ impl VariableDimensions {
         self.shape.clone()
     }
 
+    /// This shape with the bits of its type but no enumeration: the place
+    /// a member of a union is, which takes any value of them (6.19.3).
+    pub(super) fn without_enum(&self) -> VariableDimensions {
+        VariableDimensions::new(VariableShape {
+            enum_domain: None,
+            packed_enum: false,
+            declared: type_names::Declared::default(),
+            ..self.clone_shape()
+        })
+    }
+
     /// Resolve a declaration only in its own, evaluated parameter environment.
     /// An unresolved range leaves no provisional ID behind.
     pub(super) fn bind_type(
