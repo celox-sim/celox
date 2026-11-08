@@ -25,7 +25,7 @@ test("the required gate rejects failures and only accepts explicitly optional sk
   assert.match(gate, /if: \$\{\{ !cancelled\(\)/);
   assert.match(
     gate,
-    /needs: \[changes, rust-tests, rust-default-tests, sv-tests, sv-tests-shard, arm64-backend, napi-linux, napi-wasm\]/,
+    /needs: \[changes, rust-tests, rust-default-tests, sv-tests, sv-tests-shard, rtlmeter, arm64-backend, napi-linux, napi-wasm\]/,
   );
   assert.match(
     gate,
@@ -46,6 +46,8 @@ test("the required gate rejects failures and only accepts explicitly optional sk
     SV_TESTS_REQUIRED: "true",
     SV_TESTS_RESULT: "success",
     SV_TESTS_SHARDS_RESULT: "success",
+    RTLMETER_REQUIRED: "true",
+    RTLMETER_RESULT: "success",
     ARM64_REQUIRED: "true",
     ARM64_RESULT: "success",
     NAPI_REQUIRED: "true",
@@ -69,6 +71,8 @@ test("the required gate rejects failures and only accepts explicitly optional sk
         RUST_RESULT: "skipped",
         SV_TESTS_REQUIRED: "false",
         SV_TESTS_RESULT: "skipped",
+        RTLMETER_REQUIRED: "false",
+        RTLMETER_RESULT: "skipped",
       },
       passes: true,
     },
@@ -79,6 +83,7 @@ test("the required gate rejects failures and only accepts explicitly optional sk
     "DEFAULT_RESULT",
     "SV_TESTS_RESULT",
     "SV_TESTS_SHARDS_RESULT",
+    "RTLMETER_RESULT",
     "ARM64_RESULT",
     "NATIVE_RESULT",
     "WASM_RESULT",
@@ -119,6 +124,18 @@ test("the required gate rejects failures and only accepts explicitly optional sk
       passes: false,
     });
   }
+  for (const status of ["success", "skipped", "failure", "cancelled", ""]) {
+    cases.push({
+      env: { ...success, RTLMETER_REQUIRED: "false", RTLMETER_RESULT: status },
+      passes: status === "success" || status === "skipped",
+    });
+  }
+  cases.push({
+    env: { ...success, RTLMETER_REQUIRED: "", RTLMETER_RESULT: "skipped" },
+    passes: false,
+  });
+  assert.match(gate, /RTLMETER_REQUIRED: .*outputs\.rust != 'false' && needs\.changes\.outputs\.rust_sv_tests != 'false'/);
+  assert.match(job("rtlmeter"), /outputs\.rust == 'true' && needs\.changes\.outputs\.rust_sv_tests != 'false'/);
   // Only non-Rust changes may skip ARM64; other results fail closed.
   for (const status of ["success", "skipped", "failure", "cancelled", ""]) {
     cases.push({
@@ -365,7 +382,7 @@ test("PR caches cannot evict the shared default-branch Rust caches", () => {
       /      - uses: Swatinem\/rust-cache@v2\n([\s\S]*?)(?=\n      -|\n  [a-z]|$)/g,
     ),
   ];
-  assert.equal(cacheSteps.length, 10);
+  assert.equal(cacheSteps.length, 11);
   for (const [, step] of cacheSteps) {
     assert.match(
       step,
@@ -582,6 +599,21 @@ test("upstream SV TB runs on full CI and feeds failure reporting", () => {
   assert.match(upstream, /if: always\(\)/);
   assert.match(upstream, /retention-days: 14/);
   assert.match(job("report-full-validation"), /common-cells,/);
+});
+
+test("rtlmeter qualification runs all pinned cases and verifies completion and cycles", () => {
+  const rtlmeter = job("rtlmeter");
+  assert.match(rtlmeter, /needs: changes/);
+  assert.doesNotMatch(rtlmeter, /continue-on-error/);
+  assert.match(rtlmeter, /cargo build --locked --release -p celox-vpi --features systemverilog --bin celox/);
+  assert.match(rtlmeter, /python scripts\/run-rtlmeter-bench\.py prepare/);
+  assert.match(rtlmeter, /python scripts\/run-rtlmeter-bench\.py check\s+all/);
+  assert.match(rtlmeter, /--states two-state,four-state/);
+  assert.match(rtlmeter, /if: always\(\)/);
+  assert.match(rtlmeter, /retention-days: 14/);
+  assert.match(job("rust"), /rtlmeter,/);
+  assert.match(job("full-validation"), /rtlmeter,/);
+  assert.match(job("report-full-validation"), /rtlmeter,/);
 });
 
 
