@@ -472,6 +472,13 @@ Clause 4.7 permits either order in the cases below; Celox is deterministic:
 - The implementation default time scale is 1 ns / 1 ps. A `Simulation`
   counts time in the design's global time precision (3.14.3), 1 ps by
   default, so `%t` reports picoseconds in a design without time scales.
+- A class or subroutine declared in the compilation unit (`$unit`) uses
+  the compilation unit's time unit and precision. A `` `timescale ``
+  directive does not set those (3.14.2.3), so they are the default 1 ns /
+  1 ps unless `$unit` declares `timeunit`/`timeprecision`. Verilator
+  applies the last `` `timescale `` instead. For portable code, declare
+  `timeunit` in `$unit`. A precision finer than the global precision
+  rounds to whole simulation steps.
 - `final` procedures run sequentially in a deterministic but unspecified
   order. Relative order of package and module variable initializers that
   call constructors or functions is likewise unspecified (6.8, 10.5); do

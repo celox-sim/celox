@@ -129,6 +129,11 @@ pub enum StmtBase<E, L> {
         /// Global-precision ticks in one time precision step of the
         /// declaring scope, to which a real amount is rounded (3.14.1).
         ticks_per_precision: u64,
+        /// Precision steps of the declaring scope in one global-precision
+        /// tick: more than one for a scope whose precision is finer than the
+        /// global precision, whose rounded amount is rounded again to whole
+        /// ticks.
+        precision_steps_per_tick: u64,
     },
     /// `@(items)`: suspend the process until one of the events occurs
     /// (9.4.2).
@@ -414,10 +419,12 @@ impl<E, L> StmtBase<E, L> {
                 amount,
                 ticks_per_unit,
                 ticks_per_precision,
+                precision_steps_per_tick,
             } => StmtBase::Delay {
                 amount: fe(amount),
                 ticks_per_unit,
                 ticks_per_precision,
+                precision_steps_per_tick,
             },
             StmtBase::WaitEvent(items) => StmtBase::WaitEvent(
                 items
