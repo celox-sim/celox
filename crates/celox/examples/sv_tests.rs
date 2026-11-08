@@ -4,7 +4,7 @@
 //! sv-tests. This process reports only compiler/simulator success or failure.
 //!
 //! ```text
-//! sv_tests --mode preprocessing|parsing|elaboration|simulation --state-mode 2state|4state \
+//! sv_tests --mode preprocessing|parsing|elaboration|plan|simulation --state-mode 2state|4state \
 //!     [--source-encoding utf8|non-utf8-comments] [--top NAME] [--define NAME[=VALUE]] [--include DIR] [--simvariant ARG] -- FILE...
 //! ```
 
@@ -17,6 +17,9 @@ enum Mode {
     Preprocessing,
     Parsing,
     Elaboration,
+    /// Elaboration up to the compiled scheduler's plan, which is printed;
+    /// no code is generated (not an sv-tests mode).
+    Plan,
     Simulation,
 }
 
@@ -60,6 +63,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
                     "preprocessing" => Mode::Preprocessing,
                     "parsing" => Mode::Parsing,
                     "elaboration" => Mode::Elaboration,
+                    "plan" => Mode::Plan,
                     "simulation" => Mode::Simulation,
                     _ => return Err(format!("unsupported mode: {value}")),
                 })
@@ -224,12 +228,25 @@ fn run(options: &Options) -> Result<(), String> {
         // A Simulator rejects designs with processes, which it does not run.
         // The driver is an application boundary for diagnostics such as
         // `CELOX_SV_RECURSION_REPORT`.
-        Mode::Elaboration => celox::Simulation::from_sv_sources(sources, &top)
-            .four_state(options.four_state)
-            .diagnostics_from_env()
-            .build()
-            .map(|_| ())
-            .map_err(|error| error.to_string()),
+        Mode::Plan => {
+            let start = std::time::Instant::now();
+            let report = celox::Simulation::from_sv_sources(sources, &top)
+                .four_state(options.four_state)
+                .diagnostics_from_env()
+                .build_plan();
+            tracing::debug!("[elaboration] plan: {:?}", start.elapsed());
+            print!("{}", report.map_err(|error| error.to_string())?);
+            Ok(())
+        }
+        Mode::Elaboration => {
+            let start = std::time::Instant::now();
+            let built = celox::Simulation::from_sv_sources(sources, &top)
+                .four_state(options.four_state)
+                .diagnostics_from_env()
+                .build();
+            tracing::debug!("[elaboration] total: {:?}", start.elapsed());
+            built.map(|_| ()).map_err(|error| error.to_string())
+        }
         Mode::Simulation => {
             // Upstream simvariants are separate runs, each with one plusarg.
             // Recreate the simulation so no variable or scheduler state leaks.
@@ -328,8 +345,69 @@ fn simulate(mut sim: celox::Simulation) -> Result<(), String> {
     }
 }
 
+/// Prints the compiler's timing events (`[phase-timing]`, `[sv-frontend]`,
+/// `[native-timing]` and the like) to stderr, each with the time since the
+/// driver started, when `CELOX_PHASE_TIMING` asks for them. The library
+/// emits them as `tracing` events and installs no subscriber of its own.
+struct PhaseTimingReport {
+    start: std::time::Instant,
+}
+
+impl tracing::Subscriber for PhaseTimingReport {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        *metadata.level() <= tracing::Level::DEBUG
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    #[allow(clippy::disallowed_macros)] // The report goes to the driver's stderr.
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Message(String);
+        impl tracing::field::Visit for Message {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                use std::fmt::Write;
+                if field.name() == "message" {
+                    let _ = write!(self.0, "{value:?}");
+                } else {
+                    let _ = write!(self.0, " {}={value:?}", field.name());
+                }
+            }
+        }
+        let mut message = Message(String::new());
+        event.record(&mut message);
+        // Phase-level lines only; the compiler's per-unit statistics would
+        // dominate the run they measure.
+        if ![
+            "[phase-timing]",
+            "[sv-frontend]",
+            "[analysis]",
+            "[flatten]",
+            "[elaboration]",
+        ]
+        .iter()
+        .any(|prefix| message.0.starts_with(prefix))
+        {
+            return;
+        }
+        eprintln!(
+            "[{:>10.1} ms] {}",
+            self.start.elapsed().as_secs_f64() * 1000.0,
+            message.0
+        );
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
 #[allow(clippy::disallowed_macros)] // CLI diagnostics intentionally use stderr.
 fn main() -> ExitCode {
+    if env::var_os("CELOX_PHASE_TIMING").is_some_and(|value| value != "0") {
+        let _ = tracing::subscriber::set_global_default(PhaseTimingReport {
+            start: std::time::Instant::now(),
+        });
+    }
     let args: Vec<String> = env::args().skip(1).collect();
     if args.as_slice() == ["--version"] {
         println!("Celox {}", env!("CARGO_PKG_VERSION"));
@@ -339,7 +417,7 @@ fn main() -> ExitCode {
         Ok(options) => options,
         Err(error) => {
             eprintln!(
-                "{error}\nusage: sv_tests --mode preprocessing|parsing|elaboration|simulation --state-mode 2state|4state [--source-encoding utf8|non-utf8-comments] [--top NAME] [--define NAME[=VALUE]] [--include DIR] [--simvariant ARG] -- FILE..."
+                "{error}\nusage: sv_tests --mode preprocessing|parsing|elaboration|plan|simulation --state-mode 2state|4state [--source-encoding utf8|non-utf8-comments] [--top NAME] [--define NAME[=VALUE]] [--include DIR] [--simvariant ARG] -- FILE..."
             );
             return ExitCode::from(2);
         }
