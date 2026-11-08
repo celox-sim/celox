@@ -1,0 +1,1 @@
+Record user-defined nettype names in the parser, so a nettype is a known type (fixes sv_packages::rejects_unsupported_package_state)
