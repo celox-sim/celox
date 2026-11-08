@@ -6943,7 +6943,12 @@ fn lower_comb_processes(
         // A wildcard control waits for its first source event even when
         // every output is assigned. A symbolic combinational definition
         // would instead execute during the initial fixed-point evaluation.
-        let symbolic_star = symbolic_star(index, process);
+        // It also follows every variable its statement reads, while an
+        // `always @*` is sensitive only to the arguments of the functions it
+        // calls, not to what their bodies read (IEEE 1800-2023 9.2.2.2.2):
+        // one whose callees read more keeps the guarded unit.
+        let symbolic_star =
+            symbolic_star(index, process) && !pm.callees_read_beyond_wildcard(process);
         if (process.kind() == sv::ir::CombProcessKind::AlwaysStar && !symbolic_star)
             || pm.reads_simulation_state(process.body())
             // The symbolic form would expand every call.
