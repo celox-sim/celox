@@ -107,9 +107,10 @@ export function rtlmeterMetrics(report, commit) {
     const medianSimNs = simTimes[Math.floor(simTimes.length / 2)];
     const cyclesPerSecList = row.samples.map(sample => sample.cyclesPerSec ?? (sample.cycles / (sample.processNs / 1e9))).sort((a, b) => a - b);
     const medianCyclesPerSec = cyclesPerSecList[Math.floor(cyclesPerSecList.length / 2)];
+    const enginePrefix = (isSteady && row.engine === "celox") ? "rtlmeter-celox-native" : `rtlmeter-${row.engine}`;
     const metricName = isSteady
-      ? `rtlmeter-${row.engine}/rtlmeter_${report.case}_${testName}_v1_x64_${row.stateModel}_sim`
-      : `rtlmeter-${row.engine}/rtlmeter_${report.case}_hello_v1_x64_${row.stateModel}_total`;
+      ? `${enginePrefix}/rtlmeter_${report.case}_${testName}_v1_x64_${row.stateModel}_sim`
+      : `${enginePrefix}/rtlmeter_${report.case}_hello_v1_x64_${row.stateModel}_total`;
     const metricValue = isSteady ? (medianSimNs / 1000) : (times[Math.floor(times.length / 2)] / 1000);
     return {
       name: metricName,

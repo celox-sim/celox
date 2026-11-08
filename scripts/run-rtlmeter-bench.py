@@ -126,7 +126,8 @@ def accept(stdout, cycles, outcome, payload, success_marker='TEST PASSED'):
         raise ValueError('process failed or timed out')
     if re.search(r'TEST[\s_]+FAIL(?:ED)?|Time Out !!!|simulation finished with error|\$fatal|%Error:', stdout, re.I):
         raise ValueError('testbench reported failure')
-    if stdout.splitlines().count(success_marker) != 1 or stdout.splitlines().count(payload) != 1:
+    payload_count = sum(1 for line in stdout.splitlines() if line == payload or line.startswith(payload))
+    if stdout.splitlines().count(success_marker) != 1 or payload_count != 1:
         raise ValueError('missing unique upstream success marker or expected program output')
     if not re.fullmatch(r'[1-9][0-9]*', cycles.strip()):
         raise ValueError('missing valid final RTLMeter clock count')

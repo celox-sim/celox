@@ -134,6 +134,7 @@ function steadyReport(name = "e902") {
 test('RTLMeter steady-state benchmark publishes simulation time and throughput', () => {
   const metrics = rtlmeterMetrics(steadyReport(), commit);
   assert.equal(metrics.length, 5);
+  assert.ok(metrics.some(metric => metric.name.startsWith('rtlmeter-celox-native/')));
   assert.ok(metrics.every(metric => metric.name.includes('_cmark_v1_') && metric.name.endsWith('_sim')));
   assert.ok(metrics.every(metric => metric.value === 1.3e6 && metric.unit === 'us'));
   for (const metric of metrics) {

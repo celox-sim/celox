@@ -13,6 +13,8 @@ class RtlmeterTests(unittest.TestCase):
         outcome = {'exitCode': 0, 'timedOut': False}
         text = 'Hello Friend!\nTEST PASSED\n'
         self.assertEqual(bench.accept(text, '5392\n', outcome, 'Hello Friend!'), 5392)
+        cmark_text = 'CoreMark 1.0 : 0.000000 / GCC / STACK\nTEST PASSED\n'
+        self.assertEqual(bench.accept(cmark_text, '461974\n', outcome, 'CoreMark 1.0'), 461974)
         for output, count, result in [
             ('TEST PASSED\n', '5392', outcome),
             (text + 'TEST PASSED\n', '5392', outcome),
