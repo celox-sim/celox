@@ -706,8 +706,9 @@ fn element_value(
             || "container element assignment".into(),
         )?;
     }
-    if let Some(aggregate) = target.element.unpacked_struct() {
-        unpacked_structs::check_value(aggregate, id, native, tree, session, dims)?;
+    if target.element.unpacked_struct().is_some() {
+        let structure = unpacked_structs::type_id(&target.element, tree, session, dims)?;
+        unpacked_structs::check_value(structure, id, native, tree, session, dims)?;
     }
     expression_binding::check_chandle_assignment(
         target.element.chandle && target.element.unpacked_ranges.is_empty(),
