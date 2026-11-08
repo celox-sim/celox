@@ -286,6 +286,7 @@ interface RegIf {
         value: output,
     }
     modport reader {
+        value     : input,
         get_value : import,
         add_offset: import,
     }
@@ -338,6 +339,7 @@ interface IncIf {
         inc: output,
     }
     modport user {
+        inc : input,
         next: import,
     }
 }
@@ -398,6 +400,7 @@ interface ScaleIf {
         base: output,
     }
     modport reader {
+        base  : input,
         scaled: import,
     }
 }
@@ -1432,7 +1435,7 @@ interface Scale {
     function scaled (x: input logic<8>) -> logic<8> {
         return base * x;
     }
-    modport reader { scaled: import, }
+    modport reader { base: input, scaled: import, }
 }
 module Top (x: input logic<8>, y0: output logic<8>, y1: output logic<8>) {
     inst lanes: Scale [2];

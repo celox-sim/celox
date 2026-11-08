@@ -102,6 +102,7 @@ pub fn factor_signed(factor: &Factor) -> bool {
             _ => call.comptime.r#type.signed,
         },
         Factor::Value(comptime) => comptime.r#type.signed,
+        Factor::ResetValue(..) => false,
         // VarSelect is a packed bit/part selection. Its value is unsigned;
         // VarIndex has already been split out and does not change signedness.
         // The declaration type retains intrinsic signedness even when the
@@ -342,6 +343,7 @@ pub fn get_expr_width(expr: &Expression) -> Option<usize> {
 
 fn get_factor_width(factor: &Factor) -> Option<usize> {
     match factor {
+        Factor::ResetValue(..) => Some(1),
         Factor::Value(comp) | Factor::Variable(_, _, _, comp) => {
             if let ValueVariant::Numeric(v) = &comp.value {
                 if comp.r#type.total_width().is_none() {

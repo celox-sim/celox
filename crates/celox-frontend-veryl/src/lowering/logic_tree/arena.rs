@@ -12,6 +12,7 @@ pub(crate) struct SLTNodeArena<A: Hash + Eq + Clone> {
     nodes: celox_slt::SLTNodeArena<A>,
     pub(super) loop_ranges: HashMap<VarId, BigUint>,
     pub(crate) file_dependencies: crate::file_dependencies::FileDependencyCollector,
+    pub(crate) reset_type: veryl_metadata::ResetType,
 }
 impl<A: Hash + Eq + Clone> SLTNodeArena<A> {
     pub(crate) fn alloc(
@@ -28,6 +29,7 @@ impl<A: Hash + Eq + Clone> SLTNodeArena<A> {
             nodes: Default::default(),
             loop_ranges: source.loop_ranges.clone(),
             file_dependencies: source.file_dependencies.clone(),
+            reset_type: source.reset_type,
         }
     }
     pub(crate) fn into_inner(self) -> celox_slt::SLTNodeArena<A> {
@@ -40,6 +42,7 @@ impl<A: Hash + Eq + Clone> Default for SLTNodeArena<A> {
             nodes: Default::default(),
             loop_ranges: Default::default(),
             file_dependencies: Default::default(),
+            reset_type: Default::default(),
         }
     }
 }
@@ -49,6 +52,7 @@ impl<A: Hash + Eq + Clone> Clone for SLTNodeArena<A> {
             nodes: self.nodes.clone(),
             loop_ranges: self.loop_ranges.clone(),
             file_dependencies: self.file_dependencies.clone(),
+            reset_type: self.reset_type,
         }
     }
 }

@@ -314,6 +314,7 @@ mod tests {
             post2_errors.is_empty(),
             "post-pass2 errors: {post2_errors:?}"
         );
+        crate::lower_constant_loops(&mut ir);
         (parsed.veryl, ir)
     }
 

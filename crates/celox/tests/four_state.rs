@@ -244,7 +244,6 @@ fn test_four_state_concat_three_elements(sim) {
 // P1: Wide comparison + X
 // ==========================================================================
 fn test_four_state_wide_comparison_with_x(sim) {
-    @ignore_on(veryl);
     @case "four_state::test_four_state_wide_comparison_with_x";
 }
 
@@ -376,7 +375,6 @@ fn test_four_state_wide_reduction_and_dominant(sim) {
 // IEEE 1800 LogicAnd (&&) dominant-value: 0 && x = 0
 // ==========================================================================
 fn test_four_state_logic_and_dominant_zero(sim) {
-    @ignore_on(veryl);
     @case "four_state::test_four_state_logic_and_dominant_zero";
 }
 
@@ -434,7 +432,6 @@ fn test_four_state_sar_both_x(sim) {
 // Wide NE + X (128-bit)
 // ==========================================================================
 fn test_four_state_wide_ne_with_x(sim) {
-    @ignore_on(veryl);
     @case "four_state::test_four_state_wide_ne_with_x";
 }
 

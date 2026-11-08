@@ -3542,6 +3542,32 @@ module CounterTbPassSecond {
 `;
 
 describe("E2E: native testbench (runTest)", () => {
+	test("native queues are isolated between test runs", () => {
+		const sources = [
+			{
+				path: "queue.veryl",
+				content: `
+            #[test(Top)] module Top {
+                var q: $tb::queue::<u8, 2>;
+                initial {
+                    $assert(q.size() == 0);
+                    q.push_back(7);
+                    q.push_front(9);
+                    $assert(q.pop_front() == 9);
+                    $assert(q.front() == 7);
+                    $finish();
+                }
+            }
+        `,
+			},
+		];
+		for (let i = 0; i < 2; i++) {
+			const result = runTest(sources, "Top");
+			expect(result.passed).toBe(true);
+			expect(result.assertions).toHaveLength(3);
+		}
+	});
+
 	test("dynamic strings retain their length in native testbench assertions", () => {
 		const result = runTest(
 			[
