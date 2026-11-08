@@ -113,3 +113,112 @@ fn diagnostic(
         },
     }
 }
+
+/// Reject operator `op`, a compound assignment or an increment or
+/// decrement, updating native expression `target` of an enumerated type:
+/// its result is of the enumeration's base type, which the variable takes
+/// only by a cast (IEEE 1800-2023 6.19.3, 6.19.4).
+pub(super) fn check_enum_update(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    target: ExprId,
+    native: &Declarations,
+    dims: &PackedDimensions,
+    op: &str,
+) -> Converted<()> {
+    let Some(ty) = place_type(tree, session, target, native, dims)? else {
+        return Ok(());
+    };
+    if !session.types.is_enum(ty) {
+        return Ok(());
+    }
+    let base = enum_base(session, ty);
+    Err(AnalyzerError::IncompatibleAssignment {
+        context: format!("operator `{op}`"),
+        actual: session.types.spell(base),
+        target: session.types.spell(ty),
+    })
+}
+
+/// Check value `right` assigned to native expression `left` when `left` is
+/// of an enumerated type: a variable, an element, a member or a property
+/// of one takes only a value of that type, unless it is a member of a
+/// union (IEEE 1800-2023 6.19.3).
+pub(super) fn check_enum_target(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    left: ExprId,
+    right: ExprId,
+    native: &Declarations,
+    dims: &PackedDimensions,
+) -> Converted<()> {
+    let Some(target) = place_type(tree, session, left, native, dims)? else {
+        return Ok(());
+    };
+    if !session.types.is_enum(target) {
+        return Ok(());
+    }
+    check_assign(tree, session, right, native, dims, target, || {
+        "assignment".into()
+    })
+}
+
+/// The type of the place native expression `id` writes: its own type, but
+/// for an enumerated member of a union the bits of it, which take any value
+/// of them (IEEE 1800-2023 6.19.3). Every write to a place, an assignment,
+/// a compound update or an argument copied out, is judged against it.
+pub(super) fn place_type(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    native: &Declarations,
+    dims: &PackedDimensions,
+) -> Converted<Option<semantic_types::TyId>> {
+    let Ok(ty) = expression_types::type_of(tree, session, id, native, dims) else {
+        return Ok(None);
+    };
+    if session.types.is_enum(ty) && union_member(tree, session, id, native, dims)? {
+        return Ok(Some(enum_base(session, ty)));
+    }
+    Ok(Some(ty))
+}
+
+/// The packed type of the bits of enumerated type `ty`.
+fn enum_base(session: &mut Session, ty: semantic_types::TyId) -> semantic_types::TyId {
+    let semantic_types::TyData::Packed(packed) = session.types.data(ty).clone() else {
+        return ty;
+    };
+    session
+        .types
+        .intern(semantic_types::TyData::Packed(semantic_types::Packed {
+            element: semantic_types::PackedElement::Bits,
+            keyword: None,
+            ..packed
+        }))
+}
+
+/// Whether native expression `id` is a member of a packed union: its
+/// members all start at bit 0, or are tagged (7.3).
+pub(super) fn union_member(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    native: &Declarations,
+    dims: &PackedDimensions,
+) -> Converted<bool> {
+    let ExprKind::Member {
+        expression: receiver,
+        ..
+    } = &native
+        .expression(expression_binding::ungroup(id, native))
+        .kind
+    else {
+        return Ok(false);
+    };
+    let Some(shape) = dimensions::operand_shape(*receiver, tree, session, dims)? else {
+        return Ok(false);
+    };
+    let members = &shape.members;
+    Ok(members.iter().any(packed_structs::PackedMember::is_tagged)
+        || members.len() > 1 && members.iter().all(|member| member.offset() == 0))
+}

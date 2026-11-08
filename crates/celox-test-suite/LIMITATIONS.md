@@ -2199,3 +2199,19 @@ monitor subset accepts whole static scalar variables, constants and direct
 time queries. General expressions, selected values, file-monitor string variables
 and unsupported strobe call contexts are rejected explicitly. Portable state
 files capture values but cannot resume designs containing monitor tasks.
+
+### Implicit integral enum writes
+
+IEEE 1800-2023 6.19.3 and 6.19.4 require an explicit cast when a value of
+another type is assigned to an enum variable. Celox checks every place of an
+enumerated type through the type system: assignments to variables, elements,
+members and properties, initializers, continuous assignments, arguments,
+return values and assignment pattern items, as well as compound
+assignments, increments and decrements. A member of a union is exempt
+(6.19.3).
+
+The shared `types::enum_explicit_integral_assignments` and
+`types::enum_wide_parameters_preserve_declared_types` cases preserve
+explicit casts, aliases, conditional enum values, function results and enum
+parameters wider than 64 bits through packages, generated scopes and
+overrides.

@@ -949,6 +949,27 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             &self.dims,
             self.session,
         )?;
+        // Every write to an enumerated place, whatever kind of place it
+        // is, is judged before its kind writes it (6.19.3, 6.19.4).
+        if op == "=" {
+            assignments::check_enum_target(
+                self.tree,
+                self.session,
+                left,
+                right,
+                self.tree.declarations(),
+                &self.dims,
+            )?;
+        } else {
+            assignments::check_enum_update(
+                self.tree,
+                self.session,
+                left,
+                self.tree.declarations(),
+                &self.dims,
+                op,
+            )?;
+        }
         if let Some(mut stmt) = containers::set(
             left,
             right,
@@ -1087,7 +1108,18 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         let mut rhs = if op == "="
             && let Some((_, ty)) = &member_context
         {
-            let shape = procedural::dimensions_from_type(ty);
+            let mut shape = procedural::dimensions_from_type(ty);
+            // An enumerated member of a union takes any value of its bits
+            // (IEEE 1800-2023 6.19.3).
+            if assignments::union_member(
+                self.tree,
+                self.session,
+                left,
+                self.tree.declarations(),
+                &self.dims,
+            )? {
+                shape = shape.without_enum();
+            }
             if !shape.unpacked.is_empty() {
                 array_compatibility::check_native_unpacked_assignment(
                     self.tree,
