@@ -439,6 +439,51 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  rtlmeter:
+    name: RTLMeter qualification
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.fast_queue != 'true' && (needs.changes.result != 'success' || (needs.changes.outputs.rust == 'true' && needs.changes.outputs.rust_sv_tests != 'false')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.validation_ref || github.sha }}
+
+      - uses: $/.github/actions/setup-rust
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Fetch pinned RTLMeter source
+        run: |
+          python -m pip install -r benchmarks/rtlmeter/requirements.txt
+          python scripts/run-rtlmeter-bench.py prepare "$RUNNER_TEMP/rtlmeter"
+
+      - name: Build the SystemVerilog CLI
+        run: cargo build --locked --release -p celox-vpi --features systemverilog --bin celox
+
+      - name: Verify RTLMeter completion and cycle counts
+        run: >-
+          python scripts/run-rtlmeter-bench.py check
+          all "$RUNNER_TEMP/rtlmeter" target/release/celox
+          --states two-state,four-state
+          --output "$RUNNER_TEMP/rtlmeter-logs"
+
+      - name: Retain qualification logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rtlmeter-results
+          path: ${{ runner.temp }}/rtlmeter-logs
+          if-no-files-found: ignore
+          retention-days: 14
+
   # The SystemVerilog suite with every subroutine that can be lowered out
   # of line (CELOX_SV_FORCE_OUT_OF_LINE), on every backend: no design takes
   # that path yet, so full validation checks it gives each case the results
@@ -691,7 +736,7 @@ jobs:
   # into a successful check merely because a downstream job was skipped.
   rust:
     name: Rust Test & NAPI Build
-    needs: [changes, rust-tests, rust-default-tests, sv-tests, sv-tests-shard, arm64-backend, napi-linux, napi-wasm]
+    needs: [changes, rust-tests, rust-default-tests, sv-tests, sv-tests-shard, rtlmeter, arm64-backend, napi-linux, napi-wasm]
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.napi == 'true') }}
     runs-on: ubuntu-latest
     env:
@@ -703,6 +748,8 @@ jobs:
       SV_TESTS_REQUIRED: ${{ needs.changes.outputs.fast_queue != 'true' && needs.changes.outputs.rust != 'false' && needs.changes.outputs.rust_sv_tests != 'false' }}
       SV_TESTS_RESULT: ${{ needs.sv-tests.result }}
       SV_TESTS_SHARDS_RESULT: ${{ needs.sv-tests-shard.result }}
+      RTLMETER_REQUIRED: ${{ needs.changes.outputs.fast_queue != 'true' && needs.changes.outputs.rust != 'false' && needs.changes.outputs.rust_sv_tests != 'false' }}
+      RTLMETER_RESULT: ${{ needs.rtlmeter.result }}
       # Platform coverage is mandatory in full validation, outside the queue.
       ARM64_REQUIRED: ${{ needs.changes.outputs.full_validation != 'false' && needs.changes.outputs.rust != 'false' }}
       ARM64_RESULT: ${{ needs.arm64-backend.result }}
@@ -723,6 +770,9 @@ jobs:
           if [ "$SV_TESTS_REQUIRED" != false ] || [ "$SV_TESTS_RESULT" != skipped ]; then
             test "$SV_TESTS_RESULT" = success
             test "$SV_TESTS_SHARDS_RESULT" = success
+          fi
+          if [ "$RTLMETER_REQUIRED" != false ] || [ "$RTLMETER_RESULT" != skipped ]; then
+            test "$RTLMETER_RESULT" = success
           fi
           if [ "$ARM64_REQUIRED" != false ] || [ "$ARM64_RESULT" != skipped ]; then
             test "$ARM64_RESULT" = success
@@ -1037,6 +1087,7 @@ jobs:
         sv-tests-shard,
         common-cells,
         sv-out-of-line-calls,
+        rtlmeter,
         napi-linux,
         napi-wasm,
         rust,
@@ -1075,6 +1126,7 @@ jobs:
         sv-tests-shard,
         common-cells,
         sv-out-of-line-calls,
+        rtlmeter,
         napi-linux,
         napi-wasm,
         rust,
