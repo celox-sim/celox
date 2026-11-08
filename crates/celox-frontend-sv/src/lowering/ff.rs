@@ -7262,12 +7262,18 @@ impl Ff<'_, '_> {
             private.extend([slots.resume, slots.status, slots.delay]);
             // The change counts of boxes are the module's, which every
             // activation bumps and every waiter watches; so is the gate that
-            // holds 1, which the writes of the activations judge.
+            // holds 1, which the writes of the activations judge. The
+            // sampled copies and `$past` histories are the runtime's, which
+            // samples the copies at each time step and commits the histories
+            // (IEEE 1800-2023 16.5.1, 16.9.3).
             private.retain(|id| {
+                let variable = self.m.var(*id);
                 !self.frame_locals.contains(id)
                     && Some(*id) != self.m.id(TIME_SLOT)
                     && Some(*id) != self.m.id(super::procedural::HELD_GATE)
                     && !self.m.box_changes.contains(id)
+                    && variable.sampled_from.is_none()
+                    && variable.history_of.is_none()
             });
             celox_design::ProcessFrame {
                 resume_count,
