@@ -458,6 +458,7 @@ impl Ff<'_, '_> {
             copy,
             SvVariable {
                 path: vec![copy_name.clone()],
+                activation_scratch: true,
                 ..variable
             },
         );
