@@ -1,0 +1,1 @@
+Report unresolved single-name specializations such as Missing#(1) as undeclared
