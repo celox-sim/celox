@@ -1,0 +1,6 @@
+Revision history for #3408:
+
+rev 2 (content) 2026-11-08 18:35 UTC — Retain publish marks only for homes the publisher partition writes instead of all touched homes
+rev 1 (initial) 2026-11-08 18:35 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3408,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"f6f4793b8538a2270406115e14f5bc98948c690f","timestamp_iso":"2026-11-08T18:35:32Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"f6f4793b8538a2270406115e14f5bc98948c690f","new_sha":"cc88d538908829b7f03151c716ade992fbe8de97","timestamp_iso":"2026-11-08T18:35:32Z","reason":"Retain publish marks only for homes the publisher partition writes instead of all touched homes","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/f6f4793b8538a2270406115e14f5bc98948c690f...cc88d538908829b7f03151c716ade992fbe8de97"}]} -->
