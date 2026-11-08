@@ -566,7 +566,10 @@ sv_backends! {
 fn unsupported_and_illegal_uses_are_rejected() {
     let types = "typedef struct { int a; bit b; } i_t; typedef struct { int a; string s; } s_t;";
     for (body, want) in [
-        ("i_t v; initial v = 5;", "not of its type"),
+        (
+            "i_t v; initial v = 5;",
+            "is not assignment compatible with `struct Top::i_t`",
+        ),
         ("i_t v; int x; initial x = v;", "not of its type"),
         (
             "function int f(int x); return x; endfunction i_t v; initial $display(\"%0d\", f(v));",
@@ -574,26 +577,29 @@ fn unsupported_and_illegal_uses_are_rejected() {
         ),
         (
             "typedef struct { int a; bit b; } j_t; typedef struct { i_t m; } o_t; o_t o; initial o = '{m: j_t'{1, 0}};",
-            "not of its type",
+            "not assignment compatible",
         ),
-        ("i_t v; s_t w; initial v = w;", "not of its type"),
+        ("i_t v; s_t w; initial v = w;", "not assignment compatible"),
         (
             "class A; endclass class B; endclass typedef struct { A node; } r_t; r_t r; B b; initial r = '{node: b};",
             "assignment pattern member",
         ),
         (
             "typedef struct { int a; bit b; } j_t; i_t v; initial v = j_t'{1, 0};",
-            "not of its type",
+            "not assignment compatible",
         ),
         (
             "typedef struct { int a; bit b; } j_t; function int f(i_t r); return r.a; endfunction j_t w; initial $display(\"%0d\", f(w));",
-            "not of its type",
+            "not assignment compatible",
         ),
         (
             "function int f(i_t r); return r.a; endfunction initial $display(\"%0d\", f(5));",
-            "not of its type",
+            "not assignment compatible",
         ),
-        ("function i_t f(); return 5; endfunction", "not of its type"),
+        (
+            "function i_t f(); return 5; endfunction",
+            "not assignment compatible",
+        ),
         (
             "i_t v; int x; initial x = v + 1;",
             "applied to an unpacked structure",
