@@ -2395,14 +2395,58 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                     .into_iter()
                     .map(move |var_id| bindings.locate(instance, var_id))
             })
-            .chain(
-                clock_domains
-                    .iter()
-                    .flat_map(|(&alias, &canonical)| [alias, canonical]),
-            )
+            .collect();
+        // The events: those of flip-flop domains, the aliases that resolve
+        // to them, and every event the design orders. A process's store there is counted as the domain's
+        // occurrence, as a function unit's store is, by the per-store
+        // instrumentation above; a combinational or flip-flop unit's store
+        // triggers the domain (`ScheduledRtl::inject_triggers`), which no
+        // function body has. So only a function such a unit calls must not
+        // store there. A variable that is only wired to another, as through
+        // a continuous assignment to a port, is no event: `clock_domains`
+        // names every end of such wiring.
+        let domains: HashSet<AbsoluteAddr> = eval_apply_ffs
+            .keys()
+            .chain(eval_comb_apply_ffs.keys())
+            .chain(eval_only_ffs.keys())
+            .chain(apply_ffs.keys())
+            .copied()
+            .collect();
+        let events: HashSet<AbsoluteAddr> = clock_domains
+            .iter()
+            .filter(|(_, canonical)| domains.contains(canonical))
+            .flat_map(|(&alias, &canonical)| [alias, canonical])
+            .chain(domains.iter().copied())
             .chain(topological_clocks.iter().copied())
             .collect();
-        let instrumented_store = functions.iter().any(|function| {
+        let calls = |unit: &ExecutionUnit<RegionedAbsoluteAddr>| -> Vec<usize> {
+            unit.blocks
+                .values()
+                .flat_map(|block| &block.instructions)
+                .filter_map(|instruction| match instruction {
+                    SIRInstruction::Call { function, .. } => Some(function.0 as usize),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut pending: Vec<usize> = eval_comb
+            .iter()
+            .chain(eval_apply_ffs.values().flatten())
+            .chain(eval_comb_apply_ffs.values().flatten())
+            .chain(eval_only_ffs.values().flatten())
+            .chain(apply_ffs.values().flatten())
+            .flat_map(calls)
+            .collect();
+        let mut called_by_units = HashSet::default();
+        while let Some(function) = pending.pop() {
+            if called_by_units.insert(function)
+                && let Some(callee) = functions.get(function)
+            {
+                pending.extend(calls(&callee.unit));
+            }
+        }
+        let instrumented_store = functions.iter().enumerate().any(|(index, function)| {
+            let triggered = called_by_units.contains(&index);
             function
                 .unit
                 .blocks
@@ -2415,9 +2459,10 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                         true
                     }
                     SIRInstruction::Commit(..) => true,
-                    instruction => instruction
-                        .memory_write()
-                        .is_some_and(|access| instrumented.contains(&access.addr.absolute_addr())),
+                    instruction => instruction.memory_write().is_some_and(|access| {
+                        let address = access.addr.absolute_addr();
+                        instrumented.contains(&address) || (triggered && events.contains(&address))
+                    }),
                 })
         });
         if instrumented_store {
