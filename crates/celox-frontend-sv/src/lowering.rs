@@ -463,8 +463,16 @@ fn analyze_sources_with_requests(
             )
         })
         .collect::<Vec<_>>();
+    // Each step reports its time as a `[analysis]` event, which applications
+    // print when they ask for phase timing.
+    let mut checkpoint = std::time::Instant::now();
+    let mut step = |label: &str| {
+        tracing::debug!("[analysis] {label}: {:?}", checkpoint.elapsed());
+        checkpoint = std::time::Instant::now();
+    };
     let (elaboration, interface_member_paths) =
         sv::plan_interfaces_with_member_paths(sources, &bindings)?;
+    step("plan_interfaces");
     let root_names = elaboration.root_names.clone();
     let mut modules = HashMap::default();
     let sources: Vec<_> = sources
@@ -502,6 +510,7 @@ fn analyze_sources_with_requests(
         );
     }
     let interfaces = std::sync::Arc::new(interfaces);
+    step("parse");
     let parsed: Vec<&sv::ParsedSource> = sources.iter().map(|(source, ..)| &**source).collect();
     // The interfaces that virtual interface types name, before their
     // instances are known (see `virtual_interfaces`).
@@ -521,6 +530,7 @@ fn analyze_sources_with_requests(
     } else {
         analysis_options
     };
+    step("virtual_interface_declarations");
     let mut packages = match roots {
         Some(roots) => {
             let roots = roots
@@ -551,6 +561,7 @@ fn analyze_sources_with_requests(
         }
         None => sv::ParsedSource::analyze_packages_with_options(&parsed, None, analysis_options)?,
     };
+    step("analyze_packages");
     packages.set_interface_plan(elaboration.clone());
     let packages = std::rc::Rc::new(packages);
     for (source, code, path) in &sources {

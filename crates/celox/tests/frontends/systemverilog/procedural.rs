@@ -509,3 +509,47 @@ fn always_comb_blocks_may_not_share_a_variable() {
     assert!(error.contains("shared.sv:7"), "{error}");
     assert!(error.contains("shared.sv:11"), "{error}");
 }
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[test]
+fn plan_builds_report_kernels_and_warnings_without_code() {
+    // `build_plan` stops after the compiled scheduler's plan: each kernel
+    // is scheduled or falls back, or, without a compiled plan, runs in the
+    // reference loop; a warning a build would return is reported too.
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("short.hex");
+    std::fs::write(&file, "aa").unwrap();
+    let source = format!(
+        r#"`timescale 1ns/1ns
+        module Top;
+            logic clk = 0;
+            logic [7:0] mem [0:1];
+            always #5 clk = ~clk;
+            initial $readmemh("{}", mem);
+        endmodule"#,
+        file.display()
+    );
+    let report =
+        celox::Simulation::from_sv_sources(vec![(source.as_str(), Path::new("top.sv"))], "Top")
+            .build_plan()
+            .unwrap();
+    assert!(report.contains("processes: 1"), "{report}");
+    assert!(
+        report.contains("`always` at top.sv:5:13 in `Top`: scheduled"),
+        "{report}"
+    );
+    assert!(report.contains("warning: `$readmemh` reading"), "{report}");
+    let report =
+        celox::Simulation::from_sv_sources(vec![(source.as_str(), Path::new("top.sv"))], "Top")
+            .scheduler_mode(celox::SchedulerMode::Reference)
+            .build_plan()
+            .unwrap();
+    assert!(
+        report.contains("`always` at top.sv:5:13 in `Top`: reference loop"),
+        "{report}"
+    );
+    assert!(
+        report.contains("scheduler: none (reference loop)"),
+        "{report}"
+    );
+}
