@@ -6,12 +6,20 @@ import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { hostCpu, publishResult } from "./publish-heliodor-bench.mjs";
 
-const manifest = JSON.parse(readFileSync(new URL("../benchmarks/rtlmeter/manifest.json", import.meta.url)));
+const coldManifest = JSON.parse(readFileSync(new URL("../benchmarks/rtlmeter/manifest.json", import.meta.url)));
 const locked = JSON.parse(readFileSync(new URL("../flake.lock", import.meta.url))).nodes.xezim;
 const digest = value => /^[a-f0-9]{64}$/.test(value ?? "");
 const positive = value => Number.isSafeInteger(value) && value > 0;
 
+export function manifestFor(report) {
+  if (report?.contract === "rtlmeter-steady-state-v1") {
+    return JSON.parse(readFileSync(new URL("../benchmarks/rtlmeter/steady_manifest.json", import.meta.url)));
+  }
+  return coldManifest;
+}
+
 export function rtlmeterMetrics(report, commit) {
+  const manifest = manifestFor(report);
   assert.ok(manifest.cases[report.case], "Unknown RTLMeter case");
   const spec = manifest.cases[report.case];
   assert.deepEqual(report.caseSpec, spec, "Workload options must match the manifest");
@@ -32,11 +40,16 @@ export function rtlmeterMetrics(report, commit) {
   for (const engine of ["celox", "verilator", "xezim"]) {
     assert.ok(report.versions?.[engine] && digest(report.binarySha256?.[engine]));
   }
-  assert.deepEqual(report.configuration, {
+  const expectedConfig = report.contract === "rtlmeter-steady-state-v1" ? {
+    celox: "native O2; threads=1; steady-state simulation",
+    verilator: "--binary --timing --assert; -O3; C++ -O3; -j1; steady-state simulation",
+    xezim: "release default VM; persistent caches disabled; full four-state",
+  } : {
     celox: "tiered hotspot JIT O2; threads=1; cold source-to-finish",
     verilator: "--binary --timing --assert; -O3; C++ -O3; -j1; fresh Mdir",
     xezim: "release default VM; persistent caches disabled; full four-state",
-  });
+  };
+  assert.deepEqual(report.configuration, expectedConfig);
   assert.ok(digest(report.sourceSha256));
   assert.ok(Object.keys(report.inputSha256 ?? {}).length > 100);
   assert.ok(Object.values(report.inputSha256).every(digest));
@@ -70,7 +83,11 @@ export function rtlmeterMetrics(report, commit) {
     for (const sample of row.samples) {
       assert.equal(sample.status, "passed");
       assert.ok(positive(sample.processNs) && positive(sample.cycles));
-      assert.ok(sample.cycles < report.maxCycles);
+      if (report.contract === "rtlmeter-steady-state-v1") {
+        assert.ok(positive(sample.simNs));
+        assert.ok(typeof sample.cyclesPerSec === "number" && sample.cyclesPerSec > 0);
+      }
+      assert.ok(sample.cycles <= report.maxCycles);
       assert.equal(sample.cycles, row.samples[0].cycles);
     }
   }
@@ -82,14 +99,31 @@ export function rtlmeterMetrics(report, commit) {
     }
   }
   const run = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+  const testName = spec.test ?? (report.contract === "rtlmeter-steady-state-v1" ? "cmark" : "hello");
+  const isSteady = report.contract === "rtlmeter-steady-state-v1";
   return report.results.filter(row => row.status === "passed").map(row => {
     const times = row.samples.map(sample => sample.processNs).sort((a, b) => a - b);
-    return { name: `rtlmeter-${row.engine}/rtlmeter_${report.case}_hello_v1_x64_${row.stateModel}_total`,
-      unit: "us", value: times[Math.floor(times.length / 2)] / 1000,
-      extra: JSON.stringify({ caseSpec: report.caseSpec, contract: report.contract, rtlmeter: report.rtlmeterRevision,
-        state: row.stateModel, cycles: row.samples[0].cycles, maxCycles: report.maxCycles, samples: times,
+    const simTimes = row.samples.map(sample => sample.simNs ?? sample.processNs).sort((a, b) => a - b);
+    const medianSimNs = simTimes[Math.floor(simTimes.length / 2)];
+    const cyclesPerSecList = row.samples.map(sample => sample.cyclesPerSec ?? (sample.cycles / (sample.processNs / 1e9))).sort((a, b) => a - b);
+    const medianCyclesPerSec = cyclesPerSecList[Math.floor(cyclesPerSecList.length / 2)];
+    const metricName = isSteady
+      ? `rtlmeter-${row.engine}/rtlmeter_${report.case}_${testName}_v1_x64_${row.stateModel}_sim`
+      : `rtlmeter-${row.engine}/rtlmeter_${report.case}_hello_v1_x64_${row.stateModel}_total`;
+    const metricValue = isSteady ? (medianSimNs / 1000) : (times[Math.floor(times.length / 2)] / 1000);
+    return {
+      name: metricName,
+      unit: "us",
+      value: metricValue,
+      extra: JSON.stringify({
+        caseSpec: report.caseSpec, contract: report.contract, rtlmeter: report.rtlmeterRevision,
+        state: row.stateModel, cycles: row.samples[0].cycles, maxCycles: report.maxCycles,
+        samples: times, simSamples: simTimes, cyclesPerSec: medianCyclesPerSec,
+        throughputKhz: Math.round(medianCyclesPerSec / 10) / 100,
         configuration: report.configuration, versions: report.versions,
-        binarySha256: report.binarySha256, sourceSha256: report.sourceSha256, run }) };
+        binarySha256: report.binarySha256, sourceSha256: report.sourceSha256, run
+      })
+    };
   });
 }
 

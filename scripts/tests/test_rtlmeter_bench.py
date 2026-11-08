@@ -124,6 +124,42 @@ configurations:
         self.assertTrue(result['timedOut'])
         self.assertEqual(execute.call_count, 1)
 
+    def test_steady_state_commands_use_native_backend_for_celox_and_verbose_for_xezim(self):
+        spec = {'top': 'tb', 'includes': [Path('/source/rtl')], 'defines': {'CLOCK': 'tb.clk'}}
+        binaries = {engine: engine for engine in bench.ENGINES}
+        cmd_celox = bench.commands('celox', 'two-state', spec, Path('/files.f'), Path('/build'), binaries, [],
+                                   contract='rtlmeter-steady-state-v1')[0]
+        self.assertIn('--backend', cmd_celox)
+        self.assertEqual(cmd_celox[cmd_celox.index('--backend') + 1], 'native')
+        self.assertIn('-O', cmd_celox)
+        self.assertEqual(cmd_celox[cmd_celox.index('-O') + 1], 'O2')
+        self.assertIn('--report', cmd_celox)
+
+        cmd_xezim = bench.commands('xezim', 'four-state', spec, Path('/files.f'), Path('/build'), binaries, [],
+                                   contract='rtlmeter-steady-state-v1')[0]
+        self.assertIn('--verbose', cmd_xezim)
+
+    def test_extract_sim_ns_parses_simulator_output_correctly(self):
+        outcome = {'elapsedNs': 5000000000, 'commands': [{'elapsedNs': 3000000000}, {'elapsedNs': 2000000000}]}
+        celox_stdout = 'CELOX_TEST_TIMING test=tb compile_ns=3000000000 execute_ns=1234567890 jit_execute_ns=NA\n'
+        self.assertEqual(bench.extract_sim_ns('celox', celox_stdout, outcome), 1234567890)
+
+        self.assertEqual(bench.extract_sim_ns('verilator', '', outcome), 2000000000)
+
+        xezim_stdout = '[PHASE] compilation: 100.0ms\n[PHASE] simulation: 85.5ms\n[PHASE] total: 185.5ms\n'
+        self.assertEqual(bench.extract_sim_ns('xezim', xezim_stdout, outcome), 85500000)
+
+    def test_steady_manifest_specifies_coremark_cases(self):
+        import json
+        steady_manifest = json.loads((Path(bench.ROOT) / 'benchmarks/rtlmeter/steady_manifest.json').read_text())
+        self.assertEqual(steady_manifest['contract'], 'rtlmeter-steady-state-v1')
+        self.assertIn('e902', steady_manifest['cases'])
+        self.assertIn('e906', steady_manifest['cases'])
+        self.assertEqual(steady_manifest['cases']['e902']['test'], 'cmark')
+        self.assertEqual(steady_manifest['cases']['e906']['test'], 'cmark')
+        self.assertEqual(steady_manifest['cases']['e902']['payload'], 'CoreMark 1.0')
+        self.assertEqual(steady_manifest['cases']['e906']['payload'], 'CoreMark 1.0')
+
 
 if __name__ == '__main__':
     unittest.main()

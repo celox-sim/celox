@@ -436,6 +436,10 @@ function rtlmeterDesignName(name: string): string {
 function formatChartTitle(benchName: string): string {
   const rtlmeter = benchName.match(/^rtlmeter_(e902|e906|e203)_hello_v1_x64_(two-state|four-state)_total$/);
   if (rtlmeter) return `${rtlmeterDesignName(rtlmeter[1])} hello · cold source-to-finish`;
+  const rtlmeterCmark = benchName.match(/^rtlmeter_(e902|e906|e203)_cmark_v1_x64_(two-state|four-state)_sim$/);
+  if (rtlmeterCmark) return `${rtlmeterDesignName(rtlmeterCmark[1])} CoreMark · steady-state simulation`;
+  const rtlmeterSteady = benchName.match(/^rtlmeter_(e902|e906|e203)_([a-z0-9]+)_v1_x64_(two-state|four-state)_sim$/);
+  if (rtlmeterSteady) return `${rtlmeterDesignName(rtlmeterSteady[1])} ${rtlmeterSteady[2]} · steady-state simulation`;
   let s = benchName;
   const rica = s.match(/^collection_rica_(kernel-[a-z-]+)_([a-f0-9]+)_(x64|arm64)_total$/);
   if (rica) return `rica ${rica[1]} · total · ${rica[3]} · workload ${rica[2]}`;

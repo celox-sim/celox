@@ -94,3 +94,65 @@ test('E203 publishes the default hello workload and rejects altered options or i
   r.sourceSha256 = createHash('sha256').update(JSON.stringify(r.inputSha256)).digest('hex');
   assert.throws(() => rtlmeterMetrics(r, commit), /Missing input identity:.*program\.hex/);
 });
+
+const steadyManifest = JSON.parse(readFileSync(new URL("../benchmarks/rtlmeter/steady_manifest.json", import.meta.url)));
+
+function steadyReport(name = "e902") {
+  const spec = steadyManifest.cases[name];
+  const inputSha256 = Object.fromEntries([
+    ...Array.from({ length: 110 }, (_, i) => `designs/${spec.design}/src/${i}.v`),
+    `designs/${spec.design}/descriptor.yaml`,
+    ...(spec.inputFiles ?? ["tests/cmark/case.pat"]).map(file => `designs/${spec.design}/${file}`),
+    'rtl/__rtlmeter_utils.sv', 'rtl/__rtlmeter_top_include.vh',
+  ].sort().map(path => [path, 'b'.repeat(64)]));
+  return { schemaVersion: 1, contract: steadyManifest.contract, case: name, caseSpec: spec, status: 'completed',
+    rtlmeterRevision: steadyManifest.revision, celoxCommit: commit, dirty: false,
+    requestedSamples: 3, maxCycles: spec.maxCycles, host: { architecture: 'x86_64', cpu: 'test CPU', affinityCpu: 0 },
+    xezimRelease: locked.original.ref, xezimRevision: locked.locked.rev,
+    versions: { celox: 'celox 0.12.0', verilator: 'Verilator 5.052', xezim: `xezim version ${locked.original.ref.replace(/^v/, '')}\ngit unknown` },
+    binarySha256: { celox: 'a'.repeat(64), verilator: 'b'.repeat(64), xezim: 'c'.repeat(64) },
+    configuration: { celox: 'native O2; threads=1; steady-state simulation',
+      verilator: '--binary --timing --assert; -O3; C++ -O3; -j1; steady-state simulation',
+      xezim: 'release default VM; persistent caches disabled; full four-state' },
+    inputSha256, sourceSha256: createHash('sha256').update(JSON.stringify(inputSha256)).digest('hex'),
+    results: ['two-state', 'four-state'].flatMap(stateModel => ['celox', 'verilator', 'xezim'].map(engine => ({
+      engine, stateModel, experimental: engine === 'verilator' && stateModel === 'four-state',
+      ...(engine === 'xezim' && stateModel === 'two-state' ? {
+        status: 'unsupported', reason: 'No global two-state mode', samples: [],
+      } : { status: 'passed', probe: 'passed', negativeControl: 'passed',
+        samples: [3e9, 1e9, 2e9].map((processNs, i) => {
+          const simNs = [1.5e9, 1.2e9, 1.3e9][i];
+          const cycles = 500000;
+          return { status: 'passed', processNs, simNs, cycles,
+            cyclesPerSec: Math.round(cycles / (simNs / 1e9) * 100) / 100,
+            throughputKhz: Math.round((cycles / (simNs / 1e9) / 1000) * 100) / 100 };
+        }) }),
+    }))),
+  };
+}
+
+test('RTLMeter steady-state benchmark publishes simulation time and throughput', () => {
+  const metrics = rtlmeterMetrics(steadyReport(), commit);
+  assert.equal(metrics.length, 5);
+  assert.ok(metrics.every(metric => metric.name.includes('_cmark_v1_') && metric.name.endsWith('_sim')));
+  assert.ok(metrics.every(metric => metric.value === 1.3e6 && metric.unit === 'us'));
+  for (const metric of metrics) {
+    const extra = JSON.parse(metric.extra);
+    assert.equal(extra.contract, 'rtlmeter-steady-state-v1');
+    assert.ok(extra.throughputKhz > 0);
+    assert.ok(extra.cyclesPerSec > 0);
+    assert.equal(extra.simSamples.length, 3);
+  }
+});
+
+test('RTLMeter steady workflow runs periodically with steady manifest and master-only publication', () => {
+  const workflow = readFileSync(new URL('../.github/workflows/rtlmeter-steady-bench.yml', import.meta.url), 'utf8');
+  assert.match(workflow, /schedule:[\s\S]+workflow_dispatch:/);
+  assert.doesNotMatch(workflow, /^\s+(pull_request|push|merge_group):/m);
+  assert.match(workflow, /group: rtlmeter-steady-benchmark-/);
+  assert.match(workflow, /case: \[e902, e906, e203\]/);
+  assert.match(workflow, /--manifest benchmarks\/rtlmeter\/steady_manifest\.json/);
+  assert.match(workflow, /needs: comparison\n    if: github.ref == 'refs\/heads\/master'/);
+  assert.ok(workflow.indexOf('--validate-only') < workflow.lastIndexOf('node scripts/publish-rtlmeter-bench.mjs'));
+});
+
