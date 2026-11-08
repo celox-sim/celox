@@ -10,13 +10,13 @@
   "groups": {
     "cores": {
       "2state": {
-        "passed": 1,
-        "failed": 15,
+        "passed": 0,
+        "failed": 16,
         "skipped": 5,
         "executed": 16,
         "upstream_input_issues": 1,
-        "pass_percent": 6.25,
-        "tags_passed": 1,
+        "pass_percent": 0.0,
+        "tags_passed": 0,
         "tags_tested": 8,
         "skipped_by_tag": {
           "ibex": 1,
@@ -25,7 +25,7 @@
         },
         "by_tag": {
           "RgGen": {
-            "passed": 1,
+            "passed": 0,
             "executed": 1
           },
           "TNoC": {
@@ -59,25 +59,24 @@
         },
         "by_execution_mode": {
           "elaboration": {
-            "fail": 15,
-            "pass": 1
+            "fail": 16
           }
         },
         "by_failure_category": {
           "compile_error": 4,
           "input_issue": 1,
           "unclassified": 1,
-          "unsupported": 9
+          "unsupported": 10
         }
       },
       "4state": {
-        "passed": 1,
-        "failed": 15,
+        "passed": 0,
+        "failed": 16,
         "skipped": 5,
         "executed": 16,
         "upstream_input_issues": 1,
-        "pass_percent": 6.25,
-        "tags_passed": 1,
+        "pass_percent": 0.0,
+        "tags_passed": 0,
         "tags_tested": 8,
         "skipped_by_tag": {
           "ibex": 1,
@@ -86,7 +85,7 @@
         },
         "by_tag": {
           "RgGen": {
-            "passed": 1,
+            "passed": 0,
             "executed": 1
           },
           "TNoC": {
@@ -120,15 +119,14 @@
         },
         "by_execution_mode": {
           "elaboration": {
-            "fail": 15,
-            "pass": 1
+            "fail": 16
           }
         },
         "by_failure_category": {
           "compile_error": 4,
           "input_issue": 1,
           "unclassified": 1,
-          "unsupported": 9
+          "unsupported": 10
         }
       }
     }
@@ -437,21 +435,21 @@
     {
       "test": "generated/rggen/rggen.sv",
       "state_mode": "2state",
-      "result": "pass",
+      "result": "fail",
       "mode": "elaboration",
       "tags": "RgGen",
-      "failure_category": "",
-      "diagnostic": "",
+      "failure_category": "unsupported",
+      "diagnostic": "unsupported_construct",
       "input_issue": ""
     },
     {
       "test": "generated/rggen/rggen.sv",
       "state_mode": "4state",
-      "result": "pass",
+      "result": "fail",
       "mode": "elaboration",
       "tags": "RgGen",
-      "failure_category": "",
-      "diagnostic": "",
+      "failure_category": "unsupported",
+      "diagnostic": "unsupported_construct",
       "input_issue": ""
     },
     {
@@ -556,7 +554,7 @@
     }
   ],
   "driver_profile": "release",
-  "measured_at": "2026-11-07T11:47:51.751674+00:00",
-  "celox_revision": "5ac6da4074e35aecacb3e51beabd46ed60d6af16",
-  "run_url": "https://github.com/celox-sim/celox/actions/runs/42367135167"
+  "measured_at": "2026-11-08T11:39:00.604480+00:00",
+  "celox_revision": "8388ce2e1226d01a76fda4cd184ea6223d5f4edf",
+  "run_url": "https://github.com/celox-sim/celox/actions/runs/42475557087"
 }
