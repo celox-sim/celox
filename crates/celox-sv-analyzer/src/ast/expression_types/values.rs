@@ -473,6 +473,11 @@ fn conditional(
     right: TyId,
 ) -> Option<TyId> {
     let predicate_four_state = four_state(table.data(predicate));
+    // 11.4.11: arms of the same enumerated type give that type, which an
+    // enum variable takes (6.19.3).
+    if table.matches(left, right) && table.is_enum(left) {
+        return Some(left);
+    }
     // 11.3.4, 11.4.11: differing branch bits merge to X for an ambiguous
     // predicate. Promote even matching two-state integral branch types.
     if predicate_four_state

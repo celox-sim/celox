@@ -489,6 +489,24 @@ pub(in crate::ast) fn bind_native(
                     )?);
                     continue;
                 }
+                // An item of an enumerated element is of its type (6.19.3).
+                if !pattern
+                    && shape.unpacked.is_empty()
+                    && shape.container.is_none()
+                    && let Some(enumeration) = shape
+                        .type_id(&mut session.types, &tree.functions, &dims.const_env)
+                        .filter(|ty| session.types.is_enum(*ty))
+                {
+                    assignments::check_assign(
+                        tree,
+                        session,
+                        id,
+                        native,
+                        dims,
+                        enumeration,
+                        || "assignment pattern item".into(),
+                    )?;
+                }
                 // A handle is checked where it is one element; a value
                 // given to a subarray is an array, checked as one above.
                 if let Some(class) = shape.class.as_deref()

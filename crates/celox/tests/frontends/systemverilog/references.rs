@@ -66,7 +66,7 @@ fn ref_actuals_of_enumerated_types_match_only_their_enumeration() {
                typedef enum bit [1:0] {{A, B, C}} E;
                typedef enum bit [1:0] {{P, Q, R}} F;
                typedef bit [1:0] U;
-               {actual} v = {{1'b0, 1'b1}};
+               {actual} v = {actual}'(1);
                function automatic void advance(ref {formal} x);
                  x = {formal}'(x + 1);
                endfunction
