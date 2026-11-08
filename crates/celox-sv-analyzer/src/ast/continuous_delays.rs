@@ -141,6 +141,7 @@ pub(super) fn lower(
                                     amount: Expr::Literal(ticks.to_string()),
                                     ticks_per_unit: 1,
                                     ticks_per_precision: 1,
+                                    precision_steps_per_tick: 1,
                                 },
                                 Stmt::Assign {
                                     lhs: LValue::Ident(driven.clone()),

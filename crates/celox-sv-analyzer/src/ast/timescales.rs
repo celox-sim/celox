@@ -739,6 +739,17 @@ impl Timescales {
         )
     }
 
+    /// The time precision steps of the scope of `node` in one time unit of
+    /// the simulation: more than one where the scope's precision is finer
+    /// than the global precision, and its delays round again to whole
+    /// simulation steps (3.14.1, 3.14.3).
+    fn precision_steps_per_tick_in_unit(&self, at: usize, unit: &Unit) -> Option<u64> {
+        let scale =
+            scope_at(&unit.scopes, &unit.parents, at).map_or(unit.scale, |i| unit.scopes[i].scale);
+        let precision = self.precision.unwrap_or(DEFAULT.precision);
+        Some(10u64.pow(u32::try_from(precision - scale.precision).unwrap_or(0)))
+    }
+
     /// The time units of the simulation in `10^exponent(scale)` seconds,
     /// where `scale` is the time scale of the scope at `at`; `None` when that
     /// is less than one. The simulation counts the global precision (3.14.3),
@@ -972,6 +983,15 @@ pub(super) fn precision_divisor(
     tree: &AnalysisContext<'_>,
 ) -> Converted<u64> {
     divisor(node, tree, Timescales::precision_divisor_in_unit)
+}
+
+/// The time precision steps of the scope of `node` in one time unit of the
+/// simulation, at least one (see `Timescales::precision_steps_per_tick_in_unit`).
+pub(super) fn precision_steps_per_tick(
+    node: celox_sv_syntax::ExprId,
+    tree: &AnalysisContext<'_>,
+) -> Converted<u64> {
+    divisor(node, tree, Timescales::precision_steps_per_tick_in_unit)
 }
 
 fn divisor(
