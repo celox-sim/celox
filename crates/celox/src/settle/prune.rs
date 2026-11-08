@@ -48,11 +48,12 @@ pub(crate) fn prune_stale_marks(
     }
     let flags = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, schema.flags);
     let partitions = settle.partitions;
-    // What each partition touches, once every body found for it resolved;
-    // a partition with an unresolved body keeps every mark.
+    // What each partition touches and writes, once every body found for it
+    // resolved; a partition with an unresolved body keeps every mark.
     let mut touched: Vec<Option<Homes>> = vec![None; partitions];
+    let mut written: Vec<Option<Homes>> = vec![None; partitions];
     let mut unresolved = vec![false; partitions];
-    let mut bodies: Vec<Vec<Vec<BlockId>>> = Vec::new();
+    let mut bodies: Vec<Vec<(usize, Vec<BlockId>)>> = Vec::new();
     // An alias store leaves its load behind: only live values count.
     for unit in &mut sir.eval_comb {
         celox_sir_opt::optimizer::remove_dead_sir_definitions(unit);
@@ -65,16 +66,18 @@ pub(crate) fn prune_stale_marks(
                 continue;
             };
             let blocks = analysis.body(body, merge);
-            match analysis.touched(&blocks) {
-                Some(homes) if !unresolved[partition] => {
-                    touched[partition].get_or_insert_default().extend(homes);
+            match analysis.effects(&blocks) {
+                Some((t, w)) if !unresolved[partition] => {
+                    touched[partition].get_or_insert_default().extend(t);
+                    written[partition].get_or_insert_default().extend(w);
                 }
                 _ => {
                     unresolved[partition] = true;
                     touched[partition] = None;
+                    written[partition] = None;
                 }
             }
-            unit_bodies.push(blocks);
+            unit_bodies.push((partition, blocks));
         }
         bodies.push(unit_bodies);
     }
@@ -127,8 +130,16 @@ pub(crate) fn prune_stale_marks(
             let analysis = Analysis::new(unit, &flags, partitions, &layout.offsets);
             let mut edits = Vec::new();
             let mut seen = crate::HashSet::default();
-            for blocks in &unit_bodies {
-                analysis.publish_edits(blocks, &keeps, &mut seen, &mut edits);
+            for (partition, blocks) in &unit_bodies {
+                let publisher_writes = written[*partition].as_ref();
+                analysis.publish_edits(
+                    blocks,
+                    &keeps,
+                    publisher_writes,
+                    &touched,
+                    &mut seen,
+                    &mut edits,
+                );
             }
             edits
         };
@@ -381,11 +392,12 @@ impl<'a> Analysis<'a> {
         }
     }
 
-    /// The homes the instructions of `blocks` touch, through the values they
-    /// use wherever those are computed; `None` when a body reaches state in
-    /// a way this cannot follow, or ends the unit.
-    fn touched(&self, blocks: &[BlockId]) -> Option<Homes> {
-        let mut homes = Homes::default();
+    /// The homes the instructions of `blocks` touch (read or write) and write;
+    /// `None` when a body reaches state in a way this cannot follow, or ends the
+    /// unit.
+    fn effects(&self, blocks: &[BlockId]) -> Option<(Homes, Homes)> {
+        let mut touched = Homes::default();
+        let mut written = Homes::default();
         let mut work: Vec<RegisterId> = Vec::new();
         // The loads that only feed identity stores, with those stores.
         let mut identity_loads: crate::HashMap<RegisterId, usize> = crate::HashMap::default();
@@ -409,8 +421,9 @@ impl<'a> Analysis<'a> {
                 {
                     continue;
                 }
-                self.add_access(&mut homes, instruction.state_reads())?;
-                self.add_access(&mut homes, instruction.state_writes())?;
+                self.add_access(&mut touched, instruction.state_reads())?;
+                self.add_access(&mut touched, instruction.state_writes())?;
+                self.add_access(&mut written, instruction.state_writes())?;
                 instruction.for_each_use(|register| work.push(register));
             }
             if matches!(block.terminator, SIRTerminator::Return) {
@@ -426,7 +439,7 @@ impl<'a> Analysis<'a> {
                 continue;
             }
             if let Some(instruction) = self.defs.get(&register) {
-                self.add_access(&mut homes, instruction.state_reads())?;
+                self.add_access(&mut touched, instruction.state_reads())?;
                 instruction.for_each_use(|register| work.push(register));
             } else if let Some(&(block, index)) = self.params.get(&register) {
                 let arguments = self.args.get(&block)?;
@@ -437,7 +450,15 @@ impl<'a> Analysis<'a> {
                 return None;
             }
         }
-        Some(homes)
+        Some((touched, written))
+    }
+
+    /// The homes the instructions of `blocks` touch, through the values they
+    /// use wherever those are computed; `None` when a body reaches state in
+    /// a way this cannot follow, or ends the unit.
+    #[cfg(test)]
+    fn touched(&self, blocks: &[BlockId]) -> Option<Homes> {
+        self.effects(blocks).map(|(touched, _)| touched)
     }
 
     /// The homes a change test compares: an `Or` tree of `NeCase` leaves,
@@ -578,6 +599,8 @@ impl<'a> Analysis<'a> {
         &self,
         blocks: &[BlockId],
         keeps: &dyn Fn(usize, &Homes) -> bool,
+        publisher_writes: Option<&Homes>,
+        touched: &[Option<Homes>],
         seen: &mut crate::HashSet<BlockId>,
         edits: &mut Vec<Edit>,
     ) {
@@ -608,7 +631,20 @@ impl<'a> Analysis<'a> {
                 let kept = readers
                     .iter()
                     .copied()
-                    .filter(|&reader| keeps(reader, &compared))
+                    .filter(|&reader| {
+                        // A reader that touches any home that the publisher partition
+                        // writes depends on the publisher's work: keep it even if
+                        // this specific change test compared another object.
+                        if let (Some(pub_writes), Some(reader_homes)) = (
+                            publisher_writes,
+                            touched.get(reader).and_then(|h| h.as_ref()),
+                        ) {
+                            if reader_homes.iter().any(|home| pub_writes.contains(home)) {
+                                return true;
+                            }
+                        }
+                        keeps(reader, &compared)
+                    })
                     .collect::<Vec<_>>();
                 remaining += kept.len();
                 if kept.len() != readers.len() {
@@ -891,5 +927,57 @@ module Top (
             }
         }
         assert!(checked > 0);
+    }
+
+    #[test]
+    fn publisher_retains_readers_touching_its_other_homes() {
+        let source = r#"
+module Sub (
+    d: input logic<8>,
+    q: output logic<8>,
+) {
+    assign q = d;
+}
+
+module Top (
+    clk: input logic,
+    a: input logic<8>,
+    x: output logic<8>,
+    y: output logic<8>,
+) {
+    var v1: logic<8>;
+    var v2: logic<8>;
+    var sub_q: logic<8>;
+    // v1 and v2 are produced together by one partition
+    assign v1 = a + 8'd1;
+    assign v2 = a ^ 8'hff;
+    // Reader partition touches v1 directly, and also sub.d (aliased to v2)
+    inst sub: Sub (d: v2, q: sub_q);
+    assign x = v1 + sub_q;
+    assign y = v2;
+}
+"#;
+        let options = crate::optimizer::OptimizeOptions::default()
+            .enable(crate::optimizer::SirPass::PartitionedSettle)
+            .with_settle_partition(SettlePartition::Always);
+        let (program, _) = crate::compile_to_sir(
+            &[(source, std::path::Path::new("settle-prune-multi.veryl"))],
+            "Top",
+            &[],
+            &[],
+            false,
+            &Default::default(),
+            None,
+            None,
+            None,
+            None,
+            &[],
+            &options,
+        )
+        .unwrap();
+        let program = program.into_laid_out(false);
+        let layout = program.layout();
+        let settle = layout.settle.as_ref().unwrap();
+        assert!(settle.partitions > 0);
     }
 }
