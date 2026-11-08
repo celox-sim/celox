@@ -1,0 +1,1 @@
+Drop the unmodeled-type exemption walk; the binder's tables record every type declaration they visit (ScopeSymbols::type_declarations for imports), so deferred and undeclared names are told apart
