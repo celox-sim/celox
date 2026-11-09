@@ -7,7 +7,8 @@ use std::collections::BinaryHeap;
 use celox_design::{SchedulerExit, edges::LEVEL_UNKNOWN};
 
 use super::{
-    Baseline, CompiledSlots, NativeResidency, SchedulerMode, SimulationExecutor, SimulationState,
+    Baseline, CompiledSlots, NativeResidency, NbaUpdate, SchedulerMode, SimulationExecutor,
+    SimulationState,
 };
 use crate::{
     SimulatorErrorCode,
@@ -391,9 +392,53 @@ impl<B: SimBackend> SimulationState<B> {
         }
 
         let scheduler = scheduler_refs(&self.model.scheduler)?;
+        let (count, now): (u64, u64) = {
+            let backend = executor.backend();
+            (
+                backend.get_scheduler_slot(scheduler.count),
+                backend.get_scheduler_slot(scheduler.now),
+            )
+        };
+        if !executor.compiled_nba_queues() {
+            // A fused flip-flop domain staged delayed updates during the
+            // slot and set their sites' pending flags; no generated queue
+            // publishes them in this executor, so queue them for their due
+            // times here (IEEE 1800-2023 9.4.5, 10.4.2). Runs are one slot
+            // at a time for such designs, so `now` is the capture time.
+            let backend = executor.backend_mut();
+            for process in &self.model.processes {
+                for site in &process.nba_sites {
+                    if !site.unit {
+                        continue;
+                    }
+                    let Some(pending) = site.pending else {
+                        continue;
+                    };
+                    if backend.get_as::<u8>(pending) == 0 {
+                        continue;
+                    }
+                    backend.set(pending, 0u8);
+                    let update = crate::timing::read(backend, site.value);
+                    let update = NbaUpdate {
+                        target: site.target,
+                        lsb: site.lsb,
+                        width: site.width,
+                        value: update,
+                    };
+                    if site.delay > 0 {
+                        let due = now.saturating_add(site.delay);
+                        self.process_state
+                            .delayed_nba
+                            .entry(due)
+                            .or_default()
+                            .push((false, update));
+                    } else {
+                        self.process_state.nba_queue.push(update);
+                    }
+                }
+            }
+        }
         let backend = executor.backend();
-        let count: u64 = backend.get_scheduler_slot(scheduler.count);
-        let now: u64 = backend.get_scheduler_slot(scheduler.now);
         let exit = SchedulerExit::from_code(backend.get_scheduler_slot(scheduler.exit));
         let current: u64 = backend.get_scheduler_slot(scheduler.current);
         let complete = result.is_ok() && exit == Some(SchedulerExit::Limit);

@@ -234,6 +234,9 @@ pub struct NbaSiteRefs {
     pub value: SignalRef,
     pub position: Option<NbaPosition<SignalRef>>,
     pub pending: Option<SignalRef>,
+    /// The site belongs to a fused flip-flop domain: its commit unit, not
+    /// a process kernel, stages the update and sets the pending flag.
+    pub unit: bool,
 }
 
 /// Control slots and sites of one process kernel.

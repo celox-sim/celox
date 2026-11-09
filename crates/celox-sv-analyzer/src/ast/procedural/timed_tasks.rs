@@ -208,7 +208,13 @@ pub(in crate::ast) fn classify<'a>(
     let mut retained = Vec::new();
     for process in std::mem::take(ff) {
         let effects = body_effects(&process.body, &known, &definitions);
-        let blocks = effects.suspends;
+        // An intra-assignment delay schedules its update without suspending
+        // the caller (IEEE 1800-2023 9.4.5, 10.4.2), so a plain `always`
+        // whose only timing controls are such delays keeps its fused form;
+        // the lowering stages the delayed updates for timed publication.
+        let blocks = effects.suspends
+            && !(process.suspendable
+                && delayed_nonblocking_only(&process.body, &timed, &definitions));
         if !blocks && !effects.uses_kernel() {
             retained.push(process);
             continue;
@@ -255,6 +261,106 @@ pub(in crate::ast) fn classify<'a>(
         processes.sort_by_key(|process| (!process.is_initializer(), process.creation_order));
     }
     Ok(())
+}
+
+/// Whether nothing in `body` suspends its caller except the delay controls
+/// of delayed nonblocking assignments, which schedule an update at a future
+/// time instead of suspending (IEEE 1800-2023 9.4.5). A delayed assignment
+/// with an event control, any other timing statement, and a call of a timed
+/// subroutine all suspend.
+fn delayed_nonblocking_only(
+    body: &[Stmt],
+    timed: &HashSet<String>,
+    definitions: &HashMap<&str, &Subroutine>,
+) -> bool {
+    let mut exempt: HashSet<*const Stmt> = HashSet::default();
+    for stmt in body {
+        stmt.walk(&mut |stmt| {
+            if let Stmt::DelayedNonblocking { control, .. } = stmt
+                && matches!(&**control, Stmt::Delay { .. })
+            {
+                exempt.insert(std::ptr::from_ref(&**control));
+            }
+        });
+    }
+    let mut suspends = false;
+    for stmt in body {
+        stmt.walk(&mut |stmt| {
+            match stmt {
+                Stmt::Delay { .. } => {
+                    if !exempt.contains(&std::ptr::from_ref(stmt)) {
+                        suspends = true;
+                    }
+                }
+                Stmt::WaitEvent(_)
+                | Stmt::WaitImplicit { .. }
+                | Stmt::Wait(_)
+                | Stmt::WaitFork
+                | Stmt::Fork { .. }
+                | Stmt::DeferActive
+                | Stmt::AssertionRegion { .. } => suspends = true,
+                Stmt::Call { name, .. } if timed.contains(name) => suspends = true,
+                Stmt::Call { name, .. }
+                    if definitions.get(name.as_str()).is_some_and(|subroutine| {
+                        subroutine_contains_delayed(
+                            subroutine,
+                            definitions,
+                            &mut HashSet::default(),
+                        )
+                    }) =>
+                {
+                    suspends = true
+                }
+                _ => {}
+            }
+            for expr in lifetimes::stmt_exprs(stmt) {
+                suspends |= expression_effects(expr).suspends;
+                // A call in an expression suspends as a call statement
+                // does when the callee is timed or contains a delayed
+                // nonblocking assignment in its own units.
+                const_functions::visit_expr_calls(expr, &mut |callee, _| {
+                    if let Callee::Subroutine(name) = callee
+                        && (timed.contains(name)
+                            || definitions.get(name.as_str()).is_some_and(|subroutine| {
+                                subroutine_contains_delayed(
+                                    subroutine,
+                                    definitions,
+                                    &mut HashSet::default(),
+                                )
+                            }))
+                    {
+                        suspends = true;
+                    }
+                });
+            }
+        });
+    }
+    !suspends
+}
+
+/// Whether a subroutine body contains a delayed nonblocking assignment,
+/// directly or through the subroutines it calls: those run in their own
+/// units, which cannot stage a flip-flop's delayed update.
+fn subroutine_contains_delayed(
+    subroutine: &Subroutine,
+    definitions: &HashMap<&str, &Subroutine>,
+    visited: &mut HashSet<String>,
+) -> bool {
+    let mut found = false;
+    for stmt in subroutine.body.iter().chain(&subroutine.sensitivity_body) {
+        stmt.walk(&mut |stmt| match stmt {
+            Stmt::DelayedNonblocking { .. } => found = true,
+            Stmt::Call { name, .. } => {
+                if visited.insert(name.clone())
+                    && let Some(callee) = definitions.get(name.as_str())
+                {
+                    found |= subroutine_contains_delayed(callee, definitions, visited);
+                }
+            }
+            _ => {}
+        });
+    }
+    found
 }
 
 /// The subroutines for which `holds` is true, given those already found:

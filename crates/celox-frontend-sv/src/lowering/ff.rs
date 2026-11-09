@@ -6238,9 +6238,119 @@ impl<'p, 'a> Ff<'p, 'a> {
             .chain(exact.iter().copied())
             .collect();
         mixed.sort_by_key(|id| id.0);
-        let staged: Vec<NbaStage> = mixed
+        // The intra-assignment delays of this body's delayed nonblocking
+        // assignments (IEEE 1800-2023 9.4.5): each distinct delay of a
+        // variable gets a staging pair of its own, so an update is
+        // published at its own due time rather than at the edge.
+        let mut delayed: HashMap<SourceVarId, Vec<u64>> = HashMap::default();
+        let mut delayed_assignments: HashSet<usize> = HashSet::default();
+        let mut stmt_delays: HashMap<usize, u64> = HashMap::default();
+        let mut pending_delays: Vec<(usize, sv::ir::Expr, u64, SourceVarId)> = Vec::new();
+        for stmt in body {
+            stmt.walk(&mut |stmt| {
+                let sv::ir::Stmt::DelayedNonblocking {
+                    control,
+                    assignment,
+                } = stmt
+                else {
+                    return;
+                };
+                let sv::ir::Stmt::Delay {
+                    amount,
+                    ticks_per_unit,
+                    ..
+                } = control.as_ref()
+                else {
+                    return;
+                };
+                let (target, assignment_ptr) = match assignment.as_ref() {
+                    sv::ir::Stmt::Assign { lhs, .. } => (
+                        self.m.id(lhs.name()),
+                        std::ptr::from_ref(assignment.as_ref()),
+                    ),
+                    sv::ir::Stmt::AssignConcat { parts, .. } => (
+                        parts.first().and_then(|part| self.m.id(part.name())),
+                        std::ptr::from_ref(assignment.as_ref()),
+                    ),
+                    _ => (None, std::ptr::from_ref(assignment.as_ref())),
+                };
+                delayed_assignments.insert(assignment_ptr as usize);
+                if let Some(target) = target {
+                    pending_delays.push((
+                        std::ptr::from_ref(stmt) as usize,
+                        amount.clone(),
+                        *ticks_per_unit,
+                        target,
+                    ));
+                }
+            });
+        }
+        for (pointer, amount, ticks_per_unit, target) in pending_delays {
+            let delay = self
+                .eval_const_with_width(&amount, Some(celox_design::PROCESS_DELAY_WIDTH))?
+                .and_then(|(value, _)| u64::try_from(value).ok())
+                .and_then(|value| value.checked_mul(ticks_per_unit))
+                .ok_or_else(|| {
+                    unsupported("nonconstant or overflowing nonblocking assignment delay")
+                })?;
+            stmt_delays.insert(pointer, delay);
+            delayed.entry(target).or_default().push(delay);
+        }
+        // Variables an ordinary (undelayed) nonblocking assignment writes.
+        let mut plain: HashSet<SourceVarId> = HashSet::default();
+        for stmt in body {
+            stmt.walk(&mut |stmt| {
+                if delayed_assignments.contains(&(std::ptr::from_ref(stmt) as usize)) {
+                    return;
+                }
+                match stmt {
+                    sv::ir::Stmt::Assign {
+                        lhs,
+                        nonblocking: true,
+                        ..
+                    } => {
+                        if let Some(id) = self.m.id(lhs.name()) {
+                            plain.insert(id);
+                        }
+                    }
+                    sv::ir::Stmt::AssignConcat {
+                        parts,
+                        nonblocking: true,
+                        ..
+                    } => {
+                        for part in parts {
+                            if let Some(id) = self.m.id(part.name()) {
+                                plain.insert(id);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            });
+        }
+        // Every variable a delayed assignment writes gets a stage, even
+        // when its undelayed assignments would write the working state
+        // directly: the delayed value must be captured at the edge and
+        // published at its due time instead.
+        let mut stage_ids: Vec<SourceVarId> = mixed;
+        for id in delayed.keys() {
+            if !stage_ids.contains(id) {
+                stage_ids.push(*id);
+            }
+        }
+        stage_ids.sort_by_key(|id| id.0);
+        let staged: Vec<NbaStage> = stage_ids
             .into_iter()
-            .map(|id| {
+            .flat_map(|id| {
+                let mut delays: Vec<u64> = delayed.get(&id).cloned().unwrap_or_default();
+                delays.sort_unstable();
+                delays.dedup();
+                if (plain.contains(&id) || delays.is_empty()) && !delays.contains(&0) {
+                    delays.insert(0, 0);
+                }
+                delays.into_iter().map(move |delay| (id, delay))
+            })
+            .map(|(id, delay)| {
                 let (value, value_name) = self.m.shadow(id, "nba_value", false);
                 let (mask, mask_name) = self.m.shadow(id, "nba_mask", true);
                 // Staging of one activation's update.
@@ -6251,6 +6361,17 @@ impl<'p, 'a> Ff<'p, 'a> {
                         .expect("a new staging copy")
                         .activation_scratch = true;
                 }
+                let site = (delay > 0).then(|| {
+                    let variable = self.m.var(id);
+                    let (site_value, _) = self.m.module_temp(
+                        "ff_nba_value",
+                        variable.width,
+                        false,
+                        variable.is_4state,
+                    );
+                    let (pending, _) = self.m.module_temp("ff_nba_pending", 1, false, false);
+                    (site_value, pending)
+                });
                 NbaStage {
                     id,
                     name: self.m.var(id).path.join("."),
@@ -6258,6 +6379,8 @@ impl<'p, 'a> Ff<'p, 'a> {
                     value_name,
                     mask,
                     mask_name,
+                    delay,
+                    site,
                     sites: None,
                 }
             })
@@ -6267,7 +6390,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         let mut staged = staged;
         if self.kernel.is_none() && !self.direct {
             for stage in &mut staged {
-                if self.m.var(stage.id).array_dims.is_empty() {
+                if stage.delay > 0 || self.m.var(stage.id).array_dims.is_empty() {
                     continue;
                 }
                 let Some(count) = array_nba_site_count(body, stage.id, self.m) else {
@@ -6294,7 +6417,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         let body = if staged.is_empty() {
             body.to_vec()
         } else {
-            stage_nonblocking(body, &staged, self.m, &mut HashMap::default())
+            stage_nonblocking(body, &staged, self.m, &mut HashMap::default(), &stmt_delays)
         };
         // A variable staged for an exact publication has no next state of
         // its own: only its merge publishes it. A shared variable is written
@@ -6370,6 +6493,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             self.m.variables,
         );
         emit_nba_merges(&mut apply, &staged, self.m);
+        emit_delayed_publications(&mut apply, &staged, self.m);
         let mut active = SIRBuilder::new();
         emit_ff_commits(&mut active, &active_targets);
         let mut nba = SIRBuilder::new();
@@ -6380,6 +6504,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             self.m.variables,
         );
         emit_nba_merges(&mut nba, &staged, self.m);
+        emit_delayed_publications(&mut nba, &staged, self.m);
         Ok(FfProcessUnits {
             eval,
             apply: seal_builder(apply),
@@ -6389,6 +6514,23 @@ impl<'p, 'a> Ff<'p, 'a> {
             staged: staged
                 .iter()
                 .map(|stage| (stage.id, stage.value, stage.mask))
+                .collect(),
+            delayed_sites: staged
+                .iter()
+                .filter(|stage| stage.delay > 0)
+                .filter_map(|stage| {
+                    stage.site.map(|(value, pending)| NbaSite {
+                        delay: stage.delay,
+                        process: 0,
+                        target: stage.id,
+                        lsb: 0,
+                        width: self.m.var(stage.id).width,
+                        value,
+                        position: None,
+                        pending: Some(pending),
+                        unit: true,
+                    })
+                })
                 .collect(),
         })
     }
@@ -6439,6 +6581,9 @@ pub(super) struct FfProcessUnits {
     pub targets: Vec<VarAtomBase<SourceVarId>>,
     /// The staged variables, as (variable, staging value, staging mask).
     pub staged: Vec<(SourceVarId, SourceVarId, SourceVarId)>,
+    /// Timed nonblocking sites of the delayed assignments, grouped later
+    /// under a synthetic publication process.
+    pub delayed_sites: Vec<NbaSite<SourceVarId>>,
 }
 
 /// A part of a nonblocking assignment in a process: it takes `width` bits
@@ -6481,6 +6626,14 @@ struct NbaStage {
     value_name: String,
     mask: SourceVarId,
     mask_name: String,
+    /// The intra-assignment delay of the assignments this stage captures;
+    /// zero for an ordinary nonblocking assignment. A delayed stage is not
+    /// merged at the edge: its commit hands the staged value to a timed
+    /// nonblocking site (IEEE 1800-2023 9.4.5, 10.4.2).
+    delay: u64,
+    /// For a delayed stage, the persistent (value, pending) objects of its
+    /// timed nonblocking site, which publication queues for the due time.
+    site: Option<(SourceVarId, SourceVarId)>,
     /// For an unpacked array, the sites of its nonblocking writes, when each
     /// runs at most once an evaluation: the merge then publishes only the
     /// elements they wrote. Without them every element is merged.
@@ -6571,12 +6724,14 @@ fn stage_nonblocking(
     staged: &[NbaStage],
     pm: &ProcModule<'_>,
     next_site: &mut HashMap<SourceVarId, usize>,
+    stmt_delays: &HashMap<usize, u64>,
 ) -> Vec<sv::ir::Stmt> {
-    let stage_of = |lvalue: &sv::ir::LValue| {
+    let stage_of_delay = |lvalue: &sv::ir::LValue, delay: u64| {
         staged
             .iter()
-            .find(|stage| pm.id(lvalue.name()) == Some(stage.id))
+            .find(|stage| stage.delay == delay && pm.id(lvalue.name()) == Some(stage.id))
     };
+    let stage_of = |lvalue: &sv::ir::LValue| stage_of_delay(lvalue, 0);
     let renamed = |lvalue: &sv::ir::LValue, name: &str| match lvalue {
         sv::ir::LValue::Ident(_) => sv::ir::LValue::Ident(name.to_string()),
         sv::ir::LValue::Select {
@@ -6659,14 +6814,57 @@ fn stage_nonblocking(
                     }
                 }
             }
+            sv::ir::Stmt::DelayedNonblocking { assignment, .. }
+                if stmt_delays.contains_key(&(std::ptr::from_ref(stmt) as usize)) =>
+            {
+                let delay = stmt_delays[&(std::ptr::from_ref(stmt) as usize)];
+                match assignment.as_ref() {
+                    sv::ir::Stmt::Assign {
+                        lhs,
+                        rhs,
+                        nonblocking: true,
+                    } if stage_of_delay(lhs, delay).is_some() => {
+                        let stage = stage_of_delay(lhs, delay).unwrap();
+                        out.push(sv::ir::Stmt::Assign {
+                            lhs: renamed(lhs, &stage.value_name),
+                            rhs: rhs.clone(),
+                            nonblocking: true,
+                        });
+                        out.push(mark(lhs, stage));
+                    }
+                    sv::ir::Stmt::AssignConcat {
+                        parts,
+                        rhs,
+                        nonblocking: true,
+                    } if parts
+                        .iter()
+                        .all(|part| stage_of_delay(part, delay).is_some()) =>
+                    {
+                        out.push(sv::ir::Stmt::AssignConcat {
+                            parts: parts
+                                .iter()
+                                .map(|part| {
+                                    renamed(part, &stage_of_delay(part, delay).unwrap().value_name)
+                                })
+                                .collect(),
+                            rhs: rhs.clone(),
+                            nonblocking: true,
+                        });
+                        for part in parts {
+                            out.push(mark(part, stage_of_delay(part, delay).unwrap()));
+                        }
+                    }
+                    _ => out.push(stmt.clone()),
+                }
+            }
             sv::ir::Stmt::If {
                 condition,
                 then_body,
                 else_body,
             } => out.push(sv::ir::Stmt::If {
                 condition: condition.clone(),
-                then_body: stage_nonblocking(then_body, staged, pm, next_site),
-                else_body: stage_nonblocking(else_body, staged, pm, next_site),
+                then_body: stage_nonblocking(then_body, staged, pm, next_site, stmt_delays),
+                else_body: stage_nonblocking(else_body, staged, pm, next_site, stmt_delays),
             }),
             sv::ir::Stmt::Case {
                 kind,
@@ -6680,12 +6878,12 @@ fn stage_nonblocking(
                     .iter()
                     .map(|item| sv::ir::CaseItem {
                         labels: item.labels.clone(),
-                        body: stage_nonblocking(&item.body, staged, pm, next_site),
+                        body: stage_nonblocking(&item.body, staged, pm, next_site, stmt_delays),
                     })
                     .collect(),
                 default: default
                     .as_ref()
-                    .map(|body| stage_nonblocking(body, staged, pm, next_site)),
+                    .map(|body| stage_nonblocking(body, staged, pm, next_site, stmt_delays)),
             }),
             sv::ir::Stmt::Loop {
                 kind,
@@ -6698,7 +6896,7 @@ fn stage_nonblocking(
                 init: init.clone(),
                 condition: condition.clone(),
                 step: step.clone(),
-                body: stage_nonblocking(body, staged, pm, next_site),
+                body: stage_nonblocking(body, staged, pm, next_site, stmt_delays),
             }),
             other => out.push(other.clone()),
         }
@@ -6711,6 +6909,9 @@ fn stage_nonblocking(
 /// committed.
 fn emit_nba_merges(builder: &mut SIRBuilder<Addr>, staged: &[NbaStage], pm: &ProcModule<'_>) {
     for stage in staged {
+        if stage.delay > 0 {
+            continue;
+        }
         let _ = &stage.name;
         let variable = pm.var(stage.id);
         if let Some(element_width) =
@@ -6781,6 +6982,71 @@ fn emit_nba_merges(builder: &mut SIRBuilder<Addr>, staged: &[NbaStage], pm: &Pro
             SIROffset::Static(0),
             width,
             merged,
+            Vec::new(),
+            Vec::new(),
+        ));
+    }
+}
+
+/// Hand every delayed stage that ran to its timed nonblocking site: the
+/// staged value moves to the site's persistent object and its pending flag
+/// is set, so publication queues the update for the due time instead of
+/// landing it in this slot's NBA region (IEEE 1800-2023 9.4.5, 10.4.2).
+fn emit_delayed_publications(
+    builder: &mut SIRBuilder<Addr>,
+    staged: &[NbaStage],
+    pm: &ProcModule<'_>,
+) {
+    for stage in staged {
+        let Some((site_value, pending)) = stage.site else {
+            continue;
+        };
+        let variable = pm.var(stage.id);
+        let width = variable.width;
+        let value = if variable.is_4state {
+            builder.alloc_logic(width)
+        } else {
+            builder.alloc_bit(width, false)
+        };
+        builder.emit(SIRInstruction::Load(
+            value,
+            working(stage.value),
+            SIROffset::Static(0),
+            width,
+        ));
+        builder.emit(SIRInstruction::Store(
+            stable(site_value),
+            SIROffset::Static(0),
+            width,
+            value,
+            Vec::new(),
+            Vec::new(),
+        ));
+        let mask = builder.alloc_bit(width, false);
+        builder.emit(SIRInstruction::Load(
+            mask,
+            working(stage.mask),
+            SIROffset::Static(0),
+            width,
+        ));
+        let zero = builder.alloc_bit(width, false);
+        builder.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+        let ran = builder.alloc_bit(1, false);
+        builder.emit(SIRInstruction::Binary(ran, mask, BinaryOp::Ne, zero));
+        let was = builder.alloc_bit(1, false);
+        builder.emit(SIRInstruction::Load(
+            was,
+            stable(pending),
+            SIROffset::Static(0),
+            1,
+        ));
+        let set = builder.alloc_bit(1, false);
+        builder.emit(SIRInstruction::Binary(set, was, BinaryOp::Or, ran));
+        builder.emit(SIRInstruction::Store(
+            stable(pending),
+            SIROffset::Static(0),
+            1,
+            set,
             Vec::new(),
             Vec::new(),
         ));
@@ -7425,6 +7691,7 @@ impl Ff<'_, '_> {
                 value,
                 position: slots,
                 pending: Some(pending),
+                unit: false,
             };
             let index = self.nba_sites.len() as u32;
             self.with_kernel(|kernel| {

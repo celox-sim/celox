@@ -75,6 +75,32 @@ fn has_timing_control(
     let mut pending = vec![root];
     while let Some(id) = pending.pop() {
         let statement = native.statement(id);
+        // An intra-assignment delay on a nonblocking assignment schedules
+        // the update without suspending the process (IEEE 1800-2023
+        // 9.4.5, 10.4.2), so it does not by itself make an edge-triggered
+        // `always` a timed process; the fused flip-flop lowering stages
+        // such updates for timed publication.
+        let intra_assignment_delay = match &statement.kind {
+            StatementKind::Assignment {
+                nonblocking: true,
+                timing_control: Some(control),
+                repeat_count: None,
+                ..
+            } => matches!(
+                native.timing_control(*control).kind,
+                celox_sv_syntax::TimingControlKind::Delay { .. }
+            ),
+            _ => false,
+        };
+        if intra_assignment_delay {
+            if !matches!(
+                statement.kind,
+                celox_sv_syntax::StatementKind::Unconverted { .. }
+            ) {
+                pending.extend(statement.kind.children());
+            }
+            continue;
+        }
         if matches!(
             statement.kind,
             StatementKind::Assignment {
