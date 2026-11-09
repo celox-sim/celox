@@ -1,0 +1,1 @@
+Mark the copy destination for VCD activity (PR #3438 review): write_memory only marks the settle range, so a waveform dump sparse-scanning marked groups could skip a copied signal.
