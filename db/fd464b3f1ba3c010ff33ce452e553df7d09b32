@@ -1,0 +1,1 @@
+Address Codex review on PR 3440: build_with_trace lays out its own program, so prune unread sampled copies there too
