@@ -15,7 +15,7 @@
     # The xezim reference simulator for the shared test suite, pinned by
     # release tag. Updatecli refreshes the tag and both lockfiles together.
     xezim = {
-      url = "github:aionhw/xezim/0.11.4";
+      url = "github:aionhw/xezim/0.11.5";
       flake = false;
     };
   };
