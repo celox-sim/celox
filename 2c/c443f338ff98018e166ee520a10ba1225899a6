@@ -1,0 +1,1 @@
+Exclude synthetic sample copies from the read roots before pruning (PR #3440 review): the frontend lists every copy as a testbench read root for the host refresh, which made retain keep copies no unit reads.
