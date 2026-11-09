@@ -50,12 +50,21 @@ test("guards the repository setting that exposes the title to release automation
   );
   assert.match(
     workflow,
-    /Validate pull request commit release impact\n\s+if: github\.event_name == 'pull_request_target' && !startsWith\(github\.head_ref, 'mergify\/merge-queue\/'\) && github\.event\.pull_request\.base\.ref == github\.event\.repository\.default_branch/,
+    /Validate pull request commit release impact\n\s+if: github\.event_name == 'pull_request' && !startsWith\(github\.head_ref, 'mergify\/merge-queue\/'\) && github\.event\.pull_request\.base\.ref == github\.event\.repository\.default_branch/,
   );
   assert.match(
     workflow,
     /Revalidate merge group release impact\n\s+if: github\.event_name == 'merge_group' && github\.event\.merge_group\.base_ref == format\('refs\/heads\/\{0\}', github\.event\.repository\.default_branch\)[\s\S]*MERGE_GROUP_BASE_REF:[\s\S]*MERGE_GROUP_HEAD_REF:[\s\S]*MERGE_GROUP_SHA:[\s\S]*run: node scripts\/check-pr-release-impact\.mjs/,
   );
+});
+
+test("title workflow does not use the default-policy-blocked PR event", () => {
+  const workflow = readFileSync(new URL("../.github/workflows/pr-title.yml", import.meta.url), "utf8");
+  // GitHub's default Actions event policy blocks this event in public
+  // repositories; the read-only check must run on pull_request instead.
+  assert.doesNotMatch(workflow, /pull_request_target/);
+  assert.match(workflow, /^  pull_request:\n    types: \[opened, edited, synchronize, reopened\]$/m);
+  assert.doesNotMatch(workflow, /event_name == 'pull_request_target'/);
 });
 
 test("title events finish independently without skipping edit validation", () => {

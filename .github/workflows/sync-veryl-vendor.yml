@@ -1,7 +1,13 @@
 name: Sync Veryl Vendor
 
 on:
-  pull_request_target:
+  # Only same-repository Renovate PRs are eligible (see the job condition and
+  # the in-job API revalidation), so this does not need the target-based PR
+  # event that GitHub's default policy blocks in public repositories. Fork PRs
+  # receive no secrets and are skipped. Scripts still execute only from the
+  # trusted base checkout below; the PR checkout is data, built only inside a
+  # secretless disposable container.
+  pull_request:
     types: [opened, synchronize, reopened]
     paths:
       - Cargo.toml
