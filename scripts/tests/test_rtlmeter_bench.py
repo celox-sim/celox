@@ -13,6 +13,8 @@ class RtlmeterTests(unittest.TestCase):
         outcome = {'exitCode': 0, 'timedOut': False}
         text = 'Hello Friend!\nTEST PASSED\n'
         self.assertEqual(bench.accept(text, '5392\n', outcome, 'Hello Friend!'), 5392)
+        cmark_text = 'CoreMark 1.0 : 0.000000 / GCC / STACK\nTEST PASSED\n'
+        self.assertEqual(bench.accept(cmark_text, '461974\n', outcome, 'CoreMark 1.0'), 461974)
         for output, count, result in [
             ('TEST PASSED\n', '5392', outcome),
             (text + 'TEST PASSED\n', '5392', outcome),
@@ -123,6 +125,55 @@ configurations:
             result = bench.run_commands([['compiler'], ['model']], Path('/cwd'), Path('/logs'), 1, 0)
         self.assertTrue(result['timedOut'])
         self.assertEqual(execute.call_count, 1)
+
+    def test_steady_state_commands_use_native_backend_for_celox_and_verbose_for_xezim(self):
+        spec = {'top': 'tb', 'includes': [Path('/source/rtl')], 'defines': {'CLOCK': 'tb.clk'}}
+        binaries = {engine: engine for engine in bench.ENGINES}
+        cmd_celox = bench.commands('celox', 'two-state', spec, Path('/files.f'), Path('/build'), binaries, [],
+                                   contract='rtlmeter-steady-state-v1')[0]
+        self.assertIn('--backend', cmd_celox)
+        self.assertEqual(cmd_celox[cmd_celox.index('--backend') + 1], 'native')
+        self.assertIn('-O', cmd_celox)
+        self.assertEqual(cmd_celox[cmd_celox.index('-O') + 1], 'O2')
+        self.assertIn('--report', cmd_celox)
+
+        cmd_xezim = bench.commands('xezim', 'four-state', spec, Path('/files.f'), Path('/build'), binaries, [],
+                                   contract='rtlmeter-steady-state-v1')[0]
+        self.assertIn('--verbose', cmd_xezim)
+        self.assertIn('--max-time', cmd_xezim)
+        self.assertEqual(cmd_xezim[cmd_xezim.index('--max-time') + 1], '60s')
+
+        cmd_xezim_cold = bench.commands('xezim', 'four-state', spec, Path('/files.f'), Path('/build'), binaries, [],
+                                        contract='rtlmeter-cold-process-v1')[0]
+        self.assertNotIn('--verbose', cmd_xezim_cold)
+        self.assertIn('--max-time', cmd_xezim_cold)
+        self.assertEqual(cmd_xezim_cold[cmd_xezim_cold.index('--max-time') + 1], '1s')
+
+    def test_extract_sim_ns_parses_simulator_output_correctly(self):
+        outcome = {'elapsedNs': 5000000000, 'commands': [{'elapsedNs': 3000000000}, {'elapsedNs': 2000000000}]}
+        celox_stdout = 'CELOX_TEST_TIMING test=tb compile_ns=3000000000 execute_ns=1234567890 jit_execute_ns=NA\n'
+        self.assertEqual(bench.extract_sim_ns('celox', celox_stdout, outcome), 1234567890)
+
+        self.assertEqual(bench.extract_sim_ns('verilator', '', outcome), 2000000000)
+
+        xezim_stdout = '[PHASE] compilation: 100.0ms\n[PHASE] simulation: 85.5ms\n[PHASE] total: 185.5ms\n'
+        self.assertEqual(bench.extract_sim_ns('xezim', xezim_stdout, outcome), 85500000)
+
+    def test_steady_manifest_specifies_coremark_cases(self):
+        import json
+        steady_manifest = json.loads((Path(bench.ROOT) / 'benchmarks/rtlmeter/steady_manifest.json').read_text())
+        self.assertEqual(steady_manifest['contract'], 'rtlmeter-steady-state-v1')
+        self.assertIn('e902', steady_manifest['cases'])
+        self.assertIn('e906', steady_manifest['cases'])
+        self.assertNotIn('e203', steady_manifest['cases'])
+        self.assertEqual(steady_manifest['cases']['e902']['test'], 'cmark')
+        self.assertEqual(steady_manifest['cases']['e906']['test'], 'cmark')
+        self.assertEqual(steady_manifest['cases']['e902']['payload'], 'CoreMark 1.0')
+        self.assertEqual(steady_manifest['cases']['e906']['payload'], 'CoreMark 1.0')
+
+    def test_steady_configuration_includes_verbose_and_max_time_for_xezim(self):
+        self.assertIn('--verbose', bench.STEADY_CONFIGURATION['xezim'])
+        self.assertIn('--max-time 60s', bench.STEADY_CONFIGURATION['xezim'])
 
     def test_check_case_validates_cycles_and_payload(self):
         from unittest.mock import patch

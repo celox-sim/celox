@@ -65,6 +65,22 @@ The **RTLMeter Benchmark** workflow runs daily at 04:37 UTC and by manual
 dispatch. Only scheduled/manual `master` runs publish history. Raw logs remain
 available in workflow artifacts for 30 days.
 
+## Steady-state simulation throughput
+
+In addition to cold process latency, steady-state simulation throughput is measured
+using **CoreMark** on XuanTie-E902 and XuanTie-E906 under the `rtlmeter-steady-state-v1`
+contract (`benchmarks/rtlmeter/steady_manifest.json`).
+
+| Simulator | Configuration | Simulation measurement |
+| --- | --- | --- |
+| Celox | `--backend native -O O2` | `execute_ns` from `CELOX_TEST_TIMING` |
+| Verilator | `-O3 -CFLAGS -O3` | Elapsed wall time of the compiled simulator binary |
+| xezim | Release VM, `--verbose` | `[PHASE] simulation:` elapsed time |
+
+Pure simulation execution time is isolated from compiler elaboration, reporting
+both simulation execution time (`us`) and simulation clock throughput (`cycles/sec`, `kHz`).
+The **RTLMeter Steady-State Benchmark** workflow runs daily at 05:17 UTC.
+
 ## Reproduce
 
 Build the CLI in the repository development shell and use the xezim shell:

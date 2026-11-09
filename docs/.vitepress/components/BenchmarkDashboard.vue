@@ -66,6 +66,7 @@ interface Series {
     | "collection-celox-tiered"
     | "collection-veryl-tiered"
     | "rtlmeter-celox"
+    | "rtlmeter-celox-native"
     | "rtlmeter-verilator"
     | "rtlmeter-xezim"
     | "taxi-celox"
@@ -282,6 +283,7 @@ function classifySeries(benchName: string): string {
 
 const RUNTIME_COLORS: Record<string, string> = {
   "rtlmeter-celox": "#2563eb",
+  "rtlmeter-celox-native": "#2563eb",
   "rtlmeter-verilator": "#f97316",
   "rtlmeter-xezim": "#16a34a",
   "taxi-celox": "#2563eb",
@@ -309,6 +311,7 @@ const RUNTIME_COLORS: Record<string, string> = {
 
 const RUNTIME_LABELS: Record<string, string> = {
   "rtlmeter-celox": "Celox tiered (hotspot JIT) O2",
+  "rtlmeter-celox-native": "Celox native O2",
   "rtlmeter-verilator": "Verilator (4-state experimental)",
   "rtlmeter-xezim": "xezim release VM",
   "taxi-celox": "Celox native O1 · SV / cocotb",
@@ -345,7 +348,7 @@ const activeTab = ref("heliodor");
 
 function stripPrefix(name: string): string {
   return name.replace(
-    /^(rtlmeter-celox|rtlmeter-verilator|rtlmeter-xezim|taxi-celox|taxi-verilator|collection-celox-tiered|collection-veryl-tiered|collection-celox-veryl-native|rust-dse|rust|ts|verilator|heliodor-celox-jit|heliodor-celox-total|heliodor-celox-compile|heliodor-celox-tiered|heliodor-celox-tiered-aarch64|heliodor-veryl-tiered-x86_64|heliodor-veryl-tiered-aarch64|heliodor-veryl|heliodor-veryl-compile|heliodor-native-x86_64|heliodor-native-parallel-x86_64|heliodor-veryl-cc-x86_64|heliodor-native-aarch64|heliodor-native-parallel-aarch64|heliodor-veryl-cc-aarch64)\//,
+    /^(rtlmeter-celox-native|rtlmeter-celox|rtlmeter-verilator|rtlmeter-xezim|taxi-celox|taxi-verilator|collection-celox-tiered|collection-veryl-tiered|collection-celox-veryl-native|rust-dse|rust|ts|verilator|heliodor-celox-jit|heliodor-celox-total|heliodor-celox-compile|heliodor-celox-tiered|heliodor-celox-tiered-aarch64|heliodor-veryl-tiered-x86_64|heliodor-veryl-tiered-aarch64|heliodor-veryl|heliodor-veryl-compile|heliodor-native-x86_64|heliodor-native-parallel-x86_64|heliodor-veryl-cc-x86_64|heliodor-native-aarch64|heliodor-native-parallel-aarch64|heliodor-veryl-cc-aarch64)\//,
     "",
   );
 }
@@ -378,6 +381,7 @@ function normalizeBenchName(benchName: string): string {
 }
 
 function runtime(name: string): Series["runtime"] | null {
+  if (name.startsWith("rtlmeter-celox-native/")) return "rtlmeter-celox-native";
   if (name.startsWith("rtlmeter-celox/")) return "rtlmeter-celox";
   if (name.startsWith("rtlmeter-verilator/")) return "rtlmeter-verilator";
   if (name.startsWith("rtlmeter-xezim/")) return "rtlmeter-xezim";
@@ -436,6 +440,10 @@ function rtlmeterDesignName(name: string): string {
 function formatChartTitle(benchName: string): string {
   const rtlmeter = benchName.match(/^rtlmeter_(e902|e906|e203)_hello_v1_x64_(two-state|four-state)_total$/);
   if (rtlmeter) return `${rtlmeterDesignName(rtlmeter[1])} hello · cold source-to-finish`;
+  const rtlmeterCmark = benchName.match(/^rtlmeter_(e902|e906|e203)_cmark_v1_x64_(two-state|four-state)_sim$/);
+  if (rtlmeterCmark) return `${rtlmeterDesignName(rtlmeterCmark[1])} CoreMark · steady-state simulation`;
+  const rtlmeterSteady = benchName.match(/^rtlmeter_(e902|e906|e203)_([a-z0-9]+)_v1_x64_(two-state|four-state)_sim$/);
+  if (rtlmeterSteady) return `${rtlmeterDesignName(rtlmeterSteady[1])} ${rtlmeterSteady[2]} · steady-state simulation`;
   let s = benchName;
   const rica = s.match(/^collection_rica_(kernel-[a-z-]+)_([a-f0-9]+)_(x64|arm64)_total$/);
   if (rica) return `rica ${rica[1]} · total · ${rica[3]} · workload ${rica[2]}`;
