@@ -3608,10 +3608,13 @@ mod host {
                 let vcd_recording = self.vcd_path.is_some();
                 // As in the timed `build_tiered`: only a native image runs
                 // derived-edge units, and it expands deferred ones itself.
+                // Wide FF commits match the native build: the compiled
+                // tier is a native image, and the interpreter runs the
+                // same units through their typed shadow commits.
                 self.into_laid_out_program(
                     crate::backend::tiered::tiered_layout_mode(vcd_recording),
                     crate::backend::tiered::native_is_default_target(),
-                    false,
+                    true,
                 )?
             };
             validate_untimed_processes(laid_out.runtime())?;
@@ -3684,10 +3687,13 @@ mod host {
                 let vcd_recording = self.vcd_path.is_some();
                 // As in the timed `build_tiered`: only a native image runs
                 // derived-edge units, and it expands deferred ones itself.
+                // Wide FF commits match the native build: the compiled
+                // tier is a native image, and the interpreter runs the
+                // same units through their typed shadow commits.
                 self.into_laid_out_program(
                     crate::backend::tiered::tiered_layout_mode(vcd_recording),
                     crate::backend::tiered::native_is_default_target(),
-                    false,
+                    true,
                 )?
             };
             validate_untimed_processes(laid_out.runtime())?;
@@ -4450,7 +4456,10 @@ mod host {
             // ones itself. Expanding every unit here copies the comb settle
             // into each of them, which exhausts memory on large designs.
             let defer_derived_edges = crate::backend::tiered::native_is_default_target();
-            self.build_with_backend(layout, defer_derived_edges, false, |program, options| {
+            // Wide FF commits match the native build: the compiled tier
+            // is a native image, and the units keep their typed shadow
+            // commits for the tiers that do not compile them.
+            self.build_with_backend(layout, defer_derived_edges, true, |program, options| {
                 Ok(crate::backend::TieredBackend::new(program, options))
             })
         }
@@ -7301,6 +7310,61 @@ endmodule"#;
         assert_eq!(simulation.get(simulation.signal("seen")), 9u8.into());
         let stats = simulation.scheduler_stats();
         assert!(stats.checked_steps > 0, "{stats:?}");
+    }
+
+    /// The tiered layout instruments flip-flop units with the wide
+    /// commits only a native image compiles (raw state words shadowed
+    /// by typed commits). The interpreted tier executes the same units
+    /// before adoption, so it must run those raw accesses as plain
+    /// state loads and stores instead of extern calls.
+    #[cfg(all(
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn tiered_wide_ff_commits_match_reference() {
+        let source = r#"`timescale 1ns/1ns
+module Top(output logic [63:0] wide_q, output logic [7:0] a_q, output logic [7:0] b_q);
+    bit clk = 0;
+    always #5 clk = ~clk;
+    initial begin wide_q = 0; a_q = 0; b_q = 0; end
+    always @(posedge clk) begin
+        wide_q <= wide_q + 64'd1;
+        a_q <= a_q + 8'd3;
+        b_q <= b_q ^ a_q;
+    end
+endmodule"#;
+        let build = || {
+            crate::Simulation::from_sv_sources(
+                vec![(source, std::path::Path::new("tiered-wide-ff.sv"))],
+                "Top",
+            )
+        };
+        let mut reference = build()
+            .scheduler_mode(crate::SchedulerMode::Reference)
+            .build_native()
+            .unwrap();
+        // Adoption is delayed so the interpreted tier runs the wide
+        // units first; the compiled tier adopts them later.
+        let mut tiered = build()
+            .tier_promotion(crate::TierPromotion::AfterSteps(64))
+            .build_tiered()
+            .unwrap();
+        for end in [10, 20, 40, 80] {
+            reference.run_until(end).unwrap();
+            tiered.run_until(end).unwrap();
+            for name in ["wide_q", "a_q", "b_q"] {
+                assert_eq!(
+                    tiered.get(tiered.signal(name)),
+                    reference.get(reference.signal(name)),
+                    "{name} at t={end}"
+                );
+            }
+        }
+        assert_eq!(tiered.get(tiered.signal("wide_q")), 8u8.into());
     }
 
     /// A partitioned settle has a clock cone of its own: the partitions
