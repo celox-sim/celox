@@ -35,7 +35,7 @@ export function rtlmeterMetrics(report, commit) {
   assert.ok(report.host.cpu && Number.isInteger(report.host.affinityCpu));
   assert.equal(report.xezimRelease, locked.original.ref);
   assert.equal(report.xezimRevision, locked.locked.rev);
-  assert.match(report.versions?.verilator ?? "", /^Verilator 5\.052\b/);
+  assert.match(report.versions?.verilator ?? "", /^Verilator 5\.054\b/);
   assert.equal(report.versions?.xezim?.split("\n")[0], `xezim version ${locked.original.ref.replace(/^v/, "")}`);
   for (const engine of ["celox", "verilator", "xezim"]) {
     assert.ok(report.versions?.[engine] && digest(report.binarySha256?.[engine]));
