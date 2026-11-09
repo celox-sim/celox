@@ -87,7 +87,7 @@ workflows:
         - 'swatinem/rust-cache@v2'
     '.github/workflows/pr-title.yml':
         - 'actions/checkout@v7'
-        - 'mergifyio/setup-cli@dc99f07e699b94b39e5495c24596372813eadcbc'
+        - 'mergifyio/setup-cli@7816afe056a19ad5eb899d903f199ba2626f9de5'
     '.github/workflows/publish-aplite.yml':
         - 'actions/checkout@v7'
         - 'actions/setup-node@v7'
@@ -286,6 +286,11 @@ dependencies:
         uses:
             - 'mergifyio/setup-cli@dc99f07e699b94b39e5495c24596372813eadcbc'
             - 're-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35'
+    'mergifyio/setup-cli@7816afe056a19ad5eb899d903f199ba2626f9de5':
+        ref: 'v1.4.0'
+        commit: 'sha1-7816afe056a19ad5eb899d903f199ba2626f9de5'
+        owner_id: 37838584
+        repo_id: 1267289500
     'mergifyio/setup-cli@dc99f07e699b94b39e5495c24596372813eadcbc':
         ref: 'v1.3.0'
         commit: 'sha1-dc99f07e699b94b39e5495c24596372813eadcbc'
