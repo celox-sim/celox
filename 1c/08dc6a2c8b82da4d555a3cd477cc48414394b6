@@ -1,0 +1,1 @@
+Rebased on master: union aggregate finishing grew the recursive bind_in_mode frame past the specialization stack budget; extracted it into an inline(never) helper
