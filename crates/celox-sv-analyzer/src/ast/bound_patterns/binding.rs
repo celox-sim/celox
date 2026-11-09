@@ -74,7 +74,7 @@ pub(in crate::ast) fn prepare_native(
             {
                 Key::Member(instances::normalize_identifier(&name.spelling))
             }
-            ExprKind::Type(_) => return Err(unsupported("assignment pattern type key")),
+            ExprKind::Type(_) => Key::Type(id),
             _ => Key::Index(integer(id)?),
         });
     }

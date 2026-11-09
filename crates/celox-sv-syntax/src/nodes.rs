@@ -1003,6 +1003,11 @@ pub struct VariableDeclaration {
 pub struct ClassConstraint {
     pub name: Name,
     pub expressions: Option<Vec<ExprId>>,
+    /// Whether a definition supplied the body, even an unsupported one
+    /// whose `expressions` are `None`; a prototype alone is not defined.
+    pub defined: bool,
+    /// Whether the prototype or definition was qualified `static`.
+    pub is_static: bool,
 }
 
 /// A class declaration (IEEE 1800-2023 8.3). Its body also remains an
