@@ -20,7 +20,7 @@ an undriven wire. The 2-state probe expects zero; the 4-state probe expects X/Z.
 | Simulator | 2-state | 4-state |
 | --- | --- | --- |
 | Celox tiered with hotspot JIT, O2, one thread | `--two-state` | `--four-state` |
-| Verilator 5.052, C++ -O3, one build worker | `--no-fourstate --x-initial 0 --x-assign 0` | `--fourstate`, experimental |
+| Verilator 5.054, C++ -O3, one build worker | `--no-fourstate --x-initial 0 --x-assign 0` | `--fourstate`, experimental |
 | xezim, stable release pinned by Nix | Unsupported: no global 2-state mode | Default VM, persistent caches disabled |
 
 Celox runs `celox run --backend tiered --jit hotspot`: simulation starts on the
