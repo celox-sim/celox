@@ -722,6 +722,7 @@ impl TieredBackend {
         not(feature = "arm64-codegen")
     ))]
     pub(crate) fn publish_scheduler_for_test(&mut self) {
+        self.keep_incremental_for_test();
         let Phase::Interpreting(Some(interp)) = &mut self.phase else {
             panic!("scheduler test requires the mixed executor");
         };
@@ -737,10 +738,34 @@ impl TieredBackend {
         not(feature = "arm64-codegen")
     ))]
     pub(crate) fn interp_for_test(&mut self) -> &mut crate::backend::InterpBackend {
+        self.keep_incremental_for_test();
         let Phase::Interpreting(Some(interp)) = &mut self.phase else {
             panic!("scheduler test requires the mixed executor");
         };
         interp
+    }
+
+    /// Stop the background whole-image compiler so a test that inspects the
+    /// mixed executor keeps it for the rest of the run. Large designs
+    /// escalate to whole-image code once it is ready, which would otherwise
+    /// replace the executor under test at a timing-dependent safe point.
+    /// Hotspot compilation is left running.
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    fn keep_incremental_for_test(&mut self) {
+        if !matches!(self.phase, Phase::Interpreting(Some(_))) {
+            return;
+        }
+        self.upgrade_receiver = None;
+        self.cancel.cancel();
+        self.derived_compile_request = None;
+        if matches!(self.promotion, Promotion::Pending(_)) {
+            self.promotion = Promotion::Disabled;
+        }
     }
 
     /// Build a tiered simulation targeting this host's default compiled
