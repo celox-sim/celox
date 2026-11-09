@@ -497,3 +497,27 @@ module Top;
 endmodule
 "#)
   (top Top) (run_to_finish))
+
+(case real_conversions
+  (source "real_conversions.sv" #"
+module Top(output bit ok);
+  string a = "4.76", neg = "-1.25e2x", bad = "abc", out;
+  real via_init = a.atoreal();
+  function automatic real two_point_five();
+    return 2.5;
+  endfunction
+  initial begin
+    ok = via_init == 4.76 && a.atoreal() == 4.76
+      && neg.atoreal() == -125.0 && bad.atoreal() == 0.0;
+    out.realtoa(2.5);
+    ok = ok && out == "2.5" && out.atoreal() == 2.5;
+    out.realtoa(-0.125);
+    ok = ok && out.atoreal() == -0.125;
+    out.realtoa(4.76);
+    ok = ok && out.atoreal() == 4.76;
+    out.realtoa(two_point_five());
+    ok = ok && out == "2.5";
+  end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq ok 1))

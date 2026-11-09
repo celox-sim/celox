@@ -179,14 +179,22 @@ impl Parser<'_> {
         }
     }
 
-    /// Complete the innermost open class at its `endclass`.
-    pub(super) fn finish_class(&mut self) {
+    /// Complete the innermost open class at its `endclass`; `package` is
+    /// the package unit that declares it, if any.
+    pub(super) fn finish_class(&mut self, package: Option<String>) {
         if let Some(mut class) = self.class_stack.pop() {
             class.tokens = TokenRange {
                 start: class.tokens.start,
                 end: self.indices[self.at - 1] + 1,
             };
+            let mut scope = package.into_iter().collect::<Vec<_>>();
+            scope.extend(
+                self.class_stack
+                    .iter()
+                    .map(|outer| outer.name.spelling.clone()),
+            );
             self.classes.push(class);
+            self.class_scopes.push(scope);
         }
     }
 

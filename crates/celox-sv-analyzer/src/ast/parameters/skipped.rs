@@ -442,6 +442,7 @@ fn pattern_items(
             }
             NativeKind::Keyed(keys) => {
                 let mut named = HashMap::default();
+                let mut typed = Vec::new();
                 let mut default = None;
                 for (key, value) in keys.into_iter().zip(plan.bindings) {
                     match key {
@@ -451,6 +452,17 @@ fn pattern_items(
                             }
                             named.insert(name, value);
                         }
+                        Key::Type(id) => {
+                            let ty = expression_types::cast_type(
+                                tree,
+                                session,
+                                id,
+                                tree.declarations(),
+                                dims,
+                            )
+                            .ok_or_else(|| unsupported("assignment pattern type key"))?;
+                            typed.push((ty, value));
+                        }
                         Key::Default => default = Some(value),
                         Key::Index(_) | Key::Name { .. } => {
                             return Err(unsupported("structure assignment pattern form"));
@@ -458,9 +470,23 @@ fn pattern_items(
                     }
                 }
                 for member in &shape.members {
+                    // Member, then type, then default keys (10.9.2).
                     let value = named
                         .get(member.name())
                         .copied()
+                        .or_else(|| {
+                            let member_type = semantic_types::of_type(
+                                &mut session.types,
+                                &tree.functions,
+                                member.r#type(),
+                                &dims.const_env,
+                            )?;
+                            typed
+                                .iter()
+                                .rev()
+                                .find(|(ty, _)| session.types.matches(member_type, *ty))
+                                .map(|(_, value)| *value)
+                        })
                         .or(default)
                         .ok_or_else(wrong)?;
                     values.push((value, procedural::dimensions_from_type(member.r#type())));
@@ -470,82 +496,88 @@ fn pattern_items(
         }
         return Ok(values);
     }
-    let (count, low, high, element) = if let Some((dim, rest)) = shape.unpacked.split_first() {
-        let left =
-            eval_ast_const_expr(&tree.functions, &dim.left, &dims.const_env).ok_or_else(wrong)?;
-        let right =
-            eval_ast_const_expr(&tree.functions, &dim.right, &dims.const_env).ok_or_else(wrong)?;
-        let count = usize::try_from(left.abs_diff(right))
-            .ok()
-            .and_then(|v| v.checked_add(1))
-            .ok_or_else(wrong)?;
-        (
-            count,
-            left.min(right),
-            left.max(right),
-            VariableDimensions::new(VariableShape {
-                declared: type_names::Declared::default(),
-                container: None,
-                chandle: false,
-                real: false,
-                string: false,
-                class: None,
-                unpacked: rest.to_vec(),
-                ..shape.clone_shape()
-            }),
-        )
-    } else if let Some((dim, rest)) = shape.packed.split_first()
-        && !rest.is_empty()
-    {
-        let left =
-            eval_ast_const_expr(&tree.functions, &dim.left, &dims.const_env).ok_or_else(wrong)?;
-        let right =
-            eval_ast_const_expr(&tree.functions, &dim.right, &dims.const_env).ok_or_else(wrong)?;
-        let count = usize::try_from(left.abs_diff(right))
-            .ok()
-            .and_then(|v| v.checked_add(1))
-            .ok_or_else(wrong)?;
-        (
-            count,
-            left.min(right),
-            left.max(right),
-            VariableDimensions::new(VariableShape {
-                declared: type_names::Declared::default(),
-                container: None,
-                real: false,
-                string: false,
-                class: None,
-                packed: rest.to_vec(),
-                ..shape.clone_shape()
-            }),
-        )
-    } else {
-        let count = patterns::shape_width(&tree.functions, shape, dims).ok_or_else(wrong)?;
-        (
-            count,
-            0,
-            count as i128 - 1,
-            VariableDimensions::new(VariableShape {
-                declared: type_names::Declared::default(),
-                container: None,
-                chandle: false,
-                randomizable: true,
-                enum_domain: None,
-                packed_enum: false,
-                real: false,
-                string: false,
-                class: None,
-                virtual_interface: None,
-                packed: Vec::new(),
-                unpacked: Vec::new(),
-                members: Vec::new(),
-                signed: false,
-                is_2state: shape.is_2state,
-                signed_element_depth: None,
-                unpacked_struct: None,
-            }),
-        )
-    };
+    // Only the last branch models a packed integer vector as its bits;
+    // its items are not array elements a type key can match (10.9).
+    let (count, low, high, element, integer) =
+        if let Some((dim, rest)) = shape.unpacked.split_first() {
+            let left = eval_ast_const_expr(&tree.functions, &dim.left, &dims.const_env)
+                .ok_or_else(wrong)?;
+            let right = eval_ast_const_expr(&tree.functions, &dim.right, &dims.const_env)
+                .ok_or_else(wrong)?;
+            let count = usize::try_from(left.abs_diff(right))
+                .ok()
+                .and_then(|v| v.checked_add(1))
+                .ok_or_else(wrong)?;
+            (
+                count,
+                left.min(right),
+                left.max(right),
+                VariableDimensions::new(VariableShape {
+                    declared: type_names::Declared::default(),
+                    container: None,
+                    chandle: false,
+                    real: false,
+                    string: false,
+                    class: None,
+                    unpacked: rest.to_vec(),
+                    ..shape.clone_shape()
+                }),
+                false,
+            )
+        } else if let Some((dim, rest)) = shape.packed.split_first()
+            && !rest.is_empty()
+        {
+            let left = eval_ast_const_expr(&tree.functions, &dim.left, &dims.const_env)
+                .ok_or_else(wrong)?;
+            let right = eval_ast_const_expr(&tree.functions, &dim.right, &dims.const_env)
+                .ok_or_else(wrong)?;
+            let count = usize::try_from(left.abs_diff(right))
+                .ok()
+                .and_then(|v| v.checked_add(1))
+                .ok_or_else(wrong)?;
+            (
+                count,
+                left.min(right),
+                left.max(right),
+                VariableDimensions::new(VariableShape {
+                    declared: type_names::Declared::default(),
+                    container: None,
+                    real: false,
+                    string: false,
+                    class: None,
+                    packed: rest.to_vec(),
+                    ..shape.clone_shape()
+                }),
+                false,
+            )
+        } else {
+            let count = patterns::shape_width(&tree.functions, shape, dims).ok_or_else(wrong)?;
+            (
+                count,
+                0,
+                count as i128 - 1,
+                VariableDimensions::new(VariableShape {
+                    declared: type_names::Declared::default(),
+                    container: None,
+                    chandle: false,
+                    randomizable: true,
+                    enum_domain: None,
+                    packed_enum: false,
+                    real: false,
+                    string: false,
+                    class: None,
+                    virtual_interface: None,
+                    packed: Vec::new(),
+                    unpacked: Vec::new(),
+                    members: Vec::new(),
+                    signed: false,
+                    is_2state: shape.is_2state,
+                    signed_element_depth: None,
+                    unpacked_struct: None,
+                }),
+                true,
+            )
+        };
     match plan.kind {
         NativeKind::List => {
             if plan.bindings.len() != count {
@@ -569,10 +601,35 @@ fn pattern_items(
                         indices.insert(index);
                     }
                     Key::Default => default = true,
+                    // A type key that matches the element type covers the
+                    // elements no index key sets (10.9.1), as a default does
+                    // for this coverage estimate; a nonmatching type key
+                    // sets no element.
+                    Key::Type(id) => {
+                        if integer {
+                            return Err(unsupported("type key in an integer assignment pattern"));
+                        }
+                        let ty = expression_types::cast_type(
+                            tree,
+                            session,
+                            id,
+                            tree.declarations(),
+                            dims,
+                        )
+                        .ok_or_else(|| unsupported("assignment pattern type key"))?;
+                        if semantic_types::of_shape(
+                            &mut session.types,
+                            &tree.functions,
+                            &element,
+                            &dims.const_env,
+                        )
+                        .is_some_and(|element| session.types.matches(element, ty))
+                        {
+                            default = true;
+                        }
+                    }
                     Key::Member(_) | Key::Name { .. } => {
-                        return Err(unsupported(
-                            "member or type key in an array assignment pattern",
-                        ));
+                        return Err(unsupported("member key in an array assignment pattern"));
                     }
                 }
             }
@@ -1375,6 +1432,9 @@ mod tests {
         let session = &mut Session::default();
         for (items, valid) in [
             ("default:0", true),
+            ("logic[7:0]:0", true),
+            ("int:0", false),
+            ("0:1, int:0", false),
             ("0:1, default:0", true),
             ("1000000000:1, default:0", false),
             ("1,2", false),
@@ -1397,6 +1457,28 @@ mod tests {
                 false,
             );
             assert_eq!(result.is_ok(), valid, "{items}: {result:?}");
+        }
+        // A packed integer target takes no type key at all (10.9), as in
+        // the pattern binder, even one naming its bit type.
+        for (items, valid) in [("default:0", true), ("bit:0", false)] {
+            let tree = parse(&format!(
+                "module M;typedef bit[999999999:0] word_t;localparam N=0&&word_t'{{{items}}};endmodule"
+            ));
+            let tree = AnalysisContext::unspecialized(&tree);
+            let root = tree
+                .declarations()
+                .expression_nodes()
+                .find_map(|(id, node)| matches!(node.kind, ExprKind::Pattern { .. }).then_some(id))
+                .unwrap();
+            let result = validate(
+                root,
+                &tree,
+                session,
+                &PackedDimensions::default(),
+                &HashSet::default(),
+                false,
+            );
+            assert_eq!(result.is_ok(), valid, "word_t {items}: {result:?}");
         }
     }
     #[test]

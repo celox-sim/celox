@@ -28,7 +28,12 @@ enum Items {
 pub(super) enum Key {
     Index(i128),
     Member(String),
-    Name { name: String, index: Option<i128> },
+    Name {
+        name: String,
+        index: Option<i128>,
+    },
+    /// A type key (10.9), as the native expression that names the type.
+    Type(celox_sv_syntax::ExprId),
     Default,
 }
 
@@ -353,6 +358,16 @@ impl BoundPattern {
                 values.iter().map(|v| (v, false)).collect::<Vec<_>>()
             }
             Items::Keyed(items) => {
+                // Type keys apply to array and structure elements, not to
+                // the bits of a packed integer (10.9.1-2).
+                if shape.unpacked.is_empty()
+                    && shape.unpacked_struct.is_none()
+                    && shape.members.is_empty()
+                    && shape.packed.len() <= 1
+                    && items.iter().any(|(key, _)| matches!(key, Key::Type(_)))
+                {
+                    return Err(unsupported("type key in an integer assignment pattern"));
+                }
                 let structure = shape.unpacked.is_empty()
                     && shape.packed.len() <= 1
                     && (!shape.members.is_empty() || shape.unpacked_struct.is_some());
@@ -371,30 +386,61 @@ impl BoundPattern {
                     .collect::<Converted<Vec<_>>>()?;
                 let mut seen = HashSet::default();
                 for (key, _) in &items {
-                    if !seen.insert(key) {
+                    // A type key may repeat; its last value is used
+                    // (10.9.2).
+                    if !matches!(key, Key::Type(_)) && !seen.insert(key) {
                         return Err(unsupported("duplicate assignment pattern key"));
                     }
-                    if *key != Key::Default && !keys.contains(key) {
+                    if *key != Key::Default && !matches!(key, Key::Type(_)) && !keys.contains(key) {
                         return Err(unsupported("assignment pattern key outside target"));
                     }
                 }
-                keys.iter()
-                    .map(|key| {
-                        items
-                            .iter()
-                            .rev()
-                            .find(|(k, _)| k == key)
-                            .map(|(_, v)| (*v, false))
-                            .or_else(|| {
-                                items
-                                    .iter()
-                                    .rev()
-                                    .find(|(k, _)| *k == Key::Default)
-                                    .map(|(_, v)| (*v, true))
-                            })
-                            .ok_or_else(|| unsupported("assignment pattern missing element"))
-                    })
-                    .collect::<Converted<Vec<_>>>()?
+                // The type of each type key, resolved once (10.9).
+                let mut typed = Vec::new();
+                for (key, value) in &items {
+                    if let Key::Type(id) = key {
+                        let ty = expression_types::cast_type(
+                            tree,
+                            session,
+                            *id,
+                            tree.declarations(),
+                            dims,
+                        )
+                        .ok_or_else(|| unsupported("assignment pattern type key"))?;
+                        typed.push((ty, *value));
+                    }
+                }
+                // An explicit key sets its element; a type key sets each
+                // element of a matching type that no explicit key set,
+                // the last of a type winning; the default sets the rest
+                // (10.9.1-2).
+                let mut selected = Vec::new();
+                for (key, element) in keys.iter().zip(&shapes) {
+                    let value = items
+                        .iter()
+                        .rev()
+                        .find(|(k, _)| k == key)
+                        .map(|(_, v)| (*v, false))
+                        .or_else(|| {
+                            let element_type =
+                                element.type_id(&mut session.types, functions, &dims.const_env)?;
+                            typed
+                                .iter()
+                                .rev()
+                                .find(|(ty, _)| session.types.matches(element_type, *ty))
+                                .map(|(_, v)| (*v, false))
+                        })
+                        .or_else(|| {
+                            items
+                                .iter()
+                                .rev()
+                                .find(|(k, _)| *k == Key::Default)
+                                .map(|(_, v)| (*v, true))
+                        })
+                        .ok_or_else(|| unsupported("assignment pattern missing element"))?;
+                    selected.push(value);
+                }
+                selected
             }
         };
         let mut parts = selected
