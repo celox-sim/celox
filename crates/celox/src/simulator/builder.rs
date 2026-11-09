@@ -7292,6 +7292,72 @@ endmodule"#;
         }
     }
 
+    /// An intra-assignment delay on a nonblocking assignment evaluates the
+    /// right-hand side at the edge and publishes the update at the due time
+    /// (IEEE 1800-2023 9.4.5, 10.4.2). The flip-flop still fuses into its
+    /// clock domain instead of running as a process kernel per edge.
+    #[cfg(all(
+        feature = "systemverilog",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn delayed_nonblocking_ff_is_fused_and_matches_reference() {
+        let source = r#"`timescale 1ns/1ns
+module Top(output logic [7:0] q, output logic [7:0] seen);
+    bit clk = 0;
+    bit rst_n = 0;
+    logic [7:0] d = 8'h11;
+    always #5 clk = ~clk;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) q <= 8'h00;
+        else q <= #1 d;
+    end
+    always @(posedge clk) seen <= q;
+    initial begin
+        #12 rst_n = 1;
+        #10 d = 8'h22;
+        #10 d = 8'h33;
+        #40 $finish;
+    end
+endmodule"#;
+        for four_state in [false, true] {
+            let builder = || {
+                crate::Simulation::from_sv_sources(
+                    vec![(source, std::path::Path::new("delayed-ff.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+            };
+            let (program, _, _, _, _) = builder()
+                .emit_triggers()
+                .into_laid_out_program(crate::MemoryLayoutMode::Packed, false, false)
+                .unwrap();
+            assert!(
+                !program.sir.eval_apply_ffs.is_empty(),
+                "a delayed nonblocking flip-flop must fuse into its clock domain"
+            );
+            let mut simulation = builder()
+                .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+                .build_native()
+                .unwrap();
+            // The edge at t=15 captures d=8'h11; the update lands at t=16,
+            // so at t=15 the old value is still visible.
+            simulation.run_until(15).unwrap();
+            assert_eq!(simulation.get(simulation.signal("q")), 0u8.into());
+            simulation.run_until(16).unwrap();
+            assert_eq!(simulation.get(simulation.signal("q")), 0x11u8.into());
+            simulation.run_until(26).unwrap();
+            assert_eq!(simulation.get(simulation.signal("q")), 0x22u8.into());
+            simulation.run_until(72).unwrap();
+            assert!(simulation.is_finished());
+            let stats = simulation.scheduler_stats();
+            assert!(
+                stats.compiled_slots > 0 && stats.checked_steps > 0,
+                "{stats:?}"
+            );
+        }
+    }
+
     /// A partitioned settle has a clock cone of its own: the partitions
     /// the kernels' clock writes dirty and those they publish to. The slot
     /// after a clock toggle runs only the cone; a kernel writing data as

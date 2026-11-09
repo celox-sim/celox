@@ -15,8 +15,20 @@ impl BodyBuilder<'_, '_, '_> {
         if operator != "=" && !nonblocking {
             return Err(unsupported("compound assignment with a timing control"));
         }
-        self.allow_timing("intra-assignment timing control")?;
         let control = control.ok_or_else(|| unsupported("intra-assignment cycle control"))?;
+        // A nonblocking assignment with an intra-assignment delay evaluates
+        // its right-hand side now and schedules the update for later; it
+        // does not suspend, so an `always` body may contain it (IEEE
+        // 1800-2023 9.4.5, 10.4.2).
+        let delayed = nonblocking
+            && repeat_count.is_none()
+            && matches!(
+                self.tree.declarations().timing_control(control).kind,
+                celox_sv_syntax::TimingControlKind::Delay { .. }
+            );
+        if !delayed {
+            self.allow_timing("intra-assignment timing control")?;
+        }
         if self.implicit_event_control(control)? {
             return Err(unsupported("implicit intra-assignment event control"));
         }
@@ -38,7 +50,10 @@ impl BodyBuilder<'_, '_, '_> {
             return Err(unsupported("nonintegral intra-assignment target"));
         }
         if nonblocking {
-            let delay = self.native_timing_control(control)?;
+            self.delayed_nonblocking = delayed;
+            let delay = self.native_timing_control(control);
+            self.delayed_nonblocking = false;
+            let delay = delay?;
             if repeat_count.is_some() || !matches!(delay, Stmt::Delay { .. }) {
                 return Err(unsupported("nonblocking intra-assignment event control"));
             }

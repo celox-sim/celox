@@ -4998,6 +4998,7 @@ fn lower_module_with_overrides(
             reset_clock_map,
             parallel_ff_parts,
             event_vars,
+            delayed_sites,
         ),
         mut runtime_event_sites,
         mut runtime_errors,
@@ -5041,9 +5042,9 @@ fn lower_module_with_overrides(
         initial_values,
         declaration_values,
         folded_initial_memory_values,
-        processes,
+        mut processes,
         wait_sites,
-        nba_sites,
+        mut nba_sites,
         nba_switches,
         host_request_sites,
         event_assignments,
@@ -5060,6 +5061,17 @@ fn lower_module_with_overrides(
         warnings,
         calls,
     )?;
+    // The delayed flip-flop updates are published by their domains' commit
+    // units through timed nonblocking sites; one synthetic process groups
+    // the module's sites for publication. Its kernel never runs.
+    if !delayed_sites.is_empty() {
+        let index = processes.len();
+        processes.push(delayed_publication_process(&mut variables, index));
+        nba_sites.extend(delayed_sites.into_iter().map(|mut site| {
+            site.process = index;
+            site
+        }));
+    }
     let mut declaration_initial_memory_values = initial_memory_values.clone();
     declaration_initial_memory_values.extend(declaration_values);
     initial_memory_values.extend(initial_values);
@@ -6531,6 +6543,92 @@ fn process_random_seeds(module: &sv::ir::Module) -> HashMap<(u8, usize), u32> {
 }
 
 /// The source procedure of a process kernel, for diagnostics.
+/// The synthetic process that groups a module's delayed flip-flop
+/// nonblocking sites for timed publication. Its kernel is empty: the
+/// domains' commit units stage the updates and set the sites' pending
+/// flags, and publication queues them for their due times.
+fn delayed_publication_process(
+    variables: &mut HashMap<SourceVarId, SvVariable>,
+    index: usize,
+) -> SymbolicProcess {
+    let mut next_id = SourceVarId(
+        variables
+            .keys()
+            .map(|id| id.0 + 1)
+            .max()
+            .unwrap_or_default(),
+    );
+    let mut declare = |slot: &str, width: usize| {
+        let id = next_var_id(&mut next_id);
+        variables.insert(
+            id,
+            SvVariable {
+                float: None,
+                value_kind: celox_design::ValueKind::Bits,
+                path: vec![format!("$ff-nba[{index}]"), slot.to_string()],
+                width,
+                signed: false,
+                is_4state: false,
+                is_unpacked_struct: false,
+                packed_ranges: vec![(width as i128 - 1, 0)],
+                array_dims: Vec::new(),
+                unpacked_ranges: Vec::new(),
+                domain_kind: DomainKind::Other,
+                kind: VariableKind::Variable,
+                type_kind: PortTypeKind::Bit,
+                source: None,
+                hidden: true,
+                force_control: None,
+                sampled_from: None,
+                history_of: None,
+                activation_scratch: false,
+            },
+        );
+        id
+    };
+    let resume = declare("resume", PROCESS_RESUME_WIDTH);
+    let status = declare("status", celox_design::PROCESS_STATUS_WIDTH);
+    let delay = declare("delay", celox_design::PROCESS_DELAY_WIDTH);
+    // The kernel only marks itself done: it never runs the sites.
+    let mut kernel = SIRBuilder::new();
+    let code = kernel.alloc_bit(celox_design::PROCESS_STATUS_WIDTH, false);
+    kernel.emit(SIRInstruction::Imm(
+        code,
+        SIRValue::new(celox_design::ProcessStatus::Done.code()),
+    ));
+    kernel.emit(SIRInstruction::Store(
+        RegionedVarAddrBase {
+            region: STABLE_REGION,
+            var_id: status,
+        },
+        SIROffset::Static(0),
+        celox_design::PROCESS_STATUS_WIDTH,
+        code,
+        Vec::new(),
+        Vec::new(),
+    ));
+    SymbolicProcess {
+        kernel: seal_builder(kernel),
+        frame: None,
+        slots: ProcessSlots {
+            kind: celox_design::ProcessKind::Regular,
+            requires_timed_simulation: false,
+            const_delays: true,
+            program: None,
+            resume,
+            status,
+            delay,
+            call_top: None,
+        },
+        call_resumes: Vec::new(),
+        origin: celox_design::ProcessOrigin {
+            construct: "flip-flop delayed nonblocking publication".to_string(),
+            location: None,
+            scope: None,
+        },
+    }
+}
+
 fn process_origin(process: &sv::ir::InitialProcess) -> celox_design::ProcessOrigin {
     let construct = match process.site() {
         Some(site) => site.construct,
@@ -11348,6 +11446,7 @@ type SvFfBlocks = (
         Vec<celox_frontend_core::symbolic::artifact::FfPart<RegionedVarAddr>>,
     >,
     FfEventVars,
+    Vec<celox_design::NbaSite<SourceVarId>>,
 );
 
 /// The variables `always_ff` event controls are sensed on.
@@ -11479,6 +11578,7 @@ fn lower_ff_processes(
     let mut nba_ff_blocks: HashMap<_, ExecutionUnit<RegionedVarAddr>> = HashMap::default();
     let mut eval_apply_ff_blocks = HashMap::default();
     let mut reset_clock_map = HashMap::default();
+    let mut all_delayed_sites: Vec<celox_design::NbaSite<SourceVarId>> = Vec::new();
 
     // Every event of every process, as (signal, domain kind): the clock, then
     // the resets.
@@ -11598,6 +11698,7 @@ fn lower_ff_processes(
             nba,
             targets,
             staged,
+            delayed_sites,
         } = ff::Ff::new(pm, random_seeds[&(0, index)])
             .with_sparse_memories(shared_memories)
             .with_shared_variables(shared_variables)
@@ -11605,6 +11706,7 @@ fn lower_ff_processes(
             .with_window_writes(&window_writes)
             .with_inferred_clock(clock)
             .lower_process(process.body())?;
+        all_delayed_sites.extend(delayed_sites);
         repeated_writes.extend(repeated_ff_writes(&eval_only, &staged));
         // A process without writes still runs for its runtime events and
         // extern calls.
@@ -11659,6 +11761,7 @@ fn lower_ff_processes(
         reset_clock_map,
         parallel_ff_parts,
         event_vars,
+        all_delayed_sites,
     ))
 }
 
@@ -11723,7 +11826,92 @@ fn runs_as_process(
                 .events()
                 .iter()
                 .any(|event| multi_bit(event.signal()))
-            || writes_other_instance())
+            || writes_other_instance()
+            || ineligible_delayed_nonblocking(module, process))
+}
+
+/// Whether a flip-flop's delayed nonblocking assignments cannot take the
+/// fused staging path: an event control or nonconstant delay, a partial or
+/// array target, or a target another process or assignment also writes.
+/// Those keep the process-kernel path, whose queued updates preserve the
+/// exact timing and order (IEEE 1800-2023 9.4.5, 10.4.2).
+fn ineligible_delayed_nonblocking(module: &sv::ir::Module, process: &sv::ir::FfProcess) -> bool {
+    let mut targets: Vec<String> = Vec::new();
+    let mut ineligible = false;
+    for stmt in process.body() {
+        stmt.walk(&mut |stmt| {
+            let sv::ir::Stmt::DelayedNonblocking {
+                control,
+                assignment,
+            } = stmt
+            else {
+                return;
+            };
+            let sv::ir::Stmt::Delay { amount, .. } = control.as_ref() else {
+                ineligible = true;
+                return;
+            };
+            if !matches!(amount, sv::ir::Expr::Literal(_) | sv::ir::Expr::Ident(_)) {
+                ineligible = true;
+                return;
+            }
+            match assignment.as_ref() {
+                sv::ir::Stmt::Assign {
+                    lhs: sv::ir::LValue::Ident(name),
+                    nonblocking: true,
+                    ..
+                } => targets.push(name.clone()),
+                _ => ineligible = true,
+            }
+        });
+    }
+    if ineligible {
+        return true;
+    }
+    if targets.is_empty() {
+        return false;
+    }
+    // A target of an unpacked array keeps the kernel path: the fused
+    // staging publishes whole variables only.
+    let array_target = targets.iter().any(|name| {
+        module
+            .ports()
+            .iter()
+            .find(|port| port.name() == name)
+            .map(sv::ir::Port::r#type)
+            .or_else(|| {
+                module
+                    .signals()
+                    .iter()
+                    .find(|signal| signal.name() == name)
+                    .map(sv::ir::Signal::r#type)
+            })
+            .is_some_and(|ty| !ty.unpacked_ranges().is_empty())
+    });
+    if array_target {
+        return true;
+    }
+    // A target another process or a continuous assignment writes keeps the
+    // kernel path: the fused commit publishes its variable on its own.
+    let mut written = HashSet::default();
+    for other in module.ff_processes() {
+        if !std::ptr::eq(other, process) {
+            procedural::written_names_with_calls(module, other.body(), &mut written);
+        }
+    }
+    for other in module.comb_processes() {
+        procedural::written_names_with_calls(module, other.body(), &mut written);
+        for assignment in other.assignments() {
+            written.insert(assignment.lhs().to_string());
+        }
+    }
+    for other in module.initial_processes() {
+        procedural::written_names_with_calls(module, other.body(), &mut written);
+    }
+    for assignment in module.assignments() {
+        written.insert(assignment.lhs().to_string());
+    }
+    targets.iter().any(|target| written.contains(target))
 }
 
 fn clock_event_from_ff_process(process: &sv::ir::FfProcess) -> Option<&sv::ir::FfEvent> {

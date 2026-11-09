@@ -1280,6 +1280,13 @@ pub struct NbaSite<A> {
     /// reaching the site again while the flag is set returns
     /// [`ProcessStatus::Nba`] first, so the runtime queues the staged value.
     pub pending: Option<A>,
+    /// The site belongs to a fused flip-flop domain rather than a process
+    /// kernel: the domain's commit unit stages the value and sets the
+    /// pending flag, and publication queues the update for its due time.
+    /// The named process only groups the sites for publication; its kernel
+    /// never runs them.
+    #[serde(default)]
+    pub unit: bool,
 }
 
 impl<A: Copy> NbaSite<A> {
@@ -1293,6 +1300,7 @@ impl<A: Copy> NbaSite<A> {
             value: map(self.value),
             position: self.position.map(|position| position.map(&mut map)),
             pending: self.pending.map(&mut map),
+            unit: self.unit,
         }
     }
 }
