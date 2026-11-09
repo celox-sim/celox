@@ -165,11 +165,15 @@ pub fn copy_signal<B: backend::SimBackend>(backend: &mut B, from: SignalRef, to:
         1
     };
     let bytes = celox_state_layout::get_byte_size(from.width) * planes;
-    let (memory, size) = backend.memory_as_mut_ptr();
+    let (memory, size) = backend.memory_as_ptr();
     assert!(from.offset + bytes <= size && to.offset + bytes <= size);
-    // SAFETY: both ranges are in the backend's memory. Signal views can
-    // alias, so use the copy operation that permits overlapping ranges.
-    unsafe { std::ptr::copy(memory.add(from.offset), memory.add(to.offset), bytes) };
+    // SAFETY: both ranges are in the backend's memory. Read through a
+    // temporary so aliased ranges copy like `memmove`. Writing through
+    // `write_memory` (not a raw mutable view) keeps settle/VCD change
+    // tracking alive: a retained raw view would make every settle run
+    // every partition from then on.
+    let value = unsafe { std::slice::from_raw_parts(memory.add(from.offset), bytes) }.to_vec();
+    backend.write_memory(to.offset, &value);
 }
 
 #[cfg(test)]
