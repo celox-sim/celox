@@ -15,7 +15,8 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-MANIFEST = json.loads((ROOT / 'benchmarks/rtlmeter/manifest.json').read_text())
+DEFAULT_MANIFEST_PATH = ROOT / 'benchmarks/rtlmeter/manifest.json'
+MANIFEST = json.loads(DEFAULT_MANIFEST_PATH.read_text())
 ENGINES = ('celox', 'verilator', 'xezim')
 STATES = ('two-state', 'four-state')
 CONFIGURATION = {
@@ -23,6 +24,17 @@ CONFIGURATION = {
     'verilator': '--binary --timing --assert; -O3; C++ -O3; -j1; fresh Mdir',
     'xezim': 'release default VM; persistent caches disabled; full four-state',
 }
+STEADY_CONFIGURATION = {
+    'celox': 'native O2; threads=1; steady-state simulation',
+    'verilator': '--binary --timing --assert; -O3; C++ -O3; -j1; steady-state simulation',
+    'xezim': 'release default VM; persistent caches disabled; full four-state; --verbose; --max-time 60s',
+}
+
+
+def configuration_for(contract):
+    if contract == 'rtlmeter-steady-state-v1':
+        return dict(STEADY_CONFIGURATION)
+    return dict(CONFIGURATION)
 
 
 def git(directory, *args):
@@ -34,22 +46,28 @@ def sha(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
-def prepare(destination):
+def prepare(destination, manifest=None):
+    if manifest is None:
+        manifest = MANIFEST
     destination = destination.resolve()
     if not destination.exists():
-        subprocess.run(['git', 'clone', '--no-checkout', MANIFEST['repository'], str(destination)], check=True)
-        subprocess.run(['git', '-C', str(destination), 'checkout', '--detach', MANIFEST['revision']], check=True)
-    verify_source(destination)
+        subprocess.run(['git', 'clone', '--no-checkout', manifest['repository'], str(destination)], check=True)
+        subprocess.run(['git', '-C', str(destination), 'checkout', '--detach', manifest['revision']], check=True)
+    verify_source(destination, manifest)
 
 
-def verify_source(source):
-    if git(source, 'rev-parse', 'HEAD') != MANIFEST['revision'] or git(source, 'status', '--porcelain'):
+def verify_source(source, manifest=None):
+    if manifest is None:
+        manifest = MANIFEST
+    if git(source, 'rev-parse', 'HEAD') != manifest['revision'] or git(source, 'status', '--porcelain'):
         raise ValueError('RTLMeter sources must be the clean pinned revision')
 
 
-def specification(name, source):
+def specification(name, source, manifest=None):
+    if manifest is None:
+        manifest = MANIFEST
     import yaml
-    spec = MANIFEST['cases'][name]
+    spec = manifest['cases'][name]
     design = source / 'designs' / spec['design']
     descriptor = yaml.safe_load((design / 'descriptor.yaml').read_text())
     compile_spec = descriptor['compile']
@@ -61,7 +79,7 @@ def specification(name, source):
     test = {**test, **configured_execute.get('tests', {}).get(spec['test'], {})}
     sources = [design / p for p in compile_spec['verilogSourceFiles']]
     sources.append(source / 'rtl/__rtlmeter_utils.sv')
-    files = [design / p for p in test.get('files', [])]
+    files = [design / p for p in (spec.get('inputFiles') or test.get('files', []))]
     defines = {**compile_spec.get('verilogDefines', {}), **configured_compile.get('verilogDefines', {}),
                '__RTLMETER_MAIN_CLOCK': compile_spec['mainClock']}
     # Fingerprint all potential local headers, not only explicit compilation inputs.
@@ -69,9 +87,10 @@ def specification(name, source):
                          source / 'rtl/__rtlmeter_top_include.vh']))
     hashes = {str(p.relative_to(source)): sha(p) for p in inputs if p.is_file()}
     digest = hashlib.sha256(json.dumps(hashes, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    args = spec.get('args', test.get('args', []))
     return {**spec, 'top': compile_spec['topModule'], 'sources': sources, 'files': files,
             'defines': defines, 'includes': [source / 'rtl', design / 'src'],
-            'args': test.get('args', []), 'sourceSha256': digest, 'inputSha256': hashes}
+            'args': args, 'sourceSha256': digest, 'inputSha256': hashes}
 
 
 def environment():
@@ -107,25 +126,31 @@ def accept(stdout, cycles, outcome, payload, success_marker='TEST PASSED'):
         raise ValueError('process failed or timed out')
     if re.search(r'TEST[\s_]+FAIL(?:ED)?|Time Out !!!|simulation finished with error|\$fatal|%Error:', stdout, re.I):
         raise ValueError('testbench reported failure')
-    if stdout.splitlines().count(success_marker) != 1 or stdout.splitlines().count(payload) != 1:
+    payload_count = sum(1 for line in stdout.splitlines() if line == payload or line.startswith(payload))
+    if stdout.splitlines().count(success_marker) != 1 or payload_count != 1:
         raise ValueError('missing unique upstream success marker or expected program output')
     if not re.fullmatch(r'[1-9][0-9]*', cycles.strip()):
         raise ValueError('missing valid final RTLMeter clock count')
     return int(cycles.strip())
 
 
-def commands(engine, state, spec, files, build, binaries, plusargs):
+def commands(engine, state, spec, files, build, binaries, plusargs, contract='rtlmeter-cold-process-v1'):
     includes = [f'-I{p}' for p in spec['includes']]
     defines = [f'-D{k}={v}' for k, v in sorted(spec['defines'].items())]
     if engine == 'celox':
-        # Hotspot JIT starts on the interpreter and compiles hot groups in the
-        # background; an explicit mode fails instead of silently falling back.
+        if contract == 'rtlmeter-steady-state-v1':
+            return [[binaries[engine], 'run', '-f', files, '--top', spec['top'], '--backend', 'native',
+                     '--threads', '1', '-O', 'O2', '--four-state' if state == 'four-state' else '--two-state',
+                     '--unlimited', '--report', '--no-checkpoint-on-signal', *includes, *defines, *plusargs]]
         return [[binaries[engine], 'run', '-f', files, '--top', spec['top'], '--backend', 'tiered',
                  '--jit', 'hotspot', '--report', '--threads', '1', '-O', 'O2', '--four-state' if state == 'four-state' else '--two-state',
                  '--unlimited', '--no-checkpoint-on-signal', *includes, *defines, *plusargs]]
     if engine == 'xezim':
         if state != 'four-state':
             raise ValueError('xezim has no global two-state mode; zero initialization is not equivalent')
+        if contract == 'rtlmeter-steady-state-v1':
+            return [[binaries[engine], '--error-exit', '--verbose', '--max-time', '60s', '-s', spec['top'],
+                     '-f', files, *includes, *defines, *plusargs]]
         return [[binaries[engine], '--error-exit', '--max-time', '1s', '-s', spec['top'],
                  '-f', files, *includes, *defines, *plusargs]]
     model = build / 'sim'
@@ -142,12 +167,33 @@ def probe_source(state):
 
 def run_commands(sequence, cwd, logs, timeout, cpu):
     total = 0
+    command_outcomes = []
     for i, command in enumerate(sequence):
         result = execute(command, cwd, logs / f'{i}.log', timeout, cpu)
         total += result['elapsedNs']
+        command_outcomes.append(result)
         if result['timedOut'] or result['exitCode'] != 0:
-            return {**result, 'elapsedNs': total}
-    return {**result, 'elapsedNs': total}
+            return {**result, 'elapsedNs': total, 'commands': command_outcomes}
+    return {**result, 'elapsedNs': total, 'commands': command_outcomes}
+
+
+def extract_sim_ns(engine, stdout, outcome):
+    if engine == 'celox':
+        match = re.search(r'^CELOX_TEST_TIMING\s+.*?\bexecute_ns=(\d+)', stdout, re.M)
+        if match:
+            return int(match.group(1))
+    elif engine == 'verilator':
+        cmds = outcome.get('commands', [])
+        if len(cmds) > 1:
+            return cmds[1]['elapsedNs']
+    elif engine == 'xezim':
+        match = re.search(r'\[PHASE\]\s+simulation:\s*([\d.]+)ms', stdout)
+        if match:
+            return int(float(match.group(1)) * 1_000_000)
+        match = re.search(r'\[PROF\]\s+simulation_loop=([\d.]+)ms', stdout)
+        if match:
+            return int(float(match.group(1)) * 1_000_000)
+    return outcome['elapsedNs']
 
 
 def build_directory(root, name):
@@ -156,10 +202,12 @@ def build_directory(root, name):
     return tempfile.TemporaryDirectory(prefix=name + '-', dir=root)
 
 
-def measure_case(name, source, celox, xezim, output, build_root, timeout=1800, samples=3, verilator='verilator'):
+def measure_case(name, source, celox, xezim, output, build_root, timeout=1800, samples=3, verilator='verilator', manifest=None):
+    if manifest is None:
+        manifest = MANIFEST
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-    verify_source(source)
-    spec = specification(name, source)
+    verify_source(source, manifest)
+    spec = specification(name, source, manifest)
     output.mkdir(parents=True, exist_ok=False)
     build_root = build_root / name
     build_root.mkdir(parents=True, exist_ok=True)
@@ -171,19 +219,20 @@ def measure_case(name, source, celox, xezim, output, build_root, timeout=1800, s
     version = lambda engine: subprocess.check_output([binaries[engine], '-V' if engine == 'xezim' else '--version'], text=True, stderr=subprocess.STDOUT).strip()
     versions = {engine: version(engine) for engine in ENGINES}
     locked = json.loads((ROOT / 'flake.lock').read_text())['nodes']['xezim']
-    if not re.search(r'Verilator ' + re.escape(MANIFEST['verilatorVersion']) + r'\b', versions['verilator']):
+    if not re.search(r'Verilator ' + re.escape(manifest['verilatorVersion']) + r'\b', versions['verilator']):
         raise ValueError('Verilator version does not match the measurement contract')
     release = locked['original'].get('ref')
     if release is None or versions['xezim'].splitlines()[0] != f'xezim version {release.removeprefix("v")}':
         raise ValueError('xezim must be built from the release fixed by flake.lock')
-    report = {'schemaVersion': 1, 'contract': MANIFEST['contract'], 'case': name, 'caseSpec': MANIFEST['cases'][name],
-              'rtlmeterRevision': MANIFEST['revision'], 'sourceSha256': spec['sourceSha256'],
+    config = configuration_for(manifest['contract'])
+    report = {'schemaVersion': 1, 'contract': manifest['contract'], 'case': name, 'caseSpec': manifest['cases'][name],
+              'rtlmeterRevision': manifest['revision'], 'sourceSha256': spec['sourceSha256'],
               'inputSha256': spec['inputSha256'], 'celoxCommit': git(ROOT, 'rev-parse', 'HEAD'),
               'dirty': bool(git(ROOT, 'status', '--porcelain')), 'requestedSamples': samples,
               'maxCycles': spec['maxCycles'],
               'host': {'cpu': cpu_model, 'architecture': platform.machine(), 'affinityCpu': cpu},
               'versions': versions, 'binarySha256': {k: sha(v) for k, v in binaries.items()},
-              'configuration': CONFIGURATION,
+              'configuration': config,
               'xezimRelease': locked['original']['ref'], 'xezimRevision': locked['locked']['rev'],
               'date': time.time_ns() // 1_000_000, 'status': 'incomplete', 'results': []}
     def save():
@@ -209,7 +258,7 @@ def measure_case(name, source, celox, xezim, output, build_root, timeout=1800, s
         probe_files.write_text(json.dumps(str(probe)) + '\n')
         probe_spec = {**spec, 'top': 'tb', 'defines': {}, 'includes': []}
         with build_directory(build_root, f'{engine}-{state}-probe') as build:
-            outcome = run_commands(commands(engine, state, probe_spec, probe_files, Path(build), binaries, []),
+            outcome = run_commands(commands(engine, state, probe_spec, probe_files, Path(build), binaries, [], manifest['contract']),
                                    directory, directory / 'probe-logs', timeout, cpu)
         log = ''.join(p.read_text(errors='replace') for p in sorted((directory / 'probe-logs').glob('*.log')))
         if outcome['exitCode'] != 0 or outcome['timedOut'] or 'STATE PROBE PASSED' not in log:
@@ -222,7 +271,7 @@ def measure_case(name, source, celox, xezim, output, build_root, timeout=1800, s
                 shutil.copyfile(path, control / path.name)
             with build_directory(build_root, f'{engine}-{state}-negative') as build:
                 outcome = run_commands(commands(engine, state, spec, files, Path(build),
-                                               binaries, [*spec['args'], '+max_cycles=1']),
+                                               binaries, [*spec['args'], '+max_cycles=1'], manifest['contract']),
                                        control, control / 'logs', timeout, cpu)
             text = ''.join(p.read_text(errors='replace') for p in sorted((control / 'logs').glob('*.log')))
             control_cycles = control / '_rtlmeter_cycles.txt'
@@ -248,7 +297,7 @@ def measure_case(name, source, celox, xezim, output, build_root, timeout=1800, s
             print(f'RUN {name} {engine} {state} {repetition + 1}/{samples}', flush=True)
             with build_directory(build_root, f'{engine}-{state}-{repetition}') as build:
                 outcome = run_commands(commands(engine, state, spec, files, Path(build), binaries,
-                                               [*spec['args'], f'+max_cycles={spec["maxCycles"]}']),
+                                               [*spec['args'], f'+max_cycles={spec["maxCycles"]}'], manifest['contract']),
                                        directory, directory / 'logs', timeout, cpu)
             stdout = ''.join(p.read_text(errors='replace') for p in sorted((directory / 'logs').glob('*.log')))
             cycles = directory / '_rtlmeter_cycles.txt'
@@ -256,10 +305,22 @@ def measure_case(name, source, celox, xezim, output, build_root, timeout=1800, s
                 count = accept(stdout, cycles.read_text() if cycles.exists() else '', outcome, spec['payload'], spec.get('successMarker', 'TEST PASSED'))
                 if count >= spec['maxCycles']:
                     raise ValueError('Workload reached the cycle limit instead of completing normally')
-                if engine == 'celox' and not any(line.startswith('CELOX_JIT_CONFIG mode=hotspot ')
-                                                 for line in stdout.splitlines()):
-                    raise ValueError('Celox did not run with the hotspot JIT')
-                row['samples'].append({'status': 'passed', 'processNs': outcome['elapsedNs'], 'cycles': count})
+                if engine == 'celox':
+                    if manifest['contract'] == 'rtlmeter-steady-state-v1':
+                        if not any(line.startswith('CELOX_TEST_TIMING ') for line in stdout.splitlines()):
+                            raise ValueError('Celox did not emit CELOX_TEST_TIMING')
+                    elif not any(line.startswith('CELOX_JIT_CONFIG mode=hotspot ') for line in stdout.splitlines()):
+                        raise ValueError('Celox did not run with the hotspot JIT')
+                sim_ns = extract_sim_ns(engine, stdout, outcome)
+                cycles_per_sec = round(count / (sim_ns / 1e9), 2) if sim_ns > 0 else 0.0
+                row['samples'].append({
+                    'status': 'passed',
+                    'processNs': outcome['elapsedNs'],
+                    'simNs': sim_ns,
+                    'cycles': count,
+                    'cyclesPerSec': cycles_per_sec,
+                    'throughputKhz': round(cycles_per_sec / 1000.0, 2),
+                })
             except ValueError as error:
                 row.update(status='failed', reason=str(error))
             save()
@@ -343,6 +404,7 @@ def main():
     sub = parser.add_subparsers(dest='command', required=True)
     prepare_parser = sub.add_parser('prepare')
     prepare_parser.add_argument('destination', type=Path)
+    prepare_parser.add_argument('--manifest', type=Path, default=DEFAULT_MANIFEST_PATH)
     check = sub.add_parser('check')
     check.add_argument('case', choices=[*MANIFEST['cases'], 'all'])
     check.add_argument('source', type=Path)
@@ -353,18 +415,20 @@ def main():
                        help='Optional output directory to retain simulation logs')
     check.add_argument('--timeout', type=int, default=300)
     run = sub.add_parser('run')
-    run.add_argument('case', choices=MANIFEST['cases'])
+    run.add_argument('case')
     run.add_argument('source', type=Path)
     run.add_argument('celox', type=Path)
     run.add_argument('output', type=Path)
+    run.add_argument('--manifest', type=Path, default=DEFAULT_MANIFEST_PATH)
     run.add_argument('--xezim', default='xezim')
     run.add_argument('--verilator', default='verilator')
     run.add_argument('--build-root', type=Path, default=ROOT / 'work/rtlmeter-build')
     run.add_argument('--timeout', type=int, default=1800)
-    run.add_argument('--samples', type=int, default=MANIFEST['samples'])
+    run.add_argument('--samples', type=int, default=None)
     args = parser.parse_args()
+    manifest = json.loads(args.manifest.read_text()) if hasattr(args, 'manifest') else MANIFEST
     if args.command == 'prepare':
-        prepare(args.destination)
+        prepare(args.destination, manifest)
     elif args.command == 'check':
         states = [s.strip() for s in args.states.split(',') if s.strip()]
         for s in states:
@@ -375,10 +439,13 @@ def main():
             check_case(c, args.source.resolve(), args.celox.resolve(),
                        states=states, timeout=args.timeout, output=args.output)
     else:
-        if not 1 <= args.samples <= 30 or args.timeout <= 0:
+        if args.case not in manifest['cases']:
+            parser.error(f"unknown case '{args.case}', expected one of {list(manifest['cases'])}")
+        samples = args.samples if args.samples is not None else manifest['samples']
+        if not 1 <= samples <= 30 or args.timeout <= 0:
             parser.error('samples must be 1..30; timeout must be positive')
         measure_case(args.case, args.source.resolve(), args.celox.resolve(), args.xezim,
-                     args.output.resolve(), args.build_root.resolve(), args.timeout, args.samples, args.verilator)
+                     args.output.resolve(), args.build_root.resolve(), args.timeout, samples, args.verilator, manifest)
 
 
 if __name__ == '__main__':
