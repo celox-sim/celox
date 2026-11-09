@@ -5181,3 +5181,58 @@ endmodule
 "#)
   (top Top) (run_until 0)
   (assert_eq chosen 0x47) (assert_eq record 0x34))
+
+; IEEE 1800-2023 18.5.1: a package scope in an external constraint name
+; selects that package's class when two packages declare one of the same
+; name, in either declaration order.
+(case external_constraints_in_packages
+  (source "external_constraints_in_packages.sv" #"
+package PB;
+  class C;
+    rand int x;
+    constraint range;
+  endclass
+endpackage
+package PA;
+  class C;
+    rand int x;
+    constraint range;
+  endclass
+endpackage
+constraint PB::C::range { x < 10; }
+constraint PA::C::range { x > 100; }
+module Top(output bit ok);
+  initial begin
+    PA::C a = new();
+    PB::C b = new();
+    ok = 1;
+    repeat (20) begin
+      if (a.randomize() != 1 || a.x <= 100) ok = 0;
+      if (b.randomize() != 1 || b.x >= 10) ok = 0;
+    end
+  end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq ok 1))
+
+(case external_constraints
+  (source "external_constraints.sv" #"
+class C;
+  rand int x;
+  extern constraint pos;
+  constraint little;
+endclass
+constraint C::pos { x >= 0; }
+constraint C::little { x < 10; }
+module Top(output bit ok);
+  initial begin
+    C c = new();
+    ok = 1;
+    repeat (20) begin
+      if (c.randomize() != 1) ok = 0;
+      if (c.x < 0 || c.x >= 10) ok = 0;
+    end
+  end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq ok 1))

@@ -3110,6 +3110,28 @@ fn constraints_retain_simple_expressions_and_mark_other_forms() {
 }
 
 #[test]
+fn external_constraints_track_unsupported_definitions_and_static_prototypes() {
+    // An unsupported external body still defines the constraint, so a
+    // second external block for it is a duplicate (18.5.1).
+    assert!(
+        Declarations::parse(
+            "class C; rand int x; extern constraint c; endclass constraint C::c { solve x before x; } constraint C::c { x > 0; }",
+            Path::new("duplicate_external.sv")
+        )
+        .is_err()
+    );
+    // A static prototype completed externally stays static and so keeps
+    // no executable expressions (18.5.10).
+    let tree = parse(
+        "class C; rand int x; extern static constraint c; endclass constraint C::c { x > 0; }",
+    );
+    let block = &tree.classes[0].constraints[0];
+    assert!(block.defined);
+    assert!(block.is_static);
+    assert!(block.expressions.is_none());
+}
+
+#[test]
 fn inline_constraints_retain_ownership_and_bound_nested_calls() {
     let syntax =
         parse("module M; initial obj.randomize() with { if (x) y == 1; else y == 2; }; endmodule");
@@ -3645,4 +3667,52 @@ fn var_declarations_with_type_operators_are_no_instances() {
             "{item}"
         );
     }
+}
+
+#[test]
+fn external_constraints_complete_the_scoped_nested_class() {
+    let syntax = parse(
+        "class Outer2; class Inner; rand int x; constraint range; endclass endclass \
+         class Outer1; class Inner; rand int x; constraint range; endclass endclass \
+         constraint Outer2::Inner::range { x < 10; } \
+         constraint Outer1::Inner::range { x > 100; x < 1000; } \
+         module M; endmodule",
+    );
+    let inners: Vec<_> = syntax
+        .classes
+        .iter()
+        .filter(|class| class.name.spelling == "Inner")
+        .collect();
+    assert_eq!(inners.len(), 2);
+    // Classes finish innermost first: Outer2's Inner, then Outer1's.
+    assert_eq!(
+        inners[0].constraints[0].expressions.as_ref().map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(
+        inners[1].constraints[0].expressions.as_ref().map(Vec::len),
+        Some(2)
+    );
+}
+
+#[test]
+fn external_constraints_resolve_unqualified_names_in_their_lexical_scope() {
+    // The block sits in package `P`, so `C` is the package class, not the
+    // later nested `Outer::C` (18.5.1).
+    let syntax = parse(
+        "package P; \
+         class C; rand int x; extern constraint c; endclass \
+         class Outer; class C; rand int x; extern constraint c; endclass endclass \
+         constraint C::c { x > 0; } \
+         endpackage",
+    );
+    let classes: Vec<_> = syntax
+        .classes
+        .iter()
+        .filter(|class| class.name.spelling == "C")
+        .collect();
+    assert_eq!(classes.len(), 2);
+    // The package class finishes first, the nested one second.
+    assert!(classes[0].constraints[0].expressions.is_some());
+    assert!(classes[1].constraints[0].expressions.is_none());
 }

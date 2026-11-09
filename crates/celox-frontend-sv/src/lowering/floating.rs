@@ -51,6 +51,11 @@ pub(super) fn precision(
             callee: sv::ir::Callee::System(F::Bitstoshortreal),
             ..
         } => Some(FP::F32),
+        // `str.atoreal()` returns a `real` (6.16.10).
+        E::Call {
+            callee: sv::ir::Callee::String(sv::ir::StringOp::Atoreal),
+            ..
+        } => Some(FP::F64),
         E::Call {
             callee: sv::ir::Callee::Object(op),
             ..

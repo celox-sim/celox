@@ -794,3 +794,17 @@ stdout file output and radix variants. Celox API cases check zero-delay work,
 sampled values, repeated calls, descriptor capture, close cancellation and
 checkpoint/native-image replay. Verilator's configured program-output mismatch
 is recorded with narrow retained evidence. This is not a full-corpus measurement.
+
+String `atoreal` / `realtoa` (6.16.10, 6.16.15), assignment-pattern type keys
+(10.9), and explicit and implicit external constraints (18.5.1) update ten
+reviewed expectations. Five cases pass in both state modes in focused
+official invocations: `5.10-structures`, `6.16.10--string_atoreal`,
+`6.16.15--string_realtoa`, `18.5.1--explicit-external-constraint_0`, and
+`18.5.1--implicit-external-constraint_0`. Shared regressions cover real round
+trips (plus heap unit tests of the `%g` form), last-value-wins and
+member-over-type pattern key priority (including `int` matching
+`bit signed [31:0]`), and external constraint randomization within bounds.
+Boundaries: pattern type keys do not descend into subarrays or nested
+structures and integer patterns reject them. `20.6--isunbounded` stays
+failing: the case calls `$isunbounded(1)`, but 20.6.3 requires a parameter
+name, which Celox's reviewed strictness enforces.
