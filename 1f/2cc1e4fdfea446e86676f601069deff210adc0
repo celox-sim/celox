@@ -1,0 +1,8 @@
+Revision history for #3360:
+
+rev 4 (content) 2026-11-09 00:51 UTC — Address Codex review on PR 3360: resolve unqualified external constraints in their lexical scope (18.5.1)
+rev 3 (content) 2026-11-07 19:17 UTC
+rev 2 (content) 2026-11-07 18:39 UTC
+rev 1 (initial) 2026-11-07 18:39 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3360,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"fbc5840c1d968376715bf1c77e4e949ac45d0976","timestamp_iso":"2026-11-07T18:39:44Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"fbc5840c1d968376715bf1c77e4e949ac45d0976","new_sha":"34701343b151b8ed621bdc96916fe8d43d310411","timestamp_iso":"2026-11-07T18:39:44Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/fbc5840c1d968376715bf1c77e4e949ac45d0976...34701343b151b8ed621bdc96916fe8d43d310411"},{"number":3,"change_type":"content","old_sha":"34701343b151b8ed621bdc96916fe8d43d310411","new_sha":"8c64123bc04982583306d0fdb5ab2ac596165893","timestamp_iso":"2026-11-07T19:17:01Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/34701343b151b8ed621bdc96916fe8d43d310411...8c64123bc04982583306d0fdb5ab2ac596165893"},{"number":4,"change_type":"content","old_sha":"5e5895ede2e62570cb95408e1edcea2edd744f3a","new_sha":"c82bde12590c18218e71fdc99d5e6ca20619718b","timestamp_iso":"2026-11-09T00:51:24Z","reason":"Address Codex review on PR 3360: resolve unqualified external constraints in their lexical scope (18.5.1)","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/5e5895ede2e62570cb95408e1edcea2edd744f3a...c82bde12590c18218e71fdc99d5e6ca20619718b"}]} -->
