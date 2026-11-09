@@ -1011,7 +1011,10 @@ impl<B: SimBackend> SimulationState<B> {
     /// Whether every run of the compiled scheduler takes one slot: the
     /// sampled copies are made before entering each later timestamp.
     fn one_slot_runs(&self) -> bool {
-        !self.model.sample_shadows.is_empty()
+        // The runtime refreshes the sampled copies between runs, so a
+        // compiled run may span timestamps only when the compiled
+        // scheduler refreshes them at its own slot starts.
+        !self.model.sample_shadows.is_empty() && !self.model.refreshes_sample_shadows
     }
 }
 
