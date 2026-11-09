@@ -3062,6 +3062,72 @@ mod host {
         }
     }
 
+    /// Drop sampled copies no remaining unit reads. A copy's readers are
+    /// the processes that sampled the value; when the frontend dropped
+    /// those (a two-state monitor that can never fail, say), refreshing
+    /// the copy at every timestamp is pure overhead. Copies a host root
+    /// can observe stay.
+    fn prune_unread_sample_shadows(program: &mut crate::ir::LaidOutProgram) {
+        use crate::HashSet;
+        let schema = &program.runtime().runtime_schema;
+        if schema.sample_shadows.is_empty() {
+            return;
+        }
+        let mut reads = HashSet::default();
+        reads.extend(schema.testbench_read_roots.iter().copied());
+        reads.extend(schema.live_signals.iter().copied());
+        reads.extend(
+            schema
+                .comb_observers
+                .iter()
+                .flat_map(|observer| observer.sensitivity.iter().map(|atom| atom.id)),
+        );
+        reads.extend(schema.watches.iter().map(|watch| watch.signal));
+        let sir = &program.sir;
+        let units = sir
+            .eval_comb
+            .iter()
+            .chain(sir.eval_apply_ffs.values().flatten())
+            .chain(sir.eval_comb_apply_ffs.values().flatten())
+            .chain(sir.eval_only_ffs.values().flatten())
+            .chain(sir.apply_ffs.values().flatten())
+            .chain(sir.processes.iter())
+            .chain(sir.functions.iter().map(|function| &function.unit));
+        // A call of a process kernel or a host call reports
+        // `Everything`, but every callee unit is in the scanned set and
+        // host calls address source-visible objects; a sampled copy is
+        // internal state only a scanned unit can read.
+        let mut scan = |unit: &celox_sir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>| {
+            for block in unit.blocks.values() {
+                for instruction in &block.instructions {
+                    use celox_sir::StateAccess;
+                    match instruction.state_reads() {
+                        StateAccess::None | StateAccess::Everything => {}
+                        StateAccess::Access(access) => {
+                            reads.insert(access.addr.absolute_addr());
+                        }
+                        StateAccess::Objects(objects) => {
+                            reads.extend(objects.iter().map(|addr| addr.absolute_addr()));
+                        }
+                    }
+                }
+            }
+        };
+        for unit in units {
+            scan(unit);
+        }
+        if let Some(parallel) = &sir.parallel {
+            for lane in parallel.units() {
+                scan(&lane.unit);
+            }
+        }
+        program
+            .runtime
+            .runtime_schema
+            .sample_shadows
+            .retain(|(_, copy)| reads.contains(copy));
+    }
+
     impl<'a, Target> SimulatorBuilder<'a, Target> {
         /// Compile SIR, finalize its state layout, and return the typed artifact
         /// along with the remaining builder state.
@@ -3110,21 +3176,28 @@ mod host {
             SimulatorError,
         > {
             let Some(path) = self.options.trace.settle_plan_output.clone() else {
-                return self.into_laid_out_program_traced(
+                let mut result = self.into_laid_out_program_traced(
                     layout_mode,
                     trace,
                     defer_derived_edges,
                     wide_commits,
                 );
+                if let Ok((program, ..)) = &mut result {
+                    prune_unread_sample_shadows(program);
+                }
+                return result;
             };
             let mut local = crate::debug::CompilationTrace::default();
             let trace = trace.unwrap_or(&mut local);
-            let result = self.into_laid_out_program_traced(
+            let mut result = self.into_laid_out_program_traced(
                 layout_mode,
                 Some(&mut *trace),
                 defer_derived_edges,
                 wide_commits,
             );
+            if let Ok((program, ..)) = &mut result {
+                prune_unread_sample_shadows(program);
+            }
             write_settle_plan_output(Some(&path), trace);
             result
         }
