@@ -2035,6 +2035,11 @@ mod host {
             }
         }
 
+        #[cfg(all(test, feature = "systemverilog"))]
+        pub(crate) fn sampled_copy_count(&self) -> usize {
+            self.sample_shadows.len()
+        }
+
         /// The time slot ends: the actions of deferred assertions that their
         /// process did not flush mature, `#0` before `final` (IEEE 1800-2023
         /// 16.4). A fatal one ends the simulation with an error.
