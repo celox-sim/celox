@@ -1,0 +1,1 @@
+Address Codex review on PR 3361: reject nonintegral index expressions for integral associative keys before lowering
