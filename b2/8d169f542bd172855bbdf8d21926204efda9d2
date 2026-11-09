@@ -1,0 +1,1 @@
+Address Codex review on PR 3360: reject type keys for packed integer parameter patterns, stop atoreal underscore scan unless between digits, track external constraint definition presence and static qualifier
