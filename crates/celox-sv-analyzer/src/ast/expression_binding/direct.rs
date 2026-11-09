@@ -640,13 +640,15 @@ fn bind_value_in(
                 unpacked_structs::check_operands(id, native, tree, session, dimensions)?;
                 // An argument, result or other value received as an unpacked
                 // structure is a pattern or a value of its type (6.22.3).
-                if let Some(aggregate) = target
+                if let Some(shape) = target
                     .as_deref()
-                    .filter(|shape| shape.unpacked.is_empty())
-                    .and_then(|shape| shape.unpacked_struct.as_deref())
+                    .filter(|shape| shape.unpacked.is_empty() && shape.unpacked_struct.is_some())
                 {
+                    let structure = shape
+                        .type_id(&mut session.types, &tree.functions, &dimensions.const_env)
+                        .ok_or_else(|| unsupported("unpacked structure target"))?;
                     unpacked_structs::check_value(
-                        aggregate, id, native, tree, session, dimensions,
+                        structure, id, native, tree, session, dimensions,
                     )?;
                 } else if target
                     .as_deref()
@@ -674,7 +676,9 @@ fn bind_value_in(
                         .as_deref()
                         .filter(|_| !shape.unpacked.is_empty() && shape.container.is_none())
                 }) {
-                    virtual_interfaces::check_array_assignment(id, native, dimensions, ty)?;
+                    virtual_interfaces::check_array_assignment(
+                        session, id, native, dimensions, ty,
+                    )?;
                 }
                 if let Some(shape) = target.as_deref()
                     && shape

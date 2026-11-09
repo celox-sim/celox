@@ -271,8 +271,22 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
         .signal_access(arguments.design.signal_access.clone())
         .plusargs(arguments.plusargs.iter().cloned())
         .defer_initialization(arguments.save_state.restore_checkpoint.is_some());
+    let builder = if std::env::var_os("CELOX_TRACE_NATIVE").is_some() {
+        builder.trace_native().trace_on_build()
+    } else {
+        builder
+    };
+    // Cross-check every partitioned settle against a full one (slow).
+    let builder = builder.settle_check(std::env::var_os("CELOX_SETTLE_CHECK").is_some());
+    let builder = match &arguments.execution.dump_settle_plan {
+        Some(path) => builder.settle_plan_output(path),
+        None => builder,
+    };
+    let builder = builder.settle_profile(arguments.execution.settle_profile.is_some());
     let builder = if let Some(path) = &arguments.execution.vcd {
         builder.vcd(path)
+    } else if let Some(path) = &arguments.execution.fst {
+        builder.fst(path)
     } else {
         builder
     };
@@ -315,6 +329,12 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
                 arguments.execution.report,
             );
             $(if arguments.execution.report { $report_hotspots(&simulation, &arguments.design.top); })?
+            runner::write_settle_profile(
+                arguments.execution.settle_profile.as_deref(),
+                simulation.layout(),
+                simulation.settle_profile(),
+            )
+            .map_err(|error| format!("cannot write the settle profile: {error}"))?;
             result
         }};
     }

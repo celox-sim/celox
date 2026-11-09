@@ -4,7 +4,7 @@ The repository-wide agent workflow requirements in `AGENTS.md` also apply.
 
 ## Project Overview
 
-Celox is a JIT simulator for Veryl HDL and a synthesizable subset of SystemVerilog. It compiles designs with Cranelift for high-speed simulation. The SystemVerilog frontend (`celox-sv-analyzer`, `celox-frontend-sv`) is behind the `systemverilog` feature of `celox`; see `docs/guide/systemverilog.md` for the supported subset.
+Celox is a JIT simulator for Veryl HDL and SystemVerilog (IEEE 1800-2023). It compiles designs with Cranelift for high-speed simulation. The SystemVerilog frontend (`celox-sv-analyzer`, `celox-frontend-sv`) is behind the `systemverilog` feature of `celox`; see `docs/guide/systemverilog-reference.md` for the deviations from IEEE 1800-2023 (everything not listed there follows the standard).
 
 ## Build Commands
 
@@ -99,6 +99,7 @@ GCC-style optimization level presets with per-pass overrides.
 | `SplitCoalescedStores` | Splits wide coalesced stores back after reschedule |
 | `PartialForward` | Partial store-load forwarding in combinational blocks |
 | `IdentityStoreBypass` | Detects identity copies and registers address aliases |
+| `IfConversion` | Replaces small pure if/else diamonds of clocked processes by `Mux`es (straight-line reset/enable chains) |
 | `TailCallSplit` | Splits large functions into tail-call chains (enabled even at O0) |
 | `DerivedEdgeUnits` | Runs edges of gated/divided clocks in generated units instead of the Rust plan walk (not a SIR transform; costs build time, `-sir:derived_edge_units` to opt out) |
 | `PartitionedSettle` | Splits the combinational settle into partitions that run only when state they read changed (not a SIR transform; off unless enabled, `+sir:partitioned_settle`; `SimulatorBuilder::settle_check` cross-checks it) |

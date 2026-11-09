@@ -74,9 +74,15 @@ pub(super) fn restore<B: SimBackend>(
             "{}.resume-",
             requested.file_name().unwrap_or_default().to_string_lossy()
         );
+        // Keep the source extension so the restored segment records in the
+        // same format (`restore_source_waveform` selects by extension).
+        let suffix = format!(
+            ".{}",
+            celox::WaveformFormat::from_path(&requested).extension()
+        );
         let segment = tempfile::Builder::new()
             .prefix(&prefix)
-            .suffix(".vcd")
+            .suffix(&suffix)
             .tempfile_in(requested.parent().unwrap_or(Path::new(".")))
             .map_err(|error| error.to_string())?;
         let (file, path) = segment.keep().map_err(|error| error.to_string())?;

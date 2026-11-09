@@ -31,6 +31,8 @@ pub(crate) struct Header {
     pub returns: u64,
     pub work_limit: u64,
     pub return_limit: u64,
+    /// The runs since the guard reset; the entry each wrote is its index
+    /// modulo the ring's length.
     pub recent_next: u64,
     pub recent: [u64; 64],
     /// The slot observer watches every update (`AFTER_UPDATE`).
@@ -116,7 +118,11 @@ impl Arena {
             buffer
                 .try_reserve(capacity - buffer.len())
                 .map_err(|_| Self::capacity_error())?;
-            buffer.resize(capacity, 0);
+            // A record buffer's event words hold the index of the event's
+            // pending record, `u64::MAX` when none: new capacity starts
+            // with no records (the generated reset clears only the words
+            // its records set). Image words are written before use.
+            buffer.resize(capacity, if images { 0 } else { u64::MAX });
         }
         let (pointer, capacity) = if images {
             (&mut self.header.images, &mut self.header.image_capacity)
@@ -171,6 +177,11 @@ mod tests {
             };
             // SAFETY: the grown allocation preserves the preceding words.
             assert_eq!(unsafe { pointer.add(2).read() }, 0x0123_4567_89ab_cdef);
+            // SAFETY: the grown allocation holds at least 1024 words.
+            assert_eq!(
+                unsafe { pointer.add(1000).read() },
+                if images { 0 } else { u64::MAX }
+            );
             assert!(arena.reserve(images, u64::MAX).is_err());
         }
         assert_eq!(std::mem::offset_of!(Arena, header), 0);

@@ -135,4 +135,4 @@ SystemVerilog の実行中に、指定したサイクルや時刻で状態ファ
 ## 関連資料
 
 - [テストの書き方](./writing-tests.md) -- Simulator・Simulation のパターン。
-- [VCD 波形出力](./vcd.md) -- 波形の記録。
+- [波形出力（VCD と FST）](./vcd.md) -- 波形の記録。

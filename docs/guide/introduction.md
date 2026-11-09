@@ -15,7 +15,7 @@ designs without installing a local toolchain.
 - Test combinational and sequential designs with manual or scheduled clocks.
 - Access child-instance ports when a test needs hierarchy visibility.
 - Simulate `X` and `Z` values with optional four-state mode.
-- Write VCD waveforms for GTKWave, Surfer, and other viewers.
+- Write VCD and FST waveforms for GTKWave, Surfer, and other viewers.
 - Override value parameters and include test-only Veryl sources.
 
 Celox compiles the design when the simulator is created. x86-64 and AArch64

@@ -49,7 +49,7 @@ export default defineConfig({
                   link: "/ja/guide/systemverilog",
                   items: [
                     {
-                      text: "SystemVerilog リファレンス",
+                      text: "SystemVerilog の逸脱事項",
                       link: "/ja/guide/systemverilog-reference",
                     },
                   ],
@@ -88,7 +88,7 @@ export default defineConfig({
                   link: "/ja/guide/hierarchy",
                 },
                 {
-                  text: "VCD 波形出力",
+                  text: "波形出力（VCD と FST）",
                   link: "/ja/guide/vcd",
                 },
                 {
@@ -176,7 +176,7 @@ export default defineConfig({
               link: "/guide/systemverilog",
               items: [
                 {
-                  text: "SystemVerilog Reference",
+                  text: "SystemVerilog Deviations",
                   link: "/guide/systemverilog-reference",
                 },
               ],
@@ -196,7 +196,7 @@ export default defineConfig({
             { text: "4-State Simulation", link: "/guide/four-state" },
             { text: "Parameter Overrides", link: "/guide/parameter-overrides" },
             { text: "Child Instance Access", link: "/guide/hierarchy" },
-            { text: "VCD Waveform Output", link: "/guide/vcd" },
+            { text: "Waveform Output (VCD/FST)", link: "/guide/vcd" },
             { text: "Checkpoints", link: "/guide/checkpoints" },
             { text: "Type Conversion", link: "/guide/type-conversion" },
           ],

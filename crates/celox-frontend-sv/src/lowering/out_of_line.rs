@@ -39,6 +39,23 @@
 //! handles in the saved frames through the module's resume table
 //! ([`celox_design::CallResume`]), and checkpoints keep the saved stack.
 //!
+//! A `fork` in a unit is such a suspension too, whose branches are resume
+//! points of the unit (see `Ff::fork_in_unit`): the runtime starts each
+//! child as an activation of the calling kernel in a copy of the parent's
+//! frames, the unit resuming at the child's entry, so the children outlive
+//! the call. A variable that the children and the parent share and write
+//! lives in a box, a heap object whose handle the copies share (see
+//! `calls::SharedBox`). `wait fork` and `disable fork` act on the children
+//! of the process the unit runs in.
+//!
+//! An event control or a level wait in a unit suspends it at one of the
+//! module's function wait sites, which every kernel that can suspend
+//! inside a call lists after its own; the kernel's call turns the unit's
+//! site number into the process's. The unit evaluates a level wait's
+//! condition again at each resume, and an event control that reads its
+//! frame keeps samples there that it compares at each resume (see
+//! `Ff::unit_wait_event`).
+//!
 //! A `ref` formal is a place (see [`Place`]): the call passes its static
 //! part, which selects the function, so one subroutine has a function for
 //! each binding its calls make (a variable the unit names itself, the field
@@ -93,8 +110,8 @@ pub(super) enum Reason {
     /// two `ref` formals to one automatic of the calling unit, which the
     /// call copies (see [`Place::Frame`]).
     RefFormal,
-    /// It, or a subroutine it calls, has an event control, a wait or a
-    /// fork.
+    /// It, or a subroutine it calls, has an `@*`, a deferred action, a
+    /// delayed nonblocking assignment or a concurrent assertion region.
     MaySuspend,
     /// It, or a subroutine it calls, makes a host request a unit cannot
     /// make: `$exit`, monitors, strobes, VCD tasks, or a DPI-C import; or a caller that cannot suspend calls a
@@ -145,6 +162,21 @@ pub(super) struct ProcessState {
     /// A host request does not: the host serves it before anything else
     /// runs.
     pub yields: bool,
+    /// Whether it forks (`fork`, `wait fork`, `disable fork`): a fork
+    /// suspends with the branches as resume points of the unit, and each
+    /// child continues the call in a copy of the frames (see
+    /// [`celox_design::PROCESS_FORK_RESUME_SHIFT`]); the calling kernel
+    /// keeps a process frame, as one that forks itself.
+    pub forks: bool,
+    /// Whether it makes a nonblocking assignment: a unit stages the value
+    /// at one of the module's function NBA sites and suspends, as a kernel
+    /// does at its own (see `ProcModule::function_nba_sites`).
+    pub nbas: bool,
+    /// Whether it waits, for an event control or a level wait: a unit
+    /// suspends at one of the module's function wait sites, which every
+    /// kernel that calls it lists after its own (see
+    /// `ProcModule::function_wait_sites`).
+    pub waits: bool,
     /// Whether it reads `e.triggered` (IEEE 1800-2023 15.5.3) or a process's
     /// `status()` (9.7), which a level wait's predicate reads as an
     /// observation of the event or process, so that a predicate's call of
@@ -480,12 +512,18 @@ impl OutOfLine {
                     )
                 }),
                 calls: function.calls.clone(),
+                // Each element of an unpacked array of handles is a handle
+                // slot, as in state memory.
                 handles: function
                     .slots
                     .iter()
                     .zip(&function.offsets)
                     .filter(|(slot, _)| slot.kind != celox_design::ValueKind::Bits)
-                    .map(|(slot, &offset)| (offset, slot.kind))
+                    .flat_map(|(slot, &offset)| {
+                        (0..slot.width / celox_design::HANDLE_WIDTH).map(move |index| {
+                            (offset + index * celox_heap::HANDLE_BYTES, slot.kind)
+                        })
+                    })
                     .collect(),
             })
             .collect()
@@ -1327,21 +1365,41 @@ impl ProcModule<'_> {
                             state.suspends = true;
                             state.yields = true;
                         }
-                        sv::ir::Stmt::WaitEvent(_)
-                        | sv::ir::Stmt::WaitImplicit { .. }
-                        | sv::ir::Stmt::Wait(_)
-                        | sv::ir::Stmt::WaitFork
-                        | sv::ir::Stmt::DisableFork
-                        | sv::ir::Stmt::Fork { .. }
+                        // A fork creates processes that run the unit's
+                        // code in copies of its frames, and the parent
+                        // goes on; `wait fork` parks the process until
+                        // they end.
+                        sv::ir::Stmt::Fork { .. } | sv::ir::Stmt::WaitFork => {
+                            state.suspends = true;
+                            state.yields = true;
+                            state.forks = true;
+                        }
+                        sv::ir::Stmt::DisableFork => {
+                            state.suspends = true;
+                            state.forks = true;
+                        }
+                        // A wait suspends the process with the unit's
+                        // frames until the occurrence it waits for.
+                        sv::ir::Stmt::WaitEvent(_) | sv::ir::Stmt::Wait(_) => {
+                            state.suspends = true;
+                            state.yields = true;
+                            state.waits = true;
+                        }
+                        sv::ir::Stmt::WaitImplicit { .. }
                         | sv::ir::Stmt::DelayedNonblocking { .. }
                         | sv::ir::Stmt::DeferActive
                         | sv::ir::Stmt::AssertionRegion { .. } => note(Reason::MaySuspend),
+                        // A nonblocking assignment hands the runtime its
+                        // update by suspending; the process goes on at once.
                         sv::ir::Stmt::Assign {
                             nonblocking: true, ..
                         }
                         | sv::ir::Stmt::AssignConcat {
                             nonblocking: true, ..
-                        } => note(Reason::Other("instrumented store".to_string())),
+                        } => {
+                            state.suspends = true;
+                            state.nbas = true;
+                        }
                         // Prints, messages and Veryl's assertion calls are
                         // runtime events, which a unit raises as an inlined
                         // body does; a message carries the time. `$finish`
@@ -1419,7 +1477,9 @@ impl ProcModule<'_> {
                             ) => state.suspends = true,
                             // `suspend()` of the calling process parks it
                             // until another process resumes it, `await()`
-                            // until another ends, and the blocking methods of
+                            // until another ends, an event control on named
+                            // events or a wait for a trigger until one is
+                            // triggered, and the blocking methods of
                             // semaphores and mailboxes until they can be
                             // served; the frames stay with the activation
                             // meanwhile, and a mailbox method retries when the
@@ -1428,6 +1488,8 @@ impl ProcModule<'_> {
                                 celox_design::ProcessOp::Suspend
                                 | celox_design::ProcessOp::Await
                                 | celox_design::ProcessOp::SemaphoreGet
+                                | celox_design::ProcessOp::WaitEvent
+                                | celox_design::ProcessOp::WaitTriggered
                                 | celox_design::ProcessOp::MailboxPut
                                 | celox_design::ProcessOp::MailboxGet
                                 | celox_design::ProcessOp::MailboxPeek,

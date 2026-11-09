@@ -1207,8 +1207,8 @@ endmodule
 #[test]
 fn units_store_into_what_waits_and_logic_observe() {
     // As UVM's objections push to a static queue that a task waits on,
-    // `schedule` pushes to `Sched::pending`, which `drain` (inlined, since it
-    // waits) waits for with a level wait; `note` stores `last`, which an event control waits on and
+    // `schedule` pushes to `Sched::pending`, which `drain` waits for with a
+    // level wait at a function wait site; `note` stores `last`, which an event control waits on and
     // a continuous assignment reads. `pulse` changes `blip` and changes it
     // back, which an event control on it sees only as the stores' own
     // changes (IEEE 1800-2023 9.4.2). Assembly counts these stores in the
@@ -1263,7 +1263,7 @@ module Top(output int got, output int seen_at, output int follow, output int y, 
 endmodule
 "#;
     let names = ["got", "seen_at", "follow", "y", "z", "pulsed_at"];
-    same_as_inlined(source, 4, 5, &names);
+    same_as_inlined(source, 5, 5, &names);
     assert_eq!(
         simulate(source, false, true, "interpreter", 5, &names),
         Ok(vec![
@@ -3044,4 +3044,2413 @@ fn ref_formals_bind_the_locals_of_forked_processes() {
             );
         }
     }
+}
+
+#[test]
+fn forks_in_functions_start_processes_that_outlive_the_call() {
+    // `spawn` forks a call of `work` and returns at once; the children
+    // run in copies of its frame after it returned (IEEE 1800-2023 9.3.2).
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c, output int d);
+    int hits[$];
+    task automatic work(int n);
+        #(n);
+        hits.push_back(n);
+    endtask
+    function automatic void spawn(int n);
+        fork
+            work(n);
+        join_none
+    endfunction
+    int three = 3, one = 1;
+    initial begin
+        spawn(three);
+        spawn(one);
+        a = hits.size();
+        #5;
+        b = hits.size();
+        c = hits[0];
+        d = hits[1];
+    end
+endmodule
+"#;
+    same_as_inlined(source, 2, 6, &["a", "b", "c", "d"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 6, &["a", "b", "c", "d"]),
+        Ok(vec![value(0), value(2), value(1), value(3)])
+    );
+}
+
+#[test]
+fn forks_in_a_loop_give_each_child_its_own_variable() {
+    // Each execution of the fork's declaration makes a new `k`, which the
+    // child started then keeps.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c, output int d);
+    int seen[$];
+    function automatic void spawn_all(int n);
+        for (int i = 0; i < n; i++) begin
+            fork
+                automatic int k = i;
+                begin
+                    #(n - k);
+                    seen.push_back(k * 10);
+                end
+            join_none
+        end
+    endfunction
+    int four = 4;
+    initial begin
+        spawn_all(four);
+        #5;
+        a = seen[0];
+        b = seen[1];
+        c = seen[2];
+        d = seen[3];
+    end
+endmodule
+"#;
+    same_as_inlined(source, 1, 6, &["a", "b", "c", "d"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 6, &["a", "b", "c", "d"]),
+        Ok(vec![value(30), value(20), value(10), value(0)])
+    );
+}
+
+#[test]
+fn forked_children_draw_on_their_own_process_state() {
+    // A child's `process::self()` is its own process, and `srandom` seeds
+    // its RNG, which its `$urandom` draws on: a unit's frames take the
+    // child's state as they continue. Two children seeded alike draw alike.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c, output int d, output bit same, output bit distinct);
+    int rands[$];
+    process procs[$];
+    function automatic void draws(int seed, bit reseed);
+        fork
+            begin
+                process p = process::self();
+                procs.push_back(p);
+                if (reseed) p.srandom(seed);
+                #1;
+                rands.push_back($urandom);
+            end
+            begin
+                #2;
+                rands.push_back($urandom_range(1000));
+            end
+        join_none
+        rands.push_back($urandom);
+    endfunction
+    int seed = 7;
+    bit yes = 1, no = 0;
+    initial begin
+        draws(seed, no);
+        draws(seed, yes);
+        draws(seed, yes);
+        #5;
+        a = rands[0];
+        b = rands[3];
+        c = rands[6];
+        d = rands[8];
+        same = rands[4] == rands[5];
+        distinct = procs[0] != procs[1] && procs[1] != procs[2];
+    end
+endmodule
+"#;
+    let names = ["a", "b", "c", "d", "same", "distinct"];
+    same_as_inlined(source, 1, 6, &names);
+    let run = simulate(source, false, true, "interpreter", 6, &names).expect("runs");
+    assert_eq!(run[4..], [value(1), value(1)]);
+}
+
+#[test]
+fn recursion_through_a_fork_goes_out_of_line() {
+    // `walk` forks a child at each level and recurses: out of line by
+    // default, where inlining cannot expand it.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c);
+    int seen[$];
+    function automatic void walk(int depth);
+        if (depth == 0) return;
+        fork
+            begin
+                #(depth);
+                seen.push_back(100 + depth);
+            end
+        join_none
+        walk(depth - 1);
+    endfunction
+    int three = 3;
+    initial begin
+        walk(three);
+        #5;
+        a = seen[0];
+        b = seen[1];
+        c = seen[2];
+    end
+endmodule
+"#;
+    assert_eq!(function_units(source, false), 1);
+    for four_state in [false, true] {
+        for forced in [false, true] {
+            assert_eq!(
+                simulate(
+                    source,
+                    four_state,
+                    forced,
+                    "interpreter",
+                    6,
+                    &["a", "b", "c"]
+                ),
+                Ok(vec![value(101), value(102), value(103)]),
+                "four_state {four_state} forced {forced}"
+            );
+        }
+    }
+}
+
+#[test]
+fn forked_children_share_the_variables_they_write() {
+    // `x` is the task's, which the parent and both children share, and `y`
+    // the fork's, which both children share: each sees the others' writes
+    // (IEEE 1800-2023 6.21, 9.3.2), through a box their frames hold.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c);
+    int got[$];
+    task automatic share(int start);
+        int x = start;
+        fork
+            automatic int y = 0;
+            begin
+                #1 x = x + 1; y = 5;
+            end
+            begin
+                #2 got.push_back(x); got.push_back(y);
+                x = x + 10;
+            end
+        join_none
+        #3 got.push_back(x);
+    endtask
+    int one = 1;
+    initial begin
+        share(one);
+        a = got[0];
+        b = got[1];
+        c = got[2];
+    end
+endmodule
+"#;
+    same_as_inlined(source, 1, 4, &["a", "b", "c"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 4, &["a", "b", "c"]),
+        Ok(vec![value(2), value(5), value(12)])
+    );
+}
+
+#[test]
+fn joins_and_fork_control_in_task_units() {
+    // `join`, `join_any`, `wait fork` and `disable fork` in a unit act on
+    // the children of the process it runs in.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c, output int d, output int e, output int f);
+    int log_[$];
+    task automatic joins(int base);
+        fork
+            #(base + 2) log_.push_back(1);
+            #(base + 1) log_.push_back(2);
+        join
+        a = $time;
+        fork
+            #3 log_.push_back(3);
+            #1 log_.push_back(4);
+        join_any
+        b = $time;
+        fork
+            #4 log_.push_back(5);
+        join_none
+        wait fork;
+        c = $time;
+        fork
+            #10 log_.push_back(99);
+        join_none
+        #1 disable fork;
+        d = $time;
+    endtask
+    int zero = 0;
+    initial begin
+        joins(zero);
+        #20;
+        e = log_.size();
+        f = log_[log_.size() - 1];
+    end
+endmodule
+"#;
+    let names = ["a", "b", "c", "d", "e", "f"];
+    same_as_inlined(source, 1, 30, &names);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 30, &names),
+        Ok(vec![
+            value(2),
+            value(3),
+            value(7),
+            value(8),
+            value(5),
+            value(5)
+        ])
+    );
+}
+
+#[test]
+fn boxes_of_forked_children_survive_collections() {
+    // Only the saved frames of the children hold the box of `x` after the
+    // parent returned; another process allocates enough for the heap to
+    // collect while they wait.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int n);
+    class Item;
+        int v;
+        function new(int x);
+            v = x;
+        endfunction
+    endclass
+    function automatic void spawn(int start);
+        int x = start;
+        fork
+            #2 x = x + 1;
+            #5 a = x;
+        join_none
+    endfunction
+    int seven = 7;
+    int count = 2000;
+    initial spawn(seven);
+    initial begin
+        Item t;
+        #1;
+        for (int i = 0; i < count; i++) begin
+            t = new(i);
+            n += t.v % 2;
+        end
+    end
+endmodule
+"#;
+    same_as_inlined(source, 2, 10, &["a", "n"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 10, &["a"]),
+        Ok(vec![value(8)])
+    );
+}
+
+#[test]
+fn forked_children_write_the_callers_variables_through_ref() {
+    // `owner` passes its automatics by `ref` to `spawn2`, directly and
+    // through `pass_on`, whose fork's two children write them in turn: the
+    // owner boxes each, so both writes reach it (IEEE 1800-2023 13.5.2). A
+    // `ref` formal may be named in a fork only when it joins all (9.3.2).
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b);
+    task automatic spawn2(ref int x);
+        fork
+            #1 x = x + 1;
+            #2 x = x + 10;
+        join
+    endtask
+    task automatic pass_on(ref int y);
+        spawn2(y);
+    endtask
+    task automatic owner(input int start, output int r, output int s);
+        int v = start;
+        int w = start;
+        spawn2(v);
+        pass_on(w);
+        r = v;
+        s = w;
+    endtask
+    int zero = 0;
+    initial owner(zero, a, b);
+endmodule
+"#;
+    // `spawn2` has a function for each box it binds: a box's field is a
+    // watched property, whose place selects the function.
+    same_as_inlined(source, 4, 10, &["a", "b"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 10, &["a", "b"]),
+        Ok(vec![value(11), value(11)])
+    );
+}
+
+#[test]
+fn state_files_keep_the_boxes_forked_children_share() {
+    // Saved while three children of `spawn` wait, holding the box of `x`
+    // in their frames: the file holds the box once, and a load on any
+    // backend gives the frames one box again, so the second child's write
+    // after the load reaches the third.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a);
+    function automatic void spawn(int start);
+        int x = start;
+        fork
+            #2 x = x + 1;
+            #4 x = x + 10;
+            #6 a = x;
+        join_none
+    endfunction
+    int seven = 7;
+    initial spawn(seven);
+endmodule
+"#;
+    let build = || {
+        Simulation::from_sv_sources(vec![(source, Path::new("calls.sv"))], "Top")
+            .force_out_of_line_calls()
+    };
+    let mut origin = build().build_interpreter().expect("builds");
+    origin.run_until(3).expect("the design runs");
+    let mut bytes = Vec::new();
+    origin
+        .save_state()
+        .expect("the boxes save")
+        .write_to(&mut bytes)
+        .expect("the file writes");
+    let file = celox::StateFile::read_from(bytes.as_slice()).expect("the file reads");
+    assert_eq!(
+        file.schedule
+            .as_ref()
+            .expect("a schedule")
+            .processes
+            .boxes
+            .len(),
+        1,
+        "one box, which three frames share"
+    );
+    origin.run_until(10).expect("the saved run continues");
+    assert_eq!(origin.get(origin.signal("a")), 18u8.into());
+    macro_rules! resumes {
+        ($build:ident) => {{
+            let mut target = build().$build().expect("builds");
+            target.load_state(&file).expect("the boxes load");
+            target.run_until(10).expect("the loaded design runs");
+            assert_eq!(
+                target.get(target.signal("a")),
+                18u8.into(),
+                stringify!($build)
+            );
+        }};
+    }
+    resumes!(build_interpreter);
+    resumes!(build_cranelift);
+    resumes!(build_wasm);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    resumes!(build_native);
+}
+
+#[test]
+fn state_files_keep_shared_strings_and_refuse_shared_containers() {
+    // A string the children of `spawn` share is a value: the file holds
+    // its contents with the box, and the frames share the box again after
+    // a load on any backend. A shared queue is a container, which state
+    // files do not record in a variable either.
+    let strings = r#"`timescale 1ns/1ns
+module Top(output int a);
+    function automatic void spawn(int start);
+        string s = "ab";
+        fork
+            #2 s = {s, "c"};
+            #4 s = {s, "de"};
+            #6 a = s.len() * 100 + start;
+        join_none
+    endfunction
+    int seven = 7;
+    initial spawn(seven);
+endmodule
+"#;
+    let build = || {
+        Simulation::from_sv_sources(vec![(strings, Path::new("calls.sv"))], "Top")
+            .force_out_of_line_calls()
+    };
+    let mut origin = build().build_interpreter().expect("builds");
+    origin.run_until(3).expect("the design runs");
+    let mut bytes = Vec::new();
+    origin
+        .save_state()
+        .expect("the string box saves")
+        .write_to(&mut bytes)
+        .expect("the file writes");
+    let file = celox::StateFile::read_from(bytes.as_slice()).expect("the file reads");
+    let boxes = &file.schedule.as_ref().expect("a schedule").processes.boxes;
+    assert_eq!(boxes.len(), 1, "one box, which three frames share");
+    assert_eq!(boxes[0].kind, celox_runtime::FrameValueKind::String);
+    origin.run_until(10).expect("the saved run continues");
+    assert_eq!(origin.get(origin.signal("a")), 507u16.into());
+    macro_rules! resumes {
+        ($build:ident) => {{
+            let mut target = build().$build().expect("builds");
+            target.load_state(&file).expect("the box loads");
+            target.run_until(10).expect("the loaded design runs");
+            assert_eq!(
+                target.get(target.signal("a")),
+                507u16.into(),
+                stringify!($build)
+            );
+        }};
+    }
+    resumes!(build_interpreter);
+    resumes!(build_cranelift);
+    resumes!(build_wasm);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    resumes!(build_native);
+
+    let queues = r#"`timescale 1ns/1ns
+module Top(output int a);
+    function automatic void spawn(int start);
+        int q[$];
+        fork
+            #2 q.push_back(start);
+            #4 a = q.size();
+        join_none
+    endfunction
+    int seven = 7;
+    initial spawn(seven);
+endmodule
+"#;
+    let mut sim = Simulation::from_sv_sources(vec![(queues, Path::new("calls.sv"))], "Top")
+        .force_out_of_line_calls()
+        .build_interpreter()
+        .expect("builds");
+    sim.run_until(3).expect("the design runs");
+    assert!(
+        matches!(sim.save_state(), Err(celox::StateError::Objects(_))),
+        "a container in a frame"
+    );
+    sim.run_until(10).expect("the design runs on");
+    assert_eq!(sim.get(sim.signal("a")), 1u8.into());
+}
+
+#[test]
+fn ref_formals_bind_elements_of_the_callers_arrays() {
+    // `owner` passes an element of its array to `spawn2`, whose two
+    // children write it in turn, and to `bump`: the array is the caller's
+    // whole variable, shared as any is (IEEE 1800-2023 13.5.2). A unit
+    // names the element's array by the caller's storage for it, here the
+    // copy an inlined activation of `owner` has; an array in the frame of
+    // the calling unit keeps the call inlined.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c);
+    task automatic spawn2(ref int x);
+        fork
+            #1 x = x + 1;
+            #2 x = x + 10;
+        join
+    endtask
+    task automatic bump(ref int x);
+        x = x + 1;
+    endtask
+    task automatic owner(input int start, output int r, output int s);
+        int v[2];
+        v[0] = start;
+        v[1] = start;
+        spawn2(v[0]);
+        bump(v[1]);
+        bump(v[1]);
+        r = v[0];
+        s = v[1];
+    endtask
+    int zero = 0;
+    initial begin
+        owner(zero, a, b);
+        #1 owner(zero + 5, c, b);
+    end
+endmodule
+"#;
+    let names = ["a", "b", "c"];
+    // A function for each of `spawn2` and `bump` per array they bind: each
+    // inlined call of `owner` has its own copy of `v`.
+    same_as_inlined(source, 4, 20, &names);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 20, &names),
+        Ok(vec![value(11), value(7), value(16)])
+    );
+}
+
+#[test]
+fn state_files_refuse_scheduler_objects_in_saved_frames() {
+    // A semaphore is a scheduler object, whose class no box shares: a frame
+    // holding one while the task waits is refused as a class handle is,
+    // since state files do not record semaphores, and the run goes on with
+    // the semaphore intact.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    task automatic hold();
+        semaphore s = new(1);
+        s.get(1);
+        #5 s.put(1);
+        s.get(1);
+        done = 1;
+    endtask
+    initial hold();
+endmodule
+"#;
+    let mut sim = Simulation::from_sv_sources(vec![(source, Path::new("calls.sv"))], "Top")
+        .force_out_of_line_calls()
+        .build_interpreter()
+        .expect("builds");
+    sim.run_until(1).expect("the design runs");
+    assert!(
+        matches!(sim.save_state(), Err(celox::StateError::Objects(_))),
+        "a semaphore in a frame"
+    );
+    sim.run_until(10).expect("the design runs on");
+    assert_eq!(sim.get(sim.signal("done")), 1u8.into());
+}
+
+#[test]
+fn units_whose_fork_branches_fail_stay_inlined() {
+    // A branch of a fork in `spawn`, here one of a nested fork, that cannot
+    // be lowered leaves the unit unlowered: the call is inlined and the
+    // design gets the diagnostic an inlined body gets, with and without
+    // out-of-line calls.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a);
+    bit [1:0] bus;
+    function automatic bit pick(int i);
+        a++;
+        return bus[i];
+    endfunction
+    function automatic void spawn(int i);
+        fork
+            begin
+                fork
+                    @(posedge pick(i));
+                join_none
+            end
+        join_none
+    endfunction
+    int zero = 0;
+    initial spawn(zero);
+endmodule
+"#;
+    for forced in [false, true] {
+        let run = simulate(source, false, forced, "interpreter", 10, &["a"]);
+        assert!(
+            run.as_ref()
+                .is_err_and(|error| error.contains("impure call `pick` in an event expression")),
+            "forced {forced}: {run:?}"
+        );
+    }
+}
+
+#[test]
+fn forked_children_store_class_properties_through_formals() {
+    // The child stores into a property of the object a formal of `one`
+    // holds: the analyzer's temporaries for the update, which the body does
+    // not declare, are shared like a formal, in a box made at the entry.
+    let source = r#"`timescale 1ns/1ns
+class st_t;
+    int done;
+endclass
+module Top(output int a);
+    task automatic one(st_t s, int n);
+        fork
+            begin
+                #(n);
+                s.done = s.done + 1;
+            end
+        join_none
+    endtask
+    int two = 2;
+    st_t o = new;
+    initial begin
+        one(o, two);
+        one(o, two + 1);
+        #5 a = o.done;
+    end
+endmodule
+"#;
+    same_as_inlined(source, 2, 10, &["a"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 10, &["a"]),
+        Ok(vec![value(2)])
+    );
+}
+
+#[test]
+fn forked_children_display_arrays_they_do_not_write() {
+    // A `$display` argument is read, not written: `seen`, which only its
+    // declaration writes, is copied into each child, not shared through a
+    // box (which an unpacked array cannot have), so the recursive `walk`
+    // still goes out of line.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a);
+    function automatic void walk(int depth);
+        int seen[2] = '{depth, depth * 10};
+        if (depth == 0) return;
+        fork
+            begin
+                #(depth);
+                $display("level %0d %0d", seen[0], seen[1]);
+                a = a + seen[1];
+            end
+        join_none
+        walk(depth - 1);
+    endfunction
+    int two = 2;
+    initial begin
+        a = 0;
+        walk(two);
+    end
+endmodule
+"#;
+    assert_eq!(function_units(source, false), 1);
+    for four_state in [false, true] {
+        for backend in backends() {
+            let (values, events) = simulate_run(source, four_state, true, backend, 5, &["a"])
+                .unwrap_or_else(|error| panic!("{backend}: {error}"));
+            assert_eq!(
+                values,
+                vec![value(30)],
+                "{backend}, four-state {four_state}"
+            );
+            let displays: Vec<String> = events
+                .iter()
+                .filter_map(|event| match event {
+                    celox::RuntimeEvent::Display { message } => {
+                        Some(String::from_utf8_lossy(message).into_owned())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                displays,
+                ["level 1 10", "level 2 20"],
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+}
+
+#[test]
+fn forked_children_write_parts_of_shared_variables() {
+    // Each child writes part of the shared `x`: a bit, a part-select and
+    // both indexed part-selects. Through the box each loads `x`, writes its
+    // part and stores it back, as a write to part of a class property does.
+    let source = r#"`timescale 1ns/1ns
+module Top(output logic [15:0] a);
+    task automatic parts(logic [15:0] start);
+        logic [15:0] x = start;
+        int i = 4;
+        fork
+            begin #1 x[0] = 1'b1; end
+            begin #2 x[7:4] = 4'ha; end
+            begin #3 x[i * 2 +: 4] = 4'h5; end
+            begin #4 x[15 -: 2] = 2'b11; end
+        join_none
+        #5 a = x;
+    endtask
+    logic [15:0] zero = 0;
+    initial parts(zero);
+endmodule
+"#;
+    same_as_inlined(source, 1, 6, &["a"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 6, &["a"]),
+        Ok(vec![value(0xc5a1)])
+    );
+}
+
+#[test]
+fn joined_children_read_ref_arrays_without_sharing_them() {
+    // `show`'s child only reads `arr`, and `show` joins it: the caller waits
+    // in the call, so the child reads the caller's array through the copied
+    // frame and nothing is shared. The recursive `walk`, whose array could
+    // not be shared, stays out of line.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a);
+    task automatic show(ref int arr[3], input int depth);
+        fork
+            begin
+                #1 a += arr[0] + arr[1] + arr[2] + depth;
+            end
+        join
+    endtask
+    task automatic walk(int depth);
+        int arr[3] = '{depth, depth * 10, depth * 100};
+        if (depth == 0) return;
+        show(arr, depth);
+        walk(depth - 1);
+    endtask
+    int two = 2;
+    initial begin
+        a = 0;
+        walk(two);
+    end
+endmodule
+"#;
+    assert!(function_units(source, false) > 0, "out of line");
+    for four_state in [false, true] {
+        for forced in [false, true] {
+            for backend in backends() {
+                assert_eq!(
+                    simulate(source, four_state, forced, backend, 5, &["a"]),
+                    Ok(vec![value(336)]),
+                    "{backend}, four-state {four_state}, forced {forced}"
+                );
+            }
+        }
+    }
+}
+
+/// A design whose task `step` waits at each level of a recursion for a
+/// clock edge, an element of a queue and a state of an object, with
+/// `RECURSE` choosing how it repeats: by recursion, out of line by default,
+/// or by a loop, which inlines.
+const WAITING_LEVELS: &str = r#"`timescale 1ns/1ns
+class state_t;
+    int state;
+endclass
+module Top(output int a, output int b, output int c, output int d, output int e, output int f);
+    bit clk;
+    int q[$];
+    int log_[$];
+    state_t st = new;
+    initial forever #5 clk = ~clk;
+    task automatic step(int n, state_t s);
+        for (int m = n; m > 0; m = RECURSE) begin
+            @(posedge clk);
+            log_.push_back(int'($time));
+            wait (q.size() != 0);
+            log_.push_back(q.pop_front() * 100 + int'($time));
+            wait (s.state >= 4 - m);
+            log_.push_back(int'($time));
+        end
+    endtask
+    int three = 3;
+    initial begin
+        step(three, st);
+        a = log_[0];
+        b = log_[1];
+        c = log_[2];
+        d = log_[4];
+        e = log_[7];
+        f = log_[8];
+    end
+    initial begin
+        #12 q.push_back(1);
+        #10 st.state = 1;
+        #20 q.push_back(2);
+        q.push_back(3);
+        #3 st.state = 2;
+        #2 st.state = 3;
+    end
+endmodule
+"#;
+
+#[test]
+fn waits_in_recursive_units() {
+    // Each level of `step` waits for a posedge of `clk`, for an element of
+    // `q` and for a state of the object: out of line by default, as its
+    // recursion, it waits at the module's function wait sites, the same as
+    // the loop that inlines.
+    let recursive = WAITING_LEVELS.replace(
+        "for (int m = n; m > 0; m = RECURSE) begin",
+        "if (n > 0) begin\n            automatic int m = n;",
+    );
+    let recursive = recursive.replace(
+        "            log_.push_back(int'($time));\n        end\n    endtask",
+        "            log_.push_back(int'($time));\n            step(n - 1, s);\n        end\n    endtask",
+    );
+    let looped = WAITING_LEVELS.replace("RECURSE", "m - 1");
+    assert_eq!(function_units(&recursive, false), 1, "step");
+    let names = ["a", "b", "c", "d", "e", "f"];
+    for four_state in [false, true] {
+        let expected = simulate(&looped, four_state, false, "interpreter", 200, &names)
+            .expect("the loop runs");
+        for forced in [false, true] {
+            assert_eq!(
+                simulate(&recursive, four_state, forced, "interpreter", 200, &names),
+                Ok(expected.clone()),
+                "four_state {four_state} forced {forced}"
+            );
+        }
+    }
+    assert_eq!(
+        simulate(&looped, false, false, "interpreter", 200, &names),
+        Ok(vec![
+            value(5),
+            value(112),
+            value(22),
+            value(242),
+            value(355),
+            value(55)
+        ])
+    );
+}
+
+#[test]
+fn waits_in_units_are_those_of_the_inlined_body() {
+    // A level wait on a module queue, one on a class property and an event
+    // control, in units that waiting processes share.
+    let source = r#"`timescale 1ns/1ns
+class state_t;
+    int state;
+endclass
+module Top(output int a, output int b, output int c, output int d);
+    bit clk;
+    int q[$];
+    state_t st = new;
+    initial forever #5 clk = ~clk;
+    task automatic take(output int v);
+        wait (q.size() != 0);
+        v = q.pop_front();
+    endtask
+    task automatic until_state(state_t s, int want, output int at);
+        wait (s.state == want);
+        at = $time;
+    endtask
+    task automatic edges(int k, output int at);
+        repeat (k) @(negedge clk);
+        at = $time;
+    endtask
+    int two = 2, three = 3;
+    initial begin
+        fork
+            take(a);
+            until_state(st, two, b);
+            edges(three, c);
+            edges(two, d);
+        join
+    end
+    initial begin
+        #12 q.push_back(7);
+        #10 st.state = 1;
+        #10 st.state = 2;
+    end
+endmodule
+"#;
+    same_as_inlined(source, 4, 60, &["a", "b", "c", "d"]);
+    assert_eq!(
+        simulate(
+            source,
+            false,
+            true,
+            "interpreter",
+            60,
+            &["a", "b", "c", "d"]
+        ),
+        Ok(vec![value(7), value(32), value(30), value(20)])
+    );
+}
+
+#[test]
+fn units_wait_on_virtual_interface_clocks() {
+    // Two processes wait at the same site of `count` on the clocks of two
+    // interfaces, which the unit's frame selects: each keeps its own sample
+    // of its clock and counts its own edges.
+    let source = r#"`timescale 1ns/1ns
+interface clk_if();
+    bit clk;
+endinterface
+module Top(output int a, output int b, output int c);
+    clk_if x();
+    clk_if y();
+    initial forever #5 x.clk = ~x.clk;
+    initial forever #3 y.clk = ~y.clk;
+    task automatic count(virtual clk_if v, int k, output int at);
+        repeat (k) @(posedge v.clk);
+        at = $time;
+    endtask
+    task automatic changes(virtual clk_if v, int k, output int at);
+        repeat (k) @(v.clk);
+        at = $time;
+    endtask
+    int three = 3, four = 4;
+    initial fork
+        count(x, three, a);
+        count(y, three, b);
+        changes(y, four, c);
+    join
+endmodule
+"#;
+    same_as_inlined(source, 2, 40, &["a", "b", "c"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 40, &["a", "b", "c"]),
+        Ok(vec![value(25), value(15), value(12)])
+    );
+}
+
+#[test]
+fn units_count_each_edge_of_a_virtual_interface_member() {
+    // `pulse` raises and lowers the clock of `x` in one run: the rise is an
+    // event (IEEE 1800-2023 9.4.2), though the clock ends as it began. The
+    // unit selects at the start of the wait the member the handle denotes,
+    // and waits at the site that counts its rises where they happen.
+    let source = r#"`timescale 1ns/1ns
+interface clk_if();
+    bit clk;
+endinterface
+module Top(output int a, output int b);
+    clk_if x();
+    clk_if y();
+    task automatic rises(virtual clk_if v, int k, output int at);
+        repeat (k) @(posedge v.clk);
+        at = $time;
+    endtask
+    task automatic pulse();
+        x.clk = 1;
+        x.clk = 0;
+    endtask
+    int one = 1, two = 2;
+    initial fork
+        rises(x, one, a);
+        rises(y, two, b);
+    join
+    initial begin
+        #3 pulse();
+        #2 y.clk = 1;
+        #1 y.clk = 0;
+        #1 y.clk = 1;
+    end
+endmodule
+"#;
+    same_as_inlined(source, 2, 20, &["a", "b"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 20, &["a", "b"]),
+        Ok(vec![value(3), value(7)])
+    );
+}
+
+#[test]
+fn units_wait_on_the_status_of_a_process() {
+    // A level wait on `p.status()` in a unit observes `p`, as an inlined
+    // one does: `p` ending wakes it (IEEE 1800-2023 9.7).
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a);
+    task automatic until_done(process p, output int at);
+        wait (p.status() == process::FINISHED);
+        at = $time;
+    endtask
+    process child;
+    initial begin
+        fork
+            begin
+                child = process::self();
+                #5;
+            end
+        join_none
+        #1 until_done(child, a);
+    end
+endmodule
+"#;
+    same_as_inlined(source, 1, 20, &["a"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 20, &["a"]),
+        Ok(vec![value(5)])
+    );
+}
+
+#[test]
+fn waits_in_units_are_flush_points_of_deferred_assertions() {
+    // The deferred assertion queued before the call fails, but the wait in
+    // `wait_rise` ends before the Observed region: its resume is a flush
+    // point, which discards the queued `$fatal` (IEEE 1800-2023 16.4.2).
+    let source = r#"`timescale 1ns/1ns
+module Top(output int done);
+    bit sig;
+    bit c;
+    task automatic wait_rise();
+        @(posedge sig);
+    endtask
+    initial begin
+        assert #0 (c) else $fatal(1, "not flushed");
+        wait_rise();
+        done = 1;
+    end
+    initial #0 sig = 1;
+endmodule
+"#;
+    for four_state in [false, true] {
+        for forced in [false, true] {
+            assert_eq!(
+                simulate(source, four_state, forced, "interpreter", 5, &["done"]),
+                Ok(vec![value(1)]),
+                "four_state {four_state} forced {forced}"
+            );
+        }
+    }
+    assert!(function_units(source, true) >= 1);
+}
+
+#[test]
+fn iff_gates_of_unit_waits_hold_at_the_occurrence() {
+    // An occurrence of `posedge bus[i] iff ...` counts only if the gate holds
+    // when it happens (IEEE 1800-2023 9.4.2.3), which a comparison at the
+    // waiter's resume cannot judge. `edge_en`, whose item reads the frame
+    // and whose gate is module state that other processes change between
+    // the edge and the resume, stays inlined, where the kernel judges the
+    // gate when it observes the occurrence; `edge_k`, gated by its own
+    // argument, which cannot change during the wait, goes out of line and
+    // drops every edge while the argument is 0.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c);
+    bit [1:0] bus;
+    bit en;
+    task automatic edge_en(int i, output int at);
+        @(posedge bus[i] iff en);
+        at = $time;
+    endtask
+    task automatic edge_k(int i, int k, output int at);
+        @(posedge bus[i] iff (k > 0));
+        at = $time;
+    endtask
+    initial begin
+        #5 bus[0] = 1;
+        #5 bus[0] = 0;
+        #5 bus[0] = 1;
+    end
+    initial #5 en = 1;
+    int zero = 0, one = 1;
+    initial edge_en(zero, a);
+    initial edge_k(zero, one, b);
+    initial edge_k(zero, zero, c);
+endmodule
+"#;
+    let names = ["a", "b", "c"];
+    same_as_inlined(source, 1, 30, &names);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 30, &names),
+        Ok(vec![value(5), value(5), value(0)])
+    );
+}
+
+#[test]
+fn impure_event_expressions_are_unsupported_in_units_too() {
+    // The unit evaluates the item `pick(i)`, which reads its frame, at each
+    // resume, as the kernel evaluates an event expression whenever it looks
+    // for occurrences: a call with an effect is unsupported in both, with
+    // the same diagnostic, with and without out-of-line calls.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a);
+    bit [1:0] bus;
+    int count;
+    function automatic bit pick(int i);
+        count++;
+        return bus[i];
+    endfunction
+    task automatic edge_of(int i, output int at);
+        @(posedge pick(i));
+        at = $time;
+    endtask
+    int zero = 0;
+    initial edge_of(zero, a);
+    initial #5 bus[0] = 1;
+endmodule
+"#;
+    for forced in [false, true] {
+        let run = simulate(source, false, forced, "interpreter", 10, &["a"]);
+        assert!(
+            run.as_ref()
+                .is_err_and(|error| error.contains("impure call `pick` in an event expression")),
+            "forced {forced}: {run:?}"
+        );
+    }
+}
+
+#[test]
+fn iff_gates_of_units_hold_only_when_known_true() {
+    // A gate holds when its value is known nonzero (IEEE 1800-2023
+    // 9.4.2.3): an x gate never does and leaves the definite one's site in
+    // place, and a multi-bit gate holds on any set bit, not its least
+    // significant one. The gates are frame values that select the unit's
+    // wait site, or that its samples keep.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b);
+    bit pa, pb;
+    bit [1:0] bus;
+    task automatic either(logic gx, logic g1, output int at);
+        @(posedge pa iff gx or posedge pb iff g1);
+        at = $time;
+    endtask
+    task automatic masked(int i, logic [1:0] mask, output int at);
+        @(posedge bus[i] iff mask);
+        at = $time;
+    endtask
+    int zero = 0;
+    initial either(1'bx, 1'b1, a);
+    initial masked(zero, 2'b10, b);
+    initial begin
+        #2 pa = 1;
+        #2 pb = 1;
+        #2 bus[0] = 1;
+    end
+endmodule
+"#;
+    same_as_inlined(source, 2, 10, &["a", "b"]);
+    for four_state in [false, true] {
+        assert_eq!(
+            simulate(source, four_state, true, "interpreter", 10, &["a", "b"]),
+            Ok(vec![value(4), value(6)]),
+            "four_state {four_state}"
+        );
+    }
+}
+
+#[test]
+fn units_watch_static_storage_as_kernels_do() {
+    // A static task's formals and locals are module-wide storage, which a
+    // concurrent call may change while the process waits: an event control
+    // reading them gets a kernel's treatment, here the diagnostic for a
+    // static formal in an event expression and the proxy of a static local,
+    // with and without out-of-line calls.
+    let formal = r#"`timescale 1ns/1ns
+module Top(output int a);
+    bit clk;
+    task gated(input bit g, output int at);
+        @(posedge clk iff g);
+        at = $time;
+    endtask
+    bit no = 0, yes = 1;
+    initial gated(no, a);
+    initial #1 gated(yes, a);
+    initial #3 clk = 1;
+endmodule
+"#;
+    for forced in [false, true] {
+        let run = simulate(formal, false, forced, "interpreter", 10, &["a"]);
+        assert!(
+            run.as_ref()
+                .is_err_and(|error| error.contains("static task argument")),
+            "forced {forced}: {run:?}"
+        );
+    }
+    let local = r#"`timescale 1ns/1ns
+module Top(output int a, output int b);
+    task toggle(input bit on, output int at);
+        static bit flag;
+        if (on) begin
+            #2 flag = 1;
+            at = $time;
+        end else begin
+            @(posedge flag);
+            at = $time;
+        end
+    endtask
+    bit no = 0, yes = 1;
+    initial toggle(no, a);
+    initial #1 toggle(yes, b);
+endmodule
+"#;
+    let names = ["a", "b"];
+    for four_state in [false, true] {
+        let inlined = simulate(local, four_state, false, "interpreter", 10, &names);
+        assert_eq!(
+            simulate(local, four_state, true, "interpreter", 10, &names),
+            inlined,
+            "four_state {four_state}"
+        );
+    }
+}
+
+#[test]
+fn rejected_units_leave_no_event_proxies() {
+    // The first wait of `t` makes the proxy of `(a && b)`; the second, on
+    // an item of the frame gated by module state, keeps the unit inlined:
+    // the lowering of the unit is undone, its proxy with it, and the inlined
+    // body makes its own.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int x, output int y);
+    bit a, b, en;
+    bit [1:0] bus;
+    task automatic t(int i, output int first, output int second);
+        @(posedge (a && b));
+        first = $time;
+        @(posedge bus[i] iff en);
+        second = $time;
+    endtask
+    int zero = 0;
+    initial t(zero, x, y);
+    initial begin
+        #1 a = 1;
+        #1 b = 1;
+        #1 en = 1;
+        #1 bus[0] = 1;
+    end
+endmodule
+"#;
+    same_as_inlined(source, 0, 10, &["x", "y"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 10, &["x", "y"]),
+        Ok(vec![value(2), value(4)])
+    );
+}
+
+#[test]
+fn gates_that_compare_equal_values_select_together() {
+    // `i == 1` and `i == 32'd1` are the same condition, though spelled
+    // apart: with `i` 1 both hold, so the unit waits at the site of both
+    // items.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b);
+    bit pa, pb;
+    task automatic either(int i, output int at);
+        @(posedge pa iff (i == 1) or posedge pb iff (i == 32'd1));
+        at = $time;
+    endtask
+    int one = 1;
+    initial either(one, a);
+    initial #3 either(one, b);
+    initial begin
+        #2 pb = 1;
+        #2 pa = 1;
+    end
+endmodule
+"#;
+    same_as_inlined(source, 1, 10, &["a", "b"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 10, &["a", "b"]),
+        Ok(vec![value(2), value(4)])
+    );
+}
+
+#[test]
+fn units_wait_for_named_events() {
+    // `@e` in a recursion, `@` on an event a class property holds, and
+    // `wait (e.triggered)` park the process in units as in an inlined body
+    // (IEEE 1800-2023 15.5.2, 15.5.3): UVM's objections and sequences wait
+    // so inside its phase traversal.
+    let source = r#"`timescale 1ns/1ns
+class obj_t;
+    event raised;
+    int waiters;
+endclass
+module Top(output int got, output int waiting, output int at);
+    event e;
+    obj_t o = new;
+    task automatic wait_named(int n);
+        if (n == 0) return;
+        @e;
+        got = got + 1;
+        wait_named(n - 1);
+    endtask
+    task automatic wait_prop(obj_t x);
+        x.waiters++;
+        @(x.raised);
+        x.waiters--;
+    endtask
+    task automatic wait_trig();
+        wait (e.triggered);
+    endtask
+    int two = 2;
+    initial begin
+        wait_named(two);
+        wait_prop(o);
+        wait_trig();
+        waiting = o.waiters;
+        at = $time;
+    end
+    initial begin
+        #1 -> e;
+        #1 -> e;
+        #1 -> o.raised;
+        #1 -> e;
+    end
+endmodule
+"#;
+    assert_eq!(function_units(source, false), 1, "wait_named");
+    for four_state in [false, true] {
+        for forced in [false, true] {
+            assert_eq!(
+                simulate(
+                    source,
+                    four_state,
+                    forced,
+                    "interpreter",
+                    10,
+                    &["got", "waiting", "at"]
+                ),
+                Ok(vec![value(2), value(0), value(4)]),
+                "four_state {four_state} forced {forced}"
+            );
+        }
+    }
+}
+
+#[test]
+fn resuming_from_named_event_waits_flushes_deferred_assertions() {
+    // A resume from `@e` or from `wait (e.triggered)` that suspended is a
+    // flush point (IEEE 1800-2023 16.4.2): the failing deferred assertion
+    // queued before it is discarded, in a kernel and in a unit alike. A
+    // `wait (e.triggered)` that does not suspend is none, so the failure
+    // queued before it is reported.
+    let flushed = |wait: &str, call: bool| {
+        let body = if call { "wait_it();" } else { wait };
+        format!(
+            "`timescale 1ns/1ns\nmodule Top(output int done);\n    event e;\n    bit c;\n    task automatic wait_it();\n        {wait}\n    endtask\n    initial begin\n        assert #0 (c) else $fatal(1, \"not flushed\");\n        {body}\n        done = 1;\n    end\n    initial #0 -> e;\nendmodule\n"
+        )
+    };
+    for wait in ["@e;", "wait (e.triggered);"] {
+        for call in [false, true] {
+            let source = flushed(wait, call);
+            for four_state in [false, true] {
+                for forced in [false, true] {
+                    assert_eq!(
+                        simulate(&source, four_state, forced, "interpreter", 5, &["done"]),
+                        Ok(vec![value(1)]),
+                        "{wait} call {call} four_state {four_state} forced {forced}"
+                    );
+                }
+            }
+        }
+    }
+    let unsuspended = r#"`timescale 1ns/1ns
+module Top(output int done);
+    event e;
+    bit c;
+    task automatic wait_it();
+        wait (e.triggered);
+    endtask
+    initial begin
+        -> e;
+        assert #0 (c) else $fatal(1, "reported");
+        wait_it();
+        done = 1;
+    end
+endmodule
+"#;
+    for forced in [false, true] {
+        assert_eq!(
+            simulate(unsuspended, false, forced, "interpreter", 5, &["done"]),
+            Err("reported".to_string()),
+            "forced {forced}"
+        );
+    }
+}
+
+/// A design whose task `bump` makes, at each level of a recursion or of a
+/// loop as `REPEAT` chooses, nonblocking assignments to a module variable
+/// and a static class property, waits for the first, and calls `wait_nba`,
+/// the shape of UVM's `uvm_wait_for_nba_region`: a nonblocking assignment
+/// to a static local, then an event control on it.
+const NBA_LEVELS: &str = r#"`timescale 1ns/1ns
+class cfg_t;
+    static int level;
+endclass
+module Top(output int a, output int b, output int c, output int d);
+    int m;
+    int log_[$];
+    task wait_nba;
+        static int nba;
+        static int next_nba;
+        next_nba++;
+        nba <= next_nba;
+        @(nba);
+    endtask
+    task automatic bump(int n);
+        REPEAT begin
+            m <= m + 1;
+            @(m);
+            cfg_t::level <= cfg_t::level + 10;
+            wait_nba();
+            log_.push_back(m * 100 + cfg_t::level);
+            NEXT
+        end
+    endtask
+    int three = 3;
+    initial begin
+        bump(three);
+        a = log_[0];
+        b = log_[1];
+        c = log_[2];
+        d = $time;
+    end
+endmodule
+"#;
+
+#[test]
+fn nonblocking_assignments_in_recursive_units() {
+    // Out of line by default, as its recursion, `bump` stages each update
+    // at a function NBA site, which the calling kernel lists after its own:
+    // the results are those of the loop that inlines.
+    let recursive = NBA_LEVELS
+        .replace("REPEAT begin", "if (n > 0) begin")
+        .replace("NEXT", "bump(n - 1);");
+    let looped = NBA_LEVELS
+        .replace("REPEAT begin", "for (int k = n; k > 0; k--) begin")
+        .replace("NEXT", "");
+    assert_eq!(function_units(&recursive, false), 1, "bump");
+    let names = ["a", "b", "c", "d"];
+    for four_state in [false, true] {
+        let expected =
+            simulate(&looped, four_state, false, "interpreter", 10, &names).expect("the loop runs");
+        for forced in [false, true] {
+            assert_eq!(
+                simulate(&recursive, four_state, forced, "interpreter", 10, &names),
+                Ok(expected.clone()),
+                "four_state {four_state} forced {forced}"
+            );
+        }
+    }
+    assert_eq!(
+        simulate(&looped, false, false, "interpreter", 10, &names),
+        Ok(vec![value(110), value(220), value(330), value(0)])
+    );
+}
+
+#[test]
+fn nonblocking_assignments_in_units_are_those_of_the_inlined_body() {
+    // The same updates from units that the inlined design makes in its
+    // kernels, through every backend.
+    let source = NBA_LEVELS
+        .replace("REPEAT begin", "for (int k = n; k > 0; k--) begin")
+        .replace("NEXT", "");
+    same_as_inlined(&source, 2, 10, &["a", "b", "c", "d"]);
+}
+
+/// UVM's `uvm_sequencer_base::m_select_sequence` shape: a child of a fork
+/// sets a variable it shares with the parent, which waits for it. `REPEAT`
+/// chooses a recursion or a loop.
+const SELECT_LEVELS: &str = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int c);
+    int log_[$];
+    task automatic select(int n);
+        REPEAT begin
+            automatic int completed = 0;
+            fork
+                begin
+                    #(m);
+                    completed = 1;
+                end
+            join_none
+            wait (completed > 0);
+            log_.push_back(m * 100 + int'($time));
+            NEXT
+        end
+    endtask
+    int three = 3;
+    initial begin
+        select(three);
+        a = log_[0];
+        b = log_[1];
+        c = log_[2];
+    end
+endmodule
+"#;
+
+#[test]
+fn waits_on_variables_forked_children_share() {
+    // The shared variable is in a box, whose stores bump a change count of
+    // its own, which the parent's wait watches as it watches a class
+    // property's: the child's store wakes it. Out of line by default, as its
+    // recursion, `select` gives the results of the loop that inlines.
+    let recursive = SELECT_LEVELS
+        .replace(
+            "REPEAT begin",
+            "if (n > 0) begin\n            automatic int m = n;",
+        )
+        .replace("NEXT", "select(n - 1);");
+    let looped = SELECT_LEVELS
+        .replace("REPEAT begin", "for (int m = n; m > 0; m--) begin")
+        .replace("NEXT", "");
+    assert_eq!(function_units(&recursive, false), 1, "select");
+    let names = ["a", "b", "c"];
+    for four_state in [false, true] {
+        let expected =
+            simulate(&looped, four_state, false, "interpreter", 20, &names).expect("the loop runs");
+        for forced in [false, true] {
+            assert_eq!(
+                simulate(&recursive, four_state, forced, "interpreter", 20, &names),
+                Ok(expected.clone()),
+                "four_state {four_state} forced {forced}"
+            );
+        }
+    }
+    assert_eq!(
+        simulate(&looped, false, false, "interpreter", 20, &names),
+        Ok(vec![value(303), value(205), value(106)])
+    );
+    same_as_inlined(&looped, 1, 20, &names);
+}
+
+#[test]
+fn rejected_units_leave_no_box_counts() {
+    // `spawn` boxes `a`, then is rejected for sharing its output `out` with
+    // its children, and is inlined: the box's count is gone with the
+    // rejected lowering, so `randomize`, which counts the stores of the
+    // properties, finds none of it.
+    let source = r#"`timescale 1ns/1ns
+class r_t;
+    rand bit [7:0] v;
+endclass
+module Top(output int got, output int ok);
+    r_t r = new;
+    task automatic spawn(output int out);
+        int a = 1;
+        fork
+            #1 begin a = a + 1; out = a; end
+        join
+    endtask
+    initial begin
+        spawn(got);
+        ok = r.randomize();
+    end
+endmodule
+"#;
+    for forced in [false, true] {
+        assert_eq!(
+            simulate(source, false, forced, "interpreter", 5, &["got", "ok"]),
+            Ok(vec![value(2), value(1)]),
+            "forced {forced}"
+        );
+    }
+}
+
+/// The variables each process kernel of `source` stores, by name, with
+/// calls forced out of line, and the names of all the variables; a variable
+/// the module no longer has is `?<id>`.
+fn kernel_stores(
+    source: &str,
+) -> (
+    Vec<std::collections::BTreeSet<String>>,
+    std::collections::BTreeSet<String>,
+) {
+    use celox_sir::SIRInstruction;
+    let result = SimulatorBuilder::<Simulator>::from_sv_sources(
+        vec![(source, Path::new("calls.sv"))],
+        "Top",
+    )
+    .force_out_of_line_calls()
+    .trace_sim_modules()
+    .build_with_trace();
+    let mut kernels = Vec::new();
+    let mut variables = std::collections::BTreeSet::new();
+    for module in result
+        .trace
+        .sim_modules
+        .as_ref()
+        .expect("traced modules")
+        .values()
+    {
+        variables.extend(
+            module
+                .variables
+                .values()
+                .map(|variable| variable.path.join(".")),
+        );
+        for process in &module.processes {
+            let mut stores = std::collections::BTreeSet::new();
+            for block in process.kernel.blocks.values() {
+                for instruction in &block.instructions {
+                    if let SIRInstruction::Store(addr, ..) = instruction {
+                        stores.insert(module.variables.get(&addr.var_id).map_or_else(
+                            || format!("?{}", addr.var_id.0),
+                            |variable| variable.path.join("."),
+                        ));
+                    }
+                }
+            }
+            kernels.push(stores);
+        }
+    }
+    (kernels, variables)
+}
+
+#[test]
+fn randomize_counts_no_stores_of_shared_variables() {
+    // `completed` lives in a box whose stores count apart from the class
+    // properties': the kernel that randomizes, which counts a store of
+    // every watched property, bumps none of the box's counts.
+    let source = SELECT_LEVELS
+        .replace(
+            "REPEAT begin",
+            "if (n > 0) begin\n            automatic int m = n;",
+        )
+        .replace("NEXT", "select(n - 1);")
+        .replace(
+            "module Top(output int a, output int b, output int c);",
+            "class r_t;\n    rand bit [7:0] v;\nendclass\nmodule Top(output int a, output int b, output int c, output int ok);\n    r_t r = new;",
+        )
+        // Lowered after `select`, whose unit makes the box.
+        .replace("endmodule", "    initial #1 ok = r.randomize();\nendmodule");
+    let (kernels, variables) = kernel_stores(&source);
+    assert!(
+        variables.iter().any(|name| name.starts_with("box_changes")),
+        "the box has a count: {variables:?}"
+    );
+    let randomizing = kernels
+        .iter()
+        .find(|stores| stores.contains("ok"))
+        .expect("the kernel that randomizes");
+    assert!(
+        !randomizing
+            .iter()
+            .any(|name| name.starts_with("box_changes")),
+        "{randomizing:?}"
+    );
+}
+
+#[test]
+fn event_controls_on_class_properties_count_each_store() {
+    // `@(e.on)`, `@(posedge e.on)` and `@(negedge e.l)` (IEEE 1800-2023
+    // 9.4.2): each store of the property counts the stored object's
+    // occurrences, so a pulse within one step is an occurrence, another
+    // object's store is none, and a handle that comes to denote an object
+    // whose value differs is one. UVM's `uvm_event::wait_on` waits so on a
+    // property of `this`.
+    let source = r#"`timescale 1ns/1ns
+class ev_t;
+    bit on;
+    logic l;
+    int seen;
+    task wait_on();
+        @on;
+        seen = 1;
+    endtask
+endclass
+module Top(output int pulse, output int pos, output int neg, output int moved, output int other,
+           output int method);
+    ev_t a = new, b = new, c = new, h;
+    task automatic wait_any(ev_t e, output int at);
+        @(e.on);
+        at = $time;
+    endtask
+    task automatic wait_pos(ev_t e, output int at);
+        @(posedge e.on);
+        at = $time;
+    endtask
+    task automatic wait_neg(ev_t e, output int at);
+        @(negedge e.l);
+        at = $time;
+    endtask
+    task automatic wait_h(output int at);
+        @(h.on);
+        at = $time;
+    endtask
+    initial begin
+        h = c;
+        fork
+            wait_any(a, pulse);
+            wait_pos(a, pos);
+            wait_neg(a, neg);
+            wait_h(moved);
+            wait_pos(b, other);
+            a.wait_on();
+        join_none
+        #2 a.on = 1;
+        a.on = 0;
+        #2 a.l = 1;
+        #1 a.l = 0;
+        #2 b.on = 1;
+        #2 h = b;
+        #1 method = a.seen;
+    end
+endmodule
+"#;
+    let names = ["pulse", "pos", "neg", "moved", "other", "method"];
+    same_as_inlined(source, 6, 20, &names);
+    for four_state in [false, true] {
+        assert_eq!(
+            simulate(source, four_state, true, "interpreter", 20, &names),
+            Ok(vec![
+                value(2),
+                value(2),
+                value(5),
+                value(9),
+                value(7),
+                value(1)
+            ]),
+            "four_state {four_state}"
+        );
+    }
+}
+
+/// The time each of `names` holds at `until`, inlined and out of line in
+/// both state modes, which must be the same everywhere.
+fn waits_end_at(source: &str, units: usize, until: u64, names: &[&str], expected: &[u64]) {
+    same_as_inlined(source, units, until, names);
+    for four_state in [false, true] {
+        assert_eq!(
+            simulate(source, four_state, true, "interpreter", until, names),
+            Ok(expected.iter().map(|&at| value(at)).collect()),
+            "four_state {four_state}"
+        );
+    }
+}
+
+#[test]
+fn randomize_stores_are_occurrences_of_watched_properties() {
+    // `randomize` writes `v` through the heap's store, which counts it like
+    // an assignment does.
+    let source = r#"`timescale 1ns/1ns
+class r_t;
+    rand bit [7:0] v;
+    constraint big { v > 10; }
+endclass
+module Top(output int at, output int ok);
+    r_t r = new;
+    task automatic wait_v(r_t o, output int at);
+        @(o.v);
+        at = $time;
+    endtask
+    initial begin
+        fork
+            wait_v(r, at);
+        join_none
+        #3 ok = r.randomize();
+    end
+endmodule
+"#;
+    waits_end_at(source, 3, 10, &["at", "ok"], &[3, 1]);
+}
+
+#[test]
+fn container_write_backs_are_occurrences_of_watched_properties() {
+    // `push_back` writes the queue property's new handle back through the
+    // heap's store, which counts it.
+    let source = r#"`timescale 1ns/1ns
+class q_t;
+    int q[$];
+endclass
+module Top(output int at);
+    q_t o = new;
+    task automatic wait_q(q_t e, output int at);
+        @(e.q);
+        at = $time;
+    endtask
+    initial begin
+        fork
+            wait_q(o, at);
+        join_none
+        #4 o.q.push_back(5);
+    end
+endmodule
+"#;
+    waits_end_at(source, 2, 10, &["at"], &[4]);
+}
+
+#[test]
+fn waits_on_properties_follow_a_switched_handle() {
+    // `h` comes to denote `b`, whose `on` is 0 where `a`'s was 1: no rise,
+    // and the wait goes on with `b`, whose later rise is the occurrence.
+    let source = r#"`timescale 1ns/1ns
+class ev_t;
+    bit on;
+endclass
+module Top(output int at);
+    ev_t a = new, b = new, h;
+    task automatic wait_h(output int at);
+        @(posedge h.on);
+        at = $time;
+    endtask
+    initial begin
+        a.on = 1;
+        h = a;
+        fork
+            wait_h(at);
+        join_none
+        #2 h = b;
+        #2 b.on = 1;
+    end
+endmodule
+"#;
+    waits_end_at(source, 2, 10, &["at"], &[4]);
+}
+
+#[test]
+fn event_lists_mix_properties_and_signals() {
+    // Each item is waited on as what it is: a property by its object's
+    // count, a signal by its value's edge.
+    let source = r#"`timescale 1ns/1ns
+class ev_t;
+    bit on;
+endclass
+module Top(output int any_at, output int pos_at, output int neg_at);
+    ev_t o = new, other = new;
+    bit clk;
+    task automatic wait_any(output int at);
+        @(o.on or clk);
+        at = $time;
+    endtask
+    task automatic wait_pos(output int at);
+        @(posedge clk or other.on);
+        at = $time;
+    endtask
+    task automatic wait_neg(output int at);
+        @(negedge clk or other.on);
+        at = $time;
+    endtask
+    initial begin
+        fork
+            wait_any(any_at);
+            wait_pos(pos_at);
+            wait_neg(neg_at);
+        join_none
+        #1 o.on = 1;
+        #2 clk = 1;
+        #2 clk = 0;
+    end
+endmodule
+"#;
+    waits_end_at(source, 4, 10, &["any_at", "pos_at", "neg_at"], &[1, 3, 5]);
+}
+
+#[test]
+fn edges_of_real_properties_are_rejected() {
+    // An edge is of the least significant bit of an integral value (IEEE
+    // 1800-2023 9.4.2): as for any real expression.
+    let source = r#"`timescale 1ns/1ns
+class r_t;
+    real r;
+endclass
+module Top(output int at);
+    r_t o = new;
+    initial begin
+        @(posedge o.r);
+        at = $time;
+    end
+endmodule
+"#;
+    for forced in [false, true] {
+        let run = simulate(source, false, forced, "interpreter", 5, &["at"]);
+        assert!(
+            run.as_ref().is_err_and(|error| error.contains("posedge")),
+            "forced {forced}: {run:?}"
+        );
+    }
+}
+
+#[test]
+fn switched_handles_compare_real_properties_as_reals() {
+    // `h` comes to denote an object whose `r` differs by an eighth: a
+    // change, which an integer sample would round away (both round to 1).
+    let source = r#"`timescale 1ns/1ns
+class r_t;
+    real r;
+endclass
+module Top(output int at);
+    r_t a = new, b = new, h;
+    task automatic wait_h(output int at);
+        @(h.r);
+        at = $time;
+    endtask
+    initial begin
+        a.r = 1.25;
+        b.r = 1.375;
+        h = a;
+        fork
+            wait_h(at);
+        join_none
+        #2 h = b;
+    end
+endmodule
+"#;
+    waits_end_at(source, 2, 10, &["at"], &[2]);
+}
+
+#[test]
+fn wide_property_stores_are_one_write_each() {
+    // A 100-bit 4-state property is stored by one heap call with all its
+    // words and both planes, which the heap counts once: the pulse at 2 is
+    // a rise and a fall, and 1 -> x at 4 a fall only (IEEE 1800-2023 Table
+    // 9-2).
+    let source = r#"`timescale 1ns/1ns
+class w_t;
+    logic [99:0] w;
+endclass
+module Top(output int pos, output int neg, output int any_at, output int x_neg);
+    w_t o = new, p = new;
+    task automatic wait_pos(w_t e, output int at);
+        @(posedge e.w);
+        at = $time;
+    endtask
+    task automatic wait_neg(w_t e, output int at);
+        @(negedge e.w);
+        at = $time;
+    endtask
+    task automatic wait_any(w_t e, output int at);
+        @(e.w);
+        at = $time;
+    endtask
+    initial begin
+        o.w = 0;
+        p.w = 1;
+        fork
+            wait_pos(o, pos);
+            wait_neg(o, neg);
+            wait_any(o, any_at);
+            wait_neg(p, x_neg);
+        join_none
+        #2 o.w = {1'b1, 99'h1};
+        o.w = 0;
+        #2 p.w = 'x;
+    end
+endmodule
+"#;
+    let names = ["pos", "neg", "any_at", "x_neg"];
+    same_as_inlined(source, 4, 10, &names);
+    assert_eq!(
+        simulate(source, true, true, "interpreter", 10, &names),
+        Ok(vec![value(2), value(2), value(2), value(4)])
+    );
+}
+
+#[test]
+fn iff_of_property_items_is_taken_at_the_start_of_the_wait() {
+    // An occurrence on a property happens inside a store, where an `iff` is
+    // not evaluated: a condition that only the waiting process writes, here
+    // the task's `go`, has its value of the start at every occurrence.
+    let source = r#"`timescale 1ns/1ns
+class ev_t;
+    bit on;
+endclass
+module Top(output int yes, output int no);
+    ev_t o = new;
+    task automatic wait_on(bit go, output int at);
+        at = 0;
+        @(posedge o.on iff go);
+        at = $time;
+    endtask
+    initial wait_on(1, yes);
+    initial wait_on(0, no);
+    initial #2 o.on = 1;
+endmodule
+"#;
+    same_as_inlined(source, 2, 10, &["yes", "no"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 10, &["yes", "no"]),
+        Ok(vec![value(2), value(0)])
+    );
+    // A condition other processes write cannot be judged at the store.
+    let shared = source
+        .replace("output int no);", "output int no);\n    bit en = 1;")
+        .replace("iff go", "iff en");
+    for forced in [false, true] {
+        let run = simulate(&shared, false, forced, "interpreter", 10, &["yes"]);
+        assert!(
+            run.as_ref()
+                .is_err_and(|error| error.contains("an event control on a class property")),
+            "forced {forced}: {run:?}"
+        );
+    }
+}
+
+#[test]
+fn signals_listed_with_properties_count_each_edge() {
+    // `clk` rises and falls in one run of another process: the rise is an
+    // occurrence of `posedge clk` (IEEE 1800-2023 9.4.2), though `clk` ends
+    // as it began; the writes count it where they happen.
+    let source = r#"`timescale 1ns/1ns
+class ev_t;
+    bit on;
+endclass
+module Top(output int at);
+    ev_t o = new;
+    bit clk;
+    task automatic wait_any(output int at);
+        @(o.on or posedge clk);
+        at = $time;
+    endtask
+    initial begin
+        fork
+            wait_any(at);
+        join_none
+        #3 begin
+            clk = 1;
+            clk = 0;
+        end
+    end
+endmodule
+"#;
+    same_as_inlined(source, 2, 10, &["at"]);
+    assert_eq!(
+        simulate(source, false, true, "interpreter", 10, &["at"]),
+        Ok(vec![value(3)])
+    );
+}
+
+#[test]
+fn waits_on_properties_of_null_handles_fault() {
+    // The wait reads the property as the item does: through a null handle
+    // it is a null dereference, not a wait that never ends.
+    let source = r#"`timescale 1ns/1ns
+class ev_t;
+    bit on;
+endclass
+module Top(output int at);
+    ev_t none;
+    task automatic wait_on(ev_t e, output int at);
+        @(e.on);
+        at = $time;
+    endtask
+    initial wait_on(none, at);
+endmodule
+"#;
+    for forced in [false, true] {
+        let run = simulate(source, false, forced, "interpreter", 5, &["at"]);
+        assert!(
+            run.as_ref().is_err_and(|error| error.contains("null")),
+            "forced {forced}: {run:?}"
+        );
+    }
+}
+
+#[test]
+fn iff_of_property_items_gates_handle_switches() {
+    // `h` comes to denote `y`, whose `on` is 1 where `x`'s was 0: a rise by
+    // the switch, which the `iff` sampled at the start gates as it gates a
+    // rise by a store.
+    let source = r#"`timescale 1ns/1ns
+class ev_t;
+    bit on;
+endclass
+module Top(output int closed, output int open);
+    ev_t x = new, y = new, h;
+    initial begin
+        y.on = 1;
+        h = x;
+    end
+    initial begin
+        bit go = 0;
+        closed = 0;
+        @(posedge h.on iff go);
+        closed = $time;
+    end
+    initial begin
+        bit go = 1;
+        open = 0;
+        @(posedge h.on iff go);
+        open = $time;
+    end
+    initial #2 h = y;
+endmodule
+"#;
+    for forced in [false, true] {
+        assert_eq!(
+            simulate(source, false, forced, "interpreter", 5, &["closed", "open"]),
+            Ok(vec![value(0), value(2)]),
+            "forced {forced}"
+        );
+    }
+}
+
+#[test]
+fn handle_switches_are_seen_as_expression_events_are() {
+    // An expression event sees a process's writes when the process reaches a
+    // timing control or ends (docs/guide/systemverilog-reference.md): the
+    // pulse `a = 1; a = 0;` is no edge of `a & b`, and the switches
+    // `h = y; h = x;` are no edge of `h.on`, though `y.on` is 1.
+    let expression = r#"`timescale 1ns/1ns
+module Top(output int at);
+    bit a, b = 1;
+    initial begin
+        at = 0;
+        @(posedge (a & b));
+        at = $time;
+    end
+    initial #2 begin
+        a = 1;
+        a = 0;
+    end
+endmodule
+"#;
+    let handle = r#"`timescale 1ns/1ns
+class ev_t;
+    bit on;
+endclass
+module Top(output int at);
+    ev_t x = new, y = new, h;
+    initial begin
+        y.on = 1;
+        h = x;
+        at = 0;
+        @(posedge h.on);
+        at = $time;
+    end
+    initial #2 begin
+        h = y;
+        h = x;
+    end
+endmodule
+"#;
+    for source in [expression, handle] {
+        for forced in [false, true] {
+            assert_eq!(
+                simulate(source, false, forced, "interpreter", 5, &["at"]),
+                Ok(vec![value(0)]),
+                "forced {forced}: {source}"
+            );
+        }
+    }
+}
+
+#[test]
+fn packed_dimensions_of_package_types_keep_their_bounds() {
+    // `wide_t`'s bound names a package parameter, which the module's
+    // constants do not hold by the name the range spells: the variables of
+    // the type keep its packed dimension as the analysis resolved it, so a
+    // write of a bit at a run-time position works, in the recursive unit
+    // `fill` and in the `initial` kernel.
+    let source = r#"`timescale 1ns/1ns
+package p;
+    parameter int PKG_W = 96;
+    typedef logic [PKG_W-1:0] wide_t;
+    class C;
+        extern function int fill(int depth, int k);
+    endclass
+    // An out-of-block method declaration, as UVM's
+    // `uvm_mem::backdoor_read_func`.
+    function int C::fill(int depth, int k);
+        wide_t val = 0;
+        val[k] = 1'b1;
+        val[k + 64] = 1'b1;
+        if (depth == 0) return int'(val[k +: 8]) + int'(val[64 +: 32]);
+        return fill(depth - 1, k + 1);
+    endfunction
+endpackage
+import p::*;
+module Top(output int unit_bits, output int kernel_bits);
+    C c = new;
+    int at = 3;
+    initial begin
+        wide_t val = 0;
+        val[at] = 1'b1;
+        val[at + 64] = 1'b1;
+        kernel_bits = int'(val[7:0]) + int'(val[95:64]);
+        unit_bits = c.fill(2, at);
+    end
+endmodule
+"#;
+    assert!(function_units(source, false) > 0, "out of line");
+    for four_state in [false, true] {
+        for forced in [false, true] {
+            for backend in backends() {
+                assert_eq!(
+                    simulate(
+                        source,
+                        four_state,
+                        forced,
+                        backend,
+                        2,
+                        &["unit_bits", "kernel_bits"]
+                    ),
+                    Ok(vec![value(1 + (1 << 5)), value((1 << 3) + (1 << 3))]),
+                    "{backend}, four-state {four_state}, forced {forced}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn frames_hold_unpacked_arrays_of_handles() {
+    // Each activation of the recursive `keep` holds objects and strings in
+    // unpacked arrays of its frame across delays, while another process
+    // allocates enough for the heap to collect: the collector scans each
+    // element of a saved frame's arrays as a handle slot.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int a, output int b, output int n);
+    class Item;
+        int v;
+        function new(int x);
+            v = x;
+        endfunction
+    endclass
+    task automatic keep(int depth, output int sum, output int chars);
+        Item items[3];
+        string names[2];
+        int below = 0;
+        int below_chars = 0;
+        // A loop of a run-time bound leaves no temporary holding all but
+        // the last element.
+        for (int i = 0; i < three; i++) begin
+            items[i] = new(depth * 10 + i);
+            names[i % 2] = $sformatf("d%0d_%0d", depth, i);
+        end
+        #2;
+        if (depth > 0) keep(depth - 1, below, below_chars);
+        #2;
+        sum = below + items[0].v + items[1].v + items[2].v;
+        chars = below_chars + names[0].len() + names[1].len();
+    endtask
+    int two = 2;
+    int three = 3;
+    int count = 3000;
+    initial keep(two, a, b);
+    initial begin
+        Item t;
+        #1;
+        for (int i = 0; i < count; i++) begin
+            t = new(i);
+            n += t.v % 2;
+            if (i % 500 == 0) #1;
+        end
+    end
+endmodule
+"#;
+    assert_eq!(function_units(source, false), 1);
+    for four_state in [false, true] {
+        for backend in backends() {
+            assert_eq!(
+                simulate(source, four_state, true, backend, 20, &["a", "b", "n"]),
+                Ok(vec![value(99), value(24), value(1500)]),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+}
+
+#[test]
+fn unknown_conditions_run_both_arms_across_suspending_calls() {
+    // An unknown condition runs both arms of a conditional operator (IEEE
+    // 1800-2023 11.4.11). Whether the else arm runs is decided before the
+    // then arm, whose call may suspend the unit and resume it there.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int r, output int s, output int t);
+    logic c;
+    int fd;
+    function automatic int show(int x);
+        $fdisplay(fd, "show %0d", x);
+        return x + 1;
+    endfunction
+    function automatic int pick(logic c);
+        return c ? show(10) : show(20);
+    endfunction
+    initial begin
+        fd = 1;
+        c = 1'bx;
+        r = pick(c);
+        #1 c = 1;
+        s = pick(c);
+        #1 c = 0;
+        t = pick(c);
+    end
+endmodule
+"#;
+    same_as_inlined(source, 1, 3, &["r", "s", "t"]);
+}
+
+/// `body`, the body of a function that the design calls three times with
+/// `a` unknown, 1 and 0, runs as it does inlined. `show` makes a host
+/// request, which suspends the process or unit that calls it and resumes it
+/// there: no value the body holds across the call may live in a register.
+fn same_across_suspensions(declarations: &str, body: &str) {
+    let source = format!(
+        r#"`timescale 1ns/1ns
+module Top(output int r, output int s, output int t);
+    int fd = 1;
+    logic [7:0] a;
+    int q[$];
+    int d[];
+    function automatic int show(int x);
+        $fdisplay(fd, "show %0d", x);
+        return x;
+    endfunction
+    function automatic void run();
+        {declarations}
+        {body}
+    endfunction
+    initial begin
+        a = 8'bx;
+        q = '{{1, 2, 3}};
+        d = '{{4, 5, 6}};
+        r = 0;
+        s = 0;
+        t = 0;
+        run();
+        #1 a = 1;
+        run();
+        #1 a = 0;
+        run();
+    end
+endmodule
+"#
+    );
+    assert!(function_units(&source, true) > 0, "function units");
+    for four_state in [false, true] {
+        let inlined = simulate_run(
+            &source,
+            four_state,
+            false,
+            "interpreter",
+            3,
+            &["r", "s", "t"],
+        )
+        .expect("the inlined design runs");
+        for backend in backends() {
+            assert_eq!(
+                simulate_run(&source, four_state, true, backend, 3, &["r", "s", "t"]),
+                Ok(inlined.clone()),
+                "{backend}, four-state {four_state}"
+            );
+        }
+    }
+}
+
+#[test]
+fn short_circuits_across_suspending_calls() {
+    same_across_suspensions(
+        "",
+        "r = r * 4 + int'((a != 0) && (show(1) != 0));
+        s = s * 4 + int'((a == 0) || (show(2) != 0));
+        t = t * 4 + int'((show(3) > 2) && (show(4) > 3));",
+    );
+}
+
+#[test]
+fn inside_across_suspending_calls() {
+    same_across_suspensions(
+        "",
+        "r = r * 4 + int'(show(2) inside {1, show(2), [show(3):show(5)]});
+        s = s * 4 + int'(a inside {show(0), show(1)});
+        t = t * 4 + int'(show(int'(a)) inside {[show(0):show(1)]});",
+    );
+}
+
+#[test]
+fn case_selectors_across_suspending_calls() {
+    same_across_suspensions(
+        "",
+        "case (show(a == 1 ? 1 : 2))
+            show(1): r += 1;
+            show(2): r += 2;
+            default: r += 3;
+        endcase
+        case (a)
+            show(0): s += 1;
+            show(1): s += 2;
+            default: s += 5;
+        endcase
+        casez (show(t))
+            show(0): t += 1;
+            default: t += 7;
+        endcase",
+    );
+}
+
+#[test]
+fn loop_conditions_across_suspending_calls() {
+    same_across_suspensions(
+        "int j = 0;",
+        "for (int i = 0; i < show(3); i++) r += show(i);
+        while (show(j) < 2) j++;
+        s += j;
+        do t += 1; while (show(t) % 4 != 0);",
+    );
+}
+
+#[test]
+fn foreach_bounds_across_suspending_calls() {
+    same_across_suspensions(
+        "int m[3] = '{7, 8, 9};",
+        "foreach (q[i]) r += show(q[i]);
+        foreach (d[i]) s += show(d[i] + i);
+        foreach (m[i]) t += show(m[i]);",
+    );
+}
+
+#[test]
+fn compound_assignments_across_suspending_calls() {
+    same_across_suspensions(
+        "int m[3] = '{1, 2, 3};",
+        "r += show(4);
+        s *= show(2) + 1;
+        m[show(1)] += show(10);
+        t -= show(m[1]);",
+    );
 }

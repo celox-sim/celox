@@ -25,6 +25,7 @@ use crate::procedural::{
 };
 
 /// One lexical scope: the locals it declares and the bindings they shadow.
+#[derive(Clone)]
 struct Scope {
     entries: Vec<ScopeEntry>,
     /// The types that the typedefs of the scope shadow, in declaration
@@ -32,6 +33,7 @@ struct Scope {
     shadowed_types: Vec<(String, Option<Type>)>,
 }
 
+#[derive(Clone)]
 struct ScopeEntry {
     source: String,
     unique: Option<String>,
@@ -99,6 +101,9 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
     /// Whether the function's result is a chandle, `None` without a result.
     return_chandle: Option<bool>,
     pub(super) sensitivity_body: Vec<Stmt>,
+    /// The name of the subroutine whose body this is, which the names of
+    /// its static variables carry (see [`Self::declare_static`]).
+    owner: Option<String>,
 }
 
 /// The names a body declares: its scopes of locals, innermost last, and
@@ -462,6 +467,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             reference_formals: HashSet::default(),
             return_chandle: None,
             sensitivity_body: Vec::new(),
+            owner: None,
             tree,
             session,
             dims,
@@ -501,6 +507,24 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             entries: Vec::new(),
             shadowed_types: Vec::new(),
         });
+    }
+
+    /// `bind` in the scope of the design element, as if none of the
+    /// body's blocks and formals were declared: the bindings of a named
+    /// sequence or property body are those of its declaration (IEEE
+    /// 1800-2023 16.8).
+    fn in_declaration_scope<T>(&mut self, bind: impl FnOnce(&mut Self) -> T) -> T {
+        let dims = self.dims.clone();
+        let type_aliases = self.type_aliases.clone();
+        let scopes = self.names.scopes.clone();
+        while !self.names.scopes.is_empty() {
+            self.pop_scope();
+        }
+        let result = bind(self);
+        self.dims = dims;
+        self.type_aliases = type_aliases;
+        self.names.scopes = scopes;
+        result
     }
 
     fn pop_scope(&mut self) {
@@ -580,6 +604,36 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     /// Declare a local in the innermost scope and return its unique name.
     pub(super) fn declare(&mut self, source: &str, r#type: Type) -> String {
         let unique = format!("{source}@{}", *self.state.counter);
+        self.declare_as(source, r#type, unique)
+    }
+
+    /// Declare a local with a static lifetime, declared at token
+    /// `declaration` of its syntax tree. A static variable is one object per
+    /// declaration and owner (IEEE 1800-2023 6.21, 8.25): in a subroutine,
+    /// its unique name is keyed by the subroutine's qualified name, which
+    /// tells apart the package, class specialization and method, and by the
+    /// declaration, so every analysis that declares it, of the package, of
+    /// its state or of a module importing it, names the same variable, and
+    /// no other owner's. A counter numbers the declarations of one analysis
+    /// only. The key is a hash, since a name with `::` would read as a
+    /// package item: `x%<key>@<declaration>`.
+    pub(super) fn declare_static(
+        &mut self,
+        source: &str,
+        r#type: Type,
+        declaration: usize,
+    ) -> String {
+        let unique = match &self.owner {
+            Some(owner) => format!(
+                "{source}%{:016x}@{declaration}",
+                fxhash::hash64(&(owner.as_str(), declaration))
+            ),
+            None => format!("{source}@{}", *self.state.counter),
+        };
+        self.declare_as(source, r#type, unique)
+    }
+
+    fn declare_as(&mut self, source: &str, r#type: Type, unique: String) -> String {
         *self.state.counter += 1;
         let shape = bound_dimensions_from_type(
             &r#type,
@@ -595,12 +649,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         self.state.locals.push(LocalVariable {
             name: unique.clone(),
             source_name: source.to_string(),
-            r#type: crate::ir::Type::from_ast(
+            r#type: super::ir_type(
+                self.session,
+                &self.tree.functions,
                 scoped_type(r#type, &self.dims.const_env),
-                &const_functions::Environment {
-                    constants: &*self.dims.const_env,
-                    functions: &self.tree.functions,
-                },
+                &self.dims.const_env,
             ),
         });
         self.names
@@ -1429,6 +1482,21 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         args.extend(kept);
         ids.truncate(start);
         ids.extend(kept_ids);
+    }
+
+    /// Name the subroutine in each `%m` of the format of a display or write
+    /// task (IEEE 1800-2023 21.2.1.5). The formats that follow the first are
+    /// already merged into it.
+    fn scope_display_format(&self, task: SystemTask, args: &mut [SystemTaskArg<Expr>]) {
+        if let Some(template) = template_index(task, args)
+            && let Some(SystemTaskArg::Str(text)) = args.get_mut(template)
+        {
+            let scoped = expression_binding::scoped_template(
+                text.as_bytes(),
+                self.dims.scope_name.as_deref(),
+            );
+            *text = String::from_utf8(scoped).expect("names and formats are UTF-8");
+        }
     }
 
     /// Rewrite each `%p` of the format of a display or write task into a
@@ -2545,10 +2613,19 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     init,
                     automatic,
                     explicit,
+                    assignment.tokens.start,
                 )?);
                 continue;
             }
-            let name = self.declare(signal.name(), signal.r#type().clone());
+            let name = if automatic {
+                self.declare(signal.name(), signal.r#type().clone())
+            } else {
+                self.declare_static(
+                    signal.name(),
+                    signal.r#type().clone(),
+                    assignment.tokens.start,
+                )
+            };
             if signal.is_const {
                 let mut shape = self.dims.get(signal.name()).unwrap().clone();
                 shape.randomizable = false;
@@ -2577,17 +2654,16 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         init: Option<Expr>,
         automatic: bool,
         explicit: bool,
+        declaration: usize,
     ) -> Result<Vec<Stmt>, AnalyzerError> {
         if signal.is_const {
             return Err(unsupported("const variable of unpacked structure type"));
         }
         if let Some(root) = root {
-            let aggregate = signal
-                .r#type()
-                .unpacked_struct()
-                .expect("an unpacked structure local");
+            let structure =
+                unpacked_structs::type_id(signal.r#type(), self.tree, self.session, &self.dims)?;
             unpacked_structs::check_value(
-                aggregate,
+                structure,
                 root,
                 self.tree.declarations(),
                 self.tree,
@@ -2595,7 +2671,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 &self.dims,
             )?;
         }
-        let leaves = self.declare_aggregate(signal.name(), signal.r#type())?;
+        let leaves = self.declare_aggregate(
+            signal.name(),
+            signal.r#type(),
+            (!automatic).then_some(declaration),
+        )?;
         // A static variable is initialized once, not on each entry: each leaf
         // keeps its part of the initializer, which is hoisted with it.
         let aggregate = signal
@@ -2665,6 +2745,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         &mut self,
         source: &str,
         r#type: &Type,
+        static_declaration: Option<usize>,
     ) -> Result<Vec<(String, Type)>, AnalyzerError> {
         if !r#type.unpacked_ranges.is_empty() {
             return Err(unsupported("array of unpacked structures"));
@@ -2693,7 +2774,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             .leaves()
             .into_iter()
             .map(|leaf| {
-                let name = self.declare(&leaf.name(source), leaf.r#type.clone());
+                let name = if let Some(declaration) = static_declaration {
+                    self.declare_static(&leaf.name(source), leaf.r#type.clone(), declaration)
+                } else {
+                    self.declare(&leaf.name(source), leaf.r#type.clone())
+                };
                 (name, leaf.r#type)
             })
             .collect())
@@ -3145,6 +3230,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 ids.push(id);
                 values.push(value);
             }
+            text = expression_binding::scoped_template(&text, self.dims.scope_name.as_deref());
             if expression_binding::has_pattern(&text) {
                 text = expression_binding::rewrite_format(
                     &text,
@@ -3286,6 +3372,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         // The native expression of each argument, kept in step with `args`.
         let mut ids = arguments.iter().map(|arg| arg.value).collect::<Vec<_>>();
         self.merge_display_formats(task, &mut args, &mut ids);
+        self.scope_display_format(task, &mut args);
         self.rewrite_display_patterns(task, &mut args, &ids)?;
         for arg in &mut args {
             if let SystemTaskArg::Expr(value) = arg {
@@ -4291,6 +4378,12 @@ pub(super) fn lower_subroutine(
     {
         return Err(unsupported("function returning an event"));
     }
+    let qualified_name = item.name(&match class {
+        Some(class) if dispatch.is_some() => classes::Class::dispatcher_name(&class.name, &name),
+        Some(class) => classes::Class::subroutine_name(&class.name, &name),
+        None => name.clone(),
+    });
+    let scope = scope_name(tree, session, declaration_env, native.tokens, class, &name);
     let mut builder = BodyBuilder::new(
         tree,
         session,
@@ -4298,6 +4391,8 @@ pub(super) fn lower_subroutine(
         state,
         system_functions::Body::Subroutine,
     );
+    builder.owner = Some(qualified_name.clone());
+    builder.dims.scope_name = Some(std::sync::Arc::new(scope));
     builder.task_timing = native.kind == celox_sv_syntax::SubroutineKind::Task;
     let first_local = builder.state.locals.len();
     builder.automatic = match native.lifetime.as_deref() {
@@ -4435,12 +4530,11 @@ pub(super) fn lower_subroutine(
             name,
             source_name: source,
             direction,
-            r#type: crate::ir::Type::from_ast(
+            r#type: super::ir_type(
+                builder.session,
+                &tree.functions,
                 scoped_type(r#type, declaration_env),
-                &const_functions::Environment {
-                    constants: &*item.env,
-                    functions: &tree.functions,
-                },
+                &item.env,
             ),
             default,
             leaves: Vec::new(),
@@ -4471,7 +4565,7 @@ pub(super) fn lower_subroutine(
         && !constructor
     {
         let leaves = builder
-            .declare_aggregate(&name, r#type)?
+            .declare_aggregate(&name, r#type, None)?
             .into_iter()
             .map(|(leaf, _)| leaf)
             .collect::<Vec<_>>();
@@ -4497,7 +4591,7 @@ pub(super) fn lower_subroutine(
             continue;
         }
         let leaves = builder
-            .declare_aggregate(&source, r#type)?
+            .declare_aggregate(&source, r#type, None)?
             .into_iter()
             .map(|(leaf, _)| leaf)
             .collect::<Vec<_>>();
@@ -4609,13 +4703,7 @@ pub(super) fn lower_subroutine(
         }
     }
     let mut subroutine = Subroutine {
-        name: item.name(&match class {
-            Some(class) if dispatch.is_some() => {
-                classes::Class::dispatcher_name(&class.name, &name)
-            }
-            Some(class) => classes::Class::subroutine_name(&class.name, &name),
-            None => name,
-        }),
+        name: qualified_name,
         is_task: native.kind == celox_sv_syntax::SubroutineKind::Task,
         automatic: builder.automatic,
         automatic_locals: builder.state.locals[first_local..]
@@ -4632,12 +4720,11 @@ pub(super) fn lower_subroutine(
             .collect(),
         persistent_locals: Vec::new(),
         return_type: return_type.map(|r#type| {
-            crate::ir::Type::from_ast(
+            super::ir_type(
+                builder.session,
+                &tree.functions,
                 scoped_type(r#type, declaration_env),
-                &const_functions::Environment {
-                    constants: &*item.env,
-                    functions: &tree.functions,
-                },
+                &item.env,
             )
         }),
         params: lowered_params,
@@ -4861,7 +4948,7 @@ fn dispatch_body(
             four_state: false,
             nullable: false,
             real: false,
-            key: 0,
+            key: crate::system_functions::ChangeKey::None,
         }),
         vec![this.clone()],
     );
@@ -5154,6 +5241,7 @@ impl BodyBuilder<'_, '_, '_> {
                     "stream",
                     handle,
                     self.tree,
+                    self.session,
                     &self.dims,
                 );
                 let stream = Expr::Ident(name.clone());
@@ -5511,8 +5599,10 @@ impl BodyBuilder<'_, '_, '_> {
             .unpacked_struct()
             .expect("an unpacked structure property")
             .clone();
+        let structure_type =
+            unpacked_structs::type_id(&aggregate.r#type, self.tree, self.session, &self.dims)?;
         unpacked_structs::check_value(
-            &structure,
+            structure_type,
             right,
             native,
             self.tree,
@@ -5655,12 +5745,11 @@ fn lower_class(
     if !constructor && !class.is_interface {
         let handle = classes::handle_type(tree, session, name)
             .ok_or_else(|| unsupported(format!("class `{name}`")))?;
-        let ir_type = crate::ir::Type::from_ast(
+        let ir_type = super::ir_type(
+            session,
+            &tree.functions,
             scoped_type(handle.clone(), declaration_env),
-            &const_functions::Environment {
-                constants: &*item.env,
-                functions: &tree.functions,
-            },
+            &item.env,
         );
         let mut builder = BodyBuilder::new(
             tree,
@@ -5757,15 +5846,15 @@ fn lower_cast(
     state: &mut BodyState<'_>,
     item: &generate::Item,
 ) -> Converted<Subroutine> {
-    let environment = const_functions::Environment {
-        constants: &*item.env,
-        functions: &tree.functions,
-    };
     let handle = classes::handle_type(tree, session, name)
         .ok_or_else(|| unsupported(format!("class `{name}`")))?;
-    let ir_handle =
-        crate::ir::Type::from_ast(scoped_type(handle.clone(), declaration_env), &environment);
-    let ir_int = crate::ir::Type::from_ast(int_type(), &environment);
+    let ir_handle = super::ir_type(
+        session,
+        &tree.functions,
+        scoped_type(handle.clone(), declaration_env),
+        &item.env,
+    );
+    let ir_int = super::ir_type(session, &tree.functions, int_type(), &item.env);
     let mut labels = vec![0];
     labels.extend(classes::cast_targets(
         tree,
@@ -5887,6 +5976,48 @@ pub(super) fn substitute_stmt_constants(
 }
 
 /// Every `initial` process of the active generate items.
+/// The value of the initializer `native` of static property `target` of
+/// class `owner`, bound in the scope of the class as its methods are (IEEE
+/// 1800-2023 8.9, 8.25): its properties and methods hide the names of the
+/// scope around it, a static property names the variable that holds it, and
+/// a call of a static method calls that method. `dimensions` is the scope of
+/// the class's bodies.
+#[allow(clippy::too_many_arguments)]
+fn static_initializer(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    state: &mut BodyState<'_>,
+    item: &generate::Item,
+    owner: &str,
+    type_aliases: &HashMap<String, Type>,
+    dimensions: &PackedDimensions,
+    native: celox_sv_syntax::ExprId,
+    target: &LValue,
+) -> Result<Expr, AnalyzerError> {
+    let (env, aliases) = classes::specializations::scope(session, owner, &item.env, type_aliases);
+    let class = classes::class(tree, session, owner, &env, &aliases)?;
+    let mut builder = BodyBuilder::new(
+        tree,
+        session,
+        dimensions,
+        state,
+        system_functions::Body::Initial,
+    );
+    builder.push_scope();
+    builder.enter_class_scope(&class);
+    let mut value = expression_binding::expression(
+        native,
+        tree.declarations(),
+        target,
+        tree,
+        builder.session,
+        &builder.dims,
+    )?;
+    builder.rename_expr(&mut value);
+    builder.pop_scope();
+    Ok(value)
+}
+
 pub(super) fn initial_processes_from_scope(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
@@ -5981,8 +6112,8 @@ pub(super) fn initial_processes_from_scope(
                     });
                     continue;
                 };
-                let scoped = owner.map(|owner| {
-                    classes::specializations::body_scope(session, &owner, item_dimensions, literals)
+                let scoped = owner.as_ref().map(|owner| {
+                    classes::specializations::body_scope(session, owner, item_dimensions, literals)
                 });
                 let (item_dimensions, literals) = match &scoped {
                     Some((dimensions, literals)) => (dimensions, literals),
@@ -6010,14 +6141,27 @@ pub(super) fn initial_processes_from_scope(
                     session,
                 )?;
                 let lhs = LValue::Ident(name);
-                let rhs = expression_binding::expression(
-                    native,
-                    tree.declarations(),
-                    &lhs,
-                    tree,
-                    session,
-                    item_dimensions,
-                )?;
+                let rhs = match &owner {
+                    Some(owner) => static_initializer(
+                        tree,
+                        session,
+                        state,
+                        item,
+                        owner,
+                        &type_aliases,
+                        item_dimensions,
+                        native,
+                        &lhs,
+                    )?,
+                    None => expression_binding::expression(
+                        native,
+                        tree.declarations(),
+                        &lhs,
+                        tree,
+                        session,
+                        item_dimensions,
+                    )?,
+                };
                 let LValue::Ident(name) = lhs else {
                     unreachable!("an initializer target is a variable")
                 };
@@ -6233,6 +6377,39 @@ fn default_conversion(string: bool, real: bool, radix: system_functions::Radix) 
         "%s".into()
     } else {
         format!("%{}", radix.letter())
+    }
+}
+
+/// The name `%m` prints in the subroutine `name`, a method of `class` if
+/// any, whose declaration spans `tokens` (IEEE 1800-2023 21.2.1.5). Names are
+/// the source's, as `$typename` prints them: a package's subroutines are
+/// named by the package, the compilation unit's by `$unit` (26.3), and a
+/// design element's under the instance that runs them. It does not depend
+/// on the caller.
+fn scope_name(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &SharedEnv,
+    tokens: celox_sv_syntax::TokenRange,
+    class: Option<&classes::Class>,
+    name: &str,
+) -> expression_binding::ScopeName {
+    use expression_binding::ScopeName;
+    let unit = classes::enclosing_unit(tree.declarations(), tokens);
+    let path = match class
+        .and_then(|class| type_names::class_scope_name(&class.name, tree, session, env))
+    {
+        Some(class) => format!("{class}::{name}"),
+        None => type_names::scoped_name(unit, name),
+    };
+    // A design element's names are under the instance, which `%m` still
+    // names at run time.
+    match unit.filter(|unit| unit.kind != celox_sv_syntax::UnitKind::Package) {
+        Some(unit) => {
+            let element = format!("{}.", instances::normalize_identifier(&unit.name.spelling));
+            ScopeName::Relative(path.strip_prefix(&element).unwrap_or(&path).to_owned())
+        }
+        None => ScopeName::Absolute(path),
     }
 }
 

@@ -3,15 +3,16 @@
 [![npm version](https://img.shields.io/npm/v/%40celox-sim%2Fcelox.svg)](https://www.npmjs.com/package/@celox-sim/celox)
 [![crates.io](https://img.shields.io/crates/v/celox.svg)](https://crates.io/crates/celox)
 
-**A compiler-based RTL simulator for [Veryl](https://veryl-lang.org/) and a
-synthesizable subset of SystemVerilog.**
+**A compiler-based RTL simulator for [Veryl](https://veryl-lang.org/) and
+SystemVerilog.**
 
-Celox compiles an elaborated Veryl design into executable simulation kernels and
-exposes the design through a type-safe TypeScript API. The same kernels can be
-built from synthesizable SystemVerilog through the Rust API (see
-[SystemVerilog support](https://celox-sim.github.io/celox/guide/systemverilog)). It is both a practical
-way to test RTL with Vitest and an open testbed for exploring how RTL simulators
-should be structured.
+Celox compiles elaborated Veryl and SystemVerilog designs into executable
+simulation kernels. Veryl designs are exposed through a type-safe TypeScript
+API; SystemVerilog (IEEE 1800-2023), including timed testbenches and designs
+mixing both languages, is available through the Rust API (see
+[SystemVerilog support](https://celox-sim.github.io/celox/guide/systemverilog)).
+It is both a practical way to test RTL with Vitest and an open testbed for
+exploring how RTL simulators should be structured.
 
 [Try the Playground](https://celox-sim.github.io/celox/playground/) ·
 [Read the guide](https://celox-sim.github.io/celox/guide/introduction) ·
@@ -46,8 +47,10 @@ compiler demo: the result can run real RTL tests, in Node.js or in a browser.
 - Exercise multiple clock domains and combinational clock cascades.
 - Enable four-state simulation and drive or inspect `X` and `Z` values.
 - Override top-level parameters and include test-only Veryl sources.
-- Inspect child instances and emit VCD waveforms.
+- Inspect child instances and emit VCD and FST waveforms.
 - Compile a Veryl design into a native executable and run cocotb tests through VPI.
+- Simulate SystemVerilog designs and timed testbenches from Rust, including
+  DPI-C imports and hierarchies that mix Veryl and SystemVerilog modules.
 - Build an external netlist frontend with the Rust SDK and ship its simulator as
   a native application binary or a frontend-specific N-API/WASI addon.
 - Run through the custom native backend on x86-64 and AArch64, the Cranelift
@@ -143,7 +146,7 @@ sim.dispose();
 ## Architecture
 
 ```text
-Veryl source
+Veryl / SystemVerilog source
     │
     ▼
 frontend analysis and hierarchy elaboration
@@ -183,27 +186,31 @@ and [SIR reference](https://celox-sim.github.io/celox/internals/ir-reference).
 
 ## Project scope
 
-Celox is under active development. Its focus is synchronous RTL written in
-Veryl or in the synthesizable subset of SystemVerilog, tested at the design
-level. The [SystemVerilog guide](https://celox-sim.github.io/celox/guide/systemverilog)
-lists what the subset covers and what it leaves out. Celox is not a general
-SystemVerilog simulator: it does not run behavioral or verification code
-(`initial`, delays, assertions, classes), and it is not a gate-level timing
-simulator or an implementation of detailed delta-cycle event semantics.
+Celox is under active development. Its focus is design-level testing of RTL
+written in Veryl or SystemVerilog. For SystemVerilog, Celox follows
+IEEE Std 1800-2023: the
+[deviations page](https://celox-sim.github.io/celox/guide/systemverilog-reference)
+lists the unsupported constructs (such as `bind`, checkers, covergroups,
+clocking blocks, `specify` blocks, and UDPs), the intentional deviations, and
+the implementation-defined choices. Anything not listed there follows the
+standard, and unsupported code is rejected with a diagnostic naming the
+construct instead of being silently mis-simulated. Celox is not a gate-level
+timing simulator.
 
-That narrower scope is intentional: it keeps the simulator small enough to make
-architectural changes, compare execution strategies, and test new compiler and
-runtime boundaries in a complete working system. Expect unsupported constructs
-and API changes while the design is still evolving.
+The scope keeps the simulator small enough to make architectural changes,
+compare execution strategies, and test new compiler and runtime boundaries in
+a complete working system. Expect API changes while the design is still
+evolving.
 
 ## Documentation
 
 - [Getting Started](https://celox-sim.github.io/celox/guide/getting-started)
+- [SystemVerilog Support](https://celox-sim.github.io/celox/guide/systemverilog)
 - [Writing Tests](https://celox-sim.github.io/celox/guide/writing-tests)
 - [Celox CLI and cocotb](https://celox-sim.github.io/celox/guide/cocotb)
 - [External Frontends and Rust Binaries](https://celox-sim.github.io/celox/guide/external-frontends)
 - [Four-State Simulation](https://celox-sim.github.io/celox/guide/four-state)
-- [VCD Waveforms](https://celox-sim.github.io/celox/guide/vcd)
+- [VCD and FST Waveforms](https://celox-sim.github.io/celox/guide/vcd)
 - [TypeScript API](https://celox-sim.github.io/celox/api/)
 - [Simulator Internals](https://celox-sim.github.io/celox/internals/architecture)
 - [Release Policy](.github/RELEASING.md)

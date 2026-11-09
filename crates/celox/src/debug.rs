@@ -23,6 +23,11 @@ pub struct TraceOptions {
     pub atomized_comb_blocks: bool,
     pub flattened_comb_blocks: bool,
     pub scheduled_units: bool,
+    /// The partitioned settle's plan, with a lint of its dependencies.
+    pub settle_plan: bool,
+    /// Write the settle plan to this file during the build, whatever the
+    /// build returns ([`crate::SimulatorBuilder::settle_plan_output`]).
+    pub settle_plan_output: Option<std::path::PathBuf>,
     pub pre_optimized_sir: bool,
     pub post_optimized_sir: bool,
     pub analyzer_ir: bool,
@@ -59,6 +64,9 @@ pub struct CompilationTrace {
     /// Analysis of profile-selected native state accesses captured from the
     /// exact merged SIR used by instruction selection.
     pub native_state_layout: Option<String>,
+    /// The partitioned settle's plan and its dependency lint; `None` without
+    /// a partitioned settle.
+    pub settle_plan: Option<String>,
 }
 
 impl TraceOptions {
@@ -73,6 +81,7 @@ impl TraceOptions {
             atomized_comb_blocks: self.atomized_comb_blocks,
             flattened_comb_blocks: self.flattened_comb_blocks,
             scheduled_units: self.scheduled_units,
+            settle_plan: self.settle_plan || self.settle_plan_output.is_some(),
         }
     }
 }
@@ -84,6 +93,7 @@ impl CompilationTrace {
         self.atomized_comb_blocks = trace.atomized_comb_blocks;
         self.flattened_comb_blocks = trace.flattened_comb_blocks;
         self.scheduled_units = trace.scheduled_units;
+        self.settle_plan = trace.settle_plan;
     }
 }
 

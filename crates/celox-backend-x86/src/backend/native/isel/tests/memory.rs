@@ -1669,3 +1669,101 @@ fn verify_wide_alignment_matrix(dynamic: bool) {
         );
     }
 }
+
+/// A byte-aligned store of a width with no native size writes its bytes in
+/// native-size pieces instead of a masked read-modify-write of the word.
+#[test]
+fn byte_aligned_stores_of_other_widths_use_native_pieces() {
+    let addresses: Vec<_> = (0..2)
+        .map(|id| AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId(id),
+        })
+        .collect();
+    let address =
+        |id: usize| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, addresses[id]);
+    let value = RegisterId(0);
+    let unit = ExecutionUnit {
+        entry_block_id: SirBlockId(0),
+        register_map: [(
+            value,
+            RegisterType::Bit {
+                width: 40,
+                signed: false,
+            },
+        )]
+        .into_iter()
+        .collect(),
+        blocks: [(
+            SirBlockId(0),
+            BasicBlock {
+                id: SirBlockId(0),
+                params: vec![],
+                instructions: vec![
+                    SIRInstruction::Load(value, address(0), SIROffset::Static(0), 40),
+                    SIRInstruction::Store(
+                        address(1),
+                        SIROffset::Static(8),
+                        40,
+                        value,
+                        vec![],
+                        vec![],
+                    ),
+                ],
+                terminator: SIRTerminator::Return,
+            },
+        )]
+        .into_iter()
+        .collect(),
+    };
+    unit.verify();
+    let mut layout = empty_layout();
+    layout.offsets = addresses.iter().copied().zip([0, 8]).collect();
+    layout.widths = addresses.iter().copied().zip([64, 64]).collect();
+    layout.is_4states = addresses
+        .iter()
+        .copied()
+        .map(|addr| (addr, false))
+        .collect();
+    layout.total_size = 16;
+    layout.merged_total_size = 16;
+    layout.working_base_offset = 16;
+    layout.sparse_base_offset = 16;
+    layout.triggered_bits_offset = 16;
+    layout.scratch_base_offset = 16;
+    let mut function = lower_execution_unit(&unit, &layout, false);
+    let stores: Vec<_> = function
+        .blocks
+        .iter()
+        .flat_map(|block| &block.insts)
+        .filter_map(|inst| match inst {
+            MInst::Store { offset, size, .. } => Some((*offset, *size)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(stores, vec![(9, OpSize::S32), (13, OpSize::S8)]);
+    assert!(
+        !function
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .any(|inst| matches!(inst, MInst::Load { offset: 8.., .. }))
+    );
+    mir_legalize::legalize(&mut function);
+    mir_opt::optimize(&mut function);
+    let allocation = regalloc::run_regalloc(&mut function).unwrap();
+    let emitted = emit::emit(
+        &function,
+        &allocation.assignment,
+        allocation.spill_frame_size,
+    )
+    .unwrap();
+    let jit = JitCode::new(&emitted.code).unwrap();
+    let mut state = vec![0xffu8; 16];
+    state[..8].copy_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
+    assert_eq!(unsafe { jit.call(&mut state) }, 0);
+    assert_eq!(
+        &state[8..],
+        &[0xff, 0x88, 0x77, 0x66, 0x55, 0x44, 0xff, 0xff]
+    );
+}

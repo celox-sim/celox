@@ -28,17 +28,24 @@ impl Ordered {
         }
     }
 
+    /// Forget the slot's records. Only `push` sets an event's word, to the
+    /// index of its record, so clearing the words of the `record_len`
+    /// records restores every event word to `u64::MAX` (the host fills new
+    /// record capacity with it) without walking every event each slot.
     fn reset(&self, g: &mut Generator<'_>) {
         let required = g.constant((self.events * 2) as u64, 64);
         self.reserve(g, false, required);
+        let count = g.arena_header_load(std::mem::offset_of!(ArenaHeader, record_len));
+        let pointer = g.arena_header_load(std::mem::offset_of!(ArenaHeader, records));
+        g.word_range(count, |g, index| {
+            let slot = self.record_word(g, index, 0);
+            let event = g.arena_load(pointer, slot);
+            let missing = g.constant(u64::MAX, 64);
+            g.arena_store(pointer, event, missing);
+        });
         let zero = g.constant(0, 64);
         g.arena_header_store(std::mem::offset_of!(ArenaHeader, record_len), zero);
         g.arena_header_store(std::mem::offset_of!(ArenaHeader, image_len), zero);
-        let pointer = g.arena_header_load(std::mem::offset_of!(ArenaHeader, records));
-        g.words(self.events, |g, index| {
-            let missing = g.constant(u64::MAX, 64);
-            g.arena_store(pointer, index, missing);
-        });
     }
 
     fn reserve(&self, g: &mut Generator<'_>, images: bool, required: RegisterId) {

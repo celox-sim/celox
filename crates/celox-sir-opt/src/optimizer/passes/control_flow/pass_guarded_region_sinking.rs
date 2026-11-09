@@ -28,7 +28,7 @@ pub(in crate::optimizer) fn recover_merged_effect_regions(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     four_state: bool,
 ) {
-    if four_state || eu.verify_result().is_err() {
+    if four_state || (cfg!(debug_assertions) && eu.verify_result().is_err()) {
         return;
     }
     form_coupled_store_regions(eu);
@@ -226,7 +226,7 @@ impl ExecutionUnitPass for GuardedRegionSinkingPass {
         // A four-state Mux bitwise-merges its arms for an X/Z condition, while
         // control flow selects one edge. No structural proof below authorizes
         // that conversion in four-state mode.
-        if options.four_state || eu.verify_result().is_err() {
+        if options.four_state || (cfg!(debug_assertions) && eu.verify_result().is_err()) {
             return;
         }
         super::loop_reduction_guard::run(eu);

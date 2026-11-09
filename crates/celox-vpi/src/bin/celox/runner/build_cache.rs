@@ -301,7 +301,10 @@ impl BuildCache {
         field(&mut hash, opts.test.as_bytes());
         // Tracing needs addressable storage and write tracking; the output
         // filename itself does not affect the compiled image.
-        field(&mut hash, &[u8::from(opts.vcd.is_some())]);
+        field(
+            &mut hash,
+            &[u8::from(opts.vcd.is_some() || opts.fst.is_some())],
+        );
         field(
             &mut hash,
             format!(

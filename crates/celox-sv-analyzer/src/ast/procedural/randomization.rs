@@ -54,15 +54,8 @@ fn lower_methods(
     };
     let handle = classes::handle_type(tree, session, &class.name)
         .ok_or_else(|| unsupported("class randomization receiver"))?;
-    let convert_type = |ty| {
-        crate::ir::Type::from_ast(
-            ty,
-            &const_functions::Environment {
-                constants: env,
-                functions: &tree.functions,
-            },
-        )
-    };
+    let convert_type =
+        |session: &mut Session, ty| crate::ast::ir_type(session, &tree.functions, ty, env);
     let mut result = Vec::new();
     for method in ["randomize", "srandom", "rand_mode"] {
         if inline.is_some() && method != "randomize" {
@@ -92,7 +85,7 @@ fn lower_methods(
                 name: this.clone(),
                 source_name: classes::THIS.into(),
                 direction: ParamDirection::Input,
-                r#type: convert_type(handle.clone()),
+                r#type: convert_type(builder.session, handle.clone()),
                 default: None,
                 leaves: Vec::new(),
             },
@@ -100,7 +93,7 @@ fn lower_methods(
                 name: argument.clone(),
                 source_name: argument.clone(),
                 direction: ParamDirection::Input,
-                r#type: convert_type(argument_type),
+                r#type: convert_type(builder.session, argument_type),
                 default: None,
                 leaves: Vec::new(),
             },
@@ -113,7 +106,7 @@ fn lower_methods(
                     name: name.clone(),
                     source_name: name.clone(),
                     direction: ParamDirection::Input,
-                    r#type: convert_type(ty.clone()),
+                    r#type: convert_type(builder.session, ty.clone()),
                     default: None,
                     leaves: Vec::new(),
                 });
@@ -526,9 +519,12 @@ fn lower_methods(
                 .map(|local| local.name.clone())
                 .collect(),
             persistent_locals: Vec::new(),
-            return_type: return_var
-                .as_ref()
-                .map(|_| convert_type(if prepare { handle.clone() } else { int_type() })),
+            return_type: return_var.as_ref().map(|_| {
+                convert_type(
+                    builder.session,
+                    if prepare { handle.clone() } else { int_type() },
+                )
+            }),
             params,
             return_var,
             body,

@@ -371,7 +371,9 @@ fn verify_instruction_constraints(
                 format!("or immediate {imm:#x} is not encodable as sign-extended imm32"),
             ))
         }
-        MInst::AndStoreImm { size, imm, .. } | MInst::OrStoreImm { size, imm, .. }
+        MInst::AndStoreImm { size, imm, .. }
+        | MInst::OrStoreImm { size, imm, .. }
+        | MInst::StoreImm { size, imm, .. }
             if match size {
                 OpSize::S8 => *imm > u64::from(u8::MAX),
                 OpSize::S16 => *imm > u64::from(u16::MAX),

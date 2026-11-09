@@ -81,6 +81,7 @@ pub(in crate::ast) fn same_tables(a: &PackedDimensions, b: &PackedDimensions) ->
         && a.class_scope == b.class_scope
         && a.constructor == b.constructor
         && a.method_name == b.method_name
+        && a.scope_name == b.scope_name
 }
 
 /// The signature entries that discovering a scope's own declarations added
@@ -1554,7 +1555,7 @@ pub(in crate::ast) fn query_operand_dimensions_id(
 /// The inputs of a query that its scope's declarations are discovered from:
 /// `input` without the locals and their signedness that the query's own
 /// scope adds to the shared tables, without the operand values of the
-/// statement it is in, and without the method it is in.
+/// statement it is in, and without the method it is in and its `%m` name.
 fn scope_inputs(input: &PackedDimensions) -> PackedDimensions {
     let mut own = PackedDimensions {
         variables: input.variables.shared(),
@@ -1562,8 +1563,10 @@ fn scope_inputs(input: &PackedDimensions) -> PackedDimensions {
         effect_values: Default::default(),
         last_indices: Default::default(),
         // The method a query is in only tells its own calls from its result
-        // variable, which the scope does not declare (13.4.1).
+        // variable, which the scope does not declare (13.4.1); its `%m`
+        // name only the formats it binds (21.2.1.5).
         method_name: None,
+        scope_name: None,
         ..input.clone()
     };
     // In a class specialization, the tables of the scope around the class,
@@ -1585,6 +1588,7 @@ fn scope_inputs(input: &PackedDimensions) -> PackedDimensions {
 /// from [`overlay`], which gives the query's tables precedence.
 fn with_query_context(context: &mut PackedDimensions, input: &PackedDimensions) {
     context.method_name = input.method_name.clone();
+    context.scope_name = input.scope_name.clone();
     context.effect_values = input.effect_values.clone();
     context.last_indices = input.last_indices.clone();
     context.expression_signedness.extend(

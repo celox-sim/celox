@@ -19,6 +19,8 @@ pub struct FrontendTraceOptions {
     pub atomized_comb_blocks: bool,
     pub flattened_comb_blocks: bool,
     pub scheduled_units: bool,
+    /// The partitioned settle's plan ([`crate::symbolic::settle_plan`]).
+    pub settle_plan: bool,
 }
 
 /// Optional diagnostics produced while `SymbolicRtl` is consumed.
@@ -29,4 +31,5 @@ pub struct FrontendTrace {
     pub atomized_comb_blocks: Option<(Vec<LogicPath<SourceAddr>>, SLTNodeArena<SourceAddr>)>,
     pub flattened_comb_blocks: Option<(Vec<LogicPath<SourceAddr>>, SLTNodeArena<SourceAddr>)>,
     pub scheduled_units: Option<Vec<ExecutionUnit<RegionedSourceAddr>>>,
+    pub settle_plan: Option<String>,
 }

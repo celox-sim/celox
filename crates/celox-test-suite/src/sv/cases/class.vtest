@@ -3683,6 +3683,66 @@ endmodule
 "#)
   (top Top) (run_until 5)
   (assert_eq t_task 2) (assert_eq t_func 3))
+(case body_parameters_are_local
+  ; IEEE 1800-2023 6.20.4: in a package, a class body, a generate block and
+  ; the compilation unit, `parameter` is `localparam`, so a range that names
+  ; one is a constant: a package class method's variable of a package
+  ; typedef takes a variable bit select. A module without a parameter port
+  ; list keeps its body parameter overridable (6.20.1).
+  (source "locality.sv" #"
+parameter int UNIT_W = 6;
+typedef logic [UNIT_W-1:0] unit_t;
+package locality;
+    parameter int MAX_W = 16;
+    typedef logic [MAX_W-1:0] data_t;
+    class C;
+        parameter int CW = 5;
+        typedef logic [CW-1:0] c_t;
+        extern function int fill(int n);
+        function int body(int n);
+            c_t v = '0;
+            for (int k = 0; k < n; k++) v[k] = 1'b1;
+            return v;
+        endfunction
+    endclass
+    function int C::fill(int n);
+        data_t val = '0;
+        int k = 0;
+        repeat (n) val[k++] = 1'b1;
+        return val;
+    endfunction
+endpackage
+module Child(output int p);
+    parameter int P = 1;
+    assign p = P;
+endmodule
+module Top(output int fill, body, u_value, g_value, child_p);
+    import locality::*;
+    unit_t u;
+    if (1) begin : g
+        parameter int GW = 3;
+        logic [GW-1:0] gv;
+        initial begin
+            gv = '0;
+            for (int k = 0; k < 2; k++) gv[k] = 1'b1;
+            g_value = gv;
+        end
+    end
+    Child #(.P(5)) c(child_p);
+    initial begin
+        C obj = new;
+        int k = 1;
+        u = '1;
+        u[k] = 1'b0;
+        u_value = u;
+        fill = obj.fill(4);
+        body = obj.body(3);
+    end
+endmodule
+"#)
+  (top Top) (run_until 1)
+  (assert_eq fill 15) (assert_eq body 7) (assert_eq u_value 61)
+  (assert_eq g_value 3) (assert_eq child_p 5))
 ; Package generic requests are bound where used and share static state across
 ; importing module scopes. Matching aliases select the same specialization (8.25).
 (case foreign_generic_static_state_across_modules

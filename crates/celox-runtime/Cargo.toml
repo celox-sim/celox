@@ -16,6 +16,7 @@ celox-state-layout = { workspace = true }
 celox-testbench = { workspace = true }
 bit-set = { workspace = true }
 chrono = "0.4"
+wavefst = { version = "0.4", default-features = false, features = ["writer", "lz4"] }
 fxhash.workspace = true
 num-bigint = { workspace = true }
 serde = { workspace = true }
@@ -25,6 +26,7 @@ tracing = { workspace = true }
 [dev-dependencies]
 tempfile.workspace = true
 vcd = "0.7"
+wellen = "0.25"
 
 [[bench]]
 name = "vcd"

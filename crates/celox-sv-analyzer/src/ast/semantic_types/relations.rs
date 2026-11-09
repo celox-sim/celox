@@ -19,6 +19,9 @@ pub(in crate::ast) enum Mismatch {
     /// The source's class neither is nor derives from or implements the
     /// target's (8.16, 8.26.5).
     ClassHandle,
+    /// A virtual interface of another interface, or with a modport that the
+    /// target's is not (25.9).
+    VirtualInterface,
     /// A value of another type than an enumeration's is assigned to it
     /// without a cast (6.19.4).
     Enum,
@@ -151,9 +154,29 @@ impl TyTable {
     /// `target` (IEEE 1800-2023 6.22.3): `null` to any class, chandle or
     /// virtual interface handle (6.11.1, 6.14, 25.9), and a class to its own
     /// class, a class it derives from or an interface class it implements
-    /// (8.16, 8.26.5), as far as the classes' supertypes are recorded.
+    /// (8.16, 8.26.5), as far as the classes' supertypes are recorded; a
+    /// virtual interface takes one of its interface with no modport or with
+    /// its own modport (25.9).
     pub fn assignable_handle(&self, source: TyId, target: TyId) -> Result<(), Mismatch> {
         match (self.data(source), self.data(target)) {
+            (
+                TyData::VirtualInterface {
+                    interface: source_interface,
+                    modport: source_modport,
+                },
+                TyData::VirtualInterface {
+                    interface: target_interface,
+                    modport: target_modport,
+                },
+            ) => {
+                if source_interface == target_interface
+                    && (source_modport.is_none() || source_modport == target_modport)
+                {
+                    Ok(())
+                } else {
+                    Err(Mismatch::VirtualInterface)
+                }
+            }
             (
                 TyData::Null,
                 TyData::Class(_) | TyData::Chandle | TyData::VirtualInterface { .. },

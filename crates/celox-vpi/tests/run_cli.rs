@@ -534,6 +534,9 @@ fn execution_option_conflicts_are_rejected() {
             "unused",
             "--dump-ir-and-run",
         ],
+        // A settle profile needs a run to count.
+        vec!["--compile-only", "--settle-profile", "unused.tsv"],
+        vec!["--dump-ir-dir", "unused", "--settle-profile", "unused.tsv"],
     ] {
         let output = run(
             &[(
@@ -1192,6 +1195,67 @@ fn vcd_rejects_compile_only_and_reports_invalid_output_paths() {
         &["--vcd", dir.path().to_str().unwrap()],
     );
     assert_eq!(output.status.code(), Some(1), "{output:?}");
+}
+
+#[test]
+fn fst_records_each_time_step_and_rejects_conflicting_options() {
+    let source = r#"
+        module Counter(clk: input clock, q: output logic<8>) {
+            always_ff (clk) { q += 1; }
+        }
+        #[test(Top)] module Top {
+            inst clk: $tb::clock_gen #(period: 2);
+            var q: logic<8>;
+            inst dut: Counter(clk, q);
+            initial { clk.next(4); $assert(q == 4); $finish(); }
+            initial { clk.next(100); }
+        }
+    "#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("counter.fst");
+    let output = run(
+        &[("top.veryl", source)],
+        &["--backend", "native", "--fst", path.to_str().unwrap()],
+    );
+    assert!(output.status.success(), "{output:?}");
+
+    let mut wave = wellen::simple::read(&path).unwrap();
+    for time in 0..=7u64 {
+        assert!(
+            wave.time_table().contains(&time),
+            "missing time {time}: {:?}",
+            wave.time_table()
+        );
+    }
+    let hierarchy = wave.hierarchy();
+    let q = hierarchy
+        .all_vars()
+        .find(|var_ref| hierarchy[*var_ref].full_name(hierarchy).ends_with(".q"))
+        .expect("counter output recorded");
+    let id = hierarchy[q].signal_ref();
+    wave.load_signals(&[id]);
+    let times: Vec<u64> = wave.time_table().to_vec();
+    let values: Vec<String> = wave
+        .get_signal(id)
+        .unwrap()
+        .iter_changes()
+        .map(|(_, value)| value.to_bit_string().unwrap())
+        .collect();
+    assert!(
+        values.iter().any(|value| value == "00000100"),
+        "final count recorded, times {times:?}: {values:?}"
+    );
+
+    let output = run(
+        &[("top.veryl", source)],
+        &["--compile-only", "--fst", "unused.fst"],
+    );
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let output = run(
+        &[("top.veryl", source)],
+        &["--vcd", "unused.vcd", "--fst", "unused.fst"],
+    );
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
 }
 
 #[test]

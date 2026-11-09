@@ -102,6 +102,7 @@ tempfile.workspace = true
 veryl-std = { workspace = true }
 veryl-emitter = { workspace = true }
 vcd = "0.7"
+wellen = "0.25"
 
 [[bench]]
 name = "vcd"

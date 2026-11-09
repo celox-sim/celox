@@ -43,9 +43,9 @@ use memory::{
     emit_sparse_inline_commits,
 };
 use operands::{
-    emit_state_base, mem_operand, mem_operand_indexed, mem_operand_ptr, mem_operand_ptr_indexed,
-    preg_to_reg8, preg_to_reg16, preg_to_reg32, preg_to_reg64, resolve, scratch_operand,
-    x86_vec_to_xmm,
+    emit_state_address, emit_state_base, mem_operand, mem_operand_indexed, mem_operand_ptr,
+    mem_operand_ptr_indexed, preg_to_reg8, preg_to_reg16, preg_to_reg32, preg_to_reg64, resolve,
+    scratch_operand, x86_vec_to_xmm,
 };
 pub use pipeline::{
     AllocatedFunction, allocate_owned_prepared_eu, emit_owned_prepared_eu, emit_prepared_eu,
@@ -351,6 +351,12 @@ fn select_spill_register_cache(
                     ..
                 }
                 | MInst::OrStoreImm {
+                    base: BaseReg::StackFrame,
+                    offset,
+                    size,
+                    ..
+                }
+                | MInst::StoreImm {
                     base: BaseReg::StackFrame,
                     offset,
                     size,
@@ -1090,6 +1096,7 @@ fn verify_function_unit(func: &MFunction, tick_loop: bool) -> Result<(), EmitErr
                     | MInst::Store { .. }
                     | MInst::AndStoreImm { .. }
                     | MInst::OrStoreImm { .. }
+                    | MInst::StoreImm { .. }
                     | MInst::LoadIndexed { .. }
                     | MInst::StoreIndexed { .. }
                     | MInst::OrStoreIndexed { .. }
@@ -1098,23 +1105,42 @@ fn verify_function_unit(func: &MFunction, tick_loop: bool) -> Result<(), EmitErr
                         ..
                     }
                     | MInst::X86Simd(X86SimdInst::Load128 { .. } | X86SimdInst::Store128 { .. })
+                    | MInst::PackedLaneCompare { .. }
+                    | MInst::MemCopy { .. }
+                    | MInst::MemFill { .. }
             );
-            let in_window = [
+            let (start, end) = (
+                i64::from(window.base),
+                i64::from(window.base) + i64::from(window.size),
+            );
+            let ranges: Vec<_> = [
                 super::memory_effect::reads(inst),
                 super::memory_effect::writes(inst),
             ]
             .iter()
             .flat_map(|effects| effects.ranges().collect::<Vec<_>>())
-            .any(|range| {
+            .filter(|range| {
                 range.base == BaseReg::SimState
-                    && range.offset < i64::from(window.base) + i64::from(window.size)
-                    && range.end().is_none_or(|end| end > i64::from(window.base))
-            });
-            if in_window && !redirected {
+                    && range.offset < end
+                    && range.end().is_none_or(|range_end| range_end > start)
+            })
+            .collect();
+            if !ranges.is_empty() && !redirected {
                 return Err(error(
                     Some(block.id),
                     Some(index),
                     "a frame slot access has no operand the frame register can address",
+                ));
+            }
+            // The frame register addresses a range from where it starts: one
+            // that also reaches state outside the window has no operand.
+            if ranges.iter().any(|range| {
+                range.offset < start || range.end().is_none_or(|range_end| range_end > end)
+            }) {
+                return Err(error(
+                    Some(block.id),
+                    Some(index),
+                    "a memory access reaches both a function unit's frame and other state",
                 ));
             }
         }

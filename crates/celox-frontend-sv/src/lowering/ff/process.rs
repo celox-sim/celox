@@ -33,6 +33,9 @@ impl Ff<'_, '_> {
                     | ProcessOp::SemaphoreTryGet
                     | ProcessOp::SemaphoreGet
                     | ProcessOp::Await
+                    | ProcessOp::Observe
+                    | ProcessOp::WaitEvent
+                    | ProcessOp::WaitTriggered
             ))
         {
             // A function unit suspends the process for the methods that
@@ -122,6 +125,13 @@ impl Ff<'_, '_> {
             strings: Vec::new(),
         });
         self.request_host(HostRequestKind::Process, index)?;
+        // A process that resumes from an event control or a wait for a
+        // trigger, which the host reports with a nonzero result, reaches a
+        // flush point of its deferred assertions (IEEE 1800-2023 16.4.2), in
+        // a kernel and in a unit alike.
+        if matches!(op, ProcessOp::WaitEvent | ProcessOp::WaitTriggered) {
+            self.flush_if_suspended(id);
+        }
         // `triggered` is a one-bit value in its expression (IEEE 1800-2023
         // 15.5.3), whatever the width of the result the scheduler writes.
         if op == ProcessOp::Triggered {
@@ -132,6 +142,46 @@ impl Ff<'_, '_> {
             });
         }
         Ok(sv::ir::Expr::Ident(name))
+    }
+
+    /// Reach a flush point of the process's deferred assertions when
+    /// variable `suspended`, a 32-bit result of a wait request, is nonzero:
+    /// the kernel's own flush site, or a unit's (see `Ff::unit_flush_point`).
+    fn flush_if_suspended(&mut self, suspended: SourceVarId) {
+        if self.kernel.is_some() && self.flush_site.is_none() {
+            return;
+        }
+        let value = self.b.alloc_bit(32, false);
+        self.b.emit(SIRInstruction::Load(
+            value,
+            stable(suspended),
+            SIROffset::Static(0),
+            32,
+        ));
+        let zero = self.b.alloc_bit(32, false);
+        self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+        let resumed = self.b.alloc_bit(1, false);
+        self.b
+            .emit(SIRInstruction::Binary(resumed, value, BinaryOp::Ne, zero));
+        let flush = self.b.new_block();
+        let join = self.b.new_block();
+        self.b.seal_block(SIRTerminator::Branch {
+            cond: resumed,
+            true_block: (flush, Vec::new()),
+            false_block: (join, Vec::new()),
+        });
+        self.b.switch_to_block(flush);
+        match self.flush_site {
+            Some(site_id) if self.kernel.is_some() => {
+                self.b.emit(SIRInstruction::RuntimeEvent {
+                    site_id,
+                    args: Vec::new(),
+                });
+            }
+            _ => self.unit_flush_point(),
+        }
+        self.b.seal_block(SIRTerminator::Jump(join, Vec::new()));
+        self.b.switch_to_block(join);
     }
 
     /// A mailbox method (IEEE 1800-2023 15.4). The analyzer passes the heap
