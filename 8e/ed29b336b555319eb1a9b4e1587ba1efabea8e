@@ -1,0 +1,1 @@
+Fix default-feature CI: the cfg(test) sampled-copy accessor is dead code without the systemverilog feature; gate it to match its test
