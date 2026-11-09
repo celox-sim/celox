@@ -1,1 +1,7 @@
-Exclude synthetic sample copies from the read roots before pruning (PR #3440 review): the frontend lists every copy as a testbench read root for the host refresh, which made retain keep copies no unit reads.
+Revision history for #3440:
+
+rev 3 (content) 2026-11-09 19:02 UTC — Exclude synthetic sample copies from the read roots before pruning (PR #3440 review): the frontend lists every copy as a testbench read root for the host refresh, which made retain keep copies no unit reads.
+rev 2 (rebase) 2026-11-09 18:49 UTC
+rev 1 (initial) 2026-11-09 18:49 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3440,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"770ea6469661748b00b79bcf7b57cdb81053e3e3","timestamp_iso":"2026-11-09T18:49:29Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"770ea6469661748b00b79bcf7b57cdb81053e3e3","new_sha":"7a36e017bed1f5b320637d98554bcf1017cc15a6","timestamp_iso":"2026-11-09T18:49:29Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/770ea6469661748b00b79bcf7b57cdb81053e3e3...7a36e017bed1f5b320637d98554bcf1017cc15a6"},{"number":3,"change_type":"content","old_sha":"7a36e017bed1f5b320637d98554bcf1017cc15a6","new_sha":"dd03367885e5ffeeabba13626ec04fc51b75a9ae","timestamp_iso":"2026-11-09T19:02:34Z","reason":"Exclude synthetic sample copies from the read roots before pruning (PR #3440 review): the frontend lists every copy as a testbench read root for the host refresh, which made retain keep copies no unit reads.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/7a36e017bed1f5b320637d98554bcf1017cc15a6...dd03367885e5ffeeabba13626ec04fc51b75a9ae"}]} -->
