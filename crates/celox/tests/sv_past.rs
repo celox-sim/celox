@@ -335,6 +335,50 @@ past!(native, build_native);
 #[cfg(feature = "wasm-runtime")]
 past!(wasm, build_wasm);
 
+/// The sampled copies a `$past` design makes at every timestamp must not
+/// disable the partitioned settle: before this was fixed, copying a sampled
+/// value took a raw mutable view of the state, which forced every settle
+/// partition to run on every settle for the rest of the run.
+#[cfg(all(
+    target_arch = "x86_64",
+    not(feature = "arm64-codegen"),
+    feature = "systemverilog"
+))]
+#[test]
+fn sampled_copies_do_not_disable_partitioned_settle() {
+    let mut chain = String::from("  logic [7:0] c1;\n  assign c1 = a + 8'd1;\n");
+    for index in 2..=32 {
+        chain.push_str(&format!(
+            "  logic [7:0] c{index};\n  assign c{index} = c{} + 8'd1;\n",
+            index - 1
+        ));
+    }
+    let source = format!(
+        "`timescale 1ns/1ns\nmodule Top;\n  bit clk; bit [7:0] a, p;\n{chain}  \
+         always #1 clk = ~clk;\n  \
+         always @(posedge clk) p <= $past(a);\n  \
+         initial begin #2 a = 1; #2 a = 2; #2 a = 3; #2 a = 4; end\nendmodule"
+    );
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![(source.as_str(), Path::new("past_settle.sv"))],
+        "Top",
+    )
+    .settle_partition(celox::SettlePartition::Always)
+    .settle_profile(true)
+    .build_native()
+    .unwrap();
+    sim.run_until(9).unwrap();
+    let p = sim.signal("p");
+    assert_eq!(sim.get(p), 3u32.into());
+    let profile = sim.settle_profile().expect("built with a settle profile");
+    assert!(profile.settles > 0, "{profile:?}");
+    assert!(profile.runs.len() > 1, "{profile:?}");
+    assert!(
+        profile.runs.iter().any(|&runs| runs < profile.settles),
+        "every partition ran on every settle: {profile:?}"
+    );
+}
+
 /// A `Simulator` tick is a tick of the clock.
 #[test]
 fn simulator_ticks_are_clock_ticks() {
