@@ -1,0 +1,1 @@
+Address Codex review on PR 3439: keep monitors whose predicate calls a subroutine, and stop treating out-of-range selects, inside with unknown operands, division/modulo/power and widening casts as provably known
