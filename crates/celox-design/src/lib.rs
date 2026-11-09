@@ -1847,6 +1847,11 @@ pub struct SchedulerSchema<A> {
     /// each blocking update of a watched object as they make it, through
     /// the host context slot, so the host runs them with that context.
     pub value_change_kernels: Vec<usize>,
+    /// The generated scheduler refreshes the sampled-value shadows at
+    /// every slot it starts, so a compiled run may span many timestamps
+    /// without the runtime refreshing them between slots.
+    #[serde(default)]
+    pub refreshes_sample_shadows: bool,
 }
 
 impl<A> SchedulerSchema<A> {
@@ -1862,6 +1867,7 @@ impl<A> SchedulerSchema<A> {
             domain_waits: self.domain_waits,
             update_points: self.update_points,
             value_change_kernels: self.value_change_kernels,
+            refreshes_sample_shadows: self.refreshes_sample_shadows,
         }
     }
 }
