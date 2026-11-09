@@ -7022,7 +7022,10 @@ impl Ff<'_, '_> {
     ) -> Result<KernelUnit, sv::AnalyzerError> {
         self.process = process;
         let monitored;
-        let body = if let Some(clock) = concurrent_monitor_clock(body) {
+        let no_body: &[sv::ir::Stmt] = &[];
+        let body = if !self.m.four_state && vacuous_two_state_monitor(body) {
+            no_body
+        } else if let Some(clock) = concurrent_monitor_clock(body) {
             self.inferred_clock = Some(clock);
             self.declare_history(body)?;
             if self.history.is_empty() {
@@ -9223,6 +9226,290 @@ fn concurrent_monitor_clock(body: &[sv::ir::Stmt]) -> Option<Clock> {
         rising,
         alone: true,
     })
+}
+
+/// Whether `body` is a module-level concurrent assertion that can never
+/// fail in two-state mode and whose pass action does nothing observable:
+/// its predicate is true on every tick, so the monitor process, its region
+/// transitions and its sampled-value readers can all be dropped. Anything
+/// not in exactly that shape keeps its process.
+fn vacuous_two_state_monitor(body: &[sv::ir::Stmt]) -> bool {
+    use sv::ir::{LoopKind, Stmt};
+    let [
+        Stmt::Loop {
+            kind: LoopKind::Forever,
+            init,
+            condition: None,
+            body: inner,
+            ..
+        },
+    ] = body
+    else {
+        return false;
+    };
+    if !init.is_empty() {
+        return false;
+    }
+    let [
+        Stmt::WaitEvent(_),
+        Stmt::AssertionRegion { reactive: false },
+        rest @ ..,
+    ] = inner.as_slice()
+    else {
+        return false;
+    };
+    let decision = match rest {
+        // `disable iff` wraps the decision; it can only suppress attempts,
+        // never make a true predicate fail.
+        [
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            },
+        ] if then_body.is_empty() && else_body.len() == 1 => &else_body[0],
+        [decision] => decision,
+        _ => return false,
+    };
+    let Stmt::If {
+        condition,
+        then_body,
+        ..
+    } = decision
+    else {
+        return false;
+    };
+    then_body
+        .iter()
+        .all(|stmt| matches!(stmt, Stmt::AssertionRegion { .. }))
+        && two_state_condition_always_true(condition)
+}
+
+/// Whether `expr` is true on every evaluation in two-state mode, where no
+/// stored value carries unknown bits. Only the shapes proved here count;
+/// everything else is left to runtime evaluation.
+fn two_state_condition_always_true(expr: &sv::ir::Expr) -> bool {
+    use sv::ir::{BinaryOp, Callee, Expr, SystemFunction, UnaryOp};
+    if let Some((value, mask, _)) = two_state_const(expr) {
+        return mask.is_zero() && !value.is_zero();
+    }
+    match expr {
+        // Truthiness-preserving wrappers the assertion transform puts
+        // around a Boolean predicate: sampled in Preponed, converted to
+        // two-state and reduced to one bit.
+        Expr::Unary {
+            op: UnaryOp::RedOr | UnaryOp::Plus | UnaryOp::ToTwoState,
+            expr,
+        } => two_state_condition_always_true(expr),
+        Expr::Call {
+            callee: Callee::System(SystemFunction::Sampled),
+            args,
+            ..
+        } if args.len() == 1 => args[0]
+            .as_ref()
+            .is_some_and(two_state_condition_always_true),
+        // `known !== <constant with X/Z>` (or mirrored) can never be an
+        // exact match for the constant, whatever the known side holds
+        // (IEEE 1800-2023 11.4.10).
+        Expr::Binary {
+            left,
+            op: BinaryOp::NeCase,
+            right,
+        } => {
+            (two_state_const(left).is_some_and(|(_, mask, _)| !mask.is_zero())
+                && two_state_mask_zero(right))
+                || (two_state_const(right).is_some_and(|(_, mask, _)| !mask.is_zero())
+                    && two_state_mask_zero(left))
+        }
+        Expr::Binary {
+            left,
+            op: BinaryOp::LogicAnd,
+            right,
+        } => two_state_condition_always_true(left) && two_state_condition_always_true(right),
+        _ => false,
+    }
+}
+
+/// Whether `expr` provably carries no unknown bits in two-state mode.
+/// Runtime boundaries (stored values, calls) are two-state there, as in
+/// `case_equality`'s projection; unknown bits can only enter through
+/// literals that carry them.
+fn two_state_mask_zero(expr: &sv::ir::Expr) -> bool {
+    use sv::ir::{BinaryOp, Expr, UnaryOp};
+    match expr {
+        Expr::Literal(_) => two_state_const(expr).is_some_and(|(_, mask, _)| mask.is_zero()),
+        Expr::Ident(_) | Expr::Call { .. } | Expr::Inside { .. } => true,
+        Expr::Unary { op, expr } => matches!(op, UnaryOp::ToTwoState) || two_state_mask_zero(expr),
+        Expr::Binary { left, op, right } => {
+            matches!(op, BinaryOp::EqCase | BinaryOp::NeCase)
+                || (two_state_mask_zero(left) && two_state_mask_zero(right))
+        }
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            two_state_mask_zero(condition)
+                && two_state_mask_zero(then_expr)
+                && two_state_mask_zero(else_expr)
+        }
+        Expr::Concat(parts) => parts.iter().all(two_state_mask_zero),
+        Expr::RepeatConcat { parts, .. } => parts.iter().all(two_state_mask_zero),
+        Expr::Select { expr, .. } | Expr::Resize { expr, .. } => two_state_mask_zero(expr),
+    }
+}
+
+/// A compile-time `(value, unknown mask, width)` for `expr` when every
+/// leaf is a literal; `None` for anything else. Values are zero-extended
+/// to the widest operand, as sized literals are when coerced.
+fn two_state_const(expr: &sv::ir::Expr) -> Option<(BigUint, BigUint, usize)> {
+    use sv::ir::{BinaryOp, Expr, UnaryOp};
+    let bits = |width: usize| {
+        if width == 0 {
+            BigUint::zero()
+        } else {
+            (BigUint::from(1u8) << width) - BigUint::from(1u8)
+        }
+    };
+    match expr {
+        Expr::Literal(text) => {
+            let literal = sv::typecheck::eval_const_integral_literal_with_types(
+                &sv::ir::ConstExpr::Literal(text.clone()),
+                &HashMap::default(),
+                &HashMap::default(),
+            )?;
+            Some((literal.value, literal.mask, literal.width))
+        }
+        Expr::Unary { op, expr } => {
+            let (value, mask, width) = two_state_const(expr)?;
+            match op {
+                UnaryOp::Plus => Some((value, mask, width)),
+                UnaryOp::ToTwoState => {
+                    Some((value & (bits(width) ^ &mask), BigUint::zero(), width))
+                }
+                UnaryOp::BitNot => Some((bits(width) ^ (value & bits(width)), mask, width)),
+                UnaryOp::LogicNot if mask.is_zero() => {
+                    Some((BigUint::from(u8::from(value.is_zero())), BigUint::zero(), 1))
+                }
+                UnaryOp::RedAnd if mask.is_zero() => Some((
+                    BigUint::from(u8::from(value == bits(width))),
+                    BigUint::zero(),
+                    1,
+                )),
+                UnaryOp::RedOr if mask.is_zero() => Some((
+                    BigUint::from(u8::from(!value.is_zero())),
+                    BigUint::zero(),
+                    1,
+                )),
+                UnaryOp::RedXor if mask.is_zero() => Some((
+                    BigUint::from(
+                        value
+                            .iter_u64_digits()
+                            .fold(0u32, |acc, digit| acc ^ digit.count_ones())
+                            & 1,
+                    ),
+                    BigUint::zero(),
+                    1,
+                )),
+                _ => None,
+            }
+        }
+        Expr::Binary { left, op, right } => {
+            let (lvalue, lmask, lwidth) = two_state_const(left)?;
+            let (rvalue, rmask, rwidth) = two_state_const(right)?;
+            let width = lwidth.max(rwidth);
+            match op {
+                BinaryOp::EqCase | BinaryOp::NeCase => {
+                    let equal = if lmask.is_zero() && rmask.is_zero() {
+                        lvalue == rvalue
+                    } else if lmask.is_zero() != rmask.is_zero() {
+                        false
+                    } else if lwidth == rwidth {
+                        lvalue == rvalue && lmask == rmask
+                    } else {
+                        return None;
+                    };
+                    Some((
+                        BigUint::from(u8::from(equal != matches!(op, BinaryOp::NeCase))),
+                        BigUint::zero(),
+                        1,
+                    ))
+                }
+                BinaryOp::Eq | BinaryOp::Ne | BinaryOp::LogicAnd | BinaryOp::LogicOr
+                    if lmask.is_zero() && rmask.is_zero() =>
+                {
+                    let result = match op {
+                        BinaryOp::Eq => lvalue == rvalue,
+                        BinaryOp::Ne => lvalue != rvalue,
+                        BinaryOp::LogicAnd => !lvalue.is_zero() && !rvalue.is_zero(),
+                        _ => !lvalue.is_zero() || !rvalue.is_zero(),
+                    };
+                    Some((BigUint::from(u8::from(result)), BigUint::zero(), 1))
+                }
+                BinaryOp::BitAnd
+                | BinaryOp::BitOr
+                | BinaryOp::BitXor
+                | BinaryOp::Add
+                | BinaryOp::Sub
+                    if lmask.is_zero() && rmask.is_zero() =>
+                {
+                    let value = match op {
+                        BinaryOp::BitAnd => lvalue & rvalue,
+                        BinaryOp::BitOr => lvalue | rvalue,
+                        BinaryOp::BitXor => lvalue ^ rvalue,
+                        BinaryOp::Add => lvalue + rvalue,
+                        _ => (lvalue + bits(width) + BigUint::from(1u8) - rvalue) & bits(width),
+                    };
+                    Some((value & bits(width), BigUint::zero(), width))
+                }
+                _ => None,
+            }
+        }
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            let (cvalue, cmask, _) = two_state_const(condition)?;
+            if !cmask.is_zero() {
+                return None;
+            }
+            let taken = if cvalue.is_zero() {
+                else_expr
+            } else {
+                then_expr
+            };
+            let taken = two_state_const(taken)?;
+            let other = two_state_const(if cvalue.is_zero() {
+                then_expr
+            } else {
+                else_expr
+            });
+            if let Some(other) = other
+                && other == taken
+            {
+                return Some(taken);
+            }
+            Some(taken)
+        }
+        Expr::Concat(parts) => {
+            let mut value = BigUint::zero();
+            let mut mask = BigUint::zero();
+            let mut width = 0;
+            for part in parts {
+                let (pvalue, pmask, pwidth) = two_state_const(part)?;
+                value = (value << pwidth) | pvalue;
+                mask = (mask << pwidth) | pmask;
+                width += pwidth;
+            }
+            Some((value, mask, width))
+        }
+        Expr::Resize { expr, width, .. } => {
+            let (value, mask, _) = two_state_const(expr)?;
+            Some((value & bits(*width), mask & bits(*width), *width))
+        }
+        _ => None,
+    }
 }
 
 /// `expr` with the identifiers in `renames` replaced.

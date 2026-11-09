@@ -112,6 +112,55 @@ endmodule"#;
     assert_eq!(site.outcome, celox::AssertionOutcome::Fail);
 }
 
+/// An X-check over stored data can never fail in two-state mode, where
+/// nothing carries X (IEEE 1800-2023 11.4.10, 16.5.1): the monitor is
+/// dropped. In four-state mode the same check is live and must fire on X.
+/// A pass action keeps its monitor in both modes and must still count.
+#[test]
+fn two_state_vacuous_x_check_is_dropped_but_four_state_fires() {
+    let source = r#"`timescale 1ns/1ns
+module Top;
+ bit clk;
+ logic [7:0] dat;
+ int passes;
+ always #1 clk = ~clk;
+ always @(posedge clk) dat <= dat + 8'd1;
+ check: assert property (@(posedge clk) ((^dat) !== 1'bx))
+    else $fatal("x detected");
+ counted: assert property (@(posedge clk) ((^dat) !== 1'bx)) passes++;
+endmodule"#;
+    let build = |four_state| {
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("xcheck.sv"))], "Top")
+            .four_state(four_state)
+            .build()
+            .unwrap()
+    };
+    fn fails<B: celox::SimBackend>(sim: &mut celox::Simulation<B>) -> usize {
+        sim.drain_runtime_events()
+            .into_iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    celox::RuntimeEvent::Report(report)
+                        if report.assertion.as_ref().is_some_and(|site| {
+                            site.outcome == celox::AssertionOutcome::Fail
+                        })
+                )
+            })
+            .count()
+    }
+
+    let mut sim = build(false);
+    sim.run_until(9).unwrap();
+    assert_eq!(fails(&mut sim), 0);
+    let passes = sim.signal("passes");
+    assert_eq!(sim.get(passes), 5u32.into());
+
+    let mut sim = build(true);
+    let _ = sim.run_until(9);
+    assert!(fails(&mut sim) > 0, "four-state X check must still fire");
+}
+
 #[test]
 fn unsupported_temporal_and_procedural_forms_are_not_boolean_checks() {
     for body in [
