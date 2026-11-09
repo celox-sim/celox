@@ -137,6 +137,74 @@ pub(super) fn lower_instruction(
                     ctx.reg_map.get(*else_val)
                 };
 
+                if !ctx.four_state
+                    && d_width <= 64
+                    && let Some(shift) =
+                        match_loaded_bit_select(sir_block, sir_defs, *cond, *then_val, *else_val)
+                {
+                    // `cond ? 1 << k : 0` of a loaded two-state bit is the
+                    // bit shifted into place: a compare condition would have
+                    // to materialize first, so it keeps the compare + select.
+                    if shift == 0 {
+                        block.push(MInst::Mov {
+                            dst: dst_vreg,
+                            src: cond_is_true,
+                        });
+                    } else {
+                        block.push(MInst::ShlImm {
+                            dst: dst_vreg,
+                            src: cond_is_true,
+                            imm: shift,
+                        });
+                    }
+                    ctx.known_bits.insert(dst_vreg, shift as usize + 1);
+                    return;
+                }
+
+                if !ctx.four_state
+                    && d_width <= 64
+                    && ctx
+                        .known_bits
+                        .get(&cond_is_true)
+                        .is_some_and(|&bits| bits <= 1)
+                    && !is_fusible_select_condition(sir_block, sir_defs, *cond)
+                    && let Some((kept, kept_when_set)) =
+                        if sir_imm_u64(sir_block, sir_defs, *then_val) == Some(0) {
+                            Some((ev, false))
+                        } else if sir_imm_u64(sir_block, sir_defs, *else_val) == Some(0) {
+                            Some((tv, true))
+                        } else {
+                            None
+                        }
+                    && ctx.known_bits.get(&kept).copied().unwrap_or(64) <= d_width
+                {
+                    // `cond ? 0 : v` of a materialized bit is `v & (cond - 1)`,
+                    // `cond ? v : 0` is `v & -cond`: one instruction per
+                    // select against a test and a conditional move, and the
+                    // mask is shared by every select on the same condition.
+                    let mask = ctx.alloc_vreg(SpillDesc::transient());
+                    if kept_when_set {
+                        block.push(MInst::Neg {
+                            dst: mask,
+                            src: cond_is_true,
+                        });
+                    } else {
+                        block.push(MInst::SubImm {
+                            dst: mask,
+                            src: cond_is_true,
+                            imm: 1,
+                        });
+                    }
+                    block.push(MInst::And {
+                        dst: dst_vreg,
+                        lhs: kept,
+                        rhs: mask,
+                    });
+                    ctx.known_bits
+                        .insert(dst_vreg, ctx.known_bits.get(&kept).copied().unwrap_or(64));
+                    return;
+                }
+
                 if !ctx.four_state && d_width == 1 {
                     let tv = lower_low_bit(ctx, block, tv);
                     let ev = lower_low_bit(ctx, block, ev);
@@ -1180,6 +1248,38 @@ pub(super) fn lower_instruction(
                                     src: src_vreg,
                                     size: OpSize::from_bits(*width_bits).unwrap(),
                                 });
+                            } else if intra_byte == 0
+                                && *width_bits <= 64
+                                && width_bits.is_multiple_of(8)
+                            {
+                                // Whole bytes of another count: store them in
+                                // native-size pieces, low first, instead of a
+                                // read-modify-write of the containing word.
+                                let mut consumed = 0usize;
+                                while consumed < *width_bits {
+                                    let piece = [64, 32, 16, 8]
+                                        .into_iter()
+                                        .find(|&piece| piece <= *width_bits - consumed)
+                                        .unwrap();
+                                    let part_src = if consumed == 0 {
+                                        src_vreg
+                                    } else {
+                                        let shifted = ctx.alloc_vreg(SpillDesc::transient());
+                                        block.push(MInst::ShrImm {
+                                            dst: shifted,
+                                            src: src_vreg,
+                                            imm: consumed as u8,
+                                        });
+                                        shifted
+                                    };
+                                    block.push(MInst::Store {
+                                        base: BaseReg::SimState,
+                                        offset: byte_off + (consumed / 8) as i32,
+                                        src: part_src,
+                                        size: OpSize::from_bits(piece).unwrap(),
+                                    });
+                                    consumed += piece;
+                                }
                             } else {
                                 let mut consumed = 0usize;
                                 while consumed < *width_bits {
@@ -2396,12 +2496,26 @@ pub(super) fn lower_instruction(
                     rhs: rhs_vreg,
                     kind: CmpKind::Eq,
                 }),
-                BinaryOp::Ne => block.push(MInst::Cmp {
-                    dst: dst_vreg,
-                    lhs: lhs_vreg,
-                    rhs: rhs_vreg,
-                    kind: CmpKind::Ne,
-                }),
+                BinaryOp::Ne => {
+                    // A two-state one-bit value is its own non-zero test.
+                    let one_bit_against_zero = |value: &RegisterId, zero: &RegisterId| {
+                        !ctx.four_state
+                            && ctx.consts.get(zero) == Some(&0)
+                            && ctx.known_bits.get(&ctx.reg_map.get(*value)) == Some(&1)
+                    };
+                    if one_bit_against_zero(lhs, rhs) {
+                        ctx.emit_mov(block, dst_vreg, lhs_vreg);
+                    } else if one_bit_against_zero(rhs, lhs) {
+                        ctx.emit_mov(block, dst_vreg, rhs_vreg);
+                    } else {
+                        block.push(MInst::Cmp {
+                            dst: dst_vreg,
+                            lhs: lhs_vreg,
+                            rhs: rhs_vreg,
+                            kind: CmpKind::Ne,
+                        });
+                    }
+                }
                 BinaryOp::EqCase | BinaryOp::NeCase => {
                     if packed_state::compare(ctx, block, dst_vreg, *lhs, *rhs, *op) {
                         let zero = ctx.alloc_vreg(SpillDesc::remat(0));
@@ -2930,18 +3044,28 @@ pub(super) fn lower_instruction(
                     }
                 }
                 UnaryOp::LogicNot => {
-                    // dst = (src == 0) ? 1 : 0
-                    let zero = ctx.alloc_vreg(SpillDesc::remat(0));
-                    block.push(MInst::LoadImm {
-                        dst: zero,
-                        value: 0,
-                    });
-                    block.push(MInst::Cmp {
-                        dst: dst_vreg,
-                        lhs: src_vreg,
-                        rhs: zero,
-                        kind: CmpKind::Eq,
-                    });
+                    // dst = (src == 0) ? 1 : 0; a two-state one-bit source
+                    // flips its bit instead.
+                    if !ctx.four_state && ctx.known_bits.get(&src_vreg) == Some(&1) {
+                        let inverted = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::BitNot {
+                            dst: inverted,
+                            src: src_vreg,
+                        });
+                        ctx.emit_and_imm(block, dst_vreg, inverted, 1);
+                    } else {
+                        let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+                        block.push(MInst::LoadImm {
+                            dst: zero,
+                            value: 0,
+                        });
+                        block.push(MInst::Cmp {
+                            dst: dst_vreg,
+                            lhs: src_vreg,
+                            rhs: zero,
+                            kind: CmpKind::Eq,
+                        });
+                    }
                 }
                 UnaryOp::And => {
                     // Reduction AND: dst = (src == all_ones_mask) ? 1 : 0
@@ -3382,4 +3506,73 @@ fn wide_mask_store_chunks(
         .enumerate()
         .map(|(index, vreg)| (vreg, (width_bits - index * 64).min(64)))
         .collect()
+}
+
+/// The shift `k` of a `Mux(cond, 1 << k, 0)` whose condition is a one-bit
+/// two-state load (or its non-zero test) defined in the same block.
+fn match_loaded_bit_select(
+    sir_block: &crate::BasicBlock<RegionedAbsoluteAddr>,
+    sir_defs: &HashMap<RegisterId, usize>,
+    cond: RegisterId,
+    then_val: RegisterId,
+    else_val: RegisterId,
+) -> Option<u8> {
+    let set = sir_imm_u64(sir_block, sir_defs, then_val)?;
+    if !set.is_power_of_two() || sir_imm_u64(sir_block, sir_defs, else_val)? != 0 {
+        return None;
+    }
+    let loaded_bit = |register: RegisterId| {
+        matches!(
+            sir_block.instructions[*sir_defs.get(&register)?],
+            SIRInstruction::Load(_, _, _, 1)
+        )
+        .then_some(())
+    };
+    match &sir_block.instructions[*sir_defs.get(&cond)?] {
+        SIRInstruction::Load(_, _, _, 1) => {}
+        SIRInstruction::Binary(_, lhs, BinaryOp::Ne, rhs) => {
+            let zero = |register| sir_imm_u64(sir_block, sir_defs, register) == Some(0);
+            if !((zero(*rhs) && loaded_bit(*lhs).is_some())
+                || (zero(*lhs) && loaded_bit(*rhs).is_some()))
+            {
+                return None;
+            }
+        }
+        _ => return None,
+    }
+    Some(set.trailing_zeros() as u8)
+}
+
+/// Whether a select on `cond` would fuse with the compare computing it in
+/// this block (`cmp; cmov`, or a guarded compare select): such a condition
+/// is cheaper tested than materialized as a mask.
+fn is_fusible_select_condition(
+    sir_block: &crate::BasicBlock<RegionedAbsoluteAddr>,
+    sir_defs: &HashMap<RegisterId, usize>,
+    cond: RegisterId,
+) -> bool {
+    sir_defs.get(&cond).is_some_and(|&index| {
+        matches!(
+            sir_block.instructions[index],
+            SIRInstruction::Binary(
+                _,
+                _,
+                BinaryOp::Eq
+                    | BinaryOp::Ne
+                    | BinaryOp::EqCase
+                    | BinaryOp::NeCase
+                    | BinaryOp::LtU
+                    | BinaryOp::LtS
+                    | BinaryOp::LeU
+                    | BinaryOp::LeS
+                    | BinaryOp::GtU
+                    | BinaryOp::GtS
+                    | BinaryOp::GeU
+                    | BinaryOp::GeS
+                    | BinaryOp::LogicAnd
+                    | BinaryOp::LogicOr,
+                _
+            )
+        )
+    })
 }

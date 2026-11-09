@@ -181,6 +181,9 @@ fn resolve(
             if let Some(ty) = objects::member_type(tree, dims, &owner, &member, handle, session) {
                 return of_type(session, &ty);
             }
+            if let Some(ty) = property_type(tree, session, id, native, dims) {
+                return Some(ty);
+            }
             // A method called without parentheses (13.5.5).
             let receiver = match handle {
                 Some(handle) => objects::Receiver::Handle(handle),
@@ -461,12 +464,17 @@ fn property_type(
 ) -> Option<TyId> {
     let ty = match objects::static_property_type(tree, id, native, dims, session).ok()? {
         Some(ty) => ty,
-        None => {
-            objects::property(tree, session, id, native, dims)
-                .ok()??
-                .0
-                .r#type
-        }
+        None => match objects::property(tree, session, id, native, dims).ok()? {
+            Some((property, ..)) => property.r#type,
+            // A property of unpacked structure type is held as an
+            // aggregate of its members.
+            None => {
+                objects::aggregate_property(tree, session, id, native, dims)
+                    .ok()??
+                    .0
+                    .r#type
+            }
+        },
     };
     semantic_types::of_type(&mut session.types, &tree.functions, &ty, &dims.const_env)
 }

@@ -43,6 +43,7 @@ napi-build.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+wellen = "0.25"
 
 [lints]
 workspace = true

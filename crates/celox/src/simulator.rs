@@ -155,7 +155,7 @@ mod host {
         pub(crate) program: RuntimeProgram,
         /// The program's scheduling facts.
         pub(crate) schedule: celox_design::schedule::ScheduleModel<crate::AbsoluteAddr>,
-        pub(crate) vcd_writer: Option<crate::VcdWriter>,
+        pub(crate) vcd_writer: Option<crate::WaveformWriter>,
         pub(crate) sv_vcd: SvVcdControl,
         pub(crate) dirty: bool,
         /// Static declaration kernels may stop before wildcard baselines are
@@ -656,6 +656,7 @@ mod host {
                 let site = *site_id as u32;
                 match *deferred {
                     celox_design::DeferredSite::FlushPoint => self.flush(site),
+                    celox_design::DeferredSite::ProcessFlushPoint => self.flush_process(),
                     celox_design::DeferredSite::Action { queue, region } => {
                         self.deferred.waiting.push(DeferredReport {
                             queue,
@@ -712,6 +713,18 @@ mod host {
             if self.deferred_owners.current.is_some() {
                 self.deferred.missed.remove(&owner);
             }
+        }
+
+        /// A flush point of the process running now, whatever its queue: a
+        /// function unit's, which serves every process (16.4.2). Only a
+        /// dynamic execution has one process.
+        fn flush_process(&mut self) {
+            if self.deferred_owners.current.is_none() {
+                return;
+            }
+            let owner = self.deferred_owners.owner();
+            self.deferred.waiting.retain(|report| report.owner != owner);
+            self.deferred.missed.remove(&owner);
         }
 
         /// Mature one region. Matured actions leave the process queue and
@@ -2341,19 +2354,19 @@ mod host {
             self.warnings
         }
 
-        /// Captures the current state of all signals and writes them to the VCD file.
+        /// Captures the current state of all signals and writes them to the waveform file.
         ///
         /// # Panics
         ///
         /// Panics where [`Self::try_dump`] returns an error.
         pub fn dump(&mut self, timestamp: u64) {
             if let Err(error) = self.try_dump(timestamp) {
-                panic!("VCD dump at {timestamp} failed: {error}");
+                panic!("waveform dump at {timestamp} failed: {error}");
             }
         }
 
         /// Captures the current state of all signals and writes them to the
-        /// VCD file. Fails if combinational evaluation or writing fails, or
+        /// waveform file. Fails if combinational evaluation or writing fails, or
         /// if `timestamp` is earlier than the last dumped timestamp.
         pub fn try_dump(&mut self, timestamp: u64) -> Result<(), DumpError> {
             if self.frozen {
@@ -2372,7 +2385,7 @@ mod host {
             Ok(())
         }
 
-        /// Dump unless `timestamp` precedes what the VCD file already
+        /// Dump unless `timestamp` precedes what the waveform file already
         /// records, as after `run_until` to an earlier time.
         pub(crate) fn dump_unless_rewound(&mut self, timestamp: u64) {
             let rewound = self
@@ -2398,7 +2411,7 @@ mod host {
             }
         }
 
-        /// Reject a return to `time` if the VCD file has already passed it.
+        /// Reject a return to `time` if the waveform file has already passed it.
         pub(crate) fn check_vcd_rewind(&self, time: u64) -> Result<(), CheckpointError> {
             match self
                 .vcd_writer
@@ -2412,15 +2425,15 @@ mod host {
             }
         }
 
-        /// Finish the current VCD file and continue the waveform in a new
+        /// Finish the current waveform file and continue the waveform in a new
         /// file at `path`, whose timestamps start over. Use it to record a
         /// simulation rewound by a restore. Fails if the simulator was built
-        /// without VCD output.
+        /// without waveform output.
         pub fn switch_vcd(&mut self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
             let writer = self.vcd_writer.as_mut().ok_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    "VCD output was not enabled when the simulator was built",
+                    "waveform output was not enabled when the simulator was built",
                 )
             })?;
             writer.restart(path)
@@ -2434,8 +2447,10 @@ mod host {
             Ok(())
         }
 
-        pub fn vcd_statistics(&self) -> Option<celox_runtime::VcdStatistics> {
-            self.vcd_writer.as_ref().map(crate::VcdWriter::statistics)
+        pub fn vcd_statistics(&self) -> Option<celox_runtime::WaveformStatistics> {
+            self.vcd_writer
+                .as_ref()
+                .map(crate::WaveformWriter::statistics)
         }
 
         /// Sets a signal value and marks combinational logic as dirty.
@@ -3597,13 +3612,40 @@ mod host {
             self.backend.layout()
         }
 
-        /// Take ownership of the VCD writer, if one was configured at build time.
+        /// The work a partitioned settle counted since the simulation
+        /// started, when built with `settle_profile`.
+        pub fn settle_profile(&self) -> Option<celox_state_layout::SettleProfile> {
+            let settle = self.layout().settle.as_ref()?;
+            let (memory, size) = self.memory_as_ptr();
+            // SAFETY: the backend's state image is `size` readable bytes and
+            // nothing writes it while `self` is borrowed.
+            let memory = unsafe { std::slice::from_raw_parts(memory, size) };
+            settle.profile(memory)
+        }
+
+        /// Take ownership of the waveform writer, if one was configured at
+        /// build time.
         ///
         /// Builders create the writer themselves so that layout selection can
-        /// account for VCD recording; callers building handles around a backend
-        /// use this to keep tracing alive without rebuilding descriptors.
-        pub fn take_vcd_writer(&mut self) -> Option<crate::VcdWriter> {
+        /// account for waveform recording; callers building handles around a
+        /// backend use this to keep tracing alive without rebuilding
+        /// descriptors.
+        pub fn take_waveform_writer(&mut self) -> Option<crate::WaveformWriter> {
             self.vcd_writer.take()
+        }
+
+        /// Take ownership of the VCD writer, if the configured waveform is
+        /// VCD. An FST writer stays installed; use
+        /// [`Self::take_waveform_writer`] for either format.
+        pub fn take_vcd_writer(&mut self) -> Option<crate::VcdWriter> {
+            if matches!(self.vcd_writer, Some(crate::WaveformWriter::Vcd(_))) {
+                match self.vcd_writer.take() {
+                    Some(crate::WaveformWriter::Vcd(writer)) => Some(writer),
+                    _ => unreachable!("variant checked above"),
+                }
+            } else {
+                None
+            }
         }
 
         /// Build VCD signal descriptors for all instances.

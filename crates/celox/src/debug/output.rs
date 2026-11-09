@@ -53,6 +53,9 @@ impl CompilationTrace {
         if let Some(sir) = self.format_post_optimized_sir() {
             writeln!(output, "=== Post-optimized SIR ===\n{sir}")?;
         }
+        if let Some(plan) = &self.settle_plan {
+            writeln!(output, "=== Settle plan ===\n{plan}")?;
+        }
         if let Some(sir) = self.format_native_optimized_sir() {
             writeln!(output, "=== Native optimized merged SIR ===\n{sir}")?;
         }

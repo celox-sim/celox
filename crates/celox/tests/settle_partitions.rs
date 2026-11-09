@@ -149,6 +149,90 @@ fn partitioned_native_matches_single_pass() {
     assert_eq!(trace!(partitioned().build_native().unwrap()), reference());
 }
 
+/// The traced plan lists every partition and its compared chunks, and its
+/// lint finds no reader marked for bits it does not read: `s3` takes
+/// `s2[3:0]` and `s1[7:4]`, so neither whole variable makes it a reader.
+#[test]
+fn traced_settle_plan_marks_only_readers_of_compared_bits() {
+    let path = std::env::temp_dir().join(format!("celox-settle-plan-{}.txt", std::process::id()));
+    let result = partitioned()
+        .trace_settle_plan()
+        .settle_plan_output(&path)
+        .build_with_trace();
+    let plan = result
+        .trace
+        .settle_plan
+        .clone()
+        .expect("a partitioned settle has a plan");
+    // The traced build writes the requested file and prints the plan with
+    // the other artifacts.
+    let written = std::fs::read_to_string(&path).expect("the plan file is written");
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(written, plan);
+    let mut printed = Vec::new();
+    result.trace.write_to(&mut printed).unwrap();
+    assert!(
+        String::from_utf8(printed)
+            .unwrap()
+            .contains("=== Settle plan ===\nsettle plan: ")
+    );
+    result.expect("the design builds");
+    assert!(plan.starts_with("settle plan: "), "{plan}");
+    assert!(
+        plan.contains("readers marked for bits they do not read (!) 0:"),
+        "{plan}"
+    );
+    assert!(plan.contains("\npartition 0 cost "), "{plan}");
+    assert!(plan.contains("  watch  "), "{plan}");
+    assert!(
+        !plan
+            .lines()
+            .any(|line| line.starts_with("  watch  ") && line.contains('!')),
+        "{plan}"
+    );
+}
+
+/// The run counters leave the results alone (the settle cross-check still
+/// passes) and count consistently: every partition runs at the first settle,
+/// and no partition changed something in more runs than it had.
+fn check_settle_profile<B: celox::SimBackend>(mut sim: Simulator<B>) {
+    assert!(sim.settle_profile().is_some());
+    let outputs = trace!(sim);
+    assert_eq!(outputs, reference());
+    let profile = sim.settle_profile().expect("built with a settle profile");
+    assert!(profile.settles > 0);
+    assert!(profile.runs.iter().all(|&runs| runs > 0), "{profile:?}");
+    assert!(
+        profile
+            .runs
+            .iter()
+            .zip(&profile.changed)
+            .all(|(runs, changed)| changed <= runs),
+        "{profile:?}"
+    );
+    assert!(profile.unchanged_runs() <= profile.total_runs());
+    assert!(single_pass().build().unwrap().settle_profile().is_none());
+}
+
+#[test]
+fn settle_profile_counts_runs_interpreter() {
+    check_settle_profile(
+        partitioned()
+            .settle_profile(true)
+            .build_interpreter()
+            .unwrap(),
+    );
+}
+
+#[cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+))]
+#[test]
+fn settle_profile_counts_runs_native() {
+    check_settle_profile(partitioned().settle_profile(true).build_native().unwrap());
+}
+
 /// A count of dirty partitions says nothing about their share of the work:
 /// unrelated partitions can contain much wider expressions or larger processes.
 /// Updating one input must not promote its three readers to a full settle.
@@ -175,7 +259,7 @@ module Top (
         let (memory, _) = sim.memory_as_ptr();
         // SAFETY: these offsets describe this simulator's state allocation.
         unsafe {
-            std::slice::from_raw_parts(memory.add(settle.flags_offset), settle.partitions + 2)
+            std::slice::from_raw_parts(memory.add(settle.flags_offset), settle.flags().len())
                 .to_vec()
         }
     };
@@ -192,12 +276,16 @@ module Top (
     assert_eq!(dirty, 3);
     assert_eq!(settle.partitions, 9);
     sim.eval_comb().unwrap();
+    let untracked = settle.flags_offset + celox_design::settle_untracked_flag(settle.partitions);
     let (memory, _) = sim.memory_as_ptr();
     assert_eq!(
-        unsafe { *memory.add(settle.flags_offset + settle.partitions + 1) },
+        unsafe { *memory.add(untracked) },
         0,
         "a partial update promoted unrelated partitions to a full settle"
     );
+    let pending =
+        unsafe { std::slice::from_raw_parts(memory.add(settle.flags_offset), settle.partitions) };
+    assert!(pending.iter().all(|&flag| flag == 0));
     let a2 = sim.signal("a2");
     let b2 = sim.signal("b2");
     assert_eq!(sim.get(a2), BigUint::from(10u8));
@@ -209,10 +297,7 @@ module Top (
     unsafe { *memory.add(a.offset) = 11 };
     sim.eval_comb().unwrap();
     assert_eq!(sim.get(a2), BigUint::from(14u8));
-    assert_eq!(
-        unsafe { *memory.add(settle.flags_offset + settle.partitions + 1) },
-        1
-    );
+    assert_eq!(unsafe { *memory.add(untracked) }, 1);
 }
 
 /// Loading a state file writes every object, so every partition reading one
@@ -349,6 +434,33 @@ endmodule
         let single = matches_single_pass(GATED, &["fast", "gated", "view"], 200);
         // The gated domain must have run.
         assert_ne!(single.last().unwrap()[1], BigUint::from(0u8));
+    }
+
+    /// `p` pulses and returns to 0 within one evaluation of its process,
+    /// so the settle sees no change of `p` itself, only of its occurrence
+    /// counters: those must still set the flag of the process waiting on it.
+    const PULSE: &str = r#"`timescale 1ns/1ns
+module Top (
+    output logic [7:0] seen
+);
+    logic go = 0;
+    logic p;
+    always @* begin p = 1'b0; if (go) begin p = 1'b1; p = 1'b0; end end
+    initial begin
+        seen = 8'd0;
+        forever begin
+            @(posedge p);
+            seen = seen + 8'd1;
+        end
+    end
+    always #2 go = ~go;
+endmodule
+"#;
+
+    #[test]
+    fn pulse_within_a_partition_wakes_its_edge_wait() {
+        let single = matches_single_pass(PULSE, &["seen"], 20);
+        assert_ne!(single.last().unwrap()[0], BigUint::from(0u8));
     }
 
     #[test]

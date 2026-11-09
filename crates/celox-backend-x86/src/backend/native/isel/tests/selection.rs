@@ -965,3 +965,141 @@ fn extern_results_use_encodable_masks_at_every_width() {
         }
     }
 }
+
+/// A select of a loaded two-state bit between a power of two and zero is the
+/// bit shifted into place; one between a value and zero is the value under
+/// a mask of the bit. Both replace a test and a conditional move.
+#[test]
+fn loaded_bit_selects_lower_to_shifts_and_masks() {
+    let addresses: Vec<_> = (0..5)
+        .map(|id| AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId(id),
+        })
+        .collect();
+    let address =
+        |id: usize| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, addresses[id]);
+    let [cond, value, bit, zero, shifted, cleared, kept] =
+        std::array::from_fn::<_, 7, _>(RegisterId);
+    let store = |register, id| {
+        SIRInstruction::Store(
+            address(id),
+            SIROffset::Static(0),
+            8,
+            register,
+            vec![],
+            vec![],
+        )
+    };
+    let unit = ExecutionUnit {
+        entry_block_id: SirBlockId(0),
+        register_map: [
+            (cond, 1),
+            (value, 8),
+            (bit, 8),
+            (zero, 8),
+            (shifted, 8),
+            (cleared, 8),
+            (kept, 8),
+        ]
+        .into_iter()
+        .map(|(reg, width)| {
+            (
+                reg,
+                RegisterType::Bit {
+                    width,
+                    signed: false,
+                },
+            )
+        })
+        .collect(),
+        blocks: [(
+            SirBlockId(0),
+            BasicBlock {
+                id: SirBlockId(0),
+                params: vec![],
+                instructions: vec![
+                    SIRInstruction::Load(cond, address(0), SIROffset::Static(0), 1),
+                    SIRInstruction::Load(value, address(1), SIROffset::Static(0), 8),
+                    SIRInstruction::Imm(bit, SIRValue::new(0x10u8)),
+                    SIRInstruction::Imm(zero, SIRValue::new(0u8)),
+                    SIRInstruction::Mux(shifted, cond, bit, zero),
+                    SIRInstruction::Mux(cleared, cond, zero, value),
+                    SIRInstruction::Mux(kept, cond, value, zero),
+                    store(shifted, 2),
+                    store(cleared, 3),
+                    store(kept, 4),
+                ],
+                terminator: SIRTerminator::Return,
+            },
+        )]
+        .into_iter()
+        .collect(),
+    };
+    unit.verify();
+    let mut layout = empty_layout();
+    layout.offsets = addresses.iter().copied().zip([0, 1, 2, 3, 4]).collect();
+    layout.widths = addresses.iter().copied().zip([1, 8, 8, 8, 8]).collect();
+    layout.is_4states = addresses
+        .iter()
+        .copied()
+        .map(|addr| (addr, false))
+        .collect();
+    layout.total_size = 8;
+    layout.merged_total_size = 8;
+    layout.working_base_offset = 8;
+    layout.sparse_base_offset = 8;
+    layout.triggered_bits_offset = 8;
+    layout.scratch_base_offset = 8;
+    let mut function = lower_execution_unit(&unit, &layout, false);
+    let insts: Vec<_> = function
+        .blocks
+        .iter()
+        .flat_map(|block| &block.insts)
+        .collect();
+    assert!(
+        !insts
+            .iter()
+            .any(|inst| matches!(inst, MInst::Select { .. }))
+    );
+    assert!(
+        insts
+            .iter()
+            .any(|inst| matches!(inst, MInst::ShlImm { imm: 4, .. }))
+    );
+    assert!(insts.iter().any(|inst| matches!(inst, MInst::Neg { .. })));
+    assert!(
+        insts
+            .iter()
+            .any(|inst| matches!(inst, MInst::SubImm { imm: 1, .. }))
+    );
+    mir_legalize::legalize(&mut function);
+    mir_opt::optimize(&mut function);
+    let allocation = regalloc::run_regalloc(&mut function).unwrap();
+    let emitted = emit::emit(
+        &function,
+        &allocation.assignment,
+        allocation.spill_frame_size,
+    )
+    .unwrap();
+    let jit = JitCode::new(&emitted.code).unwrap();
+    for set in [false, true] {
+        for input in [0u8, 0x5a, 0xff] {
+            let mut state = vec![0u8; 8];
+            state[0] = u8::from(set);
+            state[1] = input;
+            assert_eq!(unsafe { jit.call(&mut state) }, 0);
+            assert_eq!(state[2], if set { 0x10 } else { 0 }, "set={set}");
+            assert_eq!(
+                state[3],
+                if set { 0 } else { input },
+                "set={set}, input={input:#x}"
+            );
+            assert_eq!(
+                state[4],
+                if set { input } else { 0 },
+                "set={set}, input={input:#x}"
+            );
+        }
+    }
+}

@@ -1,14 +1,16 @@
 # SystemVerilog Support
 
-Celox can simulate synchronous RTL written in SystemVerilog through its **Rust
-API**. Enable the `systemverilog` Cargo feature, supply your source files and
+Celox can simulate SystemVerilog through its **Rust API**.
+Enable the `systemverilog` Cargo feature, supply your source files and
 choose a top module. The TypeScript package and Vite plugin currently load
 Veryl only.
 
-The frontend supports a subset of SystemVerilog, including modules, memories,
-interfaces and two-state or four-state simulation. It shares Celox's backends
-and runtime with Veryl. See the [language reference](./systemverilog-reference)
-when checking a particular construct.
+Celox follows IEEE Std 1800™-2023.
+Instead of restating the standard, the
+[deviations page](./systemverilog-reference) lists only what is unsupported,
+what intentionally differs, and which implementation-defined choices Celox
+makes. Anything not listed there behaves as the standard specifies; a
+difference you cannot find there is a bug.
 
 ## Start with a module
 
@@ -58,86 +60,68 @@ compilation unit; choose the top by its SystemVerilog module name.
 | Advance simulation time, run timed processes and execute `final` procedures | `Simulation::from_sv_sources` |
 | Include both Veryl and SystemVerilog sources | `Simulator::from_mixed_sources` |
 
-`Simulator::tick` drives the rising edge of the selected event. `Simulation`
-tracks time and runs scheduled edges. Constant initialization applies to both.
-`final` procedures, `initial` blocks that read design state or call system tasks, processes with
-timing controls and `always` blocks whose sensitivity list is neither `@*` nor
-[the variables they read](./systemverilog-reference#timing-controls) run as
-processes and need `Simulation`. A `Simulator` runs no process, so building
-one for such a design fails with `SimulatorErrorKind::ProcessRequiresSimulation`,
-which names the first process and its source location. For a mixed hierarchy,
-build the `Simulation` with `Simulation::from_sources(veryl).with_sv_sources(sv)`.
+`Simulator::tick` drives the rising edge of the selected event.
+`Simulation` tracks time and runs scheduled edges.
+A `Simulator` runs no process, so a design with timed processes,
+non-constant `initial` blocks, or `final` procedures needs `Simulation`;
+building a `Simulator` for one fails with
+`SimulatorErrorKind::ProcessRequiresSimulation`.
+See the [execution model](./systemverilog-reference#celox-execution-model)
+for exactly which processes need `Simulation`.
 
-Use `.four_state(true)` on the builder when your test needs X/Z values. The
-[4-state guide](./four-state) explains the state model. For time units,
-`$time`, `$stop` and memory loading, see the
-[runtime reference](./systemverilog-reference#semantics-worth-knowing).
+Use `.four_state(true)` on the builder when your test needs X/Z values.
+The [4-state guide](./four-state) explains the state model.
+For a mixed hierarchy, build the `Simulation` with
+`Simulation::from_sources(veryl).with_sv_sources(sv)`.
 
-## What is supported
+## Deviations from the standard
 
-The main supported areas are:
+Unsupported constructs are rejected with an `Unsupported` error naming the
+construct and its tracking issue; nothing is silently ignored.
+The areas most likely to require changes when porting a design are:
 
-| Area | Examples |
-| --- | --- |
-| Design structure | Modules, hierarchy, parameters, generate blocks, packages, interfaces and modports, and programs, whose procedures run in the reactive region set |
-| Data | Packed vectors, multidimensional packed arrays, structs, enums and unpacked memories |
-| RTL processes | `assign`, `always_comb`, `always @*`, blocking `always_latch`, edge-triggered `always` and `always_ff` |
-| Timed processes | `initial` and `always` with `#delay` (also time literals such as `#5ns`), `@(...)` on variables, edges, selects, expressions and `@*`, `wait (...)`, nonblocking assignments and task calls with timing controls |
-| Computation | Arithmetic, selects, assignment patterns, branches, loops and functions |
-| Simulation helpers | Immediate and deferred immediate assertions, display tasks, `$readmemh` / `$readmemb`, time queries and random numbers |
-| Termination | `final` procedures on `$finish`, `$fatal` or explicit `Simulation::finish()`; see [termination semantics](./systemverilog-reference#final-procedures) |
+- Concurrent assertions beyond the Boolean and fixed-delay sequence subset,
+  and class randomization and constraints beyond the scalar subset.
+- `bind`, checkers, covergroups, clocking blocks, `specify` blocks, UDPs,
+  `defparam`, procedural `force` / `release`, and `disable` (other than
+  `disable fork`).
+- Nonblocking assignments in `always_comb` and `always_latch`, multiple net
+  drivers and tri-state buses, and `iff` in `always_ff`.
+- Wildcard `.*` connections, `ref` ports, non-ANSI port expressions, gate
+  primitives with delays or strengths, and several interface features.
+- Inferred latches in `always_comb`, which are an error unless
+  `inferred_latch = "warn"` or `"allow"` is set.
 
-Scalar `and`, `nand`, `or`, `nor`, `xor`, and `xnor` gates are supported
-without explicit delays or strengths (IEEE 1800-2023 28.4). Terminals must
-be one-bit integral expressions; named and unnamed instances, multiple
-instances in a declaration, and generate scopes are supported. Other gate
-and switch primitives remain unsupported.
-
-
-Each area has restrictions. Use the
-[detailed support list](./systemverilog-reference#what-is-supported) to check
-ports, types, statements or system functions before porting a design.
-
-## What is not supported
-
-Common reasons a design needs changes are:
-
-- Class-based verification beyond [simple classes](./systemverilog-reference#classes) and concurrent assertions beyond the [Boolean and fixed-delay sequence subset](./systemverilog-reference#concurrent-assertions).
-- `fork` / `join`, nonblocking intra-assignment event controls and nonconstant delays
-  and `iff` in `always_ff` event controls ([#452](https://github.com/celox-sim/celox/issues/452)).
-- Nonblocking latch assignments, multiple drivers and tri-state buses. Inferred latches in `always_comb` require `inferred_latch = "warn"` or `"allow"` in the common `[diagnostics]` configuration.
-- Non-ANSI module ports, wildcard `.*` connections, gate primitives with delays, strengths or instance arrays, and `bind`.
-- `real`, unpacked structs in ports and fixed-size arrays with non-integral, mixed-state or defaulted members, and several interface features.
-
-The [complete limitations list](./systemverilog-reference#what-is-not-supported)
-includes narrower restrictions and tracking issues. Unsupported constructs
-produce a diagnostic naming the construct and its tracking issue.
+The [deviations page](./systemverilog-reference#what-is-not-supported) is
+the complete list, including intentional differences such as compile-time
+`$readmemh` and implementation-defined choices for random numbers, time
+defaults, and event scheduling order.
 
 ## Mix SystemVerilog and Veryl
 
-Either language may be the top, and a hierarchy may cross the boundary in both
-directions. Use `Simulator::from_mixed_sources` to supply both source lists.
-Veryl refers to an SV module as `$sv::Module`; SV uses a Veryl module's emitted
-name, such as `prj_Module`.
-
-Interfaces and `input` / `output` modports can also cross the boundary.
-See [mixed-language designs](./systemverilog-reference#mixed-language) for
-naming, interface parameters and cross-language restrictions.
+Either language may be the top, and a hierarchy may cross the boundary in
+both directions. Use `Simulator::from_mixed_sources` to supply both source
+lists. Veryl refers to an SV module as `$sv::Module`; SV uses a Veryl
+module's emitted name, such as `prj_Module`. Interfaces and `input` /
+`output` modports can also cross the boundary.
+See [mixed-language designs](./systemverilog-reference#mixed-language).
 
 ## DPI-C imports
 
-Enable `sv-dpi` to call supported C functions from clocked SV processes.
-Register functions or shared libraries with `dpi_function` or `dpi_library`;
-these are `unsafe` APIs because the C signatures must match the SV imports.
-See [DPI-C imports](./systemverilog-reference#dpi-c-imports) for a complete example
-and the supported types and call sites.
+Enable `sv-dpi` to call C functions from `always_ff` processes.
+Register functions or shared libraries with `dpi_function` or
+`dpi_library`; these are `unsafe` APIs because the C signatures must match
+the SV imports. See [DPI-C imports](./systemverilog-reference#dpi-c-imports)
+for the supported types and call sites.
 
 ## Find a specific behavior {#semantics-worth-knowing}
 
-- [Initialization, scopes, variable lifetimes and memory files](./systemverilog-reference#semantics-worth-knowing)
-- [Event and level waits in processes](./systemverilog-reference#timing-semantics)
-- [Time units, precision and time queries](./systemverilog-reference#time-and-precision)
+- [Unsupported constructs](./systemverilog-reference#what-is-not-supported)
+- [Intentional deviations](./systemverilog-reference#intentional-deviations)
+- [Event scheduling choices](./systemverilog-reference#timing-semantics)
+- [Time units and precision defaults](./systemverilog-reference#time-and-precision)
 - [Random seeds and reproducibility](./systemverilog-reference#random-numbers)
+- [Termination and `final` procedures](./systemverilog-reference#celox-execution-model)
 
 ## SystemVerilog emitted by Veryl
 

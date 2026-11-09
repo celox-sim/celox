@@ -84,6 +84,8 @@ pub struct NapiOptions {
     /// Explicit project diagnostics take precedence. Default: false.
     pub allow_inferred_latches: Option<bool>,
     pub vcd: Option<String>,
+    /// Path of the FST waveform file to record; mutually exclusive with `vcd`.
+    pub fst: Option<String>,
     /// Optimization level preset: "O0", "O1", or "O2".
     /// Takes precedence over `optimize` and `optimize_options`.
     pub opt_level: Option<String>,
@@ -130,7 +132,7 @@ struct ParsedOptionsCommon {
     plusargs: Vec<String>,
     allow_inferred_latches: bool,
     optimize_options: celox::OptimizeOptions,
-    vcd: Option<String>,
+    waveform: Option<(String, celox::WaveformFormat)>,
     false_loops: Vec<(
         (Vec<(String, usize)>, Vec<String>),
         (Vec<(String, usize)>, Vec<String>),
@@ -317,6 +319,29 @@ fn parse_dead_store_policy(s: &str) -> Result<celox::DeadStorePolicy> {
     }
 }
 
+/// Resolve the `vcd`/`fst` options into one waveform destination.
+fn parse_waveform_option(options: &NapiOptions) -> Result<Option<(String, celox::WaveformFormat)>> {
+    match (&options.vcd, &options.fst) {
+        (Some(_), Some(_)) => Err(Error::from_reason(
+            "options.vcd and options.fst are mutually exclusive",
+        )),
+        (Some(path), None) => Ok(Some((path.clone(), celox::WaveformFormat::Vcd))),
+        (None, Some(path)) => Ok(Some((path.clone(), celox::WaveformFormat::Fst))),
+        (None, None) => Ok(None),
+    }
+}
+
+impl ParsedOptionsCommon {
+    /// The waveform destination for native handles; WASM handles do not
+    /// take a host file.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn waveform_arg(&self) -> Option<(&str, celox::WaveformFormat)> {
+        self.waveform
+            .as_ref()
+            .map(|(path, format)| (path.as_str(), *format))
+    }
+}
+
 /// Helper to extract the common builder config from NapiOptions (available on all targets).
 fn parse_options_common(options: &Option<NapiOptions>) -> Result<ParsedOptionsCommon> {
     match options.as_ref() {
@@ -395,7 +420,7 @@ fn parse_options_common(options: &Option<NapiOptions>) -> Result<ParsedOptionsCo
                 plusargs: o.plusargs.clone().unwrap_or_default(),
                 allow_inferred_latches: o.allow_inferred_latches.unwrap_or(false),
                 optimize_options,
-                vcd: o.vcd.clone(),
+                waveform: parse_waveform_option(o)?,
                 false_loops,
                 true_loops,
                 clock_type,
@@ -410,7 +435,7 @@ fn parse_options_common(options: &Option<NapiOptions>) -> Result<ParsedOptionsCo
             plusargs: Vec::new(),
             allow_inferred_latches: false,
             optimize_options: celox::OptimizeOptions::all(),
-            vcd: None,
+            waveform: None,
             false_loops: Vec::new(),
             true_loops: Vec::new(),
             clock_type: None,
@@ -662,9 +687,13 @@ fn apply_options<'a, T>(
     builder = builder.optimize_options(opts.optimize_options.clone());
     builder = builder.threads(opts.optimize_options.parallel_lanes() as usize);
     builder = builder.cranelift_options(opts.cranelift_options);
-    // VCD changes the layout and generated stores, so enable it before building.
-    if let Some(path) = opts.vcd.as_deref() {
-        builder = builder.vcd(path);
+    // Waveform recording changes the layout and generated stores, so
+    // enable it before building.
+    if let Some((path, format)) = opts.waveform.as_ref() {
+        builder = match format {
+            celox::WaveformFormat::Vcd => builder.vcd(path),
+            celox::WaveformFormat::Fst => builder.fst(path),
+        };
     }
     for (from, to) in &opts.false_loops {
         builder = builder.false_loop(from.clone(), to.clone());
@@ -816,7 +845,7 @@ fn build_cache_key(
         sources: sorted_sources,
         top: top.to_string(),
         four_state: opts.four_state,
-        vcd_tracking: opts.vcd.is_some(),
+        vcd_tracking: opts.waveform.is_some(),
         sir_optimization: SirOptimizationCacheKey::from(&opts.optimize_options),
         cranelift_opt_level: opts.cranelift_options.opt_level as u8,
         regalloc_algorithm: opts.cranelift_options.regalloc_algorithm as u8,
@@ -1103,7 +1132,7 @@ impl HandleBackend {
     }
 }
 
-/// Low-level handle wrapping the default backend and optional VCD writer.
+/// Low-level handle wrapping the default backend and optional waveform writer.
 ///
 /// JS holds this as an opaque class; all operations go through methods.
 #[cfg(not(target_arch = "wasm32"))]
@@ -1111,7 +1140,7 @@ impl HandleBackend {
 pub struct NativeSimulatorHandle {
     backend: Option<HandleBackend>,
     runtime_errors: HashMap<i64, (String, Vec<String>)>,
-    vcd_writer: Option<celox::VcdWriter>,
+    vcd_writer: Option<celox::WaveformWriter>,
     layout_json: String,
     events_json: String,
     hierarchy_json: String,
@@ -1136,7 +1165,18 @@ impl NativeSimulatorHandle {
     /// here without serializing an artifact to JSON. Signal metadata is always
     /// derived from the simulator's actual memory layout.
     pub fn from_simulator(simulator: celox::Simulator, vcd_path: Option<&str>) -> Result<Self> {
-        Self::build_and_cache(simulator, vcd_path, None)
+        Self::from_simulator_with_waveform(
+            simulator,
+            vcd_path.map(|path| (path, celox::WaveformFormat::Vcd)),
+        )
+    }
+
+    /// Like [`Self::from_simulator`], for either waveform format.
+    pub fn from_simulator_with_waveform(
+        simulator: celox::Simulator,
+        waveform: Option<(&str, celox::WaveformFormat)>,
+    ) -> Result<Self> {
+        Self::build_and_cache(simulator, waveform, None)
     }
 
     /// Build an N-API handle directly from an in-memory frontend artifact.
@@ -1152,7 +1192,7 @@ impl NativeSimulatorHandle {
         let simulator = builder
             .build()
             .map_err(|error| Error::from_reason(error.to_string()))?;
-        Self::from_simulator(simulator, opts.vcd.as_deref())
+        Self::from_simulator_with_waveform(simulator, opts.waveform_arg())
     }
 }
 
@@ -1163,7 +1203,7 @@ impl NativeSimulatorHandle {
     /// and return the handle with the default backend (and optional VcdWriter).
     fn build_and_cache(
         sim: celox::Simulator,
-        vcd_path: Option<&str>,
+        waveform: Option<(&str, celox::WaveformFormat)>,
         cache_key: Option<CacheKey>,
     ) -> Result<Self> {
         let four_state = sim.layout().four_state;
@@ -1214,11 +1254,18 @@ impl NativeSimulatorHandle {
             cache.insert(key, cached);
         }
 
-        // Create VcdWriter if requested
-        let vcd_writer = if let Some(path) = vcd_path {
+        // Create the waveform writer if requested.
+        let vcd_writer = if let Some((path, format)) = waveform {
             Some(
-                celox::VcdWriter::new_with_time_precision(path, &vcd_descs, time_precision)
-                    .map_err(|e| Error::from_reason(format!("Failed to create VCD: {}", e)))?,
+                celox::WaveformWriter::new_with_time_precision(
+                    path,
+                    format,
+                    &vcd_descs,
+                    time_precision,
+                )
+                .map_err(|e| {
+                    Error::from_reason(format!("Failed to create waveform file: {}", e))
+                })?,
             )
         } else {
             None
@@ -1254,7 +1301,7 @@ impl NativeSimulatorHandle {
         // The builder creates the VCD writer itself when recording was
         // requested, selecting a VCD-compatible packed layout in the process;
         // reuse that writer instead of rebuilding descriptors here.
-        let vcd_writer = sim.take_vcd_writer();
+        let vcd_writer = sim.take_waveform_writer();
         let four_state = sim.layout().four_state;
         let warnings_json = format_warnings_json(sim.warnings());
         let signals = sim.named_signals();
@@ -1302,7 +1349,10 @@ impl NativeSimulatorHandle {
     }
 
     /// Create a handle from a cached build (shared compiled code + fresh memory).
-    fn from_cached(cached: &CachedBuild, vcd_path: Option<&str>) -> Result<Self> {
+    fn from_cached(
+        cached: &CachedBuild,
+        waveform: Option<(&str, celox::WaveformFormat)>,
+    ) -> Result<Self> {
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         let backend = HandleBackend::Default(celox::NativeBackend::from_shared(Arc::clone(
             &cached.shared_code,
@@ -1311,14 +1361,17 @@ impl NativeSimulatorHandle {
         let backend = HandleBackend::Default(celox::JitBackend::from_shared(Arc::clone(
             &cached.shared_code,
         )));
-        let vcd_writer = if let Some(path) = vcd_path {
+        let vcd_writer = if let Some((path, format)) = waveform {
             Some(
-                celox::VcdWriter::new_with_time_precision(
+                celox::WaveformWriter::new_with_time_precision(
                     path,
+                    format,
                     &cached.vcd_descs,
                     cached.time_precision,
                 )
-                .map_err(|e| Error::from_reason(format!("Failed to create VCD: {}", e)))?,
+                .map_err(|e| {
+                    Error::from_reason(format!("Failed to create waveform file: {}", e))
+                })?,
             )
         } else {
             None
@@ -1360,7 +1413,7 @@ impl NativeSimulatorHandle {
         {
             let cache = JIT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(cached) = cache.get(&cache_key) {
-                return Self::from_cached(cached, opts.vcd.as_deref());
+                return Self::from_cached(cached, opts.waveform_arg());
             }
         }
 
@@ -1373,7 +1426,7 @@ impl NativeSimulatorHandle {
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
-        Self::build_and_cache(sim, opts.vcd.as_deref(), Some(cache_key))
+        Self::build_and_cache(sim, opts.waveform_arg(), Some(cache_key))
     }
 
     /// Create a new tiered simulator from Veryl source code.
@@ -1475,7 +1528,7 @@ impl NativeSimulatorHandle {
         {
             let cache = JIT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(cached) = cache.get(&cache_key) {
-                return Self::from_cached(cached, opts.vcd.as_deref());
+                return Self::from_cached(cached, opts.waveform_arg());
             }
         }
 
@@ -1492,7 +1545,7 @@ impl NativeSimulatorHandle {
             .build()
             .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
-        Self::build_and_cache(sim, opts.vcd.as_deref(), Some(cache_key))
+        Self::build_and_cache(sim, opts.waveform_arg(), Some(cache_key))
     }
 
     /// Returns the signal layout as a JSON string.
@@ -1659,7 +1712,7 @@ impl NativeSimulatorHandle {
             .map_err(|e| napi_runtime_error(&runtime_errors, e))
     }
 
-    /// Write VCD dump at the given timestamp.
+    /// Write a waveform dump at the given timestamp.
     #[napi]
     pub fn dump(&mut self, timestamp: f64) -> Result<()> {
         let b = self
@@ -1675,7 +1728,7 @@ impl NativeSimulatorHandle {
                     writer.dump_backend(timestamp as u64, backend.as_mut(), &[])
                 }
             }
-            .map_err(|e| Error::from_reason(format!("VCD write error: {}", e)))?;
+            .map_err(|e| Error::from_reason(format!("waveform write error: {}", e)))?;
         }
         Ok(())
     }
@@ -1685,7 +1738,7 @@ impl NativeSimulatorHandle {
     #[napi]
     pub fn switch_vcd(&mut self, path: String) -> Result<()> {
         let writer = self.vcd_writer.as_mut().ok_or_else(|| {
-            Error::from_reason("VCD output was not enabled when the simulator was created")
+            Error::from_reason("waveform output was not enabled when the simulator was created")
         })?;
         writer
             .restart(&path)
@@ -1782,7 +1835,7 @@ impl NativeSimulatorHandle {
         if let Some(mut writer) = self.vcd_writer.take() {
             writer
                 .flush()
-                .map_err(|e| Error::from_reason(format!("VCD flush error: {e}")))?;
+                .map_err(|e| Error::from_reason(format!("waveform flush error: {e}")))?;
         }
         Ok(())
     }
@@ -2353,7 +2406,7 @@ impl NativeSimulationHandle {
             .map_err(|e| Error::from_reason(format!("{}", e)))
     }
 
-    /// Write VCD dump at the given timestamp.
+    /// Write a waveform dump at the given timestamp.
     #[napi]
     pub fn dump(&mut self, timestamp: f64) -> Result<()> {
         let sim = self
@@ -2473,7 +2526,7 @@ impl NativeSimulationHandle {
     pub fn dispose(&mut self) -> Result<()> {
         if let Some(mut sim) = self.sim.take() {
             sim.flush_vcd()
-                .map_err(|e| Error::from_reason(format!("VCD flush error: {e}")))?;
+                .map_err(|e| Error::from_reason(format!("waveform flush error: {e}")))?;
         }
         Ok(())
     }
@@ -4031,7 +4084,7 @@ mod tests {
                 plusargs: Vec::new(),
                 allow_inferred_latches: false,
                 optimize_options: celox::OptimizeOptions::all(),
-                vcd: None,
+                waveform: None,
                 false_loops: vec![],
                 true_loops: vec![],
                 clock_type: None,
@@ -4174,6 +4227,7 @@ mod tests {
             let path = dir.path().join(format!("{mode}.vcd"));
             let options = Some(NapiOptions {
                 vcd: Some(path.to_str().unwrap().to_owned()),
+                fst: None,
                 four_state: None,
                 plusargs: None,
                 allow_inferred_latches: None,
@@ -4230,6 +4284,71 @@ mod tests {
             handle.dispose().unwrap();
             assert!(std::fs::read_to_string(path).unwrap().contains("\nb1 "));
         }
+    }
+
+    #[test]
+    fn fst_option_records_a_parseable_waveform_and_conflicts_with_vcd() {
+        fn options(vcd: Option<String>, fst: Option<String>) -> Option<NapiOptions> {
+            Some(NapiOptions {
+                vcd,
+                fst,
+                four_state: None,
+                plusargs: None,
+                allow_inferred_latches: None,
+                opt_level: None,
+                pass_overrides: None,
+                optimize: None,
+                optimize_options: None,
+                cranelift_opt_level: None,
+                regalloc_algorithm: None,
+                enable_alias_analysis: None,
+                enable_verifier: None,
+                false_loops: None,
+                true_loops: None,
+                clock_type: None,
+                reset_type: None,
+                extra_source: None,
+                parameters: None,
+                dead_store_policy: None,
+                threads: None,
+                hotspot_jit: None,
+            })
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("handle.fst");
+        let source =
+            "module Top (clk: input clock, q: output logic<8>) { always_ff (clk) { q += 1; } }";
+        let mut handle = NativeSimulatorHandle::new(
+            napi_sources(source),
+            "Top".into(),
+            options(None, Some(path.to_str().unwrap().to_owned())),
+        )
+        .unwrap();
+        assert!(matches!(
+            handle.vcd_writer,
+            Some(celox::WaveformWriter::Fst(_))
+        ));
+        handle.dump(0.0).unwrap();
+        handle.tick(0).unwrap();
+        handle.dump(1.0).unwrap();
+        handle.dispose().unwrap();
+
+        let wave = wellen::simple::read(&path).unwrap();
+        assert_eq!(wave.time_table(), [0, 1]);
+
+        let both = NativeSimulatorHandle::new(
+            napi_sources(TWO_EVENTS_SOURCE),
+            "Top".into(),
+            options(Some("a.vcd".into()), Some("a.fst".into())),
+        );
+        let Err(error) = both else {
+            panic!("vcd + fst must be rejected");
+        };
+        assert!(
+            error.reason.contains("mutually exclusive"),
+            "{}",
+            error.reason
+        );
     }
 
     #[test]
@@ -4736,7 +4855,11 @@ mod tests {
         Arc::get_mut(&mut cached).unwrap().time_precision =
             celox_design::TimePrecision::try_from(-15).unwrap();
         let path = dir.path().join("cached.vcd");
-        let mut handle = NativeSimulatorHandle::from_cached(&cached, path.to_str()).unwrap();
+        let mut handle = NativeSimulatorHandle::from_cached(
+            &cached,
+            path.to_str().map(|p| (p, celox::WaveformFormat::Vcd)),
+        )
+        .unwrap();
         handle.dump(123.0).unwrap();
         handle.vcd_writer.as_mut().unwrap().flush().unwrap();
         let text = std::fs::read_to_string(path).unwrap();
@@ -4750,13 +4873,19 @@ mod tests {
         let mut o1 = default_opts();
         let mut o2 = default_opts();
         // VCD instrumentation affects compilation, but its destination does not.
-        o1.common.vcd = None;
-        o2.common.vcd = Some("/tmp/dump.vcd".into());
+        o1.common.waveform = None;
+        o2.common.waveform = Some(("/tmp/dump.vcd".into(), celox::WaveformFormat::Vcd));
         assert_ne!(
             build_cache_key(&src, "Top", &o1, None),
             build_cache_key(&src, "Top", &o2, None),
         );
-        o1.common.vcd = Some("/tmp/another.vcd".into());
+        o1.common.waveform = Some(("/tmp/another.vcd".into(), celox::WaveformFormat::Vcd));
+        assert_eq!(
+            build_cache_key(&src, "Top", &o1, None),
+            build_cache_key(&src, "Top", &o2, None),
+        );
+        // FST needs the same traced layout as VCD, so format is not keyed either.
+        o1.common.waveform = Some(("/tmp/dump.fst".into(), celox::WaveformFormat::Fst));
         assert_eq!(
             build_cache_key(&src, "Top", &o1, None),
             build_cache_key(&src, "Top", &o2, None),

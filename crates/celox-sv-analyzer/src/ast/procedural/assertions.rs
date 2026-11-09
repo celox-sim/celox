@@ -424,6 +424,97 @@ mod tests {
         }
     }
 
+    /// `p iff q` of two Booleans is supported as a property and as the
+    /// consequent of an implication, which binds looser (IEEE 1800-2023
+    /// 16.12.8, Table 16-3); an operand over cycles, a chain and a named
+    /// operand are rejected.
+    #[test]
+    fn iff_of_booleans() {
+        for property in ["b iff bus[0]", "b |-> b iff bus[0] == g"] {
+            if let Err(error) = analyze("", property) {
+                panic!("{property}: {error}");
+            }
+        }
+        for property in ["b ##1 b iff b", "b iff b iff b"] {
+            let source = format!(
+                "module Top(input bit clk, b); assert property (@(posedge clk) {property}); endmodule"
+            );
+            let Err(error) = crate::analyze_source(&source, std::path::Path::new("iff.sv")) else {
+                panic!("{property} is accepted");
+            };
+            let error = error.to_string();
+            assert!(
+                error.contains("iff of properties over cycles"),
+                "{property}: {error}"
+            );
+            // A named property with it is captured unconverted.
+            if let Ok(()) = analyze("", property) {
+                panic!("{property} is accepted in a named property");
+            }
+        }
+        let source = "module Top(input bit clk, a, b); sequence s; a; endsequence \
+                      assert property (@(posedge clk) s iff b); endmodule";
+        let Err(error) = crate::analyze_source(source, std::path::Path::new("iff.sv")) else {
+            panic!("a named operand of iff is accepted");
+        };
+        assert!(error.to_string().contains("operand of iff"), "{error}");
+    }
+
+    /// `expect` (IEEE 1800-2023 16.17) takes a property with an explicit
+    /// clock, also a named one, and rejects what its one attempt cannot
+    /// decide yet.
+    #[test]
+    fn expect_statements() {
+        let analyze = |body: &str| {
+            let source = format!(
+                "module Top(input bit clk, b); sequence s; b ##1 b; endsequence \
+                 sequence kept; int x; (b, x = 1) ##1 x == 1; endsequence \
+                 property p; @(posedge clk) b |=> b; endproperty {body} endmodule"
+            );
+            crate::analyze_source(&source, std::path::Path::new("expect.sv"))
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        };
+        for body in [
+            "initial expect (@(posedge clk) b ##2 b);",
+            "initial expect (@(posedge clk) s) else $display(\"miss\");",
+            "task automatic t(int v); expect (@(posedge clk) b |=> v == 1); endtask",
+            "initial expect (p);",
+            "initial expect (@(posedge clk) b |-> b iff b);",
+        ] {
+            if let Err(error) = analyze(body) {
+                panic!("{body}: {error}");
+            }
+        }
+        for (body, expected) in [
+            (
+                "initial expect (b);",
+                "expect statement without a clocking event",
+            ),
+            (
+                "initial expect (@(posedge clk) disable iff (b) b);",
+                "disable iff in an expect statement",
+            ),
+            (
+                "initial expect (@(posedge clk) kept);",
+                "local variable of a sequence in an expect statement",
+            ),
+            (
+                "initial expect (@(posedge clk) (b, $display(\"m\")) ##1 b);",
+                "match item in an expect statement",
+            ),
+            (
+                "initial expect (@(posedge clk) b ##1025 b);",
+                "sequence longer than 1024 ticks",
+            ),
+        ] {
+            let Err(error) = analyze(body) else {
+                panic!("{body} is accepted");
+            };
+            assert!(error.contains(expected), "{body}: {error}");
+        }
+    }
+
     /// A declaration whose body starts with a cast of a built-in type
     /// declares no local variable.
     #[test]

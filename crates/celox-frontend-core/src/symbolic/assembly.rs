@@ -1514,9 +1514,9 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         None
     };
 
-    // Stores to event signals update shared trigger bytes; their writers stay
-    // in one lane of a partitioned schedule.
-    let lane0_objects = parallel.enabled().then(|| {
+    // The event signals and their aliases: a partitioned settle keeps their
+    // paths apart from the rest.
+    let clock_nets: HashSet<AbsoluteAddr> = {
         let events = topological_clocks.iter().copied().collect::<HashSet<_>>();
         events
             .iter()
@@ -1527,8 +1527,11 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                     .filter(|(_, canonical)| events.contains(canonical))
                     .map(|(alias, _)| *alias),
             )
-            .collect::<HashSet<_>>()
-    });
+            .collect()
+    };
+    // Stores to event signals update shared trigger bytes; their writers stay
+    // in one lane of a partitioned schedule.
+    let lane0_objects = parallel.enabled().then(|| clock_nets.clone());
     let mut persistent_comb_state = HashSet::default();
     let mut comb_startups = BTreeMap::new();
     for path in &comb_blocks {
@@ -1618,12 +1621,36 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                         .max()
                         .unwrap_or(0),
                 );
+                // The wait flags follow the partition flags: a partition
+                // changing a signal an edge wait watches, or one of the
+                // signal's occurrence counters, sets its process's flag
+                // (`SettlePartitions::waits`). A pulse that returns to the
+                // starting value within one partition changes only the
+                // counters.
+                let mut external_readers: HashMap<AbsoluteAddr, Vec<usize>> = HashMap::default();
+                for site in &timing.wait_sites {
+                    for &(signal, _) in &site.terms {
+                        let counters = counted
+                            .get(&signal)
+                            .into_iter()
+                            .flat_map(|slots| [slots.changes, slots.rises, slots.falls]);
+                        for watched in std::iter::once(signal).chain(counters) {
+                            let readers = external_readers.entry(watched).or_default();
+                            if !readers.contains(&site.process) {
+                                readers.push(site.process);
+                            }
+                        }
+                    }
+                }
                 scheduler::SettlePartitioning {
                     flags: AbsoluteAddr {
                         instance_id: root_instance,
                         var_id,
                     },
                     target_cost,
+                    external_readers,
+                    clock_nets: clock_nets.clone(),
+                    profile: parallel.settle_profile.then_some(process_count),
                 }
             },
         );
@@ -1637,7 +1664,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         &var_widths,
         &unpacked_element_widths,
         next_runtime_error_code,
-        settle_flags,
+        settle_flags.clone(),
     ) {
         Ok(schedule) => schedule,
         Err(error) => {
@@ -1679,6 +1706,46 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         }
     };
     let settle_partitions = schedule.partitions.clone();
+    let settle_copies = schedule.copies.clone();
+    if let Some(t) = trace.as_deref_mut()
+        && trace_opts.settle_plan
+        && !settle_partitions.is_empty()
+    {
+        let instance_paths: HashMap<InstanceId, String> = expanded
+            .iter()
+            .map(|(path, &id)| {
+                let text = path
+                    .0
+                    .iter()
+                    .map(|(name, index)| {
+                        if *index == 0 {
+                            name.clone()
+                        } else {
+                            format!("{name}[{index}]")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(".");
+                (id, text)
+            })
+            .collect();
+        t.settle_plan = Some(super::settle_plan::format(&settle_partitions, |address| {
+            let variable = instance_modules
+                .get(&address.instance_id)
+                .and_then(|module| modules.get(module))
+                .and_then(|module| module.variables.get(&address.var_id));
+            match variable {
+                Some(variable) => format!(
+                    "{}.{}",
+                    instance_paths
+                        .get(&address.instance_id)
+                        .map_or("", String::as_str),
+                    variable.path.join(".")
+                ),
+                None => address.to_string(),
+            }
+        }));
+    }
 
     let settle_flags = settle_flags.filter(|_| !settle_partitions.is_empty());
     if let Some(settle) = &settle_flags {
@@ -1693,7 +1760,12 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             &mut modules,
             root_id,
             settle.flags.var_id,
-            settle_partitions.len(),
+            if settle.profile.is_some() {
+                celox_design::settle_profile_offset(settle_partitions.len(), process_count)
+                    + celox_design::settle_profile_bytes(settle_partitions.len())
+            } else {
+                celox_design::settle_flag_count(settle_partitions.len(), process_count)
+            },
         );
     }
     let object_sizes = super::parallel::ObjectSizes {
@@ -2142,17 +2214,23 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         });
     }
     if let Some(settle) = &settle_flags {
-        // Every partition runs at the first settle.
+        // Every partition runs at the first settle, and every wait is
+        // checked at the first check.
         let partitions = settle_partitions.len();
-        let value = (0..partitions).fold(BigUint::default(), |value, partition| {
-            value | (BigUint::from(1u8) << (partition * 8))
+        let flags = (0..partitions).chain(
+            (0..process_count).map(|process| celox_design::settle_wait_flag(partitions, process)),
+        );
+        let value = flags.fold(BigUint::default(), |value, flag| {
+            value | (BigUint::from(1u8) << (flag * 8))
         });
         initial_memory_values.push(InitialStateValue {
             address: settle.flags,
             data: InitialStateData::Packed {
                 value,
                 mask: BigUint::default(),
-                written_mask: (BigUint::from(1u8) << ((partitions + 2) * 8)) - 1u8,
+                written_mask: (BigUint::from(1u8)
+                    << (celox_design::settle_flag_count(partitions, process_count) * 8))
+                    - 1u8,
             },
         });
     }
@@ -2670,6 +2748,19 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                 }
             }
         }
+        // A process's wait flag, for the signals its waits watch and the
+        // counters of their occurrences.
+        for site in &wait_sites {
+            let flag = celox_design::settle_wait_flag(settle_partitions.len(), site.process) as u32;
+            for &(signal, _) in &site.terms {
+                marks.entry(signal).or_default().insert(flag);
+                for watch in watches.iter().filter(|watch| watch.signal == signal) {
+                    for (_, counter) in watch.counters() {
+                        marks.entry(counter).or_default().insert(flag);
+                    }
+                }
+            }
+        }
         let mut marks = marks
             .into_iter()
             .map(|(state, partitions)| (state, partitions.into_iter().collect()))
@@ -2679,6 +2770,14 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             flags: project(settle.flags),
             partitions: settle_partitions.len() as u32,
             marks,
+            waits: process_count as u32,
+            profile: settle.profile.is_some(),
+            copies: settle_copies
+                .iter()
+                .filter_map(|(target, source)| {
+                    Some((*source_to_state.get(target)?, *source_to_state.get(source)?))
+                })
+                .collect(),
         }
     });
     let scheduler = scheduler_slots.map(|slots| celox_design::SchedulerSchema {
@@ -2905,16 +3004,16 @@ fn settle_partitioning(
     }
 }
 
-/// Declare the flags of a settle of `partitions` partitions, one byte each
-/// plus the untracked and the full byte, as a hidden variable of the top
-/// module.
+/// Declare the `bytes` flags of a partitioned settle, one per partition,
+/// the untracked byte and one per process for its edge wait, as a hidden
+/// variable of the top module.
 fn declare_settle_flags(
     modules: &mut HashMap<ModuleId, SimModule>,
     root: ModuleId,
     var_id: SourceVarId,
-    partitions: usize,
+    bytes: usize,
 ) {
-    let width = (partitions + 2) * 8;
+    let width = bytes * 8;
     let variables = &mut modules.get_mut(&root).expect("top module").variables;
     variables.insert(
         var_id,
@@ -3003,6 +3102,10 @@ fn declare_scheduler_slots(
         unknown_levels: declare("unknown_levels".into(), events),
         ready: declare(
             "ready".into(),
+            process_count.next_multiple_of(TIME).max(TIME),
+        ),
+        timed: declare(
+            "timed".into(),
             process_count.next_multiple_of(TIME).max(TIME),
         ),
         wake: (0..process_count)

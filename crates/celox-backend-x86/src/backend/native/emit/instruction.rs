@@ -441,6 +441,20 @@ pub(super) fn emit_inst(
                 OpSize::S64 => asm.or(qword_ptr(mem), *imm as i32)?,
             }
         }
+        MInst::StoreImm {
+            base,
+            offset,
+            size,
+            imm,
+        } => {
+            let mem = mem_operand(&context, *base, *offset);
+            match size {
+                OpSize::S8 => asm.mov(byte_ptr(mem), *imm as i32)?,
+                OpSize::S16 => asm.mov(word_ptr(mem), *imm as i32)?,
+                OpSize::S32 => asm.mov(dword_ptr(mem), *imm as i32)?,
+                OpSize::S64 => asm.mov(qword_ptr(mem), *imm as i32)?,
+            }
+        }
 
         MInst::MemCopy {
             src_offset,
@@ -481,14 +495,10 @@ pub(super) fn emit_inst(
             }
             asm.mov(qword_ptr(scratch_operand(&context, 2)), rsi)?;
             asm.mov(qword_ptr(scratch_operand(&context, 3)), rdi)?;
-            emit_state_base(asm, rsi)?;
-            asm.mov(rdi, rsi)?;
-            if *src_offset != 0 {
-                asm.add(rsi, *src_offset)?;
-            }
-            if *dst_offset != 0 {
-                asm.add(rdi, *dst_offset)?;
-            }
+            // Either side may be a function unit's frame, which the frame
+            // register addresses.
+            emit_state_address(asm, rsi, *src_offset)?;
+            emit_state_address(asm, rdi, *dst_offset)?;
             if qwords > 0 {
                 asm.mov(rcx, qwords as i64)?;
                 // MOVS has the same forward-copy semantics as the scalar loop
@@ -540,10 +550,7 @@ pub(super) fn emit_inst(
                 asm.mov(qword_ptr(scratch_operand(&context, 1)), rcx)?;
             }
             asm.mov(qword_ptr(scratch_operand(&context, 2)), rdi)?;
-            emit_state_base(asm, rdi)?;
-            if *dst_offset != 0 {
-                asm.add(rdi, *dst_offset)?;
-            }
+            emit_state_address(asm, rdi, *dst_offset)?;
             asm.mov(rax, pattern as i64)?;
             if qwords != 0 {
                 asm.mov(rcx, qwords as i64)?;

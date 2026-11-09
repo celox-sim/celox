@@ -821,7 +821,7 @@ impl<B: SimBackend> Simulation<B> {
     /// Captures the current state of all signals and writes them to the VCD file.
     pub fn dump(&mut self, timestamp: u64) {
         if let Err(error) = self.try_dump(timestamp) {
-            panic!("VCD dump at {timestamp} failed: {error}");
+            panic!("waveform dump at {timestamp} failed: {error}");
         }
     }
 
@@ -1542,6 +1542,12 @@ impl<B: SimBackend> Simulation<B> {
     /// Returns a reference to the memory layout.
     pub fn layout(&self) -> &MemoryLayout {
         self.simulator.layout()
+    }
+
+    /// The work a partitioned settle counted since the simulation started,
+    /// when built with `settle_profile`.
+    pub fn settle_profile(&self) -> Option<celox_state_layout::SettleProfile> {
+        self.simulator.settle_profile()
     }
 
     /// Returns all ports of the top-level module.

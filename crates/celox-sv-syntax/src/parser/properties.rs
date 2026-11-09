@@ -128,12 +128,30 @@ impl Parser<'_> {
             (None, first)
         };
         let boolean = |steps: &[SequenceStep]| matches!(steps, [step] if step.delay == 0 && step.items.is_empty());
+        // `p iff q` binds tighter than an implication (Table 16-3), so it is
+        // the consequent's: both of its operands are Boolean here.
+        let equivalent = if !sequence && self.peek() == "iff" {
+            self.at += 1;
+            let right = self.sequence_steps()?;
+            if !locals.is_empty()
+                || !boolean(&consequent)
+                || !boolean(&right)
+                || antecedent.as_deref().is_some_and(|steps| !boolean(steps))
+                || self.peek() == "iff"
+            {
+                return Err(self.unsupported("iff of properties over cycles"));
+            }
+            Some(right[0].expression)
+        } else {
+            None
+        };
         if locals.is_empty() && boolean(&consequent) && antecedent.as_deref().is_none_or(boolean) {
             return Ok(PropertySpec {
                 clock,
                 disable,
                 antecedent: antecedent.map(|steps| steps[0].expression),
                 condition: consequent[0].expression,
+                equivalent,
                 sequence: None,
             });
         }
@@ -152,6 +170,7 @@ impl Parser<'_> {
             disable,
             antecedent: None,
             condition,
+            equivalent: None,
             sequence: Some(id),
         })
     }
@@ -325,10 +344,21 @@ impl Parser<'_> {
             offset += 1;
         }
         let mut offset = self.past_clocking_event(offset);
+        let mut depth = 0usize;
         loop {
             match self.nth(offset) {
                 "" | "endproperty" | "endsequence" if self.nth(offset) != end => return Ok(None),
                 word if word == end => break,
+                "(" => {
+                    depth += 1;
+                    offset += 1;
+                }
+                ")" => {
+                    depth = depth.saturating_sub(1);
+                    offset += 1;
+                }
+                // A property's top-level `iff` between Booleans (16.12.8).
+                "iff" if depth == 0 && end == "endproperty" => offset += 1,
                 word if self.temporal(word, offset) => return Ok(None),
                 _ => offset += 1,
             }
@@ -553,6 +583,16 @@ impl Parser<'_> {
             return Ok(spec);
         }
         let mut result = spec;
+        if let Some(equivalent) = spec.equivalent
+            && let Some(operand) = [spec.condition, equivalent]
+                .into_iter()
+                .find(|&operand| self.instance(operand, names).is_some())
+        {
+            return Err(self.unsupported_at(
+                self.expressions[operand.0].tokens,
+                "instance of a named sequence or property as an operand of iff",
+            ));
+        }
         if let Some(antecedent) = spec.antecedent
             && let Some(id) = self.instance(antecedent, names)
         {
@@ -627,6 +667,7 @@ impl Parser<'_> {
             result.disable = inner.disable.or(spec.disable);
             result.antecedent = inner.antecedent;
             result.condition = inner.condition;
+            result.equivalent = inner.equivalent;
             result.sequence = inner.sequence;
             // An explicit leading clock of the instance overrides the
             // incoming one (16.16.1).
@@ -650,6 +691,7 @@ impl Parser<'_> {
             ));
         }
         result.condition = inner.condition;
+        result.equivalent = inner.equivalent;
         Ok(result)
     }
 

@@ -385,6 +385,16 @@ pub struct Source {
     diagnostics: Vec<warnings::AnalyzerWarning>,
 }
 
+/// The executable bodies of a module, moved out of it (see
+/// [`Module::take_bodies`]).
+pub(crate) struct ModuleBodies {
+    pub assignments: Vec<Assignment>,
+    pub comb_processes: Vec<CombProcess>,
+    pub ff_processes: Vec<FfProcess>,
+    pub initial_processes: Vec<InitialProcess>,
+    pub subroutines: Vec<Subroutine>,
+}
+
 /// Overrides supplied by one instantiation. Types have been resolved in its scope.
 pub(crate) struct ModuleParameterBindings<'a> {
     pub declarations_only: bool,
@@ -704,6 +714,11 @@ impl Source {
 
     pub fn modules(&self) -> &[Module] {
         &self.modules
+    }
+
+    /// The modules, to analyze them from their own bodies.
+    pub(crate) fn into_modules(self) -> Vec<Module> {
+        self.modules
     }
 
     pub(crate) fn warnings(&self) -> Vec<warnings::AnalyzerWarning> {
@@ -1677,7 +1692,34 @@ impl Module {
             // initializer of a process local may call the subroutine.
             static_initializers.splice(0..0, body_state.static_initializers.drain(..));
             locals.retain(|local| !kept.contains(&local.name));
+            // The package or compilation unit this scope is, whose variables
+            // are its own, not imported.
+            let own_package = syntax_tree
+                .root_unit()
+                .ok()
+                .filter(|unit| unit.kind == celox_sv_syntax::UnitKind::Package)
+                .map(|unit| instances::normalize_identifier(&unit.name.spelling))
+                .or_else(|| {
+                    (syntax_tree.scope_handle() == crate::source_tree::ScopeHandle::Compilation)
+                        .then(|| packages::UNIT.to_string())
+                });
             for name in kept {
+                // A static variable is named by its owner and declaration (see
+                // `BodyBuilder::declare_static`), so a scope that lowers a
+                // package subroutine again, such as a method of a class
+                // specialization an earlier analysis made, may import the
+                // same variable. Another package's is that variable; one of
+                // this scope's own package is this declaration.
+                if let Some(index) = signals.iter().position(|signal| signal.name == name) {
+                    let own = signals[index]
+                        .package_variable
+                        .as_ref()
+                        .is_some_and(|(package, _)| Some(package) == own_package.as_ref());
+                    if !own {
+                        continue;
+                    }
+                    signals.remove(index);
+                }
                 signals.push(Signal::new(name.clone(), statics[&name].clone()));
             }
             if !static_initializers.is_empty() {
@@ -1995,6 +2037,18 @@ impl Module {
 
     pub fn subroutines(&self) -> &[Subroutine] {
         &self.subroutines
+    }
+
+    /// Move the executable bodies out of the module, which keeps its
+    /// declarations.
+    pub(crate) fn take_bodies(&mut self) -> ModuleBodies {
+        ModuleBodies {
+            assignments: std::mem::take(&mut self.assignments),
+            comb_processes: std::mem::take(&mut self.comb_processes),
+            ff_processes: std::mem::take(&mut self.ff_processes),
+            initial_processes: std::mem::take(&mut self.initial_processes),
+            subroutines: std::mem::take(&mut self.subroutines),
+        }
     }
 
     pub fn dpi_imports(&self) -> &[crate::ir::DpiImport] {
@@ -2982,6 +3036,44 @@ pub(crate) const OBJECT_VALUE: &str = crate::ir::PLACE_VALUE;
 /// An [`LValue::Object`] past the statement that assigns it: the body
 /// builder lowers each place with its statement, into a load and a store of
 /// the object (`BodyBuilder::place_assignment`), so no other pass sees it.
+/// `env` with the declared width and signedness of each parameter of
+/// `types`, by which the type table evaluates the ranges that name them
+/// (IEEE 1800-2023 6.20.2): `~P` of a 4-bit `P` is 4 bits wide.
+pub(crate) fn with_parameter_types<'a>(
+    env: &ConstEnv,
+    types: impl IntoIterator<Item = (&'a str, usize, bool)>,
+) -> ConstEnv {
+    let mut env = env.clone();
+    for (name, width, signed) in types {
+        env.insert(dimensions::parameter_width_marker(name), width as i128);
+        env.insert(
+            dimensions::parameter_signed_marker(name),
+            i128::from(signed),
+        );
+    }
+    env
+}
+
+/// The IR type of `ty`, whose ranges name constants of `env`, with the
+/// bounds of its packed dimensions as the session's type table resolves
+/// them (see [`crate::ir::Type::packed_bounds`]).
+pub(crate) fn ir_type(
+    session: &mut Session,
+    functions: &const_functions::ConstantFunctions,
+    ty: Type,
+    env: &ConstEnv,
+) -> crate::ir::Type {
+    let bounds = semantic_types::packed_bounds(&mut session.types, functions, &ty, env);
+    crate::ir::Type::from_ast(
+        ty,
+        &const_functions::Environment {
+            constants: env,
+            functions,
+        },
+    )
+    .with_packed_bounds(bounds)
+}
+
 pub(crate) fn lowered_object() -> ! {
     unreachable!("an object place is lowered with the statement that assigns it")
 }
@@ -3651,6 +3743,9 @@ struct PackedDimensions {
     /// body calls rather than reads its result variable (IEEE 1800-2023
     /// 13.4.1).
     method_name: Option<String>,
+    /// The name `%m` prints in the body being bound, when the body is a
+    /// subroutine's; `None` names the calling instance.
+    scope_name: Option<Arc<expression_binding::ScopeName>>,
     /// Where array locator methods declare their iterator locals; `None`
     /// outside a procedural body.
     locator_locals: Option<locators::LocalSink>,
@@ -3744,6 +3839,7 @@ impl PackedDimensions {
             class_scope: None,
             constructor: false,
             method_name: None,
+            scope_name: None,
             locator_locals: None,
             locator_iterators: Arc::default(),
             effect_values: Arc::default(),

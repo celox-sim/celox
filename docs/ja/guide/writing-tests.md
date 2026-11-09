@@ -192,7 +192,7 @@ for (const event of sim.drainRuntimeEvents()) {
 ```typescript
 const sim = Simulator.fromSource(source, "Top", {
   fourState: true,      // 4 値 (X) シミュレーションを有効化
-  vcd: "./dump.vcd",    // VCD 波形出力を書き出す
+  vcd: "./dump.vcd",    // VCD 波形出力を書き出す（fst: "./dump.fst" も可）
   optLevel: "O1",       // "O0" | "O1" | "O2"
   passOverrides: ["-sir:reschedule"], // optLevel に対する個別上書き
   clockType: "posedge", // クロック極性 (デフォルト: "posedge")

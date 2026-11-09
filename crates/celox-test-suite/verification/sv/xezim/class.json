@@ -13,6 +13,17 @@
     },
     {
       "category": "Types",
+      "detail": "class::body_parameters_are_local at 3744:23: assert_eq body: expected 0x7, got 0x1",
+      "expectation": "Simulation",
+      "name": "class::body_parameters_are_local",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "class::casts_from_interface_class_handles at 713:3: expect_output: expected [49, 32, 56, 10, 49, 32, 49, 10, 48, 32, 56, 10], got [48, 32, 48, 10, 49, 32, 49, 10, 49, 32, 48, 10]",
       "expectation": "Simulation",
       "name": "class::casts_from_interface_class_handles",

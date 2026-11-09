@@ -649,6 +649,47 @@ fn typedef_name(
     }
 }
 
+/// The name of a method of class specialization `class` in the hierarchical
+/// name `%m` prints (IEEE 1800-2023 21.2.1.5): the class as `$typename`
+/// names it, or, when a parameter value of the specialization has no such
+/// name, the class as its declaration names it.
+pub(super) fn class_scope_name(
+    class: &str,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &ConstEnv,
+) -> Option<String> {
+    class_name(class, tree, session, env)
+        .ok()
+        .or_else(|| declared_class_name(class, tree, session).ok())
+}
+
+/// The name of the class that `class`, a class or a specialization of
+/// one, specializes: prefixed with the scope that declares it, without
+/// parameter values.
+fn declared_class_name(
+    class: &str,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+) -> Converted<String> {
+    let generic = classes::specializations::lookup(session, class)
+        .or_else(|| session.foreign.specialization(class))
+        .map_or_else(
+            || class.to_owned(),
+            |specialization| specialization.generic.clone(),
+        );
+    match classes::declaration(tree, session, &generic) {
+        Some(declaration) => Ok(scoped_name(
+            classes::enclosing_unit(tree.declarations(), declaration.tokens),
+            &instances::normalize_identifier(&declaration.name.spelling),
+        )),
+        // A class of a package that another scope declares is named by
+        // its package already.
+        None if generic.contains("::") && !generic.starts_with(packages::UNIT) => Ok(generic),
+        None => Err(unsupported_operand(format!("class `{class}`"))),
+    }
+}
+
 /// Class specialization `class`, prefixed with the scope that declares the
 /// class, followed by the parameter values of a parameterized class (8.25).
 fn class_name(
@@ -667,16 +708,7 @@ fn class_name(
         |specialization| specialization.generic.clone(),
     );
     let declaration = classes::declaration(tree, session, &generic);
-    let mut name = match declaration {
-        Some(declaration) => scoped_name(
-            classes::enclosing_unit(tree.declarations(), declaration.tokens),
-            &instances::normalize_identifier(&declaration.name.spelling),
-        ),
-        // A class of a package that another scope declares is named by
-        // its package already.
-        None if generic.contains("::") && !generic.starts_with(packages::UNIT) => generic.clone(),
-        None => return Err(unsupported_operand(format!("class `{class}`"))),
-    };
+    let mut name = declared_class_name(class, tree, session)?;
     let parameterized = match declaration {
         Some(declaration) => declaration.parameter_ports.is_some(),
         None => class != generic,

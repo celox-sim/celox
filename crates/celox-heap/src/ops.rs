@@ -94,6 +94,20 @@ pub const OBJECT_MODE_SELECT: u64 = 60;
 pub const OBJECT_MODE_SELECTED: u64 = 61;
 /// Draw a randc domain index; parameter is the property offset, b its domain size.
 pub const OBJECT_RANDOM_CYCLIC: u64 = 62;
+/// `watch_edges(object, offset | value_bytes << 32, four_state)`: count
+/// from now on the writes of the property at `offset` of `object`: its
+/// changes and the edges of its least significant bit (IEEE 1800-2023
+/// 9.4.2, Table 9-2).
+pub const OBJECT_EDGE_WATCH: u64 = 141;
+/// `edge_count(object, offset, kind)`: the changes (`kind` 0), rises (1) or
+/// falls (2) counted for the watched property at `offset` of `object`; 0
+/// for `null`.
+pub const OBJECT_EDGE_COUNT: u64 = 142;
+/// `store_bytes(object, offset, buffer)`: write the bytes of `buffer`, most
+/// significant first as [`APPEND_BYTES`] appends them, into `object` at
+/// `offset`, as one write: a property wider than a word, or both planes of
+/// a 4-state one, is stored by one call. The buffer is consumed.
+pub const OBJECT_STORE_BYTES: u64 = 143;
 /// `copy(object)`: a new object with a copy of the properties of `object`.
 pub const OBJECT_COPY: u64 = 63;
 /// Solve the scalar constraint program in string b for object a; c selects check-only.
@@ -306,6 +320,15 @@ impl Heap {
                 self.store(a as Handle, b as u32 as usize, (b >> 32) as usize, c);
                 0
             }
+            OBJECT_EDGE_WATCH => {
+                self.watch_edges(a as Handle, b as u32, (b >> 32) as u32, c != 0);
+                0
+            }
+            OBJECT_STORE_BYTES => {
+                self.store_bytes(a as Handle, b as usize, c);
+                0
+            }
+            OBJECT_EDGE_COUNT => self.edge_count(a as Handle, b as u32, c as usize).into(),
             OBJECT_CLASS => self.class_of(a as Handle).into(),
             OBJECT_REGISTER_PROGRAM => {
                 match serde_json::from_slice::<crate::randomization::Registered>(

@@ -136,7 +136,7 @@ impl<B: SimBackend> SimulationState<B> {
                 Some(ProcessStatus::Finish) => return Err(Halt::Finish),
                 Some(ProcessStatus::Stop) => return Err(Halt::Stop),
                 Some(ProcessStatus::Fork)
-                    if executor.backend().get_as::<u64>(process.delay) >> 32 == 2 =>
+                    if (executor.backend().get_as::<u64>(process.delay) >> 32) & 0b11 == 2 =>
                 {
                     // A join_none child cannot start until its parent blocks or
                     // terminates (9.3.2). All finals share one nonblocking process,

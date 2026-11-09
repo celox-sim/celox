@@ -9,6 +9,7 @@ sv_backends! {
     fn class_package_constant_class_defaults(sim) { @case "class::package_constant_class_defaults"; }
     fn class_waits_on_static_properties(sim) { @case "class::waits_on_static_properties"; }
     fn class_waits_on_instance_properties(sim) { @case "class::waits_on_instance_properties"; }
+    fn class_body_parameters_are_local(sim) { @case "class::body_parameters_are_local"; }
     fn class_waits_on_properties_in_package_subroutines(sim) { @case "class::waits_on_properties_in_package_subroutines"; }
     fn class_package_constant_type_arguments(sim) { @case "class::package_constant_type_arguments"; }
     fn class_named_aggregate_type_arguments(sim) { @case "class::named_aggregate_type_arguments"; }
@@ -3269,5 +3270,308 @@ fn static_class_casts_assign_upcasts_and_reject_downcasts() {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(error.contains(expected), "{cast}: {error}");
+    }
+}
+
+/// The outputs `names` of `source` at time 2, in both state modes, with
+/// calls inlined and out of line.
+fn static_outputs(source: &str, names: &[&str]) -> Vec<Vec<BigUint>> {
+    let mut runs = Vec::new();
+    for four_state in [false, true] {
+        for forced in [false, true] {
+            let builder =
+                celox::Simulation::from_sv_sources(vec![(source, Path::new("statics.sv"))], "Top")
+                    .four_state(four_state);
+            let builder = if forced {
+                builder.force_out_of_line_calls()
+            } else {
+                builder
+            };
+            let mut sim = builder
+                .build()
+                .unwrap_or_else(|error| panic!("four-state {four_state} forced {forced}: {error}"));
+            sim.run_until(2).unwrap();
+            runs.push(names.iter().map(|name| sim.get(sim.signal(name))).collect());
+        }
+    }
+    runs
+}
+
+/// A static variable of a method is one per specialization of its class
+/// (IEEE 1800-2023 6.21, 8.25): two specializations of `counter` count
+/// apart, and each specialization of `registry` keeps its own singleton, as
+/// UVM's `uvm_object_registry#(T, Tname)::get` does.
+#[test]
+fn specializations_have_their_own_static_variables() {
+    let source = r#"`timescale 1ns/1ns
+package p;
+    class counter #(int ID = 0);
+        function int next();
+            static int count = 0;
+            count++;
+            return count * 10 + ID;
+        endfunction
+    endclass
+    class registry #(type T = int, string NAME = "");
+        typedef registry #(T, NAME) this_type;
+        int tag;
+        static function this_type get();
+            static this_type m_inst;
+            if (m_inst == null) begin
+                m_inst = new();
+                m_inst.tag = $bits(T);
+            end
+            return m_inst;
+        endfunction
+    endclass
+endpackage
+import p::*;
+module Top(output int a, output int b, output int c, output int d, output bit same,
+           output bit apart);
+    counter #(1) one = new;
+    counter #(2) two = new;
+    initial begin
+        a = one.next();
+        a = one.next();
+        b = two.next();
+        c = registry #(byte, "b")::get().tag;
+        d = registry #(int, "i")::get().tag;
+        same = registry #(byte, "b")::get() == registry #(byte, "b")::get();
+        apart = registry #(byte, "b")::get().tag != registry #(int, "i")::get().tag;
+    end
+endmodule
+"#;
+    for run in static_outputs(source, &["a", "b", "c", "d", "same", "apart"]) {
+        assert_eq!(run, [21u32, 12, 8, 32, 1, 1].map(BigUint::from).to_vec());
+    }
+}
+
+/// The static variables of subroutines of a package, of a class
+/// specialization in it and of `$unit` that have one name and the same
+/// position among their analyses' declarations are three variables: each
+/// is named by its owner and its declaration, not by a counter of the
+/// analysis that declares it.
+#[test]
+fn statics_of_package_and_unit_subroutines_are_their_own() {
+    let source = r#"`timescale 1ns/1ns
+function automatic int unit_next();
+    static int m_inst = 0;
+    m_inst++;
+    return m_inst;
+endfunction
+package p;
+    class registry #(type T = int);
+        static function int get();
+            static int m_inst = 0;
+            m_inst += 10;
+            return m_inst + $bits(T);
+        endfunction
+    endclass
+    function automatic int pkg_next();
+        static int m_inst = 0;
+        m_inst += 100;
+        return m_inst;
+    endfunction
+endpackage
+import p::*;
+module Top(output int a, output int b, output int c, output int d);
+    initial begin
+        a = unit_next();
+        a = unit_next();
+        b = registry #(byte)::get();
+        b = registry #(byte)::get();
+        c = registry #(int)::get();
+        d = pkg_next();
+    end
+endmodule
+"#;
+    for run in static_outputs(source, &["a", "b", "c", "d"]) {
+        assert_eq!(run, [2u32, 28, 42, 100].map(BigUint::from).to_vec());
+    }
+}
+
+/// A class specialization of a package that both the package and the
+/// compilation unit lower, here `registry #(byte)` through `base::f` and
+/// through `$unit`'s `env::g`, has one static variable `n` (IEEE 1800-2023
+/// 6.21): the compilation unit binds the package's, which the package
+/// declares once. UVM's `uvm_component_registry#(T, Tname)::get` stopped the
+/// elaboration so ("duplicate port or signal name `m_inst@1192`").
+#[test]
+fn statics_of_specializations_lowered_by_two_scopes_are_one() {
+    let source = r#"`timescale 1ns/1ns
+package p;
+    int seed = 1;
+    class registry #(type T = int);
+        static function int get();
+            static int n = 0;
+            n += p::seed;
+            return n;
+        endfunction
+    endclass
+    class base;
+        function int f(); return registry #(byte)::get(); endfunction
+    endclass
+endpackage
+import p::*;
+class env extends base;
+    function int g(); return registry #(byte)::get() + 100; endfunction
+endclass
+module Top(output int a, output int b);
+    env e = new;
+    initial begin
+        a = e.f();
+        b = e.g();
+    end
+endmodule
+"#;
+    for run in static_outputs(source, &["a", "b"]) {
+        assert_eq!(run, [1u32, 102].map(BigUint::from).to_vec());
+    }
+}
+
+/// The value of output `a` of `source` at time 1, in both state modes.
+fn output_a(source: &str) -> Vec<BigUint> {
+    [false, true]
+        .map(|four_state| {
+            let mut sim =
+                celox::Simulation::from_sv_sources(vec![(source, Path::new("statics.sv"))], "Top")
+                    .four_state(four_state)
+                    .build()
+                    .unwrap_or_else(|error| panic!("four-state {four_state}: {error}"));
+            sim.run_until(1).unwrap();
+            sim.get(sim.signal("a"))
+        })
+        .to_vec()
+}
+
+/// The initializer of a static property is bound in the scope of its class
+/// (IEEE 1800-2023 8.9, 8.25), in a package and in a module: a static
+/// property it reads is the class's, not the module's port of the same
+/// name, and a call of a static method calls that method.
+#[test]
+fn static_property_initializers_see_their_class() {
+    let in_package = |body: &str| {
+        format!(
+            "`timescale 1ns/1ns\npackage p;\n    class reg_t;\n{body}\n    endclass\nendpackage\n\
+             import p::*;\nmodule Top(output int a);\n    initial a = reg_t::get();\nendmodule\n"
+        )
+    };
+    let in_module = |body: &str| {
+        format!(
+            "`timescale 1ns/1ns\nmodule Top(output int a);\n    class reg_t;\n{body}\n    endclass\n\
+             initial a = reg_t::get();\nendmodule\n"
+        )
+    };
+    let property = "static int a = 4;\nstatic int b = a + 1;\n\
+                    static function int get(); return b; endfunction";
+    let call = "static function int init(); return 7; endfunction\nstatic int a = init();\n\
+                static function int get(); return a; endfunction";
+    for (source, expected) in [
+        (in_package(property), 5u32),
+        (in_module(property), 5),
+        (in_package(call), 7),
+        (in_module(call), 7),
+    ] {
+        assert_eq!(
+            output_a(&source),
+            vec![BigUint::from(expected); 2],
+            "{source}"
+        );
+    }
+}
+
+/// UVM's `uvm_registry_common`: each specialization registers itself once,
+/// through the initializer `local static bit m__initialized =
+/// __deferred_init();`, which calls the specialization's own static method.
+#[test]
+fn specializations_initialize_their_static_properties_through_their_methods() {
+    let source = r#"`timescale 1ns/1ns
+package p;
+    int registered[$];
+    class registry #(type T = int);
+        static function bit __deferred_init();
+            registered.push_back($bits(T));
+            return 1;
+        endfunction
+        local static bit m__initialized = __deferred_init();
+        static function bit initialized(); return m__initialized; endfunction
+    endclass
+endpackage
+import p::*;
+module Top(output int a);
+    initial begin
+        a = registry #(byte)::initialized() + registry #(shortint)::initialized();
+        a = a * 100 + p::registered.sum();
+    end
+endmodule
+"#;
+    assert_eq!(output_a(source), vec![BigUint::from(224u32); 2]);
+}
+
+/// The initializers of a package's variables and of the static properties
+/// of its classes run before every process (IEEE 1800-2023 6.8, 10.5) and
+/// call subroutines as any process does: out of line, recursive ones
+/// included. UVM's registries reach the recursive `uvm_coreservice_t::get`
+/// so.
+#[test]
+fn package_initializers_call_recursive_subroutines() {
+    let variable = r#"`timescale 1ns/1ns
+package p;
+    function automatic int fact(int n);
+        if (n <= 1) return 1;
+        return n * fact(n - 1);
+    endfunction
+    int value = fact(4);
+endpackage
+module Top(output int a);
+    initial #1 a = p::value;
+endmodule
+"#;
+    let property = r#"`timescale 1ns/1ns
+package p;
+    class reg_t;
+        static function int fact(int n);
+            if (n <= 1) return 1;
+            return n * fact(n - 1);
+        endfunction
+        static int value = fact(4);
+        static function int get(); return value; endfunction
+    endclass
+endpackage
+import p::*;
+module Top(output int a);
+    initial a = reg_t::get();
+endmodule
+"#;
+    // A singleton whose `get` calls itself while it makes the instance.
+    let singleton = r#"`timescale 1ns/1ns
+package p;
+    class cs_t;
+        static cs_t inst;
+        int depth;
+        static function cs_t get();
+            if (inst == null) begin
+                inst = new;
+                inst.depth = 1 + (get() == inst);
+            end
+            return inst;
+        endfunction
+    endclass
+    class user_t;
+        static cs_t cs = cs_t::get();
+        static function int depth(); return cs.depth; endfunction
+    endclass
+endpackage
+import p::*;
+module Top(output int a);
+    initial #1 a = user_t::depth();
+endmodule
+"#;
+    for (source, expected) in [(variable, 24u32), (property, 24), (singleton, 2)] {
+        assert_eq!(
+            output_a(source),
+            vec![BigUint::from(expected); 2],
+            "{source}"
+        );
     }
 }

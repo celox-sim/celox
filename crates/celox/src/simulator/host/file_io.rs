@@ -3,26 +3,33 @@ use celox_design::HostRequestSite;
 use celox_runtime::{Halt, SimulatorErrorCode};
 
 /// Render the captured request values identically for a host round trip and
-/// a synchronous native call. Neither path rereads the HDL expressions.
+/// a synchronous native call. Neither path rereads the HDL expressions. A
+/// string variable's value is a handle into `heap`, which prints as the
+/// string's text (IEEE 1800-2023 21.2.1.7).
 pub(super) fn formatted_file_write(
     site: &HostRequestSite<SignalRef>,
     values: &[(BigUint, BigUint)],
     format: &RuntimeEventSite,
     timestamp: u64,
+    heap: &celox_heap::Heap,
 ) -> (Vec<RuntimeEventArgValue>, Vec<u8>) {
     let args: Vec<_> = site
         .args
         .iter()
         .zip(values)
         .skip(1)
-        .map(|(arg, (value, mask))| RuntimeEventArgValue {
-            values: value.to_u64_digits(),
-            masks: mask.to_u64_digits(),
-            width: arg.width,
-            signed: arg.signed,
-            is_string: arg.is_string,
-            float_precision: arg.float_precision,
-            handle: false,
+        .map(|(arg, (value, mask))| {
+            let mut value = RuntimeEventArgValue {
+                values: value.to_u64_digits(),
+                masks: mask.to_u64_digits(),
+                width: arg.width,
+                signed: arg.signed,
+                is_string: arg.is_string,
+                float_precision: arg.float_precision,
+                handle: arg.value_kind == celox_design::ValueKind::StrRef,
+            };
+            value.resolve_handle(heap);
+            value
         })
         .collect();
     let mut message = render_runtime_event_message(
@@ -161,12 +168,19 @@ impl<B: SimBackend> Simulator<B> {
             }
             Ok(value.to_u32_digits().first().copied().unwrap_or(0))
         };
+        let heap = self.backend.heap();
         let string = |index: usize| -> Result<String, Halt> {
             let (value, mask) = &values[index];
             if *mask != BigUint::default() {
                 return Err(error("file I/O string contains X or Z".into()));
             }
-            let bytes = value.to_bytes_be();
+            // A string variable's value is its handle.
+            let bytes = if site.args[index].value_kind == celox_design::ValueKind::StrRef {
+                let handle = value.to_u64_digits().first().copied().unwrap_or(0);
+                heap.string(handle as celox_heap::Handle).to_vec()
+            } else {
+                value.to_bytes_be()
+            };
             let bytes = bytes
                 .into_iter()
                 .skip_while(|byte| *byte == 0)
@@ -208,7 +222,8 @@ impl<B: SimBackend> Simulator<B> {
                     arg_float_precision: Vec::new(),
                     arg_is_handle: Vec::new(),
                 };
-                let (args, message) = formatted_file_write(site, &values, &format, timestamp);
+                let (args, message) =
+                    formatted_file_write(site, &values, &format, timestamp, self.backend.heap());
                 let (stdout, write_result) = self.file_io.write_with_stdout(number(0)?, &message);
                 if stdout {
                     let mut format = format;

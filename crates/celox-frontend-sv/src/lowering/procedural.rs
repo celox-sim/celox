@@ -26,6 +26,11 @@ pub(super) struct Checkpoint {
     capture_counter: u64,
     runtime_event_sites: usize,
     function_host_request_sites: usize,
+    function_wait_sites: usize,
+    event_assignments: usize,
+    activation_copies: usize,
+    box_changes: usize,
+    function_nba_sites: usize,
     runtime_errors: usize,
     extern_functions: usize,
     extern_calls: usize,
@@ -40,6 +45,10 @@ impl Checkpoint {
         self.runtime_event_sites
     }
 }
+
+/// The name of [`ProcModule::held_gate`], which is no SystemVerilog
+/// identifier.
+pub(super) const HELD_GATE: &str = "$event_held";
 
 /// The variables and subroutines of the module being lowered.
 pub(super) struct ProcModule<'a> {
@@ -72,6 +81,22 @@ pub(super) struct ProcModule<'a> {
     /// process of the module lists after its own (see
     /// [`celox_design::SiteProcess`]), numbered per family.
     pub function_host_request_sites: Vec<celox_design::HostRequestSite<SourceVarId>>,
+    /// The wait sites of the module's function units, which every process
+    /// that can suspend inside a call lists after its own; a unit suspends
+    /// with the number of the site among these, which the kernel's call
+    /// turns into one among its process's sites.
+    pub function_wait_sites: Vec<celox_design::WaitSite<SourceVarId>>,
+    /// The nonblocking assignment sites of the module's function units,
+    /// listed and numbered as [`Self::function_wait_sites`] are.
+    pub function_nba_sites: Vec<celox_design::NbaSite<SourceVarId>>,
+    /// The runtime event site of the flush points of the units' waits
+    /// (IEEE 1800-2023 16.4.2), made at the first.
+    pub unit_flush_site: Option<u32>,
+    /// The change counts of the boxes of the module's units, in the order
+    /// they were made (see `Ff::box_changes`): module variables that any
+    /// unit may bump. A box's field names its count by the count's id
+    /// (`ChangeKey::Box`), apart from the counts of class properties.
+    pub box_changes: Vec<SourceVarId>,
     /// Runtime errors (fatal assertions) of the module, by local code.
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
     /// The continuous assignments `$event[k] = expr` of the event
@@ -308,6 +333,10 @@ impl<'a> ProcModule<'a> {
             capture_counter: 0,
             runtime_event_sites: Vec::new(),
             function_host_request_sites: Vec::new(),
+            function_wait_sites: Vec::new(),
+            function_nba_sites: Vec::new(),
+            unit_flush_site: None,
+            box_changes: Vec::new(),
             runtime_errors: HashMap::default(),
             event_assignments: Vec::new(),
             unpacked_bounds,
@@ -525,7 +554,7 @@ impl<'a> ProcModule<'a> {
     /// or in a call. Then either
     /// - the items name exactly the variables the implicit event expression
     ///   of `body` has (IEEE 1800-2023 9.4.2.2), a part-select of a whole
-    ///   variable naming it, or
+    ///   variable naming it, or exactly the bits it has, or
     /// - the items cover every bit `body` reads, and running `body` when
     ///   none of those bits changed is unobservable: it has no side effects,
     ///   reads no variable it writes, and stores each variable at most once
@@ -585,6 +614,17 @@ impl<'a> ProcModule<'a> {
         }
         let reads = self.implicit_reads(body, false);
         if exact && listed == reads {
+            return true;
+        }
+        // The same bits, partitioned differently (`w[7:0] or w[31:8]` for
+        // reads of every byte of `w`), are the implicit event expression too.
+        let bits = |atoms: &HashSet<VarAtomBase<SourceVarId>>| -> HashSet<(SourceVarId, usize)> {
+            atoms
+                .iter()
+                .flat_map(|atom| (atom.access.lsb..=atom.access.msb).map(move |bit| (atom.id, bit)))
+                .collect()
+        };
+        if bits(&listed) == bits(&reads) {
             return true;
         }
         if !self.is_pure(body) {
@@ -1019,19 +1059,61 @@ impl<'a> ProcModule<'a> {
 
     /// The lowering state, for [`Self::rollback`].
     pub fn checkpoint(&self) -> Checkpoint {
+        // Every field, so that a new one cannot be left out: what a
+        // lowering grows, which a rollback restores, and what it never
+        // changes or only caches.
+        let ProcModule {
+            // Restored through `next_id`.
+            variables: _,
+            name_to_id: _,
+            next_id,
+            constants: _,
+            parameter_types: _,
+            subroutines: _,
+            constant_functions: _,
+            dpi_imports: _,
+            extern_functions,
+            extern_calls,
+            four_state: _,
+            program: _,
+            forceable: _,
+            created,
+            temp_counter,
+            capture_counter,
+            runtime_event_sites,
+            function_host_request_sites,
+            function_wait_sites,
+            function_nba_sites,
+            // Restored with `runtime_event_sites`.
+            unit_flush_site: _,
+            box_changes,
+            runtime_errors,
+            event_assignments,
+            // Filled before any lowering.
+            unpacked_bounds: _,
+            warnings,
+            calls,
+            // Facts of subroutines, the same whatever was lowered.
+            requesting_subroutines: _,
+            activation_copies,
+        } = self;
         Checkpoint {
-            next_id: self.next_id,
-            created: self.created.len(),
-            temp_counter: self.temp_counter,
-            capture_counter: self.capture_counter,
-            runtime_event_sites: self.runtime_event_sites.len(),
-            function_host_request_sites: self.function_host_request_sites.len(),
-            runtime_errors: self.runtime_errors.len(),
-            extern_functions: self.extern_functions.len(),
-            extern_calls: self.extern_calls,
-            warnings: self.warnings.len(),
-            functions: self
-                .calls
+            next_id: *next_id,
+            created: created.len(),
+            temp_counter: *temp_counter,
+            capture_counter: *capture_counter,
+            runtime_event_sites: runtime_event_sites.len(),
+            function_host_request_sites: function_host_request_sites.len(),
+            function_wait_sites: function_wait_sites.len(),
+            function_nba_sites: function_nba_sites.len(),
+            event_assignments: event_assignments.len(),
+            activation_copies: activation_copies.len(),
+            box_changes: box_changes.len(),
+            runtime_errors: runtime_errors.len(),
+            extern_functions: extern_functions.len(),
+            extern_calls: *extern_calls,
+            warnings: warnings.len(),
+            functions: calls
                 .as_deref()
                 .and_then(|calls| calls.out_of_line.as_ref())
                 .map_or(0, super::out_of_line::OutOfLine::len),
@@ -1041,7 +1123,25 @@ impl<'a> ProcModule<'a> {
     /// Forget everything lowered since `checkpoint`, so that the module
     /// lowers as if it had never been.
     pub fn rollback(&mut self, checkpoint: Checkpoint) {
-        for id in checkpoint.next_id.0..self.next_id.0 {
+        let Checkpoint {
+            next_id,
+            created,
+            temp_counter,
+            capture_counter,
+            runtime_event_sites,
+            function_host_request_sites,
+            function_wait_sites,
+            function_nba_sites,
+            event_assignments,
+            activation_copies,
+            box_changes,
+            runtime_errors,
+            extern_functions,
+            extern_calls,
+            warnings,
+            functions,
+        } = checkpoint;
+        for id in next_id.0..self.next_id.0 {
             let Some(variable) = self.variables.remove(&SourceVarId(id)) else {
                 continue;
             };
@@ -1051,22 +1151,33 @@ impl<'a> ProcModule<'a> {
                 self.name_to_id.remove(name);
             }
         }
-        self.next_id = checkpoint.next_id;
-        self.created.truncate(checkpoint.created);
-        self.temp_counter = checkpoint.temp_counter;
-        self.capture_counter = checkpoint.capture_counter;
-        self.runtime_event_sites
-            .truncate(checkpoint.runtime_event_sites);
+        self.next_id = next_id;
+        self.created.truncate(created);
+        self.temp_counter = temp_counter;
+        self.capture_counter = capture_counter;
+        self.runtime_event_sites.truncate(runtime_event_sites);
+        self.box_changes.truncate(box_changes);
+        // A flush site made since then is gone with it.
+        if self
+            .unit_flush_site
+            .is_some_and(|site| site as usize >= runtime_event_sites)
+        {
+            self.unit_flush_site = None;
+        }
         self.function_host_request_sites
-            .truncate(checkpoint.function_host_request_sites);
+            .truncate(function_host_request_sites);
+        self.function_wait_sites.truncate(function_wait_sites);
+        self.event_assignments.truncate(event_assignments);
+        self.activation_copies.truncate(activation_copies);
+        self.function_nba_sites.truncate(function_nba_sites);
         // Codes are numbered from one in registration order.
         self.runtime_errors
-            .retain(|&code, _| code <= checkpoint.runtime_errors as i64);
-        self.extern_functions.truncate(checkpoint.extern_functions);
-        self.extern_calls = checkpoint.extern_calls;
-        self.warnings.truncate(checkpoint.warnings);
-        if let Some(functions) = self.out_of_line() {
-            functions.truncate(checkpoint.functions);
+            .retain(|&code, _| code <= runtime_errors as i64);
+        self.extern_functions.truncate(extern_functions);
+        self.extern_calls = extern_calls;
+        self.warnings.truncate(warnings);
+        if let Some(out_of_line) = self.out_of_line() {
+            out_of_line.truncate(functions);
         }
     }
 
@@ -1135,6 +1246,20 @@ impl<'a> ProcModule<'a> {
             self.hidden(TIME_SLOT.to_string(), TIME_SLOT_WIDTH, false, false);
         }
         TIME_SLOT.to_string()
+    }
+
+    /// The one-bit module variable that holds 1 (see [`HELD_GATE`]): the gate of an event item
+    /// without `iff` whose occurrences a process counts itself (see
+    /// `Ff::property_event`). Each wait that uses it stores the 1 before it
+    /// suspends. It is no hidden variable, so the writes of a waited
+    /// variable judge it, and its name is no SystemVerilog identifier.
+    pub fn held_gate(&mut self) -> SourceVarId {
+        if let Some(id) = self.id(HELD_GATE) {
+            return id;
+        }
+        let id = self.hidden(HELD_GATE.to_string(), 1, false, false);
+        self.variables.get_mut(&id).expect("the held gate").hidden = false;
+        id
     }
 
     fn hidden(&mut self, name: String, width: usize, signed: bool, is_4state: bool) -> SourceVarId {
@@ -3054,7 +3179,59 @@ pub(super) fn written_names_with_calls(
         names,
         &mut HashSet::default(),
         0,
+        &mut None,
     );
+}
+
+impl ProcModule<'_> {
+    /// The names `body` writes, by assignments and through the written
+    /// arguments of the system tasks, functions and subroutines it calls.
+    /// The actual of a `ref` formal is written when the callee writes the
+    /// formal, also by passing it on to another `ref` formal it writes
+    /// (formals have module-unique names).
+    pub(super) fn written_names(&self, body: &[sv::ir::Stmt]) -> HashSet<String> {
+        let mut names = HashSet::default();
+        let mut refs = Some(Vec::new());
+        super::kernel_written_names(
+            self,
+            body,
+            &mut names,
+            &mut HashSet::default(),
+            0,
+            &mut refs,
+        );
+        let refs = refs.unwrap_or_default();
+        loop {
+            let mut grew = false;
+            for (formal, actuals) in &refs {
+                if names.contains(formal) {
+                    for actual in actuals {
+                        grew |= names.insert(actual.clone());
+                    }
+                }
+            }
+            if !grew {
+                return names;
+            }
+        }
+    }
+}
+
+impl ProcModule<'_> {
+    /// The counter that the stores of `field` bump, for the waits that read
+    /// it: a watched class property's (see `ff::property_changes`) or a
+    /// box's (see [`Self::box_changes`]).
+    pub(super) fn change_counter(&self, field: &sv::ir::ObjectField) -> Option<SourceVarId> {
+        match field.key {
+            sv::ir::ChangeKey::None => None,
+            sv::ir::ChangeKey::Property(key) => self.id(&super::ff::property_changes(key)),
+            sv::ir::ChangeKey::Box(id) => self
+                .box_changes
+                .iter()
+                .copied()
+                .find(|counter| counter.0 == id),
+        }
+    }
 }
 
 /// The lvalue an output argument writes back to.

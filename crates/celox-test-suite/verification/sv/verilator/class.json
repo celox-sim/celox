@@ -13,6 +13,17 @@
     },
     {
       "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::body_parameters_are_local",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Verilator 5.052 returns 0 from $cast of a handle of one interface class to a variable of another interface class that the object's class also implements, so the case dereferences the unassigned null handle; the adapter-free source prints 0 1 where IEEE 1800-2023 8.16 and 8.26.5 require 1 1. Celox prints 1 1. Icarus rejects interface classes, see sv_icarus_abstract_and_interface_classes.",
       "expectation": "Simulation",
       "known_issue": {

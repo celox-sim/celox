@@ -35,6 +35,14 @@ pub fn optimize_merged_chain(
             Ok(())
         }
     };
+    let timing = diagnostics.pass_timing;
+    let mut stage_start = crate::timing::now();
+    let mut report_stage = |stage: &'static str| {
+        if timing {
+            tracing::debug!("[merged-chain-timing] {stage}: {:?}", stage_start.elapsed());
+            stage_start = crate::timing::now();
+        }
+    };
     let mut changed = false;
     if crate::ir::inline_single_predecessor_jumps(eu).map_err(|error| {
         crate::OptimizationError::verification("during native jump inlining", error)
@@ -42,6 +50,7 @@ pub fn optimize_merged_chain(
         changed = true;
     }
     verify(eu, "after native jump inlining")?;
+    report_stage("jump inlining");
     OptimizeBlocksPass {
         skip_final_schedule: false,
         element_widths: Arc::clone(&element_widths),
@@ -54,6 +63,7 @@ pub fn optimize_merged_chain(
         },
     );
     verify(eu, "after native block optimization")?;
+    report_stage("block optimization");
     // The native function is assembled after the ordinary per-EU pipeline.
     // Merging exposes constants and control-flow facts across the old EU
     // boundaries, and OptimizeBlocks can expose more of them while rewriting
@@ -68,6 +78,7 @@ pub fn optimize_merged_chain(
         },
     );
     verify(eu, "after native merged-chain CFG simplification")?;
+    report_stage("CFG simplification");
     // The native-only recoveries below do not handle calls yet.
     if super::pipeline::pass_manager::makes_calls(eu) {
         return Ok(());
@@ -87,6 +98,7 @@ pub fn optimize_merged_chain(
         verify(eu, "after native merged effect-region recovery")?;
         changed = true;
     }
+    report_stage("effect-region recovery");
     checkpoint("during native merged-chain optimization")?;
     if !four_state {
         let collapsed = pass_vectorize_concat::collapse_packed_conditional_store_chains_with(
@@ -128,6 +140,7 @@ pub fn optimize_merged_chain(
         GvnPass.run(eu, &PassOptions::default());
         verify(eu, "after native fixed bit-map recovery")?;
     }
+    report_stage("packed stores and bit maps");
     checkpoint("during native merged-chain optimization")?;
     if !four_state
         && diagnostics.effect_case_dispatch
@@ -183,5 +196,6 @@ pub fn optimize_merged_chain(
         pass_vectorize_concat::remove_dead_definitions(eu);
         verify(eu, "after native merged-chain DCE")?;
     }
+    report_stage("final placement and DCE");
     Ok(())
 }

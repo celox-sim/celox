@@ -1096,7 +1096,9 @@ pub(super) fn shared_class(
                     let mut field = field(&tree.functions, &leaf.r#type, env, size)?;
                     size = field.offset + field.storage();
                     let leaf_name = leaf.name(&property_name);
-                    field.key = property_key(name, &leaf_name);
+                    field.key = crate::system_functions::ChangeKey::Property(property_key(
+                        name, &leaf_name,
+                    ));
                     properties.push(Property {
                         name: leaf_name,
                         owner: name.to_owned(),
@@ -1129,7 +1131,7 @@ pub(super) fn shared_class(
             let name = property_name;
             let mut field = field(&tree.functions, &ty, env, size)?;
             size = field.offset + field.storage();
-            field.key = property_key(&owner, &name);
+            field.key = crate::system_functions::ChangeKey::Property(property_key(&owner, &name));
             properties.push(Property {
                 name,
                 owner,
@@ -1563,7 +1565,7 @@ pub(super) fn field(
             ),
         nullable: false,
         real: matches!(ty.kind(), TypeKind::Real | TypeKind::Shortreal),
-        key: 0,
+        key: crate::system_functions::ChangeKey::None,
     })
 }
 
@@ -1581,13 +1583,14 @@ fn property_key(owner: &str, property: &str) -> u32 {
 }
 
 /// A run-time identifier of class `name`: an FNV-1a hash, never 0, which
-/// `null` reads as.
+/// `null` reads as, nor a class the heap reserves (see
+/// `celox_heap::class_identifier`).
 fn class_id(name: &str) -> u32 {
     // Compilation-unit declaration names already contain their source identity.
     let hash = name.bytes().fold(0x811c_9dc5u32, |hash, byte| {
         (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
     });
-    hash.max(1)
+    celox_heap::class_identifier(hash)
 }
 
 /// The classes whose objects a handle of class `ancestor` may refer to:

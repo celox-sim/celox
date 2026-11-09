@@ -234,38 +234,58 @@ fn lower_native_memory(
     use celox_sir::native_memory::NativeMemoryOp::*;
     let words: Vec<_> = args.iter().map(|&arg| ctx.reg_map.get(arg)).collect();
     let result = dst.map(|_| ctx.alloc_vreg(SpillDesc::transient()));
-    match op {
-        ReadIndirect => block.push(MInst::LoadPtrIndexed {
-            dst: result.unwrap(),
-            ptr: words[0],
-            offset: 0,
-            index: words[1],
-            size: OpSize::S64,
-        }),
-        WriteIndirect => block.push(MInst::StorePtrIndexed {
-            ptr: words[0],
-            offset: 0,
-            index: words[1],
-            src: words[2],
-            size: OpSize::S64,
-        }),
-        ReadState => block.push(MInst::LoadIndexed {
+    // A state access at a constant offset is a plain access of the state
+    // image, with the offset in the displacement.
+    let static_offset = matches!(op, ReadState | WriteState)
+        .then(|| ctx.consts.get(&args[0]).copied())
+        .flatten()
+        .and_then(|offset| i32::try_from(offset).ok());
+    match (op, static_offset) {
+        (ReadState, Some(offset)) => block.push(MInst::Load {
             dst: result.unwrap(),
             base: BaseReg::SimState,
-            offset: 0,
-            index: words[0],
-            scale: 1,
+            offset,
             size: OpSize::S64,
-            alias_range: None,
         }),
-        WriteState => block.push(MInst::StoreIndexed {
+        (WriteState, Some(offset)) => block.push(MInst::Store {
             base: BaseReg::SimState,
-            offset: 0,
-            index: words[0],
+            offset,
             src: words[1],
             size: OpSize::S64,
-            alias_range: None,
         }),
+        (op, _) => match op {
+            ReadIndirect => block.push(MInst::LoadPtrIndexed {
+                dst: result.unwrap(),
+                ptr: words[0],
+                offset: 0,
+                index: words[1],
+                size: OpSize::S64,
+            }),
+            WriteIndirect => block.push(MInst::StorePtrIndexed {
+                ptr: words[0],
+                offset: 0,
+                index: words[1],
+                src: words[2],
+                size: OpSize::S64,
+            }),
+            ReadState => block.push(MInst::LoadIndexed {
+                dst: result.unwrap(),
+                base: BaseReg::SimState,
+                offset: 0,
+                index: words[0],
+                scale: 1,
+                size: OpSize::S64,
+                alias_range: None,
+            }),
+            WriteState => block.push(MInst::StoreIndexed {
+                base: BaseReg::SimState,
+                offset: 0,
+                index: words[0],
+                src: words[1],
+                size: OpSize::S64,
+                alias_range: None,
+            }),
+        },
     }
     if let Some(dst) = dst {
         define_extern_result(ctx, block, dst, result.unwrap());

@@ -60,6 +60,22 @@ struct ResumeFrame {
     calls: Vec<celox_design::CallResume>,
 }
 
+/// A variable that a fork in a unit shares between the parent and the
+/// children, which run in copies of the unit's frames (see
+/// [`Ff::fork_in_unit`]): a box, a heap object of one field, holds it, and
+/// the frame holds the box's handle, which the copies share. A box is made
+/// each time the variable's declaration runs, or at the entry for a formal,
+/// as a process's automatic is a new cell each time (IEEE 1800-2023 6.21,
+/// 9.3.2). The heap collector finds the handle in the frames of the parent
+/// and of every child, so the box lives until the last of them that holds
+/// it ends or leaves the call.
+#[derive(Debug, Clone)]
+pub(super) struct SharedBox {
+    pub(super) var: String,
+    handle: String,
+    field: sv::ir::ObjectField,
+}
+
 impl Ff<'_, '_> {
     /// The function a call of `name` enters, when the call goes out of line,
     /// with its `ref` formals bound to `places`.
@@ -209,6 +225,10 @@ impl Ff<'_, '_> {
                 return Ok(None);
             }
         }
+        // The children of a unit's fork are activations of the kernel.
+        if self.kernel.is_some() && self.m.process_state(name).forks {
+            self.with_kernel(ProcessKernelBuilder::forks_in_call);
+        }
         self.record_outcome(name, Outcome::OutOfLine);
         Ok(Some(index))
     }
@@ -266,10 +286,10 @@ impl Ff<'_, '_> {
                     // Places of properties that no wait watches share a
                     // function whichever property they are.
                     field: sv::ir::ObjectField {
-                        key: if self.m.id(&property_changes(field.key)).is_some() {
+                        key: if self.m.change_counter(field).is_some() {
                             field.key
                         } else {
-                            0
+                            sv::ir::ChangeKey::None
                         },
                         ..*field
                     },
@@ -284,6 +304,19 @@ impl Ff<'_, '_> {
                     let sv::ir::LValue::Select { name, msb, lsb, .. } = &**element else {
                         return None;
                     };
+                    // The array is the caller's variable, which the callee
+                    // names by its own name: an inlined activation's copy of
+                    // a local is not the variable the local's name declares.
+                    // An array in the frame of this activation has no name a
+                    // call can pass: the call stays inlined.
+                    let id = self.m.id(name)?;
+                    if self.frame_array(id, name) {
+                        return None;
+                    }
+                    let own = self.m.var(id).path.first().filter(|own| {
+                        self.m.var(id).path.len() == 1 && *own != name && self.m.id(own) == Some(id)
+                    });
+                    let array = own.cloned().unwrap_or_else(|| name.clone());
                     // The positions the call fixed are hidden variables; the
                     // static part names them by their order.
                     let mut names = HashSet::default();
@@ -308,7 +341,8 @@ impl Ff<'_, '_> {
                         .map(|(k, position)| (position.clone(), format!("#{k}")))
                         .collect();
                     let mut element = (**element).clone();
-                    if let sv::ir::LValue::Select { msb, lsb, .. } = &mut element {
+                    if let sv::ir::LValue::Select { name, msb, lsb, .. } = &mut element {
+                        *name = array;
                         *msb = super::rename_const_idents(msb, &renames);
                         *lsb = super::rename_const_idents(lsb, &renames);
                     }
@@ -512,6 +546,12 @@ impl Ff<'_, '_> {
                     total,
                     positions,
                 } => {
+                    // The array is the caller's, which the unit writes.
+                    if let sv::ir::LValue::Select { name, .. } = &**element
+                        && let Some(id) = self.m.id(name)
+                    {
+                        referents.insert(id);
+                    }
                     let mut names = HashMap::default();
                     for (k, caller) in positions.iter().enumerate() {
                         let position = self
@@ -591,11 +631,8 @@ impl Ff<'_, '_> {
             if slots.iter().any(|slot| slot.id == id) {
                 continue;
             }
-            if !self.m.var(id).array_dims.is_empty() {
-                if single {
-                    continue;
-                }
-                array_slot(self.m.var(id))?;
+            if !self.m.var(id).array_dims.is_empty() && single {
+                continue;
             }
             slots.push(self.slot_of(id));
         }
@@ -755,8 +792,9 @@ impl Ff<'_, '_> {
         };
         self.split_property_concats(&mut body, &aliases);
         for alias in &aliases {
-            body = alias.rewrite(body, &constant)?;
+            body = alias.rewrite(body, &constant, &mut |field| self.part_scratch(field))?;
         }
+        let (body, shared) = self.share_forked(subroutine, body)?;
         let originals: Vec<(String, Option<SourceVarId>)> = renames
             .iter()
             .map(|(formal, target)| {
@@ -768,6 +806,7 @@ impl Ff<'_, '_> {
             .collect();
         self.active_calls.push(subroutine.name.clone());
         let falls = self.exec_block(&body);
+        self.shared_boxes.truncate(self.shared_boxes.len() - shared);
         for (formal, original) in originals {
             match original {
                 Some(id) => self.m.name_to_id.insert(formal, id),
@@ -832,6 +871,674 @@ impl Ff<'_, '_> {
             .map(|resume| (resume.staging, resume.calls))
             .unwrap_or_default();
         Ok((unit, frame.size_patches, staging, calls))
+    }
+
+    /// The delay word `word` of a suspension with status `code` from a call
+    /// of the kernel being lowered, as the process's: a wait at function
+    /// wait site `k` is a wait at the process's site `own + k`, `own` the
+    /// number of the kernel's own wait sites, and a nonblocking assignment
+    /// at function NBA site `k` one at its NBA site `own + k`, `own` the
+    /// number of its own NBA sites; each number is patched in when the
+    /// kernel is finished (see `Ff::wait_offset_patches`). `waits` and
+    /// `nbas` say which the callee can suspend for.
+    fn function_site_word(
+        &mut self,
+        code: RegisterId,
+        mut word: RegisterId,
+        waits: bool,
+        nbas: bool,
+    ) -> RegisterId {
+        let width = celox_design::PROCESS_DELAY_WIDTH;
+        let shift = |this: &mut Self,
+                     statuses: &[celox_design::ProcessStatus],
+                     nba: bool,
+                     word: RegisterId| {
+            let mut matched: Option<RegisterId> = None;
+            for status in statuses {
+                let value = this.b.alloc_bit(celox_design::PROCESS_STATUS_WIDTH, false);
+                this.b
+                    .emit(SIRInstruction::Imm(value, SIRValue::new(status.code())));
+                let equal = this.b.alloc_bit(1, false);
+                this.b
+                    .emit(SIRInstruction::Binary(equal, code, BinaryOp::Eq, value));
+                matched = Some(match matched {
+                    Some(any) => {
+                        let either = this.b.alloc_bit(1, false);
+                        this.b
+                            .emit(SIRInstruction::Binary(either, any, BinaryOp::Or, equal));
+                        either
+                    }
+                    None => equal,
+                });
+            }
+            let matched = matched.expect("a status");
+            let zeros = this.b.alloc_bit(width - 1, false);
+            this.b.emit(SIRInstruction::Imm(zeros, SIRValue::new(0u8)));
+            let factor = this.b.alloc_bit(width, false);
+            this.b
+                .emit(SIRInstruction::Concat(factor, vec![zeros, matched]));
+            let own = this.b.alloc_bit(width, false);
+            this.b.emit(SIRInstruction::Imm(own, SIRValue::new(0u8)));
+            if nba {
+                this.nba_offset_patches.push(own);
+            } else {
+                this.wait_offset_patches.push(own);
+            }
+            let offset = this.b.alloc_bit(width, false);
+            this.b
+                .emit(SIRInstruction::Binary(offset, factor, BinaryOp::Mul, own));
+            let translated = this.b.alloc_bit(width, false);
+            this.b.emit(SIRInstruction::Binary(
+                translated,
+                word,
+                BinaryOp::Add,
+                offset,
+            ));
+            translated
+        };
+        if waits {
+            word = shift(
+                self,
+                &[
+                    celox_design::ProcessStatus::Wait,
+                    celox_design::ProcessStatus::Pending,
+                ],
+                false,
+                word,
+            );
+        }
+        if nbas {
+            word = shift(self, &[celox_design::ProcessStatus::Nba], true, word);
+        }
+        word
+    }
+
+    /// A nonblocking update of bits `lsb..lsb + width` of `target`, its
+    /// value in variable `staged` and its run-time position, if any, in
+    /// `position`, from the unit being lowered: the value and position go
+    /// into the staging objects of a new function NBA site, and the unit
+    /// suspends with [`celox_design::ProcessStatus::Nba`], whose word the
+    /// calling kernel turns into its process's site.
+    pub(super) fn unit_nonblocking(
+        &mut self,
+        delay: u64,
+        target: SourceVarId,
+        lsb: usize,
+        width: usize,
+        staged: SourceVarId,
+        position: Option<NbaPosition<SourceVarId>>,
+    ) -> Result<(), sv::AnalyzerError> {
+        use celox_frontend_core::process::NBA_POSITION_WIDTH;
+        if !self.can_suspend_unit() {
+            return Err(unsupported(
+                "a nonblocking assignment in a unit that cannot suspend",
+            ));
+        }
+        let four_state = self.m.var(staged).is_4state;
+        let (value, _) = self.m.temp("nba_value", width, false, four_state);
+        self.copy_variable(staged, value);
+        let slots = match position {
+            Some(position) => {
+                let offset = self
+                    .m
+                    .temp("nba_offset", NBA_POSITION_WIDTH, false, false)
+                    .0;
+                let width = self.m.temp("nba_width", NBA_POSITION_WIDTH, false, false).0;
+                self.copy_variable(position.offset, offset);
+                self.copy_variable(position.width, width);
+                Some(NbaPosition { offset, width })
+            }
+            None => None,
+        };
+        if let Some(resume) = self.resume_frame() {
+            resume.staging.insert(value);
+            if let Some(slots) = slots {
+                resume.staging.extend([slots.offset, slots.width]);
+            }
+        }
+        let index = self.m.function_nba_sites.len() as u64;
+        self.m.function_nba_sites.push(NbaSite {
+            delay,
+            process: 0,
+            target,
+            lsb,
+            width,
+            value,
+            position: slots,
+            pending: None,
+        });
+        let request = self.b.alloc_bit(celox_design::PROCESS_DELAY_WIDTH, false);
+        self.b
+            .emit(SIRInstruction::Imm(request, SIRValue::new(index)));
+        self.suspend_unit_with(celox_design::ProcessStatus::Nba, request)
+    }
+
+    /// Whether a unit with resume slots is being lowered, which can
+    /// suspend the process it runs in.
+    pub(super) fn can_suspend_unit(&self) -> bool {
+        self.frame
+            .as_ref()
+            .is_some_and(|frame| frame.resume.is_some())
+    }
+
+    /// The end of the frame of the unit being lowered, function `own`
+    /// whose frame starts at the value of `base`.
+    fn own_top(&mut self, base: SourceVarId, own: usize) -> RegisterId {
+        let current = self.b.alloc_bit(32, false);
+        self.b.emit(SIRInstruction::Load(
+            current,
+            stable(base),
+            SIROffset::Static(0),
+            32,
+        ));
+        // The frame size is patched once known.
+        let size = self.b.alloc_bit(32, false);
+        self.b.emit(SIRInstruction::Imm(size, SIRValue::new(0u32)));
+        self.frame
+            .as_mut()
+            .expect("lowering a function unit")
+            .size_patches
+            .push((size, own));
+        let end = self.b.alloc_bit(32, false);
+        self.b
+            .emit(SIRInstruction::Binary(end, current, BinaryOp::Add, size));
+        end
+    }
+
+    /// Suspend the unit being lowered with the delay word `word` of a wait
+    /// at one of the module's function wait sites (see
+    /// `ProcModule::function_wait_sites`); the open block afterwards is the
+    /// resume point, whose value it returns.
+    pub(super) fn unit_wait(&mut self, word: u64) -> Result<u32, sv::AnalyzerError> {
+        let request = self.b.alloc_bit(celox_design::PROCESS_DELAY_WIDTH, false);
+        self.b
+            .emit(SIRInstruction::Imm(request, SIRValue::new(word)));
+        self.unit_wait_word(request)
+    }
+
+    /// [`Self::unit_wait`] with the delay word in register `request`.
+    fn unit_wait_word(&mut self, request: RegisterId) -> Result<u32, sv::AnalyzerError> {
+        let status = self.b.alloc_bit(celox_design::PROCESS_STATUS_WIDTH, false);
+        self.b.emit(SIRInstruction::Imm(
+            status,
+            SIRValue::new(celox_design::ProcessStatus::Wait.code()),
+        ));
+        self.suspend_unit(status, request, None)
+    }
+
+    /// The process continues after a wait in the unit being lowered: a
+    /// flush point of its deferred assertions (IEEE 1800-2023 16.4.2), as
+    /// a kernel's resume from a wait is. The site is the module's one for
+    /// every unit; it flushes the queue of the process the unit runs in.
+    pub(super) fn unit_flush_point(&mut self) {
+        let site = match self.m.unit_flush_site {
+            Some(site) => site,
+            None => {
+                let site = self.m.event_site(RuntimeEventSite {
+                    kind: RuntimeEventKind::Write,
+                    template: None,
+                    sizing: DisplaySizing::Ieee,
+                    scope: None,
+                    location: None,
+                    assertion: None,
+                    deferred: Some(DeferredSite::ProcessFlushPoint),
+                    timestamp_arg: false,
+                    arg_widths: Vec::new(),
+                    arg_signed: Vec::new(),
+                    arg_is_string: Vec::new(),
+                    arg_float_precision: Vec::new(),
+                    arg_is_handle: Vec::new(),
+                });
+                self.m.unit_flush_site = Some(site);
+                site
+            }
+        };
+        self.b.emit(SIRInstruction::RuntimeEvent {
+            site_id: site,
+            args: Vec::new(),
+        });
+    }
+
+    /// At resume point `point` of a wait with delay word `word`: continue
+    /// when `woken`, a one-bit register, holds; otherwise report that the
+    /// wait is still pending and return to the same point, as a kernel's
+    /// `wake_if` does. The continuation is open afterwards.
+    pub(super) fn unit_wake_if(
+        &mut self,
+        woken: RegisterId,
+        point: u32,
+        word: u64,
+    ) -> Result<(), sv::AnalyzerError> {
+        let frame = self.frame.as_ref().expect("lowering a function unit");
+        let (own, base) = (frame.function, frame.base);
+        let resume = frame
+            .resume
+            .as_ref()
+            .ok_or_else(|| unsupported("a wait in a unit that cannot suspend"))?;
+        let (resume_var, status_var, request_var, top_var) =
+            (resume.resume, resume.status, resume.request, resume.top);
+        let continuation = self.b.new_block();
+        let pending = self.b.new_block();
+        self.b.seal_block(SIRTerminator::Branch {
+            cond: woken,
+            true_block: (continuation, Vec::new()),
+            false_block: (pending, Vec::new()),
+        });
+        self.b.switch_to_block(pending);
+        let width = celox_frontend_core::process::PROCESS_RESUME_WIDTH;
+        let point_value = self.b.alloc_bit(width, false);
+        self.b.emit(SIRInstruction::Imm(
+            point_value,
+            SIRValue::new(u64::from(point)),
+        ));
+        self.store(resume_var, SIROffset::Static(0), width, point_value);
+        let status = self.b.alloc_bit(celox_design::PROCESS_STATUS_WIDTH, false);
+        self.b.emit(SIRInstruction::Imm(
+            status,
+            SIRValue::new(celox_design::ProcessStatus::Pending.code()),
+        ));
+        self.store(
+            status_var,
+            SIROffset::Static(0),
+            celox_design::PROCESS_STATUS_WIDTH,
+            status,
+        );
+        let request = self.b.alloc_bit(celox_design::PROCESS_DELAY_WIDTH, false);
+        self.b
+            .emit(SIRInstruction::Imm(request, SIRValue::new(word)));
+        self.store(
+            request_var,
+            SIROffset::Static(0),
+            celox_design::PROCESS_DELAY_WIDTH,
+            request,
+        );
+        let top = self.own_top(base, own);
+        self.store(
+            top_var,
+            SIROffset::Static(0),
+            celox_design::PROCESS_CALL_TOP_WIDTH,
+            top,
+        );
+        self.b.seal_block(SIRTerminator::Return);
+        self.b.switch_to_block(continuation);
+        Ok(())
+    }
+
+    /// An event control in the unit being lowered (IEEE 1800-2023 9.4.2).
+    ///
+    /// Each occurrence of an item is counted where it happens, as for a
+    /// kernel, when the items are module variables whose `iff` is either a
+    /// module variable or reads only the unit's frame. Such a frame-only
+    /// condition, such as whether a virtual interface the frame holds
+    /// denotes an instance (the analyzer makes one item per instance it may
+    /// denote), cannot change while the process waits: the unit evaluates
+    /// it at the start of the wait and waits at the site whose terms are
+    /// the items it selects, one site for each selection, among the sites
+    /// it lays out for the control. Items whose conditions compare one value
+    /// with distinct constants select at most one of them; otherwise each
+    /// set of them is a site, for up to [`MAX_SELECTED_ITEMS`] such items.
+    ///
+    /// Any other item reads the frame in its expression: the unit keeps a
+    /// sample of each item in its frame, waits for a change of what the
+    /// items read, and at each resume compares each item with its sample by
+    /// the edge rules of the item (Table 9-2), waiting again when none
+    /// occurred; samples in module variables, as a kernel's `$event[k]`
+    /// proxies take them, would be shared by every process waiting at the
+    /// site.
+    pub(super) fn unit_wait_event(
+        &mut self,
+        items: &[sv::ir::EventItem],
+    ) -> Result<(), sv::AnalyzerError> {
+        let items: Vec<sv::ir::EventItem> = items
+            .iter()
+            .map(|item| sv::ir::EventItem {
+                edge: item.edge,
+                expr: self.propagate(&item.expr),
+                iff: item.iff.as_ref().map(|iff| self.propagate(iff)),
+            })
+            .collect();
+        let shared = |this: &Self, expr: &sv::ir::Expr, one_bit: bool| match expr {
+            sv::ir::Expr::Ident(name) => this.m.id(name).is_some_and(|id| {
+                let variable = this.m.var(id);
+                !this.m.is_hidden(id)
+                    && variable.array_dims.is_empty()
+                    && (!one_bit || (variable.width == 1 && variable.float.is_none()))
+            }),
+            _ => false,
+        };
+        // Items that read no slot of the frame are those of a kernel's event
+        // control, over module storage, static storage of subroutines
+        // included: the kernel's terms, gates and proxies serve them.
+        if items.iter().all(|item| {
+            !self.reads_frame(&item.expr)
+                && item.iff.as_ref().is_none_or(|iff| !self.reads_frame(iff))
+        }) {
+            let mut terms = Vec::new();
+            let mut gates = Vec::new();
+            let mut samples = Vec::new();
+            self.event_terms(&items, &mut terms, &mut gates, &mut samples)?;
+            return self.suspend_on(terms, gates, samples);
+        }
+        // The items whose condition the frame decides, by position.
+        let mut selected = Vec::new();
+        let counted = items.iter().enumerate().all(|(position, item)| {
+            shared(self, &item.expr, false)
+                && match &item.iff {
+                    None => true,
+                    Some(iff) if self.frame_only(iff) => {
+                        selected.push(position);
+                        true
+                    }
+                    Some(iff) => !self.reads_frame(iff),
+                }
+        });
+        if !counted {
+            return self.unit_sampled_event(&items);
+        }
+        // The weight of each selected item in the number of the site: with
+        // conditions that select at most one item, its rank; otherwise a bit.
+        let (constants, parameter_types) = (self.m.constants, self.m.parameter_types);
+        let value = |expr: &sv::ir::Expr| {
+            let constant = match expr {
+                sv::ir::Expr::Literal(literal) => sv::ir::ConstExpr::Literal(literal.clone()),
+                sv::ir::Expr::Ident(name) if constants.contains_key(name) => {
+                    sv::ir::ConstExpr::Ident(name.clone())
+                }
+                _ => return None,
+            };
+            sv::typecheck::eval_const_expr_with_types(&constant, constants, parameter_types)
+        };
+        let exclusive = exclusive_selection(
+            selected.iter().map(|&position| {
+                items[position]
+                    .iff
+                    .as_ref()
+                    .expect("a selected item has a condition")
+            }),
+            value,
+        );
+        if !exclusive && selected.len() > MAX_SELECTED_ITEMS {
+            return self.unit_sampled_event(&items);
+        }
+        let selections: Vec<Vec<usize>> = if exclusive {
+            std::iter::once(Vec::new())
+                .chain(selected.iter().map(|&position| vec![position]))
+                .collect()
+        } else {
+            (0..1usize << selected.len())
+                .map(|mask| {
+                    (0..selected.len())
+                        .filter(|bit| mask & (1 << bit) != 0)
+                        .map(|bit| selected[bit])
+                        .collect()
+                })
+                .collect()
+        };
+        let mut first = None;
+        let mut samples = Vec::new();
+        for chosen in &selections {
+            let site_items: Vec<sv::ir::EventItem> = items
+                .iter()
+                .enumerate()
+                .filter(|(position, _)| !selected.contains(position) || chosen.contains(position))
+                .map(|(position, item)| sv::ir::EventItem {
+                    edge: item.edge,
+                    expr: item.expr.clone(),
+                    iff: if selected.contains(&position) {
+                        None
+                    } else {
+                        item.iff.clone()
+                    },
+                })
+                .collect();
+            let mut terms = Vec::new();
+            let mut gates = Vec::new();
+            self.event_terms(&site_items, &mut terms, &mut gates, &mut samples)?;
+            if gates.iter().all(Option::is_none) {
+                gates.clear();
+            }
+            let site = self.wait_site(terms, gates);
+            first.get_or_insert(site);
+        }
+        self.unit_samples(std::mem::take(&mut samples))?;
+        let first = first.expect("one site at least");
+        // The number of the site the frame selects now.
+        let mut index = sv::ir::Expr::Literal("64'd0".into());
+        for (rank, &position) in selected.iter().enumerate() {
+            let weight = if exclusive { rank + 1 } else { 1 << rank };
+            index = binary(
+                index,
+                sv::ir::BinaryOp::Add,
+                sv::ir::Expr::Mux {
+                    condition: Box::new(iff_truth(
+                        items[position]
+                            .iff
+                            .clone()
+                            .expect("a selected item has a condition"),
+                    )),
+                    then_expr: Box::new(sv::ir::Expr::Literal(format!("64'd{weight}"))),
+                    else_expr: Box::new(sv::ir::Expr::Literal("64'd0".into())),
+                },
+            );
+        }
+        let index = self.integer_of_width(&index, 64, false)?;
+        let base = self.b.alloc_bit(celox_design::PROCESS_DELAY_WIDTH, false);
+        self.b
+            .emit(SIRInstruction::Imm(base, SIRValue::new(u64::from(first))));
+        let word = self.b.alloc_bit(celox_design::PROCESS_DELAY_WIDTH, false);
+        self.b
+            .emit(SIRInstruction::Binary(word, base, BinaryOp::Add, index));
+        self.unit_wait_word(word)?;
+        self.unit_flush_point();
+        Ok(())
+    }
+
+    /// Whether variable `name` is a slot of the frame of the unit being
+    /// lowered: an automatic of the unit or of a body it expands, or a
+    /// temporary of its lowering. A static formal or local of a static
+    /// subroutine is module-wide storage, which another call may change.
+    fn frame_slot(&self, name: &str) -> bool {
+        self.m
+            .id(name)
+            .is_some_and(|id| self.m.is_hidden(id) && self.automatic_of_unit(id, name))
+    }
+
+    /// Whether `expr` reads only the frame of the unit being lowered and
+    /// constants, and calls nothing: its value does not change while the
+    /// process waits, since only the process writes its frame.
+    pub(super) fn frame_only(&self, expr: &sv::ir::Expr) -> bool {
+        let mut calls = Vec::new();
+        collect_calls(expr, &mut calls);
+        let mut names = HashSet::default();
+        super::super::procedural::expr_idents(expr, &mut names);
+        calls.is_empty()
+            && names
+                .iter()
+                .all(|name| self.m.constants.contains_key(name) || self.frame_slot(name))
+    }
+
+    /// Whether `expr` reads a slot of the frame of the unit being lowered.
+    fn reads_frame(&self, expr: &sv::ir::Expr) -> bool {
+        let mut names = HashSet::default();
+        super::super::procedural::expr_idents(expr, &mut names);
+        names.iter().any(|name| self.frame_slot(name))
+    }
+
+    /// Whether `expr` reads a hidden variable that is not a slot of the
+    /// frame: static storage of a subroutine, which a concurrent call may
+    /// change.
+    fn reads_static_storage(&self, expr: &sv::ir::Expr) -> bool {
+        let mut names = HashSet::default();
+        super::super::procedural::expr_idents(expr, &mut names);
+        names.iter().any(|name| {
+            self.m
+                .id(name)
+                .is_some_and(|id| self.m.is_hidden(id) && !self.frame_slot(name))
+        })
+    }
+
+    /// Take `samples` of an event control of the unit being lowered, as a
+    /// kernel takes them before it suspends (see `Ff::event_expression`):
+    /// the proxies and their operand copies are module variables, which
+    /// every process waiting there may share, since the operands are the
+    /// module's storage, never the frame's.
+    pub(super) fn unit_samples(
+        &mut self,
+        samples: Vec<(String, sv::ir::Expr)>,
+    ) -> Result<(), sv::AnalyzerError> {
+        for (target, value) in samples {
+            if let Some(id) = self.m.id(&target)
+                && let Some(resume) = self.resume_frame()
+            {
+                resume.staging.insert(id);
+            }
+            self.assign(&sv::ir::LValue::Ident(target), &value)?;
+        }
+        Ok(())
+    }
+
+    /// The event control `items` by samples in the frame (see
+    /// [`Self::unit_wait_event`]).
+    fn unit_sampled_event(&mut self, items: &[sv::ir::EventItem]) -> Result<(), sv::AnalyzerError> {
+        let mut ids = Vec::new();
+        let mut samples = Vec::new();
+        for item in items {
+            let expr = item.expr.clone();
+            // The unit evaluates the items, and their gates, at each resume.
+            self.check_event_purity(&expr)?;
+            if let Some(iff) = &item.iff {
+                self.check_event_purity(iff)?;
+            }
+            if !matches!(item.edge, sv::ir::EventEdge::Any)
+                && self.m.expr_float_precision(&expr).is_some()
+            {
+                return Err(sv::AnalyzerError::RealEdgeEvent {
+                    edge: match item.edge {
+                        sv::ir::EventEdge::Pos => "posedge",
+                        sv::ir::EventEdge::Neg => "negedge",
+                        _ => "edge",
+                    },
+                });
+            }
+            ids.extend(self.level_terms(&expr)?);
+            // An occurrence counts only if the `iff` condition holds when it
+            // happens (IEEE 1800-2023 9.4.2.3), which this comparison at the
+            // resume cannot judge for a condition that may change meanwhile;
+            // a kernel's activation probe and gate counters do. A condition
+            // on the frame alone cannot change during the wait: its value at
+            // the start is its value at every occurrence.
+            // An operand in the static storage of a subroutine, which a
+            // concurrent call may change, neither wakes the unit nor is in
+            // its frame: the unit stays inlined, where a kernel watches it.
+            if self.reads_static_storage(&expr) {
+                return Err(unsupported(
+                    "an event control on the frame of a unit reading static storage",
+                ));
+            }
+            if item.iff.as_ref().is_some_and(|iff| !self.frame_only(iff)) {
+                return Err(unsupported(
+                    "an event control on the frame of a unit gated by module state",
+                ));
+            }
+            let float = self.m.expr_float_precision(&expr);
+            let width = match float {
+                Some(celox_sir::FloatPrecision::F64) => 64,
+                Some(celox_sir::FloatPrecision::F32) => 32,
+                None => sv_expr_natural_width(
+                    &self.m.typed_calls(&expr),
+                    self.m.variables,
+                    self.m.name_to_id,
+                    self.m.constants,
+                    self.m.parameter_types,
+                )
+                .ok_or_else(|| unsupported("event expression of unknown width"))?,
+            };
+            let signed = self.expr_signed(&expr);
+            let mut temp = |purpose| {
+                let (id, name) = self.m.temp(purpose, width, signed, float.is_none());
+                self.m.variables.get_mut(&id).expect("a sample").float = float;
+                name
+            };
+            let sample = temp("event_sample");
+            let current = temp("event_current");
+            let gate = match &item.iff {
+                Some(_) => {
+                    let (_, gate) = self.m.temp("event_gate", 1, false, false);
+                    Some(gate)
+                }
+                None => None,
+            };
+            samples.push((sample, current, expr, item.edge, item.iff.clone(), gate));
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        let site = self.wait_site(
+            ids.into_iter()
+                .map(|id| (id, CounterKind::Changes))
+                .collect(),
+            Vec::new(),
+        );
+        for (sample, _, expr, _, iff, gate) in &samples {
+            self.assign(&sv::ir::LValue::Ident(sample.clone()), expr)?;
+            if let (Some(iff), Some(gate)) = (iff, gate) {
+                self.assign(
+                    &sv::ir::LValue::Ident(gate.clone()),
+                    &iff_truth(iff.clone()),
+                )?;
+            }
+        }
+        let word = u64::from(site);
+        let point = self.unit_wait(word)?;
+        let mut occurred: Option<sv::ir::Expr> = None;
+        for (sample, current, expr, edge, _, gate) in &samples {
+            self.assign(&sv::ir::LValue::Ident(current.clone()), expr)?;
+            let mut item = edge_occurred(sample, current, *edge);
+            if let Some(gate) = gate {
+                item = binary(
+                    item,
+                    sv::ir::BinaryOp::LogicAnd,
+                    sv::ir::Expr::Ident(gate.clone()),
+                );
+            }
+            occurred = Some(match occurred {
+                Some(any) => binary(any, sv::ir::BinaryOp::LogicOr, item),
+                None => item,
+            });
+        }
+        let occurred = occurred.ok_or_else(|| unsupported("an empty event control"))?;
+        let (woken, _) = self.eval_truth(&occurred)?;
+        let continuation = self.b.new_block();
+        let again = self.b.new_block();
+        self.b.seal_block(SIRTerminator::Branch {
+            cond: woken,
+            true_block: (continuation, Vec::new()),
+            false_block: (again, Vec::new()),
+        });
+        // No occurrence: the values now are the samples of the next check.
+        self.b.switch_to_block(again);
+        for (sample, current, ..) in &samples {
+            self.assign(
+                &sv::ir::LValue::Ident(sample.clone()),
+                &sv::ir::Expr::Ident(current.clone()),
+            )?;
+        }
+        let never = self.b.alloc_bit(1, false);
+        self.b.emit(SIRInstruction::Imm(never, SIRValue::new(0u8)));
+        self.unit_wake_if(never, point, word)?;
+        // The continuation of `unit_wake_if` is never taken.
+        self.b.seal_block(SIRTerminator::Return);
+        self.b.switch_to_block(continuation);
+        self.unit_flush_point();
+        Ok(())
+    }
+
+    /// Stage module variable `id` in the resumable unit being lowered: a
+    /// count or gate that every process shares, which the unit reads and
+    /// writes in place.
+    pub(super) fn stage(&mut self, id: SourceVarId) {
+        if let Some(resume) = self.resume_frame() {
+            resume.staging.insert(id);
+        }
     }
 
     fn resume_frame(&mut self) -> Option<&mut ResumeFrame> {
@@ -931,8 +1638,396 @@ impl Ff<'_, '_> {
         self.suspend_unit(code, request, None).map(drop)
     }
 
+    /// `fork` in the unit being lowered (IEEE 1800-2023 9.3.2): a
+    /// suspension with [`celox_design::ProcessStatus::Fork`] whose entries
+    /// are resume points of the unit, one per branch. The runtime starts each
+    /// child in a copy of the frames with the unit's resume slot set to its
+    /// entry, whose address the word carries (see
+    /// [`celox_design::PROCESS_FORK_RESUME_SHIFT`]); the parent continues
+    /// at the open block afterwards. A branch that runs to its end ends its
+    /// process.
+    pub(super) fn fork_in_unit(
+        &mut self,
+        join: celox_design::ForkJoin,
+        branches: &[Vec<sv::ir::Stmt>],
+    ) -> Result<(), sv::AnalyzerError> {
+        let frame = self.frame.as_ref().expect("lowering a function unit");
+        let (own, base) = (frame.function, frame.base);
+        let first = frame
+            .resume
+            .as_ref()
+            .ok_or_else(|| unsupported("a fork in a unit that cannot suspend"))?
+            .blocks
+            .len();
+        if first + branches.len() > celox_frontend_core::process::MAX_PROCESS_SUSPENSIONS {
+            return Err(unsupported("a function with too many suspension points"));
+        }
+        let entries: Vec<BlockId> = branches.iter().map(|_| self.b.new_block()).collect();
+        self.resume_frame()
+            .expect("checked above")
+            .blocks
+            .extend(entries.iter().copied());
+        // The frame is laid out in the order of its slots, and the resume
+        // slot follows slots of fixed shape, so its offset is known.
+        let functions = self.m.out_of_line().expect("lowering out of line");
+        let function = &functions.functions[own];
+        let slot = function.resume.expect("a resumable unit");
+        let offset = layout(&function.slots[..=slot]).0[slot];
+        let frame_base = self.b.alloc_bit(32, false);
+        self.b.emit(SIRInstruction::Load(
+            frame_base,
+            stable(base),
+            SIROffset::Static(0),
+            32,
+        ));
+        let high = self.b.alloc_bit(32, false);
+        self.b.emit(SIRInstruction::Imm(high, SIRValue::new(0u32)));
+        let current = self.b.alloc_bit(64, false);
+        self.b
+            .emit(SIRInstruction::Concat(current, vec![high, frame_base]));
+        let mode = match join {
+            celox_design::ForkJoin::All => 0u64,
+            celox_design::ForkJoin::Any => 1,
+            celox_design::ForkJoin::None => 2,
+        };
+        let fixed = self.b.alloc_bit(64, false);
+        self.b.emit(SIRInstruction::Imm(
+            fixed,
+            SIRValue::new(
+                first as u64
+                    | ((branches.len() as u64) << 16)
+                    | (mode << 32)
+                    | ((offset as u64) << celox_design::PROCESS_FORK_RESUME_SHIFT),
+            ),
+        ));
+        let shift = self.b.alloc_bit(64, false);
+        self.b.emit(SIRInstruction::Imm(
+            shift,
+            SIRValue::new(u64::from(celox_design::PROCESS_FORK_RESUME_SHIFT)),
+        ));
+        let address = self.b.alloc_bit(64, false);
+        self.b.emit(SIRInstruction::Binary(
+            address,
+            current,
+            BinaryOp::Shl,
+            shift,
+        ));
+        let word = self.b.alloc_bit(celox_design::PROCESS_DELAY_WIDTH, false);
+        self.b
+            .emit(SIRInstruction::Binary(word, fixed, BinaryOp::Add, address));
+        let status = self.b.alloc_bit(celox_design::PROCESS_STATUS_WIDTH, false);
+        self.b.emit(SIRInstruction::Imm(
+            status,
+            SIRValue::new(celox_design::ProcessStatus::Fork.code()),
+        ));
+        self.suspend_unit(status, word, None)?;
+        // The parent's continuation, empty until the branches are lowered.
+        let continuation = self.b.seal_block(SIRTerminator::Return);
+        // A branch runs in a process of its own: no loop or subroutine of
+        // the parent encloses it.
+        let loops = std::mem::take(&mut self.loops);
+        let functions = std::mem::take(&mut self.functions);
+        let overlay = std::mem::take(&mut self.overlay);
+        let timing_boundary = self.timing_call_boundary;
+        self.timing_call_boundary = self.active_calls.len();
+        let mut result = Ok(());
+        for (entry, branch) in entries.into_iter().zip(branches) {
+            self.b.switch_to_block(entry);
+            match self.exec_block(branch) {
+                Ok(true) => {
+                    let request = self.b.alloc_bit(celox_design::PROCESS_DELAY_WIDTH, false);
+                    self.b
+                        .emit(SIRInstruction::Imm(request, SIRValue::new(0u64)));
+                    if let Err(error) =
+                        self.suspend_unit_with(celox_design::ProcessStatus::Done, request)
+                    {
+                        result = Err(error);
+                        break;
+                    }
+                    // The process ended: its resume point is never taken.
+                    self.b.seal_block(SIRTerminator::Return);
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    result = Err(error);
+                    break;
+                }
+            }
+        }
+        self.timing_call_boundary = timing_boundary;
+        self.loops = loops;
+        self.functions = functions;
+        self.overlay = overlay;
+        // A branch that failed leaves its block open; the unit is dropped.
+        if result.is_ok() {
+            self.b.switch_to_block(continuation);
+        }
+        result
+    }
+
+    /// `body` of `subroutine`, being lowered into a unit, with the variables
+    /// a fork in it shares in boxes (see [`SharedBox`]), which it pushes to
+    /// [`Ff::shared_boxes`]; the boxes of the formals are made here. A
+    /// variable is shared when a branch names it, other than one the branch
+    /// declares, and the body writes it besides its declaration: one that no
+    /// one writes after the fork reads the same in every copy. Returns the
+    /// number of boxes pushed.
+    pub(super) fn share_forked(
+        &mut self,
+        subroutine: &sv::ir::Subroutine,
+        mut body: Vec<sv::ir::Stmt>,
+    ) -> Result<(Vec<sv::ir::Stmt>, usize), sv::AnalyzerError> {
+        use super::super::procedural::expr_idents;
+        if self.frame.is_none() || self.kernel.is_some() {
+            return Ok((body, 0));
+        }
+        let mut branches: Vec<&Vec<sv::ir::Stmt>> = Vec::new();
+        for stmt in &body {
+            stmt.walk(&mut |stmt| {
+                if let sv::ir::Stmt::Fork {
+                    branches: forked, ..
+                } = stmt
+                {
+                    branches.extend(forked);
+                }
+            });
+        }
+        // The variables the body passes to a `ref` formal that a fork of
+        // the callee shares, which the callee's children reach through the
+        // place the call passes: the variable is shared as its own would be
+        // (IEEE 1800-2023 13.5.2).
+        let mut passed = HashSet::default();
+        for stmt in &body {
+            stmt.walk(&mut |stmt| {
+                let mut calls = Vec::new();
+                stmt_calls(stmt, &mut calls);
+                for (callee, args) in calls {
+                    let sv::ir::Callee::Subroutine(callee) = callee else {
+                        continue;
+                    };
+                    for (position, arg) in args.iter().enumerate() {
+                        // An element of an array reaches the array: the
+                        // variable is shared whatever part the call binds.
+                        if let Some(name) = arg.as_ref().and_then(actual_root)
+                            && forks_through_ref(self.m, &callee, position)
+                        {
+                            passed.insert(name.to_string());
+                        }
+                    }
+                }
+            });
+        }
+        if branches.is_empty() && passed.is_empty() {
+            return Ok((body, 0));
+        }
+        let lvalue_idents = |lvalue: &sv::ir::LValue, names: &mut HashSet<String>| {
+            names.insert(lvalue.name().to_string());
+            if let sv::ir::LValue::Select { name, msb, lsb, .. } = lvalue {
+                expr_idents(
+                    &sv::ir::Expr::Select {
+                        expr: Box::new(sv::ir::Expr::Ident(name.clone())),
+                        msb: msb.clone(),
+                        lsb: lsb.clone(),
+                        signed: false,
+                    },
+                    names,
+                );
+            }
+        };
+        let mut named = HashSet::default();
+        for branch in branches {
+            let mut declared = HashSet::default();
+            let mut names = HashSet::default();
+            for stmt in branch {
+                stmt.walk(&mut |stmt| {
+                    if let sv::ir::Stmt::Local { name, .. } = stmt {
+                        declared.insert(name.clone());
+                    }
+                });
+                let mut stmt = stmt.clone();
+                let mut targets = HashSet::default();
+                stmt.visit_mut(
+                    &mut |expr| expr_idents(expr, &mut names),
+                    &mut |lvalue| lvalue_idents(lvalue, &mut targets),
+                    &mut |_| {},
+                );
+                names.extend(targets);
+            }
+            named.extend(names.into_iter().filter(|name| !declared.contains(name)));
+        }
+        // What the body writes, but by declarations: by assignments, and
+        // through the arguments that the tasks and subroutines it calls write.
+        let written = self.m.written_names(&body);
+        let mut shared: Vec<&String> = automatic_names(subroutine)
+            .filter(|name| {
+                named.contains(*name) && written.contains(*name) || passed.contains(*name)
+            })
+            .collect();
+        shared.sort_unstable();
+        shared.dedup();
+        let (constants, parameter_types) = (self.m.constants, self.m.parameter_types);
+        let constant = |position: &sv::ir::ConstExpr| {
+            sv::typecheck::eval_const_expr_with_types(position, constants, parameter_types)
+        };
+        let mut boxes = Vec::new();
+        for name in shared {
+            let param = subroutine.params.iter().find(|param| param.name == *name);
+            if param.is_some_and(|param| param.direction.is_written())
+                || subroutine.return_var.as_ref() == Some(name)
+            {
+                return Err(unsupported(format!(
+                    "fork sharing the output `{name}` of `{}`",
+                    subroutine.name
+                )));
+            }
+            let id = self
+                .m
+                .id(name)
+                .ok_or_else(|| unsupported(format!("variable `{name}`")))?;
+            let variable = self.m.var(id);
+            if !variable.array_dims.is_empty() {
+                return Err(unsupported(format!(
+                    "fork sharing the unpacked array `{name}` of `{}`",
+                    subroutine.name
+                )));
+            }
+            let field = sv::ir::ObjectField {
+                offset: 0,
+                width: variable.width as u32,
+                signed: variable.signed,
+                handle: match variable.value_kind {
+                    celox_design::ValueKind::Bits => None,
+                    celox_design::ValueKind::StrRef => Some(sv::ir::HandleProperty::String),
+                    celox_design::ValueKind::ObjRef => Some(sv::ir::HandleProperty::Object),
+                },
+                four_state: variable.is_4state,
+                nullable: false,
+                real: variable.float.is_some(),
+                key: self.box_changes(),
+            };
+            let (handle_id, handle) =
+                self.m
+                    .temp("fork_box", celox_design::HANDLE_WIDTH, false, false);
+            self.m
+                .variables
+                .get_mut(&handle_id)
+                .expect("a box handle")
+                .value_kind = celox_design::ValueKind::ObjRef;
+            let alias = super::references::Alias {
+                formal: name.clone(),
+                source_name: name.clone(),
+                target: super::references::Target::Property {
+                    handle: handle.clone(),
+                    field,
+                },
+            };
+            body = alias.rewrite(body, &constant, &mut |field| self.part_scratch(field))?;
+            boxes.push((
+                param.is_some(),
+                SharedBox {
+                    var: name.clone(),
+                    handle,
+                    field,
+                },
+            ));
+        }
+        // A variable the body does not declare, a formal or a temporary the
+        // analyzer made, gets its box at the entry; one it declares, each
+        // time the declaration runs.
+        let mut declared = HashSet::default();
+        for stmt in &body {
+            stmt.walk(&mut |stmt| {
+                if let sv::ir::Stmt::Local { name, .. } = stmt {
+                    declared.insert(name.clone());
+                }
+            });
+        }
+        let count = boxes.len();
+        for (formal, shared) in boxes {
+            if formal || !declared.contains(&shared.var) {
+                self.open_box(&shared)?;
+            }
+            self.shared_boxes.push(shared);
+        }
+        Ok((body, count))
+    }
+
+    /// The property key of a new box's field, with a change count of its
+    /// own: a store into the box bumps it and a wait that reads the box
+    /// watches it, as for a watched class property (see `property_changes`),
+    /// so a child's write wakes the parent waiting on their shared variable.
+    /// The count is a module variable, which the unit and the units it
+    /// passes the box to write (see `ProcModule::box_changes`).
+    fn box_changes(&mut self) -> sv::ir::ChangeKey {
+        let (counter, _) = self.m.temp(
+            "box_changes",
+            super::super::ff::PROPERTY_CHANGES_WIDTH,
+            false,
+            false,
+        );
+        // Observed as #3284's counts are: not one of a process's hidden
+        // variables, whose changes nothing counts.
+        self.m
+            .variables
+            .get_mut(&counter)
+            .expect("a box count")
+            .hidden = false;
+        // The box's own namespace: no class property's count, and nothing
+        // that counts every property's stores, such as `randomize`.
+        self.m.box_changes.push(counter);
+        if let Some(resume) = self.resume_frame() {
+            resume.staging.insert(counter);
+        }
+        sv::ir::ChangeKey::Box(counter.0)
+    }
+
+    /// Make the box of `shared` (see [`SharedBox`]) holding the variable's
+    /// value. The box is no class object: its creation draws on no RNG.
+    pub(super) fn open_box(&mut self, shared: &SharedBox) -> Result<(), sv::AnalyzerError> {
+        use celox_heap::ops;
+        let size = self.constant64(u64::from(shared.field.storage()));
+        let object = self.heap_call(
+            ops::encode(ops::OBJECT_NEW, u64::from(celox_heap::BOX_CLASS)),
+            &[size],
+        );
+        if let Some(kind) = shared.field.handle {
+            let offset = self.constant64(0);
+            let kind = self.constant64(match kind {
+                sv::ir::HandleProperty::String => 0,
+                sv::ir::HandleProperty::Object => 1,
+            });
+            self.heap_call(ops::OBJECT_HANDLE, &[object, offset, kind]);
+        }
+        let handle = self.b.alloc_bit(celox_design::HANDLE_WIDTH, false);
+        self.b.emit(SIRInstruction::Slice(
+            handle,
+            object,
+            0,
+            celox_design::HANDLE_WIDTH,
+        ));
+        let handle_id = self
+            .m
+            .id(&shared.handle)
+            .ok_or_else(|| unsupported("a box handle"))?;
+        self.store(
+            handle_id,
+            SIROffset::Static(0),
+            celox_design::HANDLE_WIDTH,
+            handle,
+        );
+        self.exec(&sv::ir::Stmt::Eval(sv::ir::Expr::Call {
+            callee: sv::ir::Callee::Object(Box::new(sv::ir::ObjectOp::Store(shared.field))),
+            args: vec![
+                Some(sv::ir::Expr::Ident(shared.handle.clone())),
+                Some(sv::ir::Expr::Ident(shared.var.clone())),
+            ],
+            arg_order: Vec::new(),
+        }))?;
+        Ok(())
+    }
+
     /// Store variable `from` into variable `to`, of the same shape.
-    fn copy_variable(&mut self, from: SourceVarId, to: SourceVarId) {
+    pub(super) fn copy_variable(&mut self, from: SourceVarId, to: SourceVarId) {
         let variable = self.m.var(from);
         let width = variable.width;
         let value = if variable.is_4state && self.m.four_state {
@@ -973,27 +2068,7 @@ impl Ff<'_, '_> {
         }
         let top = match top {
             Some(top) => top,
-            None => {
-                let current = self.b.alloc_bit(32, false);
-                self.b.emit(SIRInstruction::Load(
-                    current,
-                    stable(base),
-                    SIROffset::Static(0),
-                    32,
-                ));
-                // The frame size is patched once known.
-                let size = self.b.alloc_bit(32, false);
-                self.b.emit(SIRInstruction::Imm(size, SIRValue::new(0u32)));
-                self.frame
-                    .as_mut()
-                    .expect("lowering a function unit")
-                    .size_patches
-                    .push((size, own));
-                let end = self.b.alloc_bit(32, false);
-                self.b
-                    .emit(SIRInstruction::Binary(end, current, BinaryOp::Add, size));
-                end
-            }
+            None => self.own_top(base, own),
         };
         let width = celox_frontend_core::process::PROCESS_RESUME_WIDTH;
         let point_value = self.b.alloc_bit(width, false);
@@ -1078,14 +2153,11 @@ impl Ff<'_, '_> {
                     "module state created in a function".to_string(),
                 ));
             }
-            if !variable.array_dims.is_empty() {
-                // The automatic arrays of the bodies the unit inlines too:
-                // they are live only within an activation of the unit.
-                if single && !created {
-                    in_place.insert(id);
-                    continue;
-                }
-                array_slot(variable)?;
+            // The automatic arrays of the bodies the unit inlines too: they
+            // are live only within an activation of the unit.
+            if !variable.array_dims.is_empty() && single && !created {
+                in_place.insert(id);
+                continue;
             }
             slots.push(self.slot_of(id));
         }
@@ -1171,6 +2243,7 @@ impl Ff<'_, '_> {
                         && !staging.contains(&addr.var_id)
                         && !in_place.contains(&addr.var_id)
                         && !referents.contains(&addr.var_id)
+                        && !self.m.box_changes.contains(&addr.var_id)
                     {
                         return Err(other("writes hidden module state"));
                     }
@@ -1343,8 +2416,15 @@ impl Ff<'_, '_> {
             });
             self.b.switch_to_block(suspend);
             let code = load(&mut self.b, status);
-            let word = load(&mut self.b, request);
+            let mut word = load(&mut self.b, request);
             let end = load(&mut self.b, top);
+            // A unit waits at a function wait site, and makes a nonblocking
+            // assignment at a function NBA site, which the process lists
+            // after the kernel's own sites.
+            let state = self.m.process_state(&subroutine.name);
+            if self.kernel.is_some() && (state.waits || state.nbas) {
+                word = self.function_site_word(code, word, state.waits, state.nbas);
+            }
             if self.kernel.is_some() {
                 let call_top = match self.call_top {
                     Some(id) => id,
@@ -1548,13 +2628,172 @@ impl Ff<'_, '_> {
     }
 }
 
-/// Check that unpacked array `variable` can be a slot of a frame: one of
-/// bits, which the collector need not scan element by element.
-fn array_slot(variable: &SvVariable) -> Result<(), Reason> {
-    if variable.value_kind != celox_design::ValueKind::Bits {
-        return Err(Reason::Other(
-            "unpacked array of handles in the frame".to_string(),
-        ));
+/// Whether formal `position` of subroutine `name` is a `ref` formal that a
+/// branch of a fork in its body writes (see `ProcModule::written_names`),
+/// also by passing it on to such a formal of another subroutine: the
+/// children of that fork, which run in copies of the frames, then write the
+/// caller's variable through it. A child that only reads it reads the
+/// caller's variable while the caller waits in the call: a `ref` formal
+/// cannot be named in a fork the call can return before (IEEE 1800-2023
+/// 9.3.2).
+fn forks_through_ref(m: &ProcModule<'_>, name: &str, position: usize) -> bool {
+    let mut writes = false;
+    let mut pending = vec![(name.to_string(), position)];
+    let mut visited = HashSet::default();
+    while let Some((name, position)) = pending.pop() {
+        if !visited.insert((name.clone(), position)) {
+            continue;
+        }
+        let Some(subroutine) = m.subroutine(&name) else {
+            continue;
+        };
+        let Some(param) = subroutine
+            .params
+            .get(position)
+            .filter(|param| param.direction.is_reference())
+        else {
+            continue;
+        };
+        let formal = &param.name;
+        for stmt in &subroutine.body {
+            stmt.walk(&mut |stmt| {
+                if let sv::ir::Stmt::Fork { branches, .. } = stmt {
+                    writes |= branches
+                        .iter()
+                        .any(|branch| m.written_names(branch).contains(formal));
+                }
+                let mut calls = Vec::new();
+                stmt_calls(stmt, &mut calls);
+                for (callee, args) in calls {
+                    let sv::ir::Callee::Subroutine(callee) = callee else {
+                        continue;
+                    };
+                    for (next, arg) in args.iter().enumerate() {
+                        if arg.as_ref().and_then(actual_root) == Some(formal.as_str()) {
+                            pending.push((callee.clone(), next));
+                        }
+                    }
+                }
+            });
+        }
+        if writes {
+            return true;
+        }
     }
-    Ok(())
+    false
+}
+
+/// The variable a `ref` actual names, whole or in part: an element or
+/// another select of it.
+fn actual_root(actual: &sv::ir::Expr) -> Option<&str> {
+    match actual {
+        sv::ir::Expr::Ident(name) => Some(name),
+        sv::ir::Expr::Select { expr, .. } => actual_root(expr),
+        _ => None,
+    }
+}
+
+fn binary(left: sv::ir::Expr, op: sv::ir::BinaryOp, right: sv::ir::Expr) -> sv::ir::Expr {
+    sv::ir::Expr::Binary {
+        left: Box::new(left),
+        op,
+        right: Box::new(right),
+    }
+}
+
+/// Whether the value of an event expression went from that of variable
+/// `before` to that of variable `after` by an occurrence of `edge` (IEEE
+/// 1800-2023 9.4.2): any change of the value, or an edge of its least
+/// significant bit by Table 9-2, where a value of x or z is neither 0
+/// nor 1.
+fn edge_occurred(before: &str, after: &str, edge: sv::ir::EventEdge) -> sv::ir::Expr {
+    use sv::ir::BinaryOp::{EqCase, LogicAnd, LogicOr, NeCase};
+    let ident = |name: &str| sv::ir::Expr::Ident(name.to_string());
+    let bit = |name: &str| sv::ir::Expr::Select {
+        expr: Box::new(ident(name)),
+        msb: sv::ir::ConstExpr::Literal("0".into()),
+        lsb: sv::ir::ConstExpr::Literal("0".into()),
+        signed: false,
+    };
+    let is =
+        |name: &str, op, value: &str| binary(bit(name), op, sv::ir::Expr::Literal(value.into()));
+    // From `from` to anything else, or from neither to `to`.
+    let toward = |from: &str, to: &str| {
+        binary(
+            binary(is(before, EqCase, from), LogicAnd, is(after, NeCase, from)),
+            LogicOr,
+            binary(
+                binary(is(before, NeCase, from), LogicAnd, is(before, NeCase, to)),
+                LogicAnd,
+                is(after, EqCase, to),
+            ),
+        )
+    };
+    match edge {
+        sv::ir::EventEdge::Any => binary(ident(before), NeCase, ident(after)),
+        sv::ir::EventEdge::Pos => toward("1'b0", "1'b1"),
+        sv::ir::EventEdge::Neg => toward("1'b1", "1'b0"),
+        sv::ir::EventEdge::Both => binary(toward("1'b0", "1'b1"), LogicOr, toward("1'b1", "1'b0")),
+    }
+}
+
+/// The most items whose `iff` reads only the frame that an event control
+/// of a unit selects among by a site for each set of them (see
+/// `Ff::unit_wait_event`), unless their conditions exclude each other.
+const MAX_SELECTED_ITEMS: usize = 4;
+
+/// Whether at most one of `conditions` can hold at a time: each compares
+/// the same expression for equality with a constant, the constants'
+/// values all distinct, as the conditions that the analyzer makes for the
+/// instances a virtual interface may denote are. `value` evaluates a
+/// constant; a condition whose constant has no value makes them not
+/// exclusive.
+fn exclusive_selection<'a>(
+    conditions: impl Iterator<Item = &'a sv::ir::Expr>,
+    value: impl Fn(&sv::ir::Expr) -> Option<i128>,
+) -> bool {
+    let mut compared: Option<&sv::ir::Expr> = None;
+    let mut values = HashSet::default();
+    for condition in conditions {
+        let sv::ir::Expr::Binary {
+            left,
+            op: sv::ir::BinaryOp::Eq,
+            right,
+        } = condition
+        else {
+            return false;
+        };
+        let Some(constant) = value(right) else {
+            return false;
+        };
+        if compared.is_some_and(|compared| compared != &**left) || !values.insert(constant) {
+            return false;
+        }
+        compared = Some(left);
+    }
+    true
+}
+
+/// Whether the `iff` condition `iff` of an event item holds: a known
+/// nonzero value, x and z not (IEEE 1800-2023 9.4.2.3), as one bit that a
+/// kernel's gate and a unit's selection and samples alike take.
+pub(super) fn iff_truth(iff: sv::ir::Expr) -> sv::ir::Expr {
+    let not = |expr| sv::ir::Expr::Unary {
+        op: sv::ir::UnaryOp::LogicNot,
+        expr: Box::new(expr),
+    };
+    binary(
+        not(not(iff)),
+        sv::ir::BinaryOp::EqCase,
+        sv::ir::Expr::Literal("1'b1".into()),
+    )
+}
+
+/// [`edge_occurred`] for the frontend's other event lowerings.
+pub(super) fn edge_occurred_expr(
+    before: &str,
+    after: &str,
+    edge: sv::ir::EventEdge,
+) -> sv::ir::Expr {
+    edge_occurred(before, after, edge)
 }

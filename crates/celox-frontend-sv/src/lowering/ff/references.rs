@@ -101,11 +101,13 @@ impl Alias {
     }
 
     /// `body` with the formal replaced by what it refers to. `constant` is
-    /// the value of a constant position expression.
+    /// the value of a constant position expression; `scratch` makes a
+    /// variable of a property's type, for writes to part of a property.
     pub fn rewrite(
         &self,
         body: Vec<Stmt>,
         constant: &dyn Fn(&ConstExpr) -> Option<i128>,
+        scratch: &mut dyn FnMut(&sv::ir::ObjectField) -> String,
     ) -> Result<Vec<Stmt>, sv::AnalyzerError> {
         let body = self.constant_positions(body, constant)?;
         let unsupported_write = || {
@@ -115,6 +117,7 @@ impl Alias {
             ))
         };
         let mut error = None;
+        let mut value = None;
         let mut body = body;
         for stmt in &mut body {
             stmt.walk_mut(&mut |stmt| match stmt {
@@ -125,6 +128,43 @@ impl Alias {
                 } if *name == self.formal => {
                     let value = std::mem::replace(rhs, Expr::Literal(String::new()));
                     *stmt = self.store(value, *nonblocking);
+                }
+                // A write to part of a property, as of a class property
+                // (IEEE 1800-2023 8.4): the property's value is loaded into
+                // a variable of its type, the variable's part written, and
+                // the variable stored back. The store is the whole write of
+                // the formal this walk then rewrites.
+                Stmt::Assign {
+                    lhs, nonblocking, ..
+                } if lhs.name() == self.formal
+                    && matches!(self.target, Target::Property { .. }) =>
+                {
+                    if *nonblocking {
+                        error.get_or_insert_with(unsupported_write);
+                        return;
+                    }
+                    match self.part_write(stmt, &mut value, scratch) {
+                        Some(write) => *stmt = write,
+                        None => {
+                            error.get_or_insert_with(unsupported_write);
+                        }
+                    }
+                }
+                Stmt::AssignConcat {
+                    parts, nonblocking, ..
+                } if parts.iter().any(|part| part.name() == self.formal)
+                    && matches!(self.target, Target::Property { .. }) =>
+                {
+                    if *nonblocking {
+                        error.get_or_insert_with(unsupported_write);
+                        return;
+                    }
+                    match self.part_write(stmt, &mut value, scratch) {
+                        Some(write) => *stmt = write,
+                        None => {
+                            error.get_or_insert_with(unsupported_write);
+                        }
+                    }
                 }
                 Stmt::Assign { lhs, .. } if lhs.name() == self.formal => {
                     let guard = match lhs {
@@ -183,6 +223,55 @@ impl Alias {
                 })
             })
             .collect())
+    }
+
+    /// `write`, an assignment to part of a property formal, as a load of
+    /// the property into `value` (made by `scratch` on first use), the
+    /// assignment to the same part of `value`, and a whole write of the
+    /// formal from `value`. `None` for a property no bits variable holds:
+    /// a string, a handle or a real.
+    fn part_write(
+        &self,
+        write: &mut Stmt,
+        value: &mut Option<String>,
+        scratch: &mut dyn FnMut(&sv::ir::ObjectField) -> String,
+    ) -> Option<Stmt> {
+        let Target::Property { field, .. } = &self.target else {
+            return None;
+        };
+        if field.handle.is_some() || field.real {
+            return None;
+        }
+        let value = value.get_or_insert_with(|| scratch(field)).clone();
+        let mut write = std::mem::replace(write, Stmt::Break);
+        let rename = |lvalue: &mut LValue| match lvalue {
+            LValue::Ident(name) | LValue::Select { name, .. } if *name == self.formal => {
+                *name = value.clone();
+            }
+            _ => {}
+        };
+        match &mut write {
+            Stmt::Assign { lhs, .. } => rename(lhs),
+            Stmt::AssignConcat { parts, .. } => parts.iter_mut().for_each(rename),
+            _ => unreachable!("a write to part of the formal"),
+        }
+        Some(Stmt::If {
+            condition: Expr::Literal("1'b1".into()),
+            then_body: vec![
+                Stmt::Assign {
+                    lhs: LValue::Ident(value.clone()),
+                    rhs: Expr::Ident(self.formal.clone()),
+                    nonblocking: false,
+                },
+                write,
+                Stmt::Assign {
+                    lhs: LValue::Ident(self.formal.clone()),
+                    rhs: Expr::Ident(value),
+                    nonblocking: false,
+                },
+            ],
+            else_body: Vec::new(),
+        })
     }
 
     /// `body` with the constant positions of every select of an element

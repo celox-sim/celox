@@ -293,8 +293,11 @@ impl<B: SimBackend> Simulator<B> {
             old.flush()?;
         }
         self.vcd_writer = None;
-        let mut writer = crate::VcdWriter::new_with_time_precision(
+        // Extension selects the format: `$dumpfile("waves.fst")` records FST
+        // (the Icarus Verilog convention), everything else standard VCD.
+        let mut writer = crate::WaveformWriter::new_with_time_precision(
             path,
+            crate::WaveformFormat::from_path(path),
             &self.sv_vcd.selections,
             self.program.design.time_precision,
         )?;

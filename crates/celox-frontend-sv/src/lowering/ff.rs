@@ -108,6 +108,16 @@ pub(super) struct Ff<'p, 'a> {
     /// default would bind that default again, forever, so it is a
     /// recursive call, which inlining cannot expand.
     binding_defaults: Vec<String>,
+    /// The variables of the bodies being lowered into a unit that a fork
+    /// shares with its parent and siblings, each in a box (see
+    /// [`calls::SharedBox`]), innermost body last.
+    shared_boxes: Vec<calls::SharedBox>,
+    /// The registers of the kernel holding the number of its own wait
+    /// sites, which the sites of the units it calls follow (see
+    /// `Ff::function_wait_word`), set when the kernel is finished.
+    wait_offset_patches: Vec<RegisterId>,
+    /// Likewise the number of its own NBA sites.
+    nba_offset_patches: Vec<RegisterId>,
     frame_locals: Vec<SourceVarId>,
     postponed_locals: HashSet<SourceVarId>,
     event_probes: Vec<celox_design::ProcessEventProbe<SourceVarId>>,
@@ -223,6 +233,9 @@ impl<'p, 'a> Ff<'p, 'a> {
             process_control: false,
             process_predicate: false,
             binding_defaults: Vec::new(),
+            shared_boxes: Vec::new(),
+            wait_offset_patches: Vec::new(),
+            nba_offset_patches: Vec::new(),
             frame_locals: Vec::new(),
             postponed_locals: HashSet::default(),
             event_probes: Vec::new(),
@@ -1271,7 +1284,14 @@ impl<'p, 'a> Ff<'p, 'a> {
             let else_cond = slt_or(&mut arena, &mut consts, not_truth, unknown)?;
             let then_cond = self.lower_slt(&arena, then_cond)?;
             let else_cond = self.lower_slt(&arena, else_cond)?;
+            // Whether the else arm runs is decided before the then arm runs,
+            // and the then arm's calls may suspend the process or unit and
+            // resume it inside the arm. It is kept in a variable (a frame
+            // slot in a unit), as no register lives across a resumption.
+            let (decided, decided_name) = self.m.temp("else_runs", 1, false, false);
+            self.store(decided, SIROffset::Static(0), 1, else_cond);
             let then_result = self.when(then_cond, |this| then_f(this, state))?;
+            let (else_cond, _) = self.eval_truth(&sv::ir::Expr::Ident(decided_name))?;
             let else_result = self.when(else_cond, |this| else_f(this, state))?;
             return Ok((then_result, else_result));
         }
@@ -1465,6 +1485,21 @@ impl<'p, 'a> Ff<'p, 'a> {
             *msb = self.hoist_const(msb, &mut calls)?;
         }
         Ok(lvalue)
+    }
+
+    /// A variable of the type of property `field`, through which an
+    /// assignment to part of a property formal writes (see
+    /// [`references::Alias::rewrite`]). One that a unit's lowering makes is
+    /// a slot of the unit's frame, so each activation has its own.
+    fn part_scratch(&mut self, field: &sv::ir::ObjectField) -> String {
+        self.m
+            .temp(
+                "ref_part",
+                field.width as usize,
+                field.signed,
+                field.four_state,
+            )
+            .1
     }
 
     /// A copy of a position for [`Self::freeze_const`].
@@ -4044,7 +4079,10 @@ impl<'p, 'a> Ff<'p, 'a> {
                 | sv::ir::Stmt::WaitImplicit { .. }
                 | sv::ir::Stmt::Wait(_)
         ) && (self.kernel.is_none()
-            && !(matches!(stmt, sv::ir::Stmt::Delay { .. }) && self.can_request())
+            && !(matches!(
+                stmt,
+                sv::ir::Stmt::Delay { .. } | sv::ir::Stmt::WaitEvent(_) | sv::ir::Stmt::Wait(_)
+            ) && self.can_request())
             || self
                 .active_calls
                 .iter()
@@ -4097,11 +4135,12 @@ impl<'p, 'a> Ff<'p, 'a> {
                 }
                 Ok(true)
             }
+            // A unit stages the update at a function NBA site.
             sv::ir::Stmt::Assign {
                 lhs,
                 rhs,
                 nonblocking: true,
-            } if self.kernel.is_some() => {
+            } if self.kernel.is_some() || self.can_suspend_unit() => {
                 self.nonblocking(std::slice::from_ref(lhs), rhs)?;
                 Ok(true)
             }
@@ -4109,7 +4148,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 parts,
                 rhs,
                 nonblocking: true,
-            } if self.kernel.is_some() => {
+            } if self.kernel.is_some() || self.can_suspend_unit() => {
                 self.nonblocking(parts, rhs)?;
                 Ok(true)
             }
@@ -4148,6 +4187,21 @@ impl<'p, 'a> Ff<'p, 'a> {
                     .map_err(kernel_error)?;
                 Ok(true)
             }
+            sv::ir::Stmt::WaitFork | sv::ir::Stmt::DisableFork
+                if self.kernel.is_none() && self.can_suspend_unit() =>
+            {
+                // A unit acts on the children of the process it runs in.
+                let status = if matches!(stmt, sv::ir::Stmt::WaitFork) {
+                    celox_design::ProcessStatus::WaitFork
+                } else {
+                    celox_design::ProcessStatus::DisableFork
+                };
+                let request = self.b.alloc_bit(PROCESS_DELAY_WIDTH, false);
+                self.b
+                    .emit(SIRInstruction::Imm(request, SIRValue::new(0u64)));
+                self.suspend_unit_with(status, request)?;
+                Ok(true)
+            }
             sv::ir::Stmt::WaitFork | sv::ir::Stmt::DisableFork => {
                 if self.kernel.is_none() {
                     return if matches!(stmt, sv::ir::Stmt::DisableFork) {
@@ -4163,6 +4217,12 @@ impl<'p, 'a> Ff<'p, 'a> {
                     self.with_kernel(ProcessKernelBuilder::disable_fork)
                         .map_err(kernel_error)?;
                 }
+                Ok(true)
+            }
+            sv::ir::Stmt::Fork { join, branches }
+                if self.kernel.is_none() && self.can_suspend_unit() =>
+            {
+                self.fork_in_unit(*join, branches)?;
                 Ok(true)
             }
             sv::ir::Stmt::Fork { join, branches } => {
@@ -4212,6 +4272,17 @@ impl<'p, 'a> Ff<'p, 'a> {
                 match init {
                     Some(init) => self.assign(&sv::ir::LValue::Ident(name.clone()), init)?,
                     None => self.init_default(id),
+                }
+                // Each execution of the declaration makes a new variable,
+                // in a new box when a fork shares it.
+                if let Some(shared) = self
+                    .shared_boxes
+                    .iter()
+                    .rev()
+                    .find(|shared| shared.var == *name)
+                    .cloned()
+                {
+                    self.open_box(&shared)?;
                 }
                 Ok(true)
             }
@@ -5036,7 +5107,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         args: &[Option<sv::ir::Expr>],
         arg_order: &[usize],
     ) -> Result<Option<String>, sv::AnalyzerError> {
-        let subroutine = self
+        let mut subroutine = self
             .m
             .subroutine(name)
             .cloned()
@@ -5447,18 +5518,22 @@ impl<'p, 'a> Ff<'p, 'a> {
                     return_var: subroutine.return_var.clone(),
                     loop_depth: self.loops.len(),
                 });
-                let mut body = subroutine.body;
+                let mut body = std::mem::take(&mut subroutine.body);
                 let (constants, parameter_types) = (self.m.constants, self.m.parameter_types);
                 let constant = |position: &sv::ir::ConstExpr| {
                     sv::typecheck::eval_const_expr_with_types(position, constants, parameter_types)
                 };
                 self.split_property_concats(&mut body, &aliases);
                 for alias in &aliases {
-                    body = alias.rewrite(body, &constant)?;
+                    body = alias.rewrite(body, &constant, &mut |field| self.part_scratch(field))?;
                 }
+                // A fork of a body inlined into a unit shares variables as
+                // the unit's own body does.
+                let (body, shared) = self.share_forked(&subroutine, body)?;
                 let built = self.b.built();
                 self.active_calls.push(name.to_string());
                 let falls = self.exec_block(&body);
+                self.shared_boxes.truncate(self.shared_boxes.len() - shared);
                 self.active_calls.pop();
                 let after = self.b.built();
                 self.m.expanded_call(
@@ -7161,12 +7236,33 @@ impl Ff<'_, '_> {
         let slots = kernel.slots();
         let resume_count = kernel.resume_count();
         let mut unit = kernel.build();
+        if !self.wait_offset_patches.is_empty() || !self.nba_offset_patches.is_empty() {
+            let (waits, nbas) = (self.wait_sites.len() as u64, self.nba_sites.len() as u64);
+            for block in unit.blocks.values_mut() {
+                for instruction in &mut block.instructions {
+                    if let SIRInstruction::Imm(dst, value) = instruction {
+                        if self.wait_offset_patches.contains(dst) {
+                            *value = SIRValue::new(waits);
+                        } else if self.nba_offset_patches.contains(dst) {
+                            *value = SIRValue::new(nbas);
+                        }
+                    }
+                }
+            }
+        }
         prune_unreachable_blocks(&mut unit);
         let frame = self.forked.then(|| {
             let mut private = self.m.created[first_created..].to_vec();
             private.extend([slots.resume, slots.status, slots.delay]);
-            private
-                .retain(|id| !self.frame_locals.contains(id) && Some(*id) != self.m.id(TIME_SLOT));
+            // The change counts of boxes are the module's, which every
+            // activation bumps and every waiter watches; so is the gate that
+            // holds 1, which the writes of the activations judge.
+            private.retain(|id| {
+                !self.frame_locals.contains(id)
+                    && Some(*id) != self.m.id(TIME_SLOT)
+                    && Some(*id) != self.m.id(super::procedural::HELD_GATE)
+                    && !self.m.box_changes.contains(id)
+            });
             celox_design::ProcessFrame {
                 resume_count,
                 private,
@@ -7277,6 +7373,14 @@ impl Ff<'_, '_> {
                 self.m
                     .temp("nba_part", width, false, self.m.var(id).is_4state);
             self.assign(&sv::ir::LValue::Ident(staged_name), &value)?;
+            // A unit stages the update in the objects of one of the
+            // module's function NBA sites, which the runtime reads as the
+            // unit suspends, as the kernel's own sites without a pending
+            // flag are read (see `ProcModule::function_nba_sites`).
+            if self.kernel.is_none() {
+                self.unit_nonblocking(delay, id, lsb, width, staged, position)?;
+                continue;
+            }
             // The staged value and position have objects of their own: a
             // value still staged from earlier in the time slot is queued
             // before they are replaced. Assembly keeps the staged or the
@@ -7773,6 +7877,12 @@ impl Ff<'_, '_> {
     /// assignment reads and stores the expression's value, which the event
     /// control samples as it begins.
     fn wait_event(&mut self, items: &[sv::ir::EventItem]) -> Result<(), sv::AnalyzerError> {
+        if self.property_event(items)? {
+            return Ok(());
+        }
+        if self.kernel.is_none() && self.can_suspend_unit() {
+            return self.unit_wait_event(items);
+        }
         let mut terms = Vec::new();
         let mut gates = Vec::new();
         let mut samples = Vec::new();
@@ -7882,6 +7992,26 @@ impl Ff<'_, '_> {
         self.suspend_on(terms, gates, samples)
     }
 
+    /// Reject an edge of event expression `expr` when it is real: an edge
+    /// is of the least significant bit of an integral value (IEEE 1800-2023
+    /// 9.4.2).
+    pub(super) fn check_event_edge(
+        &self,
+        edge: sv::ir::EventEdge,
+        expr: &sv::ir::Expr,
+    ) -> Result<(), sv::AnalyzerError> {
+        let edge = match edge {
+            sv::ir::EventEdge::Any => return Ok(()),
+            sv::ir::EventEdge::Pos => "posedge",
+            sv::ir::EventEdge::Neg => "negedge",
+            sv::ir::EventEdge::Both => "edge",
+        };
+        if self.m.expr_float_precision(expr).is_some() {
+            return Err(sv::AnalyzerError::RealEdgeEvent { edge });
+        }
+        Ok(())
+    }
+
     /// The counter terms of `items`, their `iff` gates, and the samples the
     /// process takes of their expressions before it suspends.
     fn event_terms(
@@ -7893,17 +8023,7 @@ impl Ff<'_, '_> {
     ) -> Result<(), sv::AnalyzerError> {
         for item in items {
             let expr = self.propagate(&item.expr);
-            let edge = match item.edge {
-                sv::ir::EventEdge::Any => None,
-                sv::ir::EventEdge::Pos => Some("posedge"),
-                sv::ir::EventEdge::Neg => Some("negedge"),
-                sv::ir::EventEdge::Both => Some("edge"),
-            };
-            if let Some(edge) = edge
-                && self.m.expr_float_precision(&expr).is_some()
-            {
-                return Err(sv::AnalyzerError::RealEdgeEvent { edge });
-            }
+            self.check_event_edge(item.edge, &expr)?;
             let mut variable = false;
             let id = match &expr {
                 sv::ir::Expr::Ident(name) => match self.m.id(name) {
@@ -7959,13 +8079,22 @@ impl Ff<'_, '_> {
         mut gates: Vec<Option<WaitGate<SourceVarId>>>,
         samples: Vec<(String, sv::ir::Expr)>,
     ) -> Result<(), sv::AnalyzerError> {
-        for (target, value) in samples {
-            self.assign(&sv::ir::LValue::Ident(target), &value)?;
+        if self.kernel.is_none() {
+            self.unit_samples(samples)?;
+        } else {
+            for (target, value) in samples {
+                self.assign(&sv::ir::LValue::Ident(target), &value)?;
+            }
         }
         if gates.iter().all(Option::is_none) {
             gates.clear();
         }
         let site = self.wait_site(terms, gates);
+        if self.kernel.is_none() {
+            self.unit_wait(u64::from(site))?;
+            self.unit_flush_point();
+            return Ok(());
+        }
         self.with_kernel(|kernel| -> Result<(), ProcessKernelError> {
             kernel.suspend_wait(site)?;
             let woken = kernel.builder().alloc_bit(1, false);
@@ -7998,17 +8127,16 @@ impl Ff<'_, '_> {
         {
             return Ok((id, true));
         }
-        let not = |expr| sv::ir::Expr::Unary {
-            op: sv::ir::UnaryOp::LogicNot,
-            expr: Box::new(expr),
-        };
-        Ok((self.event_expression(&not(not(iff)), samples)?, false))
+        Ok((
+            self.event_expression(&calls::iff_truth(iff), samples)?,
+            false,
+        ))
     }
 
     /// The counters of a new gated term ([`GateCounters`]): `$event[k]`
     /// counts the occurrences while the gate holds, `$event[k].all` all
     /// of them.
-    fn gate_counters(&mut self) -> GateCounters<SourceVarId> {
+    pub(super) fn gate_counters(&mut self) -> GateCounters<SourceVarId> {
         let index = self.m.next_event_index();
         let counter = SvVariable {
             float: None,
@@ -8046,11 +8174,7 @@ impl Ff<'_, '_> {
         expr: &sv::ir::Expr,
         samples: &mut Vec<(String, sv::ir::Expr)>,
     ) -> Result<SourceVarId, sv::AnalyzerError> {
-        if let Some(name) = impure_call(self.m, expr) {
-            return Err(unsupported(format!(
-                "impure call `{name}` in an event expression"
-            )));
-        }
+        self.check_event_purity(expr)?;
         // A real expression keeps its payload bits, so a change too small
         // to survive an integer conversion still wakes the process.
         let float = self.m.expr_float_precision(expr);
@@ -8140,6 +8264,18 @@ impl Ff<'_, '_> {
             }],
         ));
         Ok(event)
+    }
+
+    /// An event expression is evaluated whenever the host looks for its
+    /// occurrences, as often as it likes: one that calls something with an
+    /// effect is unsupported, in a kernel and in a unit alike.
+    pub(super) fn check_event_purity(&self, expr: &sv::ir::Expr) -> Result<(), sv::AnalyzerError> {
+        match impure_call(self.m, expr) {
+            Some(name) => Err(unsupported(format!(
+                "impure call `{name}` in an event expression"
+            ))),
+            None => Ok(()),
+        }
     }
 
     /// An activation-local expression cannot use a module-wide continuous
@@ -8330,7 +8466,7 @@ impl Ff<'_, '_> {
 
     /// Whether `id` is a static formal of a task, which keeps one
     /// module-wide address for every call.
-    fn is_static_task_formal(&self, id: SourceVarId) -> bool {
+    pub(super) fn is_static_task_formal(&self, id: SourceVarId) -> bool {
         self.m.subroutines.values().any(|subroutine| {
             subroutine.is_task
                 && subroutine.params.iter().any(|param| {
@@ -8344,6 +8480,105 @@ impl Ff<'_, '_> {
     /// if the condition holds, and otherwise checks it again whenever a
     /// variable it reads changes.
     fn wait_level(&mut self, condition: &sv::ir::Expr) -> Result<(), sv::AnalyzerError> {
+        let ids = self.level_terms(condition)?;
+        let site = self.wait_site(
+            ids.into_iter()
+                .map(|id| (id, CounterKind::Changes))
+                .collect(),
+            Vec::new(),
+        );
+        // A predicate that reads the status of a process or the trigger
+        // state of an event observes them, which it tells the host, and its
+        // site is a level wait's, which those wake.
+        let observe = if self.kernel.is_some() {
+            self.process_control
+        } else {
+            reads_process_state(self.m, condition)
+        };
+        // Keep the kernel available while evaluating the predicate: functions
+        // may perform synchronous process control such as disable fork.
+        let direct = std::mem::replace(&mut self.direct, true);
+        let predicate = std::mem::replace(&mut self.process_predicate, true);
+        let result = (|| {
+            if observe {
+                self.process_call(celox_design::ProcessOp::Observe, &[])?;
+            }
+            let (holds, _) = self.eval_truth(condition)?;
+            let join = self.b.new_block();
+            let wait = self.b.new_block();
+            self.b.seal_block(SIRTerminator::Branch {
+                cond: holds,
+                true_block: (join, Vec::new()),
+                false_block: (wait, Vec::new()),
+            });
+            self.b.switch_to_block(wait);
+            let point = self.suspend_at(site, observe)?;
+            if observe {
+                self.process_call(celox_design::ProcessOp::Observe, &[])?;
+            }
+            let (holds, _) = self.eval_truth(condition)?;
+            self.wake_at(point, holds)?;
+            self.b.seal_block(SIRTerminator::Jump(join, Vec::new()));
+            self.b.switch_to_block(join);
+            Ok(())
+        })();
+        self.direct = direct;
+        self.process_predicate = predicate;
+        result
+    }
+
+    /// Suspend the process at wait site `site` of the kernel or the unit
+    /// being lowered, a level wait's if `level` (see
+    /// [`celox_design::PROCESS_LEVEL_WAIT`]). The open block afterwards is
+    /// the resume point, which [`Self::wake_at`] ends.
+    fn suspend_at(&mut self, site: u32, level: bool) -> Result<WaitPoint, sv::AnalyzerError> {
+        if self.kernel.is_none() {
+            let word = u64::from(site)
+                | if level {
+                    celox_design::PROCESS_LEVEL_WAIT
+                } else {
+                    0
+                };
+            let point = self.unit_wait(word)?;
+            return Ok(WaitPoint::Unit { point, word });
+        }
+        self.with_kernel(|kernel| {
+            if level {
+                kernel.suspend_level_wait(site)
+            } else {
+                kernel.suspend_wait(site)
+            }
+        })
+        .map_err(kernel_error)?;
+        Ok(WaitPoint::Kernel)
+    }
+
+    /// At the resume point `point` of a wait: continue when `woken`, a
+    /// one-bit register, holds, at a flush point of the process's deferred
+    /// assertions (IEEE 1800-2023 16.4.2); otherwise wait at the same site
+    /// again. The continuation is open afterwards.
+    fn wake_at(&mut self, point: WaitPoint, woken: RegisterId) -> Result<(), sv::AnalyzerError> {
+        match point {
+            WaitPoint::Kernel => {
+                self.with_kernel(|kernel| kernel.wake_if(woken));
+                Ok(())
+            }
+            WaitPoint::Unit { point, word } => {
+                self.unit_wake_if(woken, point, word)?;
+                self.unit_flush_point();
+                Ok(())
+            }
+        }
+    }
+
+    /// The variables whose changes may change `condition`: the module
+    /// variables it reads, also through the functions it calls, and the
+    /// change counts of the class properties it reads (see
+    /// `property_changes`), which a store of the property bumps.
+    fn level_terms(
+        &mut self,
+        condition: &sv::ir::Expr,
+    ) -> Result<Vec<SourceVarId>, sv::AnalyzerError> {
         let names = level_reads(self.m, condition);
         // Static task formals can change when another caller copies arguments
         // in, but hidden local storage has no observable change counters yet.
@@ -8382,9 +8617,7 @@ impl Ff<'_, '_> {
         }
         for op in reads {
             match &op {
-                sv::ir::ObjectOp::Load(field)
-                    if let Some(id) = self.m.id(&property_changes(field.key)) =>
-                {
+                sv::ir::ObjectOp::Load(field) if let Some(id) = self.m.change_counter(field) => {
                     changes.push(id);
                 }
                 _ => return Err(unsupported(format!("{op} in a wait condition"))),
@@ -8398,50 +8631,7 @@ impl Ff<'_, '_> {
             .collect();
         ids.sort_unstable();
         ids.dedup();
-        let site = self.wait_site(
-            ids.into_iter()
-                .map(|id| (id, CounterKind::Changes))
-                .collect(),
-            Vec::new(),
-        );
-        // Keep the kernel available while evaluating the predicate: functions
-        // may perform synchronous process control such as disable fork.
-        let direct = std::mem::replace(&mut self.direct, true);
-        let predicate = std::mem::replace(&mut self.process_predicate, true);
-        let result = (|| {
-            if self.process_control {
-                self.process_call(celox_design::ProcessOp::Observe, &[])?;
-            }
-            let (holds, _) = self.eval_truth(condition)?;
-            let join = self.b.new_block();
-            let wait = self.b.new_block();
-            self.b.seal_block(SIRTerminator::Branch {
-                cond: holds,
-                true_block: (join, Vec::new()),
-                false_block: (wait, Vec::new()),
-            });
-            self.b.switch_to_block(wait);
-            let process_control = self.process_control;
-            self.with_kernel(|kernel| {
-                if process_control {
-                    kernel.suspend_level_wait(site)
-                } else {
-                    kernel.suspend_wait(site)
-                }
-            })
-            .map_err(kernel_error)?;
-            if self.process_control {
-                self.process_call(celox_design::ProcessOp::Observe, &[])?;
-            }
-            let (holds, _) = self.eval_truth(condition)?;
-            self.with_kernel(|kernel| kernel.wake_if(holds));
-            self.b.seal_block(SIRTerminator::Jump(join, Vec::new()));
-            self.b.switch_to_block(join);
-            Ok(())
-        })();
-        self.direct = direct;
-        self.process_predicate = predicate;
-        result
+        Ok(ids)
     }
 
     /// Declare a wait site of the process with the given terms and return
@@ -8451,6 +8641,17 @@ impl Ff<'_, '_> {
         terms: Vec<(SourceVarId, CounterKind)>,
         gates: Vec<Option<WaitGate<SourceVarId>>>,
     ) -> u32 {
+        // A unit's site is one of the module's function sites, which the
+        // kernels that call it list after their own.
+        if self.kernel.is_none() {
+            let index = self.m.function_wait_sites.len() as u32;
+            self.m.function_wait_sites.push(WaitSite {
+                process: 0,
+                terms,
+                gates,
+            });
+            return index;
+        }
         let index = self.wait_sites.len() as u32;
         self.wait_sites.push(WaitSite {
             process: self.process,
@@ -8715,12 +8916,15 @@ pub(crate) fn watched_properties(
             .find(|subroutine| subroutine.name == name)
     };
     let mut conditions = Vec::new();
+    let mut events = Vec::new();
     let mut visit = |stmts: &[sv::ir::Stmt]| {
         for stmt in stmts {
-            stmt.walk(&mut |stmt| {
-                if let sv::ir::Stmt::Wait(condition) = stmt {
-                    conditions.push(condition.clone());
+            stmt.walk(&mut |stmt| match stmt {
+                sv::ir::Stmt::Wait(condition) => conditions.push(condition.clone()),
+                sv::ir::Stmt::WaitEvent(items) => {
+                    events.extend(items.iter().map(|item| item.expr.clone()));
                 }
+                _ => {}
             });
         }
     };
@@ -8739,9 +8943,20 @@ pub(crate) fn watched_properties(
     for condition in &conditions {
         for op in heap_reads(subroutine, condition) {
             if let sv::ir::ObjectOp::Load(field) = op
-                && field.key != 0
+                && let sv::ir::ChangeKey::Property(key) = field.key
             {
-                keys.insert(field.key);
+                keys.insert(key);
+            }
+        }
+    }
+    // An event control on a property waits for the stores of its key (see
+    // `Ff::property_event`); the heap counts the occurrences in each object.
+    for expr in &events {
+        for op in heap_reads(subroutine, expr) {
+            if let sv::ir::ObjectOp::Load(field) = op
+                && let sv::ir::ChangeKey::Property(key) = field.key
+            {
+                keys.insert(key);
             }
         }
     }
@@ -9586,4 +9801,43 @@ struct SystemPlace {
     load: sv::ir::Expr,
     store: sv::ir::Expr,
     guards: Vec<sv::ir::Expr>,
+}
+
+/// Where a wait of a kernel or a unit resumes (see `Ff::suspend_at`).
+#[derive(Clone, Copy)]
+enum WaitPoint {
+    Kernel,
+    /// The unit's resume point and the delay word of its wait.
+    Unit {
+        point: u32,
+        word: u64,
+    },
+}
+
+/// Whether `condition` reads, also through the subroutines it calls, the
+/// state of a process or of an event that only the host knows, such as a
+/// process's `status()` or an event's `triggered` (IEEE 1800-2023 9.7,
+/// 15.5.3).
+fn reads_process_state(pm: &ProcModule<'_>, condition: &sv::ir::Expr) -> bool {
+    let mut calls = Vec::new();
+    collect_calls(condition, &mut calls);
+    let mut visited = HashSet::default();
+    while let Some((callee, args)) = calls.pop() {
+        match callee {
+            sv::ir::Callee::System(sv::ir::SystemFunction::Process(_)) => return true,
+            sv::ir::Callee::Subroutine(name) => {
+                let Some(subroutine) = pm.subroutine(&name) else {
+                    continue;
+                };
+                default_calls(subroutine, &args, &mut calls, &mut Default::default());
+                if visited.insert(name) {
+                    for stmt in &subroutine.body {
+                        stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }

@@ -6,6 +6,11 @@ impl Ff<'_, '_> {
         &mut self,
         arg: &sv::ir::SystemTaskArg<sv::ir::Expr>,
     ) -> Result<HostRequestValue<SourceVarId>, sv::AnalyzerError> {
+        // A string's value is its handle, which the host reads as the
+        // string's text: a path, or what a format prints (IEEE 1800-2023
+        // 21.3.1, 21.2.1.7).
+        let handle =
+            matches!(arg, sv::ir::SystemTaskArg::Expr(expr) if self.m.expr_is_string(expr));
         let (reg, signed, is_string, float_precision) = match arg {
             sv::ir::SystemTaskArg::Expr(expr) => {
                 let expr = if self.m.calls(expr) {
@@ -35,9 +40,15 @@ impl Ff<'_, '_> {
         let width = self.b.register(&reg).width();
         let four_state = matches!(self.b.register(&reg), celox_sir::RegisterType::Logic { .. });
         let (id, _) = self.m.temp("file_arg", width, signed, four_state);
+        let value_kind = if handle {
+            celox_design::ValueKind::StrRef
+        } else {
+            celox_design::ValueKind::Bits
+        };
+        self.m.variables.get_mut(&id).unwrap().value_kind = value_kind;
         self.store(id, SIROffset::Static(0), width, reg);
         Ok(HostRequestValue {
-            value_kind: celox_design::ValueKind::Bits,
+            value_kind,
             id,
             width,
             signed,

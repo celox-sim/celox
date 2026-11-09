@@ -446,11 +446,11 @@ pub(in crate::ast) fn bind_native(
                 }
                 // A typed pattern of a member must name the member's
                 // structure type (6.22.3).
-                if pattern
-                    && shape.unpacked.is_empty()
-                    && let Some(aggregate) = shape.unpacked_struct.as_deref()
-                {
-                    unpacked_structs::check_value(aggregate, id, native, tree, session, dims)?;
+                if pattern && shape.unpacked.is_empty() && shape.unpacked_struct.is_some() {
+                    let structure = shape
+                        .type_id(&mut session.types, &tree.functions, &dims.const_env)
+                        .ok_or_else(|| unsupported("unpacked structure member type"))?;
+                    unpacked_structs::check_value(structure, id, native, tree, session, dims)?;
                 }
                 if let Some(aggregate) = shape.unpacked_struct.clone()
                     && shape.unpacked.is_empty()
@@ -480,7 +480,10 @@ pub(in crate::ast) fn bind_native(
                         }));
                         continue;
                     }
-                    unpacked_structs::check_value(&aggregate, id, native, tree, session, dims)?;
+                    let structure = shape
+                        .type_id(&mut session.types, &tree.functions, &dims.const_env)
+                        .ok_or_else(|| unsupported("unpacked structure member type"))?;
+                    unpacked_structs::check_value(structure, id, native, tree, session, dims)?;
                     values.push(expression_binding::bind_value(
                         id, native, tree, session, dims, None,
                     )?);

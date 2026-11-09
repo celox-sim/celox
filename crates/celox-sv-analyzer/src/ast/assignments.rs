@@ -90,6 +90,11 @@ fn diagnostic(
             target: expression_types::class_name(table, target)
                 .unwrap_or_else(|| table.spell(target)),
         },
+        (_, TyData::VirtualInterface { .. }) => AnalyzerError::IncompatibleVirtualInterface {
+            context: context(),
+            actual: format!("a `{}`", table.spell(source)),
+            target: table.spell(target),
+        },
         (_, TyData::Class(_)) => AnalyzerError::NotClassHandle {
             context: context(),
             actual: table.spell(source),

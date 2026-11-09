@@ -3942,6 +3942,50 @@ describe("E2E: tiered + VCD", () => {
 	});
 });
 
+describe("E2E: FST waveform output", () => {
+	const FST_SOURCE = `
+module FstCounter (clk: input clock, q: output logic<8>) {
+    always_ff (clk) { q += 1; }
+}
+`;
+
+	test("fst option records a binary waveform file", () => {
+		const fstPath = path.join(
+			import.meta.dirname ?? __dirname,
+			"counter.tmp.fst",
+		);
+		try {
+			const sim = Simulator.fromSource(FST_SOURCE, "FstCounter", {
+				fst: fstPath,
+			});
+			try {
+				sim.dump(0);
+				sim.tick();
+				sim.tick();
+				sim.dump(10);
+			} finally {
+				sim.dispose();
+			}
+			// Parseability is asserted by the Rust wellen round-trip tests;
+			// here the plumbing contract is a finalized binary file, not VCD text.
+			const content = readFileSync(fstPath);
+			expect(content.length).toBeGreaterThan(329);
+			expect(content.subarray(0, 5).toString()).not.toBe("$date");
+		} finally {
+			rmSync(fstPath, { force: true });
+		}
+	});
+
+	test("vcd and fst options are mutually exclusive", () => {
+		expect(() =>
+			Simulator.fromSource(FST_SOURCE, "FstCounter", {
+				vcd: "unused.vcd",
+				fst: "unused.fst",
+			}),
+		).toThrow(/mutually exclusive/);
+	});
+});
+
 describe("E2E: four-state wildcard comparison", () => {
 	test("both operators produce X for unknown compared bits", () => {
 		const source = `module Wildcard (

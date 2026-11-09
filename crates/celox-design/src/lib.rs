@@ -174,6 +174,11 @@ pub enum DeferredSite {
         queue: u32,
         region: AssertionDeferral,
     },
+    /// A flush point of whichever process runs it, as a function unit's
+    /// wait is, which serves every process: the actions waiting in that
+    /// process's queue are discarded. The events of this site are not
+    /// shown.
+    ProcessFlushPoint,
 }
 
 /// Which action block of an assertion issues a report.
@@ -469,7 +474,9 @@ pub enum ProcessStatus {
     /// A program kernel called `$exit` (IEEE 1800-2023 24.7): it and every
     /// other kernel of its program instance ([`ProcessSlots::program`]) end.
     Exit,
-    /// Create child activations. The delay slot encodes their entry points and join mode.
+    /// Create child activations. The delay slot encodes their entry points
+    /// and join mode, and for a fork inside a function unit the stack
+    /// address of the unit's resume slot (see [`PROCESS_FORK_RESUME_SHIFT`]).
     Fork,
     /// Allocate a fresh automatic local cell before its declaration initializer.
     Local,
@@ -959,6 +966,18 @@ pub struct ProcessSlots<A> {
 
 /// Width of [`ProcessSlots::call_top`].
 pub const PROCESS_CALL_TOP_WIDTH: usize = 32;
+
+/// Width of a process's or a resumable function unit's resume slot.
+pub const PROCESS_RESUME_WIDTH: usize = 16;
+
+/// The bit of a [`ProcessStatus::Fork`] word where the byte address, in the
+/// call stack, of the resume slot of the function unit that forks starts;
+/// zero for a fork of the kernel itself. Below it: the first entry (16
+/// bits), the number of children (16 bits) and the join mode (2 bits). The
+/// entries of a unit's fork are resume points of the unit: each child
+/// continues the parent's call, its frames a copy of the parent's with that
+/// resume slot set to its entry.
+pub const PROCESS_FORK_RESUME_SHIFT: u32 = 34;
 
 /// A call at which a process kernel or a function unit can be suspended
 /// inside the callee: the resume point the caller stores there, and the
@@ -1504,10 +1523,10 @@ pub struct RuntimeSchema<A> {
 /// they read changed since they last ran.
 ///
 /// Byte `p` of `flags` is partition `p`'s dirty flag. The byte after the
-/// last partition's is the untracked byte, set once state may change
-/// without anyone setting flags (a retained raw view), after which every
-/// partition always runs. The next one says whether the current settle runs
-/// every partition, decided at its start.
+/// last partition's is the untracked byte ([`settle_untracked_flag`]), set
+/// once state may change without anyone setting flags (a retained raw
+/// view), after which every partition always runs; the wait flags follow
+/// it ([`settle_wait_flag`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SettlePartitions<A> {
     pub flags: A,
@@ -1517,6 +1536,53 @@ pub struct SettlePartitions<A> {
     /// its writers as well, so that, as in a single pass, the settle
     /// recomputes it.
     pub marks: Vec<(A, Vec<u32>)>,
+    /// After the untracked byte, one flag byte per process of
+    /// [`RuntimeSchema::processes`]: the compiled scheduler checks a
+    /// process's edge wait only when its flag is set, and `marks` list the
+    /// flag ([`settle_wait_flag`]) for the signals and counters the wait
+    /// watches. Zero when the flags have no such bytes.
+    pub waits: u32,
+    /// The whole-variable copies of the settle, target then source: the plan
+    /// counts a reader of the target as a reader of the source, so an
+    /// identity-store alias may merge their homes (nothing else marks the
+    /// target's readers once its store is gone).
+    pub copies: Vec<(A, A)>,
+    /// Whether the flags end with run counters ([`settle_profile_offset`]).
+    pub profile: bool,
+}
+
+/// The index of the untracked byte among the flags of a partitioned settle
+/// of `partitions` partitions: it follows the partitions' bytes.
+pub const fn settle_untracked_flag(partitions: usize) -> usize {
+    partitions
+}
+
+/// The index of the wait flag of `process` among the flags of a partitioned
+/// settle of `partitions` partitions: the wait flags follow the untracked
+/// byte.
+pub const fn settle_wait_flag(partitions: usize, process: usize) -> usize {
+    partitions + 1 + process
+}
+
+/// The number of flag bytes of a partitioned settle of `partitions`
+/// partitions and `waits` wait flags.
+pub const fn settle_flag_count(partitions: usize, waits: usize) -> usize {
+    partitions + 1 + waits
+}
+
+/// The byte offset, among the flags of a partitioned settle, of its run
+/// counters when it counts its work: little-endian 64-bit words, first one
+/// per partition counting its runs, then one per partition counting the runs
+/// in which something it compares changed, then the settles. They follow the
+/// flags proper ([`settle_flag_count`]) at an 8-byte boundary.
+pub const fn settle_profile_offset(partitions: usize, waits: usize) -> usize {
+    settle_flag_count(partitions, waits).div_ceil(8) * 8
+}
+
+/// The bytes of the run counters of a settle of `partitions` partitions
+/// ([`settle_profile_offset`]).
+pub const fn settle_profile_bytes(partitions: usize) -> usize {
+    (2 * partitions + 1) * 8
 }
 
 /// The process units that run the edges of one event together with its
@@ -1619,6 +1685,11 @@ pub struct SchedulerSlots<A> {
     /// The kernels ready to run in the current slot, one bit per kernel in
     /// kernel order.
     pub ready: A,
+    /// The kernels waiting for their wake time, one bit per kernel in kernel
+    /// order: those whose [`Self::waiting`] is set with a delay status. The
+    /// scheduler recomputes it when it enters and keeps it up to date as
+    /// kernels suspend, so a slot scans only the kernels that can be due.
+    pub timed: A,
     /// The time each process kernel resumes at, in kernel order, valid
     /// where [`Self::waiting`] is set and the kernel's status is a delay.
     pub wake: Vec<A>,
@@ -1660,6 +1731,7 @@ impl<A> SchedulerSlots<A> {
             levels: map(self.levels),
             unknown_levels: map(self.unknown_levels),
             ready: map(self.ready),
+            timed: map(self.timed),
             wake: self.wake.into_iter().map(&mut map).collect(),
             waiting: self.waiting.into_iter().map(&mut map).collect(),
             baseline: self.baseline.into_iter().map(&mut map).collect(),
@@ -1689,6 +1761,7 @@ impl<A> SchedulerSlots<A> {
             &self.levels,
             &self.unknown_levels,
             &self.ready,
+            &self.timed,
             &self.clock_next,
             &self.clock_period,
             &self.clock_value,

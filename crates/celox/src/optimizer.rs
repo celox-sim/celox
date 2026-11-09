@@ -107,5 +107,6 @@ pub(crate) fn parallel_schedule_options(
     } else {
         celox_frontend_core::SettlePartitionMode::Estimated
     };
+    parallel.settle_profile = options.settle_profile();
     parallel
 }

@@ -232,7 +232,7 @@ Both `Simulator` and `Simulation` accept the following options:
 ```typescript
 const sim = Simulator.fromSource(source, "Top", {
   fourState: true,      // Enable 4-state (X) simulation
-  vcd: "./dump.vcd",    // Write VCD waveform output
+  vcd: "./dump.vcd",    // Write VCD waveform output (or fst: "./dump.fst")
   optLevel: "O1",       // "O0" | "O1" | "O2"
   passOverrides: ["-sir:reschedule"], // per-pass overrides on top of optLevel
   clockType: "posedge", // Clock polarity (default: "posedge")
