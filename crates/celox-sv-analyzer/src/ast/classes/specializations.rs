@@ -48,14 +48,10 @@ pub(in crate::ast) struct Specialization {
 fn inherited<'a>(
     own: &'a str,
     specialization: &'a Specialization,
-) -> impl Iterator<Item = (String, Type)> + 'a {
-    specialization
-        .aliases
-        .iter()
-        .filter(move |(key, _)| {
-            specialization.generic == own || **key != scope_key(&specialization.generic)
-        })
-        .map(|(key, ty)| (key.clone(), ty.clone()))
+) -> impl Iterator<Item = (&'a String, &'a Type)> + 'a {
+    specialization.aliases.iter().filter(move |(key, _)| {
+        specialization.generic == own || **key != scope_key(&specialization.generic)
+    })
 }
 
 /// The specialization `name` and the ones it inherits from, each after
@@ -159,64 +155,91 @@ pub(in crate::ast) fn shared_scope(
 ) -> (SharedEnv, SharedMap<Type>) {
     let mut env = env.clone();
     let mut aliases = aliases.clone();
-    let edits = ScopeEdits::of(session, name);
-    if !edits.env.is_empty() {
-        for (key, value) in edits.env {
-            match value {
-                Some(value) => env.insert(key, value),
-                None => env.remove(&key),
-            };
-        }
-    }
-    if !edits.aliases.is_empty() {
-        aliases.extend(edits.aliases);
-    }
+    ScopeEdits::default().apply(session, name, &mut env, &mut aliases);
     (env, aliases)
 }
 
-/// What class `name` adds to the scope around it, in order: its parameters
-/// and those it inherits, which may also hide a constant, and the types it
-/// inherits.
+/// The entries that the scope of a class changed in the tables around it,
+/// with the values they had before, in the order they were changed.
+#[derive(Default)]
 struct ScopeEdits {
     env: Vec<(String, Option<i128>)>,
-    aliases: Vec<(String, Type)>,
+    aliases: Vec<(String, Option<Type>)>,
 }
 
 impl ScopeEdits {
-    fn of(session: &mut Session, name: &str) -> Self {
-        let mut edits = Self {
-            env: Vec::new(),
-            aliases: Vec::new(),
-        };
+    /// Add what class `name` adds to the scope around it to `env` and
+    /// `aliases`, in order: its parameters and those it inherits, which may
+    /// also hide a constant, and the types it inherits. An entry that holds
+    /// its value already is left alone, so a shared table is copied only
+    /// when the class changes it.
+    fn apply(
+        &mut self,
+        session: &Session,
+        name: &str,
+        env: &mut SharedEnv,
+        aliases: &mut SharedMap<Type>,
+    ) {
         let own = generic(session, name);
         for specialization in lineage(session, name) {
             for base in &specialization.bases {
                 if lookup(session, base).is_none()
                     && let Some(scope) = session.foreign.declarations(base)
                 {
-                    edits
-                        .env
-                        .extend(scope.env.iter().map(|(key, value)| (key.clone(), *value)));
-                    edits.aliases.extend(
-                        scope
-                            .types
-                            .iter()
-                            .map(|(key, ty)| (key.clone(), ty.clone())),
-                    );
+                    for (key, value) in &scope.env {
+                        self.set_constant(env, key, *value);
+                    }
+                    for (key, ty) in &scope.types {
+                        self.set_type(aliases, key, ty);
+                    }
                 }
             }
-            edits.env.extend(
-                specialization
-                    .env
-                    .iter()
-                    .map(|(key, value)| (key.clone(), Some(*value))),
-            );
-            edits
-                .env
-                .extend(specialization.hidden.iter().map(|key| (key.clone(), None)));
-            edits.aliases.extend(inherited(&own, &specialization));
+            for (key, value) in &specialization.env {
+                self.set_constant(env, key, Some(*value));
+            }
+            for key in &specialization.hidden {
+                self.set_constant(env, key, None);
+            }
+            for (key, ty) in inherited(&own, &specialization) {
+                self.set_type(aliases, key, ty);
+            }
         }
-        edits
+    }
+
+    fn set_constant(&mut self, env: &mut SharedEnv, key: &str, value: Option<i128>) {
+        let old = env.get(key).copied();
+        if old == value {
+            return;
+        }
+        match value {
+            Some(value) => env.insert(key.to_owned(), value),
+            None => env.remove(key),
+        };
+        self.env.push((key.to_owned(), old));
+    }
+
+    fn set_type(&mut self, aliases: &mut SharedMap<Type>, key: &str, ty: &Type) {
+        if aliases.get(key) == Some(ty) {
+            return;
+        }
+        let old = aliases.insert(key.to_owned(), ty.clone());
+        self.aliases.push((key.to_owned(), old));
+    }
+
+    /// Take the changes back, the last one first.
+    fn undo(self, env: &mut SharedEnv, aliases: &mut SharedMap<Type>) {
+        for (key, old) in self.env.into_iter().rev() {
+            match old {
+                Some(old) => env.insert(key, old),
+                None => env.remove(&key),
+            };
+        }
+        for (key, old) in self.aliases.into_iter().rev() {
+            match old {
+                Some(old) => aliases.insert(key, old),
+                None => aliases.remove(&key),
+            };
+        }
     }
 }
 
@@ -254,40 +277,17 @@ impl ClassScopes {
         {
             *self = Self::new(env, aliases);
         }
-        let edits = ScopeEdits::of(session, name);
         #[cfg(test)]
-        if !edits.env.is_empty() && self.env.is_shared()
-            || !edits.aliases.is_empty() && self.aliases.is_shared()
-        {
+        let shared = (self.env.is_shared(), self.aliases.is_shared());
+        // The entries before each edit, restored in reverse.
+        let mut edits = ScopeEdits::default();
+        edits.apply(session, name, &mut self.env, &mut self.aliases);
+        #[cfg(test)]
+        if !edits.env.is_empty() && shared.0 || !edits.aliases.is_empty() && shared.1 {
             super::super::dimensions::CLASS_SCOPE_COPIES.with(|count| count.set(count.get() + 1));
         }
-        // The entries before each edit, restored in reverse.
-        let mut env_undo = Vec::with_capacity(edits.env.len());
-        for (key, value) in edits.env {
-            let old = match value {
-                Some(value) => self.env.insert(key.clone(), value),
-                None => self.env.remove(&key),
-            };
-            env_undo.push((key, old));
-        }
-        let mut aliases_undo = Vec::with_capacity(edits.aliases.len());
-        for (key, ty) in edits.aliases {
-            let old = self.aliases.insert(key.clone(), ty);
-            aliases_undo.push((key, old));
-        }
         let result = f(session, &self.env, &self.aliases);
-        for (key, old) in env_undo.into_iter().rev() {
-            match old {
-                Some(old) => self.env.insert(key, old),
-                None => self.env.remove(&key),
-            };
-        }
-        for (key, old) in aliases_undo.into_iter().rev() {
-            match old {
-                Some(old) => self.aliases.insert(key, old),
-                None => self.aliases.remove(&key),
-            };
-        }
+        edits.undo(&mut self.env, &mut self.aliases);
         result
     }
 }
@@ -350,15 +350,21 @@ pub(in crate::ast) fn class_base(
         .class_declaration_scopes
         .get(&generic(session, name))
     {
+        // An entry that holds its value already is left alone: the tables
+        // are copied only when the declaring scope changes them.
         if env.identity() != outer.const_env.identity() {
-            outer
-                .const_env
-                .extend(env.iter().map(|(key, value)| (key.clone(), *value)));
+            for (key, value) in env.iter() {
+                if outer.const_env.get(key) != Some(value) {
+                    outer.const_env.insert(key.clone(), *value);
+                }
+            }
         }
         if aliases.identity() != outer.type_aliases.identity() {
-            outer
-                .type_aliases
-                .extend(aliases.iter().map(|(key, ty)| (key.clone(), ty.clone())));
+            for (key, ty) in aliases.iter() {
+                if outer.type_aliases.get(key) != Some(ty) {
+                    outer.type_aliases.insert(key.clone(), ty.clone());
+                }
+            }
         }
     }
     ClassBase::of(&outer)
@@ -395,9 +401,11 @@ pub(in crate::ast) fn body_scope(
         dimensions
             .parameter_values
             .extend(specialization.literals.clone());
-        dimensions
-            .type_aliases
-            .extend(inherited(&own, &specialization));
+        for (key, ty) in inherited(&own, &specialization) {
+            if dimensions.type_aliases.get(key) != Some(ty) {
+                dimensions.type_aliases.insert(key.clone(), ty.clone());
+            }
+        }
         literals.extend(specialization.literals.clone());
     }
     (dimensions, literals)

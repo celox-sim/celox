@@ -557,7 +557,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             for (key, value) in entry.shadowed_constants {
                 if let Some(value) = value {
                     self.dims.const_env.insert(key, value);
-                } else {
+                } else if self.dims.const_env.contains_key(&key) {
                     self.dims.const_env.remove(&key);
                 }
             }
@@ -577,9 +577,10 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                         .parameter_values
                         .insert(entry.source.clone(), value);
                 }
-                None => {
+                None if self.dims.parameter_values.contains_key(&entry.source) => {
                     self.dims.parameter_values.remove(&entry.source);
                 }
+                None => {}
             }
             match entry.shadowed_dimensions {
                 Some(dimensions) => {
@@ -680,12 +681,22 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             shadowed_constants: keys
                 .into_iter()
                 .map(|key| {
-                    let value = self.dims.const_env.remove(&key);
+                    // Most names hide no constant: the shared tables are
+                    // edited, and so copied, only for those that do.
+                    let value = if self.dims.const_env.contains_key(&key) {
+                        self.dims.const_env.remove(&key)
+                    } else {
+                        None
+                    };
                     (key, value)
                 })
                 .collect(),
             shadowed_literal: self.names.local_constants.remove(source),
-            shadowed_parameter_value: self.dims.parameter_values.remove(source),
+            shadowed_parameter_value: if self.dims.parameter_values.contains_key(source) {
+                self.dims.parameter_values.remove(source)
+            } else {
+                None
+            },
             shadowed_dimensions: self.dims.remove(source),
             shadowed_constant_type: if self.dims.constant_types.contains_key(source) {
                 Arc::make_mut(&mut self.dims.constant_types).remove(source)
