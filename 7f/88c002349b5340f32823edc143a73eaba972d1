@@ -1,0 +1,6 @@
+Revision history for #3438:
+
+rev 2 (content) 2026-11-09 18:49 UTC — Mark the copy destination for VCD activity (PR #3438 review): write_memory only marks the settle range, so a waveform dump sparse-scanning marked groups could skip a copied signal.
+rev 1 (initial) 2026-11-09 18:49 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3438,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"af50ee19dc195ba7862d811a5b6463636e8c685c","timestamp_iso":"2026-11-09T18:49:29Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"af50ee19dc195ba7862d811a5b6463636e8c685c","new_sha":"e156815debe9fa3ff8c80a859cad896026ebe13f","timestamp_iso":"2026-11-09T18:49:29Z","reason":"Mark the copy destination for VCD activity (PR #3438 review): write_memory only marks the settle range, so a waveform dump sparse-scanning marked groups could skip a copied signal.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/af50ee19dc195ba7862d811a5b6463636e8c685c...e156815debe9fa3ff8c80a859cad896026ebe13f"}]} -->
