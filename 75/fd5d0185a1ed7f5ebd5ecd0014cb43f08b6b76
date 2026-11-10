@@ -1,0 +1,1 @@
+Fix CI: process handles are integral identities (7.8.5) and index associative arrays; exempt them from the nonintegral index rejection
