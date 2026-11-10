@@ -223,495 +223,43 @@ pub(super) fn eval_expression_in_context(
 
     match expr {
         Expression::Term(factor) => eval_factor(module, store, factor, arena, context),
-        Expression::Binary(lhs, op, rhs, _) => {
-            if matches!(op, Op::As) {
-                if let Some(conversion) = crate::float::conversion(
-                    crate::float::type_of(lhs),
-                    crate::float::type_of(expr),
-                ) {
-                    let ((node, sources), bounds) =
-                        eval_expression_in_context(module, store, lhs, arena, None)?;
-                    let node = arena.alloc(SLTNode::Unary(conversion, node))?;
-                    return Ok(((node, sources), bounds));
-                }
-                let Some(cast) = cast_semantics(lhs, rhs) else {
-                    return Err(ParserError::internal(
-                        "as cast target",
-                        format!("{:?}", rhs),
-                        Some(&rhs.token_range()),
-                    ));
-                };
-                let ((l_expr, l_sources), l_bounds) = eval_expression_in_context(
-                    module,
-                    store,
-                    lhs,
-                    arena,
-                    Some(ValueContext {
-                        width: cast.width,
-                        signed: cast.source_signed,
-                    }),
-                )?;
-
-                // For RHS, if it's a type or numeric width, we don't evaluate it as an expression.
-                let r_bounds = if let Expression::Term(f) = rhs.as_ref() {
-                    if let Factor::Value(v) = f.as_ref() {
-                        if matches!(v.value, ValueVariant::Type(_) | ValueVariant::Numeric(_)) {
-                            BoundaryMap::default()
-                        } else {
-                            eval_expression_in_context(module, store, rhs, arena, None)?.1
-                        }
-                    } else {
-                        eval_expression_in_context(module, store, rhs, arena, None)?.1
-                    }
-                } else {
-                    eval_expression_in_context(module, store, rhs, arena, None)?.1
-                };
-
-                // Resize uses the source signedness.  Reinterpretation changes
-                // the signedness seen by the enclosing context, not the bits.
-                let cast_value =
-                    coerce_node_width(arena, l_expr, Some(cast.width), cast.source_signed)?;
-                let cast_value = if cast.result_is_2state && !cast.source_is_2state {
-                    arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, cast_value))?
-                } else {
-                    cast_value
-                };
-                let result_node = coerce_node_width(
-                    arena,
-                    cast_value,
-                    context_width,
-                    context
-                        .map(|context| context.signed)
-                        .unwrap_or(cast.result_signed),
-                )?;
-                return Ok((
-                    (result_node, l_sources),
-                    merge_boundaries(l_bounds, r_bounds),
-                ));
-            }
-
-            if crate::float::precision(crate::float::type_of(lhs)).is_some()
-                || crate::float::precision(crate::float::type_of(rhs)).is_some()
-            {
-                let target = if matches!(
-                    crate::float::precision(crate::float::type_of(lhs)),
-                    Some(celox_design::FloatPrecision::F64)
-                ) {
-                    crate::float::type_of(lhs)
-                } else if crate::float::precision(crate::float::type_of(rhs)).is_some() {
-                    crate::float::type_of(rhs)
-                } else {
-                    crate::float::type_of(lhs)
-                };
-                let precision = crate::float::precision(target).unwrap();
-                let left = crate::float::converted(lhs, target);
-                let right = crate::float::converted(rhs, target);
-                let ((left, mut sources), lb) =
-                    eval_expression_in_context(module, store, &left, arena, None)?;
-                let ((right, rs), rb) =
-                    eval_expression_in_context(module, store, &right, arena, None)?;
-                sources.extend(rs);
-                let op = crate::float::binary(*op).expect("validated floating-point operator");
-                let node = arena.alloc(SLTNode::Binary(
-                    left,
-                    BinaryOp::Float { op, precision },
-                    right,
-                ))?;
-                return Ok(((node, sources), merge_boundaries(lb, rb)));
-            }
-
-            let lhs_width = get_expr_width(lhs)
-                .or_else(|| lhs.comptime().r#type.total_width())
-                .unwrap_or(1);
-            let rhs_width = get_expr_width(rhs)
-                .or_else(|| rhs.comptime().r#type.total_width())
-                .unwrap_or(1);
-            let lhs_signed = expression_signed(lhs);
-            let rhs_signed = expression_signed(rhs);
-            let semantics =
-                binary_semantics(*op, lhs_width, rhs_width, lhs_signed, rhs_signed, context);
-
-            if matches!(op, Op::Pow) {
-                let ((l_expr, l_sources), l_bounds) =
-                    eval_expression_in_context(module, store, lhs, arena, semantics.lhs_context)?;
-                let ((r_expr, r_sources), r_bounds) =
-                    eval_expression_in_context(module, store, rhs, arena, semantics.rhs_context)?;
-                let result_node = celox_frontend_core::symbolic::pow::lower_runtime_pow(
-                    arena,
-                    l_expr,
-                    r_expr,
-                    semantics.result_width,
-                    rhs_signed,
-                    semantics.result_signed,
-                )?;
-                let result_node = coerce_node_width(
-                    arena,
-                    result_node,
-                    context_width,
-                    context
-                        .map(|context| context.signed)
-                        .unwrap_or(semantics.result_signed),
-                )?;
-                let mut sources = l_sources;
-                sources.extend(r_sources);
-                return Ok(((result_node, sources), merge_boundaries(l_bounds, r_bounds)));
-            }
-            let ((l_expr, l_sources), l_bounds) =
-                eval_expression_in_context(module, store, lhs, arena, semantics.lhs_context)?;
-            let ((r_expr, r_sources), r_bounds) = if store.effectful_mut().is_some()
-                && matches!(op, Op::LogicAnd | Op::LogicOr)
-            {
-                let base_store = store.current().fork();
-                let mut rhs_store = base_store.fork();
-                let mut rhs_state = ExpressionStore::Effectful(&mut rhs_store);
-                let rhs_value = eval_expression_in_context(
-                    module,
-                    &mut rhs_state,
-                    rhs,
-                    arena,
-                    semantics.rhs_context,
-                )?;
-                // Only a definite dominant value skips the RHS.  Map the
-                // four-state shortcut predicate through ToTwoState so X/Z
-                // continues into the RHS, matching the FF lowering.
-                let not_lhs = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, l_expr))?;
-                let shortcut_truth = if matches!(op, Op::LogicAnd) {
-                    not_lhs
-                } else {
-                    arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, not_lhs))?
-                };
-                let shortcut = arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, shortcut_truth))?;
-                let execute_rhs = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, shortcut))?;
-                let merged_store = super::merge_symbolic_versions(
-                    module,
-                    &rhs_store,
-                    &base_store,
-                    execute_rhs,
-                    &l_sources,
-                    arena,
-                )?;
-                *store
-                    .effectful_mut()
-                    .expect("effectful binary expression must retain a mutable store") =
-                    merged_store;
-                rhs_value
-            } else {
-                eval_expression_in_context(module, store, rhs, arena, semantics.rhs_context)?
-            };
-
-            let mut sources = l_sources;
-            sources.extend(r_sources);
-
-            // BitXnor/BitNand/BitNor は既存演算に分解
-            let result_node = match op {
-                Op::BitXnor => {
-                    let xor_node = arena.alloc(SLTNode::Binary(l_expr, BinaryOp::Xor, r_expr))?;
-                    arena.alloc(SLTNode::Unary(UnaryOp::BitNot, xor_node))?
-                }
-                Op::BitNand => {
-                    let and_node = arena.alloc(SLTNode::Binary(l_expr, BinaryOp::And, r_expr))?;
-                    arena.alloc(SLTNode::Unary(UnaryOp::BitNot, and_node))?
-                }
-                Op::BitNor => {
-                    let or_node = arena.alloc(SLTNode::Binary(l_expr, BinaryOp::Or, r_expr))?;
-                    arena.alloc(SLTNode::Unary(UnaryOp::BitNot, or_node))?
-                }
-                Op::Sub => {
-                    let bin_op = resolve_binary_op(*op, semantics.lhs_signed, semantics.rhs_signed);
-                    let sub_node = arena.alloc(SLTNode::Binary(l_expr, bin_op, r_expr))?;
-                    let width = {
-                        let lw = get_width(l_expr, arena);
-                        let rw = get_width(r_expr, arena);
-                        lw.max(rw)
-                    };
-                    arena.alloc(SLTNode::Slice {
-                        expr: sub_node,
-                        access: BitAccess::new(0, width - 1),
-                    })?
-                }
-                _ => {
-                    let bin_op = resolve_binary_op(*op, semantics.lhs_signed, semantics.rhs_signed);
-                    arena.alloc(SLTNode::Binary(l_expr, bin_op, r_expr))?
-                }
-            };
-
-            let result_node = coerce_node_width(
-                arena,
-                result_node,
-                Some(semantics.result_width),
-                semantics.result_signed,
-            )?;
-            let result_node = coerce_node_width(
-                arena,
-                result_node,
-                context_width,
-                context
-                    .map(|context| context.signed)
-                    .unwrap_or(semantics.result_signed),
-            )?;
-
-            Ok(((result_node, sources), merge_boundaries(l_bounds, r_bounds)))
-        }
+        Expression::Binary(lhs, op, rhs, _) => eval_binary_expression(
+            module,
+            store,
+            expr,
+            lhs,
+            op,
+            rhs,
+            arena,
+            context,
+            context_width,
+        ),
         Expression::Concatenation(exprs, _) => {
-            let mut parts = Vec::new();
-            let mut all_bounds = BoundaryMap::default();
-            let mut total_sources = HashSet::default();
-
-            for (sub_expr, repeat) in exprs {
-                let ((part_expr, part_sources), p_bounds) =
-                    eval_expression_in_context(module, store, sub_expr, arena, None)?;
-                all_bounds = merge_boundaries(all_bounds, p_bounds);
-                let width = get_width(part_expr, arena);
-
-                total_sources.extend(part_sources);
-
-                let rep_count = if let Some(rep_expr) = repeat {
-                    let v = eval_constexpr(rep_expr);
-                    v.ok_or_else(|| {
-                        ParserError::illegal_context(
-                            "concatenation non-constant repeat",
-                            format!("{:?}", rep_expr),
-                            Some(&rep_expr.token_range()),
-                        )
-                    })?
-                    .iter_u64_digits()
-                    .next()
-                    .unwrap()
-                } else {
-                    1
-                };
-                for _ in 0..rep_count {
-                    parts.push((part_expr, width));
-                }
-            }
-            let result = arena.alloc(SLTNode::Concat(parts))?;
-            let result = coerce_node_width(
-                arena,
-                result,
-                context_width,
-                context.map(|context| context.signed).unwrap_or(false),
-            )?;
-            Ok(((result, total_sources), all_bounds))
+            eval_concatenation_expression(module, store, exprs, arena, context, context_width)
         }
         Expression::Unary(op, expr, _) => {
-            if let Some(precision) = crate::float::precision(crate::float::type_of(expr)) {
-                let ((node, sources), bounds) =
-                    eval_expression_in_context(module, store, expr, arena, None)?;
-                let node = if *op == Op::Sub {
-                    arena.alloc(SLTNode::Unary(
-                        UnaryOp::Float {
-                            op: celox_design::FloatUnaryOp::Neg,
-                            precision,
-                        },
-                        node,
-                    ))?
-                } else {
-                    node
-                };
-                return Ok(((node, sources), bounds));
-            }
-            let result_signed = expression_signed(expr);
-            let operand_context = if matches!(
-                op,
-                Op::BitAnd
-                    | Op::BitNand
-                    | Op::BitOr
-                    | Op::BitNor
-                    | Op::BitXor
-                    | Op::BitXnor
-                    | Op::LogicNot
-            ) {
-                None
-            } else {
-                context
-            };
-            let ((expr, sources), bounds) =
-                eval_expression_in_context(module, store, expr, arena, operand_context)?;
-            // Reduction Nand/Nor/Xnor は既存のリダクション + Not に分解
-            let result_node = match op {
-                Op::BitNand => {
-                    let and_node = arena.alloc(SLTNode::Unary(UnaryOp::And, expr))?;
-                    arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, and_node))?
-                }
-                Op::BitNor => {
-                    let or_node = arena.alloc(SLTNode::Unary(UnaryOp::Or, expr))?;
-                    arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, or_node))?
-                }
-                Op::BitXnor => {
-                    let xor_node = arena.alloc(SLTNode::Unary(UnaryOp::Xor, expr))?;
-                    arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, xor_node))?
-                }
-                _ => arena.alloc(SLTNode::Unary(convert_unary_op(op), expr))?,
-            };
-            let result_node = coerce_node_width(
-                arena,
-                result_node,
-                context_width,
-                context
-                    .map(|context| context.signed)
-                    .unwrap_or(result_signed),
-            )?;
-            Ok(((result_node, sources), bounds))
+            eval_unary_expression(module, store, op, expr, arena, context, context_width)
         }
-        Expression::Ternary(cond, then_expr, else_expr, _) => {
-            let target_type = crate::float::type_of(expr);
-            let then_value = crate::float::converted(then_expr, target_type);
-            let else_value = crate::float::converted(else_expr, target_type);
-            let then_expr = &then_value;
-            let else_expr = &else_value;
-            let branch_width = get_expr_width(then_expr)
-                .or_else(|| then_expr.comptime().r#type.total_width())
-                .unwrap_or(1)
-                .max(
-                    get_expr_width(else_expr)
-                        .or_else(|| else_expr.comptime().r#type.total_width())
-                        .unwrap_or(1),
-                )
-                .max(context_width.unwrap_or(0));
-            let branch_context = Some(ValueContext {
-                width: branch_width,
-                signed: context.map(|context| context.signed).unwrap_or_else(|| {
-                    expression_signed(then_expr) && expression_signed(else_expr)
-                }),
-            });
-            let ((cond_expr, cond_sources), cond_bounds) =
-                eval_expression_in_context(module, store, cond, arena, None)?;
-            let (
-                ((then_expr, then_sources), then_bounds),
-                ((else_expr, else_sources), else_bounds),
-            ) = if store.effectful_mut().is_some() {
-                let base_store = store.current().fork();
-                let mut then_store = base_store.fork();
-                let mut then_state = ExpressionStore::Effectful(&mut then_store);
-                let then_value = eval_expression_in_context(
-                    module,
-                    &mut then_state,
-                    then_expr,
-                    arena,
-                    branch_context,
-                )?;
-
-                // A known condition evaluates only its selected arm. An X/Z
-                // condition evaluates both arms in order, so the else arm must
-                // observe writes made by the then arm.
-                let not_cond = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, cond_expr))?;
-                let known_false = arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, not_cond))?;
-                let true_truth = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, not_cond))?;
-                let known_true = arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, true_truth))?;
-                let execute_then = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, known_false))?;
-                let after_then = super::merge_symbolic_versions(
-                    module,
-                    &then_store,
-                    &base_store,
-                    execute_then,
-                    &cond_sources,
-                    arena,
-                )?;
-
-                let mut else_store = after_then.clone();
-                let mut else_state = ExpressionStore::Effectful(&mut else_store);
-                let else_value = eval_expression_in_context(
-                    module,
-                    &mut else_state,
-                    else_expr,
-                    arena,
-                    branch_context,
-                )?;
-
-                let execute_else = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, known_true))?;
-                let final_store = super::merge_symbolic_versions(
-                    module,
-                    &else_store,
-                    &after_then,
-                    execute_else,
-                    &cond_sources,
-                    arena,
-                )?;
-                *store
-                    .effectful_mut()
-                    .expect("effectful ternary must retain a mutable store") = final_store;
-                (then_value, else_value)
-            } else {
-                (
-                    eval_expression_in_context(module, store, then_expr, arena, branch_context)?,
-                    eval_expression_in_context(module, store, else_expr, arena, branch_context)?,
-                )
-            };
-
-            let mut sources = cond_sources;
-            sources.extend(then_sources);
-            sources.extend(else_sources);
-
-            Ok((
-                (
-                    arena.alloc(SLTNode::Mux {
-                        cond: cond_expr,
-                        then_expr,
-                        else_expr,
-                    })?,
-                    sources,
-                ),
-                merge_boundaries(cond_bounds, merge_boundaries(then_bounds, else_bounds)),
-            ))
-        }
-        Expression::StructConstructor(ty, fields, _) => {
-            let mut parts = Vec::new();
-            let mut all_bounds = BoundaryMap::default();
-            let mut total_sources = HashSet::default();
-
-            for (name, field_expr) in fields {
-                let Some(member_type) = ty.get_member_type(*name) else {
-                    return Err(ParserError::internal(
-                        "struct constructor member",
-                        format!("unknown member: {:?} in {:?}", name, ty),
-                        Some(&field_expr.token_range()),
-                    ));
-                };
-                let Some(member_width) = member_type.total_width() else {
-                    return Err(ParserError::internal(
-                        "struct constructor member width",
-                        format!("member: {:?}, type: {:?}", name, member_type),
-                        Some(&field_expr.token_range()),
-                    ));
-                };
-
-                let ((part_expr, part_sources), p_bounds) = eval_expression_in_context(
-                    module,
-                    store,
-                    field_expr,
-                    arena,
-                    Some(ValueContext {
-                        width: member_width,
-                        signed: expression_signed(field_expr),
-                    }),
-                )?;
-                all_bounds = merge_boundaries(all_bounds, p_bounds);
-                total_sources.extend(part_sources);
-                let part_expr = coerce_node_width(
-                    arena,
-                    part_expr,
-                    Some(member_width),
-                    expression_signed(field_expr),
-                )?;
-                let part_expr =
-                    if member_type.is_2state() && !field_expr.comptime().r#type.is_2state() {
-                        arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, part_expr))?
-                    } else {
-                        part_expr
-                    };
-
-                parts.push((part_expr, member_width));
-            }
-
-            let result = arena.alloc(SLTNode::Concat(parts))?;
-            let result = coerce_node_width(
-                arena,
-                result,
-                context_width,
-                context.map(|context| context.signed).unwrap_or(ty.signed),
-            )?;
-            Ok(((result, total_sources), all_bounds))
-        }
+        Expression::Ternary(cond, then_expr, else_expr, _) => eval_ternary_expression(
+            module,
+            store,
+            expr,
+            cond,
+            then_expr,
+            else_expr,
+            arena,
+            context,
+            context_width,
+        ),
+        Expression::StructConstructor(ty, fields, _) => eval_struct_constructor_expression(
+            module,
+            store,
+            ty,
+            fields,
+            arena,
+            context,
+            context_width,
+        ),
         Expression::ArrayLiteral(items, _) => {
             let ((result, sources), bounds) =
                 eval_array_literal_expression_in_store(module, store, items, context_width, arena)?;
@@ -724,6 +272,524 @@ pub(super) fn eval_expression_in_context(
             Ok(((result, sources), bounds))
         }
     }
+}
+
+fn eval_binary_expression(
+    module: &Module,
+    store: &mut ExpressionStore<'_>,
+    expr: &Expression,
+    lhs: &Expression,
+    op: &Op,
+    rhs: &Expression,
+    arena: &mut SLTNodeArena<VarId>,
+    context: Option<ValueContext>,
+    context_width: Option<usize>,
+) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    if matches!(op, Op::As) {
+        if let Some(conversion) =
+            crate::float::conversion(crate::float::type_of(lhs), crate::float::type_of(expr))
+        {
+            let ((node, sources), bounds) =
+                eval_expression_in_context(module, store, lhs, arena, None)?;
+            let node = arena.alloc(SLTNode::Unary(conversion, node))?;
+            return Ok(((node, sources), bounds));
+        }
+        let Some(cast) = cast_semantics(lhs, rhs) else {
+            return Err(ParserError::internal(
+                "as cast target",
+                format!("{:?}", rhs),
+                Some(&rhs.token_range()),
+            ));
+        };
+        let ((l_expr, l_sources), l_bounds) = eval_expression_in_context(
+            module,
+            store,
+            lhs,
+            arena,
+            Some(ValueContext {
+                width: cast.width,
+                signed: cast.source_signed,
+            }),
+        )?;
+
+        // For RHS, if it's a type or numeric width, we don't evaluate it as an expression.
+        let r_bounds = if let Expression::Term(f) = rhs {
+            if let Factor::Value(v) = f.as_ref() {
+                if matches!(v.value, ValueVariant::Type(_) | ValueVariant::Numeric(_)) {
+                    BoundaryMap::default()
+                } else {
+                    eval_expression_in_context(module, store, rhs, arena, None)?.1
+                }
+            } else {
+                eval_expression_in_context(module, store, rhs, arena, None)?.1
+            }
+        } else {
+            eval_expression_in_context(module, store, rhs, arena, None)?.1
+        };
+
+        // Resize uses the source signedness.  Reinterpretation changes
+        // the signedness seen by the enclosing context, not the bits.
+        let cast_value = coerce_node_width(arena, l_expr, Some(cast.width), cast.source_signed)?;
+        let cast_value = if cast.result_is_2state && !cast.source_is_2state {
+            arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, cast_value))?
+        } else {
+            cast_value
+        };
+        let result_node = coerce_node_width(
+            arena,
+            cast_value,
+            context_width,
+            context
+                .map(|context| context.signed)
+                .unwrap_or(cast.result_signed),
+        )?;
+        return Ok((
+            (result_node, l_sources),
+            merge_boundaries(l_bounds, r_bounds),
+        ));
+    }
+
+    if crate::float::precision(crate::float::type_of(lhs)).is_some()
+        || crate::float::precision(crate::float::type_of(rhs)).is_some()
+    {
+        let target = if matches!(
+            crate::float::precision(crate::float::type_of(lhs)),
+            Some(celox_design::FloatPrecision::F64)
+        ) {
+            crate::float::type_of(lhs)
+        } else if crate::float::precision(crate::float::type_of(rhs)).is_some() {
+            crate::float::type_of(rhs)
+        } else {
+            crate::float::type_of(lhs)
+        };
+        let precision = crate::float::precision(target).unwrap();
+        let left = crate::float::converted(lhs, target);
+        let right = crate::float::converted(rhs, target);
+        let ((left, mut sources), lb) =
+            eval_expression_in_context(module, store, &left, arena, None)?;
+        let ((right, rs), rb) = eval_expression_in_context(module, store, &right, arena, None)?;
+        sources.extend(rs);
+        let op = crate::float::binary(*op).expect("validated floating-point operator");
+        let node = arena.alloc(SLTNode::Binary(
+            left,
+            BinaryOp::Float { op, precision },
+            right,
+        ))?;
+        return Ok(((node, sources), merge_boundaries(lb, rb)));
+    }
+
+    let lhs_width = get_expr_width(lhs)
+        .or_else(|| lhs.comptime().r#type.total_width())
+        .unwrap_or(1);
+    let rhs_width = get_expr_width(rhs)
+        .or_else(|| rhs.comptime().r#type.total_width())
+        .unwrap_or(1);
+    let lhs_signed = expression_signed(lhs);
+    let rhs_signed = expression_signed(rhs);
+    let semantics = binary_semantics(*op, lhs_width, rhs_width, lhs_signed, rhs_signed, context);
+
+    if matches!(op, Op::Pow) {
+        let ((l_expr, l_sources), l_bounds) =
+            eval_expression_in_context(module, store, lhs, arena, semantics.lhs_context)?;
+        let ((r_expr, r_sources), r_bounds) =
+            eval_expression_in_context(module, store, rhs, arena, semantics.rhs_context)?;
+        let result_node = celox_frontend_core::symbolic::pow::lower_runtime_pow(
+            arena,
+            l_expr,
+            r_expr,
+            semantics.result_width,
+            rhs_signed,
+            semantics.result_signed,
+        )?;
+        let result_node = coerce_node_width(
+            arena,
+            result_node,
+            context_width,
+            context
+                .map(|context| context.signed)
+                .unwrap_or(semantics.result_signed),
+        )?;
+        let mut sources = l_sources;
+        sources.extend(r_sources);
+        return Ok(((result_node, sources), merge_boundaries(l_bounds, r_bounds)));
+    }
+    let ((l_expr, l_sources), l_bounds) =
+        eval_expression_in_context(module, store, lhs, arena, semantics.lhs_context)?;
+    let ((r_expr, r_sources), r_bounds) = if store.effectful_mut().is_some()
+        && matches!(op, Op::LogicAnd | Op::LogicOr)
+    {
+        let base_store = store.current().fork();
+        let mut rhs_store = base_store.fork();
+        let mut rhs_state = ExpressionStore::Effectful(&mut rhs_store);
+        let rhs_value =
+            eval_expression_in_context(module, &mut rhs_state, rhs, arena, semantics.rhs_context)?;
+        // Only a definite dominant value skips the RHS.  Map the
+        // four-state shortcut predicate through ToTwoState so X/Z
+        // continues into the RHS, matching the FF lowering.
+        let not_lhs = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, l_expr))?;
+        let shortcut_truth = if matches!(op, Op::LogicAnd) {
+            not_lhs
+        } else {
+            arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, not_lhs))?
+        };
+        let shortcut = arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, shortcut_truth))?;
+        let execute_rhs = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, shortcut))?;
+        let merged_store = super::merge_symbolic_versions(
+            module,
+            &rhs_store,
+            &base_store,
+            execute_rhs,
+            &l_sources,
+            arena,
+        )?;
+        *store
+            .effectful_mut()
+            .expect("effectful binary expression must retain a mutable store") = merged_store;
+        rhs_value
+    } else {
+        eval_expression_in_context(module, store, rhs, arena, semantics.rhs_context)?
+    };
+
+    let mut sources = l_sources;
+    sources.extend(r_sources);
+
+    // BitXnor/BitNand/BitNor は既存演算に分解
+    let result_node = match op {
+        Op::BitXnor => {
+            let xor_node = arena.alloc(SLTNode::Binary(l_expr, BinaryOp::Xor, r_expr))?;
+            arena.alloc(SLTNode::Unary(UnaryOp::BitNot, xor_node))?
+        }
+        Op::BitNand => {
+            let and_node = arena.alloc(SLTNode::Binary(l_expr, BinaryOp::And, r_expr))?;
+            arena.alloc(SLTNode::Unary(UnaryOp::BitNot, and_node))?
+        }
+        Op::BitNor => {
+            let or_node = arena.alloc(SLTNode::Binary(l_expr, BinaryOp::Or, r_expr))?;
+            arena.alloc(SLTNode::Unary(UnaryOp::BitNot, or_node))?
+        }
+        Op::Sub => {
+            let bin_op = resolve_binary_op(*op, semantics.lhs_signed, semantics.rhs_signed);
+            let sub_node = arena.alloc(SLTNode::Binary(l_expr, bin_op, r_expr))?;
+            let width = {
+                let lw = get_width(l_expr, arena);
+                let rw = get_width(r_expr, arena);
+                lw.max(rw)
+            };
+            arena.alloc(SLTNode::Slice {
+                expr: sub_node,
+                access: BitAccess::new(0, width - 1),
+            })?
+        }
+        _ => {
+            let bin_op = resolve_binary_op(*op, semantics.lhs_signed, semantics.rhs_signed);
+            arena.alloc(SLTNode::Binary(l_expr, bin_op, r_expr))?
+        }
+    };
+
+    let result_node = coerce_node_width(
+        arena,
+        result_node,
+        Some(semantics.result_width),
+        semantics.result_signed,
+    )?;
+    let result_node = coerce_node_width(
+        arena,
+        result_node,
+        context_width,
+        context
+            .map(|context| context.signed)
+            .unwrap_or(semantics.result_signed),
+    )?;
+
+    Ok(((result_node, sources), merge_boundaries(l_bounds, r_bounds)))
+}
+
+fn eval_concatenation_expression(
+    module: &Module,
+    store: &mut ExpressionStore<'_>,
+    exprs: &[(Expression, Option<Expression>)],
+    arena: &mut SLTNodeArena<VarId>,
+    context: Option<ValueContext>,
+    context_width: Option<usize>,
+) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    let mut parts = Vec::new();
+    let mut all_bounds = BoundaryMap::default();
+    let mut total_sources = HashSet::default();
+
+    for (sub_expr, repeat) in exprs {
+        let ((part_expr, part_sources), p_bounds) =
+            eval_expression_in_context(module, store, sub_expr, arena, None)?;
+        all_bounds = merge_boundaries(all_bounds, p_bounds);
+        let width = get_width(part_expr, arena);
+
+        total_sources.extend(part_sources);
+
+        let rep_count = if let Some(rep_expr) = repeat {
+            let v = eval_constexpr(rep_expr);
+            v.ok_or_else(|| {
+                ParserError::illegal_context(
+                    "concatenation non-constant repeat",
+                    format!("{:?}", rep_expr),
+                    Some(&rep_expr.token_range()),
+                )
+            })?
+            .iter_u64_digits()
+            .next()
+            .unwrap()
+        } else {
+            1
+        };
+        for _ in 0..rep_count {
+            parts.push((part_expr, width));
+        }
+    }
+    let result = arena.alloc(SLTNode::Concat(parts))?;
+    let result = coerce_node_width(
+        arena,
+        result,
+        context_width,
+        context.map(|context| context.signed).unwrap_or(false),
+    )?;
+    Ok(((result, total_sources), all_bounds))
+}
+
+fn eval_unary_expression(
+    module: &Module,
+    store: &mut ExpressionStore<'_>,
+    op: &Op,
+    expr: &Expression,
+    arena: &mut SLTNodeArena<VarId>,
+    context: Option<ValueContext>,
+    context_width: Option<usize>,
+) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    if let Some(precision) = crate::float::precision(crate::float::type_of(expr)) {
+        let ((node, sources), bounds) =
+            eval_expression_in_context(module, store, expr, arena, None)?;
+        let node = if *op == Op::Sub {
+            arena.alloc(SLTNode::Unary(
+                UnaryOp::Float {
+                    op: celox_design::FloatUnaryOp::Neg,
+                    precision,
+                },
+                node,
+            ))?
+        } else {
+            node
+        };
+        return Ok(((node, sources), bounds));
+    }
+    let result_signed = expression_signed(expr);
+    let operand_context = if matches!(
+        op,
+        Op::BitAnd | Op::BitNand | Op::BitOr | Op::BitNor | Op::BitXor | Op::BitXnor | Op::LogicNot
+    ) {
+        None
+    } else {
+        context
+    };
+    let ((expr, sources), bounds) =
+        eval_expression_in_context(module, store, expr, arena, operand_context)?;
+    // Reduction Nand/Nor/Xnor は既存のリダクション + Not に分解
+    let result_node = match op {
+        Op::BitNand => {
+            let and_node = arena.alloc(SLTNode::Unary(UnaryOp::And, expr))?;
+            arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, and_node))?
+        }
+        Op::BitNor => {
+            let or_node = arena.alloc(SLTNode::Unary(UnaryOp::Or, expr))?;
+            arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, or_node))?
+        }
+        Op::BitXnor => {
+            let xor_node = arena.alloc(SLTNode::Unary(UnaryOp::Xor, expr))?;
+            arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, xor_node))?
+        }
+        _ => arena.alloc(SLTNode::Unary(convert_unary_op(op), expr))?,
+    };
+    let result_node = coerce_node_width(
+        arena,
+        result_node,
+        context_width,
+        context
+            .map(|context| context.signed)
+            .unwrap_or(result_signed),
+    )?;
+    Ok(((result_node, sources), bounds))
+}
+
+fn eval_ternary_expression(
+    module: &Module,
+    store: &mut ExpressionStore<'_>,
+    expr: &Expression,
+    cond: &Expression,
+    then_expr: &Expression,
+    else_expr: &Expression,
+    arena: &mut SLTNodeArena<VarId>,
+    context: Option<ValueContext>,
+    context_width: Option<usize>,
+) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    let target_type = crate::float::type_of(expr);
+    let then_value = crate::float::converted(then_expr, target_type);
+    let else_value = crate::float::converted(else_expr, target_type);
+    let then_expr = &then_value;
+    let else_expr = &else_value;
+    let branch_width = get_expr_width(then_expr)
+        .or_else(|| then_expr.comptime().r#type.total_width())
+        .unwrap_or(1)
+        .max(
+            get_expr_width(else_expr)
+                .or_else(|| else_expr.comptime().r#type.total_width())
+                .unwrap_or(1),
+        )
+        .max(context_width.unwrap_or(0));
+    let branch_context = Some(ValueContext {
+        width: branch_width,
+        signed: context
+            .map(|context| context.signed)
+            .unwrap_or_else(|| expression_signed(then_expr) && expression_signed(else_expr)),
+    });
+    let ((cond_expr, cond_sources), cond_bounds) =
+        eval_expression_in_context(module, store, cond, arena, None)?;
+    let (((then_expr, then_sources), then_bounds), ((else_expr, else_sources), else_bounds)) =
+        if store.effectful_mut().is_some() {
+            let base_store = store.current().fork();
+            let mut then_store = base_store.fork();
+            let mut then_state = ExpressionStore::Effectful(&mut then_store);
+            let then_value = eval_expression_in_context(
+                module,
+                &mut then_state,
+                then_expr,
+                arena,
+                branch_context,
+            )?;
+
+            // A known condition evaluates only its selected arm. An X/Z
+            // condition evaluates both arms in order, so the else arm must
+            // observe writes made by the then arm.
+            let not_cond = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, cond_expr))?;
+            let known_false = arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, not_cond))?;
+            let true_truth = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, not_cond))?;
+            let known_true = arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, true_truth))?;
+            let execute_then = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, known_false))?;
+            let after_then = super::merge_symbolic_versions(
+                module,
+                &then_store,
+                &base_store,
+                execute_then,
+                &cond_sources,
+                arena,
+            )?;
+
+            let mut else_store = after_then.clone();
+            let mut else_state = ExpressionStore::Effectful(&mut else_store);
+            let else_value = eval_expression_in_context(
+                module,
+                &mut else_state,
+                else_expr,
+                arena,
+                branch_context,
+            )?;
+
+            let execute_else = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, known_true))?;
+            let final_store = super::merge_symbolic_versions(
+                module,
+                &else_store,
+                &after_then,
+                execute_else,
+                &cond_sources,
+                arena,
+            )?;
+            *store
+                .effectful_mut()
+                .expect("effectful ternary must retain a mutable store") = final_store;
+            (then_value, else_value)
+        } else {
+            (
+                eval_expression_in_context(module, store, then_expr, arena, branch_context)?,
+                eval_expression_in_context(module, store, else_expr, arena, branch_context)?,
+            )
+        };
+
+    let mut sources = cond_sources;
+    sources.extend(then_sources);
+    sources.extend(else_sources);
+
+    Ok((
+        (
+            arena.alloc(SLTNode::Mux {
+                cond: cond_expr,
+                then_expr,
+                else_expr,
+            })?,
+            sources,
+        ),
+        merge_boundaries(cond_bounds, merge_boundaries(then_bounds, else_bounds)),
+    ))
+}
+
+fn eval_struct_constructor_expression(
+    module: &Module,
+    store: &mut ExpressionStore<'_>,
+    ty: &Type,
+    fields: &[(resource_table::StrId, Expression)],
+    arena: &mut SLTNodeArena<VarId>,
+    context: Option<ValueContext>,
+    context_width: Option<usize>,
+) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    let mut parts = Vec::new();
+    let mut all_bounds = BoundaryMap::default();
+    let mut total_sources = HashSet::default();
+
+    for (name, field_expr) in fields {
+        let Some(member_type) = ty.get_member_type(*name) else {
+            return Err(ParserError::internal(
+                "struct constructor member",
+                format!("unknown member: {:?} in {:?}", name, ty),
+                Some(&field_expr.token_range()),
+            ));
+        };
+        let Some(member_width) = member_type.total_width() else {
+            return Err(ParserError::internal(
+                "struct constructor member width",
+                format!("member: {:?}, type: {:?}", name, member_type),
+                Some(&field_expr.token_range()),
+            ));
+        };
+
+        let ((part_expr, part_sources), p_bounds) = eval_expression_in_context(
+            module,
+            store,
+            field_expr,
+            arena,
+            Some(ValueContext {
+                width: member_width,
+                signed: expression_signed(field_expr),
+            }),
+        )?;
+        all_bounds = merge_boundaries(all_bounds, p_bounds);
+        total_sources.extend(part_sources);
+        let part_expr = coerce_node_width(
+            arena,
+            part_expr,
+            Some(member_width),
+            expression_signed(field_expr),
+        )?;
+        let part_expr = if member_type.is_2state() && !field_expr.comptime().r#type.is_2state() {
+            arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, part_expr))?
+        } else {
+            part_expr
+        };
+
+        parts.push((part_expr, member_width));
+    }
+
+    let result = arena.alloc(SLTNode::Concat(parts))?;
+    let result = coerce_node_width(
+        arena,
+        result,
+        context_width,
+        context.map(|context| context.signed).unwrap_or(ty.signed),
+    )?;
+    Ok(((result, total_sources), all_bounds))
 }
 
 pub(crate) fn eval_assignment_expression_effectful(
