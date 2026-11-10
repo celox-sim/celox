@@ -443,8 +443,9 @@ reaches it fails with the runner's timeout diagnostic (`runner_timeout`). PR CI
 uses 78 seconds, three times what the longest passing case of the main corpus
 took with the CI driver when the limit was set (25.8 seconds), so that a
 change which lets a UVM testbench elaborate further cannot run each one to its
-own 300 or 900 seconds. `uvm/uvm_files.sv` has since become the longest
-passing case, at about 53 seconds. The daily
+own 300 or 900 seconds. The longest passing cases are now UVM cases:
+`uvm/uvm_files.sv` takes about 17 seconds, and the negative tests that are
+rejected once `uvm_pkg` is analyzed about 35. The daily
 workflow keeps the upstream limits.
 
 `--shard INDEX/COUNT` runs and compares only one of COUNT disjoint shards
