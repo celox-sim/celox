@@ -103,6 +103,7 @@ GCC-style optimization level presets with per-pass overrides.
 | `TailCallSplit` | Splits large functions into tail-call chains (enabled even at O0) |
 | `DerivedEdgeUnits` | Runs edges of gated/divided clocks in generated units instead of the Rust plan walk (not a SIR transform; costs build time, `-sir:derived_edge_units` to opt out) |
 | `PartitionedSettle` | Splits the combinational settle into partitions that run only when state they read changed (not a SIR transform; off unless enabled, `+sir:partitioned_settle`; `SimulatorBuilder::settle_check` cross-checks it) |
+| `NetInlining` | Substitutes combinational nets the dead-store policy does not keep observable into their readers and drops the unread ones, before the settle is scheduled (not a SIR transform; pure SystemVerilog designs with a DSE policy, two-state; `-sir:net_inlining` to opt out) |
 
 ### Cranelift Backend Optimization
 

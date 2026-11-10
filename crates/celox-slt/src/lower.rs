@@ -718,7 +718,7 @@ impl SLTToSIRLowerer {
         crate::get_width(node, arena)
     }
 
-    fn get_bound_signed<A: Hash + Eq + Clone + std::fmt::Debug>(
+    pub(crate) fn get_bound_signed<A: Hash + Eq + Clone + std::fmt::Debug>(
         &self,
         node: NodeId,
         arena: &SLTNodeArena<A>,
