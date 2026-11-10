@@ -799,6 +799,114 @@ fn discovery_settles_a_scope_once_for_its_queries() {
     assert_eq!(settles(2), settles(16));
 }
 
+/// The widths of the signals of the first module of `source`, analyzed as
+/// file `path`, and the scope discoveries its queries settled.
+fn signal_widths_and_settles(source: &str, path: &str) -> (Vec<Option<usize>>, usize) {
+    SCOPE_SETTLES.with(|count| count.set(0));
+    let ir = crate::analyze_source(source, Path::new(path)).expect("the source analyzes");
+    let widths = ir.modules()[0]
+        .signals()
+        .iter()
+        .map(|signal| signal.r#type().resolved_width())
+        .collect();
+    (widths, SCOPE_SETTLES.with(|count| count.get()))
+}
+
+#[test]
+fn type_operands_need_no_discovery() {
+    // The size of a built-in type, and of a type the tables of the query
+    // already bind, does not depend on the declarations of the scope, which
+    // are not discovered for it: of a typedef of the scope, of a type
+    // parameter of a class and of a typedef of a package (IEEE 1800-2023
+    // 20.6.2).
+    let (widths, settles) = signal_widths_and_settles(
+        "package p;
+            typedef bit [5:0] word_t;
+            class C #(type T = bit [2:0]);
+                function int size(); return $bits(T) + $bits(word_t); endfunction
+            endclass
+            class D; C#(bit [8:0]) c; endclass
+            function int f(); return $bits(byte) + $bits((word_t)); endfunction
+        endpackage
+        module Top;
+            import p::*;
+            typedef bit [3:0] nibble_t;
+            localparam int A = $bits(nibble_t);
+            localparam int B = $bits(word_t) + $bits(logic [1:0]);
+            localparam int E = f();
+            logic [A:0] a;
+            logic [B:0] b;
+            logic [E:0] e;
+        endmodule",
+        "type-operands.sv",
+    );
+    assert_eq!(widths, [Some(5), Some(9), Some(15)]);
+    assert_eq!(settles, 0);
+}
+
+#[test]
+fn hidden_type_names_are_discovered() {
+    // A declaration nearer to the operand than the type of its name hides
+    // the type, also for a query whose tables hold only the type: a
+    // variable, a net, a typedef, a formal, a loop variable and a
+    // declaration of a generate block (IEEE 1800-2023 23.9).
+    for (declarations, bits) in [
+        ("wire [4:0] t; localparam N = $bits(t);", 5),
+        (
+            "function automatic int f(); logic [1:0] t; return $bits(t); endfunction",
+            2,
+        ),
+        (
+            "function automatic int f(); typedef logic [8:0] t; return $bits(t); endfunction",
+            9,
+        ),
+        (
+            "function automatic int f(logic [2:0] t); return $bits(t); endfunction",
+            3,
+        ),
+        (
+            "function automatic int f();
+                int n;
+                for (byte t = 0; t < 1; t++) n = $bits(t);
+                return n;
+            endfunction",
+            8,
+        ),
+        (
+            "if (1) begin : g logic [9:0] t; localparam N = $bits(t); end",
+            10,
+        ),
+    ] {
+        let session = &mut Session::default();
+        let tree = crate::source_tree::parse_scope_fixture(
+            &format!(
+                "package P; typedef logic [6:0] t; endpackage
+                module Top; import P::*; {declarations} endmodule"
+            ),
+            Path::new("hidden-type-names.sv"),
+        )
+        .unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
+        let aliases = type_aliases_from_scope(&tree, session).unwrap();
+        let module_scope = tree
+            .root_scopes()
+            .unwrap()
+            .into_iter()
+            .find(|handle| {
+                handle.unit(tree.declarations()).unwrap().kind == celox_sv_syntax::UnitKind::Module
+            })
+            .unwrap();
+        let tree = tree.scoped(module_scope).unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
+        let call = native_calls(&tree)[0];
+        assert_eq!(
+            query_number(call, &tree, session, &ConstEnv::default(), &aliases, None),
+            Some(bits),
+            "{declarations}"
+        );
+    }
+}
+
 #[test]
 fn discovery_settles_the_scope_of_a_class_once_for_its_specializations() {
     // The methods of each specialization query the scope around the class
