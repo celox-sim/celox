@@ -7388,6 +7388,40 @@ endmodule"#;
         }
     }
 
+    /// Sampled values are captured at the beginning of each timestamp
+    /// (IEEE 1800-2023 4.4.2.5, 16.5.1). A compiled run spanning many
+    /// timestamps refreshes the sampled copies at its own slot starts,
+    /// so a reader deep inside a batched run still sees each slot's
+    /// beginning-of-slot value, matching the reference loop.
+    #[cfg(all(
+        feature = "systemverilog",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn sampled_shadows_refresh_inside_batched_compiled_runs() {
+        let source = r#"`timescale 1ns/1ns
+module Top(input bit clk, output logic [3:0] count, output logic [3:0] seen);
+    always @(posedge clk) count <= count + 1;
+    always @(posedge clk) seen <= $sampled(count);
+endmodule"#;
+        let mut simulation = crate::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("sampled-batched.sv"))],
+            "Top",
+        )
+        .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+        .build_native()
+        .unwrap();
+        simulation.add_clock("clk", 1, 1);
+        // One long run: many timestamps inside single compiled runs.
+        // Posedges at t=1,3,...,19: count reaches 10, and `seen` holds
+        // the count sampled at the beginning of the last posedge's slot.
+        simulation.run_until(20).unwrap();
+        assert_eq!(simulation.get(simulation.signal("count")), 10u8.into());
+        assert_eq!(simulation.get(simulation.signal("seen")), 9u8.into());
+        let stats = simulation.scheduler_stats();
+        assert!(stats.checked_steps > 0, "{stats:?}");
+    }
+
     /// A partitioned settle has a clock cone of its own: the partitions
     /// the kernels' clock writes dirty and those they publish to. The slot
     /// after a clock toggle runs only the cone; a kernel writing data as

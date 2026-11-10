@@ -54,6 +54,10 @@ pub struct ResolvedSchedule<B: SimBackend> {
     pub(crate) time_slots: Vec<SignalRef>,
     /// Sampled variables and their copies, captured before entering a later timestamp.
     pub(crate) sample_shadows: Vec<(SignalRef, SignalRef)>,
+    /// The compiled scheduler refreshes the sampled copies at every slot
+    /// it starts, so compiled runs need not stop at each timestamp for
+    /// the runtime to refresh them.
+    pub(crate) refreshes_sample_shadows: bool,
     /// The compiled scheduler, when one was generated.
     pub(crate) scheduler: Option<SchedulerRefs>,
     /// Per process kernel, why the compiled scheduler does not run it, or
@@ -504,6 +508,9 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                 .iter()
                 .map(|(variable, copy)| (resolve(variable), resolve(copy)))
                 .collect(),
+            refreshes_sample_shadows: model.scheduler.as_ref().is_some_and(|scheduler| {
+                scheduler.refreshes_sample_shadows && scheduler.unit.is_some()
+            }),
             scheduler: model.scheduler.as_ref().and_then(|scheduler| {
                 let slots = &scheduler.slots;
                 let mut refs = SchedulerRefs {
