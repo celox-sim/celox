@@ -4,7 +4,10 @@
 
 The comparison runs the unmodified **XuanTie-E902**, **XuanTie-E906** and
 **HummingbirdV2-E203** `hello` programs from [RTLMeter](https://github.com/verilator/rtlmeter), fixed at commit
-`4fdd6c3fd154e9b99d3a9d713cf3f4977e284f94`. All tools receive the same ordered
+`4fdd6c3fd154e9b99d3a9d713cf3f4977e284f94`. The manifest also registers
+**Servant** and **XuanTie-C906** `hello` for the completion and cycle-count
+qualification check; they are not part of the daily timing comparison below.
+All tools receive the same ordered
 source list, headers, defines, testbench and firmware (`case.pat` for E902/E906;
 `program.hex` for E203). E203 uses the upstream `default` configuration, including
 its `#1` flip-flop delays, with assertions enabled and standard shared-variable
@@ -53,11 +56,13 @@ different hosts. Compare results within one design, state model and host.
 A successful sample requires a zero exit status, the expected program output
 and success marker exactly once, no failure marker, and a positive final
 RTLMeter clock count. E902/E906 print `Hello Friend!` and `TEST PASSED`; E203
-prints `Hello World from HummingbirdV2 E203` and `TEST_PASSED`. Counts must be stable across repetitions and differ by at most one clock
+prints `Hello World from HummingbirdV2 E203` and `TEST_PASSED`. Servant prints
+`Hi, I'm Servant!` and `Test complete`; C906 prints `Hello Friend!` and
+`TEST PASSED`. Counts must be stable across repetitions and differ by at most one clock
 between tools, allowing for `$finish` and the counter on the same active edge.
 A separate one-cycle negative control must stop before program success.
-All tools use the same upstream `+max_cycles` limit (16,384 for E902/E203; 32,768
-for E906), so a stalled UART or CPU cannot count as a completed workload.
+All tools use the same upstream `+max_cycles` limit (16,384 for E902/E203/C906; 32,768
+for E906; 131,072 for Servant), so a stalled UART or CPU cannot count as a completed workload.
 Unsupported modes, probe failures, simulation failures, timeouts and clock
 mismatches appear in the table and contribute no performance points.
 
