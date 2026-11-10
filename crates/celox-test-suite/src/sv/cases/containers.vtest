@@ -2549,3 +2549,50 @@ endmodule
   (assert_eq matched 1) (assert_eq first 5) (assert_eq last 7)
   (assert_eq longer 0) (assert_eq kept 7) (assert_eq from_queue 1)
   (assert_eq from_call 1) (assert_eq handles 1) (assert_eq strings 1))
+(case wildcard_index
+  (source "wildcard_index.sv" #"
+module Top(output bit ok);
+  int arr[*];
+  byte b = -1;
+  longint unsigned k;
+  initial begin
+    arr[8'd5] = 50;
+    arr[32'd5] = 55;
+    ok = arr.num() == 1 && arr[5] == 55;
+    arr[b] = 99;
+    ok = ok && arr.exists(255) && arr[255] == 99 && arr.num() == 2;
+    ok = ok && arr.first(k) == 1;
+    ok = ok && k == 5;
+    ok = ok && arr.last(k) == 1;
+    ok = ok && k == 255;
+    arr.delete(5);
+    ok = ok && arr.num() == 1 && !arr.exists(5);
+  end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq ok 1))
+
+(case pattern_type_keys
+  (source "pattern_type_keys.sv" #"
+module Top(output bit ok);
+  typedef struct { int a; int b; } ms_t;
+  typedef struct packed { logic [7:0] x; bit y; bit signed [31:0] z; } pk_t;
+  ms_t ms;
+  pk_t pk;
+  int arr[3];
+  initial begin
+    ok = 1;
+    ms = '{int:0, int:1};
+    ok = ok && ms.a == 1 && ms.b == 1;
+    ms = '{default:5, b:9};
+    ok = ok && ms.a == 5 && ms.b == 9;
+    ms = '{a:3, int:7};
+    ok = ok && ms.a == 3 && ms.b == 7;
+    pk = '{int:42, default:0};
+    ok = ok && pk.x == 0 && pk.y == 0 && pk.z == 42;
+    arr = '{int:2, 1:8};
+    ok = ok && arr[0] == 2 && arr[1] == 8 && arr[2] == 2;
+  end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq ok 1))
