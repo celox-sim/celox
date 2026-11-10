@@ -418,10 +418,12 @@ fn specialize(
             }
         }
     }
-    let self_qualified = imports::ScopeImports::from_scope(&context)?
-        .qualified
-        .iter()
-        .any(|(package, _)| package == name);
+    // The classes whose specializations may extend a class of the scopes
+    // that ask for them, when nothing else hides a name the package
+    // qualifies with its own.
+    let open = packages::self_qualified_names_are_plain(name, &context, |package| {
+        owner.imports.package_scopes.contains(package)
+    })?;
     let mut package = packages::analyze_package_with_symbols(
         name,
         &context,
@@ -430,7 +432,7 @@ fn specialize(
         HashMap::default(),
         None,
     )?;
-    if self_qualified {
+    if !open.is_some_and(|open| inherits_within(name, &package.symbols.classes, &open)) {
         let context = AnalysisContext {
             package: None,
             ..context.clone()
@@ -469,6 +471,56 @@ fn specialize(
         declarations,
         state_module: package.state_module.filter(|_| caller.is_some()),
     })
+}
+
+/// Whether each of `classes` that specializes one of the classes `open` of
+/// package `name` inherits from classes of the package alone, whose members
+/// its syntax tells: through the class it extends, and for an interface
+/// class through those it extends (IEEE 1800-2023 8.26.3).
+fn inherits_within(name: &str, classes: &[Class], open: &HashSet<String>) -> bool {
+    if open.is_empty() {
+        return true;
+    }
+    let prefix = format!("{name}::");
+    let by_name = classes
+        .iter()
+        .map(|class| (class.name.as_str(), class))
+        .collect::<HashMap<_, _>>();
+    // The name of a specialization is that of its class with its
+    // arguments after it; the name itself may hold any text.
+    let specializes = |class: &Class| {
+        class.name.strip_prefix(&prefix).is_some_and(|generic| {
+            open.iter().any(|open| {
+                generic
+                    .strip_prefix(open.as_str())
+                    .is_some_and(|arguments| arguments.is_empty() || arguments.starts_with("#("))
+            })
+        })
+    };
+    let mut seen = HashSet::default();
+    let mut pending = classes
+        .iter()
+        .filter(|class| specializes(class))
+        .collect::<Vec<_>>();
+    while let Some(class) = pending.pop() {
+        if !seen.insert(class.name.as_str()) {
+            continue;
+        }
+        let parents = class.base.iter().chain(
+            class
+                .is_interface
+                .then_some(&class.interfaces)
+                .into_iter()
+                .flatten(),
+        );
+        for parent in parents {
+            match by_name.get(parent.as_str()) {
+                Some(parent) if parent.name.starts_with(&prefix) => pending.push(parent),
+                _ => return false,
+            }
+        }
+    }
+    true
 }
 
 /// Records what scope `tree` declared that specializations of package class
