@@ -667,36 +667,50 @@ pub(super) fn self_qualified_names_are_plain(
             .or_insert(Some(class));
     }
     // Whether `class` declares or inherits a member `wanted`, or else the
-    // class it extends whose base the syntax does not tell.
+    // classes it is or extends whose base the syntax does not tell.
     let inherits = |class: &celox_sv_syntax::ClassDeclaration, wanted: &str| {
         let mut seen = HashSet::default();
-        let mut class = class;
-        loop {
-            if members[&item(&class.name)].contains(wanted) || !seen.insert(class.tokens.start) {
+        let mut pending = vec![class];
+        let mut unknown = Vec::new();
+        while let Some(class) = pending.pop() {
+            if members[&item(&class.name)].contains(wanted) {
                 return Err(());
             }
-            let Some(base) = &class.base else {
-                return Ok(None);
-            };
-            let known = match &native.data_type(base.data_type).kind {
-                DataTypeKind::Named(path) if path.len() == 1 => {
-                    let base = item(&path[0].name);
-                    // A parameter or type of the class hides a class of its
-                    // name.
-                    (!members[&item(&class.name)].contains(&base))
-                        .then(|| own.get(&base).copied().flatten())
-                        .flatten()
+            if !seen.insert(class.tokens.start) {
+                continue;
+            }
+            // The class it extends; an interface class inherits the
+            // parameters and types of those it extends (8.26.3).
+            let parents = class.base.iter().map(|base| base.data_type).chain(
+                class
+                    .interface
+                    .then_some(&class.interfaces)
+                    .into_iter()
+                    .flatten()
+                    .copied(),
+            );
+            for parent in parents {
+                let known = match &native.data_type(parent).kind {
+                    DataTypeKind::Named(path) if path.len() == 1 => {
+                        let base = item(&path[0].name);
+                        // A parameter or type of the class hides a class of
+                        // its name.
+                        (!members[&item(&class.name)].contains(&base))
+                            .then(|| own.get(&base).copied().flatten())
+                            .flatten()
+                    }
+                    _ => None,
+                };
+                match known {
+                    Some(base) => pending.push(base),
+                    None if foreign || members.values().any(|names| names.contains(wanted)) => {
+                        return Err(());
+                    }
+                    None => unknown.push(item(&class.name)),
                 }
-                _ => None,
-            };
-            let Some(base) = known else {
-                if foreign || members.values().any(|names| names.contains(wanted)) {
-                    return Err(());
-                }
-                return Ok(Some(item(&class.name)));
-            };
-            class = base;
+            }
         }
+        Ok(unknown)
     };
     let mut open = HashSet::default();
     // The bodies of the methods declared out of their classes, which are in
@@ -998,6 +1012,31 @@ mod tests {
         let base = analyses("class U; int v; endclass module Top; p::G#(U) g; endmodule");
         assert!(argument > none, "{argument}");
         assert!(base > argument, "{argument} {base}");
+        // An escaped name may hold the text that starts the arguments of a
+        // specialization.
+        let escaped = scope_analyses(
+            "package p;
+                localparam int X = 5;
+                class B; int v; endclass
+                class \\G#(x #(type T = B) extends T;
+                    function int g(); return p::X; endfunction
+                endclass
+            endpackage
+            class U; int v; endclass
+            module Top; p::\\G#(x #(U) g; endmodule",
+        );
+        let unescaped = scope_analyses(
+            "package p;
+                localparam int X = 5;
+                class B; int v; endclass
+                class G #(type T = B) extends T;
+                    function int g(); return p::X; endfunction
+                endclass
+            endpackage
+            class U; int v; endclass
+            module Top; p::G #(U) g; endmodule",
+        );
+        assert_eq!(escaped, unescaped);
     }
 
     #[test]
@@ -1026,6 +1065,12 @@ mod tests {
             "class B; int X; endclass
              class D extends B; extern function int f(); endclass
              function int D::f(); return p::X + X; endfunction",
+            // An interface class inherits the parameters and types of the
+            // interface classes it extends (8.26.3).
+            "interface class J; localparam int X = 1; endclass
+             interface class I extends J;
+                 pure virtual function int f(int a = p::X);
+             endclass",
             // The iterator of an array method (7.12).
             "function automatic int f(int q[$]);
                  int found[$];

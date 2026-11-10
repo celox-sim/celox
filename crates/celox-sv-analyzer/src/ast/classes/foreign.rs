@@ -475,7 +475,8 @@ fn specialize(
 
 /// Whether each of `classes` that specializes one of the classes `open` of
 /// package `name` inherits from classes of the package alone, whose members
-/// its syntax tells.
+/// its syntax tells: through the class it extends, and for an interface
+/// class through those it extends (IEEE 1800-2023 8.26.3).
 fn inherits_within(name: &str, classes: &[Class], open: &HashSet<String>) -> bool {
     if open.is_empty() {
         return true;
@@ -485,32 +486,41 @@ fn inherits_within(name: &str, classes: &[Class], open: &HashSet<String>) -> boo
         .iter()
         .map(|class| (class.name.as_str(), class))
         .collect::<HashMap<_, _>>();
-    classes
-        .iter()
-        .filter(|class| {
-            class.name.strip_prefix(&prefix).is_some_and(|generic| {
-                open.contains(
-                    generic
-                        .split_once("#(")
-                        .map_or(generic, |(generic, _)| generic),
-                )
+    // The name of a specialization is that of its class with its
+    // arguments after it; the name itself may hold any text.
+    let specializes = |class: &Class| {
+        class.name.strip_prefix(&prefix).is_some_and(|generic| {
+            open.iter().any(|open| {
+                generic
+                    .strip_prefix(open.as_str())
+                    .is_some_and(|arguments| arguments.is_empty() || arguments.starts_with("#("))
             })
         })
-        .all(|class| {
-            let mut base = class.base.as_deref();
-            let mut steps = 0;
-            while let Some(name) = base {
-                steps += 1;
-                let Some(class) = by_name.get(name).filter(|_| name.starts_with(&prefix)) else {
-                    return false;
-                };
-                if steps > classes.len() {
-                    return false;
-                }
-                base = class.base.as_deref();
+    };
+    let mut seen = HashSet::default();
+    let mut pending = classes
+        .iter()
+        .filter(|class| specializes(class))
+        .collect::<Vec<_>>();
+    while let Some(class) = pending.pop() {
+        if !seen.insert(class.name.as_str()) {
+            continue;
+        }
+        let parents = class.base.iter().chain(
+            class
+                .is_interface
+                .then_some(&class.interfaces)
+                .into_iter()
+                .flatten(),
+        );
+        for parent in parents {
+            match by_name.get(parent.as_str()) {
+                Some(parent) if parent.name.starts_with(&prefix) => pending.push(parent),
+                _ => return false,
             }
-            true
-        })
+        }
+    }
+    true
 }
 
 /// Records what scope `tree` declared that specializations of package class
