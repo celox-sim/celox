@@ -42,6 +42,125 @@ pub(super) fn analyze_clock_dependencies(
     let mut ff_writers: BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>> = BTreeMap::new();
     unique_clocks.extend(eval_apply_ffs.keys().copied());
 
+    declare_event_domains(
+        bindings,
+        eval_apply_ffs,
+        eval_only_ffs,
+        apply_ffs,
+        clock_domains,
+        expanded,
+        instance_modules,
+        modules,
+        &mut unique_clocks,
+    );
+
+    record_ff_writes(
+        eval_apply_ffs,
+        clock_domains,
+        &unique_clocks,
+        &mut ff_outputs,
+        &mut ff_writers,
+        &mut clock_deps,
+    );
+
+    // 2. Build combinational dependency graph (target -> sources)
+    let acd_timing = tracing::enabled!(tracing::Level::DEBUG);
+    let acd_start = acd_timing.then(std::time::Instant::now);
+    let comb_deps = comb_dependencies(comb_blocks, arena, acd_start);
+
+    // Which derived domains each event can trigger directly: a clock computed
+    // from the event's signal, or from state the event's domain writes.
+    let mut trigger_edges: BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>> = BTreeMap::new();
+    let mut comb_derived_clocks: BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>> = BTreeMap::new();
+    let combinational_inputs = clock_cone_inputs(comb_blocks, arena, &unique_clocks);
+    record_comb_clock_edges(
+        &unique_clocks,
+        &comb_deps,
+        clock_domains,
+        &ff_writers,
+        &mut trigger_edges,
+        &mut comb_derived_clocks,
+        &mut clock_deps,
+    );
+
+    mark_ff_derived_clocks(
+        &ff_outputs,
+        &comb_deps,
+        &unique_clocks,
+        acd_timing,
+        &mut clock_deps,
+    );
+
+    let topological_clocks = order_clocks(
+        bindings,
+        eval_apply_ffs,
+        eval_only_ffs,
+        apply_ffs,
+        clock_domains,
+        expanded,
+        instance_modules,
+        modules,
+        &unique_clocks,
+        &clock_deps,
+    );
+
+    let mut cascaded_clocks: BTreeSet<AbsoluteAddr> = BTreeSet::new();
+    for (target, sources) in &clock_deps {
+        cascaded_clocks.insert(*target);
+        for source in sources {
+            cascaded_clocks.insert(*source);
+        }
+    }
+
+    // Close the direct edges transitively: a domain triggered by the event
+    // may itself write the source of another derived clock.
+    let order: HashMap<AbsoluteAddr, usize> = topological_clocks
+        .iter()
+        .enumerate()
+        .map(|(index, clock)| (*clock, index))
+        .collect();
+    let derived_events = derived_event_targets(&trigger_edges, &comb_derived_clocks, &order);
+
+    let (level_unread_by_domain, independent_derived, combinationally_read, combinational_derived) =
+        combinational_derived_clocks(
+            bindings,
+            eval_apply_ffs,
+            comb_blocks,
+            arena,
+            clock_domains,
+            instance_modules,
+            modules,
+            &unique_clocks,
+            &comb_deps,
+            comb_derived_clocks,
+            &order,
+            &combinational_inputs,
+        );
+
+    ClockAnalysis {
+        topological_clocks,
+        cascaded_clocks,
+        derived_events,
+        combinational_derived,
+        independent_derived,
+        combinationally_read,
+        level_unread_by_domain,
+    }
+}
+
+/// Make every event-typed signal an event domain, even one no flip-flop is
+/// driven by.
+fn declare_event_domains(
+    bindings: &PackageBindings,
+    eval_apply_ffs: &mut HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    eval_only_ffs: &mut HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    apply_ffs: &mut HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
+    expanded: &HashMap<InstancePath, InstanceId>,
+    instance_modules: &HashMap<InstanceId, ModuleId>,
+    modules: &HashMap<ModuleId, SimModule>,
+    unique_clocks: &mut BTreeSet<AbsoluteAddr>,
+) {
     // Include event-typed signals even when no FF is directly driven by them.
     // A testbench clock may only feed a combinationally gated clock, in which
     // case it would otherwise be absent from the dependency graph entirely.
@@ -67,8 +186,19 @@ pub(super) fn analyze_clock_dependencies(
             apply_ffs.entry(canonical).or_default();
         }
     }
+}
 
-    for (domain_clock, eus) in &*eval_apply_ffs {
+/// Record what the flip-flops of every domain write, and the clocks among
+/// it as dependents of the domain.
+fn record_ff_writes(
+    eval_apply_ffs: &HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
+    unique_clocks: &BTreeSet<AbsoluteAddr>,
+    ff_outputs: &mut BTreeSet<AbsoluteAddr>,
+    ff_writers: &mut BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>>,
+    clock_deps: &mut BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>>,
+) {
+    for (domain_clock, eus) in eval_apply_ffs {
         for eu in eus {
             for bb in eu.blocks.values() {
                 // The domain's stores, and what its calls write.
@@ -102,10 +232,14 @@ pub(super) fn analyze_clock_dependencies(
             }
         }
     }
+}
 
-    // 2. Build combinational dependency graph (target -> sources)
-    let acd_timing = tracing::enabled!(tracing::Level::DEBUG);
-    let acd_start = acd_timing.then(std::time::Instant::now);
+/// The combinational dependency graph: every target to its sources.
+fn comb_dependencies(
+    comb_blocks: &[LogicPath<AbsoluteAddr>],
+    arena: &SLTNodeArena<AbsoluteAddr>,
+    acd_start: Option<std::time::Instant>,
+) -> BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>> {
     let mut comb_deps: BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>> = BTreeMap::new();
     for path in comb_blocks {
         let Some(target) = path.target.var() else {
@@ -129,56 +263,64 @@ pub(super) fn analyze_clock_dependencies(
             s.elapsed()
         );
     }
+    comb_deps
+}
 
-    // Record clock-to-clock dependencies through combinational logic.  FF
-    // propagation below finds divided clocks, but a plain gated clock such as
-    // `gated_clk = clk & enable` has no FF source and needs this separate walk.
-    fn collect_upstream_clocks(
-        node: AbsoluteAddr,
-        target_clock: AbsoluteAddr,
-        comb_deps: &BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>>,
-        clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
-        clocks: &BTreeSet<AbsoluteAddr>,
-        visited: &mut BTreeSet<AbsoluteAddr>,
-        found: &mut BTreeSet<AbsoluteAddr>,
-    ) {
-        if !visited.insert(node) {
-            return;
-        }
-        let Some(sources) = comb_deps.get(&node) else {
-            return;
-        };
-        for source in sources {
-            let canonical = clock_domains.get(source).copied().unwrap_or(*source);
-            if canonical != target_clock && clocks.contains(&canonical) {
-                found.insert(canonical);
-            }
-            collect_upstream_clocks(
-                *source,
-                target_clock,
-                comb_deps,
-                clock_domains,
-                clocks,
-                visited,
-                found,
-            );
-        }
+// Record clock-to-clock dependencies through combinational logic.  FF
+// propagation below finds divided clocks, but a plain gated clock such as
+// `gated_clk = clk & enable` has no FF source and needs this separate walk.
+fn collect_upstream_clocks(
+    node: AbsoluteAddr,
+    target_clock: AbsoluteAddr,
+    comb_deps: &BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>>,
+    clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
+    clocks: &BTreeSet<AbsoluteAddr>,
+    visited: &mut BTreeSet<AbsoluteAddr>,
+    found: &mut BTreeSet<AbsoluteAddr>,
+) {
+    if !visited.insert(node) {
+        return;
     }
+    let Some(sources) = comb_deps.get(&node) else {
+        return;
+    };
+    for source in sources {
+        let canonical = clock_domains.get(source).copied().unwrap_or(*source);
+        if canonical != target_clock && clocks.contains(&canonical) {
+            found.insert(canonical);
+        }
+        collect_upstream_clocks(
+            *source,
+            target_clock,
+            comb_deps,
+            clock_domains,
+            clocks,
+            visited,
+            found,
+        );
+    }
+}
 
-    // Which derived domains each event can trigger directly: a clock computed
-    // from the event's signal, or from state the event's domain writes.
-    let mut trigger_edges: BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>> = BTreeMap::new();
-    let mut comb_derived_clocks: BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>> = BTreeMap::new();
-    let combinational_inputs = clock_cone_inputs(comb_blocks, arena, &unique_clocks);
-    for target_clock in &unique_clocks {
+/// Record, for every clock, the clocks its signal is computed from and the
+/// domains that write state it is computed from.
+fn record_comb_clock_edges(
+    unique_clocks: &BTreeSet<AbsoluteAddr>,
+    comb_deps: &BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>>,
+    clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
+    ff_writers: &BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>>,
+    trigger_edges: &mut BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>>,
+    comb_derived_clocks: &mut BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>>,
+    clock_deps: &mut BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>>,
+) {
+    for target_clock in unique_clocks {
         let mut sources = BTreeSet::new();
         let mut upstream = BTreeSet::new();
         collect_upstream_clocks(
             *target_clock,
             *target_clock,
-            &comb_deps,
+            comb_deps,
             clock_domains,
-            &unique_clocks,
+            unique_clocks,
             &mut upstream,
             &mut sources,
         );
@@ -206,7 +348,17 @@ pub(super) fn analyze_clock_dependencies(
             clock_deps.entry(*target_clock).or_default().extend(sources);
         }
     }
+}
 
+/// Mark the clocks derived from flip-flop outputs through combinational
+/// logic as cascaded.
+fn mark_ff_derived_clocks(
+    ff_outputs: &BTreeSet<AbsoluteAddr>,
+    comb_deps: &BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>>,
+    unique_clocks: &BTreeSet<AbsoluteAddr>,
+    acd_timing: bool,
+    clock_deps: &mut BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>>,
+) {
     // 3. Propagate FF outputs through combinational graph to find all derived variables
     let fp_start = acd_timing.then(std::time::Instant::now);
     let mut derived_from_ff: BTreeSet<AbsoluteAddr> = ff_outputs.clone();
@@ -215,7 +367,7 @@ pub(super) fn analyze_clock_dependencies(
     while changed {
         changed = false;
         fp_rounds += 1;
-        for (target, sources) in &comb_deps {
+        for (target, sources) in comb_deps {
             if !derived_from_ff.contains(target) {
                 // If any source is derived from an FF, the target is too
                 if sources.iter().any(|s| derived_from_ff.contains(s)) {
@@ -235,52 +387,40 @@ pub(super) fn analyze_clock_dependencies(
 
     // 4. Any clock domain that is derived from an FF is a cascaded clock!
     // We add them to a special "pseudo-domain" or just add themselves to trigger cascade marking.
-    for clk in &unique_clocks {
+    for clk in unique_clocks {
         if derived_from_ff.contains(clk) {
             // Self-dependency ensures it appears in `clock_deps.keys()`
             clock_deps.entry(*clk).or_default().insert(*clk);
         }
     }
+}
 
+/// The event domains in dependency order, sources first. Every other
+/// event-typed signal becomes a domain of its own.
+fn order_clocks(
+    bindings: &PackageBindings,
+    eval_apply_ffs: &mut HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    eval_only_ffs: &mut HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    apply_ffs: &mut HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
+    expanded: &HashMap<InstancePath, InstanceId>,
+    instance_modules: &HashMap<InstanceId, ModuleId>,
+    modules: &HashMap<ModuleId, SimModule>,
+    unique_clocks: &BTreeSet<AbsoluteAddr>,
+    clock_deps: &BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>>,
+) -> Vec<AbsoluteAddr> {
     // Topologically sort the clock domains
     // Sources (no dependencies) should be evaluated first.
     let mut topological_clocks = Vec::new();
     let mut visited = BTreeSet::new();
     let mut temp_visited = BTreeSet::new();
 
-    fn topo_visit(
-        node: AbsoluteAddr,
-        deps: &BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>>,
-        visited: &mut BTreeSet<AbsoluteAddr>,
-        temp_visited: &mut BTreeSet<AbsoluteAddr>,
-        result: &mut Vec<AbsoluteAddr>,
-    ) {
-        if visited.contains(&node) {
-            return;
-        }
-        if temp_visited.contains(&node) {
-            // Cycle detected in clock generation, ignore and break cycle for now
-            return;
-        }
-        temp_visited.insert(node);
-
-        if let Some(node_deps) = deps.get(&node) {
-            for &dep in node_deps {
-                topo_visit(dep, deps, visited, temp_visited, result);
-            }
-        }
-
-        temp_visited.remove(&node);
-        visited.insert(node);
-        result.push(node);
-    }
-
     // Ensure all unique clocks mapped in eval_apply_ffs are present in the topo sort
-    for &clk in &unique_clocks {
+    for &clk in unique_clocks {
         if !visited.contains(&clk) {
             topo_visit(
                 clk,
-                &clock_deps,
+                clock_deps,
                 &mut visited,
                 &mut temp_visited,
                 &mut topological_clocks,
@@ -312,7 +452,7 @@ pub(super) fn analyze_clock_dependencies(
                 if !visited.contains(&canonical) {
                     topo_visit(
                         canonical,
-                        &clock_deps,
+                        clock_deps,
                         &mut visited,
                         &mut temp_visited,
                         &mut topological_clocks,
@@ -321,22 +461,43 @@ pub(super) fn analyze_clock_dependencies(
             }
         }
     }
+    topological_clocks
+}
 
-    let mut cascaded_clocks: BTreeSet<AbsoluteAddr> = BTreeSet::new();
-    for (target, sources) in &clock_deps {
-        cascaded_clocks.insert(*target);
-        for source in sources {
-            cascaded_clocks.insert(*source);
+fn topo_visit(
+    node: AbsoluteAddr,
+    deps: &BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>>,
+    visited: &mut BTreeSet<AbsoluteAddr>,
+    temp_visited: &mut BTreeSet<AbsoluteAddr>,
+    result: &mut Vec<AbsoluteAddr>,
+) {
+    if visited.contains(&node) {
+        return;
+    }
+    if temp_visited.contains(&node) {
+        // Cycle detected in clock generation, ignore and break cycle for now
+        return;
+    }
+    temp_visited.insert(node);
+
+    if let Some(node_deps) = deps.get(&node) {
+        for &dep in node_deps {
+            topo_visit(dep, deps, visited, temp_visited, result);
         }
     }
 
-    // Close the direct edges transitively: a domain triggered by the event
-    // may itself write the source of another derived clock.
-    let order: HashMap<AbsoluteAddr, usize> = topological_clocks
-        .iter()
-        .enumerate()
-        .map(|(index, clock)| (*clock, index))
-        .collect();
+    temp_visited.remove(&node);
+    visited.insert(node);
+    result.push(node);
+}
+
+/// Each event to the derived domains an occurrence of it can trigger,
+/// transitively, in clock order.
+fn derived_event_targets(
+    trigger_edges: &BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>>,
+    comb_derived_clocks: &BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>>,
+    order: &HashMap<AbsoluteAddr, usize>,
+) -> BTreeMap<AbsoluteAddr, Vec<AbsoluteAddr>> {
     let mut derived_events = BTreeMap::new();
     for event in trigger_edges.keys() {
         let mut reached = BTreeSet::new();
@@ -360,7 +521,33 @@ pub(super) fn analyze_clock_dependencies(
             derived_events.insert(*event, targets);
         }
     }
+    derived_events
+}
 
+/// The clocks computed combinationally from each event's signal, with
+/// their gate programs, and what the domains read of event signals: the
+/// events whose own domain does not read their level, the events whose
+/// derived domains may run in turn, and the events combinational logic
+/// reads.
+fn combinational_derived_clocks(
+    bindings: &PackageBindings,
+    eval_apply_ffs: &HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    comb_blocks: &[LogicPath<AbsoluteAddr>],
+    arena: &SLTNodeArena<AbsoluteAddr>,
+    clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
+    instance_modules: &HashMap<InstanceId, ModuleId>,
+    modules: &HashMap<ModuleId, SimModule>,
+    unique_clocks: &BTreeSet<AbsoluteAddr>,
+    comb_deps: &BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>>,
+    comb_derived_clocks: BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>>,
+    order: &HashMap<AbsoluteAddr, usize>,
+    combinational_inputs: &BTreeMap<AbsoluteAddr, Vec<AbsoluteAddr>>,
+) -> (
+    BTreeSet<AbsoluteAddr>,
+    BTreeSet<AbsoluteAddr>,
+    BTreeSet<AbsoluteAddr>,
+    BTreeMap<AbsoluteAddr, Vec<CombDerivedClock<AbsoluteAddr>>>,
+) {
     // Combinational definitions by target, for the gate programs.
     let var_widths: HashMap<AbsoluteAddr, usize> = instance_modules
         .iter()
@@ -476,16 +663,12 @@ pub(super) fn analyze_clock_dependencies(
             (event, clocks)
         })
         .collect();
-
-    ClockAnalysis {
-        topological_clocks,
-        cascaded_clocks,
-        derived_events,
-        combinational_derived,
+    (
+        level_unread_by_domain,
         independent_derived,
         combinationally_read,
-        level_unread_by_domain,
-    }
+        combinational_derived,
+    )
 }
 
 /// Complete read dependencies for proving a clock unaffected by an update.
