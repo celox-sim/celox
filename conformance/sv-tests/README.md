@@ -841,3 +841,30 @@ finishes within the PR case timeout now that `$bits` of a built-in type or
 of a type name the scope already binds no longer discovers every declaration
 of the package (about 53 seconds with the CI driver, 78 before). The other
 UVM cases still reach the timeout or fail after analysis as before.
+
+`randcase` (18.16) updates four reviewed expectations: both `18.16`
+randcase cases pass in both state modes in a focused official invocation.
+The shared regression covers zero-weight and zero-total randcase items.
+Boundary: randcase weights are limited to 64 bits. A full official run
+over the 1,028 checked-in cases for the string, pattern, constraint,
+container, net and randcase changes changed only the corresponding
+checked-in verdicts, with no passing case regressing; this is not a new
+full-corpus measurement of the prepared 1,650 cases.
+
+`disable` of a named block (9.6.2) is supported in two forms: leaving an
+enclosing named block in the same process (including from loops, functions
+and `always_comb` bodies), and killing a sibling fork branch whose body is a
+named block. Six reviewed expectations update: `9.6.2--disable`,
+`9.6.2--disable_other` and `12.7.6--forever` pass in both state modes in a
+focused official invocation, with no other verdict changed among 88 cases of
+chapters 9, 12 and 13. The upstream cases only elaborate; the shared
+regression additionally checks that statements after the `disable` do not
+run, that a killed branch stops mid-schedule, and that a loop inside the
+block is left. Boundaries: hierarchical and task-name targets stay
+unsupported, a named block containing a fork is not a disable target, a
+block outside the executing process (such as a fork parent's block) is not
+lowered, and a sibling kill uses the branch's latest activation. A fork branch
+that a sibling `disable` names takes a process handle, so its process record
+is kept for the rest of the simulation as one a `process::self()` call
+exposes is; a branch that is only labelled takes none and its record is
+reused.

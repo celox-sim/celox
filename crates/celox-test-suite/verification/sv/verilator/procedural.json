@@ -79,6 +79,17 @@
     },
     {
       "category": "ControlFlow",
+      "detail": "procedural::disable_block_in_concurrent_task at 1692:28: assert_eq ok: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "procedural::disable_block_in_concurrent_task",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
       "detail": "",
       "expectation": "Simulation",
       "name": "procedural::ff_processes_write_bits_of_separate_array_elements",

@@ -137,3 +137,45 @@ fn program_exit_discards_suspension_and_dead_wakeups() {
         verify(build().build_wasm().unwrap());
     }
 }
+
+/// A named fork branch takes a process handle only when a sibling `disable`
+/// names it (IEEE 1800-2023 9.6.2): a handle exposes its process, whose
+/// record is then kept for the rest of the simulation, so a fork that only
+/// labels its branches must go on reusing the records of finished children.
+#[test]
+fn labelled_fork_branches_reuse_their_process_records() {
+    fn verify<B: SimBackend>(mut sim: Simulation<B>) {
+        let mut records = Vec::new();
+        for time in [4u64, 16] {
+            sim.run_until(time).unwrap();
+            assert_eq!(sim.get(sim.signal("rounds")), time.into());
+            let state = sim.state.schedule_key();
+            assert!(state.activations.iter().all(|a| !a.control.exposed));
+            records.push(state.activations.len());
+        }
+        assert_eq!(records[0], records[1], "fork children are not reused");
+    }
+    let source = "`timescale 1ns/1ns
+module Top(output int rounds);
+    initial forever begin
+        fork
+            begin : left #1; end
+            begin : right #1; end
+        join
+        rounds = rounds + 1;
+    end
+endmodule
+";
+    for four_state in [false, true] {
+        let build = || {
+            Simulation::from_sv_sources(vec![(source, Path::new("labelled_fork.sv"))], "Top")
+                .four_state(four_state)
+        };
+        verify(build().build_native().unwrap());
+        verify(build().build_interpreter().unwrap());
+        #[cfg(feature = "cranelift")]
+        verify(build().build_cranelift().unwrap());
+        #[cfg(feature = "wasm-runtime")]
+        verify(build().build_wasm().unwrap());
+    }
+}

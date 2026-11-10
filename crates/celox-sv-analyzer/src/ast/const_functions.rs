@@ -978,7 +978,7 @@ fn call_in_frame(
             frame.set(return_name, value)?;
         }
         Flow::Next | Flow::Return(None) => {}
-        Flow::Break | Flow::Continue => return None,
+        Flow::Break | Flow::Continue | Flow::Disable(_) => return None,
     }
     frame.scope.values.remove(return_name)
 }
@@ -988,6 +988,8 @@ enum Flow {
     Break,
     Continue,
     Return(Option<Value>),
+    /// Leave the named block of this id (9.6.2).
+    Disable(u32),
 }
 
 /// Calls borrow their caller's values; only parameters, locals, the return
@@ -1790,6 +1792,7 @@ impl<'a> Frame<'a> {
                         Flow::Next | Flow::Continue => {}
                         Flow::Break => break,
                         Flow::Return(value) => return Some(Flow::Return(value)),
+                        flow @ Flow::Disable(_) => return Some(flow),
                     }
                     if !matches!(self.block(step)?, Flow::Next) {
                         return None;
@@ -1798,6 +1801,13 @@ impl<'a> Frame<'a> {
             }
             Stmt::Break => return Some(Flow::Break),
             Stmt::Continue => return Some(Flow::Continue),
+            Stmt::Block { id, body } => {
+                return match self.block(body)? {
+                    Flow::Disable(disabled) if disabled == *id => Some(Flow::Next),
+                    flow => Some(flow),
+                };
+            }
+            Stmt::DisableBlock(id) => return Some(Flow::Disable(*id)),
             Stmt::Return(value) => {
                 let value = match value {
                     Some(value) => {

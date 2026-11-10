@@ -47,6 +47,19 @@ struct FunctionBlocks {
     return_block: BlockId,
     return_var: Option<String>,
     loop_depth: usize,
+    block_depth: usize,
+}
+
+/// One named block a `disable` can leave. In a process kernel, where an
+/// activation can be suspended in the block while another runs, a block
+/// a statement in its body disables carries the shared generation
+/// variable of its declaration and this activation's snapshot of it, so
+/// disabling the block in one activation ends every other active one at
+/// its next statement (IEEE 1800-2023 9.6.2).
+struct BlockEntry {
+    id: u32,
+    exit: BlockId,
+    epoch: Option<(String, String)>,
 }
 
 pub(super) struct Ff<'p, 'a> {
@@ -75,6 +88,8 @@ pub(super) struct Ff<'p, 'a> {
     /// The bits whose working value is the process result.
     targets: Vec<(SourceVarId, BitAccess)>,
     loops: Vec<LoopBlocks>,
+    /// Named blocks a `disable` can leave: their ids and exit blocks.
+    blocks: Vec<BlockEntry>,
     functions: Vec<FunctionBlocks>,
     /// Loop variables of unrolled loops and their literal values.
     overlay: HashMap<String, (String, i128)>,
@@ -216,6 +231,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             nonblocking: HashSet::default(),
             targets: Vec::new(),
             loops: Vec::new(),
+            blocks: Vec::new(),
             functions: Vec::new(),
             overlay: HashMap::default(),
             active_calls: Vec::new(),
@@ -4036,9 +4052,45 @@ impl<'p, 'a> Ff<'p, 'a> {
 
     // --------------------------------------------------------------- control
 
+    /// Leave every named block an earlier `disable` ended while this
+    /// activation was suspended: at a statement boundary, an activation
+    /// whose snapshot no longer matches the block's generation jumps to
+    /// the block's exit instead of executing the statement.
+    fn check_disabled_blocks(&mut self) -> Result<(), sv::AnalyzerError> {
+        let epochs: Vec<(BlockId, String, String)> = self
+            .blocks
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .epoch
+                    .as_ref()
+                    .map(|(epoch, snapshot)| (entry.exit, epoch.clone(), snapshot.clone()))
+            })
+            .collect();
+        for (exit, epoch, snapshot) in epochs {
+            let changed = sv::ir::Expr::Binary {
+                left: Box::new(sv::ir::Expr::Ident(snapshot)),
+                op: sv::ir::BinaryOp::Ne,
+                right: Box::new(sv::ir::Expr::Ident(epoch)),
+            };
+            let (truth, _) = self.eval_truth(&changed)?;
+            let next = self.b.new_block();
+            self.b.seal_block(SIRTerminator::Branch {
+                cond: truth,
+                true_block: (exit, Vec::new()),
+                false_block: (next, Vec::new()),
+            });
+            self.b.switch_to_block(next);
+        }
+        Ok(())
+    }
+
     /// Lower a statement list; `false` when control cannot fall off its end.
     fn exec_block(&mut self, stmts: &[sv::ir::Stmt]) -> Result<bool, sv::AnalyzerError> {
         for stmt in stmts {
+            if self.blocks.iter().any(|entry| entry.epoch.is_some()) {
+                self.check_disabled_blocks()?;
+            }
             if !self.exec(stmt)? {
                 return Ok(false);
             }
@@ -4241,6 +4293,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     .map_err(kernel_error)?;
                 self.b.seal_block(SIRTerminator::Return);
                 let loops = std::mem::take(&mut self.loops);
+                let blocks = std::mem::take(&mut self.blocks);
                 let functions = std::mem::take(&mut self.functions);
                 let overlay = std::mem::take(&mut self.overlay);
                 let timing_boundary = self.timing_call_boundary;
@@ -4253,6 +4306,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 }
                 self.timing_call_boundary = timing_boundary;
                 self.loops = loops;
+                self.blocks = blocks;
                 self.functions = functions;
                 self.overlay = overlay;
                 self.b.switch_to_block(continuation);
@@ -4360,6 +4414,73 @@ impl<'p, 'a> Ff<'p, 'a> {
                     blocks.continue_block
                 };
                 self.jump(target);
+                Ok(false)
+            }
+            sv::ir::Stmt::Block { id, body } => {
+                let exit = self.b.new_block();
+                // A timed activation can be suspended inside the block
+                // while another activation of it runs, so a block its own
+                // execution disables needs the generation check. Every
+                // `disable` of the block is a statement of its body: a
+                // recursive activation runs the same statements.
+                let mut disabled = false;
+                for stmt in body {
+                    stmt.walk(&mut |stmt| {
+                        disabled |=
+                            matches!(stmt, sv::ir::Stmt::DisableBlock(block) if block == id);
+                    });
+                }
+                let epoch = if self.kernel.is_some() && disabled {
+                    let epoch = self.m.disable_epoch(*id);
+                    let (_, snapshot) = self.m.temp("disable_snapshot", 64, false, false);
+                    self.assign(
+                        &sv::ir::LValue::Ident(snapshot.clone()),
+                        &sv::ir::Expr::Ident(epoch.clone()),
+                    )?;
+                    Some((epoch, snapshot))
+                } else {
+                    None
+                };
+                self.blocks.push(BlockEntry {
+                    id: *id,
+                    exit,
+                    epoch,
+                });
+                let falls_through = self.exec_block(body);
+                self.blocks.pop();
+                if falls_through? {
+                    self.jump(exit);
+                }
+                self.b.switch_to_block(exit);
+                Ok(true)
+            }
+            sv::ir::Stmt::DisableBlock(id) => {
+                // The block must be executing in this process, in this
+                // subroutine inlining: a target outside them (an outer
+                // block of a fork parent, say) is not lowered.
+                let depth = self
+                    .functions
+                    .last()
+                    .map_or(0, |function| function.block_depth);
+                let entry = self.blocks[depth..]
+                    .iter()
+                    .rev()
+                    .find(|entry| entry.id == *id)
+                    .ok_or_else(|| {
+                        unsupported("disable of a block that is not executing in this process")
+                    })?;
+                let (exit, epoch) = (entry.exit, entry.epoch.clone());
+                // End every other active activation too: they find the
+                // generation advanced at their next statement.
+                if let Some((epoch, _)) = epoch {
+                    let advanced = sv::ir::Expr::Binary {
+                        left: Box::new(sv::ir::Expr::Ident(epoch.clone())),
+                        op: sv::ir::BinaryOp::Add,
+                        right: Box::new(sv::ir::Expr::Literal("1".into())),
+                    };
+                    self.assign(&sv::ir::LValue::Ident(epoch), &advanced)?;
+                }
+                self.jump(exit);
                 Ok(false)
             }
             sv::ir::Stmt::Return(value) => {
@@ -5524,6 +5645,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     return_block,
                     return_var: subroutine.return_var.clone(),
                     loop_depth: self.loops.len(),
+                    block_depth: self.blocks.len(),
                 });
                 let mut body = std::mem::take(&mut subroutine.body);
                 let (constants, parameter_types) = (self.m.constants, self.m.parameter_types);
@@ -6710,6 +6832,9 @@ fn array_nba_site_count(
                     count += array_nba_site_count(default, id, pm)?;
                 }
             }
+            sv::ir::Stmt::Block { body, .. } => {
+                count += array_nba_site_count(body, id, pm)?;
+            }
             other if writes(other) => return None,
             _ => {}
         }
@@ -6896,6 +7021,10 @@ fn stage_nonblocking(
                 init: init.clone(),
                 condition: condition.clone(),
                 step: step.clone(),
+                body: stage_nonblocking(body, staged, pm, next_site, stmt_delays),
+            }),
+            sv::ir::Stmt::Block { id, body } => out.push(sv::ir::Stmt::Block {
+                id: *id,
                 body: stage_nonblocking(body, staged, pm, next_site, stmt_delays),
             }),
             other => out.push(other.clone()),
@@ -9119,6 +9248,10 @@ fn without_timing_controls(stmts: &[sv::ir::Stmt]) -> Vec<sv::ir::Stmt> {
                 init: without_timing_controls(init),
                 condition: condition.clone(),
                 step: without_timing_controls(step),
+                body: without_timing_controls(body),
+            },
+            Stmt::Block { id, body } => Stmt::Block {
+                id: *id,
                 body: without_timing_controls(body),
             },
             stmt => stmt.clone(),

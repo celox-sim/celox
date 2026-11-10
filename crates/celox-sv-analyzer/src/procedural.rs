@@ -150,6 +150,16 @@ pub enum StmtBase<E, L> {
     },
     WaitFork,
     DisableFork,
+    /// A named block that a `disable` in its body can leave (IEEE
+    /// 1800-2023 9.6.2). Only blocks a `disable` names are kept; other
+    /// blocks are flattened into their enclosing statement list.
+    Block {
+        id: u32,
+        body: Vec<StmtBase<E, L>>,
+    },
+    /// `disable block`: leave the enclosing named block `id`, ending its
+    /// execution in this process (9.6.2).
+    DisableBlock(u32),
     /// An internal scheduling boundary in the current Active region (4.7).
     DeferActive,
     /// Internal region boundary of a concurrent assertion monitor.
@@ -440,6 +450,11 @@ impl<E, L> StmtBase<E, L> {
             StmtBase::DeferActive => StmtBase::DeferActive,
             StmtBase::WaitFork => StmtBase::WaitFork,
             StmtBase::DisableFork => StmtBase::DisableFork,
+            StmtBase::Block { id, body: stmts } => StmtBase::Block {
+                id,
+                body: body(stmts, fe, fl),
+            },
+            StmtBase::DisableBlock(id) => StmtBase::DisableBlock(id),
             StmtBase::Wait(condition) => StmtBase::Wait(fe(condition)),
             StmtBase::WaitImplicit { reads, always_comb } => StmtBase::WaitImplicit {
                 reads: body(reads, fe, fl),
@@ -571,9 +586,11 @@ impl<E, L> StmtBase<E, L> {
                     }
                 }
             }
+            StmtBase::Block { body: stmts, .. } => body(stmts, fe, fl, fname),
             StmtBase::DeferActive
             | StmtBase::WaitFork
             | StmtBase::DisableFork
+            | StmtBase::DisableBlock(_)
             | StmtBase::AssertionRegion { .. } => {}
             StmtBase::Wait(condition) => fe(condition),
             StmtBase::WaitImplicit { reads, .. } => body(reads, fe, fl, fname),
@@ -624,6 +641,7 @@ impl<E, L> StmtBase<E, L> {
                     visit(branch);
                 }
             }
+            StmtBase::Block { body, .. } => visit(body),
             _ => {}
         }
     }
@@ -688,6 +706,7 @@ impl<E, L> StmtBase<E, L> {
                     visit(branch);
                 }
             }
+            StmtBase::Block { body, .. } => visit(body),
             _ => {}
         }
     }

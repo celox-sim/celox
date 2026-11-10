@@ -1461,6 +1461,10 @@ pub(super) fn without_event_blocks(stmt: &Stmt) -> Stmt {
             join: *join,
             branches: branches.iter().map(|branch| all(branch)).collect(),
         },
+        Stmt::Block { id, body } => Stmt::Block {
+            id: *id,
+            body: all(body),
+        },
         stmt => stmt.clone(),
     }
 }

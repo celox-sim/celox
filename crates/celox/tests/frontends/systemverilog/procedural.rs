@@ -50,6 +50,41 @@ fn native_merged_optimization_preserves_large_and_wide_array_boundaries() {
 }
 
 sv_backends! {
+    fn randcase_weights(sim) { @case "procedural::randcase_weights"; }
+    fn disable_named_blocks(sim) { @case "procedural::disable_named_blocks"; }
+    fn disable_block_in_concurrent_task(sim) {
+        @case "procedural::disable_block_in_concurrent_task";
+    }
+    // A `break` in a named block that a `disable` names leaves the whole
+    // multidimensional foreach, as one outside the block does (IEEE
+    // 1800-2023 9.6.2, 12.8). Icarus 13.0 leaves only the innermost
+    // dimension, so the case is not a shared one.
+    fn disable_block_keeps_foreach_break(sim) {
+        @setup { let source = r#"
+module Top(output int count);
+  int m[2][3];
+  initial begin
+    foreach (m[i, j]) begin : body
+      if (j == 2) disable body;
+      count++;
+      if (i == 0 && j == 1) break;
+    end
+  end
+endmodule
+"#; }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("disable_block_keeps_foreach_break.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("count")), 2u32.into());
+    }
+    fn disable_block_stops_combinational_loop(sim) {
+        @case "procedural::disable_block_stops_combinational_loop";
+    }
+    fn disable_block_keeps_static_task_local(sim) {
+        @case "procedural::disable_block_keeps_static_task_local";
+    }
+    fn disable_block_keeps_nonblocking_region(sim) {
+        @case "procedural::disable_block_keeps_nonblocking_region";
+    }
     fn pull_and_supply_nets(sim) { @case "procedural::pull_and_supply_nets"; }
 
     fn level_processes_share_a_written_variable(sim) {

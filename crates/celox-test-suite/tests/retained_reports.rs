@@ -1340,6 +1340,9 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                         ("xezim", "concurrent_assertions::expect_statements") => {
                             ("mismatch", "execute", "assert_eq r2: expected 0x1, got 0x2")
                         }
+                        ("verilator", "procedural::disable_block_in_concurrent_task") => {
+                            ("mismatch", "execute", "assert_eq ok: expected 0x1, got 0x0")
+                        }
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }
