@@ -2230,3 +2230,14 @@ other one resumes after its delay and performs the write. The executed
 mismatch is retained in
 [the Verilator procedural report](verification/sv/verilator/procedural.json).
 No assertion is weakened.
+
+### `randcase` statements
+
+`procedural::randcase_weights` and `procedural::randcase_in_always_comb` use
+the `randcase` statement (IEEE 1800-2023 18.16). Celox and Verilator 5.052
+execute both unchanged cases.
+
+Icarus 13.0 does not parse `randcase` and reports a syntax error at the
+statement. The executed compile errors are retained in
+[the Icarus procedural report](verification/sv/icarus/procedural.json). No
+assertion is weakened.

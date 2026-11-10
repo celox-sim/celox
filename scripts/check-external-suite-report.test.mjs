@@ -429,6 +429,8 @@ test("every retained baseline accepts only its existing failures", () => {
                 "mailboxes::try_methods_do_not_block",
                 "operators::one_bit_casts",
                 "procedural::dpi_exports_leave_subroutines_unchanged",
+                "procedural::randcase_in_always_comb",
+                "procedural::randcase_weights",
                 "references::const_ref_in_a_continuous_assignment",
                 "references::const_ref_reads_the_current_value",
                 "references::ref_actual_of_an_equivalent_type",
