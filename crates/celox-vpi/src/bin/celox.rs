@@ -271,6 +271,18 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
         .signal_access(arguments.design.signal_access.clone())
         .plusargs(arguments.plusargs.iter().cloned())
         .defer_initialization(arguments.save_state.restore_checkpoint.is_some());
+    let builder =
+        arguments
+            .execution
+            .pass_overrides()
+            .iter()
+            .fold(builder, |builder, &(enable, pass)| {
+                if enable {
+                    builder.enable_pass(pass)
+                } else {
+                    builder.disable_pass(pass)
+                }
+            });
     let builder = if std::env::var_os("CELOX_TRACE_NATIVE").is_some() {
         builder.trace_native().trace_on_build()
     } else {

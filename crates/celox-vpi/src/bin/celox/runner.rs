@@ -188,6 +188,12 @@ impl ExecutionArgs {
         )
     }
 
+    /// The `--sir-pass` overrides, each enabling or disabling one pass.
+    #[cfg(feature = "systemverilog")]
+    pub(super) fn pass_overrides(&self) -> &[(bool, SirPass)] {
+        &self.pass_overrides
+    }
+
     #[cfg(feature = "systemverilog")]
     pub(super) fn validate_sv(&self) -> Result<(), String> {
         if self.compile_only
@@ -197,7 +203,6 @@ impl ExecutionArgs {
             || self.dump_ir_dir.is_some()
             || self.dump_ir_and_run
             || !self.native_profile_blocks.is_empty()
-            || !self.pass_overrides.is_empty()
             || self.native_memory_width.is_some()
             || self.x86_slp.is_some()
             || self.always_partition
