@@ -1,1 +1,6 @@
-Address Codex review on PR 3453: list the nets that left the program as combinationally derived, so signal lookup and state files keep treating them as eliminated values rather than state
+Revision history for #3453:
+
+rev 2 (content) 2026-11-10 05:33 UTC — Address Codex review on PR 3453: list the nets that left the program as combinationally derived, so signal lookup and state files keep treating them as eliminated values rather than state
+rev 1 (initial) 2026-11-10 05:33 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3453,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"5e5c422c2105b99e647dbe09ad74c3f9c466ffef","timestamp_iso":"2026-11-10T05:33:37Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"5e5c422c2105b99e647dbe09ad74c3f9c466ffef","new_sha":"c1d0c239c4d3e2f39a1d5768ad06488ced2b92e5","timestamp_iso":"2026-11-10T05:33:37Z","reason":"Address Codex review on PR 3453: list the nets that left the program as combinationally derived, so signal lookup and state files keep treating them as eliminated values rather than state","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/5e5c422c2105b99e647dbe09ad74c3f9c466ffef...c1d0c239c4d3e2f39a1d5768ad06488ced2b92e5"}]} -->
