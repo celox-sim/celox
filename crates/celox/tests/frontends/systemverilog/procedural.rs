@@ -52,6 +52,10 @@ fn native_merged_optimization_preserves_large_and_wide_array_boundaries() {
 sv_backends! {
     fn randcase_weights(sim) { @case "procedural::randcase_weights"; }
     fn disable_named_blocks(sim) { @case "procedural::disable_named_blocks"; }
+    fn disable_block_of_another_scope_keeps_running(sim) {
+        @case "procedural::disable_block_of_another_scope_keeps_running";
+    }
+    fn randcase_in_always_comb(sim) { @case "procedural::randcase_in_always_comb"; }
     fn disable_block_in_concurrent_task(sim) {
         @case "procedural::disable_block_in_concurrent_task";
     }
@@ -75,6 +79,32 @@ endmodule
         @build celox::Simulation::from_sv_sources(vec![(source, Path::new("disable_block_keeps_foreach_break.sv"))], "Top");
         sim.run_until(0).unwrap();
         assert_eq!(sim.get(sim.signal("count")), 2u32.into());
+    }
+    // A sibling `disable` that runs before the fork branch it names has
+    // started finds a block that is not executing, so it has no effect and
+    // the branch then runs (IEEE 1800-2023 9.6.2). The order in which the
+    // branches of a fork start is not specified (4.7), and Icarus 13.0 ends
+    // the branch instead, so the case is not a shared one.
+    fn disable_before_fork_branch_starts_has_no_effect(sim) {
+        @setup { let source = r#"
+`timescale 1ns/1ns
+module Top(output int ran, output int late);
+  initial begin
+    fork
+      disable second;
+      begin : second
+        ran = 1;
+        #5;
+        late = 1;
+      end
+    join
+  end
+endmodule
+"#; }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("disable_before_fork_branch_starts_has_no_effect.sv"))], "Top");
+        sim.run_until(10).unwrap();
+        assert_eq!(sim.get(sim.signal("ran")), 1u32.into());
+        assert_eq!(sim.get(sim.signal("late")), 1u32.into());
     }
     fn disable_block_stops_combinational_loop(sim) {
         @case "procedural::disable_block_stops_combinational_loop";

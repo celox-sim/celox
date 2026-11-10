@@ -1691,6 +1691,77 @@ endmodule
 "#)
   (top Top) (run_until 20) (assert_eq ok 1))
 
+(case disable_block_of_another_scope_keeps_running
+  ; A `disable` ends the activations of the block it names only: a block
+  ; of the same shape in a task of another package, or of the module that
+  ; imports them, keeps running (9.6.2).
+  (source "disable_block_of_another_scope_keeps_running.sv" #"
+package first_pkg;
+  int p_done = 0;
+  task automatic p_work(bit stop);
+    begin : B
+      #5;
+      if (stop) disable B;
+      #10;
+      p_done = p_done + 1;
+    end
+  endtask
+endpackage
+package second_pkg;
+  int q_done = 0;
+  task automatic q_work(bit stop);
+    begin : B
+      #5;
+      if (stop) disable B;
+      #10;
+      q_done = q_done + 1;
+    end
+  endtask
+endpackage
+module Top(output bit ok);
+  import first_pkg::*;
+  import second_pkg::*;
+  int done = 0;
+  task automatic work(bit stop);
+    begin : B
+      #5;
+      if (stop) disable B;
+      #10;
+      done = done + 1;
+    end
+  endtask
+  initial begin
+    fork
+      p_work(0);
+      q_work(1);
+      work(0);
+    join
+    ok = p_done == 1 && q_done == 0 && done == 1;
+  end
+endmodule
+"#)
+  (top Top) (run_until 30) (assert_eq ok 1))
+
+(case randcase_in_always_comb
+  ; A `randcase` is a statement of a combinational procedure as well
+  ; (9.2.2.2, 18.16); a zero weight is never taken.
+  (source "randcase_in_always_comb.sv" #"
+module Top(input logic [1:0] a, output logic [3:0] y);
+  always_comb begin
+    y = 4'd0;
+    randcase
+      0: y = 4'd1;
+      3: y = {2'b10, a};
+    endcase
+  end
+endmodule
+"#)
+  (top Top)
+  (set a 1)
+  (assert_eq y 9)
+  (set a 2)
+  (assert_eq y 10))
+
 (case disable_named_blocks
   (source "disable_named_blocks.sv" #"
 module Top(output bit ok);

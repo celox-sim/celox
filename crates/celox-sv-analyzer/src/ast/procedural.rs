@@ -127,7 +127,7 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
     /// can leave (9.6.2): their labels and block ids, innermost last, and
     /// whether a `disable` in the body has named the block. Only such a
     /// block stays a block in the statement tree.
-    pub(super) named_blocks: Vec<(String, u32, bool)>,
+    pub(super) named_blocks: Vec<(String, u64, bool)>,
     /// The named fork-branch blocks a `disable` in a sibling branch can
     /// kill (9.6.2): their labels, the hidden variables holding each
     /// branch's process handle and whether it is armed, and whether a
@@ -665,6 +665,24 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             None => format!("{source}@{}", *self.state.counter),
         };
         self.declare_as(source, r#type, unique)
+    }
+
+    /// The identifier of the named block declared at token `declaration`
+    /// of its syntax tree, which names the variables its `disable` shares
+    /// between the activations of the block. A module lowers the
+    /// subroutines of the packages it imports with its own, and each
+    /// analysis numbers its declarations from zero, so a block of a
+    /// subroutine is keyed as a static variable of it is (see
+    /// [`Self::declare_static`]): by the subroutine's qualified name and
+    /// the declaration, with the top bit set. A block of a process body
+    /// takes the next number of its module's analysis, top bit clear.
+    pub(super) fn block_id(&mut self, declaration: usize) -> u64 {
+        let id = match &self.owner {
+            Some(owner) => fxhash::hash64(&(owner.as_str(), declaration)) | 1 << 63,
+            None => *self.state.counter as u64,
+        };
+        *self.state.counter += 1;
+        id
     }
 
     fn declare_as(&mut self, source: &str, r#type: Type, unique: String) -> String {

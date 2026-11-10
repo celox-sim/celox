@@ -989,7 +989,7 @@ enum Flow {
     Continue,
     Return(Option<Value>),
     /// Leave the named block of this id (9.6.2).
-    Disable(u32),
+    Disable(u64),
 }
 
 /// Calls borrow their caller's values; only parameters, locals, the return

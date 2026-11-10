@@ -152,14 +152,16 @@ pub enum StmtBase<E, L> {
     DisableFork,
     /// A named block that a `disable` in its body can leave (IEEE
     /// 1800-2023 9.6.2). Only blocks a `disable` names are kept; other
-    /// blocks are flattened into their enclosing statement list.
+    /// blocks are flattened into their enclosing statement list. `id`
+    /// names the declaration among those of every scope a module lowers
+    /// (see `BodyBuilder::block_id`).
     Block {
-        id: u32,
+        id: u64,
         body: Vec<StmtBase<E, L>>,
     },
     /// `disable block`: leave the enclosing named block `id`, ending its
     /// execution in this process (9.6.2).
-    DisableBlock(u32),
+    DisableBlock(u64),
     /// An internal scheduling boundary in the current Active region (4.7).
     DeferActive,
     /// Internal region boundary of a concurrent assertion monitor.
