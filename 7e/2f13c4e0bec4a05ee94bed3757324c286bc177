@@ -1,0 +1,1 @@
+Address Codex review on PR 3439: dropping a vacuous monitor cannot strand sampled/history readers - histories are declared and advanced per reading process; add shared-history regression coverage
