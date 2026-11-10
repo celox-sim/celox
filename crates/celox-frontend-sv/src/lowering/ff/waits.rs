@@ -19,7 +19,7 @@ impl Ff<'_, '_> {
         // state of an event observes them, which it tells the host, and its
         // site is a level wait's, which those wake.
         let observe = if self.kernel.is_some() {
-            self.process_control
+            self.activation.process_control
         } else {
             reads_process_state(self.m, condition)
         };
@@ -162,7 +162,10 @@ impl Ff<'_, '_> {
         let mut ids: Vec<_> = names
             .iter()
             .filter_map(|name| self.m.id(name))
-            .filter(|&id| !self.m.is_hidden(id) || (self.forked && self.frame_locals.contains(&id)))
+            .filter(|&id| {
+                !self.m.is_hidden(id)
+                    || (self.activation.forked && self.activation.frame_locals.contains(&id))
+            })
             .chain(changes)
             .collect();
         ids.sort_unstable();
@@ -188,9 +191,9 @@ impl Ff<'_, '_> {
             });
             return index;
         }
-        let index = self.wait_sites.len() as u32;
-        self.wait_sites.push(WaitSite {
-            process: self.process,
+        let index = self.sites.wait.len() as u32;
+        self.sites.wait.push(WaitSite {
+            process: self.sites.process,
             terms,
             gates,
         });

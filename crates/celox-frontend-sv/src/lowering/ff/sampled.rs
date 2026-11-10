@@ -4,6 +4,19 @@
 
 use super::*;
 
+/// The sampled values and the deferred assertions of a process.
+#[derive(Default)]
+pub(super) struct Assertions {
+    /// The flush-point site of a process with deferred assertions, whose
+    /// queue their actions wait in.
+    pub(super) flush_site: Option<u32>,
+    /// The clock that the sampled value functions of the process infer
+    /// (IEEE 1800-2023 16.14.6).
+    pub(super) inferred_clock: Option<Clock>,
+    /// The `$past` histories of the process.
+    pub(super) history: Vec<History>,
+}
+
 impl Ff<'_, '_> {
     /// The operand of `$sampled` (IEEE 1800-2023 16.9.3) with each static
     /// variable read through its sampled copy. Automatic variables and the
@@ -82,7 +95,7 @@ impl Ff<'_, '_> {
             else {
                 continue;
             };
-            if self.inferred_clock.is_none() {
+            if self.assertions.inferred_clock.is_none() {
                 return Err(unsupported(format!(
                     "`{function}` outside an edge-triggered process whose clock it infers"
                 )));
@@ -158,30 +171,33 @@ impl Ff<'_, '_> {
                     return Err(unsupported(format!("`{function}` of an unpacked array")));
                 }
                 let index = match self
+                    .assertions
                     .history
                     .iter()
                     .position(|history| history.name == name && history.gate == gate)
                 {
                     Some(index) => index,
                     None => {
-                        self.history.push(History {
+                        self.assertions.history.push(History {
                             name: name.clone(),
                             gate: gate.clone(),
                             gate_value: None,
                             chain: Vec::new(),
                         });
-                        self.history.len() - 1
+                        self.assertions.history.len() - 1
                     }
                 };
-                while self.history[index].chain.len() < depth {
+                while self.assertions.history[index].chain.len() < depth {
                     let register = self.m.history_copy(id);
                     // A hidden variable is no target of its own: the
                     // history is state the process commits at each tick.
                     self.record_target(&sv::ir::LValue::Ident(register.clone()), false);
                     let copy = self.m.id(&register).expect("a new history register");
                     let width = self.m.var(copy).width;
-                    self.targets.push((copy, BitAccess::new(0, width - 1)));
-                    self.history[index].chain.push(register);
+                    self.writes
+                        .targets
+                        .push((copy, BitAccess::new(0, width - 1)));
+                    self.assertions.history[index].chain.push(register);
                 }
             }
         }
@@ -210,6 +226,7 @@ impl Ff<'_, '_> {
             // `declare_history` declared the histories of the process body;
             // a call elsewhere, as in a subroutine, has no clock.
             let history = self
+                .assertions
                 .history
                 .iter()
                 .find(|history| {
@@ -291,10 +308,10 @@ impl Ff<'_, '_> {
             arg_order: Vec::new(),
         };
         let mut stmts = Vec::new();
-        if self.history.is_empty() {
+        if self.assertions.history.is_empty() {
             return stmts;
         }
-        for history in &self.history {
+        for history in &self.assertions.history {
             let mut updates: Vec<Stmt> = history
                 .chain
                 .windows(2)
@@ -321,6 +338,7 @@ impl Ff<'_, '_> {
         // A run for another event, such as an asynchronous reset, is no
         // tick: the clock has kept the level it had before the slot.
         let clock = self
+            .assertions
             .inferred_clock
             .as_ref()
             .expect("histories have a clock");
@@ -369,8 +387,8 @@ impl Ff<'_, '_> {
     /// tick (IEEE 1800-2023 9.4.2.3), not after the body's assignments.
     pub(super) fn capture_history_gates(&mut self) -> Result<(), sv::AnalyzerError> {
         use sv::ir::{BinaryOp, Expr};
-        for index in 0..self.history.len() {
-            let Some(gate) = self.history[index].gate.clone() else {
+        for index in 0..self.assertions.history.len() {
+            let Some(gate) = self.assertions.history[index].gate.clone() else {
                 continue;
             };
             // Its truth, which keeps an unknown gate unknown, as `if` reads it.
@@ -382,7 +400,7 @@ impl Ff<'_, '_> {
             let value = self.eval(&truth, Some((1, false)))?;
             let (temp, name) = self.m.temp("gate", 1, false, true);
             self.store(temp, SIROffset::Static(0), 1, value);
-            self.history[index].gate_value = Some(name);
+            self.assertions.history[index].gate_value = Some(name);
         }
         Ok(())
     }
@@ -450,7 +468,7 @@ impl Ff<'_, '_> {
             arg_float_precision: Vec::new(),
             arg_is_handle: Vec::new(),
         });
-        self.flush_site = Some(site);
+        self.assertions.flush_site = Some(site);
         Some(site)
     }
 }

@@ -11,7 +11,7 @@ impl Ff<'_, '_> {
         step: &[sv::ir::Stmt],
         body: &[sv::ir::Stmt],
     ) -> Result<bool, sv::AnalyzerError> {
-        if !(self.observe_blocking_assignments && self.kernel.is_some())
+        if !(self.observation.observe_blocking_assignments && self.kernel.is_some())
             && let sv::ir::LoopKind::For = kind
             && let Some(canonical) = canonical_for_loop(init, condition, step)
             && self
@@ -63,7 +63,7 @@ impl Ff<'_, '_> {
         let mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
         let mut value = start & &mask;
         let mut values = Vec::new();
-        let saved = self.overlay.remove(&canonical.var);
+        let saved = self.scope.overlay.remove(&canonical.var);
         let result = loop {
             let numeric = if signed && value.bit(width as u64 - 1) {
                 (num_bigint::BigInt::from(value.clone()) - (num_bigint::BigInt::from(1u8) << width))
@@ -73,7 +73,9 @@ impl Ff<'_, '_> {
             };
             let Some(numeric) = numeric else { break None };
             let literal = (typed_literal(&value, width, signed), numeric);
-            self.overlay.insert(canonical.var.clone(), literal.clone());
+            self.scope
+                .overlay
+                .insert(canonical.var.clone(), literal.clone());
             let Some((proceed, _)) = self.eval_const(condition)? else {
                 break None;
             };
@@ -89,9 +91,9 @@ impl Ff<'_, '_> {
             };
             value = next & &mask;
         };
-        self.overlay.remove(&canonical.var);
+        self.scope.overlay.remove(&canonical.var);
         if let Some(saved) = saved {
-            self.overlay.insert(canonical.var.clone(), saved);
+            self.scope.overlay.insert(canonical.var.clone(), saved);
         }
         Ok(result)
     }
@@ -108,27 +110,29 @@ impl Ff<'_, '_> {
         // its value: the one `break` left, or the one that ended the loop.
         let id = self.m.id(&canonical.var).expect("loop variable");
         let exit = self.b.new_block();
-        let saved = self.overlay.remove(&canonical.var);
+        let saved = self.scope.overlay.remove(&canonical.var);
         let mut reachable = true;
         for literal in values {
             let next = self.b.new_block();
             self.store_constant(id, literal.1);
-            self.overlay.insert(canonical.var.clone(), literal.clone());
-            self.loops.push(LoopBlocks {
+            self.scope
+                .overlay
+                .insert(canonical.var.clone(), literal.clone());
+            self.scope.loops.push(LoopBlocks {
                 break_block: exit,
                 continue_block: next,
             });
             let falls = self.exec_block(body);
-            self.loops.pop();
+            self.scope.loops.pop();
             if falls? {
                 self.jump(next);
             }
             self.b.switch_to_block(next);
             reachable = true;
         }
-        self.overlay.remove(&canonical.var);
+        self.scope.overlay.remove(&canonical.var);
         if let Some(saved) = saved {
-            self.overlay.insert(canonical.var.clone(), saved);
+            self.scope.overlay.insert(canonical.var.clone(), saved);
         }
         let _ = reachable;
         self.store_constant(id, last);
@@ -239,12 +243,12 @@ impl Ff<'_, '_> {
             };
             self.assign(&sv::ir::LValue::Ident(counter.clone()), &decrement)?;
         }
-        self.loops.push(LoopBlocks {
+        self.scope.loops.push(LoopBlocks {
             break_block: exit,
             continue_block: latch,
         });
         let falls = self.exec_block(body);
-        self.loops.pop();
+        self.scope.loops.pop();
         if falls? {
             self.jump(latch);
         }

@@ -42,7 +42,7 @@ pub(super) struct Comb<'p, 'a> {
     consts: ConstCache,
     active_calls: Vec<String>,
     /// The subroutines whose calls are binding a default argument that
-    /// calls (see `Ff::binding_defaults`).
+    /// calls (see `CallStack::binding_defaults` of `Ff`).
     binding_defaults: Vec<String>,
     unrolled: usize,
     /// Whether nonblocking assignments are allowed (they are not in

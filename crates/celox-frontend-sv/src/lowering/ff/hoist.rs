@@ -186,9 +186,9 @@ impl Ff<'_, '_> {
         is_4state: bool,
     ) -> Result<(SourceVarId, String), sv::AnalyzerError> {
         let (temp, name) = self.m.temp("position", width, signed, is_4state);
-        if self.frame_positions && self.forked {
-            let slot = self.frame_locals.len();
-            self.frame_locals.push(temp);
+        if self.activation.frame_positions && self.activation.forked {
+            let slot = self.activation.frame_locals.len();
+            self.activation.frame_locals.push(temp);
             self.with_kernel(|kernel| kernel.local(slot))
                 .map_err(kernel_error)?;
         }
@@ -260,7 +260,7 @@ impl Ff<'_, '_> {
                 let width = self.b.register(&value).width();
                 let (temp, temp_name) = self.position_temp(width, *signed, is_4state)?;
                 // A frame slot starts a new block: read the bits there.
-                let value = if self.frame_positions && self.forked {
+                let value = if self.activation.frame_positions && self.activation.forked {
                     self.eval(&read, None)?
                 } else {
                     value
@@ -345,9 +345,9 @@ impl Ff<'_, '_> {
     /// Execute the user subroutine calls of an expression and replace each by
     /// a hidden variable holding its result.
     pub(super) fn hoist(&mut self, expr: &sv::ir::Expr) -> Result<sv::ir::Expr, sv::AnalyzerError> {
-        self.implicit_write_depth += 1;
+        self.observation.implicit_write_depth += 1;
         let result = self.hoist_inner(expr);
-        self.implicit_write_depth -= 1;
+        self.observation.implicit_write_depth -= 1;
         result
     }
 

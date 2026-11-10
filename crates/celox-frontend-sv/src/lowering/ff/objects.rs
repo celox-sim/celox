@@ -57,9 +57,9 @@ impl Ff<'_, '_> {
             None => (width, signed, four_state),
         };
         let (id, name) = self.m.temp(purpose, width, signed, four_state);
-        if self.forked && self.kernel.is_some() {
-            let slot = self.frame_locals.len();
-            self.frame_locals.push(id);
+        if self.activation.forked && self.kernel.is_some() {
+            let slot = self.activation.frame_locals.len();
+            self.activation.frame_locals.push(id);
             self.with_kernel(|kernel| kernel.local(slot))
                 .map_err(kernel_error)?;
         }
@@ -146,9 +146,9 @@ impl Ff<'_, '_> {
                     .get_mut(&object_id)
                     .expect("an event object")
                     .value_kind = celox_design::ValueKind::ObjRef;
-                if self.forked && self.kernel.is_some() {
-                    let slot = self.frame_locals.len();
-                    self.frame_locals.push(object_id);
+                if self.activation.forked && self.kernel.is_some() {
+                    let slot = self.activation.frame_locals.len();
+                    self.activation.frame_locals.push(object_id);
                     self.with_kernel(|kernel| kernel.local(slot))
                         .map_err(kernel_error)?;
                 }
@@ -454,7 +454,7 @@ impl Ff<'_, '_> {
         calls.is_empty()
             && names.iter().all(|name| {
                 self.m.constants.contains_key(name)
-                    || !self.forked
+                    || !self.activation.forked
                         && self.m.id(name).is_some_and(|id| {
                             self.m.is_hidden(id) && !self.is_static_task_formal(id)
                         })

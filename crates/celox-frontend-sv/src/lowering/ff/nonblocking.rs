@@ -148,7 +148,7 @@ impl Ff<'_, '_> {
             });
             let site = NbaSite {
                 delay,
-                process: self.process,
+                process: self.sites.process,
                 target: id,
                 lsb,
                 width,
@@ -157,7 +157,7 @@ impl Ff<'_, '_> {
                 pending: Some(pending),
                 unit: false,
             };
-            let index = self.nba_sites.len() as u32;
+            let index = self.sites.nba.len() as u32;
             self.with_kernel(|kernel| {
                 kernel.nonblocking_switched(index, &site, switch, |builder| {
                     let load = |builder: &mut SIRBuilder<_>, var, width, four_state| {
@@ -182,13 +182,13 @@ impl Ff<'_, '_> {
                 })
             })
             .map_err(kernel_error)?;
-            self.nba_switches.push(NbaSwitch {
+            self.sites.nba_switches.push(NbaSwitch {
                 value,
                 switch,
                 queued: staged,
                 queued_position: position,
             });
-            self.nba_sites.push(site);
+            self.sites.nba.push(site);
         }
         Ok(())
     }

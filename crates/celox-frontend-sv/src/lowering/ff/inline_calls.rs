@@ -3,6 +3,24 @@
 
 use super::*;
 
+/// The subroutine bodies being lowered, innermost last: the calls being
+/// inlined, under the function of a unit when one is lowered.
+#[derive(Default)]
+pub(super) struct CallStack {
+    pub(super) active_calls: Vec<String>,
+    // Detached children have their own function timing context.
+    pub(super) timing_call_boundary: usize,
+    /// The subroutines whose inlined calls are binding a default argument
+    /// that calls, innermost last: such a call reached again inside its own
+    /// default would bind that default again, forever, so it is a
+    /// recursive call, which inlining cannot expand.
+    pub(super) binding_defaults: Vec<String>,
+    /// The variables of the bodies being lowered into a unit that a fork
+    /// shares with its parent and siblings, each in a box (see
+    /// [`calls::SharedBox`]), innermost body last.
+    pub(super) shared_boxes: Vec<calls::SharedBox>,
+}
+
 impl Ff<'_, '_> {
     /// A variable of the type of property `field`, through which an
     /// assignment to part of a property formal writes (see
@@ -55,7 +73,7 @@ impl Ff<'_, '_> {
             .subroutine(name)
             .cloned()
             .ok_or_else(|| unsupported(format!("call of `{name}`")))?;
-        self.m.record_call(&self.active_calls, name);
+        self.m.record_call(&self.call_stack.active_calls, name);
         if args.len() > subroutine.params.len() {
             return Err(unsupported(format!(
                 "function call `{name}` with too many arguments"
@@ -167,12 +185,18 @@ impl Ff<'_, '_> {
         // function.
         let places = self.ref_places(&subroutine, &references, &aliases, &actual_names);
         let out_of_line = self.out_of_line_callee(name, &subroutine, args, places.as_deref())?;
-        if out_of_line.is_none() && self.active_calls.iter().any(|active| active == name) {
+        if out_of_line.is_none()
+            && self
+                .call_stack
+                .active_calls
+                .iter()
+                .any(|active| active == name)
+        {
             self.m
-                .record_argument_calls(&self.active_calls, &subroutine, args);
+                .record_argument_calls(&self.call_stack.active_calls, &subroutine, args);
             return Err(unsupported(format!("recursive call of `{name}`")));
         }
-        if out_of_line.is_none() && self.active_calls.len() >= MAX_CALL_DEPTH {
+        if out_of_line.is_none() && self.call_stack.active_calls.len() >= MAX_CALL_DEPTH {
             return Err(unsupported("subroutine call depth limit exceeded"));
         }
         // Each inlined automatic task activation owns persistent storage, so
@@ -181,7 +205,10 @@ impl Ff<'_, '_> {
         // An out-of-line call keeps its automatic storage in its frame.
         let mut activation = Vec::new();
         let copies_before = self.m.activation_copies.len();
-        if out_of_line.is_none() && self.kernel.is_some() && (subroutine.is_task || self.forked) {
+        if out_of_line.is_none()
+            && self.kernel.is_some()
+            && (subroutine.is_task || self.activation.forked)
+        {
             for name in &subroutine.automatic_locals {
                 // A reference formal, or a member of one, has no storage of
                 // its own.
@@ -218,9 +245,9 @@ impl Ff<'_, '_> {
                 self.m
                     .activation_copies
                     .push((name.clone(), original, copy));
-                if self.forked {
-                    let slot = self.frame_locals.len();
-                    self.frame_locals.push(copy);
+                if self.activation.forked {
+                    let slot = self.activation.frame_locals.len();
+                    self.activation.frame_locals.push(copy);
                     self.with_kernel(|kernel| kernel.local(slot))
                         .map_err(kernel_error)?;
                 }
@@ -333,14 +360,19 @@ impl Ff<'_, '_> {
                 let defaulted = matches!(args.get(position), None | Some(None));
                 let actual = if self.m.calls(&actual) {
                     if defaulted {
-                        if self.binding_defaults.iter().any(|active| active == name) {
+                        if self
+                            .call_stack
+                            .binding_defaults
+                            .iter()
+                            .any(|active| active == name)
+                        {
                             return Err(unsupported(format!("recursive call of `{name}`")));
                         }
-                        self.binding_defaults.push(name.to_string());
+                        self.call_stack.binding_defaults.push(name.to_string());
                     }
                     let hoisted = self.hoist(&actual);
                     if defaulted {
-                        self.binding_defaults.pop();
+                        self.call_stack.binding_defaults.pop();
                     }
                     hoisted?
                 } else {
@@ -457,11 +489,11 @@ impl Ff<'_, '_> {
                     }
                 }
                 let return_block = self.b.new_block();
-                self.functions.push(FunctionBlocks {
+                self.scope.functions.push(FunctionBlocks {
                     return_block,
                     return_var: subroutine.return_var.clone(),
-                    loop_depth: self.loops.len(),
-                    block_depth: self.blocks.len(),
+                    loop_depth: self.scope.loops.len(),
+                    block_depth: self.scope.blocks.len(),
                 });
                 let mut body = std::mem::take(&mut subroutine.body);
                 let (constants, parameter_types) = (self.m.constants, self.m.parameter_types);
@@ -476,10 +508,12 @@ impl Ff<'_, '_> {
                 // the unit's own body does.
                 let (body, shared) = self.share_forked(&subroutine, body)?;
                 let built = self.b.built();
-                self.active_calls.push(name.to_string());
+                self.call_stack.active_calls.push(name.to_string());
                 let falls = self.exec_block(&body);
-                self.shared_boxes.truncate(self.shared_boxes.len() - shared);
-                self.active_calls.pop();
+                self.call_stack
+                    .shared_boxes
+                    .truncate(self.call_stack.shared_boxes.len() - shared);
+                self.call_stack.active_calls.pop();
                 let after = self.b.built();
                 self.m.expanded_call(
                     name,
@@ -489,7 +523,7 @@ impl Ff<'_, '_> {
                         nodes: 0,
                     },
                 );
-                self.functions.pop();
+                self.scope.functions.pop();
                 for (formal, original, _) in references {
                     self.m.name_to_id.insert(formal, original);
                 }
@@ -631,9 +665,9 @@ impl Ff<'_, '_> {
                 self.m.variables.get_mut(&handle).unwrap().value_kind =
                     celox_design::ValueKind::ObjRef;
                 // A forked activation keeps its own object.
-                if self.forked {
-                    let slot = self.frame_locals.len();
-                    self.frame_locals.push(handle);
+                if self.activation.forked {
+                    let slot = self.activation.frame_locals.len();
+                    self.activation.frame_locals.push(handle);
                     self.with_kernel(|kernel| kernel.local(slot))
                         .map_err(kernel_error)?;
                 }
@@ -663,9 +697,9 @@ impl Ff<'_, '_> {
                 };
                 let element = self.hoist_lvalue(&element)?;
                 // A forked activation keeps its own copies of the positions.
-                self.frame_positions = true;
+                self.activation.frame_positions = true;
                 let element = self.freeze_lvalue(element);
-                self.frame_positions = false;
+                self.activation.frame_positions = false;
                 let element = element?;
                 let width = self.m.var(self.m.id(&param.name).expect("a formal")).width;
                 let total = self

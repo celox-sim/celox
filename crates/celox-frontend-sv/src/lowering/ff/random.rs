@@ -4,25 +4,48 @@
 
 use super::*;
 
+/// The random number streams of a process.
+pub(super) struct Rng {
+    /// One persistent RNG of `$urandom` and `$urandom_range` shared by every
+    /// call from this process, including calls in inlined subroutines. Bit
+    /// 32 distinguishes an unseeded state.
+    pub(super) random: Option<(SourceVarId, String)>,
+    pub(super) random_seed: u32,
+    /// The seed of this process's `$random` calls without a seed argument.
+    pub(super) dist_seed: Option<(SourceVarId, String)>,
+}
+
+impl Rng {
+    /// The streams of a process whose `$urandom` stream starts from
+    /// `random_seed`, before any call draws from them.
+    pub(super) fn new(random_seed: u32) -> Self {
+        Self {
+            random: None,
+            random_seed,
+            dist_seed: None,
+        }
+    }
+}
+
 impl Ff<'_, '_> {
     /// The seed of this process's `$urandom` stream before it is seeded: a
     /// function unit has the calling process's in its frame.
     pub(super) fn process_seed(&self) -> sv::ir::Expr {
         match self.frame.as_ref().and_then(|frame| frame.random.as_ref()) {
             Some((_, seed)) => sv::ir::Expr::Ident(seed.clone()),
-            None => sv::ir::Expr::Literal(format!("32'd{}", self.random_seed)),
+            None => sv::ir::Expr::Literal(format!("32'd{}", self.rng.random_seed)),
         }
     }
 
     /// The state of this process's `$urandom` stream.
     pub(super) fn urandom_state(&mut self) -> (SourceVarId, String) {
-        if self.random.is_none() {
+        if self.rng.random.is_none() {
             let (id, name) = self.m.temp("urandom_state", 33, false, false);
-            self.working.insert(id);
-            self.targets.push((id, BitAccess::new(0, 32)));
-            self.random = Some((id, name));
+            self.writes.working.insert(id);
+            self.writes.targets.push((id, BitAccess::new(0, 32)));
+            self.rng.random = Some((id, name));
         }
-        self.random.clone().expect("a process RNG")
+        self.rng.random.clone().expect("a process RNG")
     }
 
     /// The seed of this process's `$random` calls without a seed argument.
@@ -30,13 +53,13 @@ impl Ff<'_, '_> {
     /// does, so a design whose one process calls `$random` gets the same
     /// numbers as other simulators that use one seed for the whole design.
     pub(super) fn dist_seed(&mut self) -> (SourceVarId, String) {
-        if self.dist_seed.is_none() {
+        if self.rng.dist_seed.is_none() {
             let (id, name) = self.m.temp("random_seed", 32, false, false);
-            self.working.insert(id);
-            self.targets.push((id, BitAccess::new(0, 31)));
-            self.dist_seed = Some((id, name));
+            self.writes.working.insert(id);
+            self.writes.targets.push((id, BitAccess::new(0, 31)));
+            self.rng.dist_seed = Some((id, name));
         }
-        self.dist_seed.clone().expect("a process seed")
+        self.rng.dist_seed.clone().expect("a process seed")
     }
 
     /// Evaluate `expr` into a new hidden variable.
@@ -567,11 +590,12 @@ impl Ff<'_, '_> {
         }
         let (ret_id, ret_name) = self.m.temp("distribution_result", 32, true, false);
         let site = self
-            .host_request_sites
+            .sites
+            .host_request
             .iter()
             .filter(|site| site.kind == HostRequestKind::Distribution)
             .count() as u32;
-        self.host_request_sites.push(HostRequestSite {
+        self.sites.host_request.push(HostRequestSite {
             process: celox_design::SiteProcess::own(0),
             kind: HostRequestKind::Distribution,
             operation,

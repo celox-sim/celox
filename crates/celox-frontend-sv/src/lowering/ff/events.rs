@@ -177,7 +177,8 @@ impl Ff<'_, '_> {
                 sv::ir::Expr::Ident(name) => match self.m.id(name) {
                     Some(id)
                         if !self.m.is_hidden(id)
-                            || (self.forked && self.frame_locals.contains(&id)) =>
+                            || (self.activation.forked
+                                && self.activation.frame_locals.contains(&id)) =>
                     {
                         variable = self.m.var(id).array_dims.is_empty();
                         id
@@ -268,7 +269,8 @@ impl Ff<'_, '_> {
         let iff = self.propagate(iff);
         if let sv::ir::Expr::Ident(name) = &iff
             && let Some(id) = self.m.id(name)
-            && (!self.m.is_hidden(id) || self.forked && self.frame_locals.contains(&id))
+            && (!self.m.is_hidden(id)
+                || self.activation.forked && self.activation.frame_locals.contains(&id))
             && self.m.var(id).width == 1
             && self.m.var(id).float.is_none()
             && self.m.var(id).array_dims.is_empty()
@@ -350,7 +352,11 @@ impl Ff<'_, '_> {
             })
             .collect();
         locals.sort_unstable();
-        if self.forked && locals.iter().any(|(_, id)| self.frame_locals.contains(id)) {
+        if self.activation.forked
+            && locals
+                .iter()
+                .any(|(_, id)| self.activation.frame_locals.contains(id))
+        {
             return self.activation_event_expression(expr, width, signed, float);
         }
         // Another call can copy a new argument into a static formal while
@@ -454,11 +460,14 @@ impl Ff<'_, '_> {
         let mut inputs: Vec<_> = names
             .iter()
             .filter_map(|name| self.m.id(name))
-            .filter(|id| !self.m.is_hidden(*id) || self.frame_locals.contains(id))
+            .filter(|id| !self.m.is_hidden(*id) || self.activation.frame_locals.contains(id))
             .collect();
         inputs.sort_unstable();
         inputs.dedup();
-        if inputs.iter().any(|id| !self.frame_locals.contains(id)) {
+        if inputs
+            .iter()
+            .any(|id| !self.activation.frame_locals.contains(id))
+        {
             return Err(unsupported(
                 "activation-local event expression reading a non-automatic variable",
             ));
@@ -518,7 +527,7 @@ impl Ff<'_, '_> {
             if *id == result {
                 continue;
             }
-            if !self.m.is_hidden(*id) || self.frame_locals.contains(id) {
+            if !self.m.is_hidden(*id) || self.activation.frame_locals.contains(id) {
                 return Err(unsupported("event expression modifying persistent state"));
             }
             let variable = self.m.var(*id).clone();
@@ -555,7 +564,7 @@ impl Ff<'_, '_> {
         for instruction in unit.blocks.values().flat_map(|block| &block.instructions) {
             if let SIRInstruction::Load(_, address, _, _) = instruction
                 && (address.region != STABLE_REGION
-                    || !(self.frame_locals.contains(&address.var_id)
+                    || !(self.activation.frame_locals.contains(&address.var_id)
                         || scratch.contains(&address.var_id)))
             {
                 return Err(unsupported(
@@ -569,7 +578,7 @@ impl Ff<'_, '_> {
             .flat_map(|block| &block.instructions)
             .filter_map(|instruction| match instruction {
                 SIRInstruction::Load(_, address, _, _)
-                    if self.frame_locals.contains(&address.var_id) =>
+                    if self.activation.frame_locals.contains(&address.var_id) =>
                 {
                     Some(address.var_id)
                 }
@@ -605,12 +614,14 @@ impl Ff<'_, '_> {
             .map_err(kernel_error)?;
         self.b.inline_execution_unit(&unit);
         self.with_kernel(|kernel| kernel.end_event_probe(previous));
-        self.event_probes.push(celox_design::ProcessEventProbe {
-            result,
-            resume,
-            inputs,
-            scratch,
-        });
+        self.sites
+            .event_probes
+            .push(celox_design::ProcessEventProbe {
+                result,
+                resume,
+                inputs,
+                scratch,
+            });
         // Use the identical pure code for the initial baseline too. Lowering
         // the call again as ordinary process code could allocate activation
         // cells or suspend inside a function's temporary declarations.

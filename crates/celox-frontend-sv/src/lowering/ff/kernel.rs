@@ -2,6 +2,44 @@
 
 use super::*;
 
+/// The activations of a process kernel: whether it runs in several, as one
+/// that forks or controls processes does, and what each then keeps in a
+/// frame of its own.
+#[derive(Default)]
+pub(super) struct Activation {
+    pub(super) forked: bool,
+    /// Whether [`Ff::freeze_lvalue`] keeps its copies in the activation
+    /// frame of a forked process.
+    pub(super) frame_positions: bool,
+    pub(super) process_control: bool,
+    pub(super) frame_locals: Vec<SourceVarId>,
+}
+
+/// What a process declares to the runtime while it is lowered, which its
+/// kernel hands over when it is finished.
+#[derive(Default)]
+pub(super) struct Sites {
+    /// The registers of the kernel holding the number of its own wait
+    /// sites, which the sites of the units it calls follow (see
+    /// `Ff::function_wait_word`), set when the kernel is finished.
+    pub(super) wait_offset_patches: Vec<RegisterId>,
+    /// Likewise the number of its own NBA sites.
+    pub(super) nba_offset_patches: Vec<RegisterId>,
+    pub(super) event_probes: Vec<celox_design::ProcessEventProbe<SourceVarId>>,
+    /// The index of the process being lowered among the module's kernels.
+    pub(super) process: usize,
+    /// The wait sites of the process, by local index.
+    pub(super) wait: Vec<WaitSite<SourceVarId>>,
+    /// The nonblocking assignment sites of the process, by local index.
+    pub(super) nba: Vec<NbaSite<SourceVarId>>,
+    pub(super) host_request: Vec<celox_design::HostRequestSite<SourceVarId>>,
+    /// The nonblocking sites with a staged and a queued path.
+    pub(super) nba_switches: Vec<NbaSwitch<SourceVarId>>,
+    /// The calls at which the process kernel can be suspended inside the
+    /// callee.
+    pub(super) call_resumes: Vec<celox_design::CallResume>,
+}
+
 impl Ff<'_, '_> {
     /// Lower an `initial` body into a process kernel that runs it from time
     /// zero, reading and writing stable state directly.
@@ -12,7 +50,7 @@ impl Ff<'_, '_> {
         process: usize,
         final_process: bool,
     ) -> Result<KernelUnit, sv::AnalyzerError> {
-        self.process = process;
+        self.sites.process = process;
         let monitored;
         let no_body: &[sv::ir::Stmt] = &[];
         // Dropping the monitor cannot strand sampled or `$past` readers
@@ -23,15 +61,15 @@ impl Ff<'_, '_> {
         let body = if !self.m.four_state && vacuous_two_state_monitor(body) {
             no_body
         } else if let Some(clock) = concurrent_monitor_clock(body) {
-            self.inferred_clock = Some(clock);
+            self.assertions.inferred_clock = Some(clock);
             self.declare_history(body)?;
-            if self.history.is_empty() {
+            if self.assertions.history.is_empty() {
                 body
             } else {
                 use sv::ir::{BinaryOp, Expr, LValue, Stmt};
                 let mut gates = Vec::new();
-                for index in 0..self.history.len() {
-                    let Some(gate) = self.history[index].gate.clone() else {
+                for index in 0..self.assertions.history.len() {
+                    let Some(gate) = self.assertions.history[index].gate.clone() else {
                         continue;
                     };
                     let (_, name) = self.m.temp("assertion_history_gate", 1, false, true);
@@ -44,7 +82,7 @@ impl Ff<'_, '_> {
                         },
                         nonblocking: false,
                     });
-                    self.history[index].gate_value = Some(name);
+                    self.assertions.history[index].gate_value = Some(name);
                 }
                 let mut owned = body.to_vec();
                 let [
@@ -154,7 +192,7 @@ impl Ff<'_, '_> {
             }
             false
         }
-        self.observe_blocking_assignments =
+        self.observation.observe_blocking_assignments =
             has_activation_event(self.m, body, &mut HashSet::default());
         fn has_process(
             m: &ProcModule<'_>,
@@ -192,13 +230,13 @@ impl Ff<'_, '_> {
             }
             false
         }
-        self.process_control = has_process(
+        self.activation.process_control = has_process(
             self.m,
             body,
             &mut HashSet::default(),
             &mut HashSet::default(),
         );
-        self.forked = has_fork(
+        self.activation.forked = has_fork(
             self.m,
             body,
             &mut HashSet::default(),
@@ -206,9 +244,9 @@ impl Ff<'_, '_> {
         );
         // Finals share one process RNG even when a particular body only
         // draws random values and never exposes process::self().
-        self.forked |= self.process_control || final_process;
+        self.activation.forked |= self.activation.process_control || final_process;
         // Forks reached through inlined tasks also need per-activation random state.
-        if self.forked {
+        if self.activation.forked {
             self.urandom_state();
         }
         let mut kernel = ProcessKernelBuilder::new(slots);
@@ -218,18 +256,18 @@ impl Ff<'_, '_> {
         std::mem::swap(&mut self.b, kernel.builder());
         self.kernel = Some(kernel);
         self.exec_block(body)?;
-        if !self.observe_blocking_assignments && !self.event_probes.is_empty() {
+        if !self.observation.observe_blocking_assignments && !self.sites.event_probes.is_empty() {
             return Err(unsupported(
                 "activation-local event expression without assignment observation boundaries",
             ));
         }
-        let implicit_probe_write = self.event_probes.iter().any(|probe| {
+        let implicit_probe_write = self.sites.event_probes.iter().any(|probe| {
             probe
                 .inputs
                 .iter()
-                .any(|input| self.unobserved_function_writes.contains(input))
+                .any(|input| self.observation.unobserved_function_writes.contains(input))
         });
-        let implicit_gate_write = self.wait_sites.iter().any(|site| {
+        let implicit_gate_write = self.sites.wait.iter().any(|site| {
             site.terms
                 .iter()
                 .zip(&site.gates)
@@ -237,8 +275,14 @@ impl Ff<'_, '_> {
                     gate.is_some_and(|gate| {
                         gate.at_write
                             && gate.counters.is_none()
-                            && (self.unobserved_function_writes.contains(&signal)
-                                || self.unobserved_function_writes.contains(&gate.signal))
+                            && (self
+                                .observation
+                                .unobserved_function_writes
+                                .contains(&signal)
+                                || self
+                                    .observation
+                                    .unobserved_function_writes
+                                    .contains(&gate.signal))
                     })
                 })
         });
@@ -252,14 +296,14 @@ impl Ff<'_, '_> {
         let slots = kernel.slots();
         let resume_count = kernel.resume_count();
         let mut unit = kernel.build();
-        if !self.wait_offset_patches.is_empty() || !self.nba_offset_patches.is_empty() {
-            let (waits, nbas) = (self.wait_sites.len() as u64, self.nba_sites.len() as u64);
+        if !self.sites.wait_offset_patches.is_empty() || !self.sites.nba_offset_patches.is_empty() {
+            let (waits, nbas) = (self.sites.wait.len() as u64, self.sites.nba.len() as u64);
             for block in unit.blocks.values_mut() {
                 for instruction in &mut block.instructions {
                     if let SIRInstruction::Imm(dst, value) = instruction {
-                        if self.wait_offset_patches.contains(dst) {
+                        if self.sites.wait_offset_patches.contains(dst) {
                             *value = SIRValue::new(waits);
-                        } else if self.nba_offset_patches.contains(dst) {
+                        } else if self.sites.nba_offset_patches.contains(dst) {
                             *value = SIRValue::new(nbas);
                         }
                     }
@@ -267,7 +311,7 @@ impl Ff<'_, '_> {
             }
         }
         prune_unreachable_blocks(&mut unit);
-        let frame = self.forked.then(|| {
+        let frame = self.activation.forked.then(|| {
             // Each activation has its own scratch: the values its lowering
             // keeps across its own suspensions. Lexical locals are cells of
             // `locals`, not frame state; every other variable the lowering
@@ -277,16 +321,18 @@ impl Ff<'_, '_> {
             let mut private: Vec<_> = self.m.created[first_created..]
                 .iter()
                 .copied()
-                .filter(|id| self.m.var(*id).activation_scratch && !self.frame_locals.contains(id))
+                .filter(|id| {
+                    self.m.var(*id).activation_scratch && !self.activation.frame_locals.contains(id)
+                })
                 .collect();
             private.extend([slots.resume, slots.status, slots.delay]);
             celox_design::ProcessFrame {
                 resume_count,
                 private,
-                locals: self.frame_locals,
-                event_probes: self.event_probes,
-                random: self.random.as_ref().unwrap().0,
-                seed: self.random_seed,
+                locals: self.activation.frame_locals,
+                event_probes: self.sites.event_probes,
+                random: self.rng.random.as_ref().unwrap().0,
+                seed: self.rng.random_seed,
                 starts_with_event_wait,
             }
         });
@@ -294,11 +340,11 @@ impl Ff<'_, '_> {
             frame,
             unit,
             slots,
-            wait_sites: self.wait_sites,
-            nba_sites: self.nba_sites,
-            host_request_sites: self.host_request_sites,
-            nba_switches: self.nba_switches,
-            call_resumes: self.call_resumes,
+            wait_sites: self.sites.wait,
+            nba_sites: self.sites.nba,
+            host_request_sites: self.sites.host_request,
+            nba_switches: self.sites.nba_switches,
+            call_resumes: self.sites.call_resumes,
         })
     }
 }

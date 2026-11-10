@@ -64,12 +64,13 @@ impl Ff<'_, '_> {
             });
         }
         let local_site = self
-            .host_request_sites
+            .sites
+            .host_request
             .iter()
             .filter(|site| site.kind == HostRequestKind::Vcd)
             .count() as u32;
-        self.host_request_sites.push(HostRequestSite {
-            process: celox_design::SiteProcess::own(self.process),
+        self.sites.host_request.push(HostRequestSite {
+            process: celox_design::SiteProcess::own(self.sites.process),
             kind: HostRequestKind::Vcd,
             operation: operation as u32,
             args: values,
@@ -232,11 +233,12 @@ impl Ff<'_, '_> {
             None
         };
         let site = self
-            .host_request_sites
+            .sites
+            .host_request
             .iter()
             .filter(|site| site.kind == HostRequestKind::Plusargs)
             .count() as u32;
-        self.host_request_sites.push(HostRequestSite {
+        self.sites.host_request.push(HostRequestSite {
             process: celox_design::SiteProcess::own(0),
             kind: HostRequestKind::Plusargs,
             operation: u32::from(value_query),
@@ -494,7 +496,7 @@ impl Ff<'_, '_> {
         let deferred = assertion_site
             .map(|assertion| assertion.deferral)
             .filter(|&region| region != celox_design::AssertionDeferral::None)
-            .zip(self.flush_site)
+            .zip(self.assertions.flush_site)
             .map(|(region, queue)| DeferredSite::Action { queue, region });
         let site_id = self.m.event_site(RuntimeEventSite {
             kind: event_kind,

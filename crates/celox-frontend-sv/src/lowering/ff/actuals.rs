@@ -105,9 +105,9 @@ impl Ff<'_, '_> {
             .get_mut(&id)
             .expect("a temporary")
             .value_kind = kind;
-        if self.forked {
-            let slot = self.frame_locals.len();
-            self.frame_locals.push(id);
+        if self.activation.forked {
+            let slot = self.activation.frame_locals.len();
+            self.activation.frame_locals.push(id);
             self.with_kernel(|kernel| kernel.local(slot))
                 .map_err(kernel_error)?;
         }

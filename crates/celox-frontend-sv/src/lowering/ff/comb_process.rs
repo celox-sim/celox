@@ -47,7 +47,7 @@ impl Ff<'_, '_> {
         self.scan(body, &mut HashSet::default());
         for &id in explicit_targets {
             let width = self.m.var(id).width;
-            self.targets.push((id, BitAccess::new(0, width - 1)));
+            self.writes.targets.push((id, BitAccess::new(0, width - 1)));
         }
         let flush_site = self.deferred_flush_site(body);
         if self.exec_block(body)? {
@@ -58,6 +58,7 @@ impl Ff<'_, '_> {
         // to module signals (lifetimes::keep_static_locals). Remaining hidden
         // locals are initialized per activation; they cannot retain old state.
         let mut targets: Vec<_> = self
+            .writes
             .targets
             .iter()
             .filter(|(id, _)| !self.m.is_hidden(*id) || explicit_targets.contains(id))

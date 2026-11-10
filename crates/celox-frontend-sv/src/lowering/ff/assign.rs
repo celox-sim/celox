@@ -3,6 +3,33 @@
 
 use super::*;
 
+/// Read-modify-write views of a variable's working value.
+pub(super) struct Aliases {
+    /// alias -> var.
+    pub(super) map: HashMap<SourceVarId, SourceVarId>,
+    pub(super) next: u32,
+}
+
+impl Aliases {
+    /// No view yet; the ids of the aliases count down from `u32::MAX`.
+    pub(super) fn new() -> Self {
+        Self {
+            map: HashMap::default(),
+            next: u32::MAX,
+        }
+    }
+}
+
+/// The blocking assignments a process kernel publishes to its waits before
+/// the next statement (see [`Ff::observe_assignment`]), and the writes it
+/// could not publish.
+#[derive(Default)]
+pub(super) struct Observation {
+    pub(super) unobserved_function_writes: HashSet<SourceVarId>,
+    pub(super) observe_blocking_assignments: bool,
+    pub(super) implicit_write_depth: usize,
+}
+
 impl Ff<'_, '_> {
     /// The store `store` of a place, a class property or a container
     /// element, published as a store of a variable is (see
@@ -29,16 +56,16 @@ impl Ff<'_, '_> {
         // plusargs actuals, bypass statement lowering. They cannot introduce
         // observation yields while caller registers are live. Record the
         // resolved destination here so a later probe cannot silently miss it.
-        if self.observe_blocking_assignments
+        if self.observation.observe_blocking_assignments
             && self.kernel.is_some()
-            && (self.implicit_write_depth != 0
-                || self.active_calls.iter().any(|name| {
+            && (self.observation.implicit_write_depth != 0
+                || self.call_stack.active_calls.iter().any(|name| {
                     self.m
                         .subroutine(name)
                         .is_some_and(|subroutine| !subroutine.is_task)
                 }))
         {
-            self.unobserved_function_writes.insert(id);
+            self.observation.unobserved_function_writes.insert(id);
         }
         let value = if let Some((enabled, forced)) = self.m.force_controls(id) {
             let condition = self.b.alloc_bit(1, false);
@@ -74,9 +101,9 @@ impl Ff<'_, '_> {
     }
 
     pub(super) fn alias(&mut self, id: SourceVarId) -> SourceVarId {
-        let alias = SourceVarId(self.next_alias);
-        self.next_alias -= 1;
-        self.aliases.insert(alias, id);
+        let alias = SourceVarId(self.aliases.next);
+        self.aliases.next -= 1;
+        self.aliases.map.insert(alias, id);
         alias
     }
 
@@ -513,7 +540,7 @@ impl Ff<'_, '_> {
                     bit_offset: 0,
                     dynamic_bit_offset: None,
                 };
-                if self.sparse_memories.contains(&id) {
+                if self.writes.sparse_memories.contains(&id) {
                     let part = self.b.alloc_logic(packed_element_width);
                     self.b.emit(SIRInstruction::Slice(
                         part,
@@ -554,7 +581,7 @@ impl Ff<'_, '_> {
             bit_offset: access.lsb,
             dynamic_bit_offset: None,
         };
-        if self.sparse_memories.contains(&id) {
+        if self.writes.sparse_memories.contains(&id) {
             return self.when(valid, |this| {
                 this.store(id, offset, target_width, value);
                 Ok(())
@@ -626,16 +653,20 @@ impl Ff<'_, '_> {
         &mut self,
         targets: &[sv::ir::LValue],
     ) -> Result<(), sv::AnalyzerError> {
-        if !self.forked || !self.observe_blocking_assignments || self.kernel.is_none() {
+        if !self.activation.forked
+            || !self.observation.observe_blocking_assignments
+            || self.kernel.is_none()
+        {
             return Ok(());
         }
-        let in_function = self.active_calls.iter().any(|name| {
+        let in_function = self.call_stack.active_calls.iter().any(|name| {
             self.m
                 .subroutine(name)
                 .is_some_and(|subroutine| !subroutine.is_task)
         });
-        if in_function || self.implicit_write_depth != 0 {
-            self.unobserved_function_writes
+        if in_function || self.observation.implicit_write_depth != 0 {
+            self.observation
+                .unobserved_function_writes
                 .extend(targets.iter().filter_map(|target| self.m.id(target.name())));
         } else {
             self.with_kernel(ProcessKernelBuilder::yield_now)

@@ -96,111 +96,43 @@ struct BlockEntry {
 
 pub(super) struct Ff<'p, 'a> {
     pub m: &'p mut ProcModule<'a>,
-    sparse_memories: HashSet<SourceVarId>,
-    /// Arrays only edge-triggered processes drive. One this process writes
-    /// only by nonblocking element writes, at least one at a run-time
-    /// element, joins `sparse_memories`.
-    sparse_candidates: HashSet<SourceVarId>,
-    /// Variables written at a run-time element of an unpacked array.
-    element_writes: HashSet<SourceVarId>,
-    /// Variables written other than at a constant range or one element of
-    /// an unpacked array, which a sparse publication does not support.
-    other_writes: HashSet<SourceVarId>,
-    /// Variables a process kernel may write between the evaluation of this
-    /// process and the NBA region (see `kernel_window_writes`).
-    window_writes: HashSet<SourceVarId>,
-    /// Variables several edge processes write by blocking assignments (see
-    /// `with_shared_variables`).
-    shared: HashSet<SourceVarId>,
+    /// What the process writes and how.
+    writes: classify::Writes,
     b: SIRBuilder<Addr>,
-    /// Variables read from the working region.
-    working: HashSet<SourceVarId>,
-    /// Variables a nonblocking assignment writes.
-    nonblocking: HashSet<SourceVarId>,
-    /// The bits whose working value is the process result.
-    targets: Vec<(SourceVarId, BitAccess)>,
-    loops: Vec<LoopBlocks>,
-    /// Named blocks a `disable` can leave: their ids and exit blocks.
-    blocks: Vec<BlockEntry>,
-    functions: Vec<FunctionBlocks>,
-    /// Loop variables of unrolled loops and their literal values.
-    overlay: HashMap<String, (String, i128)>,
-    active_calls: Vec<String>,
-    // Detached children have their own function timing context.
-    timing_call_boundary: usize,
+    /// The constructs the statement being lowered is nested in.
+    scope: stmt::Scope,
+    /// The subroutine bodies being lowered.
+    call_stack: inline_calls::CallStack,
     element_widths: HashMap<Addr, usize>,
     unrolled: usize,
-    /// Read-modify-write views of a variable's working value: alias -> var.
-    aliases: HashMap<SourceVarId, SourceVarId>,
-    next_alias: u32,
-    /// One persistent RNG of `$urandom` and `$urandom_range` shared by every
-    /// call from this process, including calls in inlined subroutines. Bit
-    /// 32 distinguishes an unseeded state.
-    random: Option<(SourceVarId, String)>,
-    random_seed: u32,
-    /// The seed of this process's `$random` calls without a seed argument.
-    dist_seed: Option<(SourceVarId, String)>,
+    /// Read-modify-write views of a variable's working value.
+    aliases: assign::Aliases,
+    /// The random number streams of the process.
+    rng: random::Rng,
     /// The kernel of a process being lowered. Its builder is `b` while the
     /// body is lowered, and the process reads and writes stable state
     /// directly.
     kernel: Option<ProcessKernelBuilder>,
-    forked: bool,
-    /// Whether [`Self::freeze_lvalue`] keeps its copies in the activation
-    /// frame of a forked process.
-    frame_positions: bool,
-    process_control: bool,
+    /// The activations of a process kernel and what each keeps for itself.
+    activation: kernel::Activation,
     process_predicate: bool,
-    /// The subroutines whose inlined calls are binding a default argument
-    /// that calls, innermost last: such a call reached again inside its own
-    /// default would bind that default again, forever, so it is a
-    /// recursive call, which inlining cannot expand.
-    binding_defaults: Vec<String>,
-    /// The variables of the bodies being lowered into a unit that a fork
-    /// shares with its parent and siblings, each in a box (see
-    /// [`calls::SharedBox`]), innermost body last.
-    shared_boxes: Vec<calls::SharedBox>,
-    /// The registers of the kernel holding the number of its own wait
-    /// sites, which the sites of the units it calls follow (see
-    /// `Ff::function_wait_word`), set when the kernel is finished.
-    wait_offset_patches: Vec<RegisterId>,
-    /// Likewise the number of its own NBA sites.
-    nba_offset_patches: Vec<RegisterId>,
-    frame_locals: Vec<SourceVarId>,
     postponed_locals: HashSet<SourceVarId>,
-    event_probes: Vec<celox_design::ProcessEventProbe<SourceVarId>>,
-    unobserved_function_writes: HashSet<SourceVarId>,
-    observe_blocking_assignments: bool,
-    implicit_write_depth: usize,
-    /// The index of the process being lowered among the module's kernels.
-    process: usize,
-    /// The wait sites of the process, by local index.
-    wait_sites: Vec<WaitSite<SourceVarId>>,
-    /// The nonblocking assignment sites of the process, by local index.
-    nba_sites: Vec<NbaSite<SourceVarId>>,
-    host_request_sites: Vec<celox_design::HostRequestSite<SourceVarId>>,
-    /// The nonblocking sites with a staged and a queued path.
-    nba_switches: Vec<NbaSwitch<SourceVarId>>,
+    /// The blocking assignments a process kernel publishes to its waits.
+    observation: assign::Observation,
+    /// What the process declares to the runtime while it is lowered.
+    sites: kernel::Sites,
     direct: bool,
     /// Whether a combinational process also reruns for occurrences of its
     /// inputs that left their value unchanged.
     input_occurrences: bool,
-    /// The flush-point site of a process with deferred assertions, whose
-    /// queue their actions wait in.
-    flush_site: Option<u32>,
-    /// The clock that the sampled value functions of the process infer
-    /// (IEEE 1800-2023 16.14.6).
-    inferred_clock: Option<Clock>,
-    /// The `$past` histories of the process.
-    history: Vec<History>,
+    /// The sampled values and the deferred assertions of the process.
+    assertions: sampled::Assertions,
     /// The function whose unit this lowers, if it lowers one.
     frame: Option<calls::FrameContext>,
     /// The slot where a process kernel leaves the end of the live frames
     /// when it suspends inside a call ([`ProcessSlots::call_top`]), once
     /// it calls a function that can suspend it.
     call_top: Option<SourceVarId>,
-    /// The calls at which the process kernel can be suspended inside the
-    /// callee.
-    call_resumes: Vec<celox_design::CallResume>,
     /// Whether every call is inlined, in code that must not call.
     inline_calls: bool,
 }
@@ -252,57 +184,25 @@ impl<'p, 'a> Ff<'p, 'a> {
         }
         Self {
             m,
-            sparse_memories: HashSet::default(),
-            sparse_candidates: HashSet::default(),
-            element_writes: HashSet::default(),
-            other_writes: HashSet::default(),
-            window_writes: HashSet::default(),
-            shared: HashSet::default(),
+            writes: classify::Writes::default(),
             b: SIRBuilder::new(),
-            working: HashSet::default(),
-            nonblocking: HashSet::default(),
-            targets: Vec::new(),
-            loops: Vec::new(),
-            blocks: Vec::new(),
-            functions: Vec::new(),
-            overlay: HashMap::default(),
-            active_calls: Vec::new(),
-            timing_call_boundary: 0,
+            scope: stmt::Scope::default(),
+            call_stack: inline_calls::CallStack::default(),
             element_widths,
             unrolled: 0,
-            aliases: HashMap::default(),
-            next_alias: u32::MAX,
-            random: None,
-            random_seed,
-            dist_seed: None,
+            aliases: assign::Aliases::new(),
+            rng: random::Rng::new(random_seed),
             kernel: None,
-            forked: false,
-            frame_positions: false,
-            process_control: false,
+            activation: kernel::Activation::default(),
             process_predicate: false,
-            binding_defaults: Vec::new(),
-            shared_boxes: Vec::new(),
-            wait_offset_patches: Vec::new(),
-            nba_offset_patches: Vec::new(),
-            frame_locals: Vec::new(),
             postponed_locals: HashSet::default(),
-            event_probes: Vec::new(),
-            unobserved_function_writes: HashSet::default(),
-            observe_blocking_assignments: false,
-            implicit_write_depth: 0,
+            observation: assign::Observation::default(),
+            sites: kernel::Sites::default(),
             direct: false,
             input_occurrences: true,
-            process: 0,
-            wait_sites: Vec::new(),
-            nba_sites: Vec::new(),
-            host_request_sites: Vec::new(),
-            nba_switches: Vec::new(),
-            flush_site: None,
-            inferred_clock: None,
-            history: Vec::new(),
+            assertions: sampled::Assertions::default(),
             frame: None,
             call_top: None,
-            call_resumes: Vec::new(),
             inline_calls: false,
         }
     }
@@ -310,7 +210,7 @@ impl<'p, 'a> Ff<'p, 'a> {
     /// Lower an edge-triggered process with the clock its sampled value
     /// functions infer, if any.
     pub fn with_inferred_clock(mut self, clock: Option<Clock>) -> Self {
-        self.inferred_clock = clock;
+        self.assertions.inferred_clock = clock;
         self
     }
 
@@ -323,17 +223,17 @@ impl<'p, 'a> Ff<'p, 'a> {
     }
 
     pub fn with_sparse_memories(mut self, names: &HashSet<String>) -> Self {
-        self.sparse_memories = names.iter().filter_map(|name| self.m.id(name)).collect();
+        self.writes.sparse_memories = names.iter().filter_map(|name| self.m.id(name)).collect();
         self
     }
 
     pub fn with_sparse_candidates(mut self, names: &HashSet<String>) -> Self {
-        self.sparse_candidates = names.iter().filter_map(|name| self.m.id(name)).collect();
+        self.writes.sparse_candidates = names.iter().filter_map(|name| self.m.id(name)).collect();
         self
     }
 
     pub fn with_window_writes(mut self, names: &HashSet<String>) -> Self {
-        self.window_writes = names.iter().filter_map(|name| self.m.id(name)).collect();
+        self.writes.window_writes = names.iter().filter_map(|name| self.m.id(name)).collect();
         self
     }
 
@@ -345,7 +245,7 @@ impl<'p, 'a> Ff<'p, 'a> {
     /// working value seeded by each process would instead be committed by
     /// every one of them.
     pub fn with_shared_variables(mut self, names: &HashSet<String>) -> Self {
-        self.shared = names.iter().filter_map(|name| self.m.id(name)).collect();
+        self.writes.shared = names.iter().filter_map(|name| self.m.id(name)).collect();
         self
     }
 
@@ -353,7 +253,7 @@ impl<'p, 'a> Ff<'p, 'a> {
     /// the working region, or stable state in a process kernel and for a
     /// shared variable.
     fn target(&self, id: SourceVarId) -> Addr {
-        if self.kernel.is_some() || self.direct || self.shared.contains(&id) {
+        if self.kernel.is_some() || self.direct || self.writes.shared.contains(&id) {
             stable(id)
         } else {
             working(id)

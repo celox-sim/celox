@@ -20,15 +20,16 @@ impl Ff<'_, '_> {
         // subroutine assigns keeps its whole next state.
         let called = self.subroutine_assignments(body);
         let exact: HashSet<SourceVarId> = self
+            .writes
             .nonblocking
             .iter()
             .copied()
             .filter(|id| {
-                self.window_writes.contains(id)
+                self.writes.window_writes.contains(id)
                     && !called.contains(id)
-                    && !self.working.contains(id)
+                    && !self.writes.working.contains(id)
                     && !self.m.is_hidden(*id)
-                    && !self.sparse_memories.contains(id)
+                    && !self.writes.sparse_memories.contains(id)
             })
             .collect();
         // Publish only the written elements of an array this process alone
@@ -37,27 +38,34 @@ impl Ff<'_, '_> {
         // statement order, so the last write to an element wins, and reads
         // see stable state (IEEE 1800-2023 4.6, 10.4.2).
         let sparse: Vec<_> = self
+            .writes
             .sparse_candidates
             .iter()
             .copied()
             .filter(|id| {
-                self.element_writes.contains(id)
+                self.writes.element_writes.contains(id)
                     && !exact.contains(id)
-                    && !self.working.contains(id)
-                    && !self.other_writes.contains(id)
+                    && !self.writes.working.contains(id)
+                    && !self.writes.other_writes.contains(id)
                     && !self.m.is_hidden(*id)
             })
             .collect();
-        self.sparse_memories.extend(sparse);
-        if self.nonblocking.iter().any(|id| self.shared.contains(id)) {
+        self.writes.sparse_memories.extend(sparse);
+        if self
+            .writes
+            .nonblocking
+            .iter()
+            .any(|id| self.writes.shared.contains(id))
+        {
             return Err(unsupported(
                 "nonblocking writes to a variable several edge processes write",
             ));
         }
         if self
+            .writes
             .working
             .iter()
-            .any(|id| self.sparse_memories.contains(id))
+            .any(|id| self.writes.sparse_memories.contains(id))
         {
             return Err(unsupported(
                 "blocking writes to a shared edge-triggered memory",
@@ -65,7 +73,7 @@ impl Ff<'_, '_> {
         }
         // Merge the written ranges of each variable.
         let mut ranges: HashMap<SourceVarId, Vec<BitAccess>> = HashMap::default();
-        for (id, access) in std::mem::take(&mut self.targets) {
+        for (id, access) in std::mem::take(&mut self.writes.targets) {
             ranges.entry(id).or_default().push(access);
         }
         let mut targets = Vec::new();
@@ -91,8 +99,9 @@ impl Ff<'_, '_> {
         // values apart: blocking reads see the blocking value, and the
         // nonblocking update lands after it (IEEE 1800-2023 10.4).
         let mut mixed: Vec<SourceVarId> = self
+            .writes
             .nonblocking
-            .intersection(&self.working)
+            .intersection(&self.writes.working)
             .copied()
             .filter(|&id| !self.m.is_hidden(id) && self.m.var(id).array_dims.is_empty())
             .chain(exact.iter().copied())
@@ -285,12 +294,14 @@ impl Ff<'_, '_> {
         let published: Vec<_> = targets
             .iter()
             .copied()
-            .filter(|target| !exact.contains(&target.id) && !self.shared.contains(&target.id))
+            .filter(|target| {
+                !exact.contains(&target.id) && !self.writes.shared.contains(&target.id)
+            })
             .collect();
         let ordinary_targets: Vec<_> = published
             .iter()
             .copied()
-            .filter(|target| !self.sparse_memories.contains(&target.id))
+            .filter(|target| !self.writes.sparse_memories.contains(&target.id))
             .collect();
         emit_ff_seeds(&mut self.b, &ordinary_targets);
         for stage in &staged {
@@ -327,7 +338,7 @@ impl Ff<'_, '_> {
         let mut eval = seal_drained(self.b);
         if eval.blocks.values().flat_map(|block| &block.instructions).any(|instruction| {
             matches!(instruction, SIRInstruction::Load(_, address, ..)
-                if address.region == WORKING_REGION && self.sparse_memories.contains(&address.var_id))
+                if address.region == WORKING_REGION && self.writes.sparse_memories.contains(&address.var_id))
         }) {
             return Err(unsupported("read-modify-write destination in a shared FF memory"));
         }
@@ -335,7 +346,7 @@ impl Ff<'_, '_> {
             for instruction in &mut block.instructions {
                 if let SIRInstruction::Store(address, ..) = instruction
                     && address.region == WORKING_REGION
-                    && self.sparse_memories.contains(&address.var_id)
+                    && self.writes.sparse_memories.contains(&address.var_id)
                 {
                     address.region = SPARSE_WORKING_REGION;
                 }
@@ -344,12 +355,12 @@ impl Ff<'_, '_> {
         let (active_targets, nba_targets): (Vec<_>, Vec<_>) = published
             .iter()
             .copied()
-            .partition(|target| self.working.contains(&target.id));
+            .partition(|target| self.writes.working.contains(&target.id));
         let mut apply = SIRBuilder::new();
         emit_sparse_memory_commits(
             &mut apply,
             &published,
-            &self.sparse_memories,
+            &self.writes.sparse_memories,
             self.m.variables,
         );
         emit_nba_merges(&mut apply, &staged, self.m);
@@ -360,7 +371,7 @@ impl Ff<'_, '_> {
         emit_sparse_memory_commits(
             &mut nba,
             &nba_targets,
-            &self.sparse_memories,
+            &self.writes.sparse_memories,
             self.m.variables,
         );
         emit_nba_merges(&mut nba, &staged, self.m);

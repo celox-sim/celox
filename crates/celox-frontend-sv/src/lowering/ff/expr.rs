@@ -12,11 +12,11 @@ impl Ff<'_, '_> {
     ) -> Result<RegisterId, sv::AnalyzerError> {
         let mut mapped_arena = SLTNodeArena::<Addr>::new();
         let mut cache = HashMap::default();
-        let aliases = &self.aliases;
-        let working_set = &self.working;
+        let aliases = &self.aliases.map;
+        let working_set = &self.writes.working;
         let variables = &*self.m.variables;
         let direct = self.kernel.is_some() || self.direct;
-        let shared = &self.shared;
+        let shared = &self.writes.shared;
         let map = |id: &SourceVarId| -> Addr {
             let var = aliases.get(id).unwrap_or(id);
             if direct || shared.contains(var) {
@@ -64,10 +64,10 @@ impl Ff<'_, '_> {
     }
 
     pub(super) fn propagate(&self, expr: &sv::ir::Expr) -> sv::ir::Expr {
-        if self.overlay.is_empty() {
+        if self.scope.overlay.is_empty() {
             return expr.clone();
         }
-        substitute_overlay(expr, &self.overlay)
+        substitute_overlay(expr, &self.scope.overlay)
     }
 
     pub(super) fn propagate_lvalue(&self, lvalue: &sv::ir::LValue) -> sv::ir::LValue {
@@ -83,8 +83,8 @@ impl Ff<'_, '_> {
                 lvalue,
                 sv::ir::LValue::Select {
                     name: name.clone(),
-                    msb: substitute_overlay_const(msb, &self.overlay),
-                    lsb: substitute_overlay_const(lsb, &self.overlay),
+                    msb: substitute_overlay_const(msb, &self.scope.overlay),
+                    lsb: substitute_overlay_const(lsb, &self.scope.overlay),
                     array_slice_width: array_slice_width.clone(),
                     array_slice_reversed: *array_slice_reversed,
                 },
@@ -109,7 +109,7 @@ impl Ff<'_, '_> {
         } else {
             expr
         };
-        let expr = if self.overlay.is_empty() {
+        let expr = if self.scope.overlay.is_empty() {
             expr
         } else {
             std::borrow::Cow::Owned(self.propagate(&expr))

@@ -4,6 +4,35 @@
 
 use super::*;
 
+/// What a process writes and how: the classes its caller passes in, and
+/// those the scan of its body records. They decide where a variable is read
+/// and written while the process is evaluated, and what its units commit.
+#[derive(Default)]
+pub(super) struct Writes {
+    pub(super) sparse_memories: HashSet<SourceVarId>,
+    /// Arrays only edge-triggered processes drive. One this process writes
+    /// only by nonblocking element writes, at least one at a run-time
+    /// element, joins `sparse_memories`.
+    pub(super) sparse_candidates: HashSet<SourceVarId>,
+    /// Variables written at a run-time element of an unpacked array.
+    pub(super) element_writes: HashSet<SourceVarId>,
+    /// Variables written other than at a constant range or one element of
+    /// an unpacked array, which a sparse publication does not support.
+    pub(super) other_writes: HashSet<SourceVarId>,
+    /// Variables a process kernel may write between the evaluation of this
+    /// process and the NBA region (see `kernel_window_writes`).
+    pub(super) window_writes: HashSet<SourceVarId>,
+    /// Variables several edge processes write by blocking assignments (see
+    /// `with_shared_variables`).
+    pub(super) shared: HashSet<SourceVarId>,
+    /// Variables read from the working region.
+    pub(super) working: HashSet<SourceVarId>,
+    /// Variables a nonblocking assignment writes.
+    pub(super) nonblocking: HashSet<SourceVarId>,
+    /// The bits whose working value is the process result.
+    pub(super) targets: Vec<(SourceVarId, BitAccess)>,
+}
+
 impl Ff<'_, '_> {
     /// Record a written lvalue: its constant bit range, or the whole variable.
     pub(super) fn record_target(&mut self, lvalue: &sv::ir::LValue, blocking: bool) {
@@ -32,9 +61,9 @@ impl Ff<'_, '_> {
         }
         let constant = constant.and_then(|(access, _)| access);
         if blocking {
-            self.working.insert(id);
+            self.writes.working.insert(id);
         } else {
-            self.nonblocking.insert(id);
+            self.writes.nonblocking.insert(id);
         }
         if self.m.is_hidden(id) {
             return;
@@ -66,16 +95,16 @@ impl Ff<'_, '_> {
             // `write` takes the same order: a constant range, then one
             // run-time element, then a read-modify-write of the variable.
             if element_write {
-                self.element_writes.insert(id);
+                self.writes.element_writes.insert(id);
             } else {
-                self.other_writes.insert(id);
+                self.writes.other_writes.insert(id);
             }
         }
         let access = match lvalue {
             sv::ir::LValue::Ident(_) => BitAccess::new(0, variable.width - 1),
             sv::ir::LValue::Select { .. } => constant.unwrap_or(whole),
         };
-        self.targets.push((id, access));
+        self.writes.targets.push((id, access));
     }
 
     /// The variables the subroutines `body` calls assign, directly or

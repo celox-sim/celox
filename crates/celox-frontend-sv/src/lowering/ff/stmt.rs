@@ -2,6 +2,20 @@
 
 use super::*;
 
+/// The constructs the statement being lowered is nested in, innermost
+/// last. The branches of a fork are lowered outside those of the parent:
+/// the `Fork` arm of [`Ff::exec`] and [`Ff::fork_in_unit`] each set aside
+/// the ones they do and put them back after the branches.
+#[derive(Default)]
+pub(super) struct Scope {
+    pub(super) loops: Vec<LoopBlocks>,
+    /// Named blocks a `disable` can leave: their ids and exit blocks.
+    pub(super) blocks: Vec<BlockEntry>,
+    pub(super) functions: Vec<FunctionBlocks>,
+    /// Loop variables of unrolled loops and their literal values.
+    pub(super) overlay: HashMap<String, (String, i128)>,
+}
+
 impl Ff<'_, '_> {
     /// Leave every named block an earlier `disable` ended while this
     /// activation was suspended: at a statement boundary, an activation
@@ -9,6 +23,7 @@ impl Ff<'_, '_> {
     /// the block's exit instead of executing the statement.
     pub(super) fn check_disabled_blocks(&mut self) -> Result<(), sv::AnalyzerError> {
         let epochs: Vec<(BlockId, String, String)> = self
+            .scope
             .blocks
             .iter()
             .filter_map(|entry| {
@@ -39,7 +54,7 @@ impl Ff<'_, '_> {
     /// Lower a statement list; `false` when control cannot fall off its end.
     pub(super) fn exec_block(&mut self, stmts: &[sv::ir::Stmt]) -> Result<bool, sv::AnalyzerError> {
         for stmt in stmts {
-            if self.blocks.iter().any(|entry| entry.epoch.is_some()) {
+            if self.scope.blocks.iter().any(|entry| entry.epoch.is_some()) {
                 self.check_disabled_blocks()?;
             }
             if !self.exec(stmt)? {
@@ -66,9 +81,10 @@ impl Ff<'_, '_> {
                 sv::ir::Stmt::Delay { .. } | sv::ir::Stmt::WaitEvent(_) | sv::ir::Stmt::Wait(_)
             ) && self.can_request())
             || self
+                .call_stack
                 .active_calls
                 .iter()
-                .skip(self.timing_call_boundary)
+                .skip(self.call_stack.timing_call_boundary)
                 .any(|name| {
                     self.m
                         .subroutine(name)
@@ -217,28 +233,28 @@ impl Ff<'_, '_> {
                 if self.kernel.is_none() {
                     return Err(unsupported("fork outside a timed process"));
                 }
-                self.forked = true;
+                self.activation.forked = true;
                 let (entries, continuation) = self
                     .with_kernel(|kernel| kernel.fork(branches.len(), *join))
                     .map_err(kernel_error)?;
                 self.b.seal_block(SIRTerminator::Return);
-                let loops = std::mem::take(&mut self.loops);
-                let blocks = std::mem::take(&mut self.blocks);
-                let functions = std::mem::take(&mut self.functions);
-                let overlay = std::mem::take(&mut self.overlay);
-                let timing_boundary = self.timing_call_boundary;
-                self.timing_call_boundary = self.active_calls.len();
+                let loops = std::mem::take(&mut self.scope.loops);
+                let blocks = std::mem::take(&mut self.scope.blocks);
+                let functions = std::mem::take(&mut self.scope.functions);
+                let overlay = std::mem::take(&mut self.scope.overlay);
+                let timing_boundary = self.call_stack.timing_call_boundary;
+                self.call_stack.timing_call_boundary = self.call_stack.active_calls.len();
                 for (entry, branch) in entries.into_iter().zip(branches) {
                     self.b.switch_to_block(entry);
                     if self.exec_block(branch)? {
                         self.with_kernel(ProcessKernelBuilder::complete);
                     }
                 }
-                self.timing_call_boundary = timing_boundary;
-                self.loops = loops;
-                self.blocks = blocks;
-                self.functions = functions;
-                self.overlay = overlay;
+                self.call_stack.timing_call_boundary = timing_boundary;
+                self.scope.loops = loops;
+                self.scope.blocks = blocks;
+                self.scope.functions = functions;
+                self.scope.overlay = overlay;
                 self.b.switch_to_block(continuation);
                 Ok(true)
             }
@@ -248,12 +264,17 @@ impl Ff<'_, '_> {
                     .id(name)
                     .ok_or_else(|| unsupported(format!("local `{name}`")))?;
                 self.postponed_locals.insert(id);
-                if self.forked && self.kernel.is_some() {
-                    let slot = match self.frame_locals.iter().position(|&local| local == id) {
+                if self.activation.forked && self.kernel.is_some() {
+                    let slot = match self
+                        .activation
+                        .frame_locals
+                        .iter()
+                        .position(|&local| local == id)
+                    {
                         Some(slot) => slot,
                         None => {
-                            self.frame_locals.push(id);
-                            self.frame_locals.len() - 1
+                            self.activation.frame_locals.push(id);
+                            self.activation.frame_locals.len() - 1
                         }
                     };
                     self.with_kernel(|kernel| kernel.local(slot))
@@ -266,6 +287,7 @@ impl Ff<'_, '_> {
                 // Each execution of the declaration makes a new variable,
                 // in a new box when a fork shares it.
                 if let Some(shared) = self
+                    .call_stack
                     .shared_boxes
                     .iter()
                     .rev()
@@ -328,13 +350,15 @@ impl Ff<'_, '_> {
             } => self.exec_loop(kind, init, condition.as_ref(), step, body),
             sv::ir::Stmt::Break | sv::ir::Stmt::Continue => {
                 let blocks = self
+                    .scope
                     .loops
                     .last()
                     .ok_or_else(|| unsupported("break or continue outside a loop"))?;
                 if self
+                    .scope
                     .functions
                     .last()
-                    .is_some_and(|function| function.loop_depth == self.loops.len())
+                    .is_some_and(|function| function.loop_depth == self.scope.loops.len())
                 {
                     return Err(unsupported("break or continue outside a loop"));
                 }
@@ -371,13 +395,13 @@ impl Ff<'_, '_> {
                 } else {
                     None
                 };
-                self.blocks.push(BlockEntry {
+                self.scope.blocks.push(BlockEntry {
                     id: *id,
                     exit,
                     epoch,
                 });
                 let falls_through = self.exec_block(body);
-                self.blocks.pop();
+                self.scope.blocks.pop();
                 if falls_through? {
                     self.jump(exit);
                 }
@@ -389,10 +413,11 @@ impl Ff<'_, '_> {
                 // subroutine inlining: a target outside them (an outer
                 // block of a fork parent, say) is not lowered.
                 let depth = self
+                    .scope
                     .functions
                     .last()
                     .map_or(0, |function| function.block_depth);
-                let entry = self.blocks[depth..]
+                let entry = self.scope.blocks[depth..]
                     .iter()
                     .rev()
                     .find(|entry| entry.id == *id)
@@ -415,6 +440,7 @@ impl Ff<'_, '_> {
             }
             sv::ir::Stmt::Return(value) => {
                 let function = self
+                    .scope
                     .functions
                     .last()
                     .ok_or_else(|| unsupported("return outside a subroutine"))?;
@@ -459,9 +485,9 @@ impl Ff<'_, '_> {
                 // lowering. Until they expose safe per-update boundaries, a
                 // watched automatic destination is rejected like expression
                 // copy-out rather than losing intermediate changes.
-                self.implicit_write_depth += 1;
+                self.observation.implicit_write_depth += 1;
                 let result = self.system_task(*task, args, site.as_ref(), assertion.as_ref());
-                self.implicit_write_depth -= 1;
+                self.observation.implicit_write_depth -= 1;
                 result
             }
         }
