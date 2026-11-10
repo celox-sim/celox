@@ -138,13 +138,15 @@ def commands(engine, state, spec, files, build, binaries, plusargs, contract='rt
     includes = [f'-I{p}' for p in spec['includes']]
     defines = [f'-D{k}={v}' for k, v in sorted(spec['defines'].items())]
     if engine == 'celox':
+        diagnostics = [flag for entry in spec.get('diagnostics', [])
+                       for flag in ('--diagnostic', entry)]
         if contract == 'rtlmeter-steady-state-v1':
             return [[binaries[engine], 'run', '-f', files, '--top', spec['top'], '--backend', 'native',
                      '--threads', '1', '-O', 'O2', '--four-state' if state == 'four-state' else '--two-state',
-                     '--unlimited', '--report', '--no-checkpoint-on-signal', *includes, *defines, *plusargs]]
+                     '--unlimited', '--report', '--no-checkpoint-on-signal', *diagnostics, *includes, *defines, *plusargs]]
         return [[binaries[engine], 'run', '-f', files, '--top', spec['top'], '--backend', 'tiered',
                  '--jit', 'hotspot', '--report', '--threads', '1', '-O', 'O2', '--four-state' if state == 'four-state' else '--two-state',
-                 '--unlimited', '--no-checkpoint-on-signal', *includes, *defines, *plusargs]]
+                 '--unlimited', '--no-checkpoint-on-signal', *diagnostics, *includes, *defines, *plusargs]]
     if engine == 'xezim':
         if state != 'four-state':
             raise ValueError('xezim has no global two-state mode; zero initialization is not equivalent')

@@ -39,6 +39,20 @@ class RtlmeterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'no global two-state'):
             bench.commands('xezim', 'two-state', spec, Path('/source/files.f'), Path('/build'), binaries, [])
 
+    def test_celox_commands_pass_case_diagnostics(self):
+        spec = {'top': 'tb', 'includes': [], 'defines': {},
+                'diagnostics': ['mixed_timescale=allow']}
+        binaries = {engine: engine for engine in bench.ENGINES}
+        for contract in ('rtlmeter-cold-process-v1', 'rtlmeter-steady-state-v1'):
+            command = bench.commands('celox', 'two-state', spec, Path('/files.f'),
+                                     Path('/build'), binaries, [], contract)[0]
+            index = command.index('--diagnostic')
+            self.assertEqual(command[index + 1], 'mixed_timescale=allow')
+        plain = {'top': 'tb', 'includes': [], 'defines': {}}
+        command = bench.commands('celox', 'two-state', plain, Path('/files.f'),
+                                 Path('/build'), binaries, [])[0]
+        self.assertNotIn('--diagnostic', command)
+
     def test_e203_uses_its_own_success_and_failure_markers(self):
         outcome = {'exitCode': 0, 'timedOut': False}
         text = 'Hello World from HummingbirdV2 E203\nTEST_PASSED\n'
