@@ -89,7 +89,7 @@ pub(in crate::ast) fn same_tables(a: &PackedDimensions, b: &PackedDimensions) ->
 /// that their identities stay unique.
 struct ClassSignatures {
     const_env: SharedEnv,
-    type_aliases: SharedMap<Type>,
+    type_aliases: SharedAliases,
     function_return_types: SharedMap<FunctionReturnMetadata>,
     specializations: usize,
     shapes: Vec<(String, Vec<VariableDimensions>)>,
@@ -612,7 +612,7 @@ fn class_signatures(
         class_name,
         &env,
         &aliases,
-        |session: &mut Session, env: &SharedEnv, aliases: &SharedMap<Type>| {
+        |session: &mut Session, env: &SharedEnv, aliases: &SharedAliases| {
             let mut scope = context.clone();
             scope.class_base = Some(classes::specializations::class_base(
                 session, class_name, context,
@@ -1905,7 +1905,7 @@ mod tests {
         let input = PackedDimensions::new(
             HashMap::default(),
             &[("N".to_string(), 16)].into_iter().collect::<ConstEnv>(),
-            &HashMap::default(),
+            &TypeAliases::default(),
         );
         let context = query_operand_dimensions_id(argument(&tree), &tree, session, &input).unwrap();
         assert_eq!(
@@ -1933,7 +1933,7 @@ mod tests {
         let input = PackedDimensions::new(
             HashMap::default(),
             &ConstEnv::default(),
-            &HashMap::default(),
+            &TypeAliases::default(),
         );
         let context = query_operand_dimensions_id(argument(&tree), &tree, session, &input).unwrap();
         assert_eq!(context.function_return_types["f"].width, Some(8));
@@ -1950,7 +1950,7 @@ mod tests {
         let input = PackedDimensions::new(
             HashMap::default(),
             &ConstEnv::default(),
-            &HashMap::default(),
+            &TypeAliases::default(),
         );
         let context = query_operand_dimensions_id(argument(&tree), &tree, session, &input).unwrap();
         let shape = context.get("a").unwrap();

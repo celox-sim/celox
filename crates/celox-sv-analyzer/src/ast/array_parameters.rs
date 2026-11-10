@@ -43,7 +43,7 @@ fn declared_type(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     const_env: &ConstEnv,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
 ) -> Converted<Option<Type>> {
     let celox_sv_syntax::ParameterKind::Value { data_type, .. } = native.kind else {
         return Err(unsupported(
@@ -65,7 +65,7 @@ pub(super) fn uses_signal_representation(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     const_env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<bool> {
     if !is_array_parameter(parameter, tree.declarations()) {
         return Ok(false);
@@ -87,7 +87,7 @@ pub(super) fn array_parameters_from_scope(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     const_env: &ConstEnv,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
 ) -> Converted<Vec<ArrayParameter>> {
     let mut parameters = Vec::new();
     if let Ok(unit) = tree.root_unit() {
@@ -139,7 +139,7 @@ fn array_parameters_from_declaration(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     const_env: &ConstEnv,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
     publish: &mut impl FnMut(&ArrayParameter),
 ) -> Result<Vec<ArrayParameter>, AnalyzerError> {
     let mut parameters = Vec::new();

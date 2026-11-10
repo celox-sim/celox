@@ -36,7 +36,7 @@ pub(crate) struct Session {
     concrete_classes: Option<std::rc::Rc<classes::ConcreteClasses>>,
     /// The constants and types of the scope that declares each class, which
     /// its parameter defaults and body see (IEEE 1800-2023 8.25).
-    class_declaration_scopes: HashMap<String, (SharedEnv, SharedMap<Type>)>,
+    class_declaration_scopes: HashMap<String, (SharedEnv, SharedAliases)>,
     /// The specializations that class references have named, by class
     /// declaration (see [`classes::specializations`]).
     class_specialization_names: HashMap<String, Vec<classes::specializations::Named>>,
@@ -332,8 +332,8 @@ use parameters::{
 };
 use scoped_map::{ScopedMap, Signedness};
 use selects::{add_expr, product_expr};
-pub(crate) use shared_map::ConstEnv;
-use shared_map::{SharedEnv, SharedMap, ToShared};
+pub(crate) use shared_map::{ConstEnv, TypeAliases};
+use shared_map::{SharedAliases, SharedEnv, SharedMap, ToShared};
 use statements::{
     assignment_op_expr, coerce_procedural_assignment_rhs, expr_from_lvalue, lvalue_expr_type,
 };
@@ -923,7 +923,7 @@ impl Module {
                 functions
             };
             // The scope's tables are shared with the contexts that bind in it.
-            let mut type_aliases: SharedMap<Type> =
+            let mut type_aliases: SharedAliases =
                 type_aliases_from_scope(syntax_tree, session)?.into();
             // Constant functions see the module constants known so far; they are
             // collected again once the parameters are known.
@@ -3763,7 +3763,7 @@ struct FunctionReturnMetadata {
 struct PackedDimensions {
     variables: ScopedMap<VariableDimensions>,
     const_env: SharedEnv,
-    type_aliases: SharedMap<Type>,
+    type_aliases: SharedAliases,
     function_return_types: SharedMap<FunctionReturnMetadata>,
     functions: Arc<HashMap<String, Function>>,
     parameter_values: SharedMap<Expr>,
@@ -3822,7 +3822,7 @@ struct ClassBase(Arc<ClassTables>);
 #[derive(Debug)]
 struct ClassTables {
     const_env: SharedEnv,
-    type_aliases: SharedMap<Type>,
+    type_aliases: SharedAliases,
     parameter_values: SharedMap<Expr>,
     constant_types: Arc<HashMap<String, semantic_types::ConstantType>>,
 }
@@ -3865,7 +3865,7 @@ impl PackedDimensions {
     fn new(
         variables: impl Into<ScopedMap<VariableDimensions>>,
         const_env: impl ToShared<i128, ConstEnv>,
-        type_aliases: impl ToShared<Type>,
+        type_aliases: impl ToShared<Type, TypeAliases>,
     ) -> Self {
         Self {
             variables: variables.into(),

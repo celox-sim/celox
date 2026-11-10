@@ -144,7 +144,7 @@ fn name_and_element_queries_read_the_declarations_bound_type() {
     let tree = AnalysisContext::unspecialized(&syntax);
     let id = tree.declarations().assign_statements[0].assignments[0].right;
     let mut session = Session::default();
-    let input = PackedDimensions::new(HashMap::default(), &env(5), &HashMap::default());
+    let input = PackedDimensions::new(HashMap::default(), &env(5), &TypeAliases::default());
     let mut dims =
         dimensions::query_operand_dimensions_id(id, &tree, &mut session, &input).unwrap();
     dims.const_env.insert("N".into(), 11);
@@ -163,7 +163,7 @@ fn formal_publication_observes_changed_bindings_with_identical_symbolic_ranges()
     let tree = AnalysisContext::unspecialized(&syntax);
     let id = tree.declarations().assign_statements[0].assignments[0].right;
     let mut session = Session::default();
-    let input = PackedDimensions::new(HashMap::default(), &env(5), &HashMap::default());
+    let input = PackedDimensions::new(HashMap::default(), &env(5), &TypeAliases::default());
     let mut dims =
         dimensions::query_operand_dimensions_id(id, &tree, &mut session, &input).unwrap();
     let old = dims.subroutine_param_shapes["f"][0].clone();

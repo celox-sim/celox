@@ -128,7 +128,7 @@ fn retained_parameter_types_are_frozen_per_override_and_can_cross_tables() {
         let parameters = crate::ast::parameters_from_scope(
             &tree,
             &mut session,
-            &HashMap::default(),
+            &TypeAliases::default(),
             &ConstEnv::default(),
             &HashMap::from_iter([("N".into(), ConstExpr::Literal(width.to_string()))]),
         )
@@ -217,13 +217,13 @@ fn preliminary_queries_preserve_final_scalar_parameter_bindings() {
     let parameters = crate::ast::parameters_from_scope(
         &tree,
         &mut session,
-        &HashMap::default(),
+        &TypeAliases::default(),
         &ConstEnv::default(),
         &HashMap::default(),
     )
     .unwrap();
     let env = crate::ast::parameters::const_env_from_parameters(&tree, &mut session, &parameters);
-    let mut input = PackedDimensions::new(HashMap::default(), &env, &HashMap::default());
+    let mut input = PackedDimensions::new(HashMap::default(), &env, &TypeAliases::default());
     Arc::make_mut(&mut input.constant_types)
         .insert("P".into(), parameters[0].semantic_type.clone().unwrap());
     let dims = dimensions::query_operand_dimensions_id(id, &tree, &mut session, &input).unwrap();
@@ -246,7 +246,7 @@ fn generated_parameters_keep_each_iterations_type_and_shadow_the_outer_one() {
         &tree,
         &mut session,
         &ConstEnv::default(),
-        &HashMap::default(),
+        &TypeAliases::default(),
     )
     .unwrap();
     let mut widths = Vec::new();
@@ -284,7 +284,7 @@ fn nested_generate_signals_hide_enclosing_parameter_types() {
             &tree,
             &mut session,
             &ConstEnv::default(),
-            &HashMap::default(),
+            &TypeAliases::default(),
         )
         .unwrap();
         let mut checked = false;

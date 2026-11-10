@@ -37,7 +37,7 @@ pub(super) struct Item {
     pub env: SharedEnv,
     pub literals: SharedMap<Expr>,
     parameter_dimensions: Arc<VariablePackedDimensions>,
-    qualified_types: SharedMap<Type>,
+    qualified_types: SharedAliases,
     constant_types: SharedMap<semantic_types::ConstantType>,
     names: SharedMap<String>,
     imports: SharedMap<String>,
@@ -67,10 +67,7 @@ impl<'s> BlockImports<'s> {
     /// The type aliases visible here: a name the blocks declare or import
     /// hides the module's type of that name, and an imported name denotes
     /// the type of its declaration.
-    fn type_aliases<'m>(
-        self,
-        aliases: &'m HashMap<String, Type>,
-    ) -> Cow<'m, HashMap<String, Type>> {
+    fn type_aliases<'m>(self, aliases: &'m TypeAliases) -> Cow<'m, TypeAliases> {
         let mut visible = Cow::Borrowed(aliases);
         let hidden: Vec<&String> = if aliases.len() <= self.shadowed.len() {
             aliases
@@ -164,10 +161,7 @@ impl Item {
     }
 
     /// The type aliases this item sees, given the module's.
-    pub fn type_aliases<'m>(
-        &self,
-        aliases: &'m HashMap<String, Type>,
-    ) -> Cow<'m, HashMap<String, Type>> {
+    pub fn type_aliases<'m>(&self, aliases: &'m TypeAliases) -> Cow<'m, TypeAliases> {
         if self.qualified_types.is_empty() {
             return self.block_imports().type_aliases(aliases);
         }
@@ -182,7 +176,7 @@ impl Item {
 
     /// [`Self::type_aliases`] of a shared table, which stays shared when
     /// the item sees it unchanged.
-    pub fn shared_type_aliases(&self, aliases: &SharedMap<Type>) -> SharedMap<Type> {
+    pub fn shared_type_aliases(&self, aliases: &SharedAliases) -> SharedAliases {
         match self.type_aliases(aliases) {
             Cow::Borrowed(_) => aliases.clone(),
             Cow::Owned(visible) => visible.into(),
@@ -534,7 +528,7 @@ struct Scope {
     literals: SharedMap<Expr>,
     parameters: Vec<Parameter>,
     parameter_dimensions: Arc<VariablePackedDimensions>,
-    qualified_types: SharedMap<Type>,
+    qualified_types: SharedAliases,
     constant_types: SharedMap<semantic_types::ConstantType>,
     names: SharedMap<String>,
     imports: SharedMap<String>,
@@ -542,10 +536,7 @@ struct Scope {
 }
 
 impl Scope {
-    fn type_aliases<'m>(
-        &self,
-        aliases: &'m HashMap<String, Type>,
-    ) -> Cow<'m, HashMap<String, Type>> {
+    fn type_aliases<'m>(&self, aliases: &'m TypeAliases) -> Cow<'m, TypeAliases> {
         if self.qualified_types.is_empty() {
             return self.block_imports().type_aliases(aliases);
         }
@@ -572,9 +563,9 @@ struct Elaborator<'a, 'b> {
     /// change with the imports of each generate block.
     tree: AnalysisContext<'a>,
     session: &'b mut Session,
-    module_aliases: &'b HashMap<String, Type>,
+    module_aliases: &'b TypeAliases,
     /// The type aliases of the scope being elaborated.
-    aliases: Cow<'b, HashMap<String, Type>>,
+    aliases: Cow<'b, TypeAliases>,
     remaining: usize,
     functions: HashMap<String, Function>,
     items: Vec<Item>,
@@ -587,7 +578,7 @@ pub(super) fn items(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Result<Vec<Item>, AnalyzerError> {
     items_with_literal_use(tree, session, env, aliases, LiteralUse::All)
 }
@@ -598,7 +589,7 @@ pub(super) fn subroutine_items(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Result<Vec<Item>, AnalyzerError> {
     items_with_literal_use(
         tree,
@@ -624,7 +615,7 @@ fn items_with_literal_use(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
     literal_use: LiteralUse,
 ) -> Result<Vec<Item>, AnalyzerError> {
     memo::items(tree, session, env, aliases, literal_use, |session| {
@@ -636,7 +627,7 @@ fn elaborate(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
     literal_use: LiteralUse,
 ) -> Result<Vec<Item>, AnalyzerError> {
     let parameters = parameters_from_scope(tree, session, aliases, env, &tree.parameter_overrides)?;
@@ -1522,7 +1513,7 @@ fn module_constant_functions(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
     literals: &HashMap<String, Expr>,
 ) -> Converted<HashMap<String, Function>> {
     let dimensions = PackedDimensions::new(HashMap::default(), env, aliases);
@@ -1807,7 +1798,13 @@ mod tests {
             .unwrap();
             let tree = AnalysisContext::unspecialized(&tree);
             parameters::PARAMETER_BINDINGS.with(|bindings| bindings.set(0));
-            let active = items(&tree, session, &ConstEnv::default(), &HashMap::default()).unwrap();
+            let active = items(
+                &tree,
+                session,
+                &ConstEnv::default(),
+                &TypeAliases::default(),
+            )
+            .unwrap();
             let bindings = parameters::PARAMETER_BINDINGS.with(|bindings| bindings.get());
             assert!(
                 bindings <= 3 * count,
@@ -1901,7 +1898,13 @@ mod tests {
         )
         .unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
-        let active = items(&tree, session, &ConstEnv::default(), &HashMap::default()).unwrap();
+        let active = items(
+            &tree,
+            session,
+            &ConstEnv::default(),
+            &TypeAliases::default(),
+        )
+        .unwrap();
         assert_eq!(active.len(), 2);
         assert!(std::ptr::eq(&*active[0].names, &*active[1].names));
         assert!(Arc::ptr_eq(&active[0].shadowed, &active[1].shadowed));
@@ -1939,7 +1942,7 @@ mod tests {
                 &tree,
                 &mut Session::default(),
                 &ConstEnv::from_iter([("B".into(), 99)]),
-                &HashMap::default(),
+                &TypeAliases::default(),
             )
             .unwrap();
             let assignment = active
@@ -2177,7 +2180,13 @@ mod tests {
         )
         .unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
-        let active = items(&tree, session, &ConstEnv::default(), &HashMap::default()).unwrap();
+        let active = items(
+            &tree,
+            session,
+            &ConstEnv::default(),
+            &TypeAliases::default(),
+        )
+        .unwrap();
         let outer = FunctionReturnMetadata {
             semantic_type: None,
             arguments: None,
@@ -2265,7 +2274,7 @@ mod tests {
         let parameters = parameters_from_scope(
             &tree,
             session,
-            &HashMap::default(),
+            &TypeAliases::default(),
             &ConstEnv::default(),
             &HashMap::default(),
         )
@@ -2273,7 +2282,13 @@ mod tests {
         let mut env = ConstEnv::default();
         extend_const_env_with_parameters(&tree, session, &mut env, &parameters);
         assert_eq!(env[&parameter_dimensions_marker("i")], 2);
-        let active = items(&tree, &mut Session::default(), &env, &HashMap::default()).unwrap();
+        let active = items(
+            &tree,
+            &mut Session::default(),
+            &env,
+            &TypeAliases::default(),
+        )
+        .unwrap();
         let iterations: Vec<_> = active
             .iter()
             .filter(|item| !item.scope.is_empty())
@@ -2613,8 +2628,13 @@ mod tests {
                     crate::source_tree::parse_scope_fixture(&code, Path::new("unused_chain.sv"))
                         .unwrap();
                 let tree = AnalysisContext::unspecialized(&tree);
-                let active =
-                    items(&tree, session, &ConstEnv::default(), &HashMap::default()).unwrap();
+                let active = items(
+                    &tree,
+                    session,
+                    &ConstEnv::default(),
+                    &TypeAliases::default(),
+                )
+                .unwrap();
                 assert!(active.iter().all(|item| item.literals.is_empty()));
                 let ir =
                     crate::analyze::analyze_source(Source::from_syntax(&tree).unwrap()).unwrap();
@@ -2640,7 +2660,7 @@ mod tests {
             crate::source_tree::parse_scope_fixture(code, Path::new("needed_literals.sv")).unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
         let env = ConstEnv::default();
-        let aliases = HashMap::default();
+        let aliases = TypeAliases::default();
         let parameters =
             parameters_from_scope(&tree, session, &aliases, &env, &HashMap::default()).unwrap();
         let full = parameter_value_env(&tree, session, &parameters, &env);
@@ -2746,7 +2766,7 @@ mod tests {
                 .unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
         let env = ConstEnv::default();
-        let aliases = HashMap::default();
+        let aliases = TypeAliases::default();
         let full = items(&tree, session, &env, &aliases).unwrap();
         let projected = subroutine_items(&tree, session, &env, &aliases).unwrap();
         assert_eq!(projected.len(), full.len());
@@ -2800,9 +2820,13 @@ mod tests {
                     crate::source_tree::parse_scope_fixture(&code, Path::new("rtl_chain.sv"))
                         .unwrap();
                 let tree = AnalysisContext::unspecialized(&tree);
-                let active =
-                    subroutine_items(&tree, session, &ConstEnv::default(), &HashMap::default())
-                        .unwrap();
+                let active = subroutine_items(
+                    &tree,
+                    session,
+                    &ConstEnv::default(),
+                    &TypeAliases::default(),
+                )
+                .unwrap();
                 assert!(active.iter().all(|item| item.literals.is_empty()));
                 let ir =
                     crate::analyze::analyze_source(Source::from_syntax(&tree).unwrap()).unwrap();
@@ -2853,13 +2877,22 @@ mod tests {
             )
             .unwrap();
             let tree = AnalysisContext::unspecialized(&tree);
-            let full = items(&tree, session, &ConstEnv::default(), &HashMap::default())
-                .err()
-                .expect(body);
-            let projected =
-                subroutine_items(&tree, session, &ConstEnv::default(), &HashMap::default())
-                    .err()
-                    .expect(body);
+            let full = items(
+                &tree,
+                session,
+                &ConstEnv::default(),
+                &TypeAliases::default(),
+            )
+            .err()
+            .expect(body);
+            let projected = subroutine_items(
+                &tree,
+                session,
+                &ConstEnv::default(),
+                &TypeAliases::default(),
+            )
+            .err()
+            .expect(body);
             assert_eq!(projected.to_string(), full.to_string(), "{body}");
         }
     }

@@ -23,7 +23,7 @@ pub(super) struct ScopeSymbols {
     /// Literal values of parameters and enum members.
     pub parameter_values: HashMap<String, Expr>,
     pub parameters: Vec<Parameter>,
-    pub type_aliases: HashMap<String, Type>,
+    pub type_aliases: TypeAliases,
     /// Bound type parameters, keyed by native declaration ownership.
     pub type_parameter_bindings: HashMap<celox_sv_syntax::ParameterId, Type>,
     pub pattern_parameter_bindings: HashMap<celox_sv_syntax::ParameterId, BoundPattern>,
@@ -637,6 +637,21 @@ impl<V: 'static> Table<V> for HashMap<String, V> {
         self.get(name)
     }
     fn put(&mut self, name: String, value: V) {
+        self.insert(name, value);
+    }
+}
+
+impl Table<Type> for TypeAliases {
+    fn entries(&self) -> impl Iterator<Item = (&String, &Type)> {
+        self.iter()
+    }
+    fn has(&self, name: &str) -> bool {
+        self.contains_key(name)
+    }
+    fn find(&self, name: &str) -> Option<&Type> {
+        self.get(name)
+    }
+    fn put(&mut self, name: String, value: Type) {
         self.insert(name, value);
     }
 }

@@ -27,12 +27,12 @@ pub(in crate::ast) struct Specialization {
     /// The constants and types the class declares itself, which a class
     /// extending it inherits without the scope around the declaration.
     pub declared_env: HashMap<String, Option<i128>>,
-    pub declared_aliases: HashMap<String, Type>,
+    pub declared_aliases: TypeAliases,
     pub enum_constants: HashMap<String, semantic_types::ConstantType>,
     /// The literals that replace the value parameters.
     pub literals: HashMap<String, Expr>,
     /// The type parameters and typedefs, and the class name itself.
-    pub aliases: HashMap<String, Type>,
+    pub aliases: TypeAliases,
     /// The class the specialization extends, or the interface classes an
     /// interface class extends, whose parameters and typedefs it inherits
     /// (IEEE 1800-2023 8.13, 8.26.3).
@@ -139,8 +139,8 @@ pub(in crate::ast) fn scope(
     session: &mut Session,
     name: &str,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
-) -> (ConstEnv, HashMap<String, Type>) {
+    aliases: &TypeAliases,
+) -> (ConstEnv, TypeAliases) {
     let (env, aliases) = shared_scope(session, name, &env.clone().into(), &aliases.clone().into());
     (env.into_iter().collect(), aliases.into_iter().collect())
 }
@@ -151,8 +151,8 @@ pub(in crate::ast) fn shared_scope(
     session: &mut Session,
     name: &str,
     env: &SharedEnv,
-    aliases: &SharedMap<Type>,
-) -> (SharedEnv, SharedMap<Type>) {
+    aliases: &SharedAliases,
+) -> (SharedEnv, SharedAliases) {
     let mut env = env.clone();
     let mut aliases = aliases.clone();
     ScopeEdits::default().apply(session, name, &mut env, &mut aliases);
@@ -178,7 +178,7 @@ impl ScopeEdits {
         session: &Session,
         name: &str,
         env: &mut SharedEnv,
-        aliases: &mut SharedMap<Type>,
+        aliases: &mut SharedAliases,
     ) {
         let own = generic(session, name);
         for specialization in lineage(session, name) {
@@ -218,7 +218,7 @@ impl ScopeEdits {
         self.env.push((key.to_owned(), old));
     }
 
-    fn set_type(&mut self, aliases: &mut SharedMap<Type>, key: &str, ty: &Type) {
+    fn set_type(&mut self, aliases: &mut SharedAliases, key: &str, ty: &Type) {
         if aliases.get(key) == Some(ty) {
             return;
         }
@@ -227,7 +227,7 @@ impl ScopeEdits {
     }
 
     /// Take the changes back, the last one first.
-    fn undo(self, env: &mut SharedEnv, aliases: &mut SharedMap<Type>) {
+    fn undo(self, env: &mut SharedEnv, aliases: &mut SharedAliases) {
         for (key, old) in self.env.into_iter().rev() {
             match old {
                 Some(old) => env.insert(key, old),
@@ -248,13 +248,13 @@ impl ScopeEdits {
 /// making the scope of each specialization costs what the class adds, not
 /// a copy of the tables around it.
 pub(in crate::ast) struct ClassScopes {
-    base: (SharedEnv, SharedMap<Type>),
+    base: (SharedEnv, SharedAliases),
     env: SharedEnv,
-    aliases: SharedMap<Type>,
+    aliases: SharedAliases,
 }
 
 impl ClassScopes {
-    pub(in crate::ast) fn new(env: &SharedEnv, aliases: &SharedMap<Type>) -> Self {
+    pub(in crate::ast) fn new(env: &SharedEnv, aliases: &SharedAliases) -> Self {
         Self {
             base: (env.clone(), aliases.clone()),
             env: env.clone(),
@@ -269,8 +269,8 @@ impl ClassScopes {
         session: &mut Session,
         name: &str,
         env: &SharedEnv,
-        aliases: &SharedMap<Type>,
-        f: impl FnOnce(&mut Session, &SharedEnv, &SharedMap<Type>) -> R,
+        aliases: &SharedAliases,
+        f: impl FnOnce(&mut Session, &SharedEnv, &SharedAliases) -> R,
     ) -> R {
         // The copy follows the tables it was made from.
         if self.base.0.identity() != env.identity() || self.base.1.identity() != aliases.identity()
@@ -301,7 +301,7 @@ fn inherit(
     name: &str,
     own: &str,
     env: &mut ConstEnv,
-    aliases: &mut HashMap<String, Type>,
+    aliases: &mut TypeAliases,
 ) {
     if lookup(session, name).is_none() {
         if let Some(scope) = session.foreign.declarations(name) {
@@ -634,7 +634,7 @@ struct PendingSpecialization {
     name: String,
     parameters: Parameters,
     env: ConstEnv,
-    aliases: HashMap<String, Type>,
+    aliases: TypeAliases,
 }
 
 enum Preparation {
@@ -650,12 +650,12 @@ enum Preparation {
 pub(in crate::ast) struct Named {
     arguments: BoundArguments,
     env: std::sync::Weak<ConstEnv>,
-    aliases: std::sync::Weak<HashMap<String, Type>>,
+    aliases: std::sync::Weak<TypeAliases>,
     name: String,
 }
 
 impl Named {
-    fn of(&self, env: &SharedEnv, aliases: &SharedMap<Type>) -> bool {
+    fn of(&self, env: &SharedEnv, aliases: &SharedAliases) -> bool {
         self.env.as_ptr() as usize == env.identity()
             && self.aliases.as_ptr() as usize == aliases.identity()
     }
@@ -669,7 +669,7 @@ impl Named {
 #[derive(Clone, Debug, Default)]
 pub(in crate::ast) struct BoundArguments {
     pub values: HashMap<String, ConstExpr>,
-    pub types: HashMap<String, Type>,
+    pub types: TypeAliases,
 }
 
 // Ordinary type equality ignores nominal declaration identity; specialization
@@ -707,7 +707,7 @@ pub(in crate::ast) fn bind_arguments(
         .filter(|parameter| !parameter.local)
         .collect::<Vec<_>>();
     let mut values = HashMap::<String, ConstExpr>::default();
-    let mut types = HashMap::<String, Type>::default();
+    let mut types = TypeAliases::default();
     // The formals assigned, also by an empty named assignment.
     let mut assigned = HashSet::<String>::default();
     let mut named = false;
@@ -843,7 +843,7 @@ fn prepare_bound(
         spelled: Vec::new(),
         arguments: Vec::new(),
         own_env: HashMap::default(),
-        own_aliases: HashMap::default(),
+        own_aliases: TypeAliases::default(),
     };
     if let Some(id) = declaration.parameter_ports
         && let Some(name) =
@@ -906,7 +906,7 @@ fn bind_bases(
     session: &mut Session,
     generic: &str,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<Vec<String>> {
     let native = tree.declarations();
     let declaration = super::declaration(tree, session, generic)
@@ -1144,7 +1144,7 @@ fn finish_specialization(
 struct Parameters {
     /// The values and types the assignment gives, until they are bound.
     values: HashMap<String, ConstExpr>,
-    types: HashMap<String, Type>,
+    types: TypeAliases,
     literals: HashMap<String, Expr>,
     lowered: Vec<Parameter>,
     /// The parameters of the port list as the name of the specialization
@@ -1155,7 +1155,7 @@ struct Parameters {
     /// The constants and types the class declares itself, which hide those
     /// of its bases; a constant without a value hides one of a base too.
     own_env: HashMap<String, Option<i128>>,
-    own_aliases: HashMap<String, Type>,
+    own_aliases: TypeAliases,
 }
 
 impl Parameters {
@@ -1179,7 +1179,7 @@ impl Parameters {
         parameter: &celox_sv_syntax::Parameter,
         first: usize,
         env: &ConstEnv,
-        aliases: &HashMap<String, Type>,
+        aliases: &TypeAliases,
     ) {
         let ParameterKind::Value {
             data_type,
@@ -1229,7 +1229,7 @@ impl Parameters {
         id: celox_sv_syntax::ParameterDeclarationId,
         port: bool,
         env: &mut ConstEnv,
-        aliases: &mut HashMap<String, Type>,
+        aliases: &mut TypeAliases,
     ) -> Converted<Option<String>> {
         let native = tree.declarations();
         for parameter in &native.parameter_declaration(id).parameters {
@@ -1336,7 +1336,7 @@ pub(in crate::ast) fn declare_scopes(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) {
     let native = tree.declarations();
     let scope = tree.root_unit().ok().map(|unit| unit.tokens);
@@ -1355,7 +1355,7 @@ pub(in crate::ast) fn declare_scopes(
 
 /// The constants and types of the scope that declares class `generic`,
 /// which [`collect`] records.
-fn declaration_scope(session: &mut Session, generic: &str) -> Option<(SharedEnv, SharedMap<Type>)> {
+fn declaration_scope(session: &mut Session, generic: &str) -> Option<(SharedEnv, SharedAliases)> {
     session.class_declaration_scopes.get(generic).cloned()
 }
 

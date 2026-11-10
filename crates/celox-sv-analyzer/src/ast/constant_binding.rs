@@ -10,7 +10,7 @@ pub(super) fn expression(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: impl ToShared<i128, ConstEnv>,
-    aliases: impl ToShared<Type>,
+    aliases: impl ToShared<Type, TypeAliases>,
 ) -> Converted<Option<ConstExpr>> {
     bind_in(
         root,
@@ -540,7 +540,7 @@ pub(super) fn packed_ranges(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<Vec<PackedRange>> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
     type_binding::binding::packed_ranges(dimensions, tree, session, &context)
@@ -551,7 +551,7 @@ pub(super) fn unpacked_ranges(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<Vec<UnpackedRange>> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
     dimensions
@@ -565,7 +565,7 @@ pub(super) fn unpacked_dimension(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<UnpackedRange> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
     bind_unpacked_dimension(dimension, tree, session, &context)

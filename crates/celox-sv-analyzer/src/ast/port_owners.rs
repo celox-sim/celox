@@ -125,7 +125,7 @@ mod tests {
             &AnalysisContext::unspecialized(&tree),
             session,
             &ConstEnv::default(),
-            &HashMap::default(),
+            &TypeAliases::default(),
             None,
         )
         .unwrap();
@@ -154,7 +154,7 @@ mod tests {
             &AnalysisContext::unspecialized(&tree),
             session,
             &ConstEnv::default(),
-            &HashMap::default(),
+            &TypeAliases::default(),
             Some(&selection),
         )
         .unwrap();

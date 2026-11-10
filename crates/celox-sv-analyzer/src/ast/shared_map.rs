@@ -10,6 +10,12 @@ use super::*;
 pub(crate) type ConstEnv =
     imbl::GenericHashMap<String, i128, fxhash::FxBuildHasher, imbl::shared_ptr::DefaultSharedPtr>;
 
+/// A table of the types that names stand for, as scopes share and extend
+/// them: persistent as [`ConstEnv`] is, so that a scope which declares a few
+/// types among those of a large one copies only the paths to them.
+pub(crate) type TypeAliases =
+    imbl::GenericHashMap<String, Type, fxhash::FxBuildHasher, imbl::shared_ptr::DefaultSharedPtr>;
+
 /// The entries of a [`SharedMap`].
 pub(super) trait Entries<V>:
     Clone + Default + FromIterator<(String, V)> + IntoIterator<Item = (String, V)>
@@ -36,11 +42,24 @@ impl Entries<i128> for ConstEnv {
     }
 }
 
+impl Entries<Type> for TypeAliases {
+    fn same_entries(&self, other: &Self) -> bool {
+        self.ptr_eq(other)
+            || (self.len() == other.len()
+                && self
+                    .iter()
+                    .all(|(name, value)| other.get(name) == Some(value)))
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct SharedMap<V, M = HashMap<String, V>>(Arc<M>, std::marker::PhantomData<fn() -> V>);
 
 /// The shared table of a scope's constants.
 pub(super) type SharedEnv = SharedMap<i128, ConstEnv>;
+
+/// The shared table of a scope's types.
+pub(super) type SharedAliases = SharedMap<Type, TypeAliases>;
 
 impl<V, M> Clone for SharedMap<V, M> {
     fn clone(&self) -> Self {
