@@ -1,1 +1,7 @@
-Address Codex review on PR 3439: a sampled (or past) literal carries its unknown bits, so do not treat every call as known when proving a two-state predicate
+Revision history for #3439:
+
+rev 3 (content) 2026-11-10 01:07 UTC — Address Codex review on PR 3439: a sampled (or past) literal carries its unknown bits, so do not treat every call as known when proving a two-state predicate
+rev 2 (rebase) 2026-11-09 18:49 UTC
+rev 1 (initial) 2026-11-09 18:49 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3439,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"268f40997425ff591eefd02ff5e8dcee7ace4007","timestamp_iso":"2026-11-09T18:49:29Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"268f40997425ff591eefd02ff5e8dcee7ace4007","new_sha":"b415b500f863d3e1c361792646b9bd778f6f44fe","timestamp_iso":"2026-11-09T18:49:29Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/268f40997425ff591eefd02ff5e8dcee7ace4007...b415b500f863d3e1c361792646b9bd778f6f44fe"},{"number":3,"change_type":"content","old_sha":"b415b500f863d3e1c361792646b9bd778f6f44fe","new_sha":"0b57b4415308113b0e8d84eca5a0385127d8aab3","timestamp_iso":"2026-11-10T01:07:21Z","reason":"Address Codex review on PR 3439: a sampled (or past) literal carries its unknown bits, so do not treat every call as known when proving a two-state predicate","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/b415b500f863d3e1c361792646b9bd778f6f44fe...0b57b4415308113b0e8d84eca5a0385127d8aab3"}]} -->
