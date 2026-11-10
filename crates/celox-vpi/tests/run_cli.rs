@@ -549,6 +549,47 @@ fn execution_option_conflicts_are_rejected() {
     }
 }
 
+/// `--sir-pass` selects the passes of a SystemVerilog design as it does
+/// those of a Veryl one: with net inlining (the two-state O2 default)
+/// disabled, the run prints the same.
+#[cfg(feature = "systemverilog")]
+#[test]
+fn sv_accepts_pass_overrides() {
+    let source = r#"
+        module Dut(input logic [7:0] value, output logic [7:0] result);
+            logic [7:0] bumped, mixed;
+            assign bumped = value + 8'd3;
+            assign mixed = bumped ^ {value[3:0], value[7:4]};
+            assign result = mixed & 8'h7e;
+        endmodule
+        module Top;
+            logic [7:0] value, result;
+            Dut dut(value, result);
+            initial begin
+                value = 8'h12;
+                #1;
+                $display("result=%h", result);
+                value = 8'h34;
+                #1;
+                $display("result=%h", result);
+                $finish;
+            end
+        endmodule
+    "#;
+    for extra in [
+        vec![],
+        vec!["--sir-pass=-net_inlining"],
+        vec!["--sir-pass=-net_inlining", "--sir-pass=-gvn"],
+        vec!["--backend", "native", "--sir-pass=-net_inlining"],
+    ] {
+        let output = run(&[("top.sv", source)], &extra);
+        assert!(output.status.success(), "{extra:?}: {output:?}");
+        assert_eq!(output.stdout, b"result=34\nresult=74\n", "{extra:?}");
+    }
+    let output = run(&[("top.sv", source)], &["--sir-pass=-no_such_pass"]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+}
+
 #[cfg(feature = "systemverilog")]
 #[test]
 fn sv_backends_preserve_timed_nba_execution_and_failures() {
