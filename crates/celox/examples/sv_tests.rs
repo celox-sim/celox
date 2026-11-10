@@ -123,13 +123,16 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
 }
 
 /// Select roots from parsed instantiations, including inactive generate
-/// branches (IEEE 1800-2023 23.3.1). Celox's simulator accepts one root.
-fn select_top(
+/// branches (IEEE 1800-2023 23.3.1). Celox's simulator accepts one root, so
+/// simulation requires exactly one; elaboration accepts every root in turn,
+/// as tools that elaborate all top-level modules do.
+fn select_tops(
     parsed: &[celox_sv_analyzer::ParsedSource],
     explicit: Option<&str>,
-) -> Result<String, String> {
+    mode: Mode,
+) -> Result<Vec<String>, String> {
     if let Some(top) = explicit {
-        return Ok(top.to_string());
+        return Ok(vec![top.to_string()]);
     }
     let names: BTreeSet<_> = parsed
         .iter()
@@ -142,10 +145,11 @@ fn select_top(
         .collect();
     let roots: Vec<_> = names.difference(&referenced).cloned().collect();
     match roots.as_slice() {
-        [root] => Ok(root.clone()),
         [] => {
             Err("elaboration requires a module root; none found in the parsed sources".to_string())
         }
+        _ if mode == Mode::Elaboration => Ok(roots),
+        [root] => Ok(vec![root.clone()]),
         _ => Err(format!(
             "multiple module roots ({}) are unsupported by Celox's single-root simulator; select one with --top",
             roots.join(", ")
@@ -220,7 +224,7 @@ fn run(options: &Options) -> Result<(), String> {
         }
         return Ok(());
     }
-    let top = select_top(&parsed, options.top.as_deref())?;
+    let tops = select_tops(&parsed, options.top.as_deref(), options.mode)?;
     match options.mode {
         Mode::Preprocessing | Mode::Parsing => {
             unreachable!("preprocessing and parsing returned before root selection")
@@ -230,7 +234,7 @@ fn run(options: &Options) -> Result<(), String> {
         // `CELOX_SV_RECURSION_REPORT`.
         Mode::Plan => {
             let start = std::time::Instant::now();
-            let report = celox::Simulation::from_sv_sources(sources, &top)
+            let report = celox::Simulation::from_sv_sources(sources, &tops[0])
                 .four_state(options.four_state)
                 .diagnostics_from_env()
                 .build_plan();
@@ -240,14 +244,18 @@ fn run(options: &Options) -> Result<(), String> {
         }
         Mode::Elaboration => {
             let start = std::time::Instant::now();
-            let built = celox::Simulation::from_sv_sources(sources, &top)
-                .four_state(options.four_state)
-                .diagnostics_from_env()
-                .build();
+            for top in &tops {
+                celox::Simulation::from_sv_sources(sources.clone(), top)
+                    .four_state(options.four_state)
+                    .diagnostics_from_env()
+                    .build()
+                    .map_err(|error| error.to_string())?;
+            }
             tracing::debug!("[elaboration] total: {:?}", start.elapsed());
-            built.map(|_| ()).map_err(|error| error.to_string())
+            Ok(())
         }
         Mode::Simulation => {
+            let top = &tops[0];
             // Upstream simvariants are separate runs, each with one plusarg.
             // Recreate the simulation so no variable or scheduler state leaks.
             let variants: Vec<Vec<String>> = if options.simvariants.is_empty() {
@@ -260,7 +268,7 @@ fn run(options: &Options) -> Result<(), String> {
                     .collect()
             };
             for plusargs in variants {
-                let sim = celox::Simulation::from_sv_sources(sources.clone(), &top)
+                let sim = celox::Simulation::from_sv_sources(sources.clone(), top)
                     .four_state(options.four_state)
                     .diagnostics_from_env()
                     .plusargs(plusargs)
@@ -495,21 +503,34 @@ mod tests {
         let parsed = [parse(
             "module Leaf; endmodule module Parent; Leaf u(); string name = \"Parent\"; endmodule",
         )];
-        assert_eq!(select_top(&parsed, None).unwrap(), "Parent");
+        assert_eq!(
+            select_tops(&parsed, None, Mode::Simulation).unwrap(),
+            ["Parent"]
+        );
         let parsed = [parse("module A; endmodule module top; endmodule")];
         assert!(
-            select_top(&parsed, None)
+            select_tops(&parsed, None, Mode::Simulation)
                 .unwrap_err()
                 .contains("multiple module roots")
         );
-        assert_eq!(select_top(&parsed, Some("A")).unwrap(), "A");
+        assert_eq!(
+            select_tops(&parsed, None, Mode::Elaboration).unwrap(),
+            ["A", "top"]
+        );
+        assert_eq!(
+            select_tops(&parsed, Some("A"), Mode::Simulation).unwrap(),
+            ["A"]
+        );
         let parsed = [parse(
             "module Leaf; endmodule module Parent; if (0) begin Leaf u(); end endmodule",
         )];
-        assert_eq!(select_top(&parsed, None).unwrap(), "Parent");
+        assert_eq!(
+            select_tops(&parsed, None, Mode::Simulation).unwrap(),
+            ["Parent"]
+        );
         let parsed = [parse("typedef logic T;")];
         assert!(
-            select_top(&parsed, None)
+            select_tops(&parsed, None, Mode::Simulation)
                 .unwrap_err()
                 .contains("none found")
         );
