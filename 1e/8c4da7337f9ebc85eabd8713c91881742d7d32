@@ -1,0 +1,1 @@
+Address Codex review on PR 3439: sign-extend signed operands in constant case folds, keep X/Z payloads under bitwise NOT, and only drop a monitor behind a call-free disable guard
