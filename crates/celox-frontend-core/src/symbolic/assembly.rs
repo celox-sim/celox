@@ -1606,6 +1606,79 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             }
         }
     }
+    // Nets nothing observes leave the program before it is scheduled. A
+    // fused flip-flop factory lowers the paths from their source form, and
+    // a `$dumpvars` may select any object at run time.
+    let mut inlined_nets: Vec<AbsoluteAddr> = Vec::new();
+    if parallel.unobserved_nets != celox_design::DeadStorePolicy::Off
+        && fused_ff_factory.is_none()
+        && !four_state
+        && !parallel.enabled()
+        && !timing
+            .host_request_sites
+            .iter()
+            .any(|site| site.kind == celox_design::HostRequestKind::Vcd)
+    {
+        let pinned = pinned_nets(
+            parallel.unobserved_nets,
+            expanded[&InstancePath(Vec::new())],
+            &instance_modules,
+            &modules,
+            bindings,
+            PinnedUnits {
+                flip_flops: eval_apply_ffs
+                    .values()
+                    .chain(eval_only_ffs.values())
+                    .chain(apply_ffs.values())
+                    .flatten()
+                    .chain(
+                        parallel_ff_units
+                            .values()
+                            .flatten()
+                            .flat_map(|(_, part)| [&part.evaluate, &part.apply]),
+                    )
+                    .chain(
+                        split_commits
+                            .values()
+                            .flatten()
+                            .flatten()
+                            .flat_map(|split| [&split.active, &split.nba]),
+                    )
+                    .chain(processes.iter().map(|process| &process.kernel))
+                    .chain(functions.iter().map(|function| &function.unit))
+                    .collect(),
+                events: eval_apply_ffs
+                    .keys()
+                    .chain(eval_only_ffs.keys())
+                    .chain(apply_ffs.keys())
+                    .chain(&topological_clocks)
+                    .chain(&clock_nets)
+                    .copied()
+                    .collect(),
+            },
+            &clock_domains,
+            &timing,
+            counted.keys().copied(),
+            occurrence_probes
+                .iter()
+                .chain(&declaration_probes)
+                .map(|(source, _)| source.id),
+            &comb_observers,
+            &comb_blocks,
+            &unpacked_element_widths,
+        );
+        let report =
+            celox_slt::net_inline::inline_nets(&mut comb_blocks, &mut global_arena, &pinned)?;
+        tracing::debug!(
+            "[flatten] net_inline: {} paths to {}, {} nets inlined, {} copied, {} unread",
+            report.paths_before,
+            report.paths_after,
+            report.inlined,
+            report.duplicated,
+            report.dead
+        );
+        inlined_nets = report.removed;
+    }
     let parallel_comb_blocks = parallel.enabled().then(|| comb_blocks.clone());
     // The flag object of a partitioned settle is declared once the
     // partitions are known; reserve its address now.
@@ -2936,6 +3009,9 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         .collect();
 
     let persistent_comb_state = persistent_comb_state.into_iter().map(project).collect();
+    // Nothing stores an inlined net any more, but it is still a value
+    // combinational logic derives, not state of its own.
+    let inlined_nets = inlined_nets.into_iter().map(project).collect();
     let scheduled = ScheduledRtl {
         sir,
         design: ElaboratedDesign {
@@ -2964,7 +3040,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             comb_observers,
             testbench_read_roots: timing_read_roots,
             rtl_writes,
-            comb_writes: Default::default(),
+            comb_writes: inlined_nets,
             persistent_comb_state,
             declaration_startup,
             dead_store_policy: Default::default(),
@@ -3001,6 +3077,114 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         scheduled,
         fused_optimization_hints: FusedSirOptimizationHints { direct_ff_writes },
     })
+}
+
+/// The units other than combinational paths, and the event signals, of a
+/// design whose unobserved nets are inlined ([`pinned_nets`]).
+struct PinnedUnits<'a> {
+    flip_flops: Vec<&'a ExecutionUnit<RegionedAbsoluteAddr>>,
+    events: HashSet<AbsoluteAddr>,
+}
+
+/// The variables net inlining must leave in state
+/// (`celox_slt::net_inline::inline_nets`): everything a unit other than a
+/// plain combinational path reads or writes, everything the runtime reads
+/// or the scheduler judges by its address, the observed ports, and the
+/// objects that are no packed vector.
+#[allow(clippy::too_many_arguments)]
+fn pinned_nets(
+    policy: celox_design::DeadStorePolicy,
+    root: InstanceId,
+    instance_modules: &HashMap<InstanceId, ModuleId>,
+    modules: &HashMap<ModuleId, SimModule>,
+    bindings: &PackageBindings,
+    units: PinnedUnits<'_>,
+    clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
+    timing: &TimingMetadata,
+    counted: impl Iterator<Item = AbsoluteAddr>,
+    probed: impl Iterator<Item = AbsoluteAddr>,
+    comb_observers: &[CombObserver<AbsoluteAddr>],
+    comb_blocks: &[LogicPath<AbsoluteAddr>],
+    unpacked_element_widths: &HashMap<AbsoluteAddr, usize>,
+) -> HashSet<AbsoluteAddr> {
+    let mut pinned: HashSet<AbsoluteAddr> = HashSet::default();
+    for unit in units.flip_flops {
+        for instruction in unit.blocks.values().flat_map(|block| &block.instructions) {
+            pinned.extend(
+                super::read_objects(instruction)
+                    .chain(super::written_objects(instruction))
+                    .map(|address| address.absolute_addr()),
+            );
+        }
+    }
+    // An imperative combinational process loads what it reads.
+    for path in comb_blocks {
+        if let LogicPathTarget::Process { unit, .. } = &path.target {
+            for instruction in unit.blocks.values().flat_map(|block| &block.instructions) {
+                pinned.extend(
+                    super::read_objects(instruction)
+                        .chain(super::written_objects(instruction))
+                        .copied(),
+                );
+            }
+        }
+    }
+    // The scheduler judges an event and every signal of its domain.
+    pinned.extend(
+        clock_domains
+            .iter()
+            .filter(|(alias, canonical)| {
+                units.events.contains(*alias) || units.events.contains(*canonical)
+            })
+            .flat_map(|(alias, canonical)| [*alias, *canonical]),
+    );
+    pinned.extend(units.events);
+    // The runtime reads what waits watch and what it samples.
+    for site in &timing.wait_sites {
+        pinned.extend(site.terms.iter().map(|(signal, _)| *signal));
+        pinned.extend(site.gates.iter().flatten().map(|gate| gate.signal));
+    }
+    pinned.extend(
+        timing
+            .sample_shadows
+            .iter()
+            .chain(&timing.initial_copies)
+            .flat_map(|(variable, copy)| [*variable, *copy]),
+    );
+    pinned.extend(counted);
+    pinned.extend(probed);
+    for observer in comb_observers {
+        pinned.extend(
+            observer
+                .sensitivity
+                .iter()
+                .chain(&observer.observed_inputs)
+                .chain(&observer.position_inputs)
+                .chain(&observer.preceding_writes)
+                .chain(observer.sensitivity_counters.iter().map(|(atom, _)| atom))
+                .map(|atom| atom.id),
+        );
+        pinned.extend(observer.local_inputs.iter().map(|(var, _)| *var));
+    }
+    pinned.extend(unpacked_element_widths.keys().copied());
+    for (&instance, module) in instance_modules {
+        for (&var_id, variable) in &modules[module].variables {
+            let port = variable.kind.is_port()
+                && match policy {
+                    celox_design::DeadStorePolicy::PreserveAllPorts => true,
+                    celox_design::DeadStorePolicy::PreserveTopPorts => instance == root,
+                    celox_design::DeadStorePolicy::PreserveListedSignals
+                    | celox_design::DeadStorePolicy::Off => false,
+                };
+            if port
+                || variable.metadata.value_kind != celox_design::ValueKind::Bits
+                || !variable.metadata.array_dims.is_empty()
+            {
+                pinned.insert(bindings.locate(instance, var_id));
+            }
+        }
+    }
+    pinned
 }
 
 /// Smallest combinational program, in expression nodes, whose settle

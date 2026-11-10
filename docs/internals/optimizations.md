@@ -31,6 +31,18 @@ explicit.
   whole-value work when only a slice is required.
 - **Cost-directed mux lowering** chooses between eager selection and control flow
   before expression structure is lost.
+- **Net inlining** removes combinational nets that only carry a value between
+  paths: a net one path reads becomes part of that path's expression, a small
+  net several paths read is copied into each, and a net nothing reads is
+  dropped with its driver. A stored net costs a store and a load, and in a
+  partitioned settle a comparison and a mark of its readers as well, because a
+  partition forwards nothing to another one. The pass runs only for pure
+  SystemVerilog designs in two-state mode whose dead-store policy lets signals
+  go, and only on nets nothing but combinational paths reads: every net a
+  flip-flop, a process, an event or the runtime reads, every port the policy
+  keeps, and every net of a combinational loop stays. A waveform, a live or
+  forced signal and a watched object turn it off, as does
+  `-sir:net_inlining` (`SirPass::NetInlining`).
 
 This layer may use design dependency facts, but it does not know physical memory
 offsets or target instructions.
