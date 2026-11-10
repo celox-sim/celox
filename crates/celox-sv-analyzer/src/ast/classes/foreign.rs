@@ -130,7 +130,14 @@ impl Registry {
     pub fn extend(&self, tree: &AnalysisContext<'_>, symbols: &mut ScopeSymbols) {
         let local_classes = scope_declarations(tree)
             .map(|class| declared_name(tree, class))
-            .collect::<Vec<_>>();
+            .collect::<HashSet<_>>();
+        // A member of a class or of one of its specializations: `class::`
+        // or `class#(`.
+        let local_member = |name: &str| {
+            name.match_indices("::")
+                .chain(name.match_indices("#("))
+                .any(|(end, _)| local_classes.contains(&name[..end]))
+        };
         for (owner, extra) in self.prepared.iter() {
             if self.active.contains(owner) {
                 continue;
@@ -152,14 +159,7 @@ impl Registry {
                 .signals
                 .iter()
                 .chain(&extra.state_signals)
-                .filter(|signal| {
-                    present.contains(signal.name())
-                        || local_classes.iter().any(|class| {
-                            signal.name().strip_prefix(class).is_some_and(|suffix| {
-                                suffix.starts_with("::") || suffix.starts_with("#(")
-                            })
-                        })
-                })
+                .filter(|signal| present.contains(signal.name()) || local_member(signal.name()))
                 .map(|signal| signal.name().to_owned())
                 .collect::<HashSet<_>>();
             let declarations_only = symbols.declarations_only;
