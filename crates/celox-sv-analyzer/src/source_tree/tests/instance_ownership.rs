@@ -177,9 +177,16 @@ mod tests {
             Path::new("native-wildcard.sv"),
         )
         .unwrap();
-        assert!(
-            matches!(Source::from_syntax(&wildcard), Err(AnalyzerError::Unsupported(message)) if message == "wildcard port connection")
-        );
+        let source = Source::from_syntax(&wildcard).unwrap();
+        let module = source
+            .modules()
+            .iter()
+            .find(|module| module.name() == "M")
+            .unwrap();
+        let connections = module.instances()[0].port_connections();
+        assert_eq!(connections.len(), 1);
+        assert_eq!(connections[0].formal(), "a");
+        assert!(matches!(connections[0].actual_expr(), Some(Expr::Ident(name)) if name == "a"));
     }
     #[test]
     fn native_instance_membership_and_connection_classes_are_authoritative() {

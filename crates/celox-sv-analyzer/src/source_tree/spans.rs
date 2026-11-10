@@ -135,7 +135,6 @@ pub(crate) struct Spans {
     pub types: Starts<TypeId>,
     pub body_items: Starts,
     pub net_declarations: Starts,
-    pub instantiations: Starts,
     pub subroutines: Starts,
     /// Facts the scope validation derives from the whole file.
     pub validation: std::sync::OnceLock<crate::ast::validation::Facts>,
@@ -199,7 +198,6 @@ impl Spans {
             types: Starts::new(native.type_nodes().map(|(id, node)| (id, node.tokens))),
             body_items: indexed(&mut native.body_items.iter().map(|node| node.tokens)),
             net_declarations: indexed(&mut native.net_declarations.iter().map(|node| node.tokens)),
-            instantiations: indexed(&mut native.instantiations.iter().map(|node| node.tokens)),
             subroutines: indexed(&mut native.subroutines.iter().map(|node| node.tokens)),
             validation: Default::default(),
             imports: Default::default(),

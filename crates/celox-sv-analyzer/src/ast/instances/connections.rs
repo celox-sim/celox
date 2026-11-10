@@ -61,9 +61,10 @@ pub(super) fn connections(
             }
         }
     } else {
+        let mut wildcard = false;
         for connection in &native.connections {
             match &connection.kind {
-                InstanceConnectionKind::Wildcard => {}
+                InstanceConnectionKind::Wildcard => wildcard = true,
                 InstanceConnectionKind::Named { name, value } => {
                     let formal = normalize_identifier(&name.spelling);
                     if let Some(connections) =
@@ -96,6 +97,36 @@ pub(super) fn connections(
                     lowered.push(PortConnection::new(formal, actual, actual_expr));
                 }
                 InstanceConnectionKind::Ordered(_) => unreachable!(),
+            }
+        }
+        if wildcard {
+            // `.*` implicitly connects each remaining port to a
+            // same-named signal of the instantiating scope; an explicit
+            // connection, including an empty one, takes its place
+            // (23.3.2.2).
+            let ports = interface
+                .map(|interface| interface.ports.as_slice())
+                .ok_or_else(|| unsupported("wildcard port connection"))?;
+            for formal in ports {
+                if lowered
+                    .iter()
+                    .any(|connection| connection.formal() == formal)
+                {
+                    continue;
+                }
+                if binding
+                    .and_then(|binding| binding.connections.get(formal))
+                    .is_some()
+                {
+                    continue;
+                }
+                if dimensions.get(formal).is_some() {
+                    lowered.push(PortConnection::new(
+                        formal.clone(),
+                        formal.clone(),
+                        Some(Expr::Ident(formal.clone())),
+                    ));
+                }
             }
         }
     }

@@ -1,6 +1,9 @@
 use super::*;
 
 sv_backends! {
+    fn wildcard_ports(sim) {
+        @case "hierarchy::wildcard_ports";
+    }
     fn generated_string_array_element_methods(sim) {
         @case "hierarchy::generated_string_array_element_methods";
     }
