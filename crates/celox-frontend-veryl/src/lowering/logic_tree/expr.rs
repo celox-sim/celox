@@ -8,7 +8,7 @@ use crate::{
     },
 };
 use num_traits::ToPrimitive as _;
-use veryl_analyzer::ir::{CasePattern, Type, ValueVariant};
+use veryl_analyzer::ir::{CasePattern, Comptime, Type, ValueVariant};
 
 use super::state::{FunctionControlState, FunctionLoopControlState};
 
@@ -861,269 +861,17 @@ fn eval_factor(
         .map(|context| context.signed)
         .unwrap_or_else(|| crate::context_width::factor_signed(factor));
     match factor {
-        Factor::Variable(var_id, index, select, comptime) => {
-            // Compile-time constant (e.g. genvar inside generate block): emit a
-            // constant node directly instead of loading from memory.
-            // Also handles constant[const_index] (e.g. IDX[p] in generate loops).
-            if comptime.is_const {
-                let is_bare = index.0.is_empty() && select.0.is_empty() && select.1.is_none();
-                let is_static_sel = !is_bare && crate::bitaccess::is_static_access(index, select);
-
-                let constant = if is_bare {
-                    celox_value_from_comptime_in_context(comptime, context_width)
-                } else {
-                    celox_value_from_comptime(comptime)
-                };
-                if (is_bare || is_static_sel)
-                    && let Some((celox_value, mask_xz, full_width, signed)) = constant
-                {
-                    let (val, mask, width) = if is_bare {
-                        (celox_value, mask_xz, full_width)
-                    } else {
-                        // Evaluate the static bit-select on the constant value
-                        let access = eval_var_select(module, *var_id, index, select)?;
-                        let extracted_width = access.msb - access.lsb + 1;
-                        let extracted_val = (&celox_value >> access.lsb)
-                            & ((BigUint::from(1u64) << extracted_width) - BigUint::from(1u64));
-                        let extracted_mask = (&mask_xz >> access.lsb)
-                            & ((BigUint::from(1u64) << extracted_width) - BigUint::from(1u64));
-                        (extracted_val, extracted_mask, extracted_width)
-                    };
-
-                    let expr =
-                        arena.alloc(SLTNode::Constant(val, mask, width, signed && is_bare))?;
-                    let expr =
-                        coerce_node_width(arena, expr, context_width, context_signed && is_bare)?;
-                    return Ok(((expr, HashSet::default()), BoundaryMap::default()));
-                }
-            }
-
-            let is_static_access = crate::bitaccess::is_static_access(index, select);
-            if is_static_access {
-                let access = eval_var_select(module, *var_id, index, select)?;
-
-                let mut bounds = BoundaryMap::default();
-                let access_end = access.msb.checked_add(1).ok_or_else(|| {
-                    ParserError::illegal_context(
-                        "static variable read",
-                        "source boundary overflows usize",
-                        Some(&comptime.token),
-                    )
-                })?;
-                let var_bounds = bounds.entry(*var_id).or_default();
-                var_bounds.insert(access.lsb);
-                var_bounds.insert(access_end);
-
-                let (expr, sources) = if let Some(range_store) = store.current().get(var_id) {
-                    let parts = range_store.get_parts_ref(access).map_err(|error| {
-                        super::range_store_error(
-                            "static variable read",
-                            error,
-                            Some(&comptime.token),
-                        )
-                    })?;
-                    // If any requested part is unassigned, the result still
-                    // depends on that range's process input value.
-                    let has_unassigned = parts.iter().any(|(val, _)| val.is_none());
-                    let (expr, mut sources) =
-                        combine_parts_with_default(*var_id, access.lsb, parts, arena)?;
-                    if has_unassigned {
-                        sources.insert(VarAtomBase::new(*var_id, access.lsb, access.msb));
-                    }
-                    (expr, sources)
-                } else {
-                    // Read-only variables have no mutable symbolic definition.
-                    // Materialize their input range directly instead.
-                    let expr = arena.alloc(SLTNode::Input {
-                        variable: *var_id,
-                        signed: false,
-                        index: vec![],
-                        access,
-                    })?;
-                    let mut sources = HashSet::default();
-                    sources.insert(VarAtomBase::new(*var_id, access.lsb, access.msb));
-                    (expr, sources)
-                };
-                // Symbolic substitution may replace this variable with an
-                // expression whose producer has different signedness. Width
-                // coercion follows the source variable's analyzer context,
-                // not the provenance of the substituted SLT node.
-                let expr = coerce_node_width(arena, expr, context_width, context_signed)?;
-                Ok(((expr, sources), bounds))
-            } else {
-                let mut all_sources = HashSet::default();
-
-                let var = &module.variables[var_id];
-                let width = resolve_total_width(module, var)?;
-                if width == 0 {
-                    return Err(ParserError::illegal_context(
-                        "dynamic variable read",
-                        "source variable has zero width",
-                        Some(&comptime.token),
-                    ));
-                }
-                let DynamicSelectOffset {
-                    node: offset_node,
-                    indices: dynamic_indices,
-                    sources: offset_sources,
-                    boundaries: all_bounds,
-                    indices_valid,
-                    valid,
-                    clamp,
-                    partial,
-                    ..
-                } = super::eval_dynamic_select_offset(
-                    module,
-                    store,
-                    *var_id,
-                    index,
-                    select,
-                    arena,
-                    Some(&comptime.token),
-                )?;
-                all_sources.extend(offset_sources);
-
-                // 2. Check SymbolicStore to determine if "already written"
-                let access_full = BitAccess::new(0, width - 1);
-                let parts = store
-                    .current()
-                    .get(var_id)
-                    .map(|range_store| {
-                        range_store.get_parts_ref(access_full).map_err(|error| {
-                            super::range_store_error(
-                                "dynamic variable read",
-                                error,
-                                Some(&comptime.token),
-                            )
-                        })
-                    })
-                    .transpose()?;
-                let is_unmodified = parts
-                    .as_ref()
-                    .is_none_or(|parts| parts.iter().all(|(val, _)| val.is_none()));
-
-                let element_width =
-                    crate::bitaccess::get_access_width(module, *var_id, index, select)?;
-                if element_width == 0 || element_width > width {
-                    return Err(ParserError::illegal_context(
-                        "dynamic variable read",
-                        format!("selected width {element_width} must be in 1..={width}"),
-                        Some(&comptime.token),
-                    ));
-                }
-
-                let two_state = module.variables[var_id].r#type.is_2state();
-                // An invalid index reads X, or 0 from a two-state variable
-                // (IEEE 1800-2023 7.4.6); a partly out-of-range part select
-                // reads so only for its out-of-range bits (11.5.1).
-                let extracted_expr = if let Some(partial) = partial {
-                    let placement = partial.window(arena, element_width)?;
-                    let window = if is_unmodified {
-                        // Load only the clamped window. The row indices must
-                        // address the variable even when they are invalid.
-                        let mut window_indices =
-                            dynamic_indices[..dynamic_indices.len() - 1].to_vec();
-                        window_indices =
-                            super::safe_slt_indices(arena, window_indices, indices_valid, clamp)?;
-                        window_indices.push(SLTIndex {
-                            node: placement.start,
-                            stride: partial.element_bits,
-                            kind: SLTIndexKind::Packed,
-                        });
-                        let raw_input = arena.alloc(SLTNode::Input {
-                            variable: *var_id,
-                            signed: false,
-                            index: window_indices,
-                            access: BitAccess::new(0, width - 1),
-                        })?;
-                        arena.alloc(SLTNode::Slice {
-                            expr: raw_input,
-                            access: BitAccess::new(0, element_width - 1),
-                        })?
-                    } else {
-                        let (current_expr, current_sources) = combine_parts_with_default(
-                            *var_id,
-                            0,
-                            parts.expect("a modified variable has a symbolic range"),
-                            arena,
-                        )?;
-                        all_sources.extend(current_sources);
-                        let element_bits = arena.alloc(SLTNode::Constant(
-                            BigUint::from(partial.element_bits),
-                            BigUint::from(0u8),
-                            64,
-                            false,
-                        ))?;
-                        let start_bits = arena.alloc(SLTNode::Binary(
-                            placement.start,
-                            BinaryOp::Mul,
-                            element_bits,
-                        ))?;
-                        let offset = arena.alloc(SLTNode::Binary(
-                            partial.row_offset,
-                            BinaryOp::Add,
-                            start_bits,
-                        ))?;
-                        let shifted =
-                            arena.alloc(SLTNode::Binary(current_expr, BinaryOp::Shr, offset))?;
-                        arena.alloc(SLTNode::Slice {
-                            expr: shifted,
-                            access: BitAccess::new(0, element_width - 1),
-                        })?
-                    };
-                    let selected =
-                        partial.align(arena, window, &placement, element_width, two_state)?;
-                    super::slt_or_unknown(arena, indices_valid, selected, element_width, two_state)?
-                } else if is_unmodified {
-                    // --- Code for the approach of aligning at load time ---
-                    // Keep the SLT input footprint conservative for dependency analysis.
-                    // The SIR lowerer recognizes the following Slice(Input(dynamic)) shape
-                    // and emits a narrow dynamic load.
-                    let dynamic_indices =
-                        super::safe_slt_indices(arena, dynamic_indices, valid, clamp)?;
-                    let raw_input = arena.alloc(SLTNode::Input {
-                        variable: *var_id,
-                        signed: module.variables[var_id].r#type.signed,
-                        index: dynamic_indices,
-                        access: BitAccess::new(0, width - 1),
-                    })?;
-                    let selected = arena.alloc(SLTNode::Slice {
-                        expr: raw_input,
-                        access: BitAccess::new(0, element_width - 1),
-                    })?;
-                    super::slt_or_unknown(arena, valid, selected, element_width, two_state)?
-                } else {
-                    // --- If already written ---
-                    // Combine latest values in register and align with Shr
-                    let (current_expr, current_sources) = combine_parts_with_default(
-                        *var_id,
-                        0,
-                        parts.expect("a modified variable has a symbolic range"),
-                        arena,
-                    )?;
-                    all_sources.extend(current_sources);
-
-                    let shifted =
-                        arena.alloc(SLTNode::Binary(current_expr, BinaryOp::Shr, offset_node))?;
-                    let selected = arena.alloc(SLTNode::Slice {
-                        expr: shifted,
-                        access: BitAccess::new(0, element_width - 1),
-                    })?;
-                    super::slt_or_unknown(arena, valid, selected, element_width, two_state)?
-                };
-
-                let extracted_expr =
-                    coerce_node_width(arena, extracted_expr, context_width, context_signed)?;
-
-                let prefix_access = eval_var_select(module, *var_id, index, select)?;
-                all_sources.insert(VarAtomBase::new(
-                    *var_id,
-                    prefix_access.lsb,
-                    prefix_access.msb,
-                ));
-                Ok(((extracted_expr, all_sources), all_bounds))
-            }
-        }
+        Factor::Variable(var_id, index, select, comptime) => eval_variable_factor(
+            module,
+            store,
+            var_id,
+            index,
+            select,
+            comptime,
+            arena,
+            context_width,
+            context_signed,
+        ),
         Factor::HierVariable(reference) => Err(ParserError::illegal_context(
             "hierarchical variable reference",
             format!(
@@ -1159,6 +907,264 @@ fn eval_factor(
             format!("{:?}", factor),
             Some(&factor.token_range()),
         )),
+    }
+}
+
+fn eval_variable_factor(
+    module: &Module,
+    store: &mut ExpressionStore<'_>,
+    var_id: &VarId,
+    index: &VarIndex,
+    select: &VarSelect,
+    comptime: &Comptime,
+    arena: &mut SLTNodeArena<VarId>,
+    context_width: Option<usize>,
+    context_signed: bool,
+) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    // Compile-time constant (e.g. genvar inside generate block): emit a
+    // constant node directly instead of loading from memory.
+    // Also handles constant[const_index] (e.g. IDX[p] in generate loops).
+    if comptime.is_const {
+        let is_bare = index.0.is_empty() && select.0.is_empty() && select.1.is_none();
+        let is_static_sel = !is_bare && crate::bitaccess::is_static_access(index, select);
+
+        let constant = if is_bare {
+            celox_value_from_comptime_in_context(comptime, context_width)
+        } else {
+            celox_value_from_comptime(comptime)
+        };
+        if (is_bare || is_static_sel)
+            && let Some((celox_value, mask_xz, full_width, signed)) = constant
+        {
+            let (val, mask, width) = if is_bare {
+                (celox_value, mask_xz, full_width)
+            } else {
+                // Evaluate the static bit-select on the constant value
+                let access = eval_var_select(module, *var_id, index, select)?;
+                let extracted_width = access.msb - access.lsb + 1;
+                let extracted_val = (&celox_value >> access.lsb)
+                    & ((BigUint::from(1u64) << extracted_width) - BigUint::from(1u64));
+                let extracted_mask = (&mask_xz >> access.lsb)
+                    & ((BigUint::from(1u64) << extracted_width) - BigUint::from(1u64));
+                (extracted_val, extracted_mask, extracted_width)
+            };
+
+            let expr = arena.alloc(SLTNode::Constant(val, mask, width, signed && is_bare))?;
+            let expr = coerce_node_width(arena, expr, context_width, context_signed && is_bare)?;
+            return Ok(((expr, HashSet::default()), BoundaryMap::default()));
+        }
+    }
+
+    let is_static_access = crate::bitaccess::is_static_access(index, select);
+    if is_static_access {
+        let access = eval_var_select(module, *var_id, index, select)?;
+
+        let mut bounds = BoundaryMap::default();
+        let access_end = access.msb.checked_add(1).ok_or_else(|| {
+            ParserError::illegal_context(
+                "static variable read",
+                "source boundary overflows usize",
+                Some(&comptime.token),
+            )
+        })?;
+        let var_bounds = bounds.entry(*var_id).or_default();
+        var_bounds.insert(access.lsb);
+        var_bounds.insert(access_end);
+
+        let (expr, sources) = if let Some(range_store) = store.current().get(var_id) {
+            let parts = range_store.get_parts_ref(access).map_err(|error| {
+                super::range_store_error("static variable read", error, Some(&comptime.token))
+            })?;
+            // If any requested part is unassigned, the result still
+            // depends on that range's process input value.
+            let has_unassigned = parts.iter().any(|(val, _)| val.is_none());
+            let (expr, mut sources) =
+                combine_parts_with_default(*var_id, access.lsb, parts, arena)?;
+            if has_unassigned {
+                sources.insert(VarAtomBase::new(*var_id, access.lsb, access.msb));
+            }
+            (expr, sources)
+        } else {
+            // Read-only variables have no mutable symbolic definition.
+            // Materialize their input range directly instead.
+            let expr = arena.alloc(SLTNode::Input {
+                variable: *var_id,
+                signed: false,
+                index: vec![],
+                access,
+            })?;
+            let mut sources = HashSet::default();
+            sources.insert(VarAtomBase::new(*var_id, access.lsb, access.msb));
+            (expr, sources)
+        };
+        // Symbolic substitution may replace this variable with an
+        // expression whose producer has different signedness. Width
+        // coercion follows the source variable's analyzer context,
+        // not the provenance of the substituted SLT node.
+        let expr = coerce_node_width(arena, expr, context_width, context_signed)?;
+        Ok(((expr, sources), bounds))
+    } else {
+        let mut all_sources = HashSet::default();
+
+        let var = &module.variables[var_id];
+        let width = resolve_total_width(module, var)?;
+        if width == 0 {
+            return Err(ParserError::illegal_context(
+                "dynamic variable read",
+                "source variable has zero width",
+                Some(&comptime.token),
+            ));
+        }
+        let DynamicSelectOffset {
+            node: offset_node,
+            indices: dynamic_indices,
+            sources: offset_sources,
+            boundaries: all_bounds,
+            indices_valid,
+            valid,
+            clamp,
+            partial,
+            ..
+        } = super::eval_dynamic_select_offset(
+            module,
+            store,
+            *var_id,
+            index,
+            select,
+            arena,
+            Some(&comptime.token),
+        )?;
+        all_sources.extend(offset_sources);
+
+        // 2. Check SymbolicStore to determine if "already written"
+        let access_full = BitAccess::new(0, width - 1);
+        let parts = store
+            .current()
+            .get(var_id)
+            .map(|range_store| {
+                range_store.get_parts_ref(access_full).map_err(|error| {
+                    super::range_store_error("dynamic variable read", error, Some(&comptime.token))
+                })
+            })
+            .transpose()?;
+        let is_unmodified = parts
+            .as_ref()
+            .is_none_or(|parts| parts.iter().all(|(val, _)| val.is_none()));
+
+        let element_width = crate::bitaccess::get_access_width(module, *var_id, index, select)?;
+        if element_width == 0 || element_width > width {
+            return Err(ParserError::illegal_context(
+                "dynamic variable read",
+                format!("selected width {element_width} must be in 1..={width}"),
+                Some(&comptime.token),
+            ));
+        }
+
+        let two_state = module.variables[var_id].r#type.is_2state();
+        // An invalid index reads X, or 0 from a two-state variable
+        // (IEEE 1800-2023 7.4.6); a partly out-of-range part select
+        // reads so only for its out-of-range bits (11.5.1).
+        let extracted_expr = if let Some(partial) = partial {
+            let placement = partial.window(arena, element_width)?;
+            let window = if is_unmodified {
+                // Load only the clamped window. The row indices must
+                // address the variable even when they are invalid.
+                let mut window_indices = dynamic_indices[..dynamic_indices.len() - 1].to_vec();
+                window_indices =
+                    super::safe_slt_indices(arena, window_indices, indices_valid, clamp)?;
+                window_indices.push(SLTIndex {
+                    node: placement.start,
+                    stride: partial.element_bits,
+                    kind: SLTIndexKind::Packed,
+                });
+                let raw_input = arena.alloc(SLTNode::Input {
+                    variable: *var_id,
+                    signed: false,
+                    index: window_indices,
+                    access: BitAccess::new(0, width - 1),
+                })?;
+                arena.alloc(SLTNode::Slice {
+                    expr: raw_input,
+                    access: BitAccess::new(0, element_width - 1),
+                })?
+            } else {
+                let (current_expr, current_sources) = combine_parts_with_default(
+                    *var_id,
+                    0,
+                    parts.expect("a modified variable has a symbolic range"),
+                    arena,
+                )?;
+                all_sources.extend(current_sources);
+                let element_bits = arena.alloc(SLTNode::Constant(
+                    BigUint::from(partial.element_bits),
+                    BigUint::from(0u8),
+                    64,
+                    false,
+                ))?;
+                let start_bits = arena.alloc(SLTNode::Binary(
+                    placement.start,
+                    BinaryOp::Mul,
+                    element_bits,
+                ))?;
+                let offset = arena.alloc(SLTNode::Binary(
+                    partial.row_offset,
+                    BinaryOp::Add,
+                    start_bits,
+                ))?;
+                let shifted = arena.alloc(SLTNode::Binary(current_expr, BinaryOp::Shr, offset))?;
+                arena.alloc(SLTNode::Slice {
+                    expr: shifted,
+                    access: BitAccess::new(0, element_width - 1),
+                })?
+            };
+            let selected = partial.align(arena, window, &placement, element_width, two_state)?;
+            super::slt_or_unknown(arena, indices_valid, selected, element_width, two_state)?
+        } else if is_unmodified {
+            // --- Code for the approach of aligning at load time ---
+            // Keep the SLT input footprint conservative for dependency analysis.
+            // The SIR lowerer recognizes the following Slice(Input(dynamic)) shape
+            // and emits a narrow dynamic load.
+            let dynamic_indices = super::safe_slt_indices(arena, dynamic_indices, valid, clamp)?;
+            let raw_input = arena.alloc(SLTNode::Input {
+                variable: *var_id,
+                signed: module.variables[var_id].r#type.signed,
+                index: dynamic_indices,
+                access: BitAccess::new(0, width - 1),
+            })?;
+            let selected = arena.alloc(SLTNode::Slice {
+                expr: raw_input,
+                access: BitAccess::new(0, element_width - 1),
+            })?;
+            super::slt_or_unknown(arena, valid, selected, element_width, two_state)?
+        } else {
+            // --- If already written ---
+            // Combine latest values in register and align with Shr
+            let (current_expr, current_sources) = combine_parts_with_default(
+                *var_id,
+                0,
+                parts.expect("a modified variable has a symbolic range"),
+                arena,
+            )?;
+            all_sources.extend(current_sources);
+
+            let shifted = arena.alloc(SLTNode::Binary(current_expr, BinaryOp::Shr, offset_node))?;
+            let selected = arena.alloc(SLTNode::Slice {
+                expr: shifted,
+                access: BitAccess::new(0, element_width - 1),
+            })?;
+            super::slt_or_unknown(arena, valid, selected, element_width, two_state)?
+        };
+
+        let extracted_expr =
+            coerce_node_width(arena, extracted_expr, context_width, context_signed)?;
+
+        let prefix_access = eval_var_select(module, *var_id, index, select)?;
+        all_sources.insert(VarAtomBase::new(
+            *var_id,
+            prefix_access.lsb,
+            prefix_access.msb,
+        ));
+        Ok(((extracted_expr, all_sources), all_bounds))
     }
 }
 pub fn get_width<A: Hash + Eq + Clone>(expr: NodeId, arena: &SLTNodeArena<A>) -> usize {
