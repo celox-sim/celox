@@ -67,6 +67,20 @@ pub(super) struct BodyState<'a> {
     pub constant_evaluation: bool,
 }
 
+/// The methods of the classes of a scope that a pass over its subroutines
+/// lowers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ClassMethods {
+    /// Every method, with the dispatchers, constructors and helpers of each
+    /// class, to execute them.
+    All,
+    /// The static functions: a constant function call has no object to call
+    /// another method on (IEEE 1800-2023 8.10, 13.4.3).
+    StaticFunctions,
+    /// None: the pass describes the subroutines of the scope itself.
+    None,
+}
+
 /// The statements and condition of a `for` loop header. A condition with
 /// increment or decrement operators is the `prologue` of each iteration
 /// instead (see [`BodyBuilder::loop_condition`]).
@@ -4124,6 +4138,7 @@ pub(super) fn subroutines_from_scope_with(
         state,
         rejected,
         &HashSet::default(),
+        ClassMethods::All,
     )
 }
 
@@ -4137,9 +4152,12 @@ pub(super) fn subroutines_with_symbolic_parameters(
     state: &mut BodyState<'_>,
     mut rejected: Option<&mut HashMap<String, AnalyzerError>>,
     symbolic_parameters: &HashSet<String>,
+    class_methods: ClassMethods,
 ) -> Result<Vec<Subroutine>, AnalyzerError> {
     let module_type_aliases = &packed_dimensions.type_aliases;
-    let mut subroutines = Vec::new();
+    let mut subroutines: Vec<Subroutine> = Vec::new();
+    // The names of `subroutines`.
+    let mut names = HashSet::default();
     let active = generate::subroutine_items(tree, session, const_env, module_type_aliases)?;
     let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
     for item in &active {
@@ -4197,16 +4215,16 @@ pub(super) fn subroutines_with_symbolic_parameters(
                 }
                 (Err(error), None) => return Err(error),
             };
-            if subroutines
-                .iter()
-                .any(|other: &Subroutine| other.name == subroutine.name)
-            {
+            if !names.insert(subroutine.name.clone()) {
                 return Err(unsupported(format!(
                     "duplicate function declaration `{}`",
                     subroutine.name
                 )));
             }
             subroutines.push(subroutine);
+        }
+        if class_methods == ClassMethods::None {
+            continue;
         }
         for class in classes::item_classes(item.id, tree, session) {
             let (item_dimensions, literals) = views.get(item);
@@ -4223,10 +4241,14 @@ pub(super) fn subroutines_with_symbolic_parameters(
                     literals,
                     state,
                     item,
+                    class_methods,
                 ),
                 rejected.as_deref_mut(),
             ) {
-                (Ok(methods), _) => subroutines.extend(methods),
+                (Ok(methods), _) => {
+                    names.extend(methods.iter().map(|method| method.name.clone()));
+                    subroutines.extend(methods);
+                }
                 (Err(error), Some(rejected)) => {
                     rejected.insert(class, error);
                 }
@@ -4239,15 +4261,28 @@ pub(super) fn subroutines_with_symbolic_parameters(
     // method's dispatcher, which the declaring scope lowered for the classes
     // it saw: the scope lowers the dispatcher again, over every class it
     // sees, when the dispatcher misses one (IEEE 1800-2023 8.20).
+    // Dispatchers and casts take an object, as the methods a pass over
+    // static functions leaves out do.
+    if class_methods != ClassMethods::All {
+        return Ok(subroutines);
+    }
     let imported = scope::imported(tree);
+    // The first subroutine of each name the scope imports.
+    let mut imported_subroutines: HashMap<&str, &Subroutine> = HashMap::default();
+    if !imported.classes.is_empty() {
+        for subroutine in &imported.subroutines {
+            imported_subroutines
+                .entry(subroutine.name.as_str())
+                .or_insert(subroutine);
+        }
+    }
     for class in &imported.classes {
         for method in class.dispatched_methods() {
             let name = classes::Class::dispatcher_name(&class.name, &method.name);
-            if subroutines.iter().any(|known| known.name == name) {
+            if names.contains(&name) {
                 continue;
             }
-            let Some(dispatcher) = imported.subroutines.iter().find(|known| known.name == name)
-            else {
+            let Some(dispatcher) = imported_subroutines.get(name.as_str()).copied() else {
                 continue;
             };
             let targets = classes::dispatch_targets(
@@ -4271,14 +4306,15 @@ pub(super) fn subroutines_with_symbolic_parameters(
                 &dispatcher.params,
                 dispatcher.return_var.as_deref(),
             )];
+            names.insert(name);
             subroutines.push(dispatcher);
         }
         // So does a `$cast` to a variable of the class (8.16).
         let name = classes::Class::cast_name(&class.name);
-        if subroutines.iter().any(|known| known.name == name) {
+        if names.contains(&name) {
             continue;
         }
-        let Some(cast) = imported.subroutines.iter().find(|known| known.name == name) else {
+        let Some(cast) = imported_subroutines.get(name.as_str()).copied() else {
             continue;
         };
         let targets =
@@ -5711,8 +5747,13 @@ impl BodyBuilder<'_, '_, '_> {
     }
 }
 
-/// The methods of class `name` as subroutines, with an implicit constructor
-/// when the class declares none (IEEE 1800-2023 8.7).
+fn is_function(native: &celox_sv_syntax::Declarations, id: celox_sv_syntax::SubroutineId) -> bool {
+    native.subroutine(id).kind == celox_sv_syntax::SubroutineKind::Function
+}
+
+/// The methods `methods` selects of class `name` as subroutines; with all
+/// of them, an implicit constructor when the class declares none (IEEE
+/// 1800-2023 8.7).
 #[allow(clippy::too_many_arguments)]
 fn lower_class(
     name: &str,
@@ -5724,7 +5765,18 @@ fn lower_class(
     literals: &HashMap<String, Expr>,
     state: &mut BodyState<'_>,
     item: &generate::Item,
+    methods: ClassMethods,
 ) -> Converted<Vec<Subroutine>> {
+    let static_functions = methods == ClassMethods::StaticFunctions;
+    if static_functions {
+        let native = tree.declarations();
+        if !classes::declared_methods(tree, session, name)?
+            .into_iter()
+            .any(|(id, is_static)| is_static && is_function(native, id))
+        {
+            return Ok(Vec::new());
+        }
+    }
     // A specialization's methods see its parameters (IEEE 1800-2023 8.25).
     let (declaration_env, type_aliases) =
         classes::specializations::scope(session, name, declaration_env, type_aliases);
@@ -5745,7 +5797,10 @@ fn lower_class(
     };
     let mut subroutines = Vec::new();
     let mut constructor = false;
-    for (id, _) in classes::declared_methods(tree, session, name)? {
+    for (id, is_static) in classes::declared_methods(tree, session, name)? {
+        if static_functions && !(is_static && is_function(tree.declarations(), id)) {
+            continue;
+        }
         constructor |=
             tree.declarations().subroutine(id).kind == celox_sv_syntax::SubroutineKind::Constructor;
         subroutines.push(lower_subroutine(
@@ -5761,6 +5816,11 @@ fn lower_class(
             Some(&class),
             None,
         )?);
+    }
+    // The dispatchers, the constructor, `$cast` and the randomization
+    // methods take or make an object.
+    if static_functions {
+        return Ok(subroutines);
     }
     for method in class.dispatched_methods() {
         let targets = classes::dispatch_targets(
