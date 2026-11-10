@@ -1221,6 +1221,35 @@ impl InterpMachine<RegionedAbsoluteAddr> for Machine<'_> {
             };
             return Ok(self.heap.call(code, a, b, c));
         }
+        // The settle instrumentation's wide FF commits address the state
+        // image directly; compiled tiers lower them to plain loads and
+        // stores, so the interpreter performs the same accesses here
+        // instead of calling an extern function.
+        if let Some(op) = celox_sir::native_memory::NativeMemoryOp::decode(func) {
+            use celox_sir::native_memory::NativeMemoryOp as Op;
+            let in_bounds = |offset: u64| {
+                offset
+                    .checked_add(8)
+                    .is_some_and(|end| end <= (self.memory.len() as u64) * 8)
+            };
+            return match op {
+                Op::ReadState if args.len() == 1 && in_bounds(args[0]) => {
+                    // Safety: the bounds check above keeps the access
+                    // inside the merged allocation.
+                    Ok(unsafe { self.read_u64(args[0] as usize) })
+                }
+                Op::WriteState if args.len() == 2 && in_bounds(args[0]) => {
+                    // Safety: the bounds check above keeps the access
+                    // inside the merged allocation.
+                    unsafe { self.write_u64(args[0] as usize, args[1]) };
+                    Ok(0)
+                }
+                _ => Err(InterpError::UnsupportedOperation(format!(
+                    "native memory operation {op:?} with {} arguments",
+                    args.len()
+                ))),
+            };
+        }
         // SAFETY: the frontend gives each call the argument count of the
         // DPI-C import it links to.
         Ok(unsafe { self.extern_functions.call(func, args) })
