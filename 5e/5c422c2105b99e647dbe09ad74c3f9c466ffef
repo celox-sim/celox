@@ -1,0 +1,1 @@
+Address Codex review on PR 3453: list the nets that left the program as combinationally derived, so signal lookup and state files keep treating them as eliminated values rather than state
