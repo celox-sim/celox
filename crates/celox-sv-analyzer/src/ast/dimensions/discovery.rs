@@ -1308,8 +1308,9 @@ fn lexical_scopes(
 /// subroutine or of the nested scopes around `target`, or one of the scope
 /// or its header that is no typedef. Where `target` is, such a declaration
 /// hides a type of that name which the tables of a query bind (IEEE
-/// 1800-2023 23.9). An item whose names the syntax does not tell declares
-/// `wanted` when it spells it.
+/// 1800-2023 23.9). A type parameter hides none: its type is the one the
+/// tables bind, which its discovery leaves alone. An item whose names the
+/// syntax does not tell declares `wanted` when it spells it.
 pub(in crate::ast) fn hides_type_name(
     tree: &AnalysisContext<'_>,
     target: TokenRange,
@@ -1329,12 +1330,12 @@ pub(in crate::ast) fn hides_type_name(
             DataTypeKind::Enum { items, .. } if items.iter().any(|item| named(&item.name))
         )
     };
+    let parameter = |parameter: &celox_sv_syntax::Parameter| match &parameter.kind {
+        ParameterKind::Type { .. } => false,
+        ParameterKind::Value { data_type, .. } => named(&parameter.name) || member(*data_type),
+    };
     if let Ok(unit) = tree.root_unit()
-        && (unit
-            .parameters
-            .iter()
-            .flatten()
-            .any(|item| named(&item.name))
+        && (unit.parameters.iter().flatten().any(parameter)
             || unit.ports.iter().any(|port| match &port.kind {
                 celox_sv_syntax::PortKind::Named(port)
                 | celox_sv_syntax::PortKind::Explicit { name: port, .. } => named(port),
@@ -1367,9 +1368,13 @@ pub(in crate::ast) fn hides_type_name(
                 {
                     spelled(item.tokens)
                 }
+                BodyItemKind::Parameter(declaration) => native
+                    .parameter_declaration(*declaration)
+                    .parameters
+                    .iter()
+                    .any(parameter),
                 BodyItemKind::Data(_)
                 | BodyItemKind::Net(_)
-                | BodyItemKind::Parameter(_)
                 | BodyItemKind::TypeAlias(_)
                 | BodyItemKind::Subroutine(_)
                 | BodyItemKind::Dpi(_)
@@ -1432,13 +1437,7 @@ pub(in crate::ast) fn hides_type_name(
                         .parameter_declaration(*id)
                         .parameters
                         .iter()
-                        .any(|parameter| {
-                            named(&parameter.name)
-                                || matches!(
-                                    &parameter.kind,
-                                    ParameterKind::Value { data_type, .. } if member(*data_type)
-                                )
-                        }),
+                        .any(parameter),
                     StatementKind::Declaration(LocalDeclaration::TypeAlias(id)) => {
                         let alias = native.type_alias(*id);
                         named(&alias.name)

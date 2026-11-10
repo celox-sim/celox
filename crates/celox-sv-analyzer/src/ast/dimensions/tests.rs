@@ -845,6 +845,49 @@ fn type_operands_need_no_discovery() {
 }
 
 #[test]
+fn type_parameters_are_the_types_the_tables_bind() {
+    // The tables of a query bind a type parameter of a module or class to
+    // the type it is given, which its declaration does not hide (IEEE
+    // 1800-2023 6.20.3).
+    for declarations in [
+        "module Top #(parameter type T = int); localparam N = $bits(T); endmodule",
+        "module Top;
+            class C #(type T = int);
+                function int f(); return $bits(T); endfunction
+            endclass
+        endmodule",
+    ] {
+        let session = &mut Session::default();
+        let tree = crate::source_tree::parse_scope_fixture(
+            &format!("package P; typedef logic [4:0] T; endpackage {declarations}"),
+            Path::new("type-parameters.sv"),
+        )
+        .unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
+        // The type the parameter is given.
+        let aliases = type_aliases_from_scope(&tree, session).unwrap();
+        let module_scope = tree
+            .root_scopes()
+            .unwrap()
+            .into_iter()
+            .find(|handle| {
+                handle.unit(tree.declarations()).unwrap().kind == celox_sv_syntax::UnitKind::Module
+            })
+            .unwrap();
+        let tree = tree.scoped(module_scope).unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
+        let call = native_calls(&tree)[0];
+        SCOPE_SETTLES.with(|count| count.set(0));
+        assert_eq!(
+            query_number(call, &tree, session, &ConstEnv::default(), &aliases, None),
+            Some(5),
+            "{declarations}"
+        );
+        assert_eq!(SCOPE_SETTLES.with(|count| count.get()), 0, "{declarations}");
+    }
+}
+
+#[test]
 fn hidden_type_names_are_discovered() {
     // A declaration nearer to the operand than the type of its name hides
     // the type, also for a query whose tables hold only the type: a
