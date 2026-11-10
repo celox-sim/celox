@@ -3297,5 +3297,5 @@ testbenches/uvm_sequence.sv	2state	fail
 testbenches/uvm_sequence.sv	4state	fail
 testbenches/uvm_test_run_test.sv	2state	fail
 testbenches/uvm_test_run_test.sv	4state	fail
-uvm/uvm_files.sv	2state	fail
-uvm/uvm_files.sv	4state	fail
+uvm/uvm_files.sv	2state	pass
+uvm/uvm_files.sv	4state	pass

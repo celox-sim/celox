@@ -1303,6 +1303,166 @@ fn lexical_scopes(
     }
     Ok(scopes)
 }
+/// Whether a declaration around `target` gives `wanted` to something other
+/// than a typedef of the scope itself: a declaration of the blocks, of the
+/// subroutine or of the nested scopes around `target`, or one of the scope
+/// or its header that is no typedef. Where `target` is, such a declaration
+/// hides a type of that name which the tables of a query bind (IEEE
+/// 1800-2023 23.9). A type parameter hides none: its type is the one the
+/// tables bind, which its discovery leaves alone. An item whose names the
+/// syntax does not tell declares `wanted` when it spells it.
+pub(in crate::ast) fn hides_type_name(
+    tree: &AnalysisContext<'_>,
+    target: TokenRange,
+    wanted: &str,
+) -> Converted<bool> {
+    let native = tree.declarations();
+    let named = |declared: &celox_sv_syntax::Name| name(declared) == wanted;
+    let spelled = |tokens: TokenRange| {
+        !contains(tokens, target)
+            && native.tokens[tokens.range()]
+                .iter()
+                .any(|token| instances::normalize_identifier(&token.text) == wanted)
+    };
+    let member = |id: celox_sv_syntax::TypeId| {
+        matches!(
+            &native.data_type(id).kind,
+            DataTypeKind::Enum { items, .. } if items.iter().any(|item| named(&item.name))
+        )
+    };
+    let parameter = |parameter: &celox_sv_syntax::Parameter| match &parameter.kind {
+        ParameterKind::Type { .. } => false,
+        ParameterKind::Value { data_type, .. } => named(&parameter.name) || member(*data_type),
+    };
+    if let Ok(unit) = tree.root_unit()
+        && (unit.parameters.iter().flatten().any(parameter)
+            || unit.ports.iter().any(|port| match &port.kind {
+                celox_sv_syntax::PortKind::Named(port)
+                | celox_sv_syntax::PortKind::Explicit { name: port, .. } => named(port),
+                celox_sv_syntax::PortKind::NonAnsi(Some(port)) => {
+                    spelled(native.expression(*port).tokens)
+                }
+                celox_sv_syntax::PortKind::NonAnsi(None) | celox_sv_syntax::PortKind::Wildcard => {
+                    false
+                }
+            }))
+    {
+        return Ok(true);
+    }
+    let owners = owners(tree, target)?;
+    for (depth, frame) in owners.frames.iter().enumerate() {
+        for id in direct(frame, tree)? {
+            let item = native.body_item(id);
+            let declares = match &item.kind {
+                // The typedef whose type the tables bind.
+                BodyItemKind::TypeAlias(alias)
+                    if depth == 0 && named(&native.type_alias(*alias).name) =>
+                {
+                    false
+                }
+                BodyItemKind::Data(data)
+                    if matches!(
+                        native.data_declaration(*data),
+                        celox_sv_syntax::DataDeclaration::Unconverted(_)
+                    ) =>
+                {
+                    spelled(item.tokens)
+                }
+                BodyItemKind::Parameter(declaration) => native
+                    .parameter_declaration(*declaration)
+                    .parameters
+                    .iter()
+                    .any(parameter),
+                BodyItemKind::Data(_)
+                | BodyItemKind::Net(_)
+                | BodyItemKind::TypeAlias(_)
+                | BodyItemKind::Subroutine(_)
+                | BodyItemKind::Dpi(_)
+                | BodyItemKind::Instance(_) => imports::item_names(id, tree).contains(wanted),
+                BodyItemKind::Unconverted { category, .. } if category == "class" => {
+                    imports::item_names(id, tree).contains(wanted)
+                }
+                BodyItemKind::Loop { variable, .. } => named(variable),
+                // An import may declare any name it spells (26.3).
+                BodyItemKind::PackageBinding(_)
+                | BodyItemKind::Modport(_)
+                | BodyItemKind::Unconverted { .. } => spelled(item.tokens),
+                BodyItemKind::Assign(_)
+                | BodyItemKind::LogicGate(_)
+                | BodyItemKind::Procedure(_)
+                | BodyItemKind::Time(_)
+                | BodyItemKind::Unit(_)
+                | BodyItemKind::Assertion(_)
+                | BodyItemKind::Region(_)
+                | BodyItemKind::Block { .. }
+                | BodyItemKind::Conditional { .. }
+                | BodyItemKind::Case { .. } => false,
+            };
+            if declares {
+                return Ok(true);
+            }
+        }
+    }
+    if let Some(id) = owners.subroutine {
+        let subroutine = native.subroutine(id);
+        let ports = subroutine.ports.as_deref().into_iter().flatten().chain(
+            subroutine
+                .port_declarations
+                .iter()
+                .flat_map(|group| &group.ports),
+        );
+        for port in ports {
+            // A prototype's lone identifier may be the name of its formal.
+            if port
+                .name
+                .as_ref()
+                .map_or_else(|| spelled(port.tokens), named)
+            {
+                return Ok(true);
+            }
+        }
+    }
+    for lexical in lexical_scopes(&owners.statements, target, tree)? {
+        let declares = match lexical {
+            Lexical::Statements(items) => items.into_iter().any(|id| {
+                let statement = native.statement(id);
+                match &statement.kind {
+                    StatementKind::Declaration(
+                        LocalDeclaration::Variables(data) | LocalDeclaration::Constructed(data),
+                    ) => {
+                        data.variables.iter().any(|variable| named(&variable.name))
+                            || member(data.data_type)
+                    }
+                    StatementKind::Declaration(LocalDeclaration::Parameters(id)) => native
+                        .parameter_declaration(*id)
+                        .parameters
+                        .iter()
+                        .any(parameter),
+                    StatementKind::Declaration(LocalDeclaration::TypeAlias(id)) => {
+                        let alias = native.type_alias(*id);
+                        named(&alias.name)
+                            || matches!(alias.target, TypeAliasTarget::DataType(id) if member(id))
+                    }
+                    StatementKind::Declaration(
+                        LocalDeclaration::PackageBinding(_) | LocalDeclaration::Unconverted(_),
+                    ) => spelled(statement.tokens),
+                    _ => false,
+                }
+            }),
+            Lexical::For(declarations) => declarations.iter().any(|declaration| {
+                declaration
+                    .variables
+                    .iter()
+                    .any(|variable| named(&variable.name))
+            }),
+            Lexical::Foreach(names) => names.iter().any(named),
+        };
+        if declares {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 fn statement_scope(
     ids: &[StatementId],
     target: TokenRange,

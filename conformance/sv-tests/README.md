@@ -440,9 +440,11 @@ expectations.
 `--case-timeout SECONDS` replaces each case's own `:timeout:` with one
 limit, through upstream `BaseRunner`'s `OVERRIDE_TEST_TIMEOUTS`; a case that
 reaches it fails with the runner's timeout diagnostic (`runner_timeout`). PR CI
-uses 78 seconds, three times the longest passing case of the main corpus with
-the CI driver (25.8 seconds), so that a change which lets a UVM testbench
-elaborate further cannot run each one to its own 300 or 900 seconds. The daily
+uses 78 seconds, three times what the longest passing case of the main corpus
+took with the CI driver when the limit was set (25.8 seconds), so that a
+change which lets a UVM testbench elaborate further cannot run each one to its
+own 300 or 900 seconds. `uvm/uvm_files.sv` has since become the longest
+passing case, at about 53 seconds. The daily
 workflow keeps the upstream limits.
 
 `--shard INDEX/COUNT` runs and compares only one of COUNT disjoint shards
@@ -832,3 +834,10 @@ which remains unsupported. A focused official run over 281 instance-heavy
 cases (chapters 6, 10, 23, generic and BlackParrot) reports no changed
 verdicts. The shared regression covers expansion, an explicit override and
 an explicitly empty connection.
+
+Type operands of size queries (20.6.2) update two rows: both modes of
+`uvm/uvm_files.sv` now pass. The case elaborates `uvm_pkg` alone, which
+finishes within the PR case timeout now that `$bits` of a built-in type or
+of a type name the scope already binds no longer discovers every declaration
+of the package (about 53 seconds with the CI driver, 78 before). The other
+UVM cases still reach the timeout or fail after analysis as before.
