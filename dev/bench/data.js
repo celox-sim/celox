@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794291081537,
+  "lastUpdate": 1794296223277,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -444877,6 +444877,37 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-native-parallel-aarch64/heliodor_suite_smp_linux_boot_2hart_execution",
             "unit": "ms",
             "value": 1654964.612351
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "8fd8c34f801bcaee044475cc4fdb82ff7060cbb8",
+          "message": "perf(rtlmeter): measure steady-state simulation throughput with coremark (#3412)",
+          "timestamp": "2026-11-09T02:06:39Z",
+          "url": "https://github.com/celox-sim/celox/commit/8fd8c34f801bcaee044475cc4fdb82ff7060cbb8"
+        },
+        "date": 1794296223277,
+        "cpu": "Neoverse-N2",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-veryl-cc-aarch64/heliodor_suite_smp_linux_boot_4hart_compilation",
+            "unit": "ms",
+            "value": 418362.753927
+          },
+          {
+            "name": "heliodor-veryl-cc-aarch64/heliodor_suite_smp_linux_boot_4hart_execution",
+            "unit": "ms",
+            "value": 3887456.298456
           }
         ]
       }
