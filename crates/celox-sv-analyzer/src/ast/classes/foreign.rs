@@ -418,10 +418,12 @@ fn specialize(
             }
         }
     }
-    let self_qualified = imports::ScopeImports::from_scope(&context)?
-        .qualified
-        .iter()
-        .any(|(package, _)| package == name);
+    // The classes whose specializations may extend a class of the scopes
+    // that ask for them, when nothing else hides a name the package
+    // qualifies with its own.
+    let open = packages::self_qualified_names_are_plain(name, &context, |package| {
+        owner.imports.package_scopes.contains(package)
+    })?;
     let mut package = packages::analyze_package_with_symbols(
         name,
         &context,
@@ -430,7 +432,7 @@ fn specialize(
         HashMap::default(),
         None,
     )?;
-    if self_qualified {
+    if !open.is_some_and(|open| inherits_within(name, &package.symbols.classes, &open)) {
         let context = AnalysisContext {
             package: None,
             ..context.clone()
@@ -469,6 +471,46 @@ fn specialize(
         declarations,
         state_module: package.state_module.filter(|_| caller.is_some()),
     })
+}
+
+/// Whether each of `classes` that specializes one of the classes `open` of
+/// package `name` inherits from classes of the package alone, whose members
+/// its syntax tells.
+fn inherits_within(name: &str, classes: &[Class], open: &HashSet<String>) -> bool {
+    if open.is_empty() {
+        return true;
+    }
+    let prefix = format!("{name}::");
+    let by_name = classes
+        .iter()
+        .map(|class| (class.name.as_str(), class))
+        .collect::<HashMap<_, _>>();
+    classes
+        .iter()
+        .filter(|class| {
+            class.name.strip_prefix(&prefix).is_some_and(|generic| {
+                open.contains(
+                    generic
+                        .split_once("#(")
+                        .map_or(generic, |(generic, _)| generic),
+                )
+            })
+        })
+        .all(|class| {
+            let mut base = class.base.as_deref();
+            let mut steps = 0;
+            while let Some(name) = base {
+                steps += 1;
+                let Some(class) = by_name.get(name).filter(|_| name.starts_with(&prefix)) else {
+                    return false;
+                };
+                if steps > classes.len() {
+                    return false;
+                }
+                base = class.base.as_deref();
+            }
+            true
+        })
 }
 
 /// Records what scope `tree` declared that specializations of package class

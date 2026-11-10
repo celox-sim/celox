@@ -547,7 +547,11 @@ fn analyze_package(
         // Inside the package, `p::x` names its own item `x`.
         analyze_package_scope(name, &tree.in_package(name), session, packages, None)?
     };
-    if self_qualified_names_are_plain(name, tree, packages)? {
+    // No class of another package can be a base in this one, which names
+    // none.
+    if self_qualified_names_are_plain(name, tree, |package| packages.get(package).is_some())?
+        .is_some()
+    {
         return Ok(first);
     }
     // A self-qualified reference `p::x` is not hidden by a local `x` of a
@@ -565,12 +569,16 @@ fn analyze_package(
 ///
 /// A class whose base the syntax does not tell, such as a type parameter,
 /// may inherit a member of any class its package can name: of its own, when
-/// it names no other package.
-fn self_qualified_names_are_plain(
+/// it names no other package, as far as the package itself makes its
+/// specializations. The classes of that kind around a reference are given
+/// back: a specialization that another scope asks of one of them may
+/// extend a class of that scope, whose members the package does not know.
+/// `is_package` tells the packages among the scopes of qualified names.
+pub(super) fn self_qualified_names_are_plain(
     name: &str,
     tree: &AnalysisContext<'_>,
-    packages: &Packages,
-) -> Result<bool, AnalyzerError> {
+    is_package: impl Fn(&str) -> bool,
+) -> Result<Option<HashSet<String>>, AnalyzerError> {
     use celox_sv_syntax::{DataTypeKind, TokenRange};
     let imports = imports::ScopeImports::from_scope(tree)?;
     let references = imports
@@ -581,7 +589,7 @@ fn self_qualified_names_are_plain(
         .map(|((_, item), token)| (item.as_str(), *token))
         .collect::<Vec<_>>();
     if references.is_empty() {
-        return Ok(true);
+        return Ok(Some(HashSet::default()));
     }
     let native = tree.declarations();
     let item = |name: &celox_sv_syntax::Name| instances::normalize_identifier(&name.spelling);
@@ -641,7 +649,7 @@ fn self_qualified_names_are_plain(
     let foreign = imports
         .packages
         .iter()
-        .any(|package| package != name && packages.get(package).is_some());
+        .any(|package| package != name && is_package(package));
     // The classes the package itself declares, by their names, which the
     // plain name of one is in every scope of the package that declares no
     // other of the name: a class of another scope of the source may share
@@ -658,16 +666,17 @@ fn self_qualified_names_are_plain(
             .and_modify(|known| *known = None)
             .or_insert(Some(class));
     }
-    // Whether `class` declares or inherits a member `wanted`.
+    // Whether `class` declares or inherits a member `wanted`, or else the
+    // class it extends whose base the syntax does not tell.
     let inherits = |class: &celox_sv_syntax::ClassDeclaration, wanted: &str| {
         let mut seen = HashSet::default();
         let mut class = class;
         loop {
             if members[&item(&class.name)].contains(wanted) || !seen.insert(class.tokens.start) {
-                return true;
+                return Err(());
             }
             let Some(base) = &class.base else {
-                return false;
+                return Ok(None);
             };
             let known = match &native.data_type(base.data_type).kind {
                 DataTypeKind::Named(path) if path.len() == 1 => {
@@ -681,11 +690,15 @@ fn self_qualified_names_are_plain(
                 _ => None,
             };
             let Some(base) = known else {
-                return foreign || members.values().any(|names| names.contains(wanted));
+                if foreign || members.values().any(|names| names.contains(wanted)) {
+                    return Err(());
+                }
+                return Ok(Some(item(&class.name)));
             };
             class = base;
         }
     };
+    let mut open = HashSet::default();
     // The bodies of the methods declared out of their classes, which are in
     // the scopes of those (8.24), by the names of the classes.
     let methods = native
@@ -714,15 +727,18 @@ fn self_qualified_names_are_plain(
         if scoped.iter().any(|tokens| around(tokens, token))
             || dimensions::hides_scope_item(tree, target, wanted)?
         {
-            return Ok(false);
+            return Ok(None);
         }
         // The classes around the reference, and what they inherit.
-        if native
+        for class in native
             .classes
             .iter()
-            .any(|class| around(&class.tokens, token) && inherits(class, wanted))
+            .filter(|class| around(&class.tokens, token))
         {
-            return Ok(false);
+            match inherits(class, wanted) {
+                Ok(unknown) => open.extend(unknown),
+                Err(()) => return Ok(None),
+            }
         }
         for (_, class) in methods.iter().filter(|(tokens, _)| around(tokens, token)) {
             let mut declared = native
@@ -730,17 +746,21 @@ fn self_qualified_names_are_plain(
                 .iter()
                 .filter(|declared| item(&declared.name) == *class);
             match (declared.next(), declared.next()) {
-                (Some(class), None) if !inherits(class, wanted) => {}
-                _ => return Ok(false),
+                (Some(class), None) => match inherits(class, wanted) {
+                    Ok(unknown) => open.extend(unknown),
+                    Err(()) => return Ok(None),
+                },
+                _ => return Ok(None),
             }
         }
     }
-    Ok(true)
+    Ok(Some(open))
 }
 
 #[cfg(test)]
 thread_local! {
-    /// Analyses of the scopes of packages and compilation units.
+    /// Analyses of the scopes of packages and compilation units, also for
+    /// the specializations other scopes ask of them.
     static SCOPE_ANALYSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -751,8 +771,6 @@ fn analyze_package_scope(
     packages: &Packages,
     own_items: Option<&ScopeSymbols>,
 ) -> Result<Package, AnalyzerError> {
-    #[cfg(test)]
-    SCOPE_ANALYSES.with(|count| count.set(count.get() + 1));
     let imports::ResolvedImports {
         symbols: imported,
         exports,
@@ -776,6 +794,8 @@ pub(super) fn analyze_package_with_symbols(
     exports: HashMap<String, String>,
     own_items: Option<&ScopeSymbols>,
 ) -> Result<Package, AnalyzerError> {
+    #[cfg(test)]
+    SCOPE_ANALYSES.with(|count| count.set(count.get() + 1));
     if let Some(own_items) = own_items {
         imported.extend(own_items);
     }
@@ -946,6 +966,38 @@ mod tests {
             endpackage
             module Top; endmodule";
         assert_eq!(scope_analyses(plain), 1);
+    }
+
+    #[test]
+    fn foreign_specializations_analyze_a_plain_package_once_each() {
+        // A scope that asks for a specialization of a class of the package
+        // has the package analyzed for it: once, as the package itself is,
+        // unless the specialization extends a class of that scope, which
+        // may inherit members the package does not know that hide the names
+        // it qualifies (8.25, 26.3).
+        let analyses = |user: &str| {
+            scope_analyses(&format!(
+                "package p;
+                    localparam int X = 5;
+                    class B; int v; endclass
+                    class C #(type T = int);
+                        function int f(); return p::X; endfunction
+                    endclass
+                    class G #(type T = B) extends T;
+                        function int g(); return p::X; endfunction
+                    endclass
+                endpackage
+                {user}"
+            ))
+        };
+        // The package and the compilation unit alone.
+        let none = analyses("class U; int v; endclass module Top; endmodule");
+        // A class of the unit as an argument that no class extends.
+        let argument = analyses("class U; int v; endclass module Top; p::C#(U) c; endmodule");
+        // A class of the unit that a class of the package extends.
+        let base = analyses("class U; int v; endclass module Top; p::G#(U) g; endmodule");
+        assert!(argument > none, "{argument}");
+        assert!(base > argument, "{argument} {base}");
     }
 
     #[test]
