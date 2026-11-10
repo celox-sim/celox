@@ -1694,7 +1694,10 @@ impl Module {
             // Statics of subroutines are initialized first: a run-time
             // initializer of a process local may call the subroutine.
             static_initializers.splice(0..0, body_state.static_initializers.drain(..));
-            locals.retain(|local| !kept.contains(&local.name));
+            {
+                let kept: HashSet<&str> = kept.iter().map(String::as_str).collect();
+                locals.retain(|local| !kept.contains(local.name.as_str()));
+            }
             // The package or compilation unit this scope is, whose variables
             // are its own, not imported.
             let own_package = syntax_tree
@@ -1879,18 +1882,27 @@ impl Module {
             });
             // The subroutines, locals and DPI imports of the packages the module
             // uses are lowered with it.
-            for subroutine in &imported.subroutines {
-                if !subroutines
+            {
+                let mut known: HashSet<&str> = subroutines
                     .iter()
-                    .any(|known| known.name == subroutine.name)
-                {
-                    subroutines.push(subroutine.clone());
-                }
-            }
-            for local in &imported.locals {
-                if !locals.iter().any(|known| known.name == local.name) {
-                    locals.push(local.clone());
-                }
+                    .map(|subroutine| subroutine.name.as_str())
+                    .collect();
+                let missing = imported
+                    .subroutines
+                    .iter()
+                    .filter(|subroutine| known.insert(subroutine.name.as_str()))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                subroutines.extend(missing);
+                let mut known: HashSet<&str> =
+                    locals.iter().map(|local| local.name.as_str()).collect();
+                let missing = imported
+                    .locals
+                    .iter()
+                    .filter(|local| known.insert(local.name.as_str()))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                locals.extend(missing);
             }
             for import in &imported.dpi_imports {
                 if !dpi_imports

@@ -94,6 +94,12 @@ impl<V: Clone> ScopedMap<V> {
             return base.remove(name);
         }
         let old = self.get(name).cloned();
+        // A name the scope does not see is removed already: the overlay,
+        // which another scope may share, is left alone.
+        let hidden = matches!(self.overlay.get(name), Some(None));
+        if hidden || !self.base.contains_key(name) && !self.overlay.contains_key(name) {
+            return old;
+        }
         #[cfg(test)]
         if Arc::strong_count(&self.overlay) > 1 {
             COPIED_OVERLAY_BINDINGS.with(|count| count.set(count.get() + self.overlay.len()));

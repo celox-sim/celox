@@ -396,9 +396,14 @@ fn select(
     // those and any discovery caches in a disposable session: only the value
     // of the bound expression may escape this query. Resolved declarations
     // and the semantic-table prefix retain the caller's identities.
-    let mut constants = constant_session(session);
+    // A plain decimal bound is its own value and needs no session.
+    let mut constants = None;
     let mut constant = |id| {
-        let value = constant_binding::bind_in(id, native, tree, &mut constants, dims).ok()??;
+        if let Some(value) = decimal_literal(id, native) {
+            return Some(value);
+        }
+        let constants = constants.get_or_insert_with(|| constant_session(session));
+        let value = constant_binding::bind_in(id, native, tree, constants, dims).ok()??;
         eval_ast_const_expr(&tree.functions, &value, &dims.const_env)
     };
     let count = match *selection {
@@ -495,6 +500,24 @@ pub(super) fn cast_type(
 pub(super) fn class_name(table: &semantic_types::TyTable, id: TyId) -> Option<String> {
     match table.data(id) {
         TyData::Class(Decl::Class(name)) => Some(name.to_string()),
+        _ => None,
+    }
+}
+
+/// The value of expression `id` when it is an unsized decimal literal that
+/// fits its 32 bits as a positive number, such as the `7` of `[7:0]`, with
+/// or without parentheses (IEEE 1800-2023 5.7.1).
+fn decimal_literal(id: ExprId, native: &Declarations) -> Option<i128> {
+    let mut id = id;
+    while let ExprKind::Group(inner) = &native.expression(id).kind {
+        id = *inner;
+    }
+    match &native.expression(id).kind {
+        ExprKind::Literal(text)
+            if (1..=9).contains(&text.len()) && text.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            text.parse().ok()
+        }
         _ => None,
     }
 }
