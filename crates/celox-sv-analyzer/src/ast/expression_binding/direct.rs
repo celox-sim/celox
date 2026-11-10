@@ -2670,7 +2670,8 @@ pub(super) fn path(
 
     if let Some(length) = qualified {
         if parts.len() == length + 1 {
-            let base = parts[..2].join("::");
+            // Inside its package, the item itself.
+            let base = scope::qualified_name(tree, &parts[0], &parts[1]);
             parts.drain(..1);
             qualified = None;
             let _ = qualified;

@@ -1316,6 +1316,37 @@ pub(in crate::ast) fn hides_type_name(
     target: TokenRange,
     wanted: &str,
 ) -> Converted<bool> {
+    hides(tree, target, wanted, Hidden::TypeName)
+}
+
+/// Whether a declaration nested in the scope around `target` declares
+/// `wanted`: one of the blocks, of the subroutine or of the nested scopes
+/// around `target`, such as a class. Where `target` is, such a declaration
+/// hides an item of the scope itself of that name (IEEE 1800-2023 23.9). An
+/// import there may bring any name (26.3).
+pub(in crate::ast) fn hides_scope_item(
+    tree: &AnalysisContext<'_>,
+    target: TokenRange,
+    wanted: &str,
+) -> Converted<bool> {
+    hides(tree, target, wanted, Hidden::ScopeItem)
+}
+
+/// What the declarations around a name may hide.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Hidden {
+    /// A type that the tables of a query bind: [`hides_type_name`].
+    TypeName,
+    /// An item of the scope itself: [`hides_scope_item`].
+    ScopeItem,
+}
+
+fn hides(
+    tree: &AnalysisContext<'_>,
+    target: TokenRange,
+    wanted: &str,
+    hidden: Hidden,
+) -> Converted<bool> {
     let native = tree.declarations();
     let named = |declared: &celox_sv_syntax::Name| name(declared) == wanted;
     let spelled = |tokens: TokenRange| {
@@ -1331,10 +1362,14 @@ pub(in crate::ast) fn hides_type_name(
         )
     };
     let parameter = |parameter: &celox_sv_syntax::Parameter| match &parameter.kind {
-        ParameterKind::Type { .. } => false,
+        ParameterKind::Type { .. } => hidden == Hidden::ScopeItem && named(&parameter.name),
         ParameterKind::Value { data_type, .. } => named(&parameter.name) || member(*data_type),
     };
-    if let Ok(unit) = tree.root_unit()
+    // An import may declare any name (26.3): the one it spells, or any
+    // through a wildcard.
+    let import = |tokens: TokenRange| hidden == Hidden::ScopeItem || spelled(tokens);
+    if hidden == Hidden::TypeName
+        && let Ok(unit) = tree.root_unit()
         && (unit.parameters.iter().flatten().any(parameter)
             || unit.ports.iter().any(|port| match &port.kind {
                 celox_sv_syntax::PortKind::Named(port)
@@ -1351,6 +1386,10 @@ pub(in crate::ast) fn hides_type_name(
     }
     let owners = owners(tree, target)?;
     for (depth, frame) in owners.frames.iter().enumerate() {
+        // The items of the scope itself hide none of them.
+        if hidden == Hidden::ScopeItem && depth == 0 {
+            continue;
+        }
         for id in direct(frame, tree)? {
             let item = native.body_item(id);
             let declares = match &item.kind {
@@ -1383,10 +1422,8 @@ pub(in crate::ast) fn hides_type_name(
                     imports::item_names(id, tree).contains(wanted)
                 }
                 BodyItemKind::Loop { variable, .. } => named(variable),
-                // An import may declare any name it spells (26.3).
-                BodyItemKind::PackageBinding(_)
-                | BodyItemKind::Modport(_)
-                | BodyItemKind::Unconverted { .. } => spelled(item.tokens),
+                BodyItemKind::PackageBinding(_) => import(item.tokens),
+                BodyItemKind::Modport(_) | BodyItemKind::Unconverted { .. } => spelled(item.tokens),
                 BodyItemKind::Assign(_)
                 | BodyItemKind::LogicGate(_)
                 | BodyItemKind::Procedure(_)
@@ -1405,6 +1442,10 @@ pub(in crate::ast) fn hides_type_name(
     }
     if let Some(id) = owners.subroutine {
         let subroutine = native.subroutine(id);
+        // In its body, the name of a function is also its result (13.4.1).
+        if hidden == Hidden::ScopeItem && named(&subroutine.name) {
+            return Ok(true);
+        }
         let ports = subroutine.ports.as_deref().into_iter().flatten().chain(
             subroutine
                 .port_declarations
@@ -1443,9 +1484,12 @@ pub(in crate::ast) fn hides_type_name(
                         named(&alias.name)
                             || matches!(alias.target, TypeAliasTarget::DataType(id) if member(id))
                     }
-                    StatementKind::Declaration(
-                        LocalDeclaration::PackageBinding(_) | LocalDeclaration::Unconverted(_),
-                    ) => spelled(statement.tokens),
+                    StatementKind::Declaration(LocalDeclaration::PackageBinding(_)) => {
+                        import(statement.tokens)
+                    }
+                    StatementKind::Declaration(LocalDeclaration::Unconverted(_)) => {
+                        spelled(statement.tokens)
+                    }
                     _ => false,
                 }
             }),
