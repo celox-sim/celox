@@ -133,6 +133,17 @@ unnecessary:
   simulation). A run that changed nothing compared is work the settle could
   have skipped, such as unrelated logic sharing a partition with state that
   changes every cycle.
+- partition sizing in estimated mode is a heuristic, not a derived optimum
+  (`SETTLE_PARTITION_COST`, `TARGET_ESTIMATED_SETTLE_PARTITIONS` in the
+  frontend's assembly). It pays off only for large designs whose per-cycle
+  activity is sparse and localized, with shallow dependency propagation;
+  densely toggling logic pays the flag tests and extra runs for nothing.
+  The current values were tuned on the RTLMeter designs (E906: ~10%
+  steady-state gain from target cost 51 to 32, 2,610 to 3,900 partitions;
+  E902 unchanged; finer and coarser targets both slower). Treat them as
+  due for re-examination with `--settle-profile` evidence when a design
+  with different activity characteristics appears; an activity-adaptive
+  choice would be preferable to retuning the constants by hand.
 - in the time slots a compiled scheduler runs, a combinational settle waits
   until its results are read: it runs, where the reference loop last
   settled, before a process kernel or domain that reads combinational outputs
