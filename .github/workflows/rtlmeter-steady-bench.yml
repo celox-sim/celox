@@ -47,8 +47,8 @@ jobs:
           python-version: "3.13"
       - uses: $/.github/actions/setup-verilator
         with:
-          version: "5.052"
-          revision: ea338be98e1e838d3518809ce8899f85a009963c
+          version: "5.054"
+          revision: bbb60a403932a9f695cb6ff001ceb73de6ad9234
       - uses: cachix/install-nix-action@v31.11.3
       - name: Build the release fixed by flake.lock
         run: |
