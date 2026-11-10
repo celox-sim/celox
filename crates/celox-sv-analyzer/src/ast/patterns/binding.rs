@@ -965,7 +965,7 @@ mod tests {
         let dims = PackedDimensions::new(
             HashMap::default(),
             &ConstEnv::default(),
-            &HashMap::from_iter([("T".into(), Type::new(TypeKind::Logic))]),
+            &TypeAliases::from_iter([("T".into(), Type::new(TypeKind::Logic))]),
         );
         let result = bind_native(root, tree.declarations(), tree, session, &dims, None).map(Some);
         drop(context);
@@ -1003,7 +1003,7 @@ mod tests {
         let dims = PackedDimensions::new(
             HashMap::default(),
             &ConstEnv::default(),
-            &HashMap::default(),
+            &TypeAliases::default(),
         );
         let result = expression(root, &shape, tree, session, &dims);
         let mut ty = Type::new(TypeKind::Logic);

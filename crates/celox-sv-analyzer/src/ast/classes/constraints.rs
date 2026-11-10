@@ -227,7 +227,7 @@ fn element(
                     "a constraint on objects of class `{class}` while its constraints are bound"
                 ));
             } else {
-                super::class(tree, session, &class, env, &HashMap::default())
+                super::class(tree, session, &class, env, &TypeAliases::default())
                     .map_err(|_| format!("class `{class}`"))?
                     .property(&member)
                     .cloned()
@@ -269,8 +269,8 @@ fn visible(
     let visible = match &scope {
         Some((scope, _)) if *scope == property.owner => true,
         Some((_, Some(base))) if !property.local => {
-            super::class(tree, session, base, env, &HashMap::default()).is_ok_and(|base| {
-                base.derives_from(tree, session, &property.owner, env, &HashMap::default())
+            super::class(tree, session, base, env, &TypeAliases::default()).is_ok_and(|base| {
+                base.derives_from(tree, session, &property.owner, env, &TypeAliases::default())
             })
         }
         _ => false,

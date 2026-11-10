@@ -379,7 +379,7 @@ pub(super) fn module_constant_functions(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     const_env: &ConstEnv,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
     parameter_literals: &HashMap<String, Expr>,
 ) -> ConstantFunctions {
     symbolic_module_constant_functions(
@@ -397,7 +397,7 @@ pub(super) fn symbolic_module_constant_functions(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     const_env: &ConstEnv,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
     parameter_literals: &HashMap<String, Expr>,
     symbolic_parameters: &HashSet<String>,
     class_methods: procedural::ClassMethods,
@@ -450,7 +450,7 @@ fn collect_module_constant_functions(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     const_env: &ConstEnv,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
     parameter_literals: &HashMap<String, Expr>,
     symbolic_parameters: &HashSet<String>,
     class_methods: procedural::ClassMethods,

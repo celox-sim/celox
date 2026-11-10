@@ -7,7 +7,7 @@ pub(super) fn bind(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<Option<Type>> {
     binding::bind_in(
         root,
@@ -49,7 +49,7 @@ mod tests {
             &tree,
             session,
             &ConstEnv::default(),
-            &HashMap::default(),
+            &TypeAliases::default(),
         )
         .unwrap()
         .unwrap();
@@ -100,7 +100,7 @@ mod tests {
             &tree,
             &mut Session::default(),
             &ConstEnv::default(),
-            &HashMap::default(),
+            &TypeAliases::default(),
         );
         drop(tree);
         drop(original);

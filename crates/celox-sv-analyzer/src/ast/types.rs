@@ -5,14 +5,14 @@ use celox_sv_syntax::{BodyItemKind, ParameterKind, TypeAliasTarget};
 pub(super) fn type_aliases_from_scope(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-) -> Converted<HashMap<String, Type>> {
+) -> Converted<TypeAliases> {
     // Constants of this scope are not available until parameter collection.
     // The subsequent pass with an environment requires complete defaults.
     type_aliases_in_scope(
         tree,
         session,
         &ConstEnv::default(),
-        &HashMap::default(),
+        &TypeAliases::default(),
         true,
         None,
         true,
@@ -23,12 +23,12 @@ pub(super) fn type_aliases_from_scope_with_env(
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
     const_env: &ConstEnv,
-) -> Converted<HashMap<String, Type>> {
+) -> Converted<TypeAliases> {
     type_aliases_in_scope(
         syntax_tree,
         session,
         const_env,
-        &HashMap::default(),
+        &TypeAliases::default(),
         true,
         None,
         false,
@@ -42,8 +42,8 @@ pub(super) fn type_aliases_from_body_with_env(
     session: &mut Session,
     items: &[celox_sv_syntax::BodyItemId],
     const_env: &ConstEnv,
-    inherited: &HashMap<String, Type>,
-) -> Converted<HashMap<String, Type>> {
+    inherited: &TypeAliases,
+) -> Converted<TypeAliases> {
     type_aliases_in_scope(
         syntax_tree,
         session,
@@ -64,9 +64,9 @@ pub(super) fn type_aliases_of_generate_scope(
     session: &mut Session,
     items: &[celox_sv_syntax::BodyItemId],
     const_env: &ConstEnv,
-    inherited: &HashMap<String, Type>,
+    inherited: &TypeAliases,
     path: &str,
-) -> Converted<HashMap<String, Type>> {
+) -> Converted<TypeAliases> {
     type_aliases_in_scope(
         syntax_tree,
         session,
@@ -83,17 +83,17 @@ fn type_aliases_in_scope(
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
     const_env: &ConstEnv,
-    inherited: &HashMap<String, Type>,
+    inherited: &TypeAliases,
     include_header: bool,
     items: Option<&[celox_sv_syntax::BodyItemId]>,
     defer_class_defaults: bool,
     generate_scope: Option<&str>,
-) -> Converted<HashMap<String, Type>> {
+) -> Converted<TypeAliases> {
     // Each alias binds in a context that shares the tables; it is dropped
     // before the next alias is added, so the table grows without copies.
     let const_env: SharedEnv = const_env.clone().into();
     let const_env = &const_env;
-    let mut aliases: SharedMap<Type> = scope::imported(syntax_tree).type_aliases.clone().into();
+    let mut aliases: SharedAliases = scope::imported(syntax_tree).type_aliases.clone().into();
     aliases.extend(
         inherited
             .iter()
@@ -161,7 +161,7 @@ fn type_aliases_in_scope(
     // later declares a signal of that type. Rebuilt for each specialization.
     // A non-negative bound is written as a plain decimal so that it does not
     // widen the index arithmetic of a run-time select to 128 bits.
-    for ty in aliases.values_mut() {
+    for (_, ty) in aliases.iter_mut() {
         freeze_bounds(ty, &syntax_tree.functions, const_env);
     }
     Ok(aliases.into_inner())
@@ -178,7 +178,7 @@ pub(super) fn bind_alias(
     session: &mut Session,
     alias: &celox_sv_syntax::TypeAlias,
     const_env: &SharedEnv,
-    aliases: &SharedMap<Type>,
+    aliases: &SharedAliases,
     dimension_env: &SharedEnv,
     defer_class_defaults: bool,
     name: impl FnOnce() -> (String, type_names::TypedefName),
@@ -283,7 +283,7 @@ pub(super) fn bind_local_alias(
     session: &mut Session,
     alias: &celox_sv_syntax::TypeAlias,
     const_env: &SharedEnv,
-    aliases: &SharedMap<Type>,
+    aliases: &SharedAliases,
     members: &mut EnumMemberConstants,
 ) -> Converted<Option<Type>> {
     let TypeAliasTarget::DataType(target) = alias.target else {
@@ -331,7 +331,7 @@ fn add_type_parameter(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &SharedEnv,
-    aliases: &mut SharedMap<Type>,
+    aliases: &mut SharedAliases,
 ) -> Converted<()> {
     let ParameterKind::Type { default } = parameter.kind else {
         return Ok(());

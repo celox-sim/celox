@@ -10,7 +10,7 @@ pub(super) struct Prefix<'a> {
 pub(super) fn prefix<'a>(
     parameter: Option<&celox_sv_syntax::Parameter>,
     tree: &'a SyntaxTree,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<Option<Prefix<'a>>> {
     let Some(parameter) = parameter else {
         return Ok(None);
@@ -99,7 +99,7 @@ impl Prefix<'_> {
         tree: &AnalysisContext<'_>,
         session: &mut Session,
         env: &ConstEnv,
-        aliases: &HashMap<String, Type>,
+        aliases: &TypeAliases,
     ) -> Converted<Vec<PackedRange>> {
         let mut ranges = constant_binding::packed_ranges(
             &self.data.packed_dimensions,

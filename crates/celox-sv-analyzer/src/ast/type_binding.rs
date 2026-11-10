@@ -77,7 +77,7 @@ pub(super) fn port_type(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<Option<Type>> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
     let Some(id) = port.data_type else {
@@ -95,7 +95,7 @@ pub(super) fn declared_port_range_matches(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<bool> {
     let Some(id) = port.declared_type else {
         return Ok(true);
@@ -126,7 +126,7 @@ pub(super) fn implicit_subroutine_type(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: impl ToShared<i128, ConstEnv>,
-    aliases: impl ToShared<Type>,
+    aliases: impl ToShared<Type, TypeAliases>,
 ) -> Converted<Type> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
     let data = tree.declarations().data_type(id);
@@ -143,7 +143,7 @@ pub(super) fn local_signals(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
     selected_name: Option<&str>,
     scope: Option<&PackedDimensions>,
 ) -> Converted<Vec<Signal>> {
@@ -214,7 +214,7 @@ pub(super) fn net_signals(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
     selected_name: Option<&str>,
 ) -> Converted<Vec<Signal>> {
     if declaration.net_type == "interconnect" {
@@ -269,7 +269,7 @@ pub(super) fn argument_type(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<Option<Type>> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
     if let celox_sv_syntax::ExprKind::Type(id) = tree.declarations().expression(root).kind {
@@ -336,7 +336,7 @@ pub(super) fn procedural_type(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: impl ToShared<i128, ConstEnv>,
-    aliases: impl ToShared<Type>,
+    aliases: impl ToShared<Type, TypeAliases>,
 ) -> Converted<Option<Type>> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
     binding::bind_in(id, native, tree, session, &context)
@@ -348,7 +348,7 @@ pub(super) fn enum_constant_base(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<Option<Type>> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
     bind(id, tree, session, &context)
@@ -360,7 +360,7 @@ pub(super) fn alias_base_type(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: impl ToShared<i128, ConstEnv>,
-    aliases: impl ToShared<Type>,
+    aliases: impl ToShared<Type, TypeAliases>,
     defer_class_defaults: bool,
 ) -> Converted<Option<Type>> {
     // Typedef type-reference inference is outside the supported alias path.
@@ -423,7 +423,7 @@ pub(super) fn alias_signals(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
     selected_name: Option<&str>,
 ) -> Converted<Vec<Signal>> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);

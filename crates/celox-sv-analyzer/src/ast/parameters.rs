@@ -143,7 +143,7 @@ pub(super) fn parameters_from_native(
     parameters: &mut Vec<Parameter>,
     is_local: bool,
     base_const_env: &ConstEnv,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
     parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Result<(), AnalyzerError> {
     let mut environment = ParameterEnvironment::new(
@@ -360,7 +360,7 @@ pub(super) fn parameters_from_native_with_environment(
     parameters: &mut Vec<Parameter>,
     is_local: bool,
     base_const_env: &ConstEnv,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
     parameter_overrides: &HashMap<String, ConstExpr>,
     environment: &mut ParameterEnvironment<'_>,
 ) -> Result<(), AnalyzerError> {
@@ -646,7 +646,7 @@ fn parameter_declared_width(
     session: &mut Session,
     base_const_env: &ConstEnv,
     environment: &ParameterEnvironment<'_>,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
     parameter_overrides: &HashMap<String, ConstExpr>,
     native: &declaration_types::Prefix<'_>,
 ) -> Converted<Option<usize>> {
@@ -719,7 +719,7 @@ fn parameter_declared_width(
 fn parameter_width_from_environments(
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
     range_env: &ConstEnv,
     env: &ConstEnv,
     native: &declaration_types::Prefix<'_>,
@@ -1061,7 +1061,7 @@ pub(super) fn enum_member_constants_from_scope(
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
     base_const_env: &ConstEnv,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
     parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Result<EnumMemberConstants, AnalyzerError> {
     let items = syntax_tree.body_membership()?;
@@ -1080,7 +1080,7 @@ pub(super) fn enum_member_constants_from_items(
     session: &mut Session,
     declarations: &[celox_sv_syntax::BodyItemId],
     base_const_env: &ConstEnv,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
     parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Result<EnumMemberConstants, AnalyzerError> {
     use celox_sv_syntax::{BodyItemKind, DataDeclaration, DataTypeKind, TypeAliasTarget};
@@ -1219,7 +1219,7 @@ pub(super) fn enum_members_of(
     session: &mut Session,
     id: celox_sv_syntax::TypeId,
     eval_env: &mut ConstEnv,
-    resolved_type_aliases: &HashMap<String, Type>,
+    resolved_type_aliases: &TypeAliases,
     constants: &mut EnumMemberConstants,
 ) -> Result<(), AnalyzerError> {
     use celox_sv_syntax::DataTypeKind;
@@ -2148,7 +2148,7 @@ pub(super) fn enum_constant_type(
     id: celox_sv_syntax::TypeId,
     declaration: &Type,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<Option<semantic_types::ConstantType>> {
     let celox_sv_syntax::DataTypeKind::Enum { base, items } =
         &tree.declarations().data_type(id).kind

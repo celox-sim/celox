@@ -221,7 +221,7 @@ mod tests {
         let dims = PackedDimensions::new(
             HashMap::default(),
             &ConstEnv::default(),
-            &HashMap::default(),
+            &TypeAliases::default(),
         );
         let result = super::super::from_param(root, tree, session, &dims);
         drop(context);

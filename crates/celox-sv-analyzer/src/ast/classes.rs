@@ -393,7 +393,7 @@ impl Class {
         session: &mut Session,
         ancestor: &str,
         env: &ConstEnv,
-        aliases: &HashMap<String, Type>,
+        aliases: &TypeAliases,
     ) -> bool {
         let class = self.record_lineage(tree, session, env, aliases);
         let ancestor = handle_type_id(&mut session.types, ancestor);
@@ -406,7 +406,7 @@ impl Class {
         tree: &AnalysisContext<'_>,
         session: &mut Session,
         env: &ConstEnv,
-        aliases: &HashMap<String, Type>,
+        aliases: &TypeAliases,
     ) -> HashSet<String> {
         let class = self.record_lineage(tree, session, env, aliases);
         session
@@ -425,7 +425,7 @@ impl Class {
         tree: &AnalysisContext<'_>,
         session: &mut Session,
         env: &ConstEnv,
-        aliases: &HashMap<String, Type>,
+        aliases: &TypeAliases,
     ) -> semantic_types::TyId {
         let class = handle_type_id(&mut session.types, &self.name);
         if session.types.supertypes(class).is_none() {
@@ -589,7 +589,7 @@ pub(super) fn scope_classes(
             let mut class = Class::clone(session.classes.get(&name)?);
             // The types are fixed in the scope that declares the class,
             // whose names another scope does not see.
-            let (env, _) = specializations::scope(session, &name, env, &HashMap::default());
+            let (env, _) = specializations::scope(session, &name, env, &TypeAliases::default());
             let resolve = |ty: &mut Type| {
                 if let Some(resolved) = type_parameters::resolve(&tree.functions, ty.clone(), &env)
                 {
@@ -799,7 +799,7 @@ pub(super) fn item_statics(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Vec<StaticProperty> {
     item_classes(item, tree, session)
         .into_iter()
@@ -912,7 +912,7 @@ pub(super) fn class(
     session: &mut Session,
     name: &str,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<Rc<Class>> {
     if let Some(class) = session.classes.get(name) {
         return Ok(class.clone());
@@ -932,7 +932,7 @@ pub(super) fn shared_class(
     tree: &AnalysisContext<'_>,
     name: &str,
     env: &SharedEnv,
-    aliases: &SharedMap<Type>,
+    aliases: &SharedAliases,
     session: &mut Session,
 ) -> Converted<Rc<Class>> {
     if let Some(class) = session.classes.get(name) {
@@ -1306,7 +1306,7 @@ fn interface_name(
     session: &mut Session,
     interface: celox_sv_syntax::TypeId,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<String> {
     let native = tree.declarations();
     let name = type_binding::procedural_type(interface, native, tree, session, env, aliases)?
@@ -1601,7 +1601,7 @@ fn object_classes(
     session: &mut Session,
     ancestor: &str,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<Vec<Rc<Class>>> {
     let concrete = ConcreteClasses::of(tree, session, env, aliases);
     let mut classes = Vec::new();
@@ -1636,7 +1636,7 @@ impl ConcreteClasses {
         tree: &AnalysisContext<'_>,
         session: &mut Session,
         env: &ConstEnv,
-        aliases: &HashMap<String, Type>,
+        aliases: &TypeAliases,
     ) -> Rc<Self> {
         let generation =
             |session: &Session| (session.classes.len(), session.class_specializations.len());
@@ -1678,7 +1678,7 @@ pub(super) fn rand_member_classes(
     session: &mut Session,
     class: &Class,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<Vec<Rc<Class>>> {
     let handle_classes = |class: &Class| {
         class
@@ -1729,7 +1729,7 @@ pub(super) fn dispatch_targets(
     owner: &str,
     method: &str,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<Vec<(String, Vec<u32>)>> {
     let mut targets: Vec<(String, Vec<u32>)> = Vec::new();
     for class in object_classes(tree, session, owner, env, aliases)? {
@@ -1752,7 +1752,7 @@ pub(super) fn cast_targets(
     session: &mut Session,
     name: &str,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<Vec<u32>> {
     Ok(object_classes(tree, session, name, env, aliases)?
         .iter()

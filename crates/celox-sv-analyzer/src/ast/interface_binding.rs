@@ -1363,7 +1363,7 @@ fn instance_elements(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<ArrayBinding> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
     let ranges = constant_binding::bind_unpacked_ranges(dimensions, tree, session, &context)?;
@@ -1596,7 +1596,7 @@ pub(super) fn actual_handle_key(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Converted<String> {
     use celox_sv_syntax::{DimensionKind, ExprKind};
     enum Suffix {
