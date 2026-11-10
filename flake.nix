@@ -63,6 +63,7 @@
           mbx = nix-packages.packages.${system}.mbx;
           mergify-cli = pkgs.callPackage ./nix/mergify-cli.nix { };
           xezim-simulator = pkgs.callPackage ./nix/xezim { src = xezim; };
+          verilator = pkgs.callPackage ./nix/verilator.nix { };
           # mbx recognizes a symlink named cargo and preserves Cargo's CLI,
           # including --version. Real Cargo must remain later on PATH.
           cargoShim = pkgs.runCommand "celox-cargo-shim" { } ''
@@ -82,7 +83,7 @@
             pkgs.nodejs_24
             (pkgs.lib.hiPrio pkgs.corepack)
             python
-            pkgs.verilator
+            verilator
             pkgs.iverilog
             pkgs.z3
             stdenv.cc
@@ -110,6 +111,7 @@
             mbx
             mergify-cli
             xezim-simulator
+            verilator
             tools
             python
             rust
@@ -127,6 +129,7 @@
         {
           inherit (e) mbx mergify-cli;
           xezim = e.xezim-simulator;
+          verilator = e.verilator;
           # The devcontainer uses this profile for editor and non-shell commands.
           dev-tools = e.pkgs.buildEnv {
             name = "celox-dev-tools";
