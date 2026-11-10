@@ -90,6 +90,11 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
     /// Whether the body's variables are automatic by default.
     automatic: bool,
     task_timing: bool,
+    /// While a delayed nonblocking assignment's delay control is being
+    /// converted: that delay schedules an update without suspending, so a
+    /// delay control is allowed in an `always` body for it (IEEE
+    /// 1800-2023 9.4.5).
+    delayed_nonblocking: bool,
     /// The shape of the function's result, the target of its return values:
     /// patterns take their shape from it (10.9) and streams align to it
     /// (11.4.14).
@@ -463,6 +468,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         Self {
             automatic,
             task_timing: false,
+            delayed_nonblocking: false,
             return_shape: None,
             reference_formals: HashSet::default(),
             return_chandle: None,
@@ -2424,6 +2430,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     /// `initial` or `always` process. An `always_comb` or `always_ff` body
     /// and a function may not suspend. A task suspends its caller.
     fn allow_timing(&self, construct: &'static str) -> Result<(), AnalyzerError> {
+        // A delayed nonblocking assignment's delay does not suspend its
+        // process (IEEE 1800-2023 9.4.5, 10.4.2).
+        if self.delayed_nonblocking && construct == "delay control" {
+            return Ok(());
+        }
         match self.body {
             system_functions::Body::Initial => Ok(()),
             system_functions::Body::Final => Err(AnalyzerError::TimingControlOutsideProcess {
