@@ -35,7 +35,7 @@ enum Job {
     /// Wrap the statements built since `start` as the named block `id`
     /// when a `disable` in them named it; they stay flattened otherwise.
     BlockEnd {
-        id: u32,
+        id: u64,
         start: usize,
     },
     ForkNext {
@@ -370,8 +370,7 @@ impl BodyBuilder<'_, '_, '_> {
                                 .any(|token| !token.is_trivia() && token.text == "fork")
                         });
                         if let Some(label) = named {
-                            let block_id = *self.state.counter as u32;
-                            *self.state.counter += 1;
+                            let block_id = self.block_id(native.statement(id).tokens.start);
                             self.named_blocks.push((
                                 instances::normalize_identifier(&label.spelling),
                                 block_id,

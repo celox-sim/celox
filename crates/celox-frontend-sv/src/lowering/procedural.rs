@@ -1279,8 +1279,8 @@ impl<'a> ProcModule<'a> {
     /// entry, and disabling the block advances it so each other active
     /// activation leaves at its next statement (IEEE 1800-2023 9.6.2).
     /// One variable serves every process and inlining of the block.
-    pub fn disable_epoch(&mut self, block: u32) -> String {
-        let name = format!("$disable_epoch_{block}");
+    pub fn disable_epoch(&mut self, block: u64) -> String {
+        let name = format!("$disable_epoch_{block:x}");
         if self.id(&name).is_none() {
             self.hidden(name.clone(), 64, false, false);
         }

@@ -28,7 +28,7 @@ enum Frame {
         continue_flag: SourceVarId,
     },
     /// A named block a `disable` can leave (9.6.2).
-    Block { id: u32, exit_flag: SourceVarId },
+    Block { id: u64, exit_flag: SourceVarId },
     Function {
         return_flag: SourceVarId,
         return_var: Option<String>,
