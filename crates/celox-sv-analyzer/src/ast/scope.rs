@@ -132,20 +132,12 @@ impl ScopeSymbols {
     pub fn extend(&mut self, other: &ScopeSymbols) {
         self.package_scopes
             .extend(other.package_scopes.iter().cloned());
-        for request in &other.inline_randomizations {
-            if !self
-                .inline_randomizations
-                .iter()
-                .any(|known| known.key == request.key)
-            {
-                self.inline_randomizations.push(request.clone());
-            }
-        }
-        for class in &other.classes {
-            if !self.classes.iter().any(|known| known.name == class.name) {
-                self.classes.push(class.clone());
-            }
-        }
+        extend_unnamed(
+            &mut self.inline_randomizations,
+            &other.inline_randomizations,
+            |request| &request.key,
+        );
+        extend_unnamed(&mut self.classes, &other.classes, |class| &*class.name);
         extend_missing(&mut self.class_member_types, &other.class_member_types);
         for (name, value) in &other.const_env {
             self.const_env.entry(name.clone()).or_insert(*value);
@@ -155,15 +147,9 @@ impl ScopeSymbols {
                 .entry(name.clone())
                 .or_insert_with(|| value.clone());
         }
-        for parameter in &other.parameters {
-            if !self
-                .parameters
-                .iter()
-                .any(|known| known.name == parameter.name)
-            {
-                self.parameters.push(parameter.clone());
-            }
-        }
+        extend_unnamed(&mut self.parameters, &other.parameters, |parameter| {
+            &*parameter.name
+        });
         extend_missing(&mut self.interface_members, &other.interface_members);
         extend_missing(&mut self.interface_types, &other.interface_types);
         extend_missing(&mut self.interface_arrays, &other.interface_arrays);
@@ -190,56 +176,32 @@ impl ScopeSymbols {
             .extend_missing(&other.constant_functions);
         extend_missing(&mut self.subroutine_params, &other.subroutine_params);
         extend_missing(&mut self.subroutine_shapes, &other.subroutine_shapes);
-        for subroutine in &other.subroutines {
-            if !self
-                .subroutines
+        extend_unnamed(&mut self.subroutines, &other.subroutines, |subroutine| {
+            &*subroutine.name
+        });
+        extend_unnamed(&mut self.locals, &other.locals, |local| &*local.name);
+        extend_unnamed(&mut self.state_signals, &other.state_signals, |signal| {
+            &*signal.name
+        });
+        let added = extend_unnamed(&mut self.signals, &other.signals, |signal| &*signal.name);
+        if added > 0 {
+            let added = self.signals[self.signals.len() - added..]
                 .iter()
-                .any(|known| known.name == subroutine.name)
-            {
-                self.subroutines.push(subroutine.clone());
-            }
-        }
-        for local in &other.locals {
-            if !self.locals.iter().any(|known| known.name == local.name) {
-                self.locals.push(local.clone());
-            }
-        }
-        for signal in &other.state_signals {
-            if !self
-                .state_signals
-                .iter()
-                .any(|known| known.name == signal.name)
-            {
-                self.state_signals.push(signal.clone());
-            }
-        }
-        let mut added = Vec::new();
-        for signal in &other.signals {
-            if !self.signals.iter().any(|known| known.name == signal.name) {
-                self.signals.push(signal.clone());
-                added.push(signal.name.as_str());
-            }
-        }
-        for process in &other.initial_processes {
-            if added.iter().any(|name| initializes(process, name))
-                && !self.initial_processes.contains(process)
-            {
-                self.initial_processes.push(process.clone());
+                .map(|signal| signal.name.as_str())
+                .collect::<HashSet<_>>();
+            for process in &other.initial_processes {
+                if initializes_any(process, &added) && !self.initial_processes.contains(process) {
+                    self.initial_processes.push(process.clone());
+                }
             }
         }
         self.ports.extend(other.ports.iter().cloned());
         self.comb_processes
             .extend(other.comb_processes.iter().cloned());
         self.ff_processes.extend(other.ff_processes.iter().cloned());
-        for import in &other.dpi_imports {
-            if !self
-                .dpi_imports
-                .iter()
-                .any(|known| known.name() == import.name())
-            {
-                self.dpi_imports.push(import.clone());
-            }
-        }
+        extend_unnamed(&mut self.dpi_imports, &other.dpi_imports, |import| {
+            import.name()
+        });
     }
 
     /// Make the symbol `target` visible as `name` too, as an import makes a
@@ -607,6 +569,39 @@ fn stmt_initializes(stmt: &Stmt, name: &str) -> bool {
         Stmt::AssignConcat { parts, .. } => parts.iter().any(|part| part.name() == name),
         _ => false,
     }
+}
+
+/// Whether `process` [`initializes`] one of the signals `names`.
+fn initializes_any(process: &InitialProcess, names: &HashSet<&str>) -> bool {
+    !process.is_final()
+        && process.body.iter().any(|stmt| match stmt {
+            Stmt::Assign { lhs, .. } => names.contains(lhs.name()),
+            Stmt::AssignConcat { parts, .. } => {
+                parts.iter().any(|part| names.contains(part.name()))
+            }
+            _ => false,
+        })
+}
+
+/// Append the items of `other` that `known` does not name yet, each name
+/// once, and tell how many were appended.
+fn extend_unnamed<T: Clone, K: Eq + std::hash::Hash + ?Sized>(
+    known: &mut Vec<T>,
+    other: &[T],
+    name: impl for<'a> Fn(&'a T) -> &'a K,
+) -> usize {
+    if other.is_empty() {
+        return 0;
+    }
+    let mut names = known.iter().map(&name).collect::<HashSet<_>>();
+    let missing = other
+        .iter()
+        .filter(|item| names.insert(name(item)))
+        .cloned()
+        .collect::<Vec<_>>();
+    let added = missing.len();
+    known.extend(missing);
+    added
 }
 
 fn extend_missing<V: Clone + 'static, M: Table<V>>(map: &mut M, other: &M) {
@@ -977,5 +972,21 @@ impl Renamer<'_> {
                 .collect(),
             ..subroutine
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extend_unnamed_appends_each_new_name_once() {
+        // As a scan of the known items for each new one appends them: in
+        // their order, the first of each name, and none that is known.
+        let mut known = vec![("a", 1), ("b", 2)];
+        let other = [("b", 3), ("c", 4), ("a", 5), ("c", 6), ("d", 7)];
+        assert_eq!(extend_unnamed(&mut known, &other, |item| item.0), 2);
+        assert_eq!(known, [("a", 1), ("b", 2), ("c", 4), ("d", 7)]);
+        assert_eq!(extend_unnamed(&mut known, &[], |item| item.0), 0);
     }
 }
