@@ -976,13 +976,15 @@ impl OptimizedSir {
 }
 
 /// Record the state objects written by combinational logic, including
-/// identity aliases, whose stores are about to be removed.
+/// identity aliases, whose stores are about to be removed, and the nets the
+/// frontend inlined into their readers, which it listed.
 fn collect_comb_writes(program: &mut OptimizedSir) {
     let mut comb_writes: crate::HashSet<AbsoluteAddr> = program
         .layout_requirements
         .state_aliases()
         .keys()
         .copied()
+        .chain(program.runtime.runtime_schema.comb_writes.iter().copied())
         .collect();
     for unit in &program.sir.eval_comb {
         for block in unit.blocks.values() {

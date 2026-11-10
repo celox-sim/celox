@@ -2332,6 +2332,7 @@ mod host {
         pub fn native_force_support(mut self, enable: bool) -> Self {
             self.options.native_force_support = enable;
             self.enforce_native_force_optimizer();
+            self.declare_unobserved_nets();
             self
         }
 
@@ -2386,6 +2387,33 @@ mod host {
                 crate::optimizer::OptimizeOptions::none().with_value_change_objects(watched);
             self.options.optimize_options.diagnostics = diagnostics;
             self.options.dead_store_policy = DeadStorePolicy::Off;
+        }
+
+        /// Tell the frontend which state the host observes, so it can take
+        /// the other combinational nets out of the program
+        /// ([`crate::SirPass::NetInlining`]). The dead-store policy names
+        /// that state, unless something else selects signals by name or at
+        /// run time: a waveform, a live or forced signal, a watched object.
+        fn declare_unobserved_nets(&mut self) {
+            let named = self.vcd_path.is_some()
+                || !self.live_signals.is_empty()
+                || !self.options.signal_access.live_signals.is_empty()
+                || !self.options.signal_access.force_signals.is_empty()
+                || !self
+                    .options
+                    .optimize_options
+                    .value_change_objects()
+                    .is_empty();
+            let policy = if named {
+                DeadStorePolicy::Off
+            } else {
+                self.options.dead_store_policy
+            };
+            self.options.optimize_options = self
+                .options
+                .optimize_options
+                .clone()
+                .with_unobserved_nets(policy);
         }
 
         /// Set the overall optimization level. Sets defaults for SIR passes,
@@ -3259,6 +3287,7 @@ mod host {
                 layout_mode
             };
             self.enforce_native_force_optimizer();
+            self.declare_unobserved_nets();
             let phase_timing = self.options.diagnostics.phase_timing;
             let compile_start = phase_timing.then(crate::timing::now);
             let injected_manifests = self.injected_components.manifests();
@@ -4027,6 +4056,7 @@ mod host {
                 .clone()
                 .with_inferred_latches(self.options.allow_inferred_latches);
             self.enforce_native_force_optimizer();
+            self.declare_unobserved_nets();
             let mut trace = crate::debug::CompilationTrace::default();
             let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::ElementStrided;
             let layout_mode = if self.vcd_path.is_some() {

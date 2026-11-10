@@ -681,6 +681,11 @@ pub fn parse_sv(
         // Native code applies explicit forces to reads the SLT has already
         // folded, outside any partition's dependencies.
         schedule_options.settle = celox_frontend_core::SettlePartitionMode::Off;
+    } else {
+        // Every reader of a pure SystemVerilog design is one of its own
+        // units, which the frontend sees; a host testbench compiled after
+        // it could read any signal.
+        schedule_options.unobserved_nets = optimize_options.unobserved_nets();
     }
     let frontend_start = diagnostics.phase_timing.then(crate::timing::now);
     let scheduled =
