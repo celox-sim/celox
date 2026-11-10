@@ -1349,6 +1349,25 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                         ("icarus", "procedural::randcase_in_always_comb") => {
                             ("compile_error", "compile", "source_0.sv:5: syntax error")
                         }
+                        ("icarus", "system_functions::coverage_selectors_and_database_names") => {
+                            ("compile_error", "compile", "macro SV_COV_TOGGLE undefined")
+                        }
+                        ("icarus", "system_functions::coverage_without_instrumentation") => {
+                            ("compile_error", "compile", "macro SV_COV_CHECK undefined")
+                        }
+                        (
+                            "verilator",
+                            "system_functions::coverage_selectors_and_database_names",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "reserved word not implemented: '$coverage_save'",
+                        ),
+                        ("verilator", "system_functions::coverage_without_instrumentation") => (
+                            "compile_error",
+                            "compile",
+                            "reserved word not implemented: '$coverage_control'",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

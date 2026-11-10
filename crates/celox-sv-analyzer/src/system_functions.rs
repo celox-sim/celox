@@ -80,6 +80,18 @@ pub enum SystemFunction {
     Bits,
     /// `$isunbounded` (20.6.3).
     Isunbounded,
+    /// `$coverage_control` (40.3.2.1).
+    CoverageControl,
+    /// `$coverage_get_max` (40.3.2.2).
+    CoverageGetMax,
+    /// `$coverage_get` (40.3.2.3).
+    CoverageGet,
+    /// `$coverage_merge` (40.3.2.4).
+    CoverageMerge,
+    /// `$coverage_save` (40.3.2.5).
+    CoverageSave,
+    /// `$get_coverage` (19.9).
+    GetCoverage,
     /// `$dimensions` (20.7).
     Dimensions,
     /// `$unpacked_dimensions` (20.7).
@@ -317,6 +329,12 @@ impl SystemFunction {
             Self::Typename => "$typename",
             Self::Bits => "$bits",
             Self::Isunbounded => "$isunbounded",
+            Self::CoverageControl => "$coverage_control",
+            Self::CoverageGetMax => "$coverage_get_max",
+            Self::CoverageGet => "$coverage_get",
+            Self::CoverageMerge => "$coverage_merge",
+            Self::CoverageSave => "$coverage_save",
+            Self::GetCoverage => "$get_coverage",
             Self::Dimensions => "$dimensions",
             Self::UnpackedDimensions => "$unpacked_dimensions",
             Self::Size => "$size",
@@ -368,6 +386,21 @@ impl SystemFunction {
             Support::Function(function) => Some(function),
             Support::Task(..) | Support::Unsupported => None,
         }
+    }
+
+    /// The coverage functions (19.9, 40.3.2), whose calls fold to their
+    /// results without coverage. None is a constant system function
+    /// (11.2.1).
+    pub fn is_coverage(self) -> bool {
+        matches!(
+            self,
+            Self::CoverageControl
+                | Self::CoverageGetMax
+                | Self::CoverageGet
+                | Self::CoverageMerge
+                | Self::CoverageSave
+                | Self::GetCoverage
+        )
     }
 
     /// The queries of a data object's or type's shape (20.6.2, 20.7), whose
@@ -527,6 +560,11 @@ impl SystemFunction {
             | Self::Clog2
             | Self::Countbits
             | Self::Countones
+            | Self::CoverageControl
+            | Self::CoverageGetMax
+            | Self::CoverageGet
+            | Self::CoverageMerge
+            | Self::CoverageSave
             | Self::ScopeRandomize
             | Self::ScopeRandomizeEnum => Some((32, true)),
             Self::Onehot
@@ -561,7 +599,11 @@ impl SystemFunction {
             | Self::Feof => Some((32, true)),
             Self::Urandom | Self::UrandomRange | Self::Stime | Self::Fopen => Some((32, false)),
             Self::Rtoi => Some((32, true)),
-            Self::Itor | Self::Bitstoreal | Self::Realtobits | Self::Realtime => Some((64, false)),
+            Self::Itor
+            | Self::Bitstoreal
+            | Self::Realtobits
+            | Self::Realtime
+            | Self::GetCoverage => Some((64, false)),
             Self::Shortrealtobits | Self::Bitstoshortreal => Some((32, false)),
             Self::Time => Some((64, false)),
             Self::Signed
@@ -597,6 +639,12 @@ pub enum SystemTask {
     /// `$printtimescale` (20.4.1); the analyzer rewrites it into a
     /// [`SystemTask::Display`] of the message.
     Printtimescale,
+    /// `$set_coverage_db_name` (40.3.2.7); with no coverage database the
+    /// analyzer drops the call.
+    SetCoverageDbName,
+    /// `$load_coverage_db` (40.3.2.7); with no coverage database the
+    /// analyzer drops the call.
+    LoadCoverageDb,
     /// `$fatal` (20.10).
     Fatal,
     /// `$error`, `$warning`, `$info` (20.10).
@@ -724,6 +772,8 @@ impl SystemTask {
             Self::Stop => "$stop",
             Self::Exit => "$exit",
             Self::Printtimescale => "$printtimescale",
+            Self::SetCoverageDbName => "$set_coverage_db_name",
+            Self::LoadCoverageDb => "$load_coverage_db",
             Self::Fatal => "$fatal",
             Self::Severity(Severity::Error) => "$error",
             Self::Severity(Severity::Warning) => "$warning",
@@ -2048,15 +2098,21 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     unsupported("$falling_gclk", Function),
     unsupported("$steady_gclk", Function),
     unsupported("$changing_gclk", Function),
-    // 20.13 Coverage system functions
-    unsupported("$coverage_control", Function),
-    unsupported("$coverage_get_max", Function),
-    unsupported("$coverage_get", Function),
-    unsupported("$coverage_merge", Function),
-    unsupported("$coverage_save", Function),
-    unsupported("$get_coverage", Function),
-    unsupported("$set_coverage_db_name", Task),
-    unsupported("$load_coverage_db", Task),
+    // 40.3.2 Coverage system functions. Celox collects no code coverage,
+    // so binding constant-folds them to their no-coverage results.
+    function(SystemFunction::CoverageControl, 4, Some(4)),
+    function(SystemFunction::CoverageGetMax, 3, Some(3)),
+    function(SystemFunction::CoverageGet, 3, Some(3)),
+    function(SystemFunction::CoverageMerge, 2, Some(2)),
+    function(SystemFunction::CoverageSave, 2, Some(2)),
+    function(SystemFunction::GetCoverage, 0, Some(0)),
+    task(
+        SystemTask::SetCoverageDbName,
+        ProceduralAndInitial,
+        1,
+        Some(1),
+    ),
+    task(SystemTask::LoadCoverageDb, ProceduralAndInitial, 1, Some(1)),
     // 20.14 Probabilistic distribution functions
     function(SystemFunction::Random, 0, Some(1)),
     function(SystemFunction::DistUniform, 3, Some(3)),

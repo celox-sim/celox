@@ -72,6 +72,7 @@ pub(in crate::ast) fn same_tables(a: &PackedDimensions, b: &PackedDimensions) ->
         && a.array_parameter_values.identity() == b.array_parameter_values.identity()
         && a.expression_signedness.identity() == b.expression_signedness.identity()
         && a.constant_indexed_base == b.constant_indexed_base
+        && a.constant_function_bodies == b.constant_function_bodies
         && a.scope_types_complete == b.scope_types_complete
         && a.type_query == b.type_query
         && Arc::ptr_eq(&a.subroutine_param_shapes, &b.subroutine_param_shapes)

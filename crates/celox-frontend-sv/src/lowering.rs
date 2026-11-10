@@ -9436,6 +9436,13 @@ fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
     use sv::ir::SystemFunction;
     let (width, signed) = function.result_type()?;
     let result = match function {
+        // The analyzer folds coverage calls to literals; none reach here.
+        SystemFunction::CoverageControl
+        | SystemFunction::CoverageGetMax
+        | SystemFunction::CoverageGet
+        | SystemFunction::CoverageMerge
+        | SystemFunction::CoverageSave
+        | SystemFunction::GetCoverage => return None,
         SystemFunction::Process(_) => return None,
         SystemFunction::Countbits => {
             let controls = operands[1..]

@@ -490,6 +490,7 @@ fn collect_module_constant_functions(
     dimensions.subroutine_param_names = Arc::new(subroutine_params.clone());
     dimensions.subroutine_param_shapes = Arc::new(subroutine_shapes);
     dimensions.subroutine_directions = Arc::new(subroutine_directions.clone());
+    dimensions.constant_function_bodies = true;
     let mut locals = Vec::new();
     let mut counter = 0usize;
     let mut state = procedural::BodyState {

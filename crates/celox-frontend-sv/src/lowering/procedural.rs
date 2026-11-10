@@ -1807,6 +1807,8 @@ pub(super) fn system_task_kind(task: sv::ir::SystemTask) -> Option<SystemTaskKin
         | SystemTask::Fdisplay(_)
         | SystemTask::Fwrite(_)
         | SystemTask::Printtimescale
+        | SystemTask::SetCoverageDbName
+        | SystemTask::LoadCoverageDb
         | SystemTask::Exit
         | SystemTask::Vcd(_) => return None,
     })
