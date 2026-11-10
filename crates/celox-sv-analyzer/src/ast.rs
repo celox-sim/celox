@@ -225,6 +225,7 @@ mod continuous_delays;
 mod events;
 mod mailboxes;
 mod net_delays;
+mod net_drives;
 mod processes;
 mod semaphores;
 pub use bound_patterns::BoundPattern;
@@ -628,6 +629,7 @@ impl Source {
                             r#type: signal.r#type.clone(),
                             is_net: signal.is_net,
                             unresolved_net: false,
+                            net_drive: NetDrive::None,
                             package_variable: None,
                             hierarchical: signal.paths.first().cloned(),
                         });
@@ -1645,6 +1647,7 @@ impl Module {
                 &mut signals,
                 &mut comb_processes,
             )?;
+            net_drives::lower(&ports, &instances, &signals, &mut comb_processes);
             continuous_delays::lower(
                 syntax_tree,
                 &packed_dimensions,
@@ -2288,6 +2291,16 @@ pub struct Port {
     default: Option<ConstExpr>,
 }
 
+/// The implicit driver of a pull or supply net (IEEE 1800-2023 6.6.5-6):
+/// a weak pull to the value, or a supply of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NetDrive {
+    #[default]
+    None,
+    Pull(bool),
+    Supply(bool),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signal {
     is_const: bool,
@@ -2295,6 +2308,7 @@ pub struct Signal {
     r#type: Type,
     is_net: bool,
     unresolved_net: bool,
+    net_drive: NetDrive,
     /// The package variable the signal denotes, as `(package, variable)`.
     package_variable: Option<(String, String)>,
     /// The hierarchical name of the signal of another instance the signal
@@ -2309,6 +2323,7 @@ impl Signal {
             r#type,
             is_net: false,
             unresolved_net: false,
+            net_drive: NetDrive::None,
             is_const: false,
             package_variable: None,
             hierarchical: None,
@@ -2321,6 +2336,7 @@ impl Signal {
             r#type,
             is_net: true,
             unresolved_net: false,
+            net_drive: NetDrive::None,
             is_const: false,
             package_variable: None,
             hierarchical: None,
@@ -2366,6 +2382,16 @@ impl Signal {
 
     pub(crate) fn with_unresolved_net(mut self, unresolved: bool) -> Self {
         self.unresolved_net = unresolved;
+        self
+    }
+
+    /// The implicit pull or supply driver of the net (6.6.5-6).
+    pub(crate) fn net_drive(&self) -> NetDrive {
+        self.net_drive
+    }
+
+    pub(crate) fn with_net_drive(mut self, drive: NetDrive) -> Self {
+        self.net_drive = drive;
         self
     }
 }

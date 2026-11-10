@@ -158,9 +158,20 @@ impl CompiledTier {
         heap: Box<celox_heap::Heap>,
     ) -> Self {
         debug_assert!(memory.capacity_words() >= code.required_image_words());
-        if memory.len_words() < code.required_image_words() {
-            memory.resize_zeroed_within_capacity(code.required_image_words());
+        let semantic_words = match &code {
+            #[cfg(feature = "cranelift")]
+            CompiledCode::Cranelift(shared) => shared.layout.merged_total_size.div_ceil(8),
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            CompiledCode::Native(shared) => shared.layout().merged_total_size.div_ceil(8),
+        };
+        if memory.len_words() > semantic_words {
+            memory.as_mut_slice()[semantic_words..].fill(0);
         }
+        memory.resize_zeroed_within_capacity(code.required_image_words());
         match code {
             #[cfg(feature = "cranelift")]
             CompiledCode::Cranelift(shared) => {
@@ -653,6 +664,44 @@ impl DerivedCompileRequest {
     }
 }
 
+/// Static analysis profile of the laid-out design.
+#[derive(Clone, Copy, Debug, Default)]
+struct DesignProfile {
+    total_instructions: usize,
+    has_unsupported_calls: bool,
+    has_wide_registers: bool,
+}
+
+impl DesignProfile {
+    fn analyze(laid_out: &LaidOutProgram) -> Self {
+        let mut total_instructions: usize = 0;
+        let mut has_unsupported_calls = false;
+        let mut has_wide_registers = false;
+        for unit in laid_out.sir.units() {
+            if unit.register_map.values().any(|ty| ty.width() > 4096) {
+                has_wide_registers = true;
+            }
+            for block in unit.blocks.values() {
+                total_instructions = total_instructions.saturating_add(block.instructions.len());
+                for inst in &block.instructions {
+                    if matches!(inst, celox_sir::SIRInstruction::Call { .. }) {
+                        has_unsupported_calls = true;
+                    }
+                }
+            }
+        }
+        Self {
+            total_instructions,
+            has_unsupported_calls,
+            has_wide_registers,
+        }
+    }
+
+    fn requires_whole_image_escalation(&self) -> bool {
+        self.has_unsupported_calls || self.has_wide_registers || self.total_instructions > 4096
+    }
+}
+
 /// The tick counter of the program's compiled testbench, if it has one.
 fn testbench_ticks(laid_out: &LaidOutProgram, interp: &InterpBackend) -> Option<SignalRef> {
     let scheduler = laid_out.runtime.testbench.as_ref()?.scheduler()?;
@@ -712,6 +761,9 @@ pub struct TieredBackend {
     compile_log: CompileLog,
     /// The compiled testbench's tick counter, when the program has one.
     ticks: Option<SignalRef>,
+    #[cfg(hotspot_jit)]
+    promoted_hotspot_stats: Option<super::HotspotStats>,
+    design_profile: DesignProfile,
 }
 
 impl TieredBackend {
@@ -722,6 +774,7 @@ impl TieredBackend {
         not(feature = "arm64-codegen")
     ))]
     pub(crate) fn publish_scheduler_for_test(&mut self) {
+        self.keep_incremental_for_test();
         let Phase::Interpreting(Some(interp)) = &mut self.phase else {
             panic!("scheduler test requires the mixed executor");
         };
@@ -737,10 +790,34 @@ impl TieredBackend {
         not(feature = "arm64-codegen")
     ))]
     pub(crate) fn interp_for_test(&mut self) -> &mut crate::backend::InterpBackend {
+        self.keep_incremental_for_test();
         let Phase::Interpreting(Some(interp)) = &mut self.phase else {
             panic!("scheduler test requires the mixed executor");
         };
         interp
+    }
+
+    /// Stop the background whole-image compiler so a test that inspects the
+    /// mixed executor keeps it for the rest of the run. Large designs
+    /// escalate to whole-image code once it is ready, which would otherwise
+    /// replace the executor under test at a timing-dependent safe point.
+    /// Hotspot compilation is left running.
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        target_arch = "x86_64",
+        not(feature = "arm64-codegen")
+    ))]
+    fn keep_incremental_for_test(&mut self) {
+        if !matches!(self.phase, Phase::Interpreting(Some(_))) {
+            return;
+        }
+        self.upgrade_receiver = None;
+        self.cancel.cancel();
+        self.derived_compile_request = None;
+        if matches!(self.promotion, Promotion::Pending(_)) {
+            self.promotion = Promotion::Disabled;
+        }
     }
 
     /// Build a tiered simulation targeting this host's default compiled
@@ -759,6 +836,7 @@ impl TieredBackend {
             && options.optimize_options.parallel_lanes() == 1
             && !options.native_force_support
             && options.signal_access.force_signals.is_empty()
+            && !DesignProfile::analyze(laid_out).requires_whole_image_escalation()
         {
             let mut interpreting = options.clone();
             interpreting.tier_promotion = crate::TierPromotion::Never;
@@ -774,6 +852,7 @@ impl TieredBackend {
             }
             return backend;
         }
+
         if native_is_default_target() {
             #[cfg(any(
                 target_arch = "x86_64",
@@ -897,7 +976,16 @@ impl TieredBackend {
         options: &SimulatorOptions,
     ) -> Result<Self, SimulatorError> {
         if options.hotspot_jit {
-            Ok(Self::new(laid_out, options))
+            let mut interpreting = options.clone();
+            interpreting.tier_promotion = crate::TierPromotion::Never;
+            let mut backend = Self::with_compiler(laid_out, &interpreting, |_, _, _| {
+                unreachable!("scheduler test requires the mixed executor")
+            });
+            if let Phase::Interpreting(Some(interp)) = &mut backend.phase {
+                interp.enable_hotspots(options)?;
+                interp.prepare_hotspot_scheduler(laid_out);
+            }
+            Ok(backend)
         } else {
             let mut interpreting = options.clone();
             interpreting.tier_promotion = crate::TierPromotion::Never;
@@ -952,7 +1040,33 @@ impl TieredBackend {
             let len = interp.image_word_len();
             let lanes = options.optimize_options.parallel_lanes() as usize;
             let slack = (len.max(1024) / 8).saturating_mul(lanes);
-            interp.reserve_image_capacity(len + slack.max(1024));
+            #[cfg(hotspot_jit)]
+            let hotspot_slack = if options.hotspot_jit {
+                crate::backend::hotspot::SCRATCH_BYTES / 8
+            } else {
+                0
+            };
+            #[cfg(not(hotspot_jit))]
+            let hotspot_slack = 0;
+            interp.reserve_image_capacity(len + slack.max(1024) + hotspot_slack);
+        }
+        #[cfg(hotspot_jit)]
+        if options.hotspot_jit
+            && !matches!(
+                options.tier_promotion,
+                crate::simulator::TierPromotion::Never
+            )
+            && !options.trace.native
+            && !options.trace.mir
+            && options.optimize_options.parallel_lanes() == 1
+            && !options.native_force_support
+            && options.signal_access.force_signals.is_empty()
+        {
+            if let Err(error) = interp.enable_hotspots(options) {
+                tracing::warn!("failed to enable hotspot JIT on tiered backend: {error}");
+            } else {
+                interp.prepare_hotspot_scheduler(laid_out);
+            }
         }
         let events = interp
             .id_to_event_slice()
@@ -985,6 +1099,11 @@ impl TieredBackend {
             match std::thread::Builder::new()
                 .name("celox-jit-compile".to_string())
                 .spawn(move || {
+                    #[cfg(target_os = "linux")]
+                    unsafe {
+                        let thread = libc::syscall(libc::SYS_gettid) as libc::id_t;
+                        libc::setpriority(libc::PRIO_PROCESS, thread, 10);
+                    }
                     // The result is delivered through the channel instead of the
                     // join handle so safe-point polls never block on compilation.
                     // A panicked worker surfaces as a disconnected channel and
@@ -1021,6 +1140,7 @@ impl TieredBackend {
             _ => 0,
         };
 
+        let design_profile = DesignProfile::analyze(laid_out);
         Self {
             phase: Phase::Interpreting(Some(interp)),
             promotion,
@@ -1041,6 +1161,9 @@ impl TieredBackend {
             execution_timing: None,
             compile_log,
             ticks,
+            #[cfg(hotspot_jit)]
+            promoted_hotspot_stats: None,
+            design_profile,
         }
     }
 
@@ -1080,7 +1203,33 @@ impl TieredBackend {
         // the single-stage slack before the image can be observed.
         let len = interp.image_word_len();
         let slack = len.max(1024) / 4;
-        interp.reserve_image_capacity(len + slack.max(1024));
+        #[cfg(hotspot_jit)]
+        let hotspot_slack = if baseline_options.hotspot_jit {
+            crate::backend::hotspot::SCRATCH_BYTES / 8
+        } else {
+            0
+        };
+        #[cfg(not(hotspot_jit))]
+        let hotspot_slack = 0;
+        interp.reserve_image_capacity(len + slack.max(1024) + hotspot_slack);
+        #[cfg(hotspot_jit)]
+        if baseline_options.hotspot_jit
+            && !matches!(
+                baseline_options.tier_promotion,
+                crate::simulator::TierPromotion::Never
+            )
+            && !baseline_options.trace.native
+            && !baseline_options.trace.mir
+            && baseline_options.optimize_options.parallel_lanes() == 1
+            && !baseline_options.native_force_support
+            && baseline_options.signal_access.force_signals.is_empty()
+        {
+            if let Err(error) = interp.enable_hotspots(baseline_options) {
+                tracing::warn!("failed to enable hotspot JIT in two-stage tiered backend: {error}");
+            } else {
+                interp.prepare_hotspot_scheduler(laid_out);
+            }
+        }
         let events = interp
             .id_to_event_slice()
             .iter()
@@ -1126,6 +1275,11 @@ impl TieredBackend {
         let (promotion, compiler_worker) = match std::thread::Builder::new()
             .name("celox-jit-compile".to_string())
             .spawn(move || {
+                #[cfg(target_os = "linux")]
+                unsafe {
+                    let thread = libc::syscall(libc::SYS_gettid) as libc::id_t;
+                    libc::setpriority(libc::PRIO_PROCESS, thread, 10);
+                }
                 let span = tracing::info_span!("celox.tiered.compile", target = "native");
                 span.in_scope(|| {
                     let result = logged(&worker_log, TieredCompileKind::Baseline, || {
@@ -1212,6 +1366,7 @@ impl TieredBackend {
             _ => 0,
         };
 
+        let design_profile = DesignProfile::analyze(laid_out);
         Self {
             phase: Phase::Interpreting(Some(interp)),
             promotion,
@@ -1232,6 +1387,9 @@ impl TieredBackend {
             execution_timing: None,
             compile_log,
             ticks,
+            #[cfg(hotspot_jit)]
+            promoted_hotspot_stats: None,
+            design_profile,
         }
     }
 
@@ -1246,8 +1404,16 @@ impl TieredBackend {
     pub fn hotspot_stats(&self) -> Option<super::HotspotStats> {
         match &self.phase {
             Phase::Interpreting(Some(interp)) => interp.hotspot_stats(),
-            _ => None,
+            _ => self.promoted_hotspot_stats.clone(),
         }
+    }
+
+    /// Return the static analysis profile of the design: (total instructions, requires whole-image escalation).
+    pub fn design_profile(&self) -> (usize, bool) {
+        (
+            self.design_profile.total_instructions,
+            self.design_profile.requires_whole_image_escalation(),
+        )
     }
 
     /// Return deterministic lifecycle and execution measurements.
@@ -1344,11 +1510,13 @@ impl TieredBackend {
     /// a finished worker can ignore the call cheaply.
     pub fn cancel_background_compilation(&mut self) -> bool {
         #[cfg(hotspot_jit)]
-        if let Phase::Interpreting(Some(interp)) = &mut self.phase {
-            if interp.cancel_hotspots() {
-                return true;
-            }
-        }
+        let hotspot_cancelled = if let Phase::Interpreting(Some(interp)) = &mut self.phase {
+            interp.cancel_hotspots()
+        } else {
+            false
+        };
+        #[cfg(not(hotspot_jit))]
+        let hotspot_cancelled = false;
         let promotion_pending = matches!(self.promotion, Promotion::Pending(_));
         let upgrade_pending = self.upgrade_receiver.take().is_some();
         self.cancel.cancel();
@@ -1356,7 +1524,7 @@ impl TieredBackend {
         if promotion_pending {
             self.promotion = Promotion::Failed(super::compile_cancel::cancelled_error());
         }
-        promotion_pending || upgrade_pending
+        promotion_pending || upgrade_pending || hotspot_cancelled
     }
 
     /// Record one evaluation iteration against the currently active tier.
@@ -1438,6 +1606,10 @@ impl TieredBackend {
         let mut adopted = None;
         if let Phase::Interpreting(slot) = &mut self.phase {
             if let Some(mut interp) = slot.take() {
+                #[cfg(hotspot_jit)]
+                {
+                    self.promoted_hotspot_stats = interp.hotspot_stats();
+                }
                 let (memory, runtime_event_buffer, comb_capture_enabled, heap) =
                     interp.tier_transfer();
                 drop(interp);
@@ -1596,9 +1768,10 @@ impl SimBackend for TieredBackend {
     }
 
     fn compiled_scheduler_budget(&self) -> u64 {
-        // A native loop must return periodically so an optimizing image can
-        // replace the baseline while a long simulation is still running.
-        if self.upgrade_receiver.is_some() {
+        // A native loop or hotspot scheduler must return periodically so
+        // a pending whole-image promotion or an optimizing upgrade can be
+        // adopted while a long simulation is still running.
+        if self.upgrade_receiver.is_some() || matches!(self.promotion, Promotion::Pending(_)) {
             1024
         } else {
             u64::MAX

@@ -140,6 +140,7 @@ impl Declarations {
             subroutines: Vec::new(),
             class_stack: Vec::new(),
             classes: Vec::new(),
+            class_scopes: Vec::new(),
             default_nettype: Some("wire".to_string()),
         };
         let units = parser.units()?;
@@ -372,6 +373,10 @@ struct Parser<'a> {
     /// Classes whose `endclass` is still ahead, innermost last.
     class_stack: Vec<ClassDeclaration>,
     classes: Vec<ClassDeclaration>,
+    /// The scope each finished class in `classes` was declared in, by
+    /// index: its package, if any, then its outer classes, for completing
+    /// scoped external constraints (18.5.1).
+    class_scopes: Vec<Vec<String>>,
     /// The net type of implicit nets (IEEE 1800-2023 22.8), `None` after
     /// `default_nettype none`.
     default_nettype: Option<String>,

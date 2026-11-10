@@ -53,6 +53,29 @@ pub fn interface_prototypes_with_options(
     selected: Option<&HashSet<String>>,
     options: crate::AnalysisOptions,
 ) -> Result<Vec<InterfacePrototype>, AnalyzerError> {
+    prototypes(sources, selected, options, true)
+}
+
+/// The prototypes of the interfaces in `selected`, built without analyzing
+/// any package or compilation unit when their declarations need none,
+/// which [`super::virtual_interfaces::VirtualInterfaces::declarations_of`]
+/// tries first: analyzing the packages of a large design such as UVM takes
+/// most of an elaboration. An interface that names a package's declaration
+/// fails here; build it with [`interface_prototypes_with_options`] then.
+pub(super) fn prototypes_without_packages(
+    sources: &[(&str, &Path)],
+    selected: Option<&HashSet<String>>,
+    options: crate::AnalysisOptions,
+) -> Result<Vec<InterfacePrototype>, AnalyzerError> {
+    prototypes(sources, selected, options, false)
+}
+
+fn prototypes(
+    sources: &[(&str, &Path)],
+    selected: Option<&HashSet<String>>,
+    options: crate::AnalysisOptions,
+    analyze_packages: bool,
+) -> Result<Vec<InterfacePrototype>, AnalyzerError> {
     if selected.is_some_and(HashSet::is_empty) {
         return Ok(Vec::new());
     }
@@ -97,8 +120,12 @@ pub fn interface_prototypes_with_options(
         .zip(sources)
         .map(|(file, (_, path))| (&file.syntax_tree, *path))
         .collect::<Vec<_>>();
-    let packages = packages::Packages::analyze_with_options(&trees, None, options)
-        .map_err(|error| error.with_warnings(source_warnings))?;
+    let packages = if analyze_packages {
+        packages::Packages::analyze_with_options(&trees, None, options)
+            .map_err(|error| error.with_warnings(source_warnings))?
+    } else {
+        packages::Packages::default()
+    };
     let package_warnings = packages.warnings().to_vec();
     let mut used_names = design
         .modules

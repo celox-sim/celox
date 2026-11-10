@@ -1,6 +1,9 @@
 use super::*;
 
 sv_backends! {
+    fn wildcard_index(sim) { @case "containers::wildcard_index"; }
+    fn pattern_type_keys(sim) { @case "containers::pattern_type_keys"; }
+
     fn shuffle_integral(sim) { @case "containers::shuffle_integral"; }
     fn shuffle_four_state(sim) { @case "containers::shuffle_four_state"; }
     fn shuffle_handles(sim) { @case "containers::shuffle_handles"; }

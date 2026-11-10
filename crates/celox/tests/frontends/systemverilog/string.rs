@@ -1,6 +1,8 @@
 use super::*;
 
 sv_backends! {
+    fn string_real_conversions(sim) { @case "string::real_conversions"; }
+
     fn local_bindings_shadow_imported_string_types(sim) {
         @case "string::local_bindings_shadow_imported_string_types";
     }

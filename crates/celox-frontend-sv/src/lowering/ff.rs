@@ -4166,8 +4166,14 @@ impl<'p, 'a> Ff<'p, 'a> {
                 amount,
                 ticks_per_unit,
                 ticks_per_precision,
+                precision_steps_per_tick,
             } => {
-                self.delay(amount, *ticks_per_unit, *ticks_per_precision)?;
+                self.delay(
+                    amount,
+                    *ticks_per_unit,
+                    *ticks_per_precision,
+                    *precision_steps_per_tick,
+                )?;
                 Ok(true)
             }
             sv::ir::Stmt::WaitEvent(items) => {
@@ -5263,6 +5269,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     copy,
                     SvVariable {
                         path: vec![copy_name],
+                        activation_scratch: true,
                         ..variable
                     },
                 );
@@ -6081,6 +6088,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     copy,
                     SvVariable {
                         path: vec![name],
+                        activation_scratch: true,
                         ..variable
                     },
                 );
@@ -6235,6 +6243,14 @@ impl<'p, 'a> Ff<'p, 'a> {
             .map(|id| {
                 let (value, value_name) = self.m.shadow(id, "nba_value", false);
                 let (mask, mask_name) = self.m.shadow(id, "nba_mask", true);
+                // Staging of one activation's update.
+                for staging in [value, mask] {
+                    self.m
+                        .variables
+                        .get_mut(&staging)
+                        .expect("a new staging copy")
+                        .activation_scratch = true;
+                }
                 NbaStage {
                     id,
                     name: self.m.var(id).path.join("."),
@@ -7252,17 +7268,18 @@ impl Ff<'_, '_> {
         }
         prune_unreachable_blocks(&mut unit);
         let frame = self.forked.then(|| {
-            let mut private = self.m.created[first_created..].to_vec();
+            // Each activation has its own scratch: the values its lowering
+            // keeps across its own suspensions. Lexical locals are cells of
+            // `locals`, not frame state; every other variable the lowering
+            // made, such as the time slot, the held gate, the change counts
+            // of boxes, or the sampled copies and `$past` histories the
+            // runtime maintains, is the module's.
+            let mut private: Vec<_> = self.m.created[first_created..]
+                .iter()
+                .copied()
+                .filter(|id| self.m.var(*id).activation_scratch && !self.frame_locals.contains(id))
+                .collect();
             private.extend([slots.resume, slots.status, slots.delay]);
-            // The change counts of boxes are the module's, which every
-            // activation bumps and every waiter watches; so is the gate that
-            // holds 1, which the writes of the activations judge.
-            private.retain(|id| {
-                !self.frame_locals.contains(id)
-                    && Some(*id) != self.m.id(TIME_SLOT)
-                    && Some(*id) != self.m.id(super::procedural::HELD_GATE)
-                    && !self.m.box_changes.contains(id)
-            });
             celox_design::ProcessFrame {
                 resume_count,
                 private,
@@ -7702,21 +7719,31 @@ impl Ff<'_, '_> {
     /// `#amount` (IEEE 1800-2023 9.4.1). The amount is self-determined and
     /// read as an unsigned 64-bit time: a negative value as its two's
     /// complement, and a value with an unknown bit as zero. `#0` resumes in
-    /// the inactive region.
+    /// the inactive region. A real amount is rounded to the precision of the
+    /// declaring scope, then to whole ticks of the global precision
+    /// (3.14.1), as a time literal is.
     fn delay(
         &mut self,
         amount: &sv::ir::Expr,
         ticks_per_unit: u64,
         ticks_per_precision: u64,
+        precision_steps_per_tick: u64,
     ) -> Result<(), sv::AnalyzerError> {
         // Only integral constants are recorded; a real delay counts as
         // variable.
         let mut constant = None;
         let (mut delay, ticks_per_step) = match self.m.expr_float_precision(amount) {
-            Some(precision) => (
-                self.real_delay(amount, precision, ticks_per_unit / ticks_per_precision)?,
-                ticks_per_precision,
-            ),
+            Some(precision) => {
+                let steps = self.real_delay(
+                    amount,
+                    precision,
+                    ticks_per_unit * precision_steps_per_tick / ticks_per_precision,
+                )?;
+                (
+                    self.round_to_ticks(steps, precision_steps_per_tick),
+                    ticks_per_precision,
+                )
+            }
             None => {
                 let signed = self.expr_signed(amount);
                 constant = self
@@ -7815,6 +7842,53 @@ impl Ff<'_, '_> {
         )
         .ok_or_else(|| unsupported("real delay conversion"))?;
         self.lower_slt(&arena, node)
+    }
+
+    /// `steps` precision steps in whole ticks, `steps_per_tick` steps to a
+    /// tick, rounded to the nearest tick with ties up, as a time literal is.
+    fn round_to_ticks(&mut self, steps: RegisterId, steps_per_tick: u64) -> RegisterId {
+        if steps_per_tick <= 1 {
+            return steps;
+        }
+        let constant = |this: &mut Self, value: u64| {
+            let register = this.b.alloc_bit(PROCESS_DELAY_WIDTH, false);
+            this.b
+                .emit(SIRInstruction::Imm(register, SIRValue::new(value)));
+            register
+        };
+        let divisor = constant(self, steps_per_tick);
+        let quotient = self.b.alloc_bit(PROCESS_DELAY_WIDTH, false);
+        self.b.emit(SIRInstruction::Binary(
+            quotient,
+            steps,
+            BinaryOp::DivU,
+            divisor,
+        ));
+        let remainder = self.b.alloc_bit(PROCESS_DELAY_WIDTH, false);
+        self.b.emit(SIRInstruction::Binary(
+            remainder,
+            steps,
+            BinaryOp::RemU,
+            divisor,
+        ));
+        // One more tick when the remainder is at least half a tick: the
+        // remainder plus the rest of the tick reaches a whole one. Below
+        // twice the tick, the sum cannot wrap.
+        let rest = constant(self, steps_per_tick - steps_per_tick / 2);
+        let sum = self.b.alloc_bit(PROCESS_DELAY_WIDTH, false);
+        self.b
+            .emit(SIRInstruction::Binary(sum, remainder, BinaryOp::Add, rest));
+        let carry = self.b.alloc_bit(PROCESS_DELAY_WIDTH, false);
+        self.b
+            .emit(SIRInstruction::Binary(carry, sum, BinaryOp::DivU, divisor));
+        let rounded = self.b.alloc_bit(PROCESS_DELAY_WIDTH, false);
+        self.b.emit(SIRInstruction::Binary(
+            rounded,
+            quotient,
+            BinaryOp::Add,
+            carry,
+        ));
+        rounded
     }
 
     /// `value` as a two-state register that is zero when `source` has an
@@ -8157,6 +8231,7 @@ impl Ff<'_, '_> {
             value_kind: Default::default(),
             sampled_from: None,
             history_of: None,
+            activation_scratch: false,
         };
         let (gated, _) = self.m.event_variable(index, None, counter.clone());
         let (all, _) = self
@@ -8237,6 +8312,7 @@ impl Ff<'_, '_> {
                 force_control: None,
                 sampled_from: None,
                 history_of: None,
+                activation_scratch: false,
                 value_kind: Default::default(),
             },
         );
@@ -8379,6 +8455,7 @@ impl Ff<'_, '_> {
                 copy,
                 SvVariable {
                     path: vec![copy_name],
+                    activation_scratch: true,
                     ..variable
                 },
             );

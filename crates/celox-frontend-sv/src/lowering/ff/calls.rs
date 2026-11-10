@@ -1959,7 +1959,7 @@ impl Ff<'_, '_> {
     /// The count is a module variable, which the unit and the units it
     /// passes the box to write (see `ProcModule::box_changes`).
     fn box_changes(&mut self) -> sv::ir::ChangeKey {
-        let (counter, _) = self.m.temp(
+        let (counter, _) = self.m.module_temp(
             "box_changes",
             super::super::ff::PROPERTY_CHANGES_WIDTH,
             false,
@@ -2294,6 +2294,7 @@ impl Ff<'_, '_> {
                 force_control: None,
                 sampled_from: None,
                 history_of: None,
+                activation_scratch: true,
                 ..variable
             },
         );

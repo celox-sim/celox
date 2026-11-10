@@ -1624,3 +1624,18 @@
   "#)
   (top Top) (run_until 0)
   (assert_eq sum 110))
+(case pull_and_supply_nets
+  (source "pull_supply.sv" #"
+module Top(output bit ok);
+  tri1 [3:0] a;
+  tri0 [3:0] b;
+  supply1 s1;
+  supply0 s0;
+  tri1 driven;
+  assign driven = 1'b0;
+  always_comb ok = a === 4'b1111 && b === 4'b0000 && s1 === 1'b1
+    && s0 === 1'b0 && driven === 1'b0;
+endmodule
+"#)
+  (four_state) (top Top) (run_until 0) (assert_eq ok 1))
+

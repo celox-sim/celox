@@ -10,18 +10,24 @@
       "design": "XuanTie-E902",
       "test": "hello",
       "payload": "Hello Friend!",
+      "expectedCycles": 5392,
       "maxCycles": 16384
     },
     "e906": {
       "design": "XuanTie-E906",
       "test": "hello",
       "payload": "Hello Friend!",
+      "expectedCycles": 9816,
       "maxCycles": 32768
     },
     "e203": {
       "design": "HummingbirdV2-E203",
       "test": "hello",
       "payload": "Hello World from HummingbirdV2 E203",
+      "expectedCycles": {
+        "two-state": 5079,
+        "four-state": 5080
+      },
       "maxCycles": 16384,
       "configuration": "default",
       "successMarker": "TEST_PASSED",

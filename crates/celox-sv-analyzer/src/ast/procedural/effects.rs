@@ -1440,6 +1440,14 @@ impl BodyBuilder<'_, '_, '_> {
                 "increment or decrement of an unpacked structure",
             ));
         }
+        assignments::check_enum_update(
+            self.tree,
+            self.session,
+            operand,
+            native,
+            &self.dims,
+            if increment { "++" } else { "--" },
+        )?;
         // A virtual interface is no number to step (IEEE 1800-2023 25.9).
         if let Some(ty) =
             virtual_interfaces::native_type(self.tree, self.session, operand, native, &self.dims)

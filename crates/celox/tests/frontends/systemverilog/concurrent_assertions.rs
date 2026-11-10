@@ -1,3 +1,5 @@
+use super::*;
+
 sv_backends! {
 fn overlapped_boolean_implication(sim) { @case "concurrent_assertions::overlapped_boolean_implication"; }
 fn overlapped_unknown_antecedent(sim) { @case "concurrent_assertions::overlapped_unknown_antecedent"; }
@@ -91,5 +93,47 @@ fn expect_names_resolve_in_their_scope() {
             num_bigint::BigUint::from(2u8),
             "four-state {four_state}"
         );
+    }
+}
+
+sv_backends! {
+    // An assertion whose action calls a subroutine that reads its process
+    // (`process::self`) runs in a process with a frame of its own. The
+    // sampled copies and `$past` histories of its predicate are the
+    // runtime's: it samples them at each time step and commits the
+    // histories, so they are no state of the frame (IEEE 1800-2023 16.5.1,
+    // 16.9.3).
+    fn sampled_values_of_processes_with_frames(sim) {
+        @setup {
+            let source = r#"
+                `timescale 1ns/1ns
+                module Top(output int passes, output int passed_at, output int failures);
+                    bit clk = 0;
+                    bit q = 1;
+                    int cycle = 0;
+                    function automatic void note();
+                        process p = process::self();
+                        failures++;
+                    endfunction
+                    always @(posedge clk) begin
+                        cycle <= cycle + 1;
+                        if (cycle == 5) q = 0;
+                    end
+                    assert property (@(posedge clk) $fell(q)) begin
+                        passes++;
+                        passed_at = cycle;
+                    end else note();
+                    initial repeat (20) #5 clk = ~clk;
+                endmodule
+            "#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("framed_sampled.sv"))], "Top");
+        sim.run_until(200).unwrap();
+        // `q` falls at the sixth edge; the seventh samples the fall. The
+        // action runs in the Reactive region, after that edge's nonblocking
+        // update of `cycle` (IEEE 1800-2023 16.14.1, 4.4.2).
+        assert_eq!(sim.get(sim.signal("passes")), 1u32.into());
+        assert_eq!(sim.get(sim.signal("passed_at")), 7u32.into());
+        assert_eq!(sim.get(sim.signal("failures")), 9u32.into());
     }
 }

@@ -25,6 +25,13 @@ const IDENTITY_PREFIX: &str = "$vifid$";
 /// The prefix of the signal a select through a virtual interface member is
 /// bound against before it is applied to the member of each instance.
 const TEMPLATE_PREFIX: &str = "$viftemplate$";
+/// The prefix of the signal that stands for member `<member>` of whichever
+/// instance of interface `<interface>` an access selects, before the
+/// frontend knows the instances: `$vifany$<interface>$<member>`.
+const PLACEHOLDER_PREFIX: &str = "$vifany$";
+/// The prefix of the signal that stands for the id of that instance:
+/// `$vifinstance$<interface>`.
+const INSTANCE_PREFIX: &str = "$vifinstance$";
 
 /// A virtual interface type: an interface, with a modport if one is
 /// selected (IEEE 1800-2023 25.9).
@@ -52,14 +59,13 @@ impl VirtualInterface {
     }
 }
 
-/// The interfaces that virtual interface types of a design name, and the
-/// instances of each. The frontend builds it: the declarations from the
-/// interface signatures, the instance ids from the elaborated hierarchy.
+/// The interfaces that virtual interface types of a design name, from the
+/// interface signatures. Analysis does not know their instances, which the
+/// frontend numbers in the elaborated hierarchy and repeats each access for
+/// (see [`crate::ir::Module::expand_virtual_interface_instances`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VirtualInterfaces {
     pub interfaces: HashMap<String, VirtualInterfaceDeclaration>,
-    /// The instances are those of the elaborated design, not yet unknown.
-    pub elaborated: bool,
 }
 
 /// An interface that a virtual interface type names.
@@ -69,9 +75,6 @@ pub struct VirtualInterfaceDeclaration {
     pub members: Vec<VirtualInterfaceMember>,
     /// Each modport with the members it lists and their directions.
     pub modports: HashMap<String, Vec<(String, String)>>,
-    /// The ids of the instances of the interface in the elaborated design,
-    /// the values a virtual interface of it may hold besides `null`.
-    pub instances: Vec<u32>,
     /// The interface has parameters, whose values are part of the type.
     pub parameterized: bool,
 }
@@ -106,9 +109,18 @@ impl VirtualInterfaces {
             return Ok(None);
         }
         let mut declarations = VirtualInterfaces::default();
-        for prototype in
-            interfaces::interface_prototypes_with_options(sources, Some(&names), options.clone())?
-        {
+        // Building the prototypes needs the packages only when an interface
+        // names one of their declarations.
+        let prototypes =
+            interfaces::prototypes_without_packages(sources, Some(&names), options.clone())
+                .or_else(|_| {
+                    interfaces::interface_prototypes_with_options(
+                        sources,
+                        Some(&names),
+                        options.clone(),
+                    )
+                })?;
+        for prototype in prototypes {
             let module = &prototype.module;
             // Member bounds may name the interface's constants.
             let constants = module
@@ -154,7 +166,6 @@ impl VirtualInterfaces {
                 VirtualInterfaceDeclaration {
                     members,
                     modports,
-                    instances: Vec::new(),
                     parameterized: !prototype.parameters.is_empty(),
                 },
             );
@@ -207,11 +218,32 @@ pub enum VirtualInterfaceSignal {
     /// virtual interface is bound against before it is applied to the member
     /// of each instance; it denotes no instance's member.
     Template { interface: String, member: String },
+    /// Member `member` of the instance of interface `interface` that an
+    /// access selects: analysis builds each access once with it, for the
+    /// frontend to repeat for every instance of the elaborated design (see
+    /// [`crate::ir::Module::expand_virtual_interface_instances`]).
+    Placeholder { interface: String, member: String },
+    /// The id of that instance, which the access compares its handle with.
+    Instance { interface: String },
 }
 
 impl VirtualInterfaceSignal {
     /// The kind of a signal named `name`, if the frontend binds it.
     pub fn of(name: &str) -> Option<Self> {
+        if let Some((interface, member)) = name
+            .strip_prefix(PLACEHOLDER_PREFIX)
+            .and_then(|rest| rest.split_once('$'))
+        {
+            return Some(Self::Placeholder {
+                interface: interface.to_owned(),
+                member: member.to_owned(),
+            });
+        }
+        if let Some(interface) = name.strip_prefix(INSTANCE_PREFIX) {
+            return Some(Self::Instance {
+                interface: interface.to_owned(),
+            });
+        }
         if let Some(handle) = name.strip_prefix(IDENTITY_PREFIX) {
             return Some(Self::Identity {
                 handle: handle.to_owned(),
@@ -233,13 +265,17 @@ impl VirtualInterfaceSignal {
         })
     }
 
-    pub(super) fn name(&self) -> String {
+    pub(crate) fn name(&self) -> String {
         match self {
             Self::Member { id, member } => format!("{MEMBER_PREFIX}{id}${member}"),
             Self::Identity { handle } => format!("{IDENTITY_PREFIX}{handle}"),
             Self::Template { interface, member } => {
                 format!("{TEMPLATE_PREFIX}{interface}${member}")
             }
+            Self::Placeholder { interface, member } => {
+                format!("{PLACEHOLDER_PREFIX}{interface}${member}")
+            }
+            Self::Instance { interface } => format!("{INSTANCE_PREFIX}{interface}"),
         }
     }
 }
@@ -294,12 +330,14 @@ pub(super) fn bind_type(
 }
 
 /// The member `member` that a virtual interface of type `ty` reaches, with
-/// the signals that denote it in each instance the value may denote.
+/// the signal that denotes it in the instance the value selects and the id
+/// that instance has: placeholders, which the frontend repeats for each
+/// instance of the elaborated design, so analysis does not depend on them.
 pub(super) fn member<'a>(
     state: &'a Session,
     ty: &VirtualInterface,
     member: &str,
-) -> Converted<(&'a VirtualInterfaceMember, Vec<(u32, String)>)> {
+) -> Converted<(&'a VirtualInterfaceMember, Vec<(Expr, String)>)> {
     let declaration = declarations(state)
         .and_then(|declarations| declarations.interfaces.get(&ty.interface))
         .ok_or_else(|| unsupported(format!("virtual interface type of `{}`", ty.interface)))?;
@@ -319,21 +357,16 @@ pub(super) fn member<'a>(
             ty.interface
         )));
     }
-    let signals = declaration
-        .instances
-        .iter()
-        .map(|&id| {
-            (
-                id,
-                VirtualInterfaceSignal::Member {
-                    id,
-                    member: member.to_owned(),
-                }
-                .name(),
-            )
-        })
-        .collect();
-    Ok((found, signals))
+    let instance = VirtualInterfaceSignal::Instance {
+        interface: ty.interface.clone(),
+    }
+    .name();
+    let signal = VirtualInterfaceSignal::Placeholder {
+        interface: ty.interface.clone(),
+        member: member.to_owned(),
+    }
+    .name();
+    Ok((found, vec![(Expr::Ident(instance), signal)]))
 }
 
 /// An error if member `member` of a virtual interface of type `ty` is an
@@ -364,49 +397,66 @@ pub(super) fn check_write(
     Ok(())
 }
 
-/// The signals that denote the members of every interface instance that a
-/// virtual interface may denote, which each scope declares.
+/// The signals through which each scope reaches the members of the
+/// interface instances that virtual interfaces may denote: the templates
+/// selects are bound against, and per interface the placeholders of the
+/// selected instance's members and id, which the frontend replaces with the
+/// signals of each instance (see [`crate::ir::Module::expand_virtual_interface_instances`]).
 pub(super) fn member_signals(declarations: &VirtualInterfaces) -> Vec<Signal> {
     let mut interfaces = declarations.interfaces.iter().collect::<Vec<_>>();
     interfaces.sort_by(|left, right| left.0.cmp(right.0));
-    let templates = interfaces.iter().flat_map(|(interface, declaration)| {
-        declaration.members.iter().map(|member| Signal {
+    let mut signals = Vec::new();
+    for (interface, declaration) in &interfaces {
+        signals.extend(declaration.members.iter().map(|member| Signal {
             name: template(interface, &member.name),
             r#type: member.r#type.clone(),
             is_net: false,
             unresolved_net: false,
+            net_drive: NetDrive::None,
             is_const: false,
             package_variable: None,
             hierarchical: None,
-        })
-    });
-    let templates = templates.collect::<Vec<_>>();
-    templates
-        .into_iter()
-        .chain(interfaces.into_iter().flat_map(|(_, declaration)| {
-            declaration.instances.iter().flat_map(|&id| {
-                declaration.members.iter().map(move |member| {
-                    let name = VirtualInterfaceSignal::Member {
-                        id,
-                        member: member.name.clone(),
-                    }
-                    .name();
-                    // It denotes the member of another instance, as a
-                    // hierarchical name does: that instance's object, not
-                    // one of this module.
-                    Signal {
-                        hierarchical: Some(name.clone()),
-                        name,
-                        r#type: member.r#type.clone(),
-                        is_net: member.is_net,
-                        unresolved_net: false,
-                        is_const: false,
-                        package_variable: None,
-                    }
-                })
-            })
-        }))
-        .collect()
+        }));
+    }
+    for (interface, declaration) in interfaces {
+        let instance = VirtualInterfaceSignal::Instance {
+            interface: interface.clone(),
+        }
+        .name();
+        signals.push(Signal {
+            hierarchical: Some(instance.clone()),
+            name: instance,
+            r#type: value_type(VirtualInterface {
+                interface: interface.clone(),
+                modport: None,
+            }),
+            is_net: false,
+            unresolved_net: false,
+            net_drive: NetDrive::None,
+            is_const: false,
+            package_variable: None,
+        });
+        signals.extend(declaration.members.iter().map(|member| {
+            let name = VirtualInterfaceSignal::Placeholder {
+                interface: interface.clone(),
+                member: member.name.clone(),
+            }
+            .name();
+            // It denotes the member of another instance, as a hierarchical
+            // name does: that instance's object, not one of this module.
+            Signal {
+                hierarchical: Some(name.clone()),
+                name,
+                r#type: member.r#type.clone(),
+                is_net: member.is_net,
+                unresolved_net: false,
+                net_drive: NetDrive::None,
+                is_const: false,
+                package_variable: None,
+            }
+        }));
+    }
+    signals
 }
 
 /// The signal a select through member `member` of a virtual interface of
@@ -461,7 +511,7 @@ pub(super) fn selected_read(
     let mut value = null_access(&handle, width, signed);
     for (id, signal) in signals.into_iter().rev() {
         value = Expr::Mux {
-            condition: Box::new(denotes(&handle, id)),
+            condition: Box::new(denotes(&handle, &id)),
             then_expr: Box::new(rename(selected.clone(), &from, &signal)),
             else_expr: Box::new(value),
         };
@@ -595,11 +645,11 @@ pub(super) fn native_member(
 }
 
 /// The comparison of a virtual interface value with the id of an instance.
-fn denotes(handle: &Expr, id: u32) -> Expr {
+fn denotes(handle: &Expr, id: &Expr) -> Expr {
     Expr::Binary {
         left: Box::new(handle.clone()),
         op: BinaryOp::Eq,
-        right: Box::new(Expr::Literal(format!("{WIDTH}'d{id}"))),
+        right: Box::new(id.clone()),
     }
 }
 
@@ -660,7 +710,7 @@ pub(super) fn read(
     let mut value = null_access(&handle, width, signed);
     for (id, arm) in arms.into_iter().rev() {
         value = Expr::Mux {
-            condition: Box::new(denotes(&handle, id)),
+            condition: Box::new(denotes(&handle, &id)),
             then_expr: Box::new(arm),
             else_expr: Box::new(value),
         };
@@ -824,9 +874,7 @@ pub(super) fn dispatch(
         .into_iter()
         .map(|(id, signal)| {
             Ok(crate::procedural::CaseItemBase {
-                labels: vec![crate::procedural::CaseLabel::Value(Expr::Literal(format!(
-                    "{WIDTH}'d{id}"
-                )))],
+                labels: vec![crate::procedural::CaseLabel::Value(id)],
                 body: arm(session, signal)?,
             })
         })
@@ -855,6 +903,7 @@ pub(super) fn identity_signal(state: &Session, handle: &str, interface: &str) ->
         }),
         is_net: false,
         unresolved_net: false,
+        net_drive: NetDrive::None,
         is_const: false,
         package_variable: None,
         hierarchical: None,
@@ -1294,7 +1343,7 @@ pub(super) fn watched(
     let mut value = Expr::Literal(format!("{width}'d0"));
     for (id, signal) in signals.into_iter().rev() {
         value = Expr::Mux {
-            condition: Box::new(denotes(&handle, id)),
+            condition: Box::new(denotes(&handle, &id)),
             then_expr: Box::new(Expr::Ident(signal)),
             else_expr: Box::new(value),
         };
@@ -1315,7 +1364,7 @@ pub(super) fn watched_writes(
     let (_, signals) = self::member(state, ty, member)?;
     Ok(signals
         .into_iter()
-        .map(|(id, signal)| (Expr::Ident(signal), denotes(handle, id)))
+        .map(|(id, signal)| (Expr::Ident(signal), denotes(handle, &id)))
         .collect())
 }
 
@@ -1418,7 +1467,7 @@ pub(super) fn without_event_blocks(stmt: &Stmt) -> Stmt {
 
 /// The handle and the arms of `expr` when it is a member read of
 /// [`read`]: a selection by id that ends in the `null` check.
-fn read_chain(expr: &Expr) -> Option<(&Expr, Vec<(u32, &Expr)>)> {
+fn read_chain(expr: &Expr) -> Option<(&Expr, Vec<(&Expr, &Expr)>)> {
     let mut arms = Vec::new();
     let mut handle = None;
     let mut current = expr;
@@ -1437,10 +1486,25 @@ fn read_chain(expr: &Expr) -> Option<(&Expr, Vec<(u32, &Expr)>)> {
                 else {
                     return None;
                 };
-                let Expr::Literal(literal) = &**right else {
-                    return None;
+                // An instance id: a number, or the placeholder of one.
+                let id = match &**right {
+                    Expr::Literal(literal) => {
+                        literal
+                            .strip_prefix(&format!("{WIDTH}'d"))?
+                            .parse::<u32>()
+                            .ok()?;
+                        &**right
+                    }
+                    Expr::Ident(name)
+                        if matches!(
+                            VirtualInterfaceSignal::of(name),
+                            Some(VirtualInterfaceSignal::Instance { .. })
+                        ) =>
+                    {
+                        &**right
+                    }
+                    _ => return None,
                 };
-                let id = literal.strip_prefix(&format!("{WIDTH}'d"))?.parse().ok()?;
                 if handle.is_some_and(|handle| handle != &**left) {
                     return None;
                 }
@@ -1579,4 +1643,19 @@ pub(super) fn map_children(expr: Expr, map: &mut dyn FnMut(Expr) -> Expr) -> Exp
                 .collect(),
         },
     }
+}
+
+/// The interface of placeholder signal `name`, if it is one: a member or the
+/// id of the instance an access selects (see [`member`]).
+pub(crate) fn placeholder_interface(name: &str) -> Option<String> {
+    match VirtualInterfaceSignal::of(name)? {
+        VirtualInterfaceSignal::Placeholder { interface, .. }
+        | VirtualInterfaceSignal::Instance { interface } => Some(interface),
+        _ => None,
+    }
+}
+
+/// Whether `name` is a placeholder signal (see [`member_signals`]).
+pub(crate) fn is_placeholder_signal(name: &str) -> bool {
+    placeholder_interface(name).is_some()
 }

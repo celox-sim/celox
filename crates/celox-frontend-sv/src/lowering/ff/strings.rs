@@ -33,6 +33,8 @@ impl Ff<'_, '_> {
                 let context = match op {
                     StringOp::FromBits | StringOp::Concat => None,
                     StringOp::Itoa(_) => Some((32, true)),
+                    // A `real` argument, not a string handle (6.16.15).
+                    StringOp::Realtoa => Some((64, false)),
                     _ if index == 0 || matches!(op, StringOp::Compare | StringOp::ICompare) => {
                         Some((32, false))
                     }
@@ -143,11 +145,25 @@ impl Ff<'_, '_> {
                 let buffer = self.heap_call(ops::encode(ops::ITOA, parameter), &[value]);
                 self.heap_call(ops::FREEZE, &[buffer])
             }
+            StringOp::Atoreal => {
+                let string = self.handle(&args[0])?;
+                self.heap_call(ops::ATOREAL, &[string])
+            }
+            StringOp::Realtoa => {
+                // The argument is a `real` (6.16.15); its payload bits are
+                // its 64-bit value.
+                let value = self.integer_of_width(&args[0], 64, false)?;
+                let buffer = self.heap_call(ops::REALTOA, &[value]);
+                self.heap_call(ops::FREEZE, &[buffer])
+            }
         };
         let (width, signed) = op.result_type();
         let value = self.b.alloc_bit(width, false);
         self.b.emit(SIRInstruction::Slice(value, result, 0, width));
         let (temp, name) = self.m.temp("string", width, signed, false);
+        if op == StringOp::Atoreal {
+            self.m.variables.get_mut(&temp).unwrap().float = Some(celox_sir::FloatPrecision::F64);
+        }
         if op.returns_string() {
             self.m.variables.get_mut(&temp).unwrap().value_kind = celox_design::ValueKind::StrRef;
         }

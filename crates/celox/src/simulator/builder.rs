@@ -3325,11 +3325,19 @@ mod host {
                 if let Some(scheduler) = laid_out.runtime.runtime_schema.scheduler.as_mut() {
                     scheduler.update_points = self.options.observable_updates;
                 }
+                let plan_start = self
+                    .options
+                    .diagnostics
+                    .phase_timing
+                    .then(crate::timing::now);
                 crate::scheduler::attach(
                     &mut laid_out,
                     !self.options.native_force_support
                         && self.options.signal_access.force_signals.is_empty(),
                 );
+                if let Some(start) = plan_start {
+                    tracing::debug!("[phase-timing] scheduler_plan: {:?}", start.elapsed());
+                }
             }
             #[cfg(feature = "host-runtime")]
             if self
@@ -4406,6 +4414,29 @@ mod host {
             Ok(simulation)
         }
 
+        /// Compiles the design up to the scheduler plan, as [`Self::build`]
+        /// does, but generates no code, and reports the plan: per process
+        /// kernel where it comes from, whether the compiled scheduler runs it
+        /// (or why not) and the events it writes, the scheduler's events and
+        /// clocks, the sizes of the SIR units, and the warnings a build would
+        /// return. For inspecting and timing elaboration without code
+        /// generation.
+        #[cfg(any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        ))]
+        pub fn build_plan(mut self) -> Result<String, SimulatorError> {
+            self.native_file_calls = true;
+            self.options.emit_triggers = true;
+            self.options.host_edges = false;
+            let (laid_out, warnings, ..) = self.into_laid_out_program(
+                crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
+                true,
+                true,
+            )?;
+            Ok(plan_report(&laid_out, &warnings))
+        }
+
         fn build_with_backend<B: crate::SimBackend>(
             mut self,
             layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
@@ -4417,8 +4448,12 @@ mod host {
             self.options.host_edges = false;
             let (laid_out, mut warnings, options, vcd_path, injected_components) =
                 self.into_laid_out_program(layout_mode, defer_derived_edges, wide_commits)?;
+            let backend_start = options.diagnostics.phase_timing.then(crate::timing::now);
             let backend = compile(&laid_out, &options)
                 .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
+            if let Some(start) = backend_start {
+                tracing::debug!("[phase-timing] backend_codegen: {:?}", start.elapsed());
+            }
             let shadow = Self::start_shadow(
                 |shadow_options| compile(&laid_out, shadow_options),
                 &laid_out.runtime,
@@ -8355,4 +8390,97 @@ endmodule"#
             }
         }
     }
+}
+
+/// The report `build_plan` returns for `program`.
+#[cfg(any(
+    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+))]
+fn plan_report(program: &crate::ir::LaidOutProgram, warnings: &[CompilationWarning]) -> String {
+    use std::fmt::Write;
+    let schema = &program.runtime.runtime_schema;
+    let sir = &program.sir;
+    let instructions = |units: &[celox_sir::ExecutionUnit<_>]| -> usize {
+        units
+            .iter()
+            .flat_map(|unit| unit.blocks.values())
+            .map(|block| block.instructions.len())
+            .sum()
+    };
+    let mut report = String::new();
+    let _ = writeln!(report, "processes: {}", schema.processes.len());
+    // Without a compiled plan, as with the reference scheduler mode, the
+    // reference loop runs every kernel.
+    let scheduler = schema
+        .scheduler
+        .as_ref()
+        .filter(|scheduler| scheduler.fallback.len() == schema.processes.len());
+    for index in 0..schema.processes.len() {
+        let origin = schema
+            .process_origins
+            .get(index)
+            .map_or_else(|| "?".to_string(), ToString::to_string);
+        let fallback =
+            scheduler.and_then(|scheduler| scheduler.fallback.get(index).cloned().flatten());
+        let writes = scheduler
+            .and_then(|scheduler| scheduler.kernel_events.get(index))
+            .map(|events| {
+                events
+                    .iter()
+                    .map(|&event| program.get_path(&scheduler.unwrap().events[event]))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let status = match (scheduler, fallback) {
+            (None, _) => "reference loop".to_string(),
+            (Some(_), None) => "scheduled".to_string(),
+            (Some(_), Some(reason)) => format!("fallback ({reason})"),
+        };
+        let _ = writeln!(
+            report,
+            "kernel {index}: {origin}: {status} writes {writes:?} instructions {}",
+            sir.processes
+                .get(index)
+                .map_or(0, |unit| instructions(std::slice::from_ref(unit)))
+        );
+    }
+    match scheduler {
+        Some(scheduler) => {
+            let _ = writeln!(
+                report,
+                "scheduler unit: {:?}\nevents: {:?}\nclocks: {:?}\ndomain waits: {}\nupdate points: {}",
+                scheduler.unit,
+                scheduler
+                    .events
+                    .iter()
+                    .map(|event| program.get_path(event))
+                    .collect::<Vec<_>>(),
+                scheduler
+                    .clocks
+                    .iter()
+                    .map(|event| program.get_path(event))
+                    .collect::<Vec<_>>(),
+                scheduler
+                    .domain_waits
+                    .iter()
+                    .filter(|&&waits| waits)
+                    .count(),
+                scheduler.update_points,
+            );
+        }
+        None => report.push_str("scheduler: none (reference loop)\n"),
+    }
+    for warning in warnings {
+        let _ = writeln!(report, "warning: {warning}");
+    }
+    let _ = writeln!(
+        report,
+        "sir: eval_comb {} units {} instructions; processes {} units {} instructions",
+        sir.eval_comb.len(),
+        instructions(&sir.eval_comb),
+        sir.processes.len(),
+        instructions(&sir.processes),
+    );
+    report
 }

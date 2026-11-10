@@ -24,12 +24,16 @@ impl BodyBuilder<'_, '_, '_> {
                         amount: Expr::Literal(format!("64'd{ticks}")),
                         ticks_per_unit: 1,
                         ticks_per_precision: 1,
+                        precision_steps_per_tick: 1,
                     });
                 }
                 Ok(Stmt::Delay {
                     amount: self.native_delay(*value, *parenthesized)?,
                     ticks_per_unit: timescales::time_divisor(*value, self.tree)?,
                     ticks_per_precision: timescales::precision_divisor(*value, self.tree)?,
+                    precision_steps_per_tick: timescales::precision_steps_per_tick(
+                        *value, self.tree,
+                    )?,
                 })
             }
             TimingControlKind::Event(event) => {

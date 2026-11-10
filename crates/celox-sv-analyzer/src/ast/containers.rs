@@ -85,7 +85,20 @@ pub(super) fn with_dimensions(
                 }
             }
         }
-        DimensionKind::Wildcard => return Err(unsupported("wildcard associative index type")),
+        DimensionKind::Wildcard => {
+            // A wildcard index takes any integral expression, evaluated
+            // self-determined and treated as unsigned with its leading
+            // zeros removed (7.8.1). Keys are held at 64 bits, so an
+            // index with more significant bits truncates as it would for
+            // a declared 64-bit key type.
+            index_type = Some(classes::unsigned_type(64));
+            Some(ContainerKind::Associative {
+                key_width: 64,
+                signed: false,
+                string: false,
+                object: false,
+            })
+        }
         _ => None,
     };
     let Some(kind) = kind else {
@@ -667,11 +680,9 @@ fn check_compatible(
         &dims.const_env,
     )
     .ok_or_else(|| unsupported("type of a container"))?;
-    session
-        .types
-        .assignable_array(source, target)
-        .map(|_| ())
-        .map_err(|_| unsupported("incompatible dynamic container assignment"))
+    assignments::check_types(tree, session, dims, source, target, &|| {
+        "container assignment".into()
+    })
 }
 
 fn element_value(
@@ -778,6 +789,32 @@ fn index_value(
     // Only an associative array indexed by chandles takes a chandle index.
     let chandle = target.key.as_ref().is_some_and(|key| key.chandle);
     expression_binding::check_chandle_assignment(chandle, id, tree, native, dims, session)?;
+    // An integral key, declared or wildcard, takes only an integral
+    // index: nonintegral values are illegal (7.8.1). A string literal is
+    // not a string value here; it casts to a bit vector (7.8.1).
+    let integral_key = matches!(
+        target.layout.kind,
+        ContainerKind::Associative {
+            string: false,
+            object: false,
+            ..
+        }
+    ) && !chandle;
+    if integral_key
+        && (expression_binding::native_string(tree, session, id, native, dims)
+            || matches!(&native.expression(expression_binding::ungroup(id, native)).kind,
+            ExprKind::Name(name) if dims
+                .get(&instances::normalize_identifier(&name.spelling))
+                .is_some_and(|ty| {
+                    // A process handle is an integral identity, not
+                    // an object key (7.8.5).
+                    (ty.class.is_some()
+                        && ty.class.as_deref() != Some(processes::CLASS))
+                        || ty.container.is_some()
+                })))
+    {
+        return Err(unsupported("nonintegral associative array index"));
+    }
     if matches!(
         target.layout.kind,
         ContainerKind::Associative { string: true, .. }
@@ -819,6 +856,9 @@ fn index_value(
         }
         _ => expression_binding::value(id, native, tree, session, dims)?,
     };
+    if integral_key && expression_binding::real_value(&value, dims) {
+        return Err(unsupported("nonintegral associative array index"));
+    }
     Ok(
         if matches!(
             target.layout.kind,
@@ -1527,7 +1567,7 @@ mod tests {
             ),
             (
                 "module Top; class C; int q[$]; byte a[]; endclass C c; initial begin c=new; c.q=c.a; end endmodule",
-                "incompatible",
+                "not assignment compatible",
             ),
             (
                 "module Top; class C; int q[$]; endclass C c; initial begin c=new; c.q[0]<=1; end endmodule",
@@ -1580,7 +1620,6 @@ mod tests {
                 "module Top; class A; endclass class B; endclass int m[A]; B k; initial void'(m.first(k)); endmodule",
                 "incompatible associative traversal index variable",
             ),
-            ("module Top; int a[*]; endmodule", "wildcard"),
             (
                 "module Top; int a[string]; initial a[123] = 7; endmodule",
                 "requires a string",

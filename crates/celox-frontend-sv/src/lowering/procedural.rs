@@ -717,6 +717,22 @@ impl<'a> ProcModule<'a> {
         found
     }
 
+    /// Whether the functions an `always @*` calls read a variable its implicit
+    /// event expression does not include: `always @*` is sensitive only to
+    /// the arguments of a called function, `always_comb` to what its body
+    /// reads too (IEEE 1800-2023 9.2.2.2.2), so then the two differ.
+    pub fn callees_read_beyond_wildcard(&self, process: &sv::ir::CombProcess) -> bool {
+        let ids = |include_functions: bool| -> HashSet<SourceVarId> {
+            self.implicit_reads(process.body(), include_functions)
+                .into_iter()
+                .chain(self.implicit_reads(process.sensitivity_body(), include_functions))
+                .map(|atom| atom.id)
+                .collect()
+        };
+        let wildcard = ids(false);
+        ids(true).iter().any(|id| !wildcard.contains(id))
+    }
+
     /// Syntactic implicit sensitivity, including branches that constant folding
     /// will remove. `always @*` sees arguments; `always_comb` also sees function bodies.
     /// The out-of-line eligibility of subroutines counts their stores into
@@ -1222,9 +1238,30 @@ impl<'a> ProcModule<'a> {
         self.variables.get(&id).is_some_and(|var| var.hidden)
     }
 
-    /// A fresh hidden variable of the given shape. Its name cannot clash with
-    /// a SystemVerilog identifier.
+    /// A fresh hidden variable of the given shape that holds a value of the
+    /// activation that computes it, such as an operand kept across a
+    /// suspension: in a process with a frame, each activation has its own
+    /// (see `SvVariable::activation_scratch`). Its name cannot clash with a
+    /// SystemVerilog identifier.
     pub fn temp(
+        &mut self,
+        purpose: &str,
+        width: usize,
+        signed: bool,
+        is_4state: bool,
+    ) -> (SourceVarId, String) {
+        let (id, name) = self.module_temp(purpose, width, signed, is_4state);
+        self.variables
+            .get_mut(&id)
+            .expect("a new temporary")
+            .activation_scratch = true;
+        (id, name)
+    }
+
+    /// A fresh hidden variable of the given shape that is the module's,
+    /// shared by every activation of the process that makes it, such as a
+    /// count other processes watch.
+    pub fn module_temp(
         &mut self,
         purpose: &str,
         width: usize,
@@ -1290,6 +1327,7 @@ impl<'a> ProcModule<'a> {
                 force_control: None,
                 sampled_from: None,
                 history_of: None,
+                activation_scratch: false,
             },
         );
         self.name_to_id.insert(name, id);
@@ -1339,6 +1377,7 @@ impl<'a> ProcModule<'a> {
         variable.path = vec![name.clone()];
         variable.source = None;
         variable.hidden = true;
+        variable.activation_scratch = false;
         variable.domain_kind = DomainKind::Other;
         if two_state {
             variable.is_4state = false;
@@ -1388,6 +1427,7 @@ impl<'a> ProcModule<'a> {
             force_control: None,
             sampled_from: None,
             history_of: None,
+            activation_scratch: false,
         };
         let id = next_var_id(&mut self.next_id);
         self.variables.insert(id, variable);
@@ -1420,6 +1460,7 @@ impl<'a> ProcModule<'a> {
                 force_control: None,
                 sampled_from: None,
                 history_of: None,
+                activation_scratch: false,
                 ..variable
             },
         );
@@ -1987,6 +2028,7 @@ pub(super) fn register_locals(
                 force_control: None,
                 sampled_from: None,
                 history_of: None,
+                activation_scratch: false,
             },
         );
         name_to_id.insert(local.name.clone(), id);

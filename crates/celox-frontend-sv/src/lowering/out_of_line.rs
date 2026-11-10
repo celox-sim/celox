@@ -929,18 +929,19 @@ impl ProcModule<'_> {
     ///
     /// Assembly instruments a function unit's stores as a process kernel's
     /// for the counters of waits and event controls, which are kept for the
-    /// stored variable, whatever process stores it. Its other
-    /// instrumentation is for process and flip-flop units only: the
-    /// triggers of flip-flop events, the staging of nonblocking
+    /// stored variable, whatever process stores it, the occurrences of
+    /// flip-flop events included. Its other instrumentation is for process
+    /// and flip-flop units only: the triggers that combinational and
+    /// flip-flop units' stores into events get, the staging of nonblocking
     /// assignments, the counting of what flip-flops write, and the
     /// captures of combinational observers in combinational processes. So a
-    /// function unit stores into none of the `excluded` storage: the events
-    /// and the writes of flip-flops, what instance ports connect (an
-    /// event of the instance, as far as this module can tell), the targets
-    /// of nonblocking assignments and `foreign`; and a combinational process
-    /// calls no function unit that stores into `observed` storage. Assembly
-    /// rejects a function unit that stores into storage it cannot
-    /// instrument all the same.
+    /// function unit stores into none of the `excluded` storage: the writes
+    /// of flip-flops, the targets of nonblocking assignments and `foreign`;
+    /// and a combinational process calls no function unit that stores into
+    /// `observed` storage, module state included. Assembly rejects a
+    /// function unit that a combinational or flip-flop unit calls and that
+    /// stores into an event, and one that stores into storage it cannot
+    /// instrument.
     pub(super) fn observe_storage(&mut self, module: &sv::ir::Module, foreign: &HashSet<String>) {
         if self.out_of_line().is_none() {
             return;
@@ -951,20 +952,12 @@ impl ProcModule<'_> {
             nonblocking: false,
         };
         let mut observers: Vec<sv::ir::Stmt> = Vec::new();
-        // What a function unit must not store into: the events of
-        // flip-flops, whose stores assembly gives their triggers, what
-        // flip-flops write, what instance ports connect (a clock of the
-        // instance, as far as this module can tell), and below the targets
-        // of nonblocking assignments and the names of other modules.
-        let mut hard: Vec<sv::ir::Stmt> = Vec::new();
+        // What a function unit must not store into: what flip-flops write,
+        // and below the targets of nonblocking assignments and the names of
+        // other modules. Events are assembly's to judge, which sees the
+        // units that call each function.
         let mut hard_names: Vec<String> = Vec::new();
         for process in module.ff_processes() {
-            hard_names.extend(
-                process
-                    .events()
-                    .iter()
-                    .map(|event| event.signal().to_string()),
-            );
             let mut written = HashSet::default();
             super::procedural::written_names(process.body(), &mut written);
             hard_names.extend(written);
@@ -983,7 +976,6 @@ impl ProcModule<'_> {
             for connection in instance.port_connections() {
                 if let Some(actual) = connection.actual_expr() {
                     observers.push(sv::ir::Stmt::Eval(actual.clone()));
-                    hard.push(sv::ir::Stmt::Eval(actual.clone()));
                 }
             }
         }
@@ -1039,11 +1031,7 @@ impl ProcModule<'_> {
             .into_iter()
             .flat_map(|expr| super::ff::level_reads(self, expr))
             .collect();
-        let mut excluded: HashSet<SourceVarId> = self
-            .implicit_reads(&hard, true)
-            .into_iter()
-            .map(|atom| atom.id)
-            .collect();
+        let mut excluded: HashSet<SourceVarId> = HashSet::default();
         excluded.extend(
             targets
                 .iter()
