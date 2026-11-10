@@ -1029,6 +1029,14 @@ impl Module {
                     &type_aliases,
                     &imported.parameter_values,
                     &symbolic_parameters,
+                    // The declarations describe the functions that the
+                    // types of a module's header may call, which a package
+                    // or compilation unit has none of.
+                    if is_package {
+                        procedural::ClassMethods::None
+                    } else {
+                        procedural::ClassMethods::StaticFunctions
+                    },
                 ))
                 .declarations();
             let parameter_values = parameter_value_env_with_imported(

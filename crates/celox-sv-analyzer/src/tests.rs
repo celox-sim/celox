@@ -8352,3 +8352,37 @@ fn preserves_package_enum_unknown_values() {
     "#;
     analyze_source(source, Path::new("package_enum_unknown.sv")).unwrap();
 }
+
+#[test]
+fn static_class_functions_are_constant_functions() {
+    // A static function is called without an object, also where its class
+    // has methods that need one, and by a scope that imports the class
+    // (IEEE 1800-2023 8.10, 13.4.3).
+    let ir = analyze_source(
+        "package p;
+            class E;
+                static function int two(); return 2; endfunction
+            endclass
+        endpackage
+        class D;
+            int v;
+            static function int inc(int x); return x + 1; endfunction
+            function int get(); return v; endfunction
+            virtual task run(); #1; endtask
+        endclass
+        module Top;
+            localparam int A = D::inc(3);
+            localparam int B = p::E::two();
+            logic [A:0] a;
+            logic [B:0] b;
+        endmodule",
+        Path::new("static-class-functions.sv"),
+    )
+    .expect("static class functions are constant functions");
+    let widths = ir.modules()[0]
+        .signals()
+        .iter()
+        .map(|signal| signal.r#type().resolved_width())
+        .collect::<Vec<_>>();
+    assert_eq!(widths, [Some(5), Some(3)]);
+}
