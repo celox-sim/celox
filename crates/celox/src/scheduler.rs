@@ -339,6 +339,9 @@ pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool) {
     scheduler.clocks = clocks;
     scheduler.kernel_events = kernel_events;
     scheduler.domain_waits = domain_waits;
+    // The generated unit refreshes the sampled-value shadows at every
+    // slot it starts (see `generate_with_outlines`).
+    scheduler.refreshes_sample_shadows = !program.runtime.runtime_schema.sample_shadows.is_empty();
     if let Some(unit) = unit {
         scheduler.unit = Some(program.sir.processes.len());
         program.sir.processes.push(unit);
@@ -2765,6 +2768,12 @@ impl Plan {
                 g.b.switch_to_block(slot);
             }
         }
+        // Whether this slot is at a later timestamp than the last one: a
+        // run also takes up work left at the timestamp it resumes at.
+        let advanced = (!schema.sample_shadows.is_empty()).then(|| {
+            let last = g.load(slots.now, SCHEDULER_TIME_WIDTH);
+            g.binary(1, time, BinaryOp::Ne, last)
+        });
         g.store(slots.now, SCHEDULER_TIME_WIDTH, time);
         if let Some(nbas) = &nbas {
             nbas.promote(&mut g, time);
@@ -2795,6 +2804,28 @@ impl Plan {
         g.store(slots.count, SCHEDULER_TIME_WIDTH, count);
         for &slot in &schema.time_slots {
             g.store_state(slot, 0, TIME_SLOT_WIDTH, time);
+        }
+        // Refresh the sampled-value shadows from the state the previous
+        // slot settled, as the runtime does before a later timestamp: a
+        // reader in this slot sees the value of the beginning of the
+        // slot, in the Preponed region (IEEE 1800-2023 4.4.2.5, 16.5.1).
+        // Work taken up at the same timestamp keeps the copies it has.
+        if let Some(advanced) = advanced {
+            let refresh = g.b.new_block();
+            let kept = g.b.new_block();
+            g.b.seal_block(SIRTerminator::Branch {
+                cond: advanced,
+                true_block: (refresh, Vec::new()),
+                false_block: (kept, Vec::new()),
+            });
+            g.b.switch_to_block(refresh);
+            for &(source, copy) in &schema.sample_shadows {
+                let width = program.layout().widths[&source];
+                let value = g.load_state(source, 0, width);
+                g.store_state(copy, 0, width, value);
+            }
+            g.b.seal_block(SIRTerminator::Jump(kept, Vec::new()));
+            g.b.switch_to_block(kept);
         }
         if schema.time_slots.iter().any(|&slot| g.settle_reads(slot)) {
             if self.incremental.is_some() {
