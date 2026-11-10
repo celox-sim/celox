@@ -957,3 +957,40 @@ fn integral_array_member_defaults_require_compatible_values() {
         );
     }
 }
+
+sv_backends! {
+    // A `return` in a named block that a `disable` names copies the members
+    // of an unpacked structure output back, as one outside the block does
+    // (IEEE 1800-2023 9.6.2, 13.5).
+    fn return_in_disabled_block_copies_structure_outputs(sim) {
+        @setup { let source = r#"
+module Top(output int a, output int b, output int kept, output bit [1:0] results);
+    typedef struct { int a; int b; } pair_t;
+    function automatic bit fill(output pair_t p, input int x);
+        begin : body
+            p.a = x;
+            if (x < 0) disable body;
+            p.b = x + 1;
+            return 1;
+        end
+        p.b = -1;
+        return 0;
+    endfunction
+    pair_t first, second;
+    initial begin
+        results[0] = fill(first, 4);
+        results[1] = fill(second, -7);
+        a = first.a;
+        b = first.b;
+        kept = second.b;
+    end
+endmodule
+"#; }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("return_in_disabled_block.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("a")), 4u32.into());
+        assert_eq!(sim.get(sim.signal("b")), 5u32.into());
+        assert_eq!(sim.get(sim.signal("kept")), 0xffff_ffffu32.into());
+        assert_eq!(sim.get(sim.signal("results")), 1u8.into());
+    }
+}

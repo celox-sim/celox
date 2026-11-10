@@ -451,6 +451,7 @@ fn statement_effects(statement: &Stmt) -> Effects {
         | Stmt::DeferActive
         | Stmt::AssertionRegion { .. } => effects.suspends = true,
         Stmt::DisableFork => effects.controls = true,
+        Stmt::Block { .. } | Stmt::DisableBlock(_) => {}
         Stmt::If { .. }
         | Stmt::Case { .. }
         | Stmt::Loop { .. }

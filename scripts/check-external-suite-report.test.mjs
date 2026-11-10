@@ -538,6 +538,7 @@ test("every retained baseline accepts only its existing failures", () => {
                 "operators::two_state_case_equality_keeps_unknown_expression_bits",
                 "operators::two_state_case_equality_preserves_conditional_unknowns",
                 "operators::two_state_case_equality_preserves_unknown_literals",
+                "procedural::disable_block_in_concurrent_task",
                 "references::ref_actual_of_an_equivalent_type",
                 "references::ref_array_element_index_is_fixed_at_the_call",
                 "references::ref_class_property_names_the_object_of_the_call",

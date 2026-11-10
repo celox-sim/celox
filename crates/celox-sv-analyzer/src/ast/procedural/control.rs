@@ -20,20 +20,39 @@ struct CaseState {
     items: Vec<CaseItemBase<Expr, LValue>>,
     default: Option<Vec<Stmt>>,
 }
+struct RandcaseState {
+    id: StatementId,
+    index: usize,
+    /// The hidden variables holding the evaluated weights, and the width
+    /// they and the pick share (18.16).
+    weights: Vec<String>,
+    width: usize,
+    items: Vec<Vec<Stmt>>,
+}
 enum Job {
     Enter(StatementId),
     EndScope,
+    /// Wrap the statements built since `start` as the named block `id`
+    /// when a `disable` in them named it; they stay flattened otherwise.
+    BlockEnd {
+        id: u32,
+        start: usize,
+    },
     ForkNext {
         items: Vec<StatementId>,
         index: usize,
         join: celox_design::ForkJoin,
         branches: Vec<Vec<Stmt>>,
+        /// Per item, the process-handle and armed variables of a named
+        /// branch block a sibling `disable` can kill (9.6.2).
+        handles: Vec<Option<(String, String)>>,
     },
     ForkBranch {
         items: Vec<StatementId>,
         index: usize,
         join: celox_design::ForkJoin,
         branches: Vec<Vec<Stmt>>,
+        handles: Vec<Option<(String, String)>>,
         start: usize,
         sensitivity: usize,
         parent_body: system_functions::Body,
@@ -52,6 +71,11 @@ enum Job {
     CaseBranch {
         state: CaseState,
         labels: Option<Vec<CaseLabel<Expr>>>,
+        start: usize,
+    },
+    RandcaseNext(RandcaseState),
+    RandcaseBranch {
+        state: RandcaseState,
         start: usize,
     },
     Loop {
@@ -161,7 +185,8 @@ impl BodyBuilder<'_, '_, '_> {
                     items,
                     index,
                     join,
-                    branches,
+                    mut branches,
+                    handles,
                 } => {
                     if let Some(&id) = items.get(index) {
                         if let StatementKind::Declaration(declaration) = &native.statement(id).kind
@@ -172,6 +197,7 @@ impl BodyBuilder<'_, '_, '_> {
                                 index: index + 1,
                                 join,
                                 branches,
+                                handles,
                             });
                         } else {
                             jobs.push(Job::ForkBranch {
@@ -179,6 +205,7 @@ impl BodyBuilder<'_, '_, '_> {
                                 index,
                                 join,
                                 branches,
+                                handles,
                                 start: output.len(),
                                 sensitivity: self.sensitivity_body.len(),
                                 parent_body: self.body,
@@ -191,6 +218,46 @@ impl BodyBuilder<'_, '_, '_> {
                             jobs.push(Job::Enter(id));
                         }
                     } else {
+                        // The branches' names leave scope with the fork.
+                        let registered = handles.iter().flatten().count();
+                        let named = self
+                            .fork_blocks
+                            .split_off(self.fork_blocks.len() - registered);
+                        // A branch a sibling `disable` names registers its
+                        // process as its first act (9.6.2). Other named
+                        // branches take no handle: an exposed process keeps
+                        // its record for as long as the simulation runs.
+                        let mut branch = 0;
+                        let mut named = named.into_iter();
+                        for (item, handle) in items.iter().zip(&handles) {
+                            if matches!(native.statement(*item).kind, StatementKind::Declaration(_))
+                            {
+                                continue;
+                            }
+                            if handle.is_some()
+                                && let Some((_, handle, armed, true)) = named.next()
+                            {
+                                let assign = |name: String, rhs: Expr| Stmt::Assign {
+                                    lhs: LValue::Ident(name),
+                                    rhs,
+                                    nonblocking: false,
+                                };
+                                branches[branch].splice(
+                                    0..0,
+                                    [
+                                        assign(
+                                            handle,
+                                            events::call(
+                                                celox_design::ProcessOp::SelfHandle,
+                                                Vec::new(),
+                                            ),
+                                        ),
+                                        assign(armed, Expr::Literal("1'b1".into())),
+                                    ],
+                                );
+                            }
+                            branch += 1;
+                        }
                         self.pop_scope();
                         output.push(Stmt::Fork { join, branches });
                     }
@@ -200,6 +267,7 @@ impl BodyBuilder<'_, '_, '_> {
                     index,
                     join,
                     mut branches,
+                    handles,
                     start,
                     sensitivity,
                     parent_body,
@@ -229,6 +297,7 @@ impl BodyBuilder<'_, '_, '_> {
                         index: index + 1,
                         join,
                         branches,
+                        handles,
                     });
                 }
                 Job::Enter(id) => match &native.statement(id).kind {
@@ -249,15 +318,70 @@ impl BodyBuilder<'_, '_, '_> {
                             "join_none" => celox_design::ForkJoin::None,
                             _ => return Err(disagreement()),
                         };
+                        // A branch that is a named block can be disabled
+                        // by name from a sibling branch (9.6.2): register
+                        // a process handle for each such branch.
+                        let mut handles = Vec::new();
+                        for item in items.iter() {
+                            let named = match &native.statement(*item).kind {
+                                StatementKind::Block {
+                                    label: Some(label), ..
+                                } => Some(instances::normalize_identifier(&label.spelling)),
+                                _ => None,
+                            };
+                            handles.push(named.map(|label| {
+                                let handle = self.hidden(classes::handle(processes::CLASS)).1;
+                                let armed = self.hidden(unsigned_type(1)).1;
+                                self.fork_blocks.push((
+                                    label,
+                                    handle.clone(),
+                                    armed.clone(),
+                                    false,
+                                ));
+                                (handle, armed)
+                            }));
+                        }
                         jobs.push(Job::ForkNext {
                             items: items.clone(),
                             index: 0,
                             join,
                             branches: Vec::new(),
+                            handles,
                         });
                     }
-                    StatementKind::Block { items, .. } => {
+                    StatementKind::Block { label, items, .. } => {
                         self.push_scope();
+                        // A named block is a candidate to stay a block in
+                        // the IR when a `disable` in its body can leave
+                        // it: no fork in the body, whose children a
+                        // disable would also have to kill. Others flatten
+                        // as before, and a `disable` naming them stays
+                        // unsupported. A candidate no `disable` names
+                        // flattens too (see `Job::BlockEnd`).
+                        let named = label.as_ref().filter(|_| {
+                            !native
+                                .tokens
+                                .get(
+                                    native.statement(id).tokens.start
+                                        ..native.statement(id).tokens.end,
+                                )
+                                .into_iter()
+                                .flatten()
+                                .any(|token| !token.is_trivia() && token.text == "fork")
+                        });
+                        if let Some(label) = named {
+                            let block_id = *self.state.counter as u32;
+                            *self.state.counter += 1;
+                            self.named_blocks.push((
+                                instances::normalize_identifier(&label.spelling),
+                                block_id,
+                                false,
+                            ));
+                            jobs.push(Job::BlockEnd {
+                                id: block_id,
+                                start: output.len(),
+                            });
+                        }
                         jobs.push(Job::EndScope);
                         jobs.extend(items.iter().rev().map(|id| Job::Enter(*id)));
                     }
@@ -330,6 +454,74 @@ impl BodyBuilder<'_, '_, '_> {
                             start: output.len(),
                         });
                         jobs.push(Job::Enter(*body));
+                    }
+                    // A randcase evaluates each weight once, as an
+                    // unsigned value at the widest weight's precision,
+                    // then picks a branch by a random number below their
+                    // sum (IEEE 1800-2023 18.16).
+                    StatementKind::Case {
+                        keyword,
+                        expression: None,
+                        arms,
+                        ..
+                    } if keyword == "randcase" => {
+                        let mut weight_ids = Vec::new();
+                        for arm in arms {
+                            match (arm.default, arm.matches.as_slice()) {
+                                (false, [celox_sv_syntax::CaseMatch::Expression(weight)]) => {
+                                    weight_ids.push(*weight);
+                                }
+                                _ => return Err(unsupported("randcase item")),
+                            }
+                        }
+                        if weight_ids.is_empty() {
+                            return Err(unsupported("randcase without items"));
+                        }
+                        let mut width = 1usize;
+                        for weight in &weight_ids {
+                            let ty = expression_types::type_of(
+                                self.tree,
+                                self.session,
+                                *weight,
+                                native,
+                                &self.dims,
+                            )?;
+                            let semantic_types::TyData::Packed(packed) =
+                                self.session.types.data(ty).clone()
+                            else {
+                                return Err(unsupported("non-integral randcase weight"));
+                            };
+                            width = width.max(
+                                usize::try_from(packed.bits())
+                                    .map_err(|_| unsupported("randcase weight width"))?,
+                            );
+                        }
+                        if width > 64 {
+                            return Err(unsupported("randcase weights wider than 64 bits"));
+                        }
+                        output.extend(self.effects(&weight_ids)?);
+                        let mut weights = Vec::new();
+                        for weight in &weight_ids {
+                            let value = self.native_value(*weight)?;
+                            let hidden = self.hidden(unsigned_type(width)).1;
+                            output.push(Stmt::Assign {
+                                lhs: LValue::Ident(hidden.clone()),
+                                rhs: Expr::Resize {
+                                    expr: Box::new(value),
+                                    width,
+                                    signed: false,
+                                },
+                                nonblocking: false,
+                            });
+                            weights.push(hidden);
+                        }
+                        jobs.push(Job::RandcaseNext(RandcaseState {
+                            id,
+                            index: 0,
+                            weights,
+                            width,
+                            items: Vec::new(),
+                        }));
                     }
                     // A case statement on a type reference selects its arm
                     // at elaboration: the first whose type matches, else the
@@ -711,6 +903,19 @@ impl BodyBuilder<'_, '_, '_> {
                     _ => output.extend(self.native_statement_leaf(&native.statement(id).kind)?),
                 },
                 Job::EndScope => self.pop_scope(),
+                Job::BlockEnd { id, start } => {
+                    let Some((_, registered, targeted)) = self.named_blocks.pop() else {
+                        return Err(disagreement());
+                    };
+                    debug_assert_eq!(registered, id);
+                    // A block no `disable` names is ordinary sequential
+                    // code: keeping it flat leaves every analysis of the
+                    // enclosing statement list as it is without the label.
+                    if targeted {
+                        let body = output.split_off(start);
+                        output.push(Stmt::Block { id, body });
+                    }
+                }
                 Job::ImplicitEvent { start, sensitivity } => {
                     let wait = timing::implicit_event(
                         &output[start..],
@@ -982,6 +1187,26 @@ impl BodyBuilder<'_, '_, '_> {
                     state.index += 1;
                     jobs.push(Job::CaseNext(state));
                 }
+                Job::RandcaseNext(state) => {
+                    let StatementKind::Case { arms, .. } = &native.statement(state.id).kind else {
+                        return Err(disagreement());
+                    };
+                    if state.index == arms.len() {
+                        output.extend(self.randcase_finish(state));
+                    } else {
+                        let body = arms[state.index].body;
+                        jobs.push(Job::RandcaseBranch {
+                            state,
+                            start: output.len(),
+                        });
+                        jobs.push(Job::Enter(body));
+                    }
+                }
+                Job::RandcaseBranch { mut state, start } => {
+                    state.items.push(output.split_off(start));
+                    state.index += 1;
+                    jobs.push(Job::RandcaseNext(state));
+                }
                 Job::Loop {
                     kind,
                     init,
@@ -1102,6 +1327,8 @@ fn breaks(body: &[Stmt]) -> bool {
             items.iter().any(|item| breaks(&item.body)) || default.as_deref().is_some_and(breaks)
         }
         Stmt::WaitImplicit { reads, .. } => breaks(reads),
+        // A named block is no loop: a `break` in it leaves this one.
+        Stmt::Block { body, .. } => breaks(body),
         _ => false,
     })
 }
@@ -1150,13 +1377,126 @@ pub(super) fn mark_breaks(body: Vec<Stmt>, stop: &str) -> Vec<Stmt> {
                 reads: mark_breaks(reads, stop),
                 always_comb,
             }),
+            Stmt::Block { id, body } => marked.push(Stmt::Block {
+                id,
+                body: mark_breaks(body, stop),
+            }),
             stmt => marked.push(stmt),
         }
     }
     marked
 }
 
+/// An unsigned packed type of `width` bits, for hidden randcase values.
+fn unsigned_type(width: usize) -> Type {
+    let mut ty = super::int_type();
+    ty.is_signed = false;
+    ty.packed_ranges = vec![PackedRange::new(
+        ConstExpr::Literal((width - 1).to_string()),
+        ConstExpr::Literal("0".to_string()),
+    )];
+    ty
+}
+
 impl BodyBuilder<'_, '_, '_> {
+    /// The statements that pick a randcase branch: when the weights sum
+    /// to a nonzero total, draw a number below it with the thread RNG
+    /// and take the first branch whose cumulative weight exceeds it; a
+    /// zero total takes no branch (IEEE 1800-2023 18.16).
+    fn randcase_finish(&mut self, state: RandcaseState) -> Vec<Stmt> {
+        let width = state.width;
+        let ty = unsigned_type(width);
+        let literal = |value: u32| Expr::Literal(format!("{width}'d{value}"));
+        let sum = |names: &[String]| {
+            names
+                .iter()
+                .map(|name| Expr::Ident(name.clone()))
+                .reduce(|left, right| Expr::Binary {
+                    left: Box::new(left),
+                    op: BinaryOp::Add,
+                    right: Box::new(right),
+                })
+                .expect("a randcase has weights")
+        };
+        let total = self.hidden(ty.clone()).1;
+        let pick = self.hidden(ty).1;
+        let urandom = || Expr::Call {
+            callee: Callee::System(SystemFunction::Urandom),
+            args: Vec::new(),
+            arg_order: Vec::new(),
+        };
+        let draw = if width <= 32 {
+            Expr::Call {
+                callee: Callee::System(SystemFunction::UrandomRange),
+                args: vec![
+                    Some(Expr::Binary {
+                        left: Box::new(Expr::Ident(total.clone())),
+                        op: BinaryOp::Sub,
+                        right: Box::new(literal(1)),
+                    }),
+                    Some(literal(0)),
+                ],
+                arg_order: Vec::new(),
+            }
+        } else {
+            // Two 32-bit draws make a 64-bit one; the high half of its
+            // product with the total is uniform below the total, the
+            // scaling `$urandom_range` itself uses.
+            let widen = |expr: Expr| Expr::Resize {
+                expr: Box::new(expr),
+                width: 128,
+                signed: false,
+            };
+            Expr::Resize {
+                expr: Box::new(Expr::Binary {
+                    left: Box::new(Expr::Binary {
+                        left: Box::new(widen(Expr::Concat(vec![urandom(), urandom()]))),
+                        op: BinaryOp::Mul,
+                        right: Box::new(widen(Expr::Ident(total.clone()))),
+                    }),
+                    op: BinaryOp::Shr,
+                    right: Box::new(Expr::Literal("128'd64".into())),
+                }),
+                width,
+                signed: false,
+            }
+        };
+        let mut chain: Vec<Stmt> = Vec::new();
+        for (index, body) in state.items.into_iter().enumerate().rev() {
+            chain = vec![Stmt::If {
+                condition: Expr::Binary {
+                    left: Box::new(Expr::Ident(pick.clone())),
+                    op: BinaryOp::Lt,
+                    right: Box::new(sum(&state.weights[..=index])),
+                },
+                then_body: body,
+                else_body: chain,
+            }];
+        }
+        let mut guarded = vec![Stmt::Assign {
+            lhs: LValue::Ident(pick),
+            rhs: draw,
+            nonblocking: false,
+        }];
+        guarded.extend(chain);
+        vec![
+            Stmt::Assign {
+                lhs: LValue::Ident(total.clone()),
+                rhs: sum(&state.weights),
+                nonblocking: false,
+            },
+            Stmt::If {
+                condition: Expr::Binary {
+                    left: Box::new(Expr::Ident(total)),
+                    op: BinaryOp::Ne,
+                    right: Box::new(literal(0)),
+                },
+                then_body: guarded,
+                else_body: Vec::new(),
+            },
+        ]
+    }
+
     /// The body of the arm that a case statement on type reference `value`
     /// selects: the first whose type matches, else the default one (IEEE
     /// 1800-2023 6.23).
