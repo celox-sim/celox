@@ -436,6 +436,64 @@ fn self_qualified_names_are_not_hidden_by_formals() {
 }
 
 #[test]
+fn self_qualified_enumerators_are_constants() {
+    // Nothing hides the items the package qualifies, so it is analyzed
+    // once, in which `p::LOW` is the constant `LOW` (IEEE 1800-2023 6.19,
+    // 26.3).
+    assert_eq!(
+        output(
+            "package p;
+               typedef enum { NONE, LOW, HIGH } level_e;
+               localparam int X = 5;
+               function automatic int f(input int a);
+                 level_e level;
+                 level = p::HIGH;
+                 return p::X * 10 + p::LOW + (level == p::HIGH ? a : 0);
+               endfunction
+             endpackage
+             module Top(output logic [7:0] y); assign y = 8'(p::f(3)); endmodule"
+        ),
+        54
+    );
+}
+
+#[test]
+fn a_member_of_an_imported_base_hides_the_item_from_the_plain_name_only() {
+    // `D` extends the class `q::Base` that the package imports, not the
+    // class of that name in another scope of the same source, so that `X`
+    // is the member it inherits and `p::X` the item of the package (IEEE
+    // 1800-2023 8.13, 26.3).
+    let mut simulator = Simulator::from_sv_sources(
+        vec![
+            (
+                "package q; class Base; localparam int X = 2; endclass endpackage",
+                std::path::Path::new("q.sv"),
+            ),
+            (
+                "package r; class Base; endclass endpackage
+                 package p;
+                   import q::*;
+                   localparam int X = 5;
+                   class D extends Base;
+                     static function int f(); return p::X * 10 + X; endfunction
+                   endclass
+                 endpackage
+                 module Top(output logic [7:0] y);
+                   localparam int A = p::D::f();
+                   assign y = 8'(A);
+                 endmodule",
+                std::path::Path::new("p.sv"),
+            ),
+        ],
+        "Top",
+    )
+    .build()
+    .unwrap_or_else(|error| panic!("{error}"));
+    let y = simulator.signal("y");
+    assert_eq!(u64::try_from(simulator.get(y)).unwrap(), 52);
+}
+
+#[test]
 fn selects_of_package_parameters_use_their_declared_ranges() {
     assert_eq!(
         output(
