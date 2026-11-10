@@ -3439,6 +3439,38 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     )?)],
                 }]);
             }
+            // The coverage database tasks name a database Celox does not
+            // keep: with no coverage data they have no effect (40.3.2.7)
+            // but that of evaluating the name.
+            system_functions::SystemCall::Task(
+                SystemTask::SetCoverageDbName | SystemTask::LoadCoverageDb,
+            ) => {
+                // A constant function ignores its system task calls
+                // (13.4.3).
+                if self.dims.constant_function_bodies {
+                    return Ok(Vec::new());
+                }
+                let mut stmts = Vec::new();
+                for id in arguments.iter().filter_map(|arg| arg.value) {
+                    if matches!(
+                        declarations.expression(id).kind,
+                        celox_sv_syntax::ExprKind::Literal(_)
+                    ) {
+                        continue;
+                    }
+                    let mut value = expression_binding::bind_value(
+                        id,
+                        declarations,
+                        self.tree,
+                        self.session,
+                        &self.dims,
+                        None,
+                    )?;
+                    self.rename_expr(&mut value);
+                    stmts.push(Stmt::Eval(value));
+                }
+                return Ok(stmts);
+            }
             system_functions::SystemCall::Task(task) => task,
         };
         if matches!(task, SystemTask::Readmem(_) | SystemTask::Writemem(_))

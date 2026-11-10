@@ -388,6 +388,21 @@ fn bind_in_context(
                         values.push(value);
                     }
                 }
+                // A coverage function is no constant system function
+                // (11.2.1), although its call folds to a literal.
+                ExprKind::Call { expression, .. }
+                    if matches!(&native.expression(*expression).kind, ExprKind::Name(name)
+                        if SystemFunction::from_name(&name.spelling)
+                            .is_some_and(SystemFunction::is_coverage)) =>
+                {
+                    let ExprKind::Name(name) = &native.expression(*expression).kind else {
+                        unreachable!()
+                    };
+                    return Err(AnalyzerError::InvalidSystemTfCall {
+                        name: name.spelling.clone(),
+                        detail: "a coverage function is not a constant system function".into(),
+                    });
+                }
                 ExprKind::Call { .. } | ExprKind::Member { .. } => {
                     let is_query = matches!(&native.expression(id).kind,ExprKind::Call{expression,..} if matches!(&native.expression(*expression).kind,ExprKind::Name(name) if SystemFunction::from_name(&name.spelling).is_some_and(|f|f.is_data_query()||matches!(f,SystemFunction::Isunbounded|SystemFunction::Typename))));
                     let mut context = if is_query {

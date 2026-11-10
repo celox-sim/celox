@@ -3758,3 +3758,53 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "1 HIGH\n1 HIGH\n0 HIGH\nHIGH ZERO HIGH\n1 MINUS\n0 MINUS -5\nHIGH\n1 1 1\n"))
+
+(case coverage_without_instrumentation
+  (source "coverage.sv" #"
+module Top(output bit ok);
+  int r_check, r_stop, r_max, r_get, r_bad;
+  real total;
+  initial begin
+    r_check = $coverage_control(`SV_COV_CHECK, `SV_COV_TOGGLE, `SV_COV_HIER, $root);
+    r_stop = $coverage_control(`SV_COV_STOP, `SV_COV_TOGGLE, `SV_COV_HIER, $root);
+    r_max = $coverage_get_max(`SV_COV_TOGGLE, `SV_COV_HIER, $root.Top);
+    r_get = $coverage_get(`SV_COV_STATEMENT, `SV_COV_MODULE, "Top");
+    r_bad = $coverage_get_max(99, `SV_COV_HIER, $root);
+    total = $get_coverage();
+    $set_coverage_db_name("db");
+    $load_coverage_db("db");
+    ok = r_check == `SV_COV_NOCOV && r_stop == `SV_COV_OK && r_max == 0
+      && r_get == 0 && r_bad == `SV_COV_ERROR && total == 100.0;
+  end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq ok 1))
+
+(case coverage_selectors_and_database_names
+  ; A selector is any constant expression, an invalid one is an error
+  ; result, nothing is saved without coverage (40.3.2.5), and the name of
+  ; a database is evaluated although no database is kept.
+  (source "coverage_selectors.sv" #"
+module Top(output bit ok);
+  localparam int T = 23;
+  int calls = 0;
+  int r_save, r_sum, r_bad, r_min;
+  string name = "db";
+  function automatic string next_name();
+    calls++;
+    return "db";
+  endfunction
+  initial begin
+    r_save = $coverage_save(`SV_COV_TOGGLE, "db");
+    r_sum = $coverage_get_max(T - 1, `SV_COV_HIER, $root);
+    r_bad = $coverage_get_max(T + 1, `SV_COV_HIER, $root);
+    r_min = $coverage_get(-128'sh80000000000000000000000000000000, `SV_COV_HIER, $root);
+    $set_coverage_db_name(next_name());
+    $load_coverage_db(next_name());
+    $load_coverage_db(name);
+    ok = r_save == `SV_COV_NOCOV && r_sum == `SV_COV_NOCOV && r_bad == `SV_COV_ERROR
+      && r_min == `SV_COV_ERROR && calls == 2;
+  end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq ok 1))

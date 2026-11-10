@@ -1943,6 +1943,28 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:6: warning: macro SV_COV_CHECK undefined (and assumed null) at this point.\n<case>/source_0.sv:6: warning: macro SV_COV_TOGGLE undefined (and assumed null) at this point.\n<case>/source_0.sv:6: warning: macro SV_COV_HIER undefined (and assumed null) at this point.\n<case>/source_0.sv:7: warning: macro SV_COV_STOP undefined (and assumed null) at this point.\n<case>/source_0.sv:7: warning: macro SV_COV_TOGGLE undefined (and assumed null) at this point.\n<case>/source_0.sv:7: warning: macro SV_COV_HIER undefined (and assumed null) at this point.\n<case>/source_0.sv:8: warning: macro SV_COV_TOGGLE undefined (and assumed null) at this point.\n<case>/source_0.sv:8: warning: macro SV_COV_HIER undefined (and assumed null) at this point.\n<case>/source_0.sv:9: warning: macro SV_COV_STATEMENT undefined (and assumed null) at this point.\n<case>/source_0.sv:9: warning: macro SV_COV_MODULE undefined (and assumed null) at this point.\n<case>/source_0.sv:10: warning: macro SV_COV_HIER undefined (and assumed null) at this point.\n<case>/source_0.sv:14: warning: macro SV_COV_NOCOV undefined (and assumed null) at this point.\n<case>/source_0.sv:14: warning: macro SV_COV_OK undefined (and assumed null) at this point.\n<case>/source_0.sv:15: warning: macro SV_COV_ERROR undefined (and assumed null) at this point.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Malformed statement\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:15: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "system_functions::coverage_without_instrumentation",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:12: warning: macro SV_COV_TOGGLE undefined (and assumed null) at this point.\n<case>/source_0.sv:13: warning: macro SV_COV_HIER undefined (and assumed null) at this point.\n<case>/source_0.sv:14: warning: macro SV_COV_HIER undefined (and assumed null) at this point.\n<case>/source_0.sv:15: warning: macro SV_COV_HIER undefined (and assumed null) at this point.\n<case>/source_0.sv:19: warning: macro SV_COV_NOCOV undefined (and assumed null) at this point.\n<case>/source_0.sv:19: warning: macro SV_COV_NOCOV undefined (and assumed null) at this point.\n<case>/source_0.sv:19: warning: macro SV_COV_ERROR undefined (and assumed null) at this point.\n<case>/source_0.sv:20: warning: macro SV_COV_ERROR undefined (and assumed null) at this point.\n<case>/source_0.sv:19: syntax error\n<case>/source_0.sv:20: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "system_functions::coverage_selectors_and_database_names",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

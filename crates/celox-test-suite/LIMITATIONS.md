@@ -2241,3 +2241,18 @@ Icarus 13.0 does not parse `randcase` and reports a syntax error at the
 statement. The executed compile errors are retained in
 [the Icarus procedural report](verification/sv/icarus/procedural.json). No
 assertion is weakened.
+
+### Coverage system functions
+
+`system_functions::coverage_without_instrumentation` and
+`system_functions::coverage_selectors_and_database_names` call the coverage
+system functions and tasks of IEEE 1800-2023 40.3.2 and 19.9 with the
+`` `SV_COV_* `` macros of Clause 40. Celox collects no coverage and gives
+their results without coverage.
+
+Neither reference simulator implements them: Verilator 5.052 reports each
+function as a reserved word that is not implemented, and Icarus 13.0 does not
+define the macros. The executed compile errors are retained in the
+[Verilator](verification/sv/verilator/system_functions.json) and
+[Icarus](verification/sv/icarus/system_functions.json) system function
+reports. No assertion is weakened.

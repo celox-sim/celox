@@ -3771,6 +3771,9 @@ struct PackedDimensions {
     array_parameter_values: SharedMap<Expr>,
     expression_signedness: ScopedMap<bool>,
     constant_indexed_base: bool,
+    /// The bodies bound in this context are those of constant functions,
+    /// for evaluation in constant expressions (13.4.3).
+    constant_function_bodies: bool,
     /// The current lexical scope has already collected its visible declarations.
     /// Preliminary parameter/function/range lowering must keep this false.
     scope_types_complete: bool,
@@ -3877,6 +3880,7 @@ impl PackedDimensions {
             array_parameter_values: SharedMap::default(),
             expression_signedness: ScopedMap::default(),
             constant_indexed_base: false,
+            constant_function_bodies: false,
             scope_types_complete: false,
             type_query: false,
             subroutine_param_shapes: Arc::default(),
