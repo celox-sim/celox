@@ -4,7 +4,7 @@
   "repository": "https://github.com/verilator/rtlmeter.git",
   "revision": "4fdd6c3fd154e9b99d3a9d713cf3f4977e284f94",
   "samples": 3,
-  "verilatorVersion": "5.052",
+  "verilatorVersion": "5.054",
   "cases": {
     "e902": {
       "design": "XuanTie-E902",
