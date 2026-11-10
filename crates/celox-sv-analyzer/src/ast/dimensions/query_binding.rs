@@ -1,6 +1,6 @@
 //! Size and array queries consume native operands and semantic shape metadata.
 use super::*;
-use celox_sv_syntax::{DimensionKind, ExprId, ExprKind};
+use celox_sv_syntax::{DataTypeKind, DimensionKind, ExprId, ExprKind};
 
 fn integer(value: i128) -> Expr {
     Expr::Literal(value.to_string())
@@ -53,15 +53,87 @@ fn literal_operand(root: ExprId, native: &celox_sv_syntax::Declarations) -> bool
     true
 }
 
+/// A data type whose syntax names nothing: a built-in type whose packed
+/// dimensions are literal.
+fn builtin_type(id: celox_sv_syntax::TypeId, native: &celox_sv_syntax::Declarations) -> bool {
+    let data = native.data_type(id);
+    matches!(data.kind, DataTypeKind::Builtin(_))
+        && data
+            .packed_dimensions
+            .iter()
+            .all(|dimension| match dimension.kind {
+                DimensionKind::Unsized | DimensionKind::Wildcard | DimensionKind::Queue(None) => {
+                    true
+                }
+                DimensionKind::Index(index) | DimensionKind::Queue(Some(index)) => {
+                    literal_operand(index, native)
+                }
+                DimensionKind::Range { left, right } => {
+                    literal_operand(left, native) && literal_operand(right, native)
+                }
+                DimensionKind::Indexed { base, width, .. } => {
+                    literal_operand(base, native) && literal_operand(width, native)
+                }
+            })
+}
+
+/// Whether operand `root` is a type that `context` binds as it is where the
+/// operand is written, so that the declarations of the scope cannot change
+/// its shape: a built-in type, or a name that the tables give a type and
+/// that nothing around the operand declares otherwise (IEEE 1800-2023
+/// 20.6.2, 23.9). The scope's own typedefs are in the tables when their
+/// names are, which bind them before any operand names them.
+fn bound_type_operand(
+    root: ExprId,
+    tree: &AnalysisContext<'_>,
+    context: &PackedDimensions,
+) -> Converted<bool> {
+    let native = tree.declarations();
+    let root = expression_binding::ungroup(root, native);
+    match &native.expression(root).kind {
+        ExprKind::Type(id) => Ok(builtin_type(*id, native)),
+        ExprKind::Name(name) => {
+            let name = instances::normalize_identifier(&name.spelling);
+            Ok(context.type_aliases.contains_key(&name)
+                // What [`shape`] finds before the type of that name.
+                && context.get(&name).is_none()
+                && !context.const_env.contains_key(&name)
+                && !context.parameter_values.contains_key(&name)
+                && !scope::imported(tree).interface_members.contains_key(&name)
+                && !discovery::hides_type_name(tree, native.expression(root).tokens, &name)?)
+        }
+        _ => Ok(false),
+    }
+}
+
+/// The context that the operand `root` of a query is bound in: `context`
+/// with the declarations of the scope that the operand may name.
 pub(in crate::ast) fn query_context_for_operand(
     root: ExprId,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     context: &PackedDimensions,
 ) -> Converted<PackedDimensions> {
+    operand_context(root, None, tree, session, context)
+}
+
+/// [`query_context_for_operand`], for a context that expression `evaluated`
+/// is bound in as well, which may name any declaration of the scope.
+fn operand_context(
+    root: ExprId,
+    evaluated: Option<ExprId>,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    context: &PackedDimensions,
+) -> Converted<PackedDimensions> {
+    let native = tree.declarations();
     // Aggregate port defaults commonly repeat literal arithmetic. Rediscovering
     // all declarations for each item repeatedly snapshots the growing prefix.
-    if context.scope_types_complete || literal_operand(root, tree.declarations()) {
+    if context.scope_types_complete
+        || literal_operand(root, native)
+        || (evaluated.is_none_or(|evaluated| literal_operand(evaluated, native))
+            && bound_type_operand(root, tree, context)?)
+    {
         return Ok(query_context(context));
     }
     Ok(query_context(&query_operand_dimensions_id(
@@ -122,7 +194,14 @@ pub(in crate::ast) fn query_value(
         return Err(unsupported(format!("arguments of `{}`", name.spelling)));
     }
     let argument = arguments[0].value.unwrap();
-    let context = query_context_for_operand(argument, tree, session, context)?;
+    // The dimension number is bound in the context of the operand.
+    let context = operand_context(
+        argument,
+        arguments.get(1).and_then(|argument| argument.value),
+        tree,
+        session,
+        context,
+    )?;
     reject_unbounded(argument, function, tree, &context)?;
     if function == SystemFunction::Size
         && let Some(value) = interface_array_size(
