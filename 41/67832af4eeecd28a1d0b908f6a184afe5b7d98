@@ -1,0 +1,1 @@
+Address Codex review on PR 3439: a sampled (or past) literal carries its unknown bits, so do not treat every call as known when proving a two-state predicate
