@@ -389,6 +389,7 @@ pub(super) fn module_constant_functions(
         type_aliases,
         parameter_literals,
         &HashSet::default(),
+        procedural::ClassMethods::StaticFunctions,
     )
 }
 
@@ -399,6 +400,7 @@ pub(super) fn symbolic_module_constant_functions(
     type_aliases: &HashMap<String, Type>,
     parameter_literals: &HashMap<String, Expr>,
     symbolic_parameters: &HashSet<String>,
+    class_methods: procedural::ClassMethods,
 ) -> ConstantFunctions {
     let (has_functions, has_controls) = scope_flags(tree);
     if !has_functions {
@@ -413,6 +415,7 @@ pub(super) fn symbolic_module_constant_functions(
             type_aliases,
             parameter_literals,
             symbolic_parameters,
+            class_methods,
         );
     }
     // Seed the module's functions before conditions need to call them:
@@ -428,6 +431,7 @@ pub(super) fn symbolic_module_constant_functions(
         type_aliases,
         parameter_literals,
         symbolic_parameters,
+        class_methods,
     );
     roots.extend_missing(&scope::imported(tree).constant_functions);
     let tree = &tree.with_functions(roots);
@@ -438,6 +442,7 @@ pub(super) fn symbolic_module_constant_functions(
         type_aliases,
         parameter_literals,
         symbolic_parameters,
+        class_methods,
     )
 }
 
@@ -448,6 +453,7 @@ fn collect_module_constant_functions(
     type_aliases: &HashMap<String, Type>,
     parameter_literals: &HashMap<String, Expr>,
     symbolic_parameters: &HashSet<String>,
+    class_methods: procedural::ClassMethods,
 ) -> ConstantFunctions {
     let (has_functions, _) = scope_flags(tree);
     if !has_functions {
@@ -507,6 +513,7 @@ fn collect_module_constant_functions(
         &mut state,
         Some(&mut rejected),
         symbolic_parameters,
+        class_methods,
     ) {
         Ok(subroutines) => subroutines,
         Err(error) => return ConstantFunctions::unconverted(error),
