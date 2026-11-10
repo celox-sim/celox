@@ -863,7 +863,9 @@ run, that a killed branch stops mid-schedule, and that a loop inside the
 block is left. Boundaries: hierarchical and task-name targets stay
 unsupported, a named block containing a fork is not a disable target, a
 block outside the executing process (such as a fork parent's block) is not
-lowered, and a sibling kill uses the branch's latest activation. A fork branch
+lowered, and a sibling kill uses the branch's latest activation. A sibling
+`disable` that runs before the branch it names has started finds a block that
+is not executing and has no effect, so the branch then runs. A fork branch
 that a sibling `disable` names takes a process handle, so its process record
 is kept for the rest of the simulation as one a `process::self()` call
 exposes is; a branch that is only labelled takes none and its record is

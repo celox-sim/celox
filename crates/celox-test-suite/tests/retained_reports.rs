@@ -1343,6 +1343,12 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                         ("verilator", "procedural::disable_block_in_concurrent_task") => {
                             ("mismatch", "execute", "assert_eq ok: expected 0x1, got 0x0")
                         }
+                        ("icarus", "procedural::randcase_weights") => {
+                            ("compile_error", "compile", "source_0.sv:7: syntax error")
+                        }
+                        ("icarus", "procedural::randcase_in_always_comb") => {
+                            ("compile_error", "compile", "source_0.sv:5: syntax error")
+                        }
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

@@ -57,7 +57,7 @@ struct FunctionBlocks {
 /// disabling the block in one activation ends every other active one at
 /// its next statement (IEEE 1800-2023 9.6.2).
 struct BlockEntry {
-    id: u32,
+    id: u64,
     exit: BlockId,
     epoch: Option<(String, String)>,
 }
