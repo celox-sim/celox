@@ -836,23 +836,6 @@ fn validate_scope(
             }
         }
     }
-    for index in spans.instantiations.within(&ranges) {
-        let instance = &native.instantiations[index];
-        if selected(instance.tokens)
-            && instance
-                .instances
-                .iter()
-                .flat_map(|instance| &instance.connections)
-                .any(|connection| {
-                    matches!(
-                        connection.kind,
-                        celox_sv_syntax::InstanceConnectionKind::Wildcard
-                    )
-                })
-        {
-            return Err(unsupported("wildcard port connection"));
-        }
-    }
     for id in spans.types.within(&ranges) {
         let data = native.data_type(id);
         if !selected(data.tokens) {
@@ -1015,8 +998,10 @@ fn validate_scope(
 }
 
 fn validate_net_type(name: &str) -> Converted<()> {
+    // Pull and supply nets take an implicit driver (6.6.5-6; see
+    // `net_drives`). The charge storage of a `trireg` net (6.6.4) is
+    // not modeled, so the type stays rejected.
     match name {
-        "supply0" | "supply1" | "tri0" | "tri1" => Err(unsupported("pull or supply net type")),
         "trireg" => Err(unsupported("trireg charge storage")),
         _ => Ok(()),
     }

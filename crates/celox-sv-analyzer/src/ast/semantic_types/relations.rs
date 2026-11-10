@@ -62,6 +62,11 @@ pub(in crate::ast) enum Assignable {
 }
 
 impl TyTable {
+    /// Whether `id` is an enumerated type, not a packed array of one (6.19).
+    pub fn is_enum(&self, id: TyId) -> bool {
+        matches!(self.data(id), TyData::Packed(packed) if scalar_enum(packed))
+    }
+
     /// Whether `a` and `b` are equivalent types (IEEE 1800-2023 6.22.2).
     pub fn equivalent(&self, a: TyId, b: TyId) -> bool {
         if self.matches(a, b) {

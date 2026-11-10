@@ -653,3 +653,45 @@ fn handle_copies_belong_to_their_activation() {
     assert_eq!(sim.get(woke0), num_bigint::BigUint::from(5u8));
     assert_eq!(sim.get(woke1), num_bigint::BigUint::from(3u8));
 }
+
+#[test]
+fn virtual_interface_members_keep_package_and_unit_types() {
+    // The members of an interface that a virtual interface reaches have the
+    // types the interface declares them with, also through a package import
+    // or a compilation-unit typedef, which building its declarations needs
+    // the packages for (IEEE 1800-2023 25.9, 26.3).
+    let source = r#"
+        typedef logic [11:0] word_t;
+        package P;
+            typedef logic [7:0] byte_t;
+        endpackage
+        interface ifc;
+            import P::*;
+            byte_t data;
+            word_t wide;
+        endinterface
+        module Top(output logic [7:0] data, output logic [11:0] wide);
+            ifc bus();
+            virtual ifc vif;
+            initial begin
+                bus.data = 8'hab;
+                bus.wide = 12'hcde;
+                vif = bus;
+                #1;
+                data = vif.data;
+                wide = vif.wide;
+            end
+        endmodule"#;
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![(
+            &format!("`timescale 1ns/1ns\n{source}"),
+            Path::new("vif_types.sv"),
+        )],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("data")), 0xabu8.into());
+    assert_eq!(sim.get(sim.signal("wide")), 0xcdeu16.into());
+}

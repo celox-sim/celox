@@ -4298,6 +4298,33 @@ mod host {
             assert_eq!(sim.backend.get_four_state(signal), (value, mask));
         }
 
+        #[test]
+        fn signal_copy_marks_the_destination_for_vcd_tracking() {
+            use celox_runtime::backend::SimBackend as _;
+            let dir = tempfile::tempdir().unwrap();
+            let mut sim = Simulator::builder(
+                "module Top (a: input logic<8>, b: output logic<8>) {}",
+                "Top",
+            )
+            .vcd(dir.path().join("copy.vcd"))
+            .build_interpreter()
+            .unwrap();
+            let a = sim.try_child_signal(&[], "a").unwrap();
+            let b = sim.try_child_signal(&[], "b").unwrap();
+            let group = |signal: celox_runtime::SignalRef| {
+                signal.offset / celox_state_layout::TRACE_GROUP_BYTES
+            };
+            let mut groups = Vec::new();
+            assert!(sim.backend.take_vcd_activity(&mut groups));
+            sim.backend.set(a, 0xa5u8);
+            assert!(sim.backend.take_vcd_activity(&mut groups));
+            assert!(groups.contains(&group(a)), "{groups:?}");
+            celox_runtime::copy_signal(&mut sim.backend, a, b);
+            assert_eq!(sim.backend.get(b), BigUint::from(0xa5u8));
+            assert!(sim.backend.take_vcd_activity(&mut groups));
+            assert!(groups.contains(&group(b)), "{groups:?}");
+        }
+
         /// Batched testbench ticks end each tick's slot in a design with
         /// sampled values: a register capturing `$sampled(count)` follows
         /// the preceding tick.

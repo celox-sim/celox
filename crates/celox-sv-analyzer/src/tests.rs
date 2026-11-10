@@ -851,6 +851,35 @@ fn validates_shapes_in_short_circuited_parameter_operands() {
 }
 
 #[test]
+fn wildcard_associative_indices_must_be_integral() {
+    // Nonintegral index values are illegal for a wildcard index (7.8.1);
+    // a string literal still casts to a bit vector.
+    for index in ["s", "r", "q"] {
+        let source = format!(
+            "module Top; int a[*]; string s = \"x\"; real r = 1.5; int q[$]; initial a[{index}] = 1; endmodule"
+        );
+        let error = analyze_source(&source, Path::new("wildcard_index.sv")).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("nonintegral associative array index"),
+            "{index}: {error}"
+        );
+    }
+    analyze_source(
+        "module Top; int a[*]; initial begin a[\"x\"] = 1; a[5] = 2; end endmodule",
+        Path::new("wildcard_index_literal.sv"),
+    )
+    .unwrap();
+    // A process handle is an integral identity and may index (7.8.5).
+    analyze_source(
+        "module Top; bit a[process]; process p; initial a[p] = 1; endmodule",
+        Path::new("process_index.sv"),
+    )
+    .unwrap();
+}
+
+#[test]
 fn validates_user_calls_in_short_circuited_parameter_operands() {
     for call in ["f(.missing(1))", "f(.x(1), .x(2))", "f(1, 2)", "f()", "f"] {
         let source = format!(
@@ -8000,8 +8029,8 @@ fn container_formals_copy_only_what_container_assignment_represents() {
         ("output int q[$][$]", "nb", "another queue bound"),
         ("inout int q[$][$:3]", "na", "another queue bound"),
         ("output int q[$]", "x", "compatible container"),
-        ("inout int q[$]", "m", "incompatible dynamic container"),
-        ("int q[$]", "m", "incompatible dynamic container"),
+        ("inout int q[$]", "m", "not assignment compatible"),
+        ("int q[$]", "m", "not assignment compatible"),
     ] {
         let source = format!(
             "module Top; typedef int q_t[$]; int a[$]; int b[$:3]; int x; int m[string]; \
@@ -8012,8 +8041,13 @@ fn container_formals_copy_only_what_container_assignment_represents() {
         );
         let error = analyze_source(&source, Path::new("container_formal.sv"))
             .expect_err("an actual the copy cannot represent must be rejected");
+        // A copy the heap cannot represent is unsupported; an actual of
+        // another container type is not assignment compatible (7.6).
         assert!(
-            matches!(error, AnalyzerError::Unsupported(_)) && error.to_string().contains(detail),
+            matches!(
+                error,
+                AnalyzerError::Unsupported(_) | AnalyzerError::IncompatibleUnpackedArray { .. }
+            ) && error.to_string().contains(detail),
             "{formal} <- {actual}: {error}"
         );
     }

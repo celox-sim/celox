@@ -2,6 +2,8 @@ use super::*;
 
 sv_backends! {
     fn inline_enum_wider_expression_initializer(sim) { @case "types::inline_enum_wider_expression_initializer"; }
+    fn enum_explicit_integral_assignments(sim) { @case "types::enum_explicit_integral_assignments"; }
+    fn enum_wide_parameters_preserve_declared_types(sim) { @case "types::enum_wide_parameters_preserve_declared_types"; }
     fn scalar_integral_type_casts(sim) { @case "types::scalar_integral_type_casts"; }
     fn scalar_integral_type_casts_four_state(sim) { @case "types::scalar_integral_type_casts_four_state"; }
     fn inline_enum_wide_unknown_explicit_successor(sim) { @case "types::inline_enum_wide_unknown_explicit_successor"; }
@@ -443,4 +445,130 @@ fn local_enumeration_of_nested_containers_keeps_its_members() {
     let n = sim.signal("n");
     sim.run_until(0).unwrap();
     assert_eq!(sim.get(n), BigUint::from(3u8));
+}
+
+#[test]
+fn enumerated_variables_take_only_values_of_their_type() {
+    // IEEE 1800-2023 6.19.3, 6.19.4: a value assigned to an enumerated
+    // variable, passed to an enumerated formal, returned as one or given as
+    // an item of an array of them is of the enumeration's type; any other
+    // value, such as the integral result of a compound assignment or an
+    // increment, needs a cast.
+    for body in [
+        "e_t e; initial e = 1;",
+        "e_t e; f_t f; initial e = f;",
+        "e_t e; int i; initial e = i;",
+        "e_t e; initial e = A + 1;",
+        "e_t e; assign e = 1;",
+        "e_t e = 1;",
+        "function void take(e_t x); endfunction initial take(1);",
+        "function e_t make(); return 1; endfunction",
+        "e_t a [2]; initial a = '{0, 1};",
+        "class C; e_t p; endclass C c; initial begin c = new; c.p = 1; end",
+        "e_t e; bit s; initial e = s ? A : 1;",
+        "e_t e; initial e += 1;",
+        "e_t e; initial e++;",
+        "e_t e; int i; initial i = e--;",
+        "e_t a [2]; initial a[0] = 1;",
+        "initial begin e_t v; v = 1; end",
+        "e_t e; initial e = #1 1;",
+        "e_t e; initial e <= 1;",
+        "typedef struct packed { e_t e; logic [31:0] i; } s_t; s_t s; initial s.e = 1;",
+        // An untyped parameter of an integral value is a logic vector
+        // (6.20.2), and an explicitly integral one stays integral.
+        "localparam P = B; e_t e; initial e = P;",
+        "localparam int P = B; e_t e; initial e = P;",
+        // An input or inout argument is copied in to its formal (13.5),
+        // through any binder.
+        "task t(inout e_t x); endtask int i; initial t(i);",
+        "class C; task m(inout e_t x); endtask endclass C c; int i; initial begin c = new; c.m(i); end",
+        "class C; task n(input e_t x); endtask endclass C c; initial begin c = new; c.n(1); end",
+        // An element of a container, assigned or updated.
+        "e_t q [$]; initial begin q.push_back(A); q[0] = 1; end",
+        "e_t q [$]; initial begin q.push_back(A); q[0] += 1; end",
+    ] {
+        let source = format!(
+            "`timescale 1ns/1ns\nmodule Top; typedef enum {{A, B}} e_t; typedef enum {{C0, C1}} f_t; {body} endmodule"
+        );
+        let Err(error) = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("enum.sv"))],
+            "Top",
+        )
+        .build() else {
+            panic!("an enumerated variable took a value of another type: {body}");
+        };
+        let error = error
+            .to_string()
+            .replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            error.contains("is not assignment compatible with `enum Top::e_t`"),
+            "{body}: {error}"
+        );
+    }
+    // An output argument is copied out of its enumerated formal, so its
+    // actual takes an enum value only as its own type does (13.5).
+    let source = "module Top; typedef enum {A, B} e_t; typedef enum {C0, C1} f_t;
+        task t(output e_t x); x = A; endtask f_t f; initial t(f); endmodule";
+    let Err(error) =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("enum.sv"))], "Top").build()
+    else {
+        panic!("an enum formal was copied out to another enumeration");
+    };
+    let error = error
+        .to_string()
+        .replace('│', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        error.contains("`enum Top::e_t` is not assignment compatible with `enum Top::f_t`"),
+        "{error}"
+    );
+    // A member of a union takes any value of its bits (6.19.3), also by an
+    // update; a select of an enumerated variable is integral; an output
+    // copies an enum value out to an integral actual; and a container
+    // element takes a value of its type.
+    for body in [
+        "typedef union packed { e_t e; logic [31:0] i; } u_t; u_t u; initial u.e = 1;",
+        "typedef union packed { e_t e; logic [31:0] i; } u_t; u_t u; initial u.e += 1;",
+        "typedef union packed { e_t e; logic [31:0] i; } u_t; u_t u; initial u.e++;",
+        "typedef enum logic [1:0] {P, Q} two_t; two_t t; initial t[0] = 1'b1;",
+        "task t(output e_t x); x = A; endtask int i; initial t(i);",
+        "function int g(output e_t x); x = A; return 0; endfunction int i, r; initial r = g(i);",
+        "class C; task o(output e_t x); x = A; endtask endclass C c; int i; initial begin c = new; c.o(i); end",
+        "e_t q [$]; initial begin q.push_back(A); q[0] = B; end",
+    ] {
+        let source = format!("module Top; typedef enum {{A, B}} e_t; {body} endmodule");
+        celox::Simulation::from_sv_sources(vec![(source.as_str(), Path::new("enum.sv"))], "Top")
+            .build()
+            .unwrap_or_else(|error| panic!("{body}: {error}"));
+    }
+    // A member, a variable or method result of the type, a cast and a
+    // conditional of members are of the type.
+    let source = "module Top(output int first, output int second, output int third);
+        typedef enum {A, B, C} e_t;
+        e_t e, g, a [2];
+        bit s = 1;
+        function e_t pick(e_t x); return x; endfunction
+        initial begin
+            e = B;
+            g = e;
+            e = e_t'(2);
+            first = e;
+            e = s ? A : g;
+            a = '{B, C};
+            second = e + a[1];
+            third = pick(e.next());
+        end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("enum.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("first")), 2u32.into());
+    assert_eq!(sim.get(sim.signal("second")), 2u32.into());
+    assert_eq!(sim.get(sim.signal("third")), 1u32.into());
 }

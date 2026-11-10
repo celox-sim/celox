@@ -100,6 +100,11 @@ struct SvVariable {
     /// The variable whose past sampled values this hidden register holds;
     /// it starts with the variable's value (`SimModule::initial_copies`).
     history_of: Option<SourceVarId>,
+    /// A variable a process's lowering made to hold a value of one
+    /// activation, such as an operand kept across a suspension. In a process
+    /// with a frame (`celox_design::ProcessFrame::private`) each activation
+    /// has its own; every other variable is the module's.
+    activation_scratch: bool,
 }
 
 impl SvVariable {
@@ -458,8 +463,16 @@ fn analyze_sources_with_requests(
             )
         })
         .collect::<Vec<_>>();
+    // Each step reports its time as a `[analysis]` event, which applications
+    // print when they ask for phase timing.
+    let mut checkpoint = std::time::Instant::now();
+    let mut step = |label: &str| {
+        tracing::debug!("[analysis] {label}: {:?}", checkpoint.elapsed());
+        checkpoint = std::time::Instant::now();
+    };
     let (elaboration, interface_member_paths) =
         sv::plan_interfaces_with_member_paths(sources, &bindings)?;
+    step("plan_interfaces");
     let root_names = elaboration.root_names.clone();
     let mut modules = HashMap::default();
     let sources: Vec<_> = sources
@@ -497,6 +510,7 @@ fn analyze_sources_with_requests(
         );
     }
     let interfaces = std::sync::Arc::new(interfaces);
+    step("parse");
     let parsed: Vec<&sv::ParsedSource> = sources.iter().map(|(source, ..)| &**source).collect();
     // The interfaces that virtual interface types name, before their
     // instances are known (see `virtual_interfaces`).
@@ -516,6 +530,7 @@ fn analyze_sources_with_requests(
     } else {
         analysis_options
     };
+    step("virtual_interface_declarations");
     let mut packages = match roots {
         Some(roots) => {
             let roots = roots
@@ -546,6 +561,7 @@ fn analyze_sources_with_requests(
         }
         None => sv::ParsedSource::analyze_packages_with_options(&parsed, None, analysis_options)?,
     };
+    step("analyze_packages");
     packages.set_interface_plan(elaboration.clone());
     let packages = std::rc::Rc::new(packages);
     for (source, code, path) in &sources {
@@ -1008,8 +1024,14 @@ fn lower_package_states(
     warnings: &mut Vec<crate::warning::PendingWarning>,
     force_out_of_line: bool,
     recursion_report: Option<&Path>,
+    virtual_ids: &HashMap<String, Vec<u32>>,
 ) -> Result<Vec<(String, ModuleId, LoweredSvModule)>, sv::AnalyzerError> {
     let mut states = packages.specialized_state_modules(design);
+    // Their initializers may reach interface instances through virtual
+    // interfaces, as modules do.
+    for state in &mut states {
+        state.expand_virtual_interface_instances(virtual_ids);
+    }
     // The change counts of the watched class properties (see
     // `ff::property_changes`), shared by every module and package, whose
     // initializers may store the properties too.
@@ -2810,6 +2832,7 @@ fn prepare_external_hierarchy_collecting(
                         force_control: None,
                         sampled_from: None,
                         history_of: None,
+                        activation_scratch: false,
                     },
                 )
             })
@@ -3111,6 +3134,7 @@ fn prepare_external_hierarchy_collecting(
         warnings,
         force_out_of_line,
         None,
+        &HashMap::default(),
     )?;
     // How often the design instantiates these modules is not known here;
     // assembly checks the drivers of package variables across instances.
@@ -3462,7 +3486,6 @@ fn schedule_sources_collecting(
     analysis_options: sv::AnalysisOptions,
     force_signals: &[String],
 ) -> Result<ScheduledRtlOutput, FrontendError> {
-    let found_warnings = warnings.len();
     let frontend_timing = trace_options.phase_timing;
     let mut checkpoint = std::time::Instant::now();
     macro_rules! checkpoint {
@@ -3515,9 +3538,6 @@ fn schedule_sources_collecting(
     // The virtual interfaces of the design, and the analyses of the modules
     // that may refer to their instances (see `virtual_interfaces`).
     let virtual_interfaces = analyzed[&top].packages.virtual_interfaces().cloned();
-    let instances_known = virtual_interfaces
-        .as_ref()
-        .is_some_and(|declarations| declarations.elaborated);
     let mut virtual_sources = HashMap::default();
     // These analyses have no unresolved hierarchical names. Retain them until
     // their first final lowering, whose scheduling and foreign-writer context
@@ -3544,9 +3564,6 @@ fn schedule_sources_collecting(
                     })?;
                 let declarations =
                     hierarchy::ElaboratedModule::from_declarations(source, &key.force_signals)?;
-                if instances_known {
-                    virtual_sources.insert(module_id, source.clone());
-                }
                 Ok((declarations, ir))
             });
         let module = match discovery {
@@ -3577,45 +3594,41 @@ fn schedule_sources_collecting(
         }
     }
 
-    // The ids of interface instances depend on the elaborated hierarchy, which
-    // the virtual interface accesses do not change: analyze again with them.
+    // The ids of interface instances depend on the elaborated hierarchy.
+    // Analysis builds each virtual interface access once, with placeholders
+    // for the instance it selects; repeat each for the instances now known.
     checkpoint!("discovery");
-    let virtual_instances = match &virtual_interfaces {
-        Some(declarations) => {
-            let instances = virtual_interfaces::Instances::elaborate(
+    let virtual_instances = virtual_interfaces.as_ref().map(|declarations| {
+        (
+            virtual_interfaces::Instances::elaborate(
                 root_id,
                 &module_ids,
                 &elaborated,
                 declarations,
-            );
-            if !declarations.elaborated {
-                drop(discovery_analyses);
-                warnings.truncate(found_warnings);
-                return schedule_sources_collecting(
-                    sources,
-                    &top,
-                    parameter_overrides,
-                    ignored_loops,
-                    true_loops,
-                    four_state,
-                    parallel,
-                    trace_options,
-                    trace,
-                    allow_inferred_latches,
-                    warnings,
-                    sv::AnalysisOptions {
-                        virtual_interfaces: Some(std::sync::Arc::new(
-                            instances.table(declarations),
-                        )),
-                        ..analysis_options
-                    },
-                    force_signals,
-                );
+            ),
+            declarations.clone(),
+        )
+    });
+    let virtual_ids = virtual_instances
+        .as_ref()
+        .map(|(instances, _)| instances.ids())
+        .unwrap_or_default();
+    if virtual_instances.is_some() {
+        let names: HashMap<ModuleId, &str> = module_ids
+            .iter()
+            .map(|(key, &id)| (id, key.name.as_str()))
+            .collect();
+        for (module_id, ir) in &mut discovery_analyses {
+            ir.expand_virtual_interface_instances(&virtual_ids);
+            if let Some(source) = ir
+                .modules()
+                .iter()
+                .find(|module| Some(module.name()) == names.get(module_id).copied())
+            {
+                virtual_sources.insert(*module_id, source.clone());
             }
-            Some((instances, declarations.clone()))
         }
-        None => None,
-    };
+    }
     let keys: HashMap<ModuleId, &LoweredSvModuleKey> =
         module_ids.iter().map(|(key, &id)| (id, key)).collect();
     let hierarchy = hierarchy::Hierarchy::new(
@@ -3663,6 +3676,8 @@ fn schedule_sources_collecting(
                 },
             }
         };
+        let mut ir = ir;
+        ir.expand_virtual_interface_instances(&virtual_ids);
         if let Some(module) = ir.modules().iter().find(|module| module.name() == key.name) {
             hierarchy::collect_foreign_writes(module, &resolved, &mut foreign_writes);
         }
@@ -3773,6 +3788,7 @@ fn schedule_sources_collecting(
                     recursion_report: analysis_options.recursion_report.as_deref(),
                     force_out_of_line: analysis_options.force_out_of_line_calls,
                     properties: &properties,
+                    virtual_ids: Some(&virtual_ids),
                     discovery: false,
                     shared: SharedAlways {
                         temporaries: analysis_options.shared_always_temporaries,
@@ -3893,6 +3909,7 @@ fn schedule_sources_collecting(
             warnings,
             analysis_options.force_out_of_line_calls,
             analysis_options.recursion_report.as_deref(),
+            &virtual_ids,
         )?;
         validate_package_variable_drivers([&root_key], &module_ids, &lowered_modules)?;
         let mut packages = Vec::new();
@@ -4210,7 +4227,17 @@ fn specialize_module(
             let ir = match owned_analysis {
                 Some(ir) => ir,
                 None => {
-                    analyze_specialization(module, design, key, hierarchical.signals, warnings)?
+                    let mut ir = analyze_specialization(
+                        module,
+                        design,
+                        key,
+                        hierarchical.signals,
+                        warnings,
+                    )?;
+                    ir.expand_virtual_interface_instances(
+                        hierarchical.virtual_ids.unwrap_or(&HashMap::default()),
+                    );
+                    ir
                 }
             };
             warnings.extend(crate::warning::analyzer_warnings(ir.warnings()));
@@ -4318,6 +4345,11 @@ struct HierarchicalNames<'a> {
     /// read, whose stores the module counts (see `ff::property_changes`).
     /// A wait that reads any other property is rejected.
     properties: &'a BTreeSet<u32>,
+    /// The ids of the instances of each interface of the elaborated design,
+    /// which the module's virtual interface accesses are repeated for (see
+    /// `sv::ir::Module::expand_virtual_interface_instances`); none before
+    /// the instances are known.
+    virtual_ids: Option<&'a HashMap<String, Vec<u32>>>,
     /// A lowering that only discovers the hierarchy, before `properties`
     /// is known: the module counts the stores of the properties its own
     /// waits read, and the result is not simulated.
@@ -4337,6 +4369,7 @@ impl Default for HierarchicalNames<'_> {
             recursion_report: None,
             force_out_of_line: false,
             properties: &NO_PROPERTIES,
+            virtual_ids: None,
             discovery: false,
         }
     }
@@ -4670,6 +4703,7 @@ fn lower_module_with_overrides(
             force_control: None,
             sampled_from: None,
             history_of: None,
+            activation_scratch: false,
         };
         name_to_id.insert(port.name().to_string(), id);
         port_order.push(id);
@@ -4762,6 +4796,7 @@ fn lower_module_with_overrides(
             force_control: None,
             sampled_from: None,
             history_of: None,
+            activation_scratch: false,
         };
         name_to_id.insert(signal.name().to_string(), id);
         // The package's object, or the other instance's, has its own
@@ -4852,6 +4887,7 @@ fn lower_module_with_overrides(
                 force_control: None,
                 sampled_from: None,
                 history_of: None,
+                activation_scratch: false,
             },
         );
     }
@@ -6674,6 +6710,7 @@ fn lower_initial_processes(
                         force_control: None,
                         sampled_from: None,
                         history_of: None,
+                        activation_scratch: false,
                     },
                 );
                 id
@@ -6746,6 +6783,7 @@ fn lower_initial_processes(
                             amount: sv::ir::Expr::Literal("0".to_string()),
                             ticks_per_unit: 1,
                             ticks_per_precision: 1,
+                            precision_steps_per_tick: 1,
                         },
                         sv::ir::Stmt::Loop {
                             kind: sv::ir::LoopKind::Forever,
@@ -6942,7 +6980,12 @@ fn lower_comb_processes(
         // A wildcard control waits for its first source event even when
         // every output is assigned. A symbolic combinational definition
         // would instead execute during the initial fixed-point evaluation.
-        let symbolic_star = symbolic_star(index, process);
+        // It also follows every variable its statement reads, while an
+        // `always @*` is sensitive only to the arguments of the functions it
+        // calls, not to what their bodies read (IEEE 1800-2023 9.2.2.2.2):
+        // one whose callees read more keeps the guarded unit.
+        let symbolic_star =
+            symbolic_star(index, process) && !pm.callees_read_beyond_wildcard(process);
         if (process.kind() == sv::ir::CombProcessKind::AlwaysStar && !symbolic_star)
             || pm.reads_simulation_state(process.body())
             // The symbolic form would expand every call.
@@ -7429,6 +7472,7 @@ fn ensure_parent_output_signals(
             force_control: None,
             sampled_from: None,
             history_of: None,
+            activation_scratch: false,
         };
         parent
             .variables

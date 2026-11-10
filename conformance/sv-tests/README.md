@@ -396,6 +396,15 @@ required rejection. The broader review recheck covered 1,478 pinned files in
 both modes (2,956 verdicts), excluding 172 source/path UVM-related cases.
 After the two reviewed expectation updates, all selected verdicts match.
 
+Assignments to enum variables (6.19.3, 6.19.4) update four rows: both
+modes of `6.19.3--enum_type_checking_inv.sv` and
+`6.19.4--enum_numerical_expr_no_cast.sv` now pass by rejecting the
+invalid assignments. A value assigned, passed, returned or given as a
+pattern item to an enumerated place must be of the enumeration's type,
+and compound assignments, increments and decrements of an enum variable
+need a cast. Explicit casts, enum methods, members of unions and packed
+selects keep their behavior.
+
 ## Running locally
 
 Use the locked development shell and install the pinned [`requirements.txt`](requirements.txt) in a Python environment.
@@ -785,3 +794,41 @@ stdout file output and radix variants. Celox API cases check zero-delay work,
 sampled values, repeated calls, descriptor capture, close cancellation and
 checkpoint/native-image replay. Verilator's configured program-output mismatch
 is recorded with narrow retained evidence. This is not a full-corpus measurement.
+
+String `atoreal` / `realtoa` (6.16.10, 6.16.15), assignment-pattern type keys
+(10.9), and explicit and implicit external constraints (18.5.1) update ten
+reviewed expectations. Five cases pass in both state modes in focused
+official invocations: `5.10-structures`, `6.16.10--string_atoreal`,
+`6.16.15--string_realtoa`, `18.5.1--explicit-external-constraint_0`, and
+`18.5.1--implicit-external-constraint_0`. Shared regressions cover real round
+trips (plus heap unit tests of the `%g` form), last-value-wins and
+member-over-type pattern key priority (including `int` matching
+`bit signed [31:0]`), and external constraint randomization within bounds.
+Boundaries: pattern type keys do not descend into subarrays or nested
+structures and integer patterns reject them. `20.6--isunbounded` stays
+failing: the case calls `$isunbounded(1)`, but 20.6.3 requires a parameter
+name, which Celox's reviewed strictness enforces.
+
+Wildcard associative indices (7.8.1) and pull/supply nets (6.6.5–6.6.6, with
+`vectored` / `scalared` declarations) update fourteen reviewed expectations.
+Seven cases pass in both state modes in focused official invocations:
+`6.9.2--vector_scalared`, `6.9.2--vector_vectored`,
+`arrays/associative/wildcard`, and the generated `tri0`, `tri1`, `supply0`
+and `supply1` net cases (verified against the prepared corpus; the
+generated files differ from a template materialization only by a trailing
+newline). Shared regressions cover minimal-length wildcard key identity
+across index widths, and undriven pull/supply values. Boundaries: wildcard
+keys are held at 64 bits (wider indices truncate, and index-returning
+traversal restrictions are not enforced); a pull net with an authored or
+instance driver gets no implicit pull driver, so released bits read Z
+instead of the pulled value, and general strength resolution remains
+unimplemented; `trireg` charge storage stays rejected.
+
+Wildcard port connections (`.*`, 23.3.2.2) expand to implicit same-name
+connections for ports without an explicit (including empty) connection. No
+official expectation rows change: the only pinned case using `.*`,
+`chapter-10/10.6.2--force-release.sv`, still fails on procedural `force`,
+which remains unsupported. A focused official run over 281 instance-heavy
+cases (chapters 6, 10, 23, generic and BlackParrot) reports no changed
+verdicts. The shared regression covers expansion, an explicit override and
+an explicitly empty connection.

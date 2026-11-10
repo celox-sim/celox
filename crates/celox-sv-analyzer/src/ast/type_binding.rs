@@ -246,8 +246,18 @@ pub(super) fn net_signals(
         if ty.container.is_some() {
             return Err(unsupported("dynamic container net"));
         }
-        signals
-            .push(Signal::new_net(name, ty).with_unresolved_net(declaration.net_type == "uwire"));
+        let drive = match declaration.net_type.as_str() {
+            "tri0" => NetDrive::Pull(false),
+            "tri1" => NetDrive::Pull(true),
+            "supply0" => NetDrive::Supply(false),
+            "supply1" => NetDrive::Supply(true),
+            _ => NetDrive::None,
+        };
+        signals.push(
+            Signal::new_net(name, ty)
+                .with_unresolved_net(declaration.net_type == "uwire")
+                .with_net_drive(drive),
+        );
     }
     Ok(signals)
 }

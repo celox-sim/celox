@@ -921,21 +921,6 @@ pub(in crate::ast) fn check_assignment(
     assignments::check_assign(tree, session, id, native, dimensions, target, context)
 }
 
-/// Check that a handle of class `source` may be assigned to a variable of
-/// class `target` (IEEE 1800-2023 8.16, 8.26.5).
-pub(in crate::ast) fn check_class_assignment(
-    tree: &AnalysisContext<'_>,
-    session: &mut Session,
-    dimensions: &PackedDimensions,
-    source: &str,
-    target: &str,
-    context: impl Fn() -> String,
-) -> Converted<()> {
-    let source = classes::handle_type_id(&mut session.types, source);
-    let target = classes::handle_type_id(&mut session.types, target);
-    assignments::check_types(tree, session, dimensions, source, target, &context)
-}
-
 /// Whether class `class_name` derives from or implements `ancestor`.
 pub(in crate::ast) fn derives_from(
     tree: &AnalysisContext<'_>,

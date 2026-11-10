@@ -303,9 +303,11 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
     };
     macro_rules! execute {
         ($build:ident $(, $report_hotspots:ident)?) => {{
+            let compile_start = std::time::Instant::now();
             let mut simulation = builder
                 .$build()
                 .map_err(|error| format!("compilation failed:\n{error}"))?;
+            let compile_elapsed = compile_start.elapsed();
             report_warnings(simulation.warnings())?;
             let progress = if let Some(path) = &arguments.save_state.restore_checkpoint {
                 Some(system_checkpoint::restore(&mut simulation, path)?)
@@ -321,6 +323,7 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
             if let Some(progress) = progress {
                 saves.restore_progress(&simulation, &arguments.design.top, progress)?;
             }
+            let execute_start = std::time::Instant::now();
             let result = simulate_sv(
                 &mut simulation,
                 max_steps,
@@ -328,6 +331,17 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
                 &mut std::io::stdout(),
                 arguments.execution.report,
             );
+            let execute_elapsed = execute_start.elapsed();
+            if arguments.execution.report {
+                writeln!(
+                    std::io::stdout(),
+                    "CELOX_TEST_TIMING test={} compile_ns={} execute_ns={} jit_execute_ns=NA",
+                    arguments.design.top,
+                    compile_elapsed.as_nanos(),
+                    execute_elapsed.as_nanos()
+                )
+                .ok();
+            }
             $(if arguments.execution.report { $report_hotspots(&simulation, &arguments.design.top); })?
             runner::write_settle_profile(
                 arguments.execution.settle_profile.as_deref(),

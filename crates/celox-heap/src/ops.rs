@@ -24,6 +24,9 @@ pub const GETC: u64 = 3;
 /// `atoi(a)`: the leading digits of string `a` in the radix of the
 /// parameter, as a 32-bit integer.
 pub const ATOI: u64 = 4;
+/// `atoreal(a)`: the leading real constant of string `a`, as the bits of
+/// an `f64` (IEEE 1800-2023 6.16.10).
+pub const ATOREAL: u64 = 6;
 /// `key_bytes(a, i, count)`: the `count` bytes from byte `i` of the bytes
 /// that [`KEY`] string `a` holds, most significant first, where bytes past the
 /// end read as 0. `count` is at most 8.
@@ -57,6 +60,9 @@ pub const TO_LOWER: u64 = 23;
 pub const REPLICATE: u64 = 24;
 /// `itoa(value)`: a buffer with `value` in the radix of the parameter.
 pub const ITOA: u64 = 25;
+/// `realtoa(value)`: a buffer with the `f64` whose bits are `value`, in
+/// `%g` form (IEEE 1800-2023 6.16.15).
+pub const REALTOA: u64 = 27;
 /// `freeze(buffer)`: the interned string holding `buffer`, which is freed.
 pub const FREEZE: u64 = 32;
 /// `new_object(size)`: a new object of the class in the parameter, with
@@ -242,6 +248,11 @@ impl Heap {
                 })
             }
             ATOI => atoi(self.string(a as Handle), parameter as u32 & 0xff),
+            ATOREAL => atoreal(self.string(a as Handle)).to_bits(),
+            REALTOA => {
+                let bytes = realtoa(f64::from_bits(a));
+                self.new_buffer(bytes)
+            }
             NEW => self.new_buffer(Vec::new()),
             COPY => self.new_buffer(self.string(a as Handle).to_vec()),
             APPEND => {
@@ -503,6 +514,115 @@ fn itoa(value: u64, radix: u32, width: u32, signed: bool) -> Vec<u8> {
     digits
 }
 
+/// IEEE 1800-2023 6.16.10: the leading real constant, zero when it has no
+/// digits. Underscores are legal only after a digit (5.7.1) and are
+/// skipped, as in a real literal (5.7.2); a decimal point takes digits on
+/// both sides (5.7.2), so a
+/// fraction is consumed only after a whole part and with digits after the
+/// point; an exponent marker without digits is not part of the constant.
+fn atoreal(string: &[u8]) -> f64 {
+    // An underscore is part of the constant only between digits (5.7.2);
+    // otherwise the scan stops before it (6.16.10).
+    let digits = |bytes: &[u8], at: &mut usize| {
+        // An unsigned number starts with a digit; a leading underscore
+        // starts no number (5.7.1).
+        if !bytes.get(*at).is_some_and(|b| b.is_ascii_digit()) {
+            return 0;
+        }
+        let mut count = 0;
+        loop {
+            match bytes.get(*at) {
+                Some(b) if b.is_ascii_digit() => {
+                    count += 1;
+                    *at += 1;
+                }
+                Some(b'_') if count > 0 && bytes.get(*at + 1).is_some_and(u8::is_ascii_digit) => {
+                    *at += 1;
+                }
+                _ => break,
+            }
+        }
+        count
+    };
+    let mut at = 0;
+    if matches!(string.first(), Some(b'+' | b'-')) {
+        at = 1;
+    }
+    let whole = digits(string, &mut at);
+    let mut fraction = 0;
+    if whole > 0 && string.get(at) == Some(&b'.') {
+        let mut end = at + 1;
+        fraction = digits(string, &mut end);
+        if fraction > 0 {
+            at = end;
+        }
+    }
+    if whole + fraction == 0 {
+        return 0.0;
+    }
+    if matches!(string.get(at), Some(b'e' | b'E')) {
+        let mut end = at + 1;
+        if matches!(string.get(end), Some(b'+' | b'-')) {
+            end += 1;
+        }
+        if digits(string, &mut end) > 0 {
+            at = end;
+        }
+    }
+    let text: String = string[..at]
+        .iter()
+        .filter(|b| **b != b'_')
+        .map(|b| *b as char)
+        .collect();
+    text.parse().unwrap_or(0.0)
+}
+
+/// IEEE 1800-2023 6.16.15: the ASCII representation of `value`, as `%g`
+/// writes it (21.2.1.1): six significant digits, trailing zeros removed.
+fn realtoa(value: f64) -> Vec<u8> {
+    if value.is_nan() {
+        return b"nan".to_vec();
+    }
+    if value.is_infinite() {
+        return if value < 0.0 {
+            b"-inf".to_vec()
+        } else {
+            b"inf".to_vec()
+        };
+    }
+    if value == 0.0 {
+        return if value.is_sign_negative() {
+            b"-0".to_vec()
+        } else {
+            b"0".to_vec()
+        };
+    }
+    // The decimal exponent after rounding to six significant digits picks
+    // the fixed or scientific form, as C's `%g` does.
+    let scientific = format!("{value:.5e}");
+    let exponent: i32 = scientific
+        .rsplit('e')
+        .next()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(0);
+    let text = if (-4..6).contains(&exponent) {
+        let fixed = format!("{:.*}", (5 - exponent) as usize, value);
+        trim_zeros(&fixed).to_string()
+    } else {
+        let mantissa = scientific.split('e').next().unwrap_or("0");
+        format!("{}e{exponent:+03}", trim_zeros(mantissa))
+    };
+    text.into_bytes()
+}
+
+fn trim_zeros(text: &str) -> &str {
+    if text.contains('.') {
+        text.trim_end_matches('0').trim_end_matches('.')
+    } else {
+        text
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,5 +726,39 @@ mod tests {
             itoa_of(&mut heap, i64::MIN, 10, 64, true),
             "-9223372036854775808"
         );
+        let atoreal_of = |heap: &mut Heap, text: &str| {
+            let handle = string(heap, text);
+            f64::from_bits(heap.call(ATOREAL, handle, 0, 0))
+        };
+        assert_eq!(atoreal_of(&mut heap, "4.76"), 4.76);
+        assert_eq!(atoreal_of(&mut heap, "-1.25e2x"), -125.0);
+        assert_eq!(atoreal_of(&mut heap, "1_000.5"), 1000.5);
+        // An underscore not between digits ends the scan (5.7.2, 6.16.10).
+        assert_eq!(atoreal_of(&mut heap, "1_.5"), 1.0);
+        assert_eq!(atoreal_of(&mut heap, "1__2"), 1.0);
+        assert_eq!(atoreal_of(&mut heap, "2e"), 2.0);
+        assert_eq!(atoreal_of(&mut heap, "0.5"), 0.5);
+        assert_eq!(atoreal_of(&mut heap, ".5"), 0.0);
+        assert_eq!(atoreal_of(&mut heap, "_1.5"), 0.0);
+        assert_eq!(atoreal_of(&mut heap, "1._5"), 1.0);
+        assert_eq!(atoreal_of(&mut heap, "1e_2"), 1.0);
+        assert_eq!(atoreal_of(&mut heap, "-.5"), 0.0);
+        assert_eq!(atoreal_of(&mut heap, "9."), 9.0);
+        assert_eq!(atoreal_of(&mut heap, "9.e3"), 9.0);
+        assert_eq!(atoreal_of(&mut heap, "abc"), 0.0);
+        assert_eq!(atoreal_of(&mut heap, ""), 0.0);
+        let realtoa_of = |heap: &mut Heap, value: f64| {
+            let buffer = heap.call(REALTOA, value.to_bits(), 0, 0);
+            String::from_utf8(frozen(heap, buffer)).unwrap()
+        };
+        assert_eq!(realtoa_of(&mut heap, 2.5), "2.5");
+        assert_eq!(realtoa_of(&mut heap, 0.0), "0");
+        assert_eq!(realtoa_of(&mut heap, -0.125), "-0.125");
+        assert_eq!(realtoa_of(&mut heap, 1_234_567.0), "1.23457e+06");
+        assert_eq!(realtoa_of(&mut heap, 0.000_012_345), "1.2345e-05");
+        for value in [4.76, -125.0, 1e20, 0.5] {
+            let text = realtoa_of(&mut heap, value);
+            assert_eq!(atoreal_of(&mut heap, &text), value, "{text}");
+        }
     }
 }

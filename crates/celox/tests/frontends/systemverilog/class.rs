@@ -3,6 +3,11 @@
 use super::*;
 
 sv_backends! {
+    fn class_external_constraints(sim) { @case "class::external_constraints"; }
+    fn class_external_constraints_in_packages(sim) {
+        @case "class::external_constraints_in_packages";
+    }
+
     fn class_imported_member_type_dimensions(sim) { @case "class::imported_member_type_dimensions"; }
     fn class_members_hide_module_names(sim) { @case "class::members_hide_module_names"; }
     fn class_imported_member_type_inheritance(sim) { @case "class::imported_member_type_inheritance"; }
@@ -3573,5 +3578,82 @@ endmodule
             vec![BigUint::from(expected); 2],
             "{source}"
         );
+    }
+}
+
+sv_backends! {
+    // A class of the compilation unit has the compilation unit's time unit,
+    // which a `timescale directive does not set: the default, 1 ns (IEEE
+    // 1800-2023 3.14.2.3). Its precision, 1 ps, is finer than the global
+    // precision the directive gives the design (3.14.3), so its delays and
+    // `$time` round to whole steps of 1 ns.
+    fn compilation_unit_classes_count_time_in_the_default_unit(sim) {
+        @setup {
+            let source = r#"
+                `timescale 1ns/1ns
+                class C;
+                    static function time now(); return $time; endfunction
+                    static task wait_units(); #10; endtask
+                    static task wait_literal(); #3ns; endtask
+                endclass
+                module Top(output longint a, output longint b, output longint c, output longint d);
+                    initial begin
+                        #5 a = C::now();
+                        C::wait_units();
+                        b = $time;
+                        C::wait_literal();
+                        c = $time;
+                        d = C::now();
+                    end
+                endmodule
+            "#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("unit_class_time.sv"))], "Top");
+        sim.run_until(100).unwrap();
+        assert_eq!(sim.get(sim.signal("a")), 5u32.into());
+        assert_eq!(sim.get(sim.signal("b")), 15u32.into());
+        assert_eq!(sim.get(sim.signal("c")), 18u32.into());
+        assert_eq!(sim.get(sim.signal("d")), 18u32.into());
+    }
+    // Every form of a delay rounds to the precision of its scope first, then
+    // to the global precision (3.14.1): in a compilation-unit class under a
+    // coarser `timescale, a real delay and a time literal of the same
+    // duration wait the same time.
+    fn compilation_unit_classes_round_every_delay_alike(sim) {
+        @setup {
+            let source = r#"
+                `timescale 1ns/1ns
+                class C;
+                    static task wait_real(real amount); #amount; endtask
+                    static task wait_real_literal(); #1.4999; endtask
+                    static task wait_time_literal(); #1.4999ns; endtask
+                    static task wait_low(); #1.4994ns; endtask
+                    static task wait_real_low(); #1.4994; endtask
+                endclass
+                module Top(output longint a, output longint b, output longint c, output longint d, output longint e);
+                    initial begin
+                        C::wait_real(1.4999);
+                        a = $time;
+                        C::wait_real_literal();
+                        b = $time;
+                        C::wait_time_literal();
+                        c = $time;
+                        C::wait_low();
+                        d = $time;
+                        C::wait_real_low();
+                        e = $time;
+                    end
+                endmodule
+            "#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("unit_class_rounding.sv"))], "Top");
+        sim.run_until(100).unwrap();
+        // 1.4999 ns is 1.500 ns at 1 ps, then 2 ns; 1.4994 ns is 1.499 ns,
+        // then 1 ns.
+        assert_eq!(sim.get(sim.signal("a")), 2u32.into());
+        assert_eq!(sim.get(sim.signal("b")), 4u32.into());
+        assert_eq!(sim.get(sim.signal("c")), 6u32.into());
+        assert_eq!(sim.get(sim.signal("d")), 7u32.into());
+        assert_eq!(sim.get(sim.signal("e")), 8u32.into());
     }
 }

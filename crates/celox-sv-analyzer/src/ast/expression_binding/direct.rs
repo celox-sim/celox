@@ -638,6 +638,33 @@ fn bind_value_in(
                     continue;
                 }
                 unpacked_structs::check_operands(id, native, tree, session, dimensions)?;
+                // A value received by an enumerated type is of that type;
+                // any other value needs a cast (IEEE 1800-2023 6.19.3,
+                // 6.19.4). Only the received value itself is judged, not a
+                // cast's operand, which takes the target as its context.
+                if id == root
+                    && let Some(enumeration) = target
+                        .as_deref()
+                        .filter(|shape| shape.unpacked.is_empty() && shape.container.is_none())
+                        .and_then(|shape| {
+                            shape.type_id(
+                                &mut session.types,
+                                &tree.functions,
+                                &dimensions.const_env,
+                            )
+                        })
+                        .filter(|ty| session.types.is_enum(*ty))
+                {
+                    assignments::check_assign(
+                        tree,
+                        session,
+                        id,
+                        native,
+                        dimensions,
+                        enumeration,
+                        || "assignment".into(),
+                    )?;
+                }
                 // An argument, result or other value received as an unpacked
                 // structure is a pattern or a value of its type (6.22.3).
                 if let Some(shape) = target
@@ -3988,32 +4015,39 @@ pub(in crate::ast) fn check_argument(
             || format!("argument {ordinal} of `{name}`"),
             dimensions,
         )?;
-        if let Some(class) = shape.class.as_deref().filter(|_| shape.unpacked.is_empty()) {
+        // A handle or enumerated value passes by its formal's direction
+        // (IEEE 1800-2023 13.5): an input copies the actual in, an output
+        // copies the formal out to the actual, an inout does both; a `ref`
+        // binds an equivalent variable (see `references::check_actual`).
+        if shape.unpacked.is_empty()
+            && shape.container.is_none()
+            && let Some(formal) =
+                shape.type_id(&mut session.types, &tree.functions, &dimensions.const_env)
+            && (session.types.is_enum(formal)
+                || matches!(session.types.data(formal), semantic_types::TyData::Class(_)))
+        {
             use crate::procedural::ParamDirection;
             let direction = dimensions
                 .subroutine_directions
                 .get(name)
-                .and_then(|directions| directions.get(position));
+                .and_then(|directions| directions.get(position))
+                .copied();
             let context = || format!("argument {ordinal} of `{name}`");
             if matches!(
                 direction,
                 Some(ParamDirection::Input | ParamDirection::Inout)
             ) {
-                objects::check_assignment(
-                    tree, session, actual, native, dimensions, class, context,
+                assignments::check_assign(
+                    tree, session, actual, native, dimensions, formal, context,
                 )?;
             }
-            // An output or inout formal is assigned back to its actual
-            // (13.5.1).
             if matches!(
                 direction,
                 Some(ParamDirection::Output | ParamDirection::Inout)
-            ) && let Some(target) =
-                objects::native_class(tree, session, actual, native, dimensions)
+            ) && let Some(place) =
+                assignments::place_type(tree, session, actual, native, dimensions)?
             {
-                objects::check_class_assignment(
-                    tree, session, dimensions, class, &target, context,
-                )?;
+                assignments::check_types(tree, session, dimensions, formal, place, &context)?;
             }
         }
     }

@@ -43,6 +43,7 @@ workflows:
         - 'swatinem/rust-cache@v2'
     '.github/workflows/codeql.yml':
         - 'actions/checkout@v7'
+        - 'github/codeql-action@33d7b85da1a04171e211befe2c739303b9a4c066'
         - 'github/codeql-action@9b3254085494b55a0f7c4c2b3d2d52cc712ce370'
     '.github/workflows/codspeed.yml':
         - 'actions/checkout@v7'
@@ -87,7 +88,7 @@ workflows:
         - 'swatinem/rust-cache@v2'
     '.github/workflows/pr-title.yml':
         - 'actions/checkout@v7'
-        - 'mergifyio/setup-cli@dc99f07e699b94b39e5495c24596372813eadcbc'
+        - 'mergifyio/setup-cli@7816afe056a19ad5eb899d903f199ba2626f9de5'
     '.github/workflows/publish-aplite.yml':
         - 'actions/checkout@v7'
         - 'actions/setup-node@v7'
@@ -123,6 +124,16 @@ workflows:
         - 'actions/setup-python@v7'
         - 'actions/upload-artifact@v7'
         - 'cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b'
+        - 'dtolnay/rust-toolchain@master'
+        - 'swatinem/rust-cache@v2'
+    '.github/workflows/rtlmeter-steady-bench.yml':
+        - 'actions/cache@v6'
+        - 'actions/checkout@v7'
+        - 'actions/download-artifact@v8'
+        - 'actions/setup-node@v7'
+        - 'actions/setup-python@v7'
+        - 'actions/upload-artifact@v7'
+        - 'cachix/install-nix-action@v31.11.3'
         - 'dtolnay/rust-toolchain@master'
         - 'swatinem/rust-cache@v2'
     '.github/workflows/rust-cache.yml':
@@ -235,6 +246,11 @@ dependencies:
         commit: 'sha1-75c75c31ebece974e48ebc36b4ad125bd97bd97b'
         owner_id: 36824654
         repo_id: 212301524
+    'cachix/install-nix-action@v31.11.3':
+        ref: 'v31.11.3'
+        commit: 'sha1-75c75c31ebece974e48ebc36b4ad125bd97bd97b'
+        owner_id: 36824654
+        repo_id: 212301524
     'codspeedhq/action@v5':
         ref: 'v5'
         commit: 'sha1-61efe07e57e55bedeab750c434504de272a56e8c'
@@ -248,6 +264,11 @@ dependencies:
         commit: 'sha1-683b588c487a69d01f6c6ddf40f036ff682cc2c8'
         owner_id: 1940490
         repo_id: 260749683
+    'github/codeql-action@33d7b85da1a04171e211befe2c739303b9a4c066':
+        ref: 'v4.39.3'
+        commit: 'sha1-33d7b85da1a04171e211befe2c739303b9a4c066'
+        owner_id: 9919
+        repo_id: 259445878
     'github/codeql-action@9b3254085494b55a0f7c4c2b3d2d52cc712ce370':
         ref: 'v4.39.1'
         commit: 'sha1-9b3254085494b55a0f7c4c2b3d2d52cc712ce370'
@@ -271,6 +292,11 @@ dependencies:
         uses:
             - 'mergifyio/setup-cli@dc99f07e699b94b39e5495c24596372813eadcbc'
             - 're-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35'
+    'mergifyio/setup-cli@7816afe056a19ad5eb899d903f199ba2626f9de5':
+        ref: 'v1.4.0'
+        commit: 'sha1-7816afe056a19ad5eb899d903f199ba2626f9de5'
+        owner_id: 37838584
+        repo_id: 1267289500
     'mergifyio/setup-cli@dc99f07e699b94b39e5495c24596372813eadcbc':
         ref: 'v1.3.0'
         commit: 'sha1-dc99f07e699b94b39e5495c24596372813eadcbc'

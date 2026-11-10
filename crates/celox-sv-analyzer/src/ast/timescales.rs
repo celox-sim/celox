@@ -724,25 +724,46 @@ impl Timescales {
 
     /// The time units of the simulation, which counts the global time
     /// precision (3.14.3), in one time unit of the scope of `node`.
-    fn time_divisor_in_unit(&self, at: usize, unit: &Unit) -> u64 {
+    fn time_divisor_in_unit(&self, at: usize, unit: &Unit) -> Option<u64> {
         self.ticks_in(at, unit, |scale| scale.unit)
     }
 
     /// The time units of the simulation in one time precision step of the
     /// scope of `node` (3.14.1).
-    fn precision_divisor_in_unit(&self, at: usize, unit: &Unit) -> u64 {
-        self.ticks_in(at, unit, |scale| scale.precision)
+    fn precision_divisor_in_unit(&self, at: usize, unit: &Unit) -> Option<u64> {
+        // A precision finer than the simulation's step rounds to whole
+        // steps.
+        Some(
+            self.ticks_in(at, unit, |scale| scale.precision)
+                .unwrap_or(1),
+        )
     }
 
-    /// The time units of the simulation in `10^exponent(scale)` seconds,
-    /// where `scale` is the time scale of the scope at `at`.
-    fn ticks_in(&self, at: usize, unit: &Unit, exponent: impl Fn(&Scale) -> i32) -> u64 {
+    /// The time precision steps of the scope of `node` in one time unit of
+    /// the simulation: more than one where the scope's precision is finer
+    /// than the global precision, and its delays round again to whole
+    /// simulation steps (3.14.1, 3.14.3).
+    fn precision_steps_per_tick_in_unit(&self, at: usize, unit: &Unit) -> Option<u64> {
         let scale =
             scope_at(&unit.scopes, &unit.parents, at).map_or(unit.scale, |i| unit.scopes[i].scale);
         let precision = self.precision.unwrap_or(DEFAULT.precision);
-        // A scope's precision is not coarser than its unit, and no unit is
-        // longer than 100 s or precision finer than 1 fs.
-        10u64.pow((exponent(&scale) - precision.min(scale.precision)) as u32)
+        Some(10u64.pow(u32::try_from(precision - scale.precision).unwrap_or(0)))
+    }
+
+    /// The time units of the simulation in `10^exponent(scale)` seconds,
+    /// where `scale` is the time scale of the scope at `at`; `None` when that
+    /// is less than one. The simulation counts the global precision (3.14.3),
+    /// which only a scope with the default time scale, such as the
+    /// compilation unit after a `timescale directive (3.14.2.3), can be
+    /// coarser than.
+    fn ticks_in(&self, at: usize, unit: &Unit, exponent: impl Fn(&Scale) -> i32) -> Option<u64> {
+        let scale =
+            scope_at(&unit.scopes, &unit.parents, at).map_or(unit.scale, |i| unit.scopes[i].scale);
+        let precision = self.precision.unwrap_or(DEFAULT.precision);
+        // No unit is longer than 100 s or precision finer than 1 fs.
+        u32::try_from(exponent(&scale) - precision)
+            .ok()
+            .map(|power| 10u64.pow(power))
     }
 
     fn resolve(
@@ -964,17 +985,27 @@ pub(super) fn precision_divisor(
     divisor(node, tree, Timescales::precision_divisor_in_unit)
 }
 
+/// The time precision steps of the scope of `node` in one time unit of the
+/// simulation, at least one (see `Timescales::precision_steps_per_tick_in_unit`).
+pub(super) fn precision_steps_per_tick(
+    node: celox_sv_syntax::ExprId,
+    tree: &AnalysisContext<'_>,
+) -> Converted<u64> {
+    divisor(node, tree, Timescales::precision_steps_per_tick_in_unit)
+}
+
 fn divisor(
     node: celox_sv_syntax::ExprId,
     tree: &AnalysisContext<'_>,
-    in_unit: fn(&Timescales, usize, &Unit) -> u64,
+    in_unit: fn(&Timescales, usize, &Unit) -> Option<u64>,
 ) -> Converted<u64> {
+    let finer = || unsupported("a time unit finer than the global time precision");
     let context = &*tree.timescale;
     let at = tree.declarations().expression(node).tokens.start;
     if let Some(prepared) = &context.prepared
         && prepared.address == tree.syntax_tree as *const SyntaxTree as usize
     {
-        return Ok(in_unit(&context.design, at, &prepared.unit));
+        return in_unit(&context.design, at, &prepared.unit).ok_or_else(finer);
     }
     let design = &context.design;
     let source = key(tree);
@@ -982,7 +1013,7 @@ fn divisor(
         .then(|| design.including_tree(tree))
         .transpose()?;
     let design = extended.as_ref().unwrap_or(design);
-    Ok(in_unit(design, at, &design.units[&source]))
+    in_unit(design, at, &design.units[&source]).ok_or_else(finer)
 }
 
 /// A standalone time literal used as a delay: round at the declaring
@@ -1005,10 +1036,7 @@ pub(super) fn delay_literal(
     let at = tree.declarations().expression(node).tokens.start;
     let scale =
         scope_at(&unit.scopes, &unit.parents, at).map_or(unit.scale, |i| unit.scopes[i].scale);
-    let global_precision = design
-        .precision
-        .unwrap_or(DEFAULT.precision)
-        .min(scale.precision);
+    let global_precision = design.precision.unwrap_or(DEFAULT.precision);
     let number = number.replace('_', "");
     let fraction = number
         .split_once('.')
@@ -1026,8 +1054,15 @@ pub(super) fn delay_literal(
         let divisor = num_bigint::BigUint::from(10u8).pow(power.unsigned_abs());
         (coefficient + (&divisor / 2u8)) / divisor
     };
-    let ticks = precision_units
-        * num_bigint::BigUint::from(10u8).pow((scale.precision - global_precision) as u32);
+    // A precision finer than the simulation's step rounds to whole steps.
+    let ticks = match u32::try_from(scale.precision - global_precision) {
+        Ok(power) => precision_units * num_bigint::BigUint::from(10u8).pow(power),
+        Err(_) => {
+            let divisor =
+                num_bigint::BigUint::from(10u8).pow((global_precision - scale.precision) as u32);
+            (precision_units + (&divisor / 2u8)) / divisor
+        }
+    };
     Ok(Some(u64::try_from(ticks).map_err(|_| {
         unsupported("time literal delay exceeds scheduler range")
     })?))
