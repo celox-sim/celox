@@ -1,0 +1,1 @@
+Address Codex review on PR 3362: disable of a named block in an automatic task must terminate every active activation (9.6.2); snapshot a shared generation on block entry and leave at the next statement when it has advanced
