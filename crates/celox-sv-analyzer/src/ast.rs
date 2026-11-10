@@ -1582,7 +1582,7 @@ impl Module {
             packed_dimensions.bind_types(&mut session.types, &syntax_tree.functions);
             packed_dimensions.scope_types_complete = true;
             let mut locals = Vec::new();
-            let mut local_counter = 0usize;
+            let mut local_counter = procedural::first_local(syntax_tree, session);
             let mut body_state = procedural::BodyState {
                 locals: &mut locals,
                 counter: &mut local_counter,
