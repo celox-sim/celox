@@ -547,17 +547,191 @@ fn analyze_package(
         // Inside the package, `p::x` names its own item `x`.
         analyze_package_scope(name, &tree.in_package(name), session, packages, None)?
     };
-    if !imports::ScopeImports::from_scope(tree)?
-        .qualified
-        .iter()
-        .any(|(package, _)| package == name)
-    {
+    if self_qualified_names_are_plain(name, tree, packages)? {
         return Ok(first);
     }
     // A self-qualified reference `p::x` is not hidden by a local `x` of a
     // function (IEEE 1800-2023 26.3). Analyze the package again with its
     // items from the first analysis under their qualified names.
     analyze_package_scope(name, tree, session, packages, Some(&first.symbols))
+}
+
+/// Whether each name that package `name` qualifies with its own name,
+/// `name::x`, is its item `x` also without the qualifier where it is
+/// written: nothing nested in the package around the reference declares
+/// `x`, and no class around it inherits a member `x` (IEEE 1800-2023 23.9,
+/// 26.3). One analysis of the package, which reads `name::x` as `x`, then
+/// binds them all.
+///
+/// A class whose base the syntax does not tell, such as a type parameter,
+/// may inherit a member of any class its package can name: of its own, when
+/// it names no other package.
+fn self_qualified_names_are_plain(
+    name: &str,
+    tree: &AnalysisContext<'_>,
+    packages: &Packages,
+) -> Result<bool, AnalyzerError> {
+    use celox_sv_syntax::{DataTypeKind, TokenRange};
+    let imports = imports::ScopeImports::from_scope(tree)?;
+    let references = imports
+        .qualified
+        .iter()
+        .zip(&imports.qualified_tokens)
+        .filter(|((package, _), _)| package == name)
+        .map(|((_, item), token)| (item.as_str(), *token))
+        .collect::<Vec<_>>();
+    if references.is_empty() {
+        return Ok(true);
+    }
+    let native = tree.declarations();
+    let item = |name: &celox_sv_syntax::Name| instances::normalize_identifier(&name.spelling);
+    // The members a class declares, by the name of the class. Classes of
+    // one name in several scopes of the source share their members here,
+    // which only hides more.
+    let mut members = HashMap::<String, HashSet<String>>::default();
+    for class in &native.classes {
+        let names = members.entry(item(&class.name)).or_default();
+        // The members of an enumeration are declared with its type (6.19).
+        let enumeration = |names: &mut HashSet<String>, id| {
+            if let DataTypeKind::Enum { items, .. } = &native.data_type(id).kind {
+                names.extend(items.iter().map(|member| item(&member.name)));
+            }
+        };
+        let parameters = class.parameter_ports.iter().chain(&class.parameters);
+        for parameter in parameters.flat_map(|id| &native.parameter_declaration(*id).parameters) {
+            names.insert(item(&parameter.name));
+            if let celox_sv_syntax::ParameterKind::Value { data_type, .. } = &parameter.kind {
+                enumeration(names, *data_type);
+            }
+        }
+        for alias in &class.type_aliases {
+            let alias = native.type_alias(*alias);
+            names.insert(item(&alias.name));
+            if let celox_sv_syntax::TypeAliasTarget::DataType(id) = alias.target {
+                enumeration(names, id);
+            }
+        }
+        for property in &class.properties {
+            let declaration = &property.declaration;
+            names.extend(
+                declaration
+                    .variables
+                    .iter()
+                    .map(|variable| item(&variable.name)),
+            );
+            enumeration(names, declaration.data_type);
+        }
+        for method in &class.methods {
+            names.insert(item(&native.subroutine(method.subroutine).name));
+        }
+        // The classes it declares (8.23).
+        names.extend(
+            native
+                .classes
+                .iter()
+                .filter(|nested| {
+                    class.tokens.start < nested.tokens.start
+                        && nested.tokens.end <= class.tokens.end
+                })
+                .map(|nested| item(&nested.name)),
+        );
+    }
+    // The scopes of qualified names that are packages; others are classes
+    // and types.
+    let foreign = imports
+        .packages
+        .iter()
+        .any(|package| package != name && packages.get(package).is_some());
+    // Whether `class` declares or inherits a member `wanted`.
+    let inherits = |class: &celox_sv_syntax::ClassDeclaration, wanted: &str| {
+        let mut seen = HashSet::default();
+        let mut class = class;
+        loop {
+            if members[&item(&class.name)].contains(wanted) || !seen.insert(class.tokens.start) {
+                return true;
+            }
+            let Some(base) = &class.base else {
+                return false;
+            };
+            let known = match &native.data_type(base.data_type).kind {
+                DataTypeKind::Named(path) if path.len() == 1 => {
+                    let base = item(&path[0].name);
+                    // A parameter or type of the class hides a class of its
+                    // name.
+                    (!members[&item(&class.name)].contains(&base))
+                        .then(|| {
+                            let mut found = native
+                                .classes
+                                .iter()
+                                .filter(|class| item(&class.name) == base);
+                            found.next().filter(|_| found.next().is_none())
+                        })
+                        .flatten()
+                }
+                _ => None,
+            };
+            let Some(base) = known else {
+                return foreign || members.values().any(|names| names.contains(wanted));
+            };
+            class = base;
+        }
+    };
+    // The bodies of the methods declared out of their classes, which are in
+    // the scopes of those (8.24), by the names of the classes.
+    let methods = native
+        .subroutines
+        .iter()
+        .filter_map(|subroutine| Some((subroutine.tokens, item(&subroutine.scope.last()?.name))))
+        .collect::<Vec<_>>();
+    // The array methods with a clause that declares their iterators (7.12).
+    let scoped = native
+        .expressions
+        .iter()
+        .filter(|expression| {
+            matches!(
+                expression.kind,
+                celox_sv_syntax::ExprKind::ArrayMethodWith { .. }
+            )
+        })
+        .map(|expression| expression.tokens)
+        .collect::<Vec<_>>();
+    let around = |tokens: &TokenRange, token: usize| tokens.start <= token && token < tokens.end;
+    for (wanted, token) in references {
+        let target = TokenRange {
+            start: token,
+            end: token + 1,
+        };
+        if scoped.iter().any(|tokens| around(tokens, token))
+            || dimensions::hides_scope_item(tree, target, wanted)?
+        {
+            return Ok(false);
+        }
+        // The classes around the reference, and what they inherit.
+        if native
+            .classes
+            .iter()
+            .any(|class| around(&class.tokens, token) && inherits(class, wanted))
+        {
+            return Ok(false);
+        }
+        for (_, class) in methods.iter().filter(|(tokens, _)| around(tokens, token)) {
+            let mut declared = native
+                .classes
+                .iter()
+                .filter(|declared| item(&declared.name) == *class);
+            match (declared.next(), declared.next()) {
+                (Some(class), None) if !inherits(class, wanted) => {}
+                _ => return Ok(false),
+            }
+        }
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Analyses of the scopes of packages and compilation units.
+    static SCOPE_ANALYSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn analyze_package_scope(
@@ -567,6 +741,8 @@ fn analyze_package_scope(
     packages: &Packages,
     own_items: Option<&ScopeSymbols>,
 ) -> Result<Package, AnalyzerError> {
+    #[cfg(test)]
+    SCOPE_ANALYSES.with(|count| count.set(count.get() + 1));
     let imports::ResolvedImports {
         symbols: imported,
         exports,
@@ -732,6 +908,76 @@ fn unit_visibility(tree: &SyntaxTree) -> Result<UnitVisibility, AnalyzerError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// How many times the scopes of the packages of `source` are analyzed.
+    fn scope_analyses(source: &str) -> usize {
+        SCOPE_ANALYSES.with(|count| count.set(0));
+        crate::analyze_source(source, std::path::Path::new("self-qualified.sv"))
+            .expect("the source analyzes");
+        SCOPE_ANALYSES.with(|count| count.get())
+    }
+
+    #[test]
+    fn plain_self_qualified_names_need_one_analysis() {
+        // A package that qualifies its own items where nothing hides them is
+        // analyzed once: `p::x` is `x` there (IEEE 1800-2023 26.3).
+        let plain = "package p;
+                localparam int X = 5;
+                typedef enum { NONE, LOW } level_e;
+                int counter;
+                function automatic int f(int a); return p::X + a + p::LOW; endfunction
+                class B; int v; endclass
+                class D extends B;
+                    function int g(); p::counter = p::f(1); return p::X; endfunction
+                endclass
+                class G #(type T = B) extends T;
+                    function int h(); p::B b; return p::X + p::NONE; endfunction
+                endclass
+            endpackage
+            module Top; endmodule";
+        assert_eq!(scope_analyses(plain), 1);
+    }
+
+    #[test]
+    fn hidden_self_qualified_names_need_a_second_analysis() {
+        // A declaration around the reference that gives the name to
+        // something else hides the item from the plain name, not from the
+        // qualified one: a formal, a variable of a block, a member of the
+        // class or of a class it extends, and a member that a base which is
+        // a type parameter may bring (IEEE 1800-2023 23.9, 26.3).
+        for body in [
+            "function automatic int f(int X); return p::X + X; endfunction",
+            "function automatic int f(); int X; X = 1; return p::X + X; endfunction",
+            "function automatic int f(); begin int X; X = 1; return p::X + X; end endfunction",
+            "class C; int X; function int f(); return p::X + X; endfunction endclass",
+            "class B; int X; endclass
+             class D extends B; function int f(); return p::X + X; endfunction endclass",
+            "class B; int X; endclass
+             class G #(type T = B) extends T;
+                 function int f(); return p::X; endfunction
+             endclass",
+            "class C; typedef enum { X, Z } e; function int f(); return p::X; endfunction endclass",
+            // A method declared out of its class is in the scope of the
+            // class (8.24).
+            "class C; int X; extern function int f(); endclass
+             function int C::f(); return p::X + X; endfunction",
+            "class B; int X; endclass
+             class D extends B; extern function int f(); endclass
+             function int D::f(); return p::X + X; endfunction",
+            // The iterator of an array method (7.12).
+            "function automatic int f(int q[$]);
+                 int found[$];
+                 found = q.find(X) with (X == p::X);
+                 return found.size();
+             endfunction",
+        ] {
+            let source = format!(
+                "package p; localparam int X = 5; {body} endpackage
+                module Top; endmodule"
+            );
+            assert_eq!(scope_analyses(&source), 2, "{body}");
+        }
+    }
 
     #[test]
     fn package_and_module_select_calls_have_distinct_sites() {

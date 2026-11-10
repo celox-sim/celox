@@ -4,6 +4,7 @@ use super::*;
 mod discovery;
 pub(super) use discovery::State;
 pub(super) use discovery::all_class_signatures;
+pub(super) use discovery::hides_scope_item;
 pub(super) use discovery::local_constants;
 pub(super) use discovery::same_tables;
 mod query_binding;

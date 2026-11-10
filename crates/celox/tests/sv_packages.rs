@@ -436,6 +436,28 @@ fn self_qualified_names_are_not_hidden_by_formals() {
 }
 
 #[test]
+fn self_qualified_enumerators_are_constants() {
+    // Nothing hides the items the package qualifies, so it is analyzed
+    // once, in which `p::LOW` is the constant `LOW` (IEEE 1800-2023 6.19,
+    // 26.3).
+    assert_eq!(
+        output(
+            "package p;
+               typedef enum { NONE, LOW, HIGH } level_e;
+               localparam int X = 5;
+               function automatic int f(input int a);
+                 level_e level;
+                 level = p::HIGH;
+                 return p::X * 10 + p::LOW + (level == p::HIGH ? a : 0);
+               endfunction
+             endpackage
+             module Top(output logic [7:0] y); assign y = 8'(p::f(3)); endmodule"
+        ),
+        54
+    );
+}
+
+#[test]
 fn selects_of_package_parameters_use_their_declared_ranges() {
     assert_eq!(
         output(

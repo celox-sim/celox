@@ -26,6 +26,8 @@ pub(super) struct ScopeImports {
     pub packages: Vec<String>,
     /// Every `p::x` reference, as `(p, x)`. `p` may also name a class.
     pub qualified: Vec<(String, String)>,
+    /// The first token of each reference of `qualified`.
+    pub qualified_tokens: Vec<usize>,
     /// The package exports (IEEE 1800-2023 26.6).
     pub exports: Vec<Export>,
     /// The source offset of each `export p::x;` item, by `(p, x)`.
@@ -147,6 +149,7 @@ impl ScopeImports {
                     imports
                         .qualified
                         .push((package, normalize_identifier(&name.spelling)));
+                    imports.qualified_tokens.push(offset);
                 }
             }
         }
@@ -167,6 +170,7 @@ impl ScopeImports {
                     imports
                         .qualified
                         .push((package, normalize_identifier(&name.name.spelling)));
+                    imports.qualified_tokens.push(ty.tokens.start);
                 }
             }
         }
