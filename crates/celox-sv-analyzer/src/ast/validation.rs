@@ -304,7 +304,7 @@ pub(super) fn reject_silently_ignored_constructs(
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
     const_env: &ConstEnv,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
     parameter_dimensions: &ScopedMap<VariableDimensions>,
     parameter_values: &HashMap<String, Expr>,
 ) -> Converted<()> {
@@ -1252,7 +1252,7 @@ mod traversal_tests {
                 &AnalysisContext::unspecialized(&tree),
                 session,
                 &ConstEnv::default(),
-                &HashMap::default(),
+                &TypeAliases::default(),
                 &ScopedMap::default(),
                 &HashMap::default(),
             );

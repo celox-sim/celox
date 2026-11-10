@@ -98,7 +98,7 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
     dims: PackedDimensions,
     names: Names,
     state: &'s mut BodyState<'a>,
-    type_aliases: HashMap<String, Type>,
+    type_aliases: TypeAliases,
     /// The kind of body, for the system tasks it may call.
     body: system_functions::Body,
     /// Whether the body's variables are automatic by default.
@@ -2493,7 +2493,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         // checked as those of a typedef of the module (6.19); a typedef of
         // another enumeration declares none.
         let mut members = EnumMemberConstants::default();
-        let aliases: SharedMap<Type> = self.type_aliases.clone().into();
+        let aliases: SharedAliases = self.type_aliases.clone().into();
         let ty = types::bind_local_alias(
             self.tree,
             self.session,
@@ -3911,7 +3911,7 @@ pub(super) fn subroutine_param_declarations(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: impl ToShared<i128, ConstEnv>,
-    aliases: impl ToShared<Type>,
+    aliases: impl ToShared<Type, TypeAliases>,
 ) -> Converted<
     Vec<(
         String,
@@ -3934,7 +3934,7 @@ pub(super) fn subroutine_argument_names(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     const_env: &ConstEnv,
-    type_aliases: &SharedMap<Type>,
+    type_aliases: &SharedAliases,
 ) -> Result<
     (
         HashMap<String, Vec<String>>,
@@ -4373,7 +4373,7 @@ pub(super) fn lower_subroutine(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     declaration_env: &SharedEnv,
-    type_aliases: &SharedMap<Type>,
+    type_aliases: &SharedAliases,
     item_dimensions: &PackedDimensions,
     literals: &HashMap<String, Expr>,
     state: &mut BodyState<'_>,
@@ -5771,7 +5771,7 @@ fn lower_class(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     declaration_env: &ConstEnv,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
     item_dimensions: &PackedDimensions,
     literals: &HashMap<String, Expr>,
     state: &mut BodyState<'_>,
@@ -5791,7 +5791,7 @@ fn lower_class(
     // A specialization's methods see its parameters (IEEE 1800-2023 8.25).
     let (declaration_env, type_aliases) =
         classes::specializations::scope(session, name, declaration_env, type_aliases);
-    let (declaration_env, type_aliases): (SharedEnv, SharedMap<Type>) =
+    let (declaration_env, type_aliases): (SharedEnv, SharedAliases) =
         (declaration_env.into(), type_aliases.into());
     let (item_dimensions, literals) =
         classes::specializations::body_scope(session, name, item_dimensions, literals);
@@ -5955,7 +5955,7 @@ fn lower_cast(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     declaration_env: &ConstEnv,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
     item_dimensions: &PackedDimensions,
     state: &mut BodyState<'_>,
     item: &generate::Item,
@@ -6103,7 +6103,7 @@ fn static_initializer(
     state: &mut BodyState<'_>,
     item: &generate::Item,
     owner: &str,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
     dimensions: &PackedDimensions,
     native: celox_sv_syntax::ExprId,
     target: &LValue,

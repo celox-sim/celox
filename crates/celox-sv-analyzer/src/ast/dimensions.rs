@@ -127,7 +127,7 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
     ports: &[Port],
     signals: &[Signal],
     const_env: &ConstEnv,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
 ) -> PackedDimensions {
     let mut dimensions = HashMap::default();
     for port in ports {

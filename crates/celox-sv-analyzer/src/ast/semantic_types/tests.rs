@@ -3,9 +3,9 @@ use super::{
     conversion::of_type,
     relations::{Assignable, Castable, Mismatch},
 };
-use crate::ast::ConstEnv;
 use crate::ast::Session;
 use crate::ast::{AnalysisContext, types};
+use crate::ast::{ConstEnv, TypeAliases};
 use std::path::Path;
 
 /// The semantic types of the typedefs of module `M` in `items`.
@@ -159,7 +159,7 @@ fn aggregates_of_each_generate_scope_are_types_of_their_own() {
             session,
             &items,
             &env,
-            &HashMap::default(),
+            &TypeAliases::default(),
             path,
         )
         .unwrap();

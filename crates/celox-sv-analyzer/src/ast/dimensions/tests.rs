@@ -30,7 +30,7 @@ fn query_number(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
     context: Option<&PackedDimensions>,
 ) -> Option<usize> {
     let mut context = context
@@ -86,7 +86,7 @@ fn literal_arithmetic_queries_keep_widths_and_skip_scope_discovery() {
                 &tree,
                 session,
                 &ConstEnv::default(),
-                &HashMap::default(),
+                &TypeAliases::default(),
                 Some(&input),
             )
         })
@@ -110,7 +110,7 @@ fn queries_still_discover_names_in_unselected_conditional_arms() {
             &tree,
             session,
             &ConstEnv::default(),
-            &HashMap::default(),
+            &TypeAliases::default(),
             Some(&PackedDimensions::default()),
         ),
         Some(16)
@@ -283,7 +283,7 @@ fn preliminary_function_scope_discovers_shadowing_formals() {
         &tree,
         session,
         &ConstEnv::default(),
-        &HashMap::default(),
+        &TypeAliases::default(),
         Some(&dimensions),
     )
     .unwrap();
@@ -399,7 +399,7 @@ fn nonansi_validation_leaves_generate_queries_to_elaboration() {
         &tree,
         session,
         &ConstEnv::default(),
-        &HashMap::default(),
+        &TypeAliases::default(),
         &ScopedMap::default(),
         &HashMap::default(),
     )
@@ -426,7 +426,7 @@ fn unpacked_dimensions_discovers_local_dpi_return_types() {
                 &tree,
                 session,
                 &ConstEnv::default(),
-                &HashMap::default(),
+                &TypeAliases::default(),
                 None
             ),
             Some(0)
@@ -454,7 +454,7 @@ fn unpacked_dimensions_preserves_runtime_indexed_range_types() {
             &tree,
             session,
             &ConstEnv::default(),
-            &HashMap::default(),
+            &TypeAliases::default(),
             None
         ),
         Some(1)
@@ -524,7 +524,7 @@ fn preliminary_unpacked_queries_discover_array_parameters_before_dependent_range
                 &tree,
                 session,
                 &ConstEnv::default(),
-                &HashMap::default(),
+                &TypeAliases::default(),
                 None,
             ),
             Some(1),
@@ -536,7 +536,7 @@ fn preliminary_unpacked_queries_discover_array_parameters_before_dependent_range
                 &tree,
                 session,
                 &ConstEnv::default(),
-                &HashMap::default(),
+                &TypeAliases::default(),
                 None,
             ),
             Some(2),
@@ -680,7 +680,7 @@ fn preliminary_literal_queries_do_not_discover_scope_declarations() {
                 &tree,
                 session,
                 &ConstEnv::default(),
-                &HashMap::default(),
+                &TypeAliases::default(),
                 Some(&context),
             )
         })
@@ -694,7 +694,7 @@ fn preliminary_literal_queries_do_not_discover_scope_declarations() {
                 &tree,
                 session,
                 &ConstEnv::default(),
-                &HashMap::default(),
+                &TypeAliases::default(),
                 Some(&input),
             )
         })
@@ -729,7 +729,7 @@ fn discovery_prefix_does_not_copy_a_growing_symbol_overlay() {
             &tree,
             session,
             &ConstEnv::default(),
-            &HashMap::default(),
+            &TypeAliases::default(),
             None,
         ),
         Some(8)

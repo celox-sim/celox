@@ -120,7 +120,7 @@ impl Proof<'_> {
         if !self.readable(expression) {
             return None;
         }
-        let dims = PackedDimensions::new(HashMap::default(), &self.env, &HashMap::default());
+        let dims = PackedDimensions::new(HashMap::default(), &self.env, &TypeAliases::default());
         let value = expr_to_index_const(self.tree, session, expression.clone(), &dims)?;
         eval_ast_const_expr(&self.tree.functions, &value, &self.env)
     }

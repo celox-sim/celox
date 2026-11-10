@@ -33,7 +33,7 @@ struct Entry {
     literal_use: LiteralUse,
     overrides: HashMap<String, ConstExpr>,
     env: ConstEnv,
-    aliases: HashMap<String, Type>,
+    aliases: TypeAliases,
     items: Vec<Item>,
     /// How many call sites the elaboration allocated.
     sites: usize,
@@ -63,7 +63,7 @@ pub(super) fn items(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
     literal_use: LiteralUse,
     elaborate: impl FnOnce(&mut Session) -> Result<Vec<Item>, AnalyzerError>,
 ) -> Result<Vec<Item>, AnalyzerError> {

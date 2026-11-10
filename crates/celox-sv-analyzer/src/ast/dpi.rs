@@ -26,7 +26,7 @@ pub(super) fn imports(
     items: &[generate::Item],
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
 ) -> Result<Vec<DpiImport>, AnalyzerError> {
     let syntax = tree.declarations();
     let mut imports = Vec::new();
@@ -62,7 +62,7 @@ fn export(
     items: &[generate::Item],
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
     exports: &mut HashMap<(String, String), String>,
 ) -> Result<(), AnalyzerError> {
     let syntax = tree.declarations();

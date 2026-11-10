@@ -6,7 +6,7 @@ pub(super) fn ports_from_scope(
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
     const_env: &ConstEnv,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
     selected: Option<&port_owners::Selection<'_>>,
 ) -> Result<Vec<Port>, AnalyzerError> {
     let mut ports = Vec::new();
@@ -222,7 +222,7 @@ pub(super) fn module_interface_from_scope(
 pub(super) fn parameters_from_scope(
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
     base_const_env: &ConstEnv,
     parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Result<Vec<Parameter>, AnalyzerError> {
@@ -311,7 +311,7 @@ pub(super) fn signals_from_scope(
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
     const_env: &ConstEnv,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
 ) -> Result<Vec<Signal>, AnalyzerError> {
     signals_from_scope_with_declaration_ranges(syntax_tree, session, const_env, type_aliases, false)
 }
@@ -320,7 +320,7 @@ pub(super) fn signals_from_scope_with_declaration_ranges(
     syntax_tree: &AnalysisContext<'_>,
     session: &mut Session,
     const_env: &ConstEnv,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &TypeAliases,
     preserve_parameters: bool,
 ) -> Result<Vec<Signal>, AnalyzerError> {
     let mut signals = Vec::new();
@@ -367,7 +367,7 @@ fn declared_scope(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
     signals: &[Signal],
 ) -> Box<PackedDimensions> {
     let variables: HashMap<_, _> = signals
@@ -388,7 +388,7 @@ pub(super) fn signals_from_body_item(
     id: celox_sv_syntax::BodyItemId,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
     env: &ConstEnv,
     selected_name: Option<&str>,
     signals: &mut Vec<Signal>,

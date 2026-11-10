@@ -313,7 +313,7 @@ pub(super) fn instance_ranges(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     env: &ConstEnv,
-    aliases: &HashMap<String, Type>,
+    aliases: &TypeAliases,
 ) -> Result<Vec<UnpackedRange>, AnalyzerError> {
     constant_binding::unpacked_ranges(&native.dimensions, tree, session, env, aliases)
 }
