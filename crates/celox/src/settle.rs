@@ -408,9 +408,10 @@ pub(crate) fn is_wide_commit_access(instruction: &SIRInstruction<RegionedAbsolut
 }
 
 /// `unit` without the typed shadows of its wide commits: the commits that
-/// directly follow a raw state write ([`Marker::emit_wide_run`]). The words
-/// already copied those registers, so a unit that runs as compiled code
-/// only needs the shadows for the analyses that plan it.
+/// directly follow a raw state write in its block
+/// ([`Marker::emit_wide_run`], which lets no other commit follow them
+/// there). The words already copied those registers, so a unit that runs as
+/// compiled code only needs the shadows for the analyses that plan it.
 #[cfg(feature = "host-runtime")]
 pub(crate) fn without_shadow_commits(
     unit: &ExecutionUnit<RegionedAbsoluteAddr>,
@@ -576,6 +577,16 @@ impl Segment {
         insert_block(unit, rest, Vec::new(), SIRTerminator::Return);
         self.current = rest;
         rest
+    }
+
+    /// End the segment with a jump to the block the unit continues in.
+    fn end_block(&mut self, unit: &mut ExecutionUnit<RegionedAbsoluteAddr>, alloc: &mut Allocator) {
+        let rest = alloc.block();
+        let block = unit.blocks.get_mut(&self.current).expect("ended block");
+        block.instructions = std::mem::take(&mut self.instructions);
+        block.terminator = SIRTerminator::Jump(rest, Vec::new());
+        insert_block(unit, rest, Vec::new(), SIRTerminator::Return);
+        self.current = rest;
     }
 }
 
@@ -1121,7 +1132,9 @@ impl<'a> Marker<'a> {
     /// follow the last word as its typed shadow: they name the registers
     /// the words wrote (the scheduler plans with them) and copy what the
     /// words already copied. The compiled scheduler drops them
-    /// ([`without_shadow_commits`]).
+    /// ([`without_shadow_commits`]): every commit after the last word in
+    /// its block, so the block ends with the shadows unless the word's test
+    /// follows them.
     fn emit_wide_run(
         &self,
         unit: &mut ExecutionUnit<RegionedAbsoluteAddr>,
@@ -1218,6 +1231,11 @@ impl<'a> Marker<'a> {
                 segment
                     .instructions
                     .extend(run.iter().map(|object| object.commit.clone()));
+                if groups.is_empty() {
+                    // Nothing follows the shadows here: what comes next in
+                    // the unit may be a commit of its own.
+                    segment.end_block(unit, alloc);
+                }
             }
             if groups.is_empty() {
                 continue;
@@ -1443,5 +1461,115 @@ mod tests {
         assert_eq!(marks(vec![b, a]), 1);
         assert_eq!(marks(vec![b]), 0);
         assert_eq!(marks(Vec::new()), 0);
+    }
+
+    /// A commit that follows a wide run is not one of the run's shadows:
+    /// the compiled scheduler keeps it, also when no partition reads the
+    /// run's registers, so that nothing but the shadows separates the two.
+    #[cfg(feature = "host-runtime")]
+    #[test]
+    fn a_commit_after_a_wide_run_is_not_a_shadow() {
+        let source = "module Top (clk: input clock, rst: input reset, d: input logic<8>, y: output logic<8>) {
+            var a: logic<8>;
+            var b: logic<8>;
+            var c: logic<8>;
+            always_ff {
+                if_reset {
+                    a = 0;
+                    b = 0;
+                    c = 0;
+                } else {
+                    a = d;
+                    b = a;
+                    c = b;
+                }
+            }
+            assign y = c;
+        }";
+        let (program, _) = crate::compile_to_sir(
+            &[(source, std::path::Path::new("settle-shadows.veryl"))],
+            "Top",
+            &[],
+            &[],
+            false,
+            &Default::default(),
+            None,
+            None,
+            None,
+            None,
+            &[],
+            &Default::default(),
+        )
+        .unwrap();
+        let registers = ["a", "b", "c"].map(|name| program.get_addr(&[], &[name]).unwrap());
+        let flags = program.get_addr(&[], &["d"]).unwrap();
+        let program = program.into_laid_out(false);
+        let layout = program.layout();
+        // No partition reads anything: the run's words have no test.
+        let settle = SettleLayout::new(layout.offsets[&flags], 1, Vec::new());
+        let mut marker = Marker {
+            settle: &settle,
+            layout,
+            flags: RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, flags),
+            scheduler_dirty: None,
+            clock_homes: crate::HashSet::default(),
+            wide: true,
+            homes: Vec::new(),
+        };
+        marker.collect_homes();
+        let commit = |address: AbsoluteAddr, width: usize| {
+            SIRInstruction::Commit(
+                RegionedAbsoluteAddr::from_absolute_addr(WORKING_REGION, address),
+                RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, address),
+                SIROffset::Static(0),
+                width,
+                Vec::new(),
+            )
+        };
+        let is_commit = |instruction: &&SIRInstruction<RegionedAbsoluteAddr>| {
+            matches!(instruction, SIRInstruction::Commit(..))
+        };
+        let mut wide_runs = 0;
+        for [first, second, third] in [[0, 1, 2], [1, 2, 0], [0, 2, 1]] {
+            // Two whole registers, then part of a third: the part cannot
+            // join the run.
+            let part = commit(registers[third], 4);
+            let mut unit = ExecutionUnit {
+                entry_block_id: BlockId(0),
+                blocks: [(
+                    BlockId(0),
+                    BasicBlock {
+                        id: BlockId(0),
+                        params: Vec::new(),
+                        instructions: vec![
+                            commit(registers[first], 8),
+                            commit(registers[second], 8),
+                            part.clone(),
+                        ],
+                        terminator: celox_sir::SIRTerminator::Return,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                register_map: Default::default(),
+            };
+            marker.instrument(&mut unit);
+            let instructions = || unit.blocks.values().flat_map(|block| &block.instructions);
+            if !instructions().any(is_wide_commit_access) {
+                // The two are not neighbours in both regions.
+                continue;
+            }
+            wide_runs += 1;
+            assert_eq!(instructions().filter(is_commit).count(), 3);
+            let stripped = without_shadow_commits(&unit);
+            let kept: Vec<_> = stripped
+                .blocks
+                .values()
+                .flat_map(|block| &block.instructions)
+                .filter(is_commit)
+                .collect();
+            assert_eq!(kept, [&part]);
+        }
+        assert_ne!(wide_runs, 0, "no two of the registers commit by words");
     }
 }
