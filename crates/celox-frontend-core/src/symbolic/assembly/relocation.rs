@@ -276,170 +276,26 @@ pub(super) fn relocate_units(
     for (path, id) in expanded {
         let module_id = &instance_modules[id];
         let sim_module = &modules[module_id];
-        let runtime_event_site_base = u32::try_from(runtime_event_sites.len()).map_err(|_| {
-            ParserError::illegal_context(
-                "FF runtime-event relocation",
-                "runtime event site count exceeds u32",
-                None,
-            )
-        })?;
-        let relocate_ff_summary = |summary: &FfAccessSummary<RegionedVarAddr>| {
-            let relocate_addr =
-                |addr: RegionedVarAddr| bindings.locate_regioned(addr.region, *id, addr.var_id);
-            FfAccessSummary {
-                reads: summary
-                    .reads
-                    .iter()
-                    .map(|read| VarAtomBase {
-                        id: relocate_addr(read.id),
-                        access: read.access,
-                    })
-                    .collect(),
-                writes: summary
-                    .writes
-                    .iter()
-                    .map(|write| VarAtomBase {
-                        id: relocate_addr(write.id),
-                        access: write.access,
-                    })
-                    .collect(),
-                dynamic_writes: summary
-                    .dynamic_writes
-                    .iter()
-                    .copied()
-                    .map(relocate_addr)
-                    .collect(),
-            }
-        };
-        for (trigger_set, summary) in &sim_module.ff_access_summaries {
-            let clock_addr = bindings.locate(*id, trigger_set.clock);
-            let canonical_clock = clock_domains
-                .get(&clock_addr)
-                .copied()
-                .unwrap_or(clock_addr);
-            ff_access_summaries
-                .entry(canonical_clock)
-                .or_default()
-                .push(relocate_ff_summary(summary));
-            for &reset in &trigger_set.resets {
-                let reset_addr = bindings.locate(*id, reset);
-                let canonical_reset = clock_domains
-                    .get(&reset_addr)
-                    .copied()
-                    .unwrap_or(reset_addr);
-                ff_access_summaries
-                    .entry(canonical_reset)
-                    .or_default()
-                    .push(relocate_ff_summary(summary));
-            }
-        }
-        let mut runtime_error_codes = HashMap::default();
-        for (&local_code, info) in &sim_module.runtime_errors {
-            let global_code = next_runtime_error_code;
-            next_runtime_error_code += 1;
-            runtime_error_codes.insert(local_code, global_code);
-            runtime_errors.insert(
-                global_code,
-                RuntimeErrorInfo {
-                    message: info.message.clone(),
-                    signals: info
-                        .signals
-                        .iter()
-                        .filter(|var_id| sim_module.variables.contains_key(var_id))
-                        .map(|&var_id| bindings.locate(*id, var_id))
-                        .collect(),
-                },
-            );
-        }
-        ff_runtime_relocations.insert(
-            *id,
-            FfRuntimeRelocation {
-                error_codes: runtime_error_codes.clone(),
-                event_site_base: runtime_event_site_base,
-            },
-        );
-        // Extern functions are shared by C symbol name across instances, and
-        // every import of one name must declare the same prototype.
-        let mut extern_function_map = HashMap::default();
-        for (local, function) in sim_module.extern_functions.iter().enumerate() {
-            let global = match extern_function_indices.get(&function.name).copied() {
-                Some(global) if extern_functions[global] != *function => {
-                    return Err(ParserError::ExternSignatureMismatch {
-                        name: function.name.clone(),
-                        first: extern_functions[global].to_string(),
-                        second: function.to_string(),
-                    });
-                }
-                Some(global) => global,
-                None => {
-                    extern_function_indices.insert(function.name.clone(), extern_functions.len());
-                    extern_functions.push(function.clone());
-                    extern_functions.len() - 1
-                }
-            };
-            extern_function_map.insert(local as u32, global as u32);
-        }
-        let mut runtime_event_site_map = HashMap::default();
-        let scope = elaborated_scope_name(root_name, path, expanded, indexed_instances);
-        let site_base = runtime_event_sites.len() as u32;
-        for (local_site, site) in sim_module.runtime_event_sites.iter().enumerate() {
-            let global_site = runtime_event_sites.len() as u32;
-            runtime_event_site_map.insert(local_site as u32, global_site);
-            let mut site = site.clone();
-            site.scope = Some(scope.clone());
-            // A deferred action names the flush point of its process in the
-            // same instance.
-            if let Some(celox_design::DeferredSite::Action { queue, .. }) = &mut site.deferred {
-                *queue += site_base;
-            }
-            runtime_event_sites.push(site);
-        }
-        let function_base = u32::try_from(functions.len()).map_err(|_| {
-            ParserError::illegal_context("function relocation", "function count exceeds u32", None)
-        })?;
-        for function in &sim_module.functions {
-            // Frame slots are no state: each copy of a function names its
-            // own, unique in the design because the instance is part of the
-            // address, and package or hierarchical bindings do not apply.
-            let locate = |addr: &RegionedVarAddr| {
-                if addr.region == celox_design::FRAME_REGION {
-                    RegionedAbsoluteAddr {
-                        region: addr.region,
-                        instance_id: *id,
-                        var_id: addr.var_id,
-                    }
-                } else {
-                    bindings.locate_regioned(addr.region, *id, addr.var_id)
-                }
-            };
-            functions.push(celox_sir::FunctionUnit {
-                unit: relocate_executation_unit_with_errors(
-                    &function.unit,
-                    &locate,
-                    &runtime_error_codes,
-                    &runtime_event_site_map,
-                    &extern_function_map,
-                    function_base,
-                ),
-                frame: celox_sir::FrameLayout {
-                    size: function.frame.size,
-                    slots: function
-                        .frame
-                        .slots
-                        .iter()
-                        .map(|slot| celox_sir::FrameSlot {
-                            addr: locate(&slot.addr),
-                            offset: slot.offset,
-                            width: slot.width,
-                            four_state: slot.four_state,
-                            handle: slot.handle,
-                            element_width: slot.element_width,
-                        })
-                        .collect(),
-                },
-                effects: Default::default(),
-            });
-        }
+        let instance = number_instance(
+            path,
+            id,
+            sim_module,
+            bindings,
+            clock_domains,
+            root_name,
+            expanded,
+            indexed_instances,
+            &mut ff_access_summaries,
+            &mut next_runtime_error_code,
+            &mut runtime_errors,
+            &mut ff_runtime_relocations,
+            &mut extern_function_indices,
+            &mut extern_functions,
+            &mut runtime_event_sites,
+            &functions,
+        )?;
+        let function_base = instance.function_base;
+        relocate_functions(&instance, &mut functions);
         // The callees of each copy are the copies in the same instance.
         let rebase = |calls: &[celox_design::CallResume]| {
             calls
@@ -460,276 +316,31 @@ pub(super) fn relocate_units(
         // Lane-partitioning units of every trigger group: its independently
         // lowered parts when present, otherwise its whole evaluate/apply pair.
         if let Some(parallel_ff_units) = parallel_ff_units.as_deref_mut() {
-            let relocate = |unit: &ExecutionUnit<RegionedVarAddr>| {
-                relocate_executation_unit_with_errors(
-                    unit,
-                    &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
-                    &runtime_error_codes,
-                    &runtime_event_site_map,
-                    &extern_function_map,
-                    function_base,
-                )
-            };
-            let mut trigger_sets = sim_module.eval_only_ff_blocks.keys().collect::<Vec<_>>();
-            trigger_sets.sort_unstable();
-            for trigger_set in trigger_sets {
-                let parts = match sim_module.parallel_ff_parts.get(trigger_set) {
-                    Some(parts) => parts
-                        .iter()
-                        .map(|part| part.map_units(relocate))
-                        .collect::<Vec<_>>(),
-                    None => {
-                        let Some(apply) = sim_module.apply_ff_blocks.get(trigger_set) else {
-                            continue;
-                        };
-                        vec![FfPart {
-                            evaluate: relocate(&sim_module.eval_only_ff_blocks[trigger_set]),
-                            apply: relocate(apply),
-                        }]
-                    }
-                };
-                let canonical = |var_id| {
-                    let address = bindings.locate(*id, var_id);
-                    clock_domains.get(&address).copied().unwrap_or(address)
-                };
-                let events = std::iter::once(canonical(trigger_set.clock))
-                    .chain(trigger_set.resets.iter().map(|&reset| canonical(reset)))
-                    .collect::<BTreeSet<_>>();
-                for event in events {
-                    parallel_ff_units
-                        .entry(event)
-                        .or_default()
-                        .extend(parts.iter().cloned().map(|part| (*id, part)));
-                }
-            }
+            relocate_parallel_ff_parts(&instance, parallel_ff_units);
         }
 
-        let arena_start = global_arena.len();
-        let mut relocated_module = flatten_with_trace(
-            sim_module,
+        relocate_comb_logic(
+            &instance,
             path,
             expanded,
             global_boundaries,
             unpacked_element_widths,
-            &mut global_arena,
-            bindings,
             trace_opts,
-            trace.as_deref_mut(),
-        )?;
-        remap_for_fold_runtime_event_sites(
+            trace,
+            startup_ready,
+            &startup_statuses,
             &mut global_arena,
-            arena_start,
-            &runtime_event_site_map,
+            &mut comb_blocks,
+            &mut comb_observers,
+            &mut gated_startup,
         )?;
-        for observer in &mut relocated_module.comb_observers {
-            observer.site_id = runtime_event_site_map[&observer.site_id];
-            observer.activation_group = runtime_event_site_map[&observer.activation_group];
-        }
-        for path in &mut relocated_module.comb_blocks {
-            if let celox_slt::LogicPathTarget::Process {
-                unit,
-                after_initials,
-                ..
-            } = &mut path.target
-            {
-                if let Some(ready) = startup_ready.filter(|_| *after_initials)
-                    && !startup_statuses.is_empty()
-                {
-                    path.sources.insert(VarAtomBase::new(ready, 0, 0));
-                }
-                **unit = relocate_executation_unit_with_errors(
-                    unit,
-                    &|addr| *addr,
-                    &runtime_error_codes,
-                    &runtime_event_site_map,
-                    &extern_function_map,
-                    function_base,
-                );
-                if let Some(ready) = startup_ready.filter(|_| *after_initials)
-                    && !startup_statuses.is_empty()
-                {
-                    **unit = after_initial_processes(unit, ready);
-                    gated_startup = true;
-                }
-            }
-        }
-        comb_blocks.extend(relocated_module.comb_blocks);
-        comb_observers.extend(relocated_module.comb_observers);
 
         // Relocate sequential blocks for this instance
-        for (trigger_set, eu) in &sim_module.eval_apply_ff_blocks {
-            let clock_addr = bindings.locate(*id, trigger_set.clock);
-            let canonical_addr = clock_domains
-                .get(&clock_addr)
-                .copied()
-                .unwrap_or(clock_addr);
+        relocate_ff_evaluations(&instance, &mut eval_apply_ffs, &mut eval_only_ffs);
 
-            eval_apply_ffs.entry(canonical_addr).or_default().push(
-                relocate_executation_unit_with_errors(
-                    eu,
-                    &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
-                    &runtime_error_codes,
-                    &runtime_event_site_map,
-                    &extern_function_map,
-                    function_base,
-                ),
-            );
+        relocate_processes(&instance, &rebase, &mut processes);
 
-            for &reset in &trigger_set.resets {
-                let reset_addr = bindings.locate(*id, reset);
-                let canonical_addr = clock_domains
-                    .get(&reset_addr)
-                    .copied()
-                    .unwrap_or(reset_addr);
-                eval_apply_ffs.entry(canonical_addr).or_default().push(
-                    relocate_executation_unit_with_errors(
-                        eu,
-                        &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
-                        &runtime_error_codes,
-                        &runtime_event_site_map,
-                        &extern_function_map,
-                        function_base,
-                    ),
-                );
-            }
-        }
-
-        for (trigger_set, eu) in &sim_module.eval_only_ff_blocks {
-            let clock_addr = bindings.locate(*id, trigger_set.clock);
-            let canonical_addr = clock_domains
-                .get(&clock_addr)
-                .copied()
-                .unwrap_or(clock_addr);
-            eval_only_ffs.entry(canonical_addr).or_default().push(
-                relocate_executation_unit_with_errors(
-                    eu,
-                    &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
-                    &runtime_error_codes,
-                    &runtime_event_site_map,
-                    &extern_function_map,
-                    function_base,
-                ),
-            );
-
-            for &reset in &trigger_set.resets {
-                let reset_addr = bindings.locate(*id, reset);
-                let canonical_addr = clock_domains
-                    .get(&reset_addr)
-                    .copied()
-                    .unwrap_or(reset_addr);
-                eval_only_ffs.entry(canonical_addr).or_default().push(
-                    relocate_executation_unit_with_errors(
-                        eu,
-                        &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
-                        &runtime_error_codes,
-                        &runtime_event_site_map,
-                        &extern_function_map,
-                        function_base,
-                    ),
-                );
-            }
-        }
-
-        for (index, process) in sim_module.processes.iter().enumerate() {
-            processes.push((
-                (*id, index),
-                RelocatedProcess {
-                    kernel: relocate_executation_unit_with_errors(
-                        &process.kernel,
-                        &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
-                        &runtime_error_codes,
-                        &runtime_event_site_map,
-                        &extern_function_map,
-                        function_base,
-                    ),
-                    slots: process.slots.map(|var_id| bindings.locate(*id, var_id)),
-                    frame: process
-                        .frame
-                        .clone()
-                        .map(|frame| frame.map(|var_id| bindings.locate(*id, var_id))),
-                    origin: celox_design::ProcessOrigin {
-                        scope: Some(scope.clone()),
-                        ..process.origin.clone()
-                    },
-                    call_resumes: rebase(&process.call_resumes),
-                    key: (*id, index),
-                },
-            ));
-        }
-
-        for (trigger_set, eu) in &sim_module.apply_ff_blocks {
-            let clock_addr = bindings.locate(*id, trigger_set.clock);
-            let canonical_addr = clock_domains
-                .get(&clock_addr)
-                .copied()
-                .unwrap_or(clock_addr);
-            // The split commit of each apply unit, in the same order.
-            let split = sim_module
-                .split_commit_ff_blocks
-                .get(trigger_set)
-                .map(|split| SplitCommit {
-                    active: relocate_executation_unit_with_errors(
-                        &split.active,
-                        &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
-                        &runtime_error_codes,
-                        &runtime_event_site_map,
-                        &extern_function_map,
-                        function_base,
-                    ),
-                    nba: relocate_executation_unit_with_errors(
-                        &split.nba,
-                        &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
-                        &runtime_error_codes,
-                        &runtime_event_site_map,
-                        &extern_function_map,
-                        function_base,
-                    ),
-                });
-            // Pushed like the apply units below: the clock, then each reset.
-            split_commits
-                .entry(canonical_addr)
-                .or_default()
-                .push(split.clone());
-            for &reset in &trigger_set.resets {
-                let reset_addr = bindings.locate(*id, reset);
-                let canonical_addr = clock_domains
-                    .get(&reset_addr)
-                    .copied()
-                    .unwrap_or(reset_addr);
-                split_commits
-                    .entry(canonical_addr)
-                    .or_default()
-                    .push(split.clone());
-            }
-            apply_ffs.entry(canonical_addr).or_default().push(
-                relocate_executation_unit_with_errors(
-                    eu,
-                    &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
-                    &runtime_error_codes,
-                    &runtime_event_site_map,
-                    &extern_function_map,
-                    function_base,
-                ),
-            );
-
-            for &reset in &trigger_set.resets {
-                let reset_addr = bindings.locate(*id, reset);
-                let canonical_addr = clock_domains
-                    .get(&reset_addr)
-                    .copied()
-                    .unwrap_or(reset_addr);
-                apply_ffs.entry(canonical_addr).or_default().push(
-                    relocate_executation_unit_with_errors(
-                        eu,
-                        &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
-                        &runtime_error_codes,
-                        &runtime_event_site_map,
-                        &extern_function_map,
-                        function_base,
-                    ),
-                );
-            }
-        }
+        relocate_ff_applications(&instance, split_commits, &mut apply_ffs);
     }
     // A canonical event may collect multiple reset groups or instances. The
     // ordinary tick path must evaluate every group against pre-edge state
@@ -785,6 +396,605 @@ pub(super) fn relocate_units(
         },
         (functions, function_frames),
     ))
+}
+
+/// An instance being relocated, with the global numbers of the runtime
+/// errors, event sites, extern functions and functions it declares.
+struct InstanceRelocation<'a> {
+    id: &'a InstanceId,
+    sim_module: &'a SimModule,
+    bindings: &'a PackageBindings,
+    clock_domains: &'a HashMap<AbsoluteAddr, AbsoluteAddr>,
+    runtime_error_codes: HashMap<i64, i64>,
+    runtime_event_site_map: HashMap<u32, u32>,
+    extern_function_map: HashMap<u32, u32>,
+    function_base: u32,
+    scope: String,
+}
+
+/// Place the flip-flop access summaries of instance `id` and give its
+/// runtime errors, extern functions, runtime event sites and functions
+/// their numbers in the design.
+fn number_instance<'a>(
+    path: &InstancePath,
+    id: &'a InstanceId,
+    sim_module: &'a SimModule,
+    bindings: &'a PackageBindings,
+    clock_domains: &'a HashMap<AbsoluteAddr, AbsoluteAddr>,
+    root_name: &str,
+    expanded: &HashMap<InstancePath, InstanceId>,
+    indexed_instances: &HashSet<InstanceId>,
+    ff_access_summaries: &mut HashMap<AbsoluteAddr, Vec<FfAccessSummary<RegionedAbsoluteAddr>>>,
+    next_runtime_error_code: &mut i64,
+    runtime_errors: &mut HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
+    ff_runtime_relocations: &mut HashMap<InstanceId, FfRuntimeRelocation>,
+    extern_function_indices: &mut HashMap<String, usize>,
+    extern_functions: &mut Vec<ExternFunction>,
+    runtime_event_sites: &mut Vec<RuntimeEventSite>,
+    functions: &[celox_sir::FunctionUnit<RegionedAbsoluteAddr>],
+) -> Result<InstanceRelocation<'a>, ParserError> {
+    let runtime_event_site_base = u32::try_from(runtime_event_sites.len()).map_err(|_| {
+        ParserError::illegal_context(
+            "FF runtime-event relocation",
+            "runtime event site count exceeds u32",
+            None,
+        )
+    })?;
+    let relocate_ff_summary = |summary: &FfAccessSummary<RegionedVarAddr>| {
+        let relocate_addr =
+            |addr: RegionedVarAddr| bindings.locate_regioned(addr.region, *id, addr.var_id);
+        FfAccessSummary {
+            reads: summary
+                .reads
+                .iter()
+                .map(|read| VarAtomBase {
+                    id: relocate_addr(read.id),
+                    access: read.access,
+                })
+                .collect(),
+            writes: summary
+                .writes
+                .iter()
+                .map(|write| VarAtomBase {
+                    id: relocate_addr(write.id),
+                    access: write.access,
+                })
+                .collect(),
+            dynamic_writes: summary
+                .dynamic_writes
+                .iter()
+                .copied()
+                .map(relocate_addr)
+                .collect(),
+        }
+    };
+    for (trigger_set, summary) in &sim_module.ff_access_summaries {
+        let clock_addr = bindings.locate(*id, trigger_set.clock);
+        let canonical_clock = clock_domains
+            .get(&clock_addr)
+            .copied()
+            .unwrap_or(clock_addr);
+        ff_access_summaries
+            .entry(canonical_clock)
+            .or_default()
+            .push(relocate_ff_summary(summary));
+        for &reset in &trigger_set.resets {
+            let reset_addr = bindings.locate(*id, reset);
+            let canonical_reset = clock_domains
+                .get(&reset_addr)
+                .copied()
+                .unwrap_or(reset_addr);
+            ff_access_summaries
+                .entry(canonical_reset)
+                .or_default()
+                .push(relocate_ff_summary(summary));
+        }
+    }
+    let mut runtime_error_codes = HashMap::default();
+    for (&local_code, info) in &sim_module.runtime_errors {
+        let global_code = *next_runtime_error_code;
+        *next_runtime_error_code += 1;
+        runtime_error_codes.insert(local_code, global_code);
+        runtime_errors.insert(
+            global_code,
+            RuntimeErrorInfo {
+                message: info.message.clone(),
+                signals: info
+                    .signals
+                    .iter()
+                    .filter(|var_id| sim_module.variables.contains_key(var_id))
+                    .map(|&var_id| bindings.locate(*id, var_id))
+                    .collect(),
+            },
+        );
+    }
+    ff_runtime_relocations.insert(
+        *id,
+        FfRuntimeRelocation {
+            error_codes: runtime_error_codes.clone(),
+            event_site_base: runtime_event_site_base,
+        },
+    );
+    // Extern functions are shared by C symbol name across instances, and
+    // every import of one name must declare the same prototype.
+    let mut extern_function_map = HashMap::default();
+    for (local, function) in sim_module.extern_functions.iter().enumerate() {
+        let global = match extern_function_indices.get(&function.name).copied() {
+            Some(global) if extern_functions[global] != *function => {
+                return Err(ParserError::ExternSignatureMismatch {
+                    name: function.name.clone(),
+                    first: extern_functions[global].to_string(),
+                    second: function.to_string(),
+                });
+            }
+            Some(global) => global,
+            None => {
+                extern_function_indices.insert(function.name.clone(), extern_functions.len());
+                extern_functions.push(function.clone());
+                extern_functions.len() - 1
+            }
+        };
+        extern_function_map.insert(local as u32, global as u32);
+    }
+    let mut runtime_event_site_map = HashMap::default();
+    let scope = elaborated_scope_name(root_name, path, expanded, indexed_instances);
+    let site_base = runtime_event_sites.len() as u32;
+    for (local_site, site) in sim_module.runtime_event_sites.iter().enumerate() {
+        let global_site = runtime_event_sites.len() as u32;
+        runtime_event_site_map.insert(local_site as u32, global_site);
+        let mut site = site.clone();
+        site.scope = Some(scope.clone());
+        // A deferred action names the flush point of its process in the
+        // same instance.
+        if let Some(celox_design::DeferredSite::Action { queue, .. }) = &mut site.deferred {
+            *queue += site_base;
+        }
+        runtime_event_sites.push(site);
+    }
+    let function_base = u32::try_from(functions.len()).map_err(|_| {
+        ParserError::illegal_context("function relocation", "function count exceeds u32", None)
+    })?;
+    Ok(InstanceRelocation {
+        id,
+        sim_module,
+        bindings,
+        clock_domains,
+        runtime_error_codes,
+        runtime_event_site_map,
+        extern_function_map,
+        function_base,
+        scope,
+    })
+}
+
+/// Relocate the functions of the instance; each copy is its own function.
+fn relocate_functions(
+    instance: &InstanceRelocation<'_>,
+    functions: &mut Vec<celox_sir::FunctionUnit<RegionedAbsoluteAddr>>,
+) {
+    let &InstanceRelocation {
+        id,
+        sim_module,
+        bindings,
+        function_base,
+        ref runtime_error_codes,
+        ref runtime_event_site_map,
+        ref extern_function_map,
+        ..
+    } = instance;
+    for function in &sim_module.functions {
+        // Frame slots are no state: each copy of a function names its
+        // own, unique in the design because the instance is part of the
+        // address, and package or hierarchical bindings do not apply.
+        let locate = |addr: &RegionedVarAddr| {
+            if addr.region == celox_design::FRAME_REGION {
+                RegionedAbsoluteAddr {
+                    region: addr.region,
+                    instance_id: *id,
+                    var_id: addr.var_id,
+                }
+            } else {
+                bindings.locate_regioned(addr.region, *id, addr.var_id)
+            }
+        };
+        functions.push(celox_sir::FunctionUnit {
+            unit: relocate_executation_unit_with_errors(
+                &function.unit,
+                &locate,
+                runtime_error_codes,
+                runtime_event_site_map,
+                extern_function_map,
+                function_base,
+            ),
+            frame: celox_sir::FrameLayout {
+                size: function.frame.size,
+                slots: function
+                    .frame
+                    .slots
+                    .iter()
+                    .map(|slot| celox_sir::FrameSlot {
+                        addr: locate(&slot.addr),
+                        offset: slot.offset,
+                        width: slot.width,
+                        four_state: slot.four_state,
+                        handle: slot.handle,
+                        element_width: slot.element_width,
+                    })
+                    .collect(),
+            },
+            effects: Default::default(),
+        });
+    }
+}
+
+/// Relocate the lane-partitioning units of every trigger group of the
+/// instance into `parallel_ff_units`, by event.
+fn relocate_parallel_ff_parts(
+    instance: &InstanceRelocation<'_>,
+    parallel_ff_units: &mut HashMap<AbsoluteAddr, Vec<(InstanceId, FfPart<RegionedAbsoluteAddr>)>>,
+) {
+    let &InstanceRelocation {
+        id,
+        sim_module,
+        bindings,
+        clock_domains,
+        function_base,
+        ref runtime_error_codes,
+        ref runtime_event_site_map,
+        ref extern_function_map,
+        ..
+    } = instance;
+    let relocate = |unit: &ExecutionUnit<RegionedVarAddr>| {
+        relocate_executation_unit_with_errors(
+            unit,
+            &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
+            runtime_error_codes,
+            runtime_event_site_map,
+            extern_function_map,
+            function_base,
+        )
+    };
+    let mut trigger_sets = sim_module.eval_only_ff_blocks.keys().collect::<Vec<_>>();
+    trigger_sets.sort_unstable();
+    for trigger_set in trigger_sets {
+        let parts = match sim_module.parallel_ff_parts.get(trigger_set) {
+            Some(parts) => parts
+                .iter()
+                .map(|part| part.map_units(relocate))
+                .collect::<Vec<_>>(),
+            None => {
+                let Some(apply) = sim_module.apply_ff_blocks.get(trigger_set) else {
+                    continue;
+                };
+                vec![FfPart {
+                    evaluate: relocate(&sim_module.eval_only_ff_blocks[trigger_set]),
+                    apply: relocate(apply),
+                }]
+            }
+        };
+        let canonical = |var_id| {
+            let address = bindings.locate(*id, var_id);
+            clock_domains.get(&address).copied().unwrap_or(address)
+        };
+        let events = std::iter::once(canonical(trigger_set.clock))
+            .chain(trigger_set.resets.iter().map(|&reset| canonical(reset)))
+            .collect::<BTreeSet<_>>();
+        for event in events {
+            parallel_ff_units
+                .entry(event)
+                .or_default()
+                .extend(parts.iter().cloned().map(|part| (*id, part)));
+        }
+    }
+}
+
+/// Flatten the combinational logic of the instance into the arena of the
+/// design and relocate its paths, observers and process units, gating the
+/// units that wait for the initial processes.
+fn relocate_comb_logic(
+    instance: &InstanceRelocation<'_>,
+    path: &InstancePath,
+    expanded: &HashMap<InstancePath, InstanceId>,
+    global_boundaries: &HashMap<AbsoluteAddr, std::collections::BTreeSet<usize>>,
+    unpacked_element_widths: &HashMap<AbsoluteAddr, usize>,
+    trace_opts: &crate::FrontendTraceOptions,
+    trace: &mut Option<&mut crate::FrontendTrace>,
+    startup_ready: Option<AbsoluteAddr>,
+    startup_statuses: &[AbsoluteAddr],
+    global_arena: &mut SLTNodeArena<AbsoluteAddr>,
+    comb_blocks: &mut Vec<celox_slt::LogicPath<AbsoluteAddr>>,
+    comb_observers: &mut Vec<CombObserver<AbsoluteAddr>>,
+    gated_startup: &mut bool,
+) -> Result<(), ParserError> {
+    let &InstanceRelocation {
+        sim_module,
+        bindings,
+        function_base,
+        ref runtime_error_codes,
+        ref runtime_event_site_map,
+        ref extern_function_map,
+        ..
+    } = instance;
+    let arena_start = global_arena.len();
+    let mut relocated_module = flatten_with_trace(
+        sim_module,
+        path,
+        expanded,
+        global_boundaries,
+        unpacked_element_widths,
+        global_arena,
+        bindings,
+        trace_opts,
+        trace.as_deref_mut(),
+    )?;
+    remap_for_fold_runtime_event_sites(global_arena, arena_start, runtime_event_site_map)?;
+    for observer in &mut relocated_module.comb_observers {
+        observer.site_id = runtime_event_site_map[&observer.site_id];
+        observer.activation_group = runtime_event_site_map[&observer.activation_group];
+    }
+    for path in &mut relocated_module.comb_blocks {
+        if let celox_slt::LogicPathTarget::Process {
+            unit,
+            after_initials,
+            ..
+        } = &mut path.target
+        {
+            if let Some(ready) = startup_ready.filter(|_| *after_initials)
+                && !startup_statuses.is_empty()
+            {
+                path.sources.insert(VarAtomBase::new(ready, 0, 0));
+            }
+            **unit = relocate_executation_unit_with_errors(
+                unit,
+                &|addr| *addr,
+                runtime_error_codes,
+                runtime_event_site_map,
+                extern_function_map,
+                function_base,
+            );
+            if let Some(ready) = startup_ready.filter(|_| *after_initials)
+                && !startup_statuses.is_empty()
+            {
+                **unit = after_initial_processes(unit, ready);
+                *gated_startup = true;
+            }
+        }
+    }
+    comb_blocks.extend(relocated_module.comb_blocks);
+    comb_observers.extend(relocated_module.comb_observers);
+    Ok(())
+}
+
+/// Relocate the flip-flop units of the instance that evaluate, with or
+/// without applying, under the canonical event of every trigger.
+fn relocate_ff_evaluations(
+    instance: &InstanceRelocation<'_>,
+    eval_apply_ffs: &mut HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    eval_only_ffs: &mut HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+) {
+    let &InstanceRelocation {
+        id,
+        sim_module,
+        bindings,
+        clock_domains,
+        function_base,
+        ref runtime_error_codes,
+        ref runtime_event_site_map,
+        ref extern_function_map,
+        ..
+    } = instance;
+    for (trigger_set, eu) in &sim_module.eval_apply_ff_blocks {
+        let clock_addr = bindings.locate(*id, trigger_set.clock);
+        let canonical_addr = clock_domains
+            .get(&clock_addr)
+            .copied()
+            .unwrap_or(clock_addr);
+
+        eval_apply_ffs.entry(canonical_addr).or_default().push(
+            relocate_executation_unit_with_errors(
+                eu,
+                &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
+                runtime_error_codes,
+                runtime_event_site_map,
+                extern_function_map,
+                function_base,
+            ),
+        );
+
+        for &reset in &trigger_set.resets {
+            let reset_addr = bindings.locate(*id, reset);
+            let canonical_addr = clock_domains
+                .get(&reset_addr)
+                .copied()
+                .unwrap_or(reset_addr);
+            eval_apply_ffs.entry(canonical_addr).or_default().push(
+                relocate_executation_unit_with_errors(
+                    eu,
+                    &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
+                    runtime_error_codes,
+                    runtime_event_site_map,
+                    extern_function_map,
+                    function_base,
+                ),
+            );
+        }
+    }
+
+    for (trigger_set, eu) in &sim_module.eval_only_ff_blocks {
+        let clock_addr = bindings.locate(*id, trigger_set.clock);
+        let canonical_addr = clock_domains
+            .get(&clock_addr)
+            .copied()
+            .unwrap_or(clock_addr);
+        eval_only_ffs.entry(canonical_addr).or_default().push(
+            relocate_executation_unit_with_errors(
+                eu,
+                &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
+                runtime_error_codes,
+                runtime_event_site_map,
+                extern_function_map,
+                function_base,
+            ),
+        );
+
+        for &reset in &trigger_set.resets {
+            let reset_addr = bindings.locate(*id, reset);
+            let canonical_addr = clock_domains
+                .get(&reset_addr)
+                .copied()
+                .unwrap_or(reset_addr);
+            eval_only_ffs.entry(canonical_addr).or_default().push(
+                relocate_executation_unit_with_errors(
+                    eu,
+                    &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
+                    runtime_error_codes,
+                    runtime_event_site_map,
+                    extern_function_map,
+                    function_base,
+                ),
+            );
+        }
+    }
+}
+
+/// Relocate the process kernels of the instance, keyed by the instance and
+/// their index in its module.
+fn relocate_processes(
+    instance: &InstanceRelocation<'_>,
+    rebase: &impl Fn(&[celox_design::CallResume]) -> Vec<celox_design::CallResume>,
+    processes: &mut Vec<((InstanceId, usize), RelocatedProcess)>,
+) {
+    let &InstanceRelocation {
+        id,
+        sim_module,
+        bindings,
+        function_base,
+        ref scope,
+        ref runtime_error_codes,
+        ref runtime_event_site_map,
+        ref extern_function_map,
+        ..
+    } = instance;
+    for (index, process) in sim_module.processes.iter().enumerate() {
+        processes.push((
+            (*id, index),
+            RelocatedProcess {
+                kernel: relocate_executation_unit_with_errors(
+                    &process.kernel,
+                    &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
+                    runtime_error_codes,
+                    runtime_event_site_map,
+                    extern_function_map,
+                    function_base,
+                ),
+                slots: process.slots.map(|var_id| bindings.locate(*id, var_id)),
+                frame: process
+                    .frame
+                    .clone()
+                    .map(|frame| frame.map(|var_id| bindings.locate(*id, var_id))),
+                origin: celox_design::ProcessOrigin {
+                    scope: Some(scope.clone()),
+                    ..process.origin.clone()
+                },
+                call_resumes: rebase(&process.call_resumes),
+                key: (*id, index),
+            },
+        ));
+    }
+}
+
+/// Relocate the flip-flop units of the instance that apply, and their
+/// split commits, under the canonical event of every trigger.
+fn relocate_ff_applications(
+    instance: &InstanceRelocation<'_>,
+    split_commits: &mut SplitCommits,
+    apply_ffs: &mut HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+) {
+    let &InstanceRelocation {
+        id,
+        sim_module,
+        bindings,
+        clock_domains,
+        function_base,
+        ref runtime_error_codes,
+        ref runtime_event_site_map,
+        ref extern_function_map,
+        ..
+    } = instance;
+    for (trigger_set, eu) in &sim_module.apply_ff_blocks {
+        let clock_addr = bindings.locate(*id, trigger_set.clock);
+        let canonical_addr = clock_domains
+            .get(&clock_addr)
+            .copied()
+            .unwrap_or(clock_addr);
+        // The split commit of each apply unit, in the same order.
+        let split = sim_module
+            .split_commit_ff_blocks
+            .get(trigger_set)
+            .map(|split| SplitCommit {
+                active: relocate_executation_unit_with_errors(
+                    &split.active,
+                    &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
+                    runtime_error_codes,
+                    runtime_event_site_map,
+                    extern_function_map,
+                    function_base,
+                ),
+                nba: relocate_executation_unit_with_errors(
+                    &split.nba,
+                    &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
+                    runtime_error_codes,
+                    runtime_event_site_map,
+                    extern_function_map,
+                    function_base,
+                ),
+            });
+        // Pushed like the apply units below: the clock, then each reset.
+        split_commits
+            .entry(canonical_addr)
+            .or_default()
+            .push(split.clone());
+        for &reset in &trigger_set.resets {
+            let reset_addr = bindings.locate(*id, reset);
+            let canonical_addr = clock_domains
+                .get(&reset_addr)
+                .copied()
+                .unwrap_or(reset_addr);
+            split_commits
+                .entry(canonical_addr)
+                .or_default()
+                .push(split.clone());
+        }
+        apply_ffs
+            .entry(canonical_addr)
+            .or_default()
+            .push(relocate_executation_unit_with_errors(
+                eu,
+                &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
+                runtime_error_codes,
+                runtime_event_site_map,
+                extern_function_map,
+                function_base,
+            ));
+
+        for &reset in &trigger_set.resets {
+            let reset_addr = bindings.locate(*id, reset);
+            let canonical_addr = clock_domains
+                .get(&reset_addr)
+                .copied()
+                .unwrap_or(reset_addr);
+            apply_ffs.entry(canonical_addr).or_default().push(
+                relocate_executation_unit_with_errors(
+                    eu,
+                    &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
+                    runtime_error_codes,
+                    runtime_event_site_map,
+                    extern_function_map,
+                    function_base,
+                ),
+            );
+        }
+    }
 }
 
 /// A process kernel placed in one instance.
