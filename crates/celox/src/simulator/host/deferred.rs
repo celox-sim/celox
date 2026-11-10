@@ -2,6 +2,49 @@
 
 use super::*;
 
+/// What the end of a time slot has to do.
+pub(crate) struct SlotEnd {
+    /// Deferred assertions or sampled copies have work when a host
+    /// call's time slot is over.
+    pub(crate) work: bool,
+    /// The design has deferred assertions, whose actions mature at the
+    /// end of each time slot.
+    pub(crate) deferred_assertions: bool,
+    /// Sampled variables and their copies
+    /// (`RuntimeSchema::sample_shadows`).
+    pub(super) sample_shadows: Vec<(SignalRef, SignalRef)>,
+    pub(crate) postponed_output: bool,
+}
+
+impl SlotEnd {
+    pub(super) fn new<B: SimBackend>(
+        backend: &B,
+        schema: &celox_design::RuntimeSchema<crate::ir::AbsoluteAddr>,
+        deferred_assertions: bool,
+    ) -> Self {
+        let sample_shadows: Vec<(SignalRef, SignalRef)> = schema
+            .sample_shadows
+            .iter()
+            .map(|(variable, copy)| {
+                (
+                    backend.resolve_signal(variable),
+                    backend.resolve_signal(copy),
+                )
+            })
+            .collect();
+        let postponed_output = schema.host_request_sites.iter().any(|site| {
+            site.kind == celox_design::HostRequestKind::FileIo
+                && (16..=20).contains(&site.operation)
+        });
+        Self {
+            work: postponed_output || deferred_assertions || !sample_shadows.is_empty(),
+            deferred_assertions,
+            sample_shadows,
+            postponed_output,
+        }
+    }
+}
+
 /// Host identities are deliberately outside core checkpoints. A restored
 /// activation slot must not flush reports left by a different execution.
 #[derive(Clone, Default)]
@@ -264,7 +307,7 @@ impl<B: SimBackend> Simulator<B> {
     /// deferred assertions mature, then the sampled copies are made.
     #[inline]
     pub(super) fn end_host_slot(&mut self) -> Result<(), RuntimeErrorCode> {
-        if !self.host_slot_work {
+        if !self.slot_end.work {
             return Ok(());
         }
         self.finish_host_slot()
@@ -277,7 +320,7 @@ impl<B: SimBackend> Simulator<B> {
     /// them.
     #[inline]
     pub(super) fn begin_host_slot(&mut self) -> Result<(), RuntimeErrorCode> {
-        if !self.host_slot_work || !self.dirty || self.timed {
+        if !self.slot_end.work || !self.dirty || self.timed {
             return Ok(());
         }
         self.settle_host_slot()
@@ -303,7 +346,7 @@ impl<B: SimBackend> Simulator<B> {
     /// sampled copies with the values of their variables, the default
     /// sampled values (IEEE 1800-2023 16.5.1).
     pub(crate) fn initialize_copies(&mut self) {
-        if !self.host_slot_work && self.program.runtime_schema.initial_copies.is_empty() {
+        if !self.slot_end.work && self.program.runtime_schema.initial_copies.is_empty() {
             return;
         }
         for (variable, copy) in self.program.runtime_schema.initial_copies.clone() {
@@ -317,14 +360,14 @@ impl<B: SimBackend> Simulator<B> {
     /// Copy each sampled variable into its copy (IEEE 1800-2023
     /// 16.5.1).
     pub(crate) fn sample_values(&mut self) {
-        for &(variable, copy) in &self.sample_shadows {
+        for &(variable, copy) in &self.slot_end.sample_shadows {
             celox_runtime::copy_signal(&mut self.backend, variable, copy);
         }
     }
 
     #[cfg(all(test, feature = "systemverilog"))]
     pub(crate) fn sampled_copy_count(&self) -> usize {
-        self.sample_shadows.len()
+        self.slot_end.sample_shadows.len()
     }
 
     /// The time slot ends: the actions of deferred assertions that their
@@ -341,7 +384,7 @@ impl<B: SimBackend> Simulator<B> {
     ) -> Result<(), RuntimeErrorCode> {
         // Terminal output draining must not execute actions left in the
         // Observed/Postponed queues after final procedures (9.2.3).
-        if self.frozen || !self.deferred_assertions {
+        if self.frozen || !self.slot_end.deferred_assertions {
             return Ok(());
         }
         self.stash_runtime_events();
@@ -388,7 +431,7 @@ impl<B: SimBackend> Simulator<B> {
     }
 
     pub(crate) fn enter_deferred_process(&mut self, process: usize) {
-        if self.deferred_assertions {
+        if self.slot_end.deferred_assertions {
             self.stash_runtime_events();
             self.pending_host_events
                 .lock()
@@ -398,7 +441,7 @@ impl<B: SimBackend> Simulator<B> {
     }
 
     pub(crate) fn leave_deferred_process(&mut self) {
-        if self.deferred_assertions {
+        if self.slot_end.deferred_assertions {
             self.stash_runtime_events();
             self.pending_host_events
                 .lock()
@@ -409,7 +452,7 @@ impl<B: SimBackend> Simulator<B> {
     }
 
     pub(crate) fn finish_deferred_process(&mut self, process: usize) {
-        if self.deferred_assertions {
+        if self.slot_end.deferred_assertions {
             self.pending_host_events
                 .lock()
                 .unwrap()
@@ -420,7 +463,7 @@ impl<B: SimBackend> Simulator<B> {
     }
 
     pub(crate) fn cancel_deferred_process(&mut self, process: usize) {
-        if self.deferred_assertions {
+        if self.slot_end.deferred_assertions {
             self.pending_host_events
                 .lock()
                 .unwrap()
@@ -429,12 +472,12 @@ impl<B: SimBackend> Simulator<B> {
     }
 
     pub(in crate::simulator) fn replace_deferred_execution(&mut self) {
-        if self.postponed_output {
+        if self.slot_end.postponed_output {
             let mut pending = self.pending_host_events.lock().unwrap();
             pending.strobes.clear();
             pending.monitors = MonitorState::default();
         }
-        if self.deferred_assertions {
+        if self.slot_end.deferred_assertions {
             self.stash_runtime_events();
             self.pending_host_events
                 .lock()

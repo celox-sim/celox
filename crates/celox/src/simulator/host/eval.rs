@@ -2,6 +2,121 @@
 
 use super::*;
 
+/// What native process code asks of its host: its I/O metadata, the arena
+/// it shares with the host, the budgets of a run and the nonblocking
+/// updates it queued.
+pub(crate) struct NativeHost {
+    pub(super) file_io: Option<Arc<native_io::Metadata>>,
+    pub(super) arena: native_arena::Arena,
+    pub(crate) service_calls: u64,
+    pub(crate) return_budget: u64,
+    pub(crate) round_budget: u64,
+    pub(crate) nba_queue: std::collections::VecDeque<celox_runtime::NbaUpdate>,
+    pub(crate) delayed_nbas: std::collections::VecDeque<(u64, celox_runtime::NbaUpdate)>,
+}
+
+impl NativeHost {
+    pub(super) fn new<B: SimBackend>(backend: &B, program: &RuntimeProgram) -> Self {
+        Self {
+            file_io: native_io::Metadata::new(backend, program),
+            arena: Default::default(),
+            service_calls: 0,
+            return_budget: u64::MAX,
+            // Standalone native testbenches also need a finite bound on
+            // Active feedback; timed runs replace this with their budget.
+            round_budget: 1 << 20,
+            nba_queue: Default::default(),
+            delayed_nbas: Default::default(),
+        }
+    }
+}
+
+/// The combinational observers of a design and what they last saw.
+pub(in crate::simulator) struct CombObservers {
+    pub(in crate::simulator) snapshots: Vec<crate::comb_activation::ObserverSnapshot>,
+    /// Storage reused for the next snapshot.
+    pub(super) scratch: Vec<crate::comb_activation::ObserverSnapshot>,
+    pub(super) reads: crate::comb_activation::ObserverReads,
+    pub(in crate::simulator) initial_eval: bool,
+    /// The activation groups of combinational processes with deferred
+    /// assertions, with a site of each: running the process again
+    /// flushes its queue (IEEE 1800-2023 16.4.2).
+    pub(super) deferred_groups: Vec<(u32, usize)>,
+}
+
+impl CombObservers {
+    pub(super) fn new<B: SimBackend>(
+        backend: &B,
+        schema: &celox_design::RuntimeSchema<crate::ir::AbsoluteAddr>,
+    ) -> Self {
+        let reads = crate::comb_activation::ObserverReads::new(backend, &schema.comb_observers);
+        let sites = &schema.runtime_event_sites;
+        let mut deferred_groups: Vec<(u32, usize)> = Vec::new();
+        for observer in &schema.comb_observers {
+            if matches!(
+                sites[observer.site_id as usize].deferred,
+                Some(celox_design::DeferredSite::Action { .. })
+            ) && !deferred_groups
+                .iter()
+                .any(|&(group, _)| group == observer.activation_group)
+            {
+                deferred_groups.push((observer.activation_group, observer.site_id as usize));
+            }
+        }
+        Self {
+            snapshots: Vec::new(),
+            scratch: Vec::new(),
+            reads,
+            initial_eval: true,
+            deferred_groups,
+        }
+    }
+}
+
+/// What a timed simulation's host observes inside its time slots.
+pub(crate) struct SlotObservation<B: SimBackend> {
+    pub(crate) observer: Option<Box<dyn crate::SlotObserver<B>>>,
+    /// The slot observer watches every update of a slot
+    /// ([`crate::SlotObserver::observes_updates`]).
+    pub(crate) observes_updates: bool,
+    /// Per process kernel, whether it has value change points; empty
+    /// when none has.
+    pub(crate) value_change_kernels: Vec<bool>,
+    /// The first process unit that runs with the host context: the first
+    /// generated one, or the first kernel when kernels have points.
+    pub(crate) scoped_from: usize,
+    /// What the observer did at value change points since the last
+    /// update point, encoded as `native_io::VALUE_CHANGE` results are.
+    pub(crate) value_changed: u64,
+    /// The slot observer wrote at the end of the last time slot.
+    pub(crate) writes: bool,
+}
+
+impl<B: SimBackend> SlotObservation<B> {
+    pub(super) fn new(schema: &celox_design::RuntimeSchema<crate::ir::AbsoluteAddr>) -> Self {
+        let mut scoped_from = schema.processes.len();
+        // Empty without points.
+        let mut value_change_kernels = Vec::new();
+        if let Some(scheduler) = &schema.scheduler
+            && !scheduler.value_change_kernels.is_empty()
+        {
+            value_change_kernels = vec![false; schema.processes.len()];
+            for &kernel in &scheduler.value_change_kernels {
+                value_change_kernels[kernel] = true;
+            }
+            scoped_from = 0;
+        }
+        Self {
+            observer: None,
+            observes_updates: false,
+            value_change_kernels,
+            scoped_from,
+            value_changed: 0,
+            writes: false,
+        }
+    }
+}
+
 impl<B: SimBackend> Simulator<B> {
     pub(super) fn check_comb_backend_result(
         &self,
@@ -72,26 +187,28 @@ impl<B: SimBackend> Simulator<B> {
             return (result, events);
         }
 
-        let mut snapshots = std::mem::take(&mut self.comb_observer_scratch);
-        self.comb_observer_reads
+        let mut snapshots = std::mem::take(&mut self.comb_observers.scratch);
+        self.comb_observers
+            .reads
             .snapshot(&self.backend, &mut snapshots);
         let active_sites = crate::comb_activation::active_sites(
             &self.program.runtime_schema.comb_observers,
             self.program.runtime_schema.runtime_event_sites.len(),
-            &self.comb_observer_reads,
+            &self.comb_observers.reads,
             &snapshots,
-            &self.comb_observer_snapshots,
-            self.comb_observer_initial_eval,
+            &self.comb_observers.snapshots,
+            self.comb_observers.initial_eval,
         );
-        if !self.comb_deferred_groups.is_empty() {
+        if !self.comb_observers.deferred_groups.is_empty() {
             self.flush_comb_deferred(&active_sites);
         }
         self.backend.set_comb_capture_event_enabled(&active_sites);
         let eval_result = self.backend.eval_comb();
-        if !self.comb_deferred_groups.is_empty() {
+        if !self.comb_observers.deferred_groups.is_empty() {
             self.flush_comb_rerun_deferred(&active_sites);
         }
-        self.comb_observer_reads
+        self.comb_observers
+            .reads
             .snapshot(&self.backend, &mut snapshots);
         let runtime_events = self.peek_backend_runtime_events_from(runtime_event_start_seq);
         self.backend.set_comb_capture_event_enabled(&vec![
@@ -101,9 +218,9 @@ impl<B: SimBackend> Simulator<B> {
                 .runtime_event_sites
                 .len()
         ]);
-        self.comb_observer_scratch =
-            std::mem::replace(&mut self.comb_observer_snapshots, snapshots);
-        self.comb_observer_initial_eval = false;
+        self.comb_observers.scratch =
+            std::mem::replace(&mut self.comb_observers.snapshots, snapshots);
+        self.comb_observers.initial_eval = false;
         (eval_result, runtime_events)
     }
 
@@ -113,7 +230,7 @@ impl<B: SimBackend> Simulator<B> {
     pub(super) fn flush_comb_deferred(&mut self, active_sites: &[bool]) {
         self.stash_runtime_events();
         let mut pending = self.pending_host_events.lock().unwrap();
-        for &(group, site) in &self.comb_deferred_groups {
+        for &(group, site) in &self.comb_observers.deferred_groups {
             if active_sites[site] {
                 pending.flush(group);
             }
@@ -128,7 +245,7 @@ impl<B: SimBackend> Simulator<B> {
     pub(super) fn flush_comb_rerun_deferred(&mut self, active_sites: &[bool]) {
         let enabled = self.backend.comb_capture_event_enabled();
         let mut pending = self.pending_host_events.lock().unwrap();
-        for &(group, site) in &self.comb_deferred_groups {
+        for &(group, site) in &self.comb_observers.deferred_groups {
             if !active_sites[site] && enabled.get(site).copied().unwrap_or(false) {
                 pending.flush(group);
             }
@@ -138,7 +255,7 @@ impl<B: SimBackend> Simulator<B> {
     pub(in crate::simulator) fn snapshot_all_comb_observers(
         &self,
     ) -> Vec<crate::comb_activation::ObserverSnapshot> {
-        self.comb_observer_reads.take(&self.backend)
+        self.comb_observers.reads.take(&self.backend)
     }
 
     pub(super) fn fatal_comb_capture_error(
@@ -193,7 +310,7 @@ impl<B: SimBackend> Simulator<B> {
     }
 
     pub(crate) fn set_native_region_entry(&mut self, pending: bool) {
-        self.native_arena.header.region_entry = u64::from(pending);
+        self.native.arena.header.region_entry = u64::from(pending);
     }
 
     pub(crate) fn put_native_host_inputs(
@@ -201,67 +318,70 @@ impl<B: SimBackend> Simulator<B> {
         pending: bool,
         writes: Vec<(SignalRef, (num_bigint::BigUint, num_bigint::BigUint))>,
     ) {
-        if let Some(metadata) = &self.native_file_io {
-            native_io::pack_host_inputs(&self.backend, metadata, &mut self.native_arena, writes);
+        if let Some(metadata) = &self.native.file_io {
+            native_io::pack_host_inputs(&self.backend, metadata, &mut self.native.arena, writes);
         }
-        self.native_arena.header.host_entry = u64::from(pending);
+        self.native.arena.header.host_entry = u64::from(pending);
     }
 
     pub(crate) fn has_native_scheduler_services(&self) -> bool {
-        self.native_file_io.is_some()
+        self.native.file_io.is_some()
     }
 
     pub(crate) fn run_process_checked(&mut self, index: usize) -> Result<(), RuntimeErrorCode> {
         let start = self.runtime_event_write_seq();
         // The scheduler is a generated unit (`scheduler::attach`).
         let generated = index >= self.program.runtime_schema.processes.len();
-        let native_observers = self.native_file_io.is_some()
+        let native_observers = self.native.file_io.is_some()
             && generated
             && !self.program.runtime_schema.comb_observers.is_empty();
         if native_observers {
-            self.comb_observer_reads.pack(
-                &self.comb_observer_snapshots,
-                &mut self.native_arena.observers,
+            self.comb_observers.reads.pack(
+                &self.comb_observers.snapshots,
+                &mut self.native.arena.observers,
             );
-            self.native_arena.header.observers = self.native_arena.observers.as_mut_ptr();
-            self.native_arena.header.observer_initial = u64::from(self.comb_observer_initial_eval);
-            self.native_arena.header.observer_evaluating = 0;
+            self.native.arena.header.observers = self.native.arena.observers.as_mut_ptr();
+            self.native.arena.header.observer_initial = u64::from(self.comb_observers.initial_eval);
+            self.native.arena.header.observer_evaluating = 0;
         }
         // A kernel with value change points shows its updates to the
         // observer through the host context, outside compiled runs too.
-        let result = if generated || (index >= self.scoped_from && self.value_change_kernels[index])
+        let result = if generated
+            || (index >= self.observation.scoped_from
+                && self.observation.value_change_kernels[index])
         {
-            if let Some(metadata) = &self.native_file_io {
+            if let Some(metadata) = &self.native.file_io {
                 let prepared = self
-                    .slot_observer
+                    .observation
+                    .observer
                     .as_ref()
                     .and_then(|_| self.backend.prepare_process(index));
                 let (state, state_size) = self.backend.memory_as_ptr();
                 let mut observer = native_io::SlotService {
                     backend: &mut self.backend,
-                    observer: self.slot_observer.as_deref_mut(),
+                    observer: self.observation.observer.as_deref_mut(),
                     watch: &mut self.host_watch,
                     dirty: &mut self.dirty,
-                    changed: &mut self.value_changed,
+                    changed: &mut self.observation.value_changed,
                 };
                 let mut scope = native_io::Scope {
-                    arena: &mut self.native_arena,
+                    arena: &mut self.native.arena,
                     metadata,
                     state,
                     state_size,
                     files: &mut self.file_io,
                     pending: &self.pending_host_events,
-                    read_seq: &self.runtime_event_read_seq,
+                    read_seq: &self.runtime_events.read_seq,
                     error: None,
                     calls: 0,
-                    return_budget: self.native_host_return_budget,
-                    round_budget: self.native_host_round_budget,
-                    nbas: &mut self.native_nba_queue,
-                    delayed: &mut self.native_delayed_nbas,
+                    return_budget: self.native.return_budget,
+                    round_budget: self.native.round_budget,
+                    nbas: &mut self.native.nba_queue,
+                    delayed: &mut self.native.delayed_nbas,
                     pending_scan: 0,
                     comb_before: Vec::new(),
                     observer: None,
-                    updates: self.observes_updates,
+                    updates: self.observation.observes_updates,
                 };
                 let ((result, error), elapsed) = match prepared {
                     Some(call) => {
@@ -270,7 +390,7 @@ impl<B: SimBackend> Simulator<B> {
                     }
                     None => (scope.run(observer.backend, index), None),
                 };
-                self.native_service_calls = self.native_service_calls.saturating_add(scope.calls);
+                self.native.service_calls = self.native.service_calls.saturating_add(scope.calls);
                 observer.backend.complete_process(elapsed);
                 error.map_or(result, Err)
             } else {
@@ -280,10 +400,10 @@ impl<B: SimBackend> Simulator<B> {
             self.backend.run_process(index)
         };
         if native_observers {
-            if self.native_arena.header.observer_evaluating != 0 {
+            if self.native.arena.header.observer_evaluating != 0 {
                 // A finish or fault can leave the generated settle early.
                 // The reference captures its final sensitivity even then.
-                self.comb_observer_snapshots = self.snapshot_all_comb_observers();
+                self.comb_observers.snapshots = self.snapshot_all_comb_observers();
                 self.backend.set_comb_capture_event_enabled(&vec![
                     false;
                     self.program
@@ -292,12 +412,12 @@ impl<B: SimBackend> Simulator<B> {
                         .len()
                 ]);
             } else {
-                self.comb_observer_reads.unpack(
-                    &self.native_arena.observers,
-                    &mut self.comb_observer_snapshots,
+                self.comb_observers.reads.unpack(
+                    &self.native.arena.observers,
+                    &mut self.comb_observers.snapshots,
                 );
             }
-            self.comb_observer_initial_eval = self.native_arena.header.observer_initial != 0;
+            self.comb_observers.initial_eval = self.native.arena.header.observer_initial != 0;
         }
         self.checked_kernel_result(result, start)
     }

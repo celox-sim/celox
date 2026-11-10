@@ -2,6 +2,35 @@
 
 use super::*;
 
+/// The reading side of the runtime-event buffer of a [`Simulator`].
+pub(crate) struct RuntimeEventStream {
+    pub(super) read_seq: Arc<AtomicU64>,
+    pub(super) drain_active: Arc<AtomicBool>,
+    /// Set while the active drain paces the simulation
+    /// ([`RuntimeEventDrain::set_backpressure`]).
+    pub(super) backpressure: Arc<AtomicBool>,
+    /// Whether a runtime-event site records heap handles
+    /// (`sites_record_handles`).
+    pub(super) handles: bool,
+    pub(super) pacing: Arc<DrainPacing>,
+    /// Runtime-event sequence up to which a timed simulation looked for
+    /// `$finish` records.
+    pub(crate) finish_scan_seq: u64,
+}
+
+impl RuntimeEventStream {
+    pub(super) fn new(sites: &[RuntimeEventSite]) -> Self {
+        Self {
+            read_seq: Arc::new(AtomicU64::new(0)),
+            drain_active: Arc::new(AtomicBool::new(false)),
+            backpressure: Arc::new(AtomicBool::new(false)),
+            handles: sites_record_handles(sites),
+            pacing: Arc::default(),
+            finish_scan_seq: 0,
+        }
+    }
+}
+
 impl<B: SimBackend> Simulator<B> {
     /// Drain runtime events, lazily evaluating dirty combinational logic.
     /// Fatal reports encountered during evaluation are returned as
@@ -15,7 +44,7 @@ impl<B: SimBackend> Simulator<B> {
         ctx: RuntimeFormatContext<'_>,
     ) -> Vec<RuntimeEvent> {
         assert!(
-            !self.runtime_event_drain_active.load(Ordering::Acquire),
+            !self.runtime_events.drain_active.load(Ordering::Acquire),
             "cannot use Simulator::drain_runtime_events while a RuntimeEventDrain is active",
         );
         self.settle_for_runtime_event_drain();
@@ -44,7 +73,7 @@ impl<B: SimBackend> Simulator<B> {
         ctx: RuntimeFormatContext<'_>,
     ) -> Vec<RuntimeEvent> {
         assert!(
-            !self.runtime_event_drain_active.load(Ordering::Acquire),
+            !self.runtime_events.drain_active.load(Ordering::Acquire),
             "cannot use Simulator::drain_runtime_events while a RuntimeEventDrain is active",
         );
         if !self.program.runtime_schema.comb_observers.is_empty() && self.dirty {
@@ -60,7 +89,7 @@ impl<B: SimBackend> Simulator<B> {
         ctx: RuntimeFormatContext<'_>,
     ) -> Vec<RuntimeEvent> {
         assert!(
-            !self.runtime_event_drain_active.load(Ordering::Acquire),
+            !self.runtime_events.drain_active.load(Ordering::Acquire),
             "cannot use Simulator::drain_runtime_events while a RuntimeEventDrain is active",
         );
         self.collect_formatted_runtime_events(ctx)
@@ -85,7 +114,8 @@ impl<B: SimBackend> Simulator<B> {
         if pending.events.is_empty()
             && pending.missed == 0
             && pending.deferred.waiting.is_empty()
-            && self.runtime_event_read_seq.load(Ordering::Acquire) == self.runtime_event_write_seq()
+            && self.runtime_events.read_seq.load(Ordering::Acquire)
+                == self.runtime_event_write_seq()
         {
             return Vec::new();
         }
@@ -115,7 +145,7 @@ impl<B: SimBackend> Simulator<B> {
         marker: usize,
     ) -> Vec<(Option<usize>, RuntimeEvent)> {
         assert!(
-            !self.runtime_event_drain_active.load(Ordering::Acquire),
+            !self.runtime_events.drain_active.load(Ordering::Acquire),
             "cannot use Simulator::drain_runtime_events while a RuntimeEventDrain is active",
         );
         if !self.program.runtime_schema.comb_observers.is_empty() && self.dirty {
@@ -126,7 +156,8 @@ impl<B: SimBackend> Simulator<B> {
         if pending.events.is_empty()
             && pending.missed == 0
             && pending.deferred.waiting.is_empty()
-            && self.runtime_event_read_seq.load(Ordering::Acquire) == self.runtime_event_write_seq()
+            && self.runtime_events.read_seq.load(Ordering::Acquire)
+                == self.runtime_event_write_seq()
         {
             return Vec::new();
         }
@@ -219,7 +250,7 @@ impl<B: SimBackend> Simulator<B> {
 
     pub(super) fn collect_backend_raw_runtime_events(&mut self) -> Vec<RawRuntimeEvent> {
         let layout = self.backend.layout();
-        let mut read_seq = self.runtime_event_read_seq.load(Ordering::Acquire);
+        let mut read_seq = self.runtime_events.read_seq.load(Ordering::Acquire);
         if let Some(buffer) = self.backend.runtime_event_buffer() {
             let events = collect_runtime_events(
                 layout,
@@ -229,7 +260,8 @@ impl<B: SimBackend> Simulator<B> {
                 |offset| buffer.read_u64(offset),
                 |offset| buffer.load_atomic_u64(offset, std::sync::atomic::Ordering::Acquire),
             );
-            self.runtime_event_read_seq
+            self.runtime_events
+                .read_seq
                 .store(read_seq, Ordering::Release);
             events
         } else {
@@ -245,7 +277,8 @@ impl<B: SimBackend> Simulator<B> {
                 read_u64,
                 read_u64,
             );
-            self.runtime_event_read_seq
+            self.runtime_events
+                .read_seq
                 .store(read_seq, Ordering::Release);
             events
         }
@@ -257,11 +290,11 @@ impl<B: SimBackend> Simulator<B> {
             return false;
         }
         let write_seq = self.runtime_event_write_seq();
-        if write_seq == self.finish_scan_seq {
+        if write_seq == self.runtime_events.finish_scan_seq {
             return false;
         }
-        let events = self.peek_backend_runtime_events_from(self.finish_scan_seq);
-        self.finish_scan_seq = write_seq;
+        let events = self.peek_backend_runtime_events_from(self.runtime_events.finish_scan_seq);
+        self.runtime_events.finish_scan_seq = write_seq;
         let sites = &self.program.runtime_schema.runtime_event_sites;
         events.iter().any(|event| {
             matches!(
@@ -277,7 +310,7 @@ impl<B: SimBackend> Simulator<B> {
     /// Start looking for `$finish` records at the current sequence.
     pub(crate) fn skip_runtime_finish(&mut self) {
         if self.finish_sites {
-            self.finish_scan_seq = self.runtime_event_write_seq();
+            self.runtime_events.finish_scan_seq = self.runtime_event_write_seq();
         }
     }
 
@@ -323,12 +356,13 @@ impl<B: SimBackend> Simulator<B> {
 
     /// Whether a [`RuntimeEventDrain`] is active.
     pub(crate) fn runtime_event_drain_active(&self) -> bool {
-        self.runtime_event_drain_active.load(Ordering::Acquire)
+        self.runtime_events.drain_active.load(Ordering::Acquire)
     }
 
     pub fn runtime_event_drain(&mut self) -> Option<RuntimeEventDrain> {
         let buffer = self.backend.runtime_event_buffer()?;
-        self.runtime_event_drain_active
+        self.runtime_events
+            .drain_active
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .ok()?;
         Some(RuntimeEventDrain {
@@ -337,12 +371,12 @@ impl<B: SimBackend> Simulator<B> {
             layout: self.backend.layout().clone(),
             sites: self.program.runtime_schema.runtime_event_sites.clone(),
             pending_host_events: Arc::clone(&self.pending_host_events),
-            read_seq: self.runtime_event_read_seq.load(Ordering::Acquire),
-            shared_read_seq: Arc::clone(&self.runtime_event_read_seq),
-            active: Arc::clone(&self.runtime_event_drain_active),
-            backpressure: Arc::clone(&self.runtime_event_backpressure),
-            handles: self.runtime_event_handles,
-            pacing: Arc::clone(&self.runtime_event_pacing),
+            read_seq: self.runtime_events.read_seq.load(Ordering::Acquire),
+            shared_read_seq: Arc::clone(&self.runtime_events.read_seq),
+            active: Arc::clone(&self.runtime_events.drain_active),
+            backpressure: Arc::clone(&self.runtime_events.backpressure),
+            handles: self.runtime_events.handles,
+            pacing: Arc::clone(&self.runtime_events.pacing),
         })
     }
 
@@ -351,18 +385,18 @@ impl<B: SimBackend> Simulator<B> {
     /// ring buffer and those the host moved into its bounded queue, so
     /// that the step keeps every record up to the buffer's capacity.
     pub(crate) fn await_runtime_event_room(&mut self) {
-        let pacing = Arc::clone(&self.runtime_event_pacing);
+        let pacing = Arc::clone(&self.runtime_events.pacing);
         let mut registered = false;
-        while self.runtime_event_backpressure.load(Ordering::Acquire)
-            && self.runtime_event_drain_active.load(Ordering::Acquire)
+        while self.runtime_events.backpressure.load(Ordering::Acquire)
+            && self.runtime_events.drain_active.load(Ordering::Acquire)
         {
             // The drain takes records with handles from the host queue
             // once this thread resolved them there.
-            if self.runtime_event_handles {
+            if self.runtime_events.handles {
                 self.stash_runtime_events();
             }
             let queued = self.pending_host_events.lock().unwrap().events.len();
-            let read = self.runtime_event_read_seq.load(Ordering::Acquire);
+            let read = self.runtime_events.read_seq.load(Ordering::Acquire);
             if queued == 0 && self.runtime_event_write_seq() <= read {
                 break;
             }
@@ -379,7 +413,7 @@ impl<B: SimBackend> Simulator<B> {
     }
 
     pub(in crate::simulator) fn settle_dirty_for_runtime_event_drain(&mut self) {
-        if self.runtime_event_drain_active.load(Ordering::Acquire) {
+        if self.runtime_events.drain_active.load(Ordering::Acquire) {
             self.eval_comb_for_runtime_event_drain().unwrap();
             // A fatal action is drained as a fatal report.
             let _ = self.end_untimed_slot();

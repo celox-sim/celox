@@ -184,7 +184,7 @@ fn cached_coincident_edges_match_fresh_plans_after_level_and_gate_changes(four_s
                 sim.set_four_state(clock, BigUint::from(0u8), BigUint::from(1u8));
             }
             if !reuse {
-                sim.coincident_edges = Default::default();
+                sim.derived.coincident_edges = Default::default();
             }
             let mut moves: Vec<_> = ["aclk", "bclk", "cclk"]
                 .into_iter()

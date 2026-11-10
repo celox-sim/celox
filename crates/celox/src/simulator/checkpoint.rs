@@ -164,8 +164,8 @@ impl<B: SimBackend> Simulator<B> {
     pub fn checkpoint(&self) -> Result<Checkpoint, CheckpointError> {
         Ok(Checkpoint {
             image: StateImage::capture(&self.backend, self.state_fingerprint()),
-            comb_observer_snapshots: self.comb_observer_snapshots.clone(),
-            comb_observer_initial_eval: self.comb_observer_initial_eval,
+            comb_observer_snapshots: self.comb_observers.snapshots.clone(),
+            comb_observer_initial_eval: self.comb_observers.initial_eval,
             frozen: self.frozen,
             strobes: self.strobe_calls(),
             monitors: self.monitor_state(),
@@ -196,9 +196,10 @@ impl<B: SimBackend> Simulator<B> {
         self.replace_deferred_execution();
         self.restore_strobe_calls(&checkpoint.strobes);
         self.restore_monitor_state(&checkpoint.monitors);
-        self.comb_observer_snapshots
+        self.comb_observers
+            .snapshots
             .clone_from(&checkpoint.comb_observer_snapshots);
-        self.comb_observer_initial_eval = checkpoint.comb_observer_initial_eval;
+        self.comb_observers.initial_eval = checkpoint.comb_observer_initial_eval;
         if let Some(writer) = &mut self.vcd_writer {
             writer.rescan();
         }
@@ -297,7 +298,7 @@ impl PersistedCheckpoint {
             || !simulator.valid_strobe_calls(&self.strobes)
             || self.fingerprint != simulator.state_fingerprint()
             || self.bytes.len() != state_range(&simulator.backend).len()
-            || self.observers.len() != simulator.comb_observer_snapshots.len()
+            || self.observers.len() != simulator.comb_observers.snapshots.len()
         {
             return Err(CheckpointError::DesignMismatch);
         }

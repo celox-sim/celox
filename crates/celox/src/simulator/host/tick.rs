@@ -2,6 +2,48 @@
 
 use super::*;
 
+/// Accumulated timings of ticks, reported every `tick_timing_every` ticks.
+#[derive(Default)]
+pub(super) struct TickTiming {
+    pub(super) ticks: u64,
+    pub(super) eval_apply_ns: u64,
+    pub(super) eval_comb_ns: u64,
+}
+
+/// The derived clock domains of a design and what running them needs.
+pub(super) struct DerivedClocks<B: SimBackend> {
+    /// Per event ID, the derived clock domains a tick can trigger.
+    /// Empty for a design without derived clocks.
+    pub(super) ticks: celox_runtime::DerivedTickPlans<B::Event>,
+    /// Boxed, so that taking it out for a tick moves one pointer.
+    pub(super) scratch: Option<Box<celox_runtime::DerivedTickScratch>>,
+    pub(super) coincident_edges: celox_runtime::CoincidentEdgeCache<B::Event>,
+    /// Per event ID, the generated units that run an edge of the event
+    /// with its derived domains. Empty without them.
+    pub(super) units: Arc<[Option<DerivedEdgeUnit>]>,
+    /// The flag a derived-edge unit reads to settle combinational logic
+    /// before the domains evaluate.
+    pub(super) settle: Option<SignalRef>,
+}
+
+impl<B: SimBackend> DerivedClocks<B> {
+    pub(super) fn new(
+        backend: &B,
+        schedule: &celox_design::schedule::ScheduleModel<crate::AbsoluteAddr>,
+        schema: &celox_design::RuntimeSchema<crate::ir::AbsoluteAddr>,
+    ) -> Self {
+        let (ticks, scratch) = celox_runtime::build_derived_tick_plans(backend, schedule);
+        let (units, settle) = derived_edge_units(backend, schema, &ticks);
+        Self {
+            ticks,
+            scratch: Some(Box::new(scratch)),
+            coincident_edges: Default::default(),
+            units,
+            settle,
+        }
+    }
+}
+
 /// The generated units of one event's edges with its derived domains.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct DerivedEdgeUnit {
@@ -50,18 +92,18 @@ impl<B: SimBackend> Simulator<B> {
         if every == 0 {
             return;
         }
-        self.tick_timing_ticks = self.tick_timing_ticks.saturating_add(1);
-        self.tick_timing_eval_apply_ns =
-            self.tick_timing_eval_apply_ns.saturating_add(eval_apply_ns);
-        self.tick_timing_eval_comb_ns = self.tick_timing_eval_comb_ns.saturating_add(eval_comb_ns);
-        if self.tick_timing_ticks.is_multiple_of(every) {
+        self.tick_timing.ticks = self.tick_timing.ticks.saturating_add(1);
+        self.tick_timing.eval_apply_ns =
+            self.tick_timing.eval_apply_ns.saturating_add(eval_apply_ns);
+        self.tick_timing.eval_comb_ns = self.tick_timing.eval_comb_ns.saturating_add(eval_comb_ns);
+        if self.tick_timing.ticks.is_multiple_of(every) {
             tracing::debug!(
                 "[tick-timing] ticks={} eval_apply_ms={:.3} eval_comb_ms={:.3} avg_apply_us={:.3} avg_comb_us={:.3}",
-                self.tick_timing_ticks,
-                self.tick_timing_eval_apply_ns as f64 / 1_000_000.0,
-                self.tick_timing_eval_comb_ns as f64 / 1_000_000.0,
-                self.tick_timing_eval_apply_ns as f64 / self.tick_timing_ticks as f64 / 1_000.0,
-                self.tick_timing_eval_comb_ns as f64 / self.tick_timing_ticks as f64 / 1_000.0,
+                self.tick_timing.ticks,
+                self.tick_timing.eval_apply_ns as f64 / 1_000_000.0,
+                self.tick_timing.eval_comb_ns as f64 / 1_000_000.0,
+                self.tick_timing.eval_apply_ns as f64 / self.tick_timing.ticks as f64 / 1_000.0,
+                self.tick_timing.eval_comb_ns as f64 / self.tick_timing.ticks as f64 / 1_000.0,
             );
         }
     }
@@ -95,7 +137,7 @@ impl<B: SimBackend> Simulator<B> {
             self.active_edge(event)?;
             return self.inactive_edge(event);
         }
-        if let Some(Some(_)) = self.derived_ticks.get(event.id()) {
+        if let Some(Some(_)) = self.derived.ticks.get(event.id()) {
             return self.tick_derived_quiet(event);
         }
         // Everything is read before the domain runs: right after its
@@ -184,14 +226,14 @@ impl<B: SimBackend> Simulator<B> {
         &mut self,
         event: B::Event,
     ) -> Result<(), RuntimeErrorCode> {
-        if let Some(Some(_)) = self.derived_ticks.get(event.id()) {
+        if let Some(Some(_)) = self.derived.ticks.get(event.id()) {
             return self.tick_derived(event);
         }
         let timing_enabled = self.diagnostics.tick_timing_every.is_some();
         let mut eval_comb_ns = 0u64;
         let mut eval_apply_ns = 0u64;
         if self.dirty {
-            if BEGIN && self.host_slot_work && !self.timed {
+            if BEGIN && self.slot_end.work && !self.timed {
                 self.settle_host_slot()?;
                 self.eval_apply_ff_at_checked(event)?;
             } else if timing_enabled {
@@ -247,7 +289,7 @@ impl<B: SimBackend> Simulator<B> {
             return Ok(());
         }
         let info = self.event_edges[event.id()];
-        if !matches!(self.derived_ticks.get(event.id()), Some(Some(_))) {
+        if !matches!(self.derived.ticks.get(event.id()), Some(Some(_))) {
             if !info.can_fire(edge) && self.host_watch.is_empty() {
                 // An inactive edge runs nothing, whatever the level was:
                 // store the level without reading it first. A load of
@@ -290,7 +332,7 @@ impl<B: SimBackend> Simulator<B> {
             return Ok(());
         }
         self.begin_host_slot()?;
-        if let Some(Some(unit)) = self.derived_units.get(event.id()).copied()
+        if let Some(Some(unit)) = self.derived.units.get(event.id()).copied()
             && !self.finish_sites
         {
             self.backend.request_derived_edge_units();
@@ -298,16 +340,16 @@ impl<B: SimBackend> Simulator<B> {
                 return self.edge_unit(event, info, edge, unit);
             }
         }
-        let plans = std::sync::Arc::clone(&self.derived_ticks);
+        let plans = std::sync::Arc::clone(&self.derived.ticks);
         let plan = plans.get(event.id()).and_then(Option::as_ref);
-        let mut scratch = self.derived_scratch.take().unwrap_or_default();
+        let mut scratch = self.derived.scratch.take().unwrap_or_default();
         let mut watch = std::mem::take(&mut self.host_watch);
         let dirty = self.dirty;
         let write = watched_write(&mut watch);
         let result =
             celox_runtime::run_edge(self, plan, info, &mut scratch, event, edge, dirty, write);
         self.host_watch = watch;
-        self.derived_scratch = Some(scratch);
+        self.derived.scratch = Some(scratch);
         self.note_edge(result)
     }
 
@@ -332,7 +374,7 @@ impl<B: SimBackend> Simulator<B> {
         };
         let fires = info.fires(old, edge);
         let comb_read = self.clock_move_needs_settle(event, info.comb_read)?;
-        if let Some(flag) = self.derived_settle {
+        if let Some(flag) = self.derived.settle {
             self.backend.set(flag, u8::from(self.dirty || comb_read));
         }
         let index = match edge {
@@ -420,22 +462,22 @@ impl<B: SimBackend> Simulator<B> {
             return Ok(());
         }
         self.begin_host_slot()?;
-        let plans = std::sync::Arc::clone(&self.derived_ticks);
+        let plans = std::sync::Arc::clone(&self.derived.ticks);
         let edges = std::sync::Arc::clone(&self.event_edges);
-        let mut scratch = self.derived_scratch.take().unwrap_or_default();
+        let mut scratch = self.derived.scratch.take().unwrap_or_default();
         let mut watch = std::mem::take(&mut self.host_watch);
         let dirty = self.dirty;
         let write = watched_write(&mut watch);
         let result = if moves.len() < 2 {
             celox_runtime::run_edges(self, &plans, &edges, &mut scratch, moves, dirty, write)
         } else {
-            let mut cache = std::mem::take(&mut self.coincident_edges);
+            let mut cache = std::mem::take(&mut self.derived.coincident_edges);
             let result = cache.run(self, &plans, &edges, &mut scratch, moves, dirty, write);
-            self.coincident_edges = cache;
+            self.derived.coincident_edges = cache;
             result
         };
         self.host_watch = watch;
-        self.derived_scratch = Some(scratch);
+        self.derived.scratch = Some(scratch);
         self.note_edge(result)
     }
 
@@ -449,21 +491,21 @@ impl<B: SimBackend> Simulator<B> {
     /// trigger, for hosts that drive the backend without this facade.
     /// Empty when the design has no derived clocks.
     pub fn derived_tick_plans(&self) -> celox_runtime::DerivedTickPlans<B::Event> {
-        std::sync::Arc::clone(&self.derived_ticks)
+        std::sync::Arc::clone(&self.derived.ticks)
     }
 
     /// The domain run of an event whose edges can trigger derived
     /// domains, kept out of line so that the plain run stays small.
     #[inline(never)]
     pub(super) fn tick_derived(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
-        let plans = std::sync::Arc::clone(&self.derived_ticks);
+        let plans = std::sync::Arc::clone(&self.derived.ticks);
         let Some(Some(plan)) = plans.get(event.id()) else {
             unreachable!("tick_derived needs a plan");
         };
-        let mut scratch = self.derived_scratch.take().unwrap_or_default();
+        let mut scratch = self.derived.scratch.take().unwrap_or_default();
         let dirty = self.dirty;
         let result = plan.tick(self, &mut scratch, dirty);
-        self.derived_scratch = Some(scratch);
+        self.derived.scratch = Some(scratch);
         if result.is_ok() {
             self.dirty = false;
         }
@@ -492,7 +534,7 @@ impl<B: SimBackend> Simulator<B> {
                 apply: None,
             }))
             .collect();
-        let plans = std::sync::Arc::clone(&self.derived_ticks);
+        let plans = std::sync::Arc::clone(&self.derived.ticks);
         let plan = celox_runtime::DerivedTickPlan::merge(
             sources,
             domains
@@ -501,10 +543,10 @@ impl<B: SimBackend> Simulator<B> {
                 .chain(unsplit)
                 .filter_map(|event| plans.get(event.id())?.as_ref()),
         );
-        let mut scratch = self.derived_scratch.take().unwrap_or_default();
+        let mut scratch = self.derived.scratch.take().unwrap_or_default();
         let dirty = self.dirty;
         let result = plan.tick(self, &mut scratch, dirty);
-        self.derived_scratch = Some(scratch);
+        self.derived.scratch = Some(scratch);
         if result.is_ok() {
             self.dirty = false;
         }
@@ -540,7 +582,7 @@ impl<B: SimBackend> Simulator<B> {
                 .all(|event| !self.event_edges[event.id()].inactive_runs);
         let derived = events
             .iter()
-            .any(|event| matches!(self.derived_ticks.get(event.id()), Some(Some(_))));
+            .any(|event| matches!(self.derived.ticks.get(event.id()), Some(Some(_))));
         if !only_active_edges || derived {
             let edges = std::sync::Arc::clone(&self.event_edges);
             let moves = |edge: fn(celox_runtime::EventEdge) -> celox_runtime::Edge| {
@@ -632,13 +674,13 @@ impl<B: SimBackend> Simulator<B> {
                 _ => unsplit.push(event),
             }
         }
-        if !self.derived_ticks.is_empty()
+        if !self.derived.ticks.is_empty()
             && domains.len() + unsplit.len() > 1
             && domains
                 .iter()
                 .map(|(event, _, _)| event)
                 .chain(&unsplit)
-                .any(|event| matches!(self.derived_ticks.get(event.id()), Some(Some(_))))
+                .any(|event| matches!(self.derived.ticks.get(event.id()), Some(Some(_))))
         {
             return self.tick_events_derived(&domains, &unsplit);
         }
@@ -688,8 +730,8 @@ impl<B: SimBackend> Simulator<B> {
     /// preceding comb phase and this FF phase can share one compiled function.
     pub(crate) fn tick_deferred_comb(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
         if !self.program.runtime_schema.comb_observers.is_empty()
-            || matches!(self.derived_ticks.get(event.id()), Some(Some(_)))
-            || self.host_slot_work
+            || matches!(self.derived.ticks.get(event.id()), Some(Some(_)))
+            || self.slot_end.work
         {
             // Derived domains need the settled state to see their edges,
             // and each tick of a design with slot work is a host call.
@@ -731,8 +773,8 @@ impl<B: SimBackend> Simulator<B> {
         }
         if !self.program.runtime_schema.comb_observers.is_empty()
             || !self.dirty
-            || matches!(self.derived_ticks.get(event.id()), Some(Some(_)))
-            || self.host_slot_work
+            || matches!(self.derived.ticks.get(event.id()), Some(Some(_)))
+            || self.slot_end.work
         {
             return (1, self.tick_deferred_comb(event));
         }

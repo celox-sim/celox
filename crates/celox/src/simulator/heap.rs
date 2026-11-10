@@ -7,11 +7,24 @@ use celox_heap::{HANDLE_BYTES, Handle, HandleKind, Root};
 use super::host::Simulator;
 use crate::backend::SimBackend;
 
+/// The heap handles of the design state and of running processes.
+#[derive(Default)]
+pub(crate) struct HeapRoots {
+    /// Byte offsets of every handle slot in state memory.
+    pub(super) handle_slots: std::sync::OnceLock<Arc<[(usize, celox_heap::HandleKind)]>>,
+    /// Set while handles live outside state memory, where no collection
+    /// may run: between the polls of concurrent testbench processes.
+    pub(crate) safepoints_blocked: bool,
+    pub(crate) testbench_hardware_ranges: std::sync::OnceLock<Vec<std::ops::Range<usize>>>,
+    pub(crate) process_roots: Vec<celox_heap::Root>,
+}
+
 impl<B: SimBackend> Simulator<B> {
     /// Byte offsets of every handle slot in the stable and working regions,
     /// with what its handles refer to, sorted by offset.
     pub(crate) fn handle_slots(&self) -> Arc<[(usize, HandleKind)]> {
-        self.handle_slots
+        self.heap
+            .handle_slots
             .get_or_init(|| {
                 let layout = self.backend.layout();
                 let mut slots = Vec::new();
@@ -132,7 +145,7 @@ impl<B: SimBackend> Simulator<B> {
     /// events still in the backend's buffer are taken first, which reads
     /// their string arguments.
     pub(crate) fn heap_safepoint(&mut self) {
-        if self.heap_safepoints_blocked || !self.backend.heap().should_collect() {
+        if self.heap.safepoints_blocked || !self.backend.heap().should_collect() {
             return;
         }
         self.stash_runtime_events();
@@ -150,7 +163,7 @@ impl<B: SimBackend> Simulator<B> {
         self.backend.heap_mut().collect(
             roots
                 .into_iter()
-                .chain(self.process_heap_roots.iter().copied())
+                .chain(self.heap.process_roots.iter().copied())
                 .chain(extra_roots),
         );
     }

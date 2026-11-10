@@ -90,7 +90,7 @@ impl<B: SimBackend> Simulator<B> {
         // Without a scheduler, nothing else settles the write for a
         // drain on another thread; a timed simulation's next step does,
         // and handles a fatal assertion there.
-        if !self.timed && self.runtime_event_drain_active.load(Ordering::Acquire) {
+        if !self.timed && self.runtime_events.drain_active.load(Ordering::Acquire) {
             self.eval_comb_for_runtime_event_drain()?;
             self.end_untimed_slot()?;
         }

@@ -39,7 +39,7 @@ impl<B: SimBackend> Simulation<B> {
     #[doc(hidden)]
     pub fn scheduler_stats(&self) -> crate::SchedulerStats {
         crate::SchedulerStats {
-            native_service_calls: self.simulator.native_service_calls,
+            native_service_calls: self.simulator.native.service_calls,
             checked_steps: self.checked_steps,
             unchecked: self.unchecked,
             ..self.state.scheduler_stats().clone()
@@ -268,7 +268,7 @@ fn live_heap<B: SimBackend>(sim: &Simulator<B>) -> celox_heap::Heap {
             .zip(roots)
             .filter(|((offset, _), _)| *offset < sim.backend.layout().total_size)
             .map(|(_, root)| root)
-            .chain(sim.process_heap_roots.iter().copied()),
+            .chain(sim.heap.process_roots.iter().copied()),
     );
     heap
 }
