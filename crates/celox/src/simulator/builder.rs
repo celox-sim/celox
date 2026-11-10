@@ -7322,6 +7322,149 @@ endmodule"#;
         }
     }
 
+    /// An intra-assignment delay on a nonblocking assignment evaluates the
+    /// right-hand side at the edge and publishes the update at the due time
+    /// (IEEE 1800-2023 9.4.5, 10.4.2). The flip-flop still fuses into its
+    /// clock domain instead of running as a process kernel per edge.
+    #[cfg(all(
+        feature = "systemverilog",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn delayed_nonblocking_ff_is_fused_and_matches_reference() {
+        let source = r#"`timescale 1ns/1ns
+module Top(output logic [7:0] q, output logic [7:0] seen);
+    bit clk = 0;
+    bit rst_n = 0;
+    logic [7:0] d = 8'h11;
+    always #5 clk = ~clk;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) q <= 8'h00;
+        else q <= #1 d;
+    end
+    always @(posedge clk) seen <= q;
+    initial begin
+        #12 rst_n = 1;
+        #10 d = 8'h22;
+        #10 d = 8'h33;
+        #40 $finish;
+    end
+endmodule"#;
+        for four_state in [false, true] {
+            let builder = || {
+                crate::Simulation::from_sv_sources(
+                    vec![(source, std::path::Path::new("delayed-ff.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+            };
+            let (program, _, _, _, _) = builder()
+                .emit_triggers()
+                .into_laid_out_program(crate::MemoryLayoutMode::Packed, false, false)
+                .unwrap();
+            assert!(
+                !program.sir.eval_apply_ffs.is_empty(),
+                "a delayed nonblocking flip-flop must fuse into its clock domain"
+            );
+            let mut simulation = builder()
+                .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+                .build_native()
+                .unwrap();
+            // The edge at t=15 captures d=8'h11; the update lands at t=16,
+            // so at t=15 the old value is still visible.
+            simulation.run_until(15).unwrap();
+            assert_eq!(simulation.get(simulation.signal("q")), 0u8.into());
+            simulation.run_until(16).unwrap();
+            assert_eq!(simulation.get(simulation.signal("q")), 0x11u8.into());
+            simulation.run_until(26).unwrap();
+            assert_eq!(simulation.get(simulation.signal("q")), 0x22u8.into());
+            simulation.run_until(72).unwrap();
+            assert!(simulation.is_finished());
+            let stats = simulation.scheduler_stats();
+            assert!(
+                stats.compiled_slots > 0 && stats.checked_steps > 0,
+                "{stats:?}"
+            );
+        }
+    }
+
+    /// A flip-flop's stage holds one delayed value per run. A run that
+    /// assigns a variable twice schedules two updates, each an event of its
+    /// own (IEEE 1800-2023 10.4.2), and a part-select updates its bits
+    /// alone: such an edge process, `always_ff` included, keeps the queue.
+    /// Assignments in alternative branches stay in the flip-flop.
+    #[cfg(all(
+        feature = "systemverilog",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn delayed_nonblocking_a_stage_cannot_hold_keeps_the_queue() {
+        for keyword in ["always", "always_ff"] {
+            let source = |body: &str| {
+                format!(
+                    r#"`timescale 1ns/1ns
+module Top(input bit sel, output int pulses);
+    bit clk;
+    bit q;
+    bit [7:0] w = 8'ha0;
+    always #5 clk = ~clk;
+    {keyword} @(posedge clk) begin {body} end
+    always @(posedge q) pulses++;
+endmodule"#
+                )
+            };
+            fn builder(source: &str) -> crate::SimulatorBuilder<'_, crate::Simulation> {
+                crate::Simulation::from_sv_sources(
+                    vec![(source, std::path::Path::new("delayed-queue.sv"))],
+                    "Top",
+                )
+            }
+            let clock_domains = |source: &str| {
+                let (program, _, _, _, _) = builder(source)
+                    .emit_triggers()
+                    .into_laid_out_program(crate::MemoryLayoutMode::Packed, false, false)
+                    .unwrap_or_else(|error| panic!("{keyword}: {error}"));
+                program.sir.eval_apply_ffs.len()
+            };
+            let twice = source("q <= #1 1'b1; q <= #1 1'b0;");
+            let looped = source("for (int i = 0; i < 2; i++) q <= #1 ~i[0];");
+            let part = source("w[3:0] <= #1 4'hf;");
+            let alternatives = source("if (sel) q <= #1 1'b1; else q <= #1 1'b0;");
+            let fused = clock_domains(&alternatives);
+            for queued in [&twice, &looped, &part] {
+                assert_eq!(clock_domains(queued) + 1, fused, "{keyword}: {queued}");
+            }
+            for mode in [
+                crate::SchedulerMode::Reference,
+                crate::SchedulerMode::Compiled,
+            ] {
+                let run = |source: &str| {
+                    let mut simulation = builder(source)
+                        .scheduler_mode(mode)
+                        .build_native()
+                        .unwrap_or_else(|error| panic!("{keyword}: {error}"));
+                    simulation.run_until(30).unwrap();
+                    simulation
+                };
+                // The edges at 5, 15 and 25 each raise and lower `q` one
+                // time unit later.
+                for pulsed in [&twice, &looped] {
+                    let mut simulation = run(pulsed);
+                    let pulses = simulation.signal("pulses");
+                    assert_eq!(simulation.get(pulses), 3u32.into(), "{keyword} {mode:?}");
+                    let q = simulation.signal("q");
+                    assert_eq!(simulation.get(q), 0u8.into(), "{keyword} {mode:?}");
+                }
+                let mut simulation = run(&part);
+                let w = simulation.signal("w");
+                assert_eq!(simulation.get(w), 0xafu8.into(), "{keyword} {mode:?}");
+                let mut simulation = run(&alternatives);
+                let pulses = simulation.signal("pulses");
+                assert_eq!(simulation.get(pulses), 0u32.into(), "{keyword} {mode:?}");
+            }
+        }
+    }
+
     /// A partitioned settle has a clock cone of its own: the partitions
     /// the kernels' clock writes dirty and those they publish to. The slot
     /// after a clock toggle runs only the cone; a kernel writing data as

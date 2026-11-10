@@ -1430,6 +1430,7 @@ fn lower_statements(
                     value: staged,
                     position: None,
                     pending,
+                    unit: false,
                 };
                 kernel.nonblocking(index, &site, |builder| {
                     let value = coerce_sir_expression(

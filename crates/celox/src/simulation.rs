@@ -416,6 +416,16 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
             || vcd.started.is_some()
             || vcd.pending
             || !self.handle_slots().is_empty()
+            // A fused flip-flop's delayed updates are collected by the
+            // runtime at each slot boundary, at their capture time, when
+            // no generated queue publishes them instead.
+            || (!self.compiled_nba_queues()
+                && self
+                    .program
+                    .runtime_schema
+                    .nba_sites
+                    .iter()
+                    .any(|site| site.unit))
         {
             return CompiledSlots::One;
         }

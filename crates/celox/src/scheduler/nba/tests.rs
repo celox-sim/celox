@@ -589,3 +589,103 @@ fn hotspot_scheduler_replaces_its_budgeted_stage_with_inlined_kernels() {
         assert_eq!(last.reference_steps, first.reference_steps, "{last:?}");
     }
 }
+
+/// A fused flip-flop whose delayed nonblocking update would be due past
+/// the last timestamp reports the overflow in every executor, as the
+/// queued kernel path does; it does not schedule the update at the last
+/// timestamp instead.
+#[test]
+fn fused_delayed_nba_reports_timestamp_overflow() {
+    let source = r#"`timescale 1ns/1ns
+module Top(output logic [7:0] q);
+    bit clk = 0;
+    always #5 clk = ~clk;
+    always @(posedge clk) q <= #18446744073709551615 8'h11;
+endmodule"#;
+    let builder = || {
+        Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("fused-nba-time-overflow.sv"))],
+            "Top",
+        )
+    };
+    let check = |name: &str, result: Result<(), crate::RuntimeErrorCode>| {
+        let error = result.expect_err(name);
+        assert!(
+            error
+                .to_string()
+                .contains("nonblocking assignment delay overflows simulation time"),
+            "{name}: {error}"
+        );
+    };
+    for mode in [SchedulerMode::Reference, SchedulerMode::Compiled] {
+        let mut native = builder().scheduler_mode(mode).build_native().unwrap();
+        check("native", native.run_until(u64::MAX));
+        let mut cranelift = builder().scheduler_mode(mode).build_cranelift().unwrap();
+        check("cranelift", cranelift.run_until(u64::MAX));
+        let mut interpreter = builder().scheduler_mode(mode).build_interpreter().unwrap();
+        check("interpreter", interpreter.run_until(u64::MAX));
+        let mut tiered = builder().scheduler_mode(mode).build_tiered().unwrap();
+        check("tiered", tiered.run_until(u64::MAX));
+    }
+}
+
+/// An intra-assignment delay on a nonblocking assignment does not suspend
+/// its process (IEEE 1800-2023 9.4.5), so `always_ff` takes it as a plain
+/// `always` does: the right-hand side is read at the edge and the update
+/// lands at its due time.
+#[test]
+fn always_ff_takes_delayed_nonblocking_assignments() {
+    // A whole-variable target fuses into the clock domain; a part-select
+    // keeps the queued path.
+    for (keyword, target) in [
+        ("always", "q"),
+        ("always_ff", "q"),
+        ("always", "q[7:0]"),
+        ("always_ff", "q[7:0]"),
+    ] {
+        let source = format!(
+            r#"`timescale 1ns/1ns
+module Top(output logic [7:0] q);
+    bit clk = 0;
+    logic [7:0] d = 8'h11;
+    always #5 clk = ~clk;
+    {keyword} @(posedge clk) {target} <= #1 d;
+    initial begin
+        #12 d = 8'h22;
+        #20 $finish;
+    end
+endmodule"#
+        );
+        for mode in [SchedulerMode::Reference, SchedulerMode::Compiled] {
+            let mut sim = Simulation::from_sv_sources(
+                vec![(source.as_str(), std::path::Path::new("always-ff-delay.sv"))],
+                "Top",
+            )
+            .scheduler_mode(mode)
+            .build_native()
+            .unwrap_or_else(|error| panic!("{keyword} {target}: {error}"));
+            // The edge at 5 reads 8'h11 and updates at 6; the edge at 15
+            // reads 8'h22 and updates at 16.
+            sim.run_until(5).unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 0u8.into(), "{keyword} {target}");
+            sim.run_until(6).unwrap();
+            assert_eq!(
+                sim.get(sim.signal("q")),
+                0x11u8.into(),
+                "{keyword} {target}"
+            );
+            sim.run_until(15).unwrap();
+            assert_eq!(
+                sim.get(sim.signal("q")),
+                0x11u8.into(),
+                "{keyword} {target}"
+            );
+            sim.run_until(16).unwrap();
+            assert_eq!(
+                sim.get(sim.signal("q")),
+                0x22u8.into(),
+                "{keyword} {target}"
+            );
+        }
+    }
+}

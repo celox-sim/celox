@@ -1006,6 +1006,7 @@ impl Ff<'_, '_> {
             value,
             position: slots,
             pending: None,
+            unit: false,
         });
         let request = self.b.alloc_bit(celox_design::PROCESS_DELAY_WIDTH, false);
         self.b

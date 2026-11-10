@@ -955,7 +955,8 @@ impl Plan {
                     && !process.nbas.is_empty()
                     && process.nbas.iter().all(|site| {
                         let target = storage(site.target);
-                        ordered_available
+                        site.unit
+                            || ordered_available
                             || (site.delay == 0
                                 && (!event_storage.contains_key(&target)
                                     && site.position.is_none()
