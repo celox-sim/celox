@@ -1,0 +1,1 @@
+Review fixes: an always_ff whose only timing controls are intra-assignment delays of nonblocking assignments keeps its fused form like a plain always; the per-slot collection of fused delayed updates reports a due time past the last timestamp instead of saturating.
