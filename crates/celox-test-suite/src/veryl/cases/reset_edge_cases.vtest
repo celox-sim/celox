@@ -180,3 +180,113 @@ assign q = r;
   (tick clk)
   (assert_eq q 0x00))
   ; now captures d=0
+
+(case test_reset_literals_polarity
+  (source "test.veryl" #"
+module Top (
+    ah: output reset_async_high,
+    al: output reset_async_low,
+    sh: output reset_sync_high,
+    sl: output reset_sync_low,
+    ih: output reset_async_high,
+    il: output reset_async_low,
+    jh: output reset_sync_high,
+    jl: output reset_sync_low,
+    abstract_active: output reset,
+    abstract_inactive: output reset,
+) {
+    assign ah = reset_active;
+    assign al = reset_active;
+    assign sh = reset_active;
+    assign sl = reset_active;
+    assign ih = reset_inactive;
+    assign il = reset_inactive;
+    assign jh = reset_inactive;
+    assign jl = reset_inactive;
+    assign abstract_active = reset_active;
+    assign abstract_inactive = reset_inactive;
+}
+"#)
+  (top Top)
+  (eval)
+  (assert_eq ah 1)
+  (assert_eq al 0)
+  (assert_eq sh 1)
+  (assert_eq sl 0)
+  (assert_eq ih 0)
+  (assert_eq il 1)
+  (assert_eq jh 0)
+  (assert_eq jl 1)
+  (assert_eq abstract_active 0)
+  (assert_eq abstract_inactive 1))
+
+(case test_reset_literals_context
+  (source "test.veryl" #"
+module Child (
+    a: input reset_async_low,
+    b: input reset_sync_high,
+    result: output logic<2>,
+) {
+    assign result = {b, a};
+}
+module Top (
+    rst: input reset_async_high,
+    child: output logic<2>,
+    typed_value: output logic,
+    member: output logic,
+    elements: output logic<2>,
+    eq: output logic,
+    ne: output logic,
+) {
+    struct ResetPair { low: reset_sync_low, high: reset_sync_high, }
+    var pair: ResetPair;
+    var resets: reset_sync_low[2];
+    let typed: reset_sync_high = reset_active;
+    assign pair.low = reset_inactive;
+    assign pair.high = reset_active;
+    assign resets[0] = reset_active;
+    assign resets[1] = reset_inactive;
+    assign typed_value = typed;
+    assign member = pair.low & pair.high;
+    assign elements = {resets[1], resets[0]};
+    assign eq = rst == reset_active;
+    assign ne = reset_inactive != rst;
+    inst u: Child (a: reset_active, b: reset_active, result: child);
+}
+"#)
+  (top Top)
+  (modify (set rst 1))
+  (assert_eq child 2)
+  (assert_eq typed_value 1)
+  (assert_eq member 1)
+  (assert_eq elements 2)
+  (assert_eq eq 1)
+  (assert_eq ne 1)
+  (modify (set rst 0))
+  (assert_eq eq 0)
+  (assert_eq ne 0))
+
+(case test_reset_literals_ff
+  (source "test.veryl" #"
+module Top (
+    clk: input clock,
+    rst_hi: input reset_sync_high,
+    rst_lo: input reset_async_low,
+    hi: output logic,
+    lo: output logic,
+) {
+    always_ff (clk) {
+        hi = rst_hi == reset_active;
+        lo = rst_lo != reset_inactive;
+    }
+}
+"#)
+  (top Top)
+  (modify (set rst_hi 1) (set rst_lo 0))
+  (tick clk)
+  (assert_eq hi 1)
+  (assert_eq lo 1)
+  (modify (set rst_hi 0) (set rst_lo 1))
+  (tick clk)
+  (assert_eq hi 0)
+  (assert_eq lo 0))

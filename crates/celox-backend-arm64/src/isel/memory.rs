@@ -114,6 +114,20 @@ fn logical_offset_vreg(ctx: &mut ISelContext, block: &mut MBlock, offset: &SIROf
             result
         }
         SIROffset::Dynamic(reg) => ctx.reg_map.get(*reg),
+        // A run starts at its first element's logical bit offset.
+        SIROffset::ElementRun {
+            index,
+            element_width,
+        } => logical_offset_vreg(
+            ctx,
+            block,
+            &SIROffset::Element {
+                index: *index,
+                element_width: *element_width,
+                bit_offset: 0,
+                dynamic_bit_offset: None,
+            },
+        ),
         SIROffset::Element {
             index,
             element_width,
@@ -183,6 +197,15 @@ fn logical_offset_low_zero_bits(ctx: &ISelContext, offset: &SIROffset) -> u32 {
             bit_offset: value, ..
         } => value.trailing_zeros(),
         SIROffset::Dynamic(reg) => ctx.low_zero_bits.get(reg).copied().unwrap_or(0),
+        SIROffset::ElementRun {
+            index,
+            element_width,
+        } => ctx
+            .low_zero_bits
+            .get(index)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(element_width.trailing_zeros()),
         SIROffset::Element {
             index,
             element_width,
@@ -285,8 +308,10 @@ pub(super) fn memory_offset_vreg(
             });
             result
         }
-        SIROffset::Dynamic(_) => {
-            unreachable!("arbitrary dynamic offsets disqualify an element-strided array")
+        SIROffset::Dynamic(_) | SIROffset::ElementRun { .. } => {
+            unreachable!(
+                "arbitrary dynamic offsets and element runs disqualify an element-strided array"
+            )
         }
     }
 }
@@ -544,8 +569,10 @@ pub(super) fn memory_offset_low_zero_bits(
             let (byte_offset, intra) = ctx.layout.map_static_bit_offset(&abs, *bit_offset);
             (byte_offset * 8 + intra).trailing_zeros()
         }
-        SIROffset::Dynamic(_) => {
-            unreachable!("arbitrary dynamic offsets disqualify an element-strided array")
+        SIROffset::Dynamic(_) | SIROffset::ElementRun { .. } => {
+            unreachable!(
+                "arbitrary dynamic offsets and element runs disqualify an element-strided array"
+            )
         }
     }
 }
@@ -756,7 +783,7 @@ fn emit_single_chunk_sparse_insert(
                 value_mask,
             );
         }
-        SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+        SIROffset::Dynamic(_) | SIROffset::Element { .. } | SIROffset::ElementRun { .. } => {
             let offset = memory_offset_vreg(ctx, block, addr, offset);
             let masked_value = if value_mask == u64::MAX {
                 value
@@ -1322,7 +1349,7 @@ pub(super) fn prepare_sparse_store(
         | SIROffset::PackedElements {
             bit_offset: value, ..
         } => ((value % 64) + width).div_ceil(64),
-        SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+        SIROffset::Dynamic(_) | SIROffset::Element { .. } | SIROffset::ElementRun { .. } => {
             let zero_bits = memory_offset_low_zero_bits(ctx, addr, offset).min(6);
             let alignment = 1usize << zero_bits;
             (width + (64 - alignment)).div_ceil(64)

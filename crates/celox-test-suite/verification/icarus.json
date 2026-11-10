@@ -59,6 +59,7 @@
     "icarus/struct_constructor.json",
     "icarus/synth_dynamic_loop.json",
     "icarus/system_function.json",
+    "icarus/tb_queue.json",
     "icarus/test_unimplemented_paths.json",
     "icarus/veryl_context_regressions.json",
     "icarus/veryl_language.json",

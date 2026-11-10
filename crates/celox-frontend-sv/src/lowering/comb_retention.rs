@@ -94,6 +94,12 @@ fn retained_state(
             bit_offset: offset, ..
         } => Some(*offset),
         SIROffset::Dynamic(register) => constants.get(register).copied(),
+        SIROffset::ElementRun {
+            index,
+            element_width,
+        } => constants
+            .get(index)
+            .and_then(|index| index.checked_mul(*element_width)),
         SIROffset::Element {
             index,
             element_width,
@@ -191,6 +197,66 @@ fn retained_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn element_run_reads_check_the_selected_elements() {
+        for (index_value, expected_retention) in
+            [(Some(1u64), false), (Some(0), true), (None, true)]
+        {
+            let id = SourceVarId(0);
+            let address = RegionedVarAddr {
+                region: celox_design::STABLE_REGION,
+                var_id: id,
+            };
+            let mut builder = SIRBuilder::new();
+            let index = builder.alloc_bit(32, false);
+            let value = builder.alloc_bit(8, false);
+            if let Some(index_value) = index_value {
+                builder.emit(SIRInstruction::Imm(index, SIRValue::new(index_value)));
+            }
+            builder.emit(SIRInstruction::Imm(value, SIRValue::new(0u8)));
+            builder.emit(SIRInstruction::Store(
+                address,
+                SIROffset::Static(8),
+                8,
+                value,
+                Vec::new(),
+                Vec::new(),
+            ));
+            builder.emit(SIRInstruction::Load(
+                value,
+                address,
+                SIROffset::ElementRun {
+                    index,
+                    element_width: 8,
+                },
+                8,
+            ));
+            builder.emit(SIRInstruction::Store(
+                address,
+                SIROffset::Static(0),
+                8,
+                value,
+                Vec::new(),
+                Vec::new(),
+            ));
+            builder.seal_block(SIRTerminator::Return);
+            let (blocks, register_map, _) = builder.drain();
+            let unit = ExecutionUnit {
+                blocks,
+                register_map,
+                entry_block_id: BlockId(0),
+            };
+            assert_eq!(
+                retains_state(
+                    &unit,
+                    &[VarAtomBase::new(id, 0, 15)],
+                    &[(id, 16)].into_iter().collect()
+                ),
+                expected_retention
+            );
+        }
+    }
 
     #[test]
     fn out_of_range_accesses_are_clipped_before_mask_allocation() {

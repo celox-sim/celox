@@ -1,0 +1,108 @@
+{
+  "cases": [
+    {
+      "category": "ControlFlow",
+      "detail": "Veryl native $tb::queue components cannot be emitted by the shared SystemVerilog adapter. Emission panics before either simulator runs; Celox native testbench execution remains enabled.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "emitter_panic",
+        "evidence": [
+          "verification/repros/tb_queue_verilator.json",
+          "verification/repros/tb_queue_icarus.json",
+          "LIMITATIONS.md#veryl-native-queue-components"
+        ],
+        "id": "veryl_native_queue_components",
+        "observed_version": "Veryl 1cd88389745b; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl native $tb::queue components cannot be emitted by the shared SystemVerilog adapter. Emission panics before either simulator runs; Celox native testbench execution remains enabled.",
+        "upstream": [
+          "https://github.com/veryl-lang/veryl/pull/3558"
+        ]
+      },
+      "name": "tb_queue::aggregate_and_selected_returns",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "Veryl native $tb::queue components cannot be emitted by the shared SystemVerilog adapter. Emission panics before either simulator runs; Celox native testbench execution remains enabled.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "emitter_panic",
+        "evidence": [
+          "verification/repros/tb_queue_verilator.json",
+          "verification/repros/tb_queue_icarus.json",
+          "LIMITATIONS.md#veryl-native-queue-components"
+        ],
+        "id": "veryl_native_queue_components",
+        "observed_version": "Veryl 1cd88389745b; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl native $tb::queue components cannot be emitted by the shared SystemVerilog adapter. Emission panics before either simulator runs; Celox native testbench execution remains enabled.",
+        "upstream": [
+          "https://github.com/veryl-lang/veryl/pull/3558"
+        ]
+      },
+      "name": "tb_queue::four_state_values",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "Veryl native $tb::queue components cannot be emitted by the shared SystemVerilog adapter. Emission panics before either simulator runs; Celox native testbench execution remains enabled.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "emitter_panic",
+        "evidence": [
+          "verification/repros/tb_queue_verilator.json",
+          "verification/repros/tb_queue_icarus.json",
+          "LIMITATIONS.md#veryl-native-queue-components"
+        ],
+        "id": "veryl_native_queue_components",
+        "observed_version": "Veryl 1cd88389745b; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl native $tb::queue components cannot be emitted by the shared SystemVerilog adapter. Emission panics before either simulator runs; Celox native testbench execution remains enabled.",
+        "upstream": [
+          "https://github.com/veryl-lang/veryl/pull/3558"
+        ]
+      },
+      "name": "tb_queue::operations",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "Veryl native $tb::queue components cannot be emitted by the shared SystemVerilog adapter. Emission panics before either simulator runs; Celox native testbench execution remains enabled.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "emitter_panic",
+        "evidence": [
+          "verification/repros/tb_queue_verilator.json",
+          "verification/repros/tb_queue_icarus.json",
+          "LIMITATIONS.md#veryl-native-queue-components"
+        ],
+        "id": "veryl_native_queue_components",
+        "observed_version": "Veryl 1cd88389745b; Verilator 5.052 / Icarus 13.0",
+        "phase": "emission",
+        "reason": "Veryl native $tb::queue components cannot be emitted by the shared SystemVerilog adapter. Emission panics before either simulator runs; Celox native testbench execution remains enabled.",
+        "upstream": [
+          "https://github.com/veryl-lang/veryl/pull/3558"
+        ]
+      },
+      "name": "tb_queue::shared_processes",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

@@ -73,6 +73,22 @@ impl<A> TestbenchProgram<A> {
                         visit(expr)?;
                         target(dst, visit)?;
                     }
+                    TestbenchStatement::Queue {
+                        value,
+                        value_target,
+                        ret,
+                        ..
+                    } => {
+                        if let Some(value) = value {
+                            visit(value)?;
+                        }
+                        if let Some(value_target) = value_target {
+                            target(value_target, visit)?;
+                        }
+                        if let Some(ret) = ret {
+                            target(ret, visit)?;
+                        }
+                    }
                     TestbenchStatement::RandomSeed { value, .. } => visit(value)?,
                     TestbenchStatement::RandomGet { ret, .. }
                     | TestbenchStatement::RandomGetSeed { ret, .. } => {
@@ -200,5 +216,75 @@ impl<A: Copy> TestbenchProgram<A> {
             }
         }
         block(&mut self.statements);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn queue_program() -> TestbenchProgram<usize> {
+        let expr = |value| ExprBytecode::new(vec![ExprOpcode::ConstU64(value)]);
+        let target = |offset| TestbenchTarget {
+            signal: SemanticSignal {
+                address: 0,
+                width: 32,
+            },
+            selection: Some(TestbenchSelection {
+                offset: expr(offset),
+                width: 8,
+            }),
+            width: 8,
+        };
+        TestbenchProgram::new(vec![TestbenchStatement::Queue {
+            handle: "queue".into(),
+            op: QueueOp::PushBack,
+            value: Some(expr(1)),
+            value_target: Some(target(2)),
+            value_mask: BigUint::default(),
+            value_width: 8,
+            value_signed: false,
+            width: 8,
+            signed: false,
+            four_state: true,
+            capacity: 8,
+            ret: Some(target(3)),
+        }])
+    }
+
+    #[test]
+    fn queue_values_and_both_target_offsets_are_rewritten() {
+        let mut program = queue_program();
+        program
+            .try_visit_expressions::<()>(|expr| {
+                *expr =
+                    ExprBytecode::new(vec![ExprOpcode::ConstU64(expr.literal_u64().unwrap() + 10)]);
+                Ok(())
+            })
+            .unwrap();
+        let mut rewritten = Vec::new();
+        program
+            .try_visit_expressions::<()>(|expr| {
+                rewritten.push(expr.literal_u64().unwrap());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(rewritten, [11, 12, 13]);
+    }
+
+    #[test]
+    fn queue_target_visit_errors_stop_traversal() {
+        let mut visited = Vec::new();
+        let result = queue_program().try_visit_expressions(|expr| {
+            let value = expr.literal_u64().unwrap();
+            visited.push(value);
+            if value == 2 {
+                Err("target error")
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(result, Err("target error"));
+        assert_eq!(visited, [1, 2]);
     }
 }
