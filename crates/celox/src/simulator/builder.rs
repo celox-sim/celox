@@ -3062,6 +3062,100 @@ mod host {
         }
     }
 
+    /// Drop sampled copies no remaining unit reads. A copy's readers are
+    /// the processes that sampled the value; when the frontend dropped
+    /// those (a two-state monitor that can never fail, say), refreshing
+    /// the copy at every timestamp is pure overhead. Copies a host root
+    /// can observe stay.
+    fn prune_unread_sample_shadows(program: &mut crate::ir::LaidOutProgram) {
+        use crate::HashSet;
+        let schema = &program.runtime().runtime_schema;
+        if schema.sample_shadows.is_empty() {
+            return;
+        }
+        let copies: HashSet<_> = schema
+            .sample_shadows
+            .iter()
+            .map(|&(_, copy)| copy)
+            .collect();
+        let mut reads = HashSet::default();
+        // The frontend lists every sampled copy among the testbench
+        // read roots because the host refresh writes them; that
+        // bookkeeping is not a read. A copy counts only when a unit
+        // or a genuinely host-observable root can read it.
+        reads.extend(
+            schema
+                .testbench_read_roots
+                .iter()
+                .filter(|root| !copies.contains(root))
+                .copied(),
+        );
+        reads.extend(schema.live_signals.iter().copied());
+        reads.extend(
+            schema
+                .comb_observers
+                .iter()
+                .flat_map(|observer| observer.sensitivity.iter().map(|atom| atom.id)),
+        );
+        reads.extend(schema.watches.iter().map(|watch| watch.signal));
+        let sir = &program.sir;
+        let units = sir
+            .eval_comb
+            .iter()
+            .chain(sir.eval_apply_ffs.values().flatten())
+            .chain(sir.eval_comb_apply_ffs.values().flatten())
+            .chain(sir.eval_only_ffs.values().flatten())
+            .chain(sir.apply_ffs.values().flatten())
+            .chain(sir.processes.iter())
+            .chain(sir.functions.iter().map(|function| &function.unit));
+        // A call of a process kernel or a host call reports
+        // `Everything`, but every callee unit is in the scanned set and
+        // host calls address source-visible objects; a sampled copy is
+        // internal state only a scanned unit can read.
+        let mut scan = |unit: &celox_sir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>| {
+            for block in unit.blocks.values() {
+                for instruction in &block.instructions {
+                    use celox_sir::StateAccess;
+                    match instruction.state_reads() {
+                        StateAccess::None | StateAccess::Everything => {}
+                        StateAccess::Access(access) => {
+                            reads.insert(access.addr.absolute_addr());
+                        }
+                        StateAccess::Objects(objects) => {
+                            reads.extend(objects.iter().map(|addr| addr.absolute_addr()));
+                        }
+                    }
+                }
+            }
+        };
+        for unit in units {
+            scan(unit);
+        }
+        if let Some(parallel) = &sir.parallel {
+            for lane in parallel.units() {
+                scan(&lane.unit);
+            }
+        }
+        // A retained copy whose source is itself a sampled copy keeps
+        // that source copy: the host refresh feeds the retained one.
+        loop {
+            let before = reads.len();
+            for &(variable, copy) in &schema.sample_shadows {
+                if reads.contains(&copy) && copies.contains(&variable) {
+                    reads.insert(variable);
+                }
+            }
+            if reads.len() == before {
+                break;
+            }
+        }
+        program
+            .runtime
+            .runtime_schema
+            .sample_shadows
+            .retain(|(_, copy)| reads.contains(copy));
+    }
+
     impl<'a, Target> SimulatorBuilder<'a, Target> {
         /// Compile SIR, finalize its state layout, and return the typed artifact
         /// along with the remaining builder state.
@@ -3110,21 +3204,28 @@ mod host {
             SimulatorError,
         > {
             let Some(path) = self.options.trace.settle_plan_output.clone() else {
-                return self.into_laid_out_program_traced(
+                let mut result = self.into_laid_out_program_traced(
                     layout_mode,
                     trace,
                     defer_derived_edges,
                     wide_commits,
                 );
+                if let Ok((program, ..)) = &mut result {
+                    prune_unread_sample_shadows(program);
+                }
+                return result;
             };
             let mut local = crate::debug::CompilationTrace::default();
             let trace = trace.unwrap_or(&mut local);
-            let result = self.into_laid_out_program_traced(
+            let mut result = self.into_laid_out_program_traced(
                 layout_mode,
                 Some(&mut *trace),
                 defer_derived_edges,
                 wide_commits,
             );
+            if let Ok((program, ..)) = &mut result {
+                prune_unread_sample_shadows(program);
+            }
             write_settle_plan_output(Some(&path), trace);
             result
         }
@@ -4037,6 +4138,7 @@ mod host {
                 if self.options.dead_store_policy != DeadStorePolicy::Off {
                     run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
                 }
+                prune_unread_sample_shadows(&mut laid_out);
                 crate::value_change::lower(&mut laid_out, false);
 
                 #[cfg(any(
@@ -4636,6 +4738,66 @@ mod host {
                 Err(error) => Err(SimulatorError::from(error).with_warnings(warnings)),
             }
         }
+    }
+
+    /// Sampled copies no unit reads are dropped from the runtime
+    /// schema, even though the frontend lists every copy among the
+    /// testbench read roots for the host refresh that writes them.
+    #[cfg(all(test, feature = "systemverilog"))]
+    #[test]
+    fn unread_sample_copies_are_pruned_from_the_runtime_schema() {
+        // The sampled copy of `dat` is read only by the check's monitor
+        // process. Two-state mode drops that vacuous monitor, so the
+        // copy must be pruned even though the frontend lists every
+        // sampled copy among the testbench read roots (the host writes
+        // the copies there; that bookkeeping is not a read). In
+        // four-state mode the monitor stays and keeps the copy.
+        let source = r#"`timescale 1ns/1ns
+module Top;
+ bit clk;
+ logic [7:0] dat;
+ always #1 clk = ~clk;
+ always @(posedge clk) dat <= dat + 8'd1;
+ check: assert property (@(posedge clk) ((^dat) !== 1'bx));
+endmodule"#;
+        let shadows = |four_state| {
+            let (program, ..) = crate::Simulator::from_sv_sources(
+                vec![(source, std::path::Path::new("prune-shadows.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+            .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided, true, false)
+            .unwrap();
+            program.runtime().runtime_schema.sample_shadows.len()
+        };
+        assert_eq!(shadows(false), 0);
+        assert!(shadows(true) > 0);
+    }
+
+    /// The traced build lays out its program itself, so it must prune
+    /// the same unread sampled copies as the laid-out path above.
+    #[cfg(all(test, feature = "systemverilog"))]
+    #[test]
+    fn unread_sample_copies_are_pruned_in_traced_builds() {
+        // A sampled copy no unit reads is pruned; the copy an output
+        // reads stays.
+        let shadows = |body: &str| {
+            let source = format!(
+                "module Top(input logic [7:0] dat, output logic [7:0] q);\n{body}\nendmodule"
+            );
+            crate::Simulator::from_sv_sources(
+                vec![(
+                    source.as_str(),
+                    std::path::Path::new("prune-shadows-traced.sv"),
+                )],
+                "Top",
+            )
+            .build_with_trace()
+            .unwrap()
+            .sampled_copy_count()
+        };
+        assert_eq!(shadows(" always_comb begin $sampled(dat); q = dat; end"), 0);
+        assert!(shadows(" always_comb q = $sampled(dat);") > 0);
     }
 
     /// Lane units that call functions share the call stack, so the lane
