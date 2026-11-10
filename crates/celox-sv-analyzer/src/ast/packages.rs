@@ -642,6 +642,22 @@ fn self_qualified_names_are_plain(
         .packages
         .iter()
         .any(|package| package != name && packages.get(package).is_some());
+    // The classes the package itself declares, by their names, which the
+    // plain name of one is in every scope of the package that declares no
+    // other of the name: a class of another scope of the source may share
+    // the name with a class the package imports.
+    let package = tree.root_unit().ok().map(|unit| unit.tokens);
+    let mut own = HashMap::<String, Option<&celox_sv_syntax::ClassDeclaration>>::default();
+    for class in native.classes.iter().filter(|class| {
+        classes::enclosing_unit(native, class.tokens).map(|unit| unit.tokens) == package
+            && !native.classes.iter().any(|outer| {
+                outer.tokens.start < class.tokens.start && class.tokens.end <= outer.tokens.end
+            })
+    }) {
+        own.entry(item(&class.name))
+            .and_modify(|known| *known = None)
+            .or_insert(Some(class));
+    }
     // Whether `class` declares or inherits a member `wanted`.
     let inherits = |class: &celox_sv_syntax::ClassDeclaration, wanted: &str| {
         let mut seen = HashSet::default();
@@ -659,13 +675,7 @@ fn self_qualified_names_are_plain(
                     // A parameter or type of the class hides a class of its
                     // name.
                     (!members[&item(&class.name)].contains(&base))
-                        .then(|| {
-                            let mut found = native
-                                .classes
-                                .iter()
-                                .filter(|class| item(&class.name) == base);
-                            found.next().filter(|_| found.next().is_none())
-                        })
+                        .then(|| own.get(&base).copied().flatten())
                         .flatten()
                 }
                 _ => None,
