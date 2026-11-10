@@ -1173,6 +1173,7 @@ mod tests {
                         value,
                         position: None,
                         pending: Some(pending),
+                        unit: false,
                     })
                     .collect(),
             ],
