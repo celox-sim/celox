@@ -75,6 +75,10 @@ pub(super) struct DesignArgs {
     /// SystemVerilog macro, NAME or NAME=VALUE (repeatable; last value wins).
     #[arg(short = 'D', long = "define", value_name = "NAME[=VALUE]")]
     defines: Vec<String>,
+    /// Shared library that provides the C functions of DPI-C imports
+    /// (repeatable; searched in order, after the project's `dpi_libs`).
+    #[arg(long = "dpi-lib", value_name = "PATH")]
+    dpi_libs: Vec<PathBuf>,
     /// Override a top parameter with an integer or SV literal (repeatable; last value wins).
     #[arg(
         short = 'G',
@@ -115,6 +119,7 @@ struct Manifest {
     filelists: Vec<PathBuf>,
     include_dirs: Vec<PathBuf>,
     defines: BTreeMap<String, String>,
+    dpi_libs: Vec<PathBuf>,
     single_unit: Option<bool>,
     strict_source_encoding: Option<bool>,
     parameters: BTreeMap<String, ParameterValue>,
@@ -151,6 +156,7 @@ struct Target {
     filelists: Vec<PathBuf>,
     include_dirs: Vec<PathBuf>,
     defines: BTreeMap<String, String>,
+    dpi_libs: Vec<PathBuf>,
     single_unit: Option<bool>,
     strict_source_encoding: Option<bool>,
     parameters: BTreeMap<String, ParameterValue>,
@@ -170,6 +176,8 @@ pub(super) struct Design {
     pub sources: Vec<PathBuf>,
     pub include_dirs: Vec<PathBuf>,
     pub defines: BTreeMap<String, String>,
+    /// The shared libraries of DPI-C imports, in search order.
+    pub dpi_libraries: Vec<PathBuf>,
     single_unit: Option<bool>,
     strict_source_encoding: Option<bool>,
     pub parameters: BTreeMap<String, u64>,
@@ -334,6 +342,7 @@ impl DesignArgs {
                     &config.include_dirs,
                     &config.defines,
                 )?;
+                design.extend_dpi_libraries(base, &config.dpi_libs);
                 design.extend_parameters(&config.parameters)?;
                 design.diagnostics = config.diagnostics.clone();
                 design.top = config.top.clone().unwrap_or_default();
@@ -356,6 +365,7 @@ impl DesignArgs {
                         &target.include_dirs,
                         &target.defines,
                     )?;
+                    design.extend_dpi_libraries(base, &target.dpi_libs);
                     if let Some(top) = &target.top {
                         design.top.clone_from(top);
                     }
@@ -448,6 +458,11 @@ impl DesignArgs {
             design.diagnostics.set_override(diagnostic)?;
         }
         design.include_dirs.extend(self.include_dirs);
+        if !self.dpi_libs.is_empty() {
+            let cwd = std::env::current_dir()
+                .map_err(|error| format!("failed to locate current directory: {error}"))?;
+            design.extend_dpi_libraries(&cwd, &self.dpi_libs);
+        }
         for define in &self.defines {
             design.define(define)?;
         }
@@ -479,6 +494,9 @@ impl DesignArgs {
         }
         if !design.is_sv() && !design.sv_parameters.is_empty() {
             return Err("SV parameter literals require .sv/.v sources".to_string());
+        }
+        if !design.is_sv() && !design.dpi_libraries.is_empty() {
+            return Err("DPI-C libraries require SystemVerilog sources".into());
         }
         if !design.is_sv() && (!design.include_dirs.is_empty() || !design.defines.is_empty()) {
             return Err(
@@ -659,6 +677,13 @@ impl Design {
             self.read_filelist(&base.join(list), &mut Vec::new())?;
         }
         Ok(())
+    }
+
+    /// Add `libraries`, each resolved from `base`. The loader gets a path
+    /// with a directory, so it never searches the system library path.
+    fn extend_dpi_libraries(&mut self, base: &Path, libraries: &[PathBuf]) {
+        self.dpi_libraries
+            .extend(libraries.iter().map(|path| base.join(path)));
     }
 
     fn define(&mut self, definition: &str) -> Result<(), String> {

@@ -61,6 +61,19 @@ SVのtestbenchでは、`+`で始まる位置引数（または繰り返し指定
 celox run tb.v --top tb +iterations=9 --plusarg +trace
 ```
 
+DPI-C で C 関数を import する SystemVerilog 設計では、関数を提供する共有ライブラリを
+`--dpi-lib PATH`（繰り返し可）、または`celox.toml`のルートかターゲットの
+`dpi_libs = ["lib/model.so"]`で指定します。import はその C 名を定義する最初の
+ライブラリにリンクします。順序はルート、ターゲット、コマンドラインです。
+C ソースからのライブラリのビルドはプロジェクト側で行います（`svdpi.h`は Celox に
+含まれません）。対応する引数型は
+[DPI-C imports](./systemverilog-reference#dpi-c-imports)を参照してください。
+
+```sh
+cc -shared -fPIC -o model.so model.c
+celox run tb.sv --top tb --dpi-lib model.so
+```
+
 両言語とも`--backend native|tiered|interpreter|cranelift|wasm`で実行方式を選べます（既定native）。
 tieredはインタープリターで開始し、待機中のイベントを保ちながら生成コードへ移行します。
 両言語とも`--threads N`（1〜64、既定1）で並列度を指定できます。

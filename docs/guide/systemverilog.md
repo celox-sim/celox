@@ -108,11 +108,12 @@ See [mixed-language designs](./systemverilog-reference#mixed-language).
 
 ## DPI-C imports
 
-Enable `sv-dpi` to call C functions from `always_ff` processes.
-Register functions or shared libraries with `dpi_function` or
-`dpi_library`; these are `unsafe` APIs because the C signatures must match
-the SV imports. See [DPI-C imports](./systemverilog-reference#dpi-c-imports)
-for the supported types and call sites.
+Enable `sv-dpi` to call C functions from procedural code. Register
+functions or shared libraries with `dpi_function` or `dpi_library`; these
+are `unsafe` APIs because the C signatures must match the SV imports. The
+`celox run` command links shared libraries with `--dpi-lib PATH`. See
+[DPI-C imports](./systemverilog-reference#dpi-c-imports) for the supported
+types and call sites.
 
 ## Find a specific behavior {#semantics-worth-knowing}
 
