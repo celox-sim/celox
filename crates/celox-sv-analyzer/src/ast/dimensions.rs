@@ -332,6 +332,23 @@ pub(super) fn parameter_signed_element_marker(name: &str) -> String {
     format!("__parameter::signed_element::{name}")
 }
 
+/// Present for a parameter of packed structure type whose member constants
+/// are published; the payload is their count.
+pub(super) fn parameter_members_marker(name: &str) -> String {
+    format!("__parameter::members::{name}")
+}
+
+/// The value of member `path` (`a.b` for a member of a member) of the packed
+/// structure parameter `name`.
+pub(super) fn parameter_member_value_marker(name: &str, path: &str) -> String {
+    format!("__parameter::member::value::{path}::{name}")
+}
+
+/// The type of that member: its width, shifted left by one, and its sign.
+pub(super) fn parameter_member_type_marker(name: &str, path: &str) -> String {
+    format!("__parameter::member::type::{path}::{name}")
+}
+
 pub(super) fn variable_bits_marker(name: &str) -> String {
     format!("__variable::bits::{name}")
 }

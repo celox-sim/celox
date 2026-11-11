@@ -404,6 +404,17 @@ fn bind_in_context(
                     });
                 }
                 ExprKind::Call { .. } | ExprKind::Member { .. } => {
+                    // A member of a packed structure parameter is a constant
+                    // of the member's type (11.2.1, 7.2.1). Fold it here: a
+                    // dimension or a generate condition has no layout to
+                    // select from, and an override is evaluated before the
+                    // instance that receives it exists.
+                    if let Some(literal) =
+                        parameter_member(id, native, tree, &query_dimensions.const_env)
+                    {
+                        values.push(ConstExpr::Literal(literal));
+                        continue;
+                    }
                     let is_query = matches!(&native.expression(id).kind,ExprKind::Call{expression,..} if matches!(&native.expression(*expression).kind,ExprKind::Name(name) if SystemFunction::from_name(&name.spelling).is_some_and(|f|f.is_data_query()||matches!(f,SystemFunction::Isunbounded|SystemFunction::Typename))));
                     let mut context = if is_query {
                         query_dimensions.clone()
@@ -617,6 +628,51 @@ pub(super) fn bind_unpacked_dimension(
         }
     };
     range.ok_or_else(|| unsupported("unresolved unpacked array dimension"))
+}
+
+/// The typed literal of native expression `id` if it selects a member, or a
+/// member of a member, of a packed structure parameter whose member
+/// constants `env` holds: `p.m`, `p.m.n` or `pkg::p.m`.
+fn parameter_member(
+    mut id: ExprId,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    env: &ConstEnv,
+) -> Option<String> {
+    let mut path = Vec::new();
+    let root = loop {
+        match &native.expression(id).kind {
+            ExprKind::Member {
+                expression,
+                separator,
+                name,
+            } if separator == "." => {
+                path.push(instances::normalize_identifier(&name.spelling));
+                id = *expression;
+            }
+            ExprKind::Member {
+                expression,
+                separator,
+                name,
+            } if separator == "::" => {
+                let ExprKind::Name(package) = &native.expression(*expression).kind else {
+                    return None;
+                };
+                break scope::qualified_name(
+                    tree,
+                    &instances::normalize_identifier(&package.spelling),
+                    &instances::normalize_identifier(&name.spelling),
+                );
+            }
+            ExprKind::Name(name) => break instances::normalize_identifier(&name.spelling),
+            _ => return None,
+        }
+    };
+    if path.is_empty() {
+        return None;
+    }
+    path.reverse();
+    parameters::member_literal(&root, &path.join("."), env)
 }
 
 /// The operand of native expression `id` if it is a `$typename` call.

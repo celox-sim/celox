@@ -110,8 +110,10 @@ region に関する逸脱2件は[意図的な逸脱](#intentional-deviations)に
   tagged union、unpacked 配列メンバを持つ unpacked 構造体、enum や符号付き
   typedef の packed 配列、整数でない値パラメータを持つクラス、
   `$typename(a + b)` のような名前やデータ型でない被演算子が該当します。
-- 集約型の定数パラメータ（unpacked 配列、パターンで与えた packed 構造体）は
-  開始時から値を持ちますが、展開時に必要な定数としては使えません。
+- unpacked 配列型のパラメータは開始時から値を持ちますが、展開時に必要な定数としては
+  使えません。packed 構造体パラメータのメンバは展開時定数ですが、127 ビットを超える
+  メンバと X・Z ビットを持つメンバは、宣言の寸法、generate 構文の選択、パラメータの
+  上書きには使えません。
 
 ### unpacked 構造体 {#unpacked-structures}
 

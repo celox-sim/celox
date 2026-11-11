@@ -35,6 +35,17 @@ fn unknown_member(
     dimensions: &PackedDimensions,
 ) -> AnalyzerError {
     if !bound_interface && dimensions.get(&path[0]).is_none() {
+        // A name that the scope binds to a parameter is no hierarchical
+        // name, whatever follows it (23.7).
+        if dimensions
+            .const_env
+            .contains_key(&parameters::unbounded_parameter_marker(&path[0]))
+        {
+            return unsupported(format!(
+                "member `{}` of a parameter in this constant expression",
+                path.join(".")
+            ));
+        }
         return AnalyzerError::HierarchicalReference {
             path: path.join("."),
         };

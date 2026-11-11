@@ -170,6 +170,7 @@ impl ScopeElaboration<'_> {
             session,
             &self.const_env,
             &self.type_aliases,
+            &self.parameters,
         )?;
         for parameter in &self.array_parameters {
             self.const_env.insert(
@@ -270,6 +271,7 @@ impl ScopeElaboration<'_> {
                         session,
                         &self.const_env,
                         &self.type_aliases,
+                        &self.parameters,
                     )?;
                     let parameter_values = parameter_value_env_with_imported(
                         syntax_tree,

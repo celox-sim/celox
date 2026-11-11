@@ -47,6 +47,20 @@ fn leaves(source: &Source) -> Vec<(usize, i128)> {
     }
     leaves
 }
+/// The width and value of the packed parameter `P`, which a pattern of
+/// constants gives its value at elaboration.
+fn packed_value(source: &Source) -> (usize, u128) {
+    let parameter = source.modules()[0]
+        .parameters()
+        .iter()
+        .find(|parameter| parameter.name() == "P")
+        .expect("the pattern gives a value parameter");
+    let Some(crate::ast::ConstExpr::Literal(text)) = parameter.value() else {
+        panic!("{:?}", parameter.value())
+    };
+    let literal = crate::typecheck::parse_integral_literal(text).unwrap();
+    (literal.width, u128::try_from(literal.value).unwrap())
+}
 #[test]
 fn native_packed_and_typed_parameter_pattern_defaults_own_value_operators() {
     for declaration in [
@@ -54,9 +68,10 @@ fn native_packed_and_typed_parameter_pattern_defaults_own_value_operators() {
         "typedef logic[1:0][7:0]T;localparam T P=T'{10+2,8+2};",
     ] {
         let tree = parsed(&format!("module M;{declaration}endmodule"));
+        // `{8'(10 - 2), 8'(8 - 2)}`
         assert_eq!(
-            leaves(&Source::from_syntax(&tree).unwrap()),
-            [(8, 10), (8, 8)]
+            packed_value(&Source::from_syntax(&tree).unwrap()),
+            (16, 0x0806)
         );
     }
 }
@@ -75,10 +90,11 @@ fn native_unpacked_parameter_pattern_defaults_preserve_flat_order_and_keys() {
 }
 #[test]
 fn native_parameter_pattern_repeat_counts_follow_native_alias_widths() {
-    let tree = parsed("module M;typedef logic[3+1:1]T;localparam T P=T'{3+1{10+2}};endmodule");
+    // `logic [2:1]` takes two elements, each the low bit of `10 - 3`.
+    let tree = parsed("module M;typedef logic[3+1:1]T;localparam T P=T'{3+1{10+3}};endmodule");
     assert_eq!(
-        leaves(&Source::from_syntax(&tree).unwrap()),
-        [(1, 10), (1, 10)]
+        packed_value(&Source::from_syntax(&tree).unwrap()),
+        (2, 0b11)
     );
 }
 #[test]
