@@ -1171,6 +1171,9 @@ pub(in crate::ast) fn needs_selected(
             {
                 return true;
             }
+            // The items of an assignment pattern take their types from the
+            // pattern's target, whose binding evaluates them.
+            ExprKind::Pattern { .. } => {}
             _ => jobs.extend(children(id, native)),
         }
     }
