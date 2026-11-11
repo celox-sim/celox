@@ -367,22 +367,6 @@ impl Packages {
     ) -> Result<Self, AnalyzerError> {
         let mut declarations: Vec<(String, SyntaxTree)> = Vec::new();
         for (tree, _) in trees {
-            // Only modules and packages are analyzed, so an import declared
-            // at compilation-unit scope would never be found.
-            for item in &tree.declarations().source_items {
-                if let celox_sv_syntax::SourceItemKind::Declaration(id) = item.kind
-                    && matches!(
-                        tree.declarations().body_item(id).kind,
-                        celox_sv_syntax::BodyItemKind::Dpi(_)
-                    )
-                {
-                    return Err(AnalyzerError::Unsupported(
-                        "DPI-C import or export at compilation-unit scope (declare it in a \
-                         module or package)"
-                            .to_string(),
-                    ));
-                }
-            }
             for handle in tree.root_scopes()? {
                 if handle
                     .unit(tree.declarations())

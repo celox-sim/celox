@@ -67,8 +67,7 @@ constructs without a dedicated issue point to the frontend roadmap,
 - Packages: package nets
   ([#1146](https://github.com/celox-sim/celox/issues/1146)); a package
   variable cannot be a clock or reset.
-- Compilation units: only one source file may declare `$unit` variables;
-  DPI-C imports at compilation-unit scope are unsupported.
+- Compilation units: only one source file may declare `$unit` variables.
 
 ### Interfaces {#interface-restrictions}
 
@@ -619,9 +618,9 @@ unresolved name fails the build with a `Dpi` error. Both methods are
 
 Supported subset; everything else is rejected:
 
-- `function` imports (not tasks, not `context`) declared in a module or a
-  package, called from `always_ff` processes and functions they call.
-  Calls in combinational logic are rejected.
+- `function` imports (not tasks, not `context`) declared in a module, in a
+  package or at compilation-unit scope, called from `always_ff` processes
+  and functions they call. Calls in combinational logic are rejected.
 - Up to 16 `input` arguments; no `output` or `inout` arguments.
 - Argument and result types `bit`, `logic` (as `svBit` / `svLogic`),
   `byte`, `shortint`, `int`, `longint` (signed or unsigned), `chandle`,

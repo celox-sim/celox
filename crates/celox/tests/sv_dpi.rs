@@ -734,13 +734,6 @@ fn rejects_unsupported_imports_and_calls() {
             "DPI-C function `f` called in combinational logic",
         ),
         (
-            r#"import "DPI-C" function int f(input int x);
-            module Top(input logic clk, input int a, output int y);
-                always_ff @(posedge clk) y <= f(a);
-            endmodule"#,
-            "DPI-C import or export at compilation-unit scope",
-        ),
-        (
             r#"module Top(input logic clk, input int a, output int y);
                 import "DPI-C" function void f(input int x, output int r);
                 always_ff @(posedge clk) f(a, y);
@@ -873,5 +866,33 @@ dpi_backends! {
         sim.tick(clk).unwrap();
         assert_eq!(sim.get(value), BigUint::from(0xffff_ffffu32));
         assert_eq!(sim.get(is_null), BigUint::from(1u32));
+    }
+}
+
+// An import declared at compilation-unit scope is visible in every module of
+// the unit, and a module may import the same function again (IEEE 1800-2023
+// 35.2.1, 35.5.4).
+dpi_backends! {
+    fn compilation_unit_imports_are_visible_in_modules(sim) {
+        @build unsafe {
+            builder(r#"
+                import "DPI-C" function int add(input int x, input int y);
+                module Sub(input logic clk, input int a, output int y);
+                    always @(posedge clk) y <= add(a, 1);
+                endmodule
+                module Top(input logic clk, input int a, output int y, z);
+                    import "DPI-C" function int add(input int x, input int y);
+                    Sub sub(.clk, .a, .y);
+                    always_ff @(posedge clk) z <= add(a, a);
+                endmodule
+            "#)
+            .dpi_function("add", dpi_add as *const ())
+        };
+        let clk = sim.event("clk");
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 20u32)).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), BigUint::from(21u32));
+        assert_eq!(sim.get(sim.signal("z")), BigUint::from(40u32));
     }
 }
