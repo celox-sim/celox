@@ -97,6 +97,14 @@ impl Signedness for SizeQuerySignedness<'_> {
         }
         parameter_type_from_const_env(self.const_env, name)
             .map(|ty| ty.signed)
+            // A constant too wide for the numeric environment, such as a
+            // wide enumeration member, is known by its literal.
+            .or_else(|| match self.dimensions.parameter_values.get(name) {
+                Some(Expr::Literal(literal)) => {
+                    typecheck::parse_integral_literal(literal).map(|literal| literal.signed)
+                }
+                _ => None,
+            })
             .or_else(|| self.const_env.contains_key(name).then_some(true))
     }
 }
