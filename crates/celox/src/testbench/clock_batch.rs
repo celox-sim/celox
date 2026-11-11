@@ -57,7 +57,7 @@ impl ClockBatch {
         let schema = &sim.program.runtime_schema;
         // Timed RTL processes need the runtime queue's scheduling state. The
         // caller checks all other observers before using the direct edge path.
-        if sim.host_slot_work
+        if sim.slot_end.work
             || !sim.host_watch.is_empty()
             || schema
                 .processes
