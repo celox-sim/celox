@@ -12,7 +12,7 @@ use num_bigint::BigUint;
 
 use crate::ast::ConstEnv;
 use crate::ast::const_functions::Budget;
-use crate::ir::{BinaryOp, Callee, ConstExpr, PackedRange, SystemFunction, UnaryOp};
+use crate::ir::{BinaryOp, Callee, ConstExpr, PackedRange, StringOp, SystemFunction, UnaryOp};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IntegralLiteral {
@@ -1257,6 +1257,163 @@ thread_local! {
     static LITERAL_EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// The packed value of the string an integral value makes: its bytes,
+/// most significant first, without NUL bytes, as a string holds no NUL
+/// byte (IEEE 1800-2023 6.16). `None` for a value with unknown bits.
+pub(crate) fn packed_string_literal(operand: &IntegralLiteral) -> Option<IntegralLiteral> {
+    if operand.mask.bits() != 0 {
+        return None;
+    }
+    let bytes: Vec<u8> = literal_bytes(operand)
+        .into_iter()
+        .filter(|byte| *byte != 0)
+        .collect();
+    Some(IntegralLiteral {
+        // The empty string literal is one NUL byte (5.9).
+        width: (bytes.len() * 8).max(8),
+        signed: false,
+        value: BigUint::from_bytes_be(&bytes),
+        mask: BigUint::default(),
+    })
+}
+
+/// The bytes of the packed value `literal`, the most significant first.
+fn literal_bytes(literal: &IntegralLiteral) -> Vec<u8> {
+    let bytes = literal.value.to_bytes_be();
+    let width = literal.width.div_ceil(8);
+    let mut padded = vec![0; width.saturating_sub(bytes.len())];
+    padded.extend(&bytes[bytes.len().saturating_sub(width)..]);
+    padded
+}
+
+/// The packed value of the string `$sformatf` makes of constant `operands`,
+/// a format and its values, as the call makes it at run time (IEEE 1800-2023
+/// 21.2.1, 21.3.3). `None` for a value with unknown bits and for a
+/// conversion that is not folded: one with a field width other than `0`, or
+/// other than `%d`, `%h`, `%x`, `%o`, `%b`, `%c` and `%s`.
+/// The longest string a constant `$sformatf` gives, in bytes: 65,536 bits.
+const MAX_FORMAT_BYTES: usize = 65_536 / 8;
+
+pub(crate) fn constant_format(operands: &[IntegralLiteral]) -> Option<IntegralLiteral> {
+    use num_bigint::BigInt;
+    let (format, values) = operands.split_first()?;
+    if operands.iter().any(|operand| operand.mask.bits() != 0) {
+        return None;
+    }
+    // Formatting a wider operand could allocate a string of its whole
+    // width (or the modulus of its type) before the result is measured;
+    // the result holds at most 65,536 bits in any case.
+    if operands.iter().any(|operand| operand.width > 65_536) {
+        return None;
+    }
+    let mut values = values.iter();
+    // The runtime formatter reads a format value without its NUL bytes,
+    // so a NUL in the template is not a directive character: `%\0d` is
+    // `%d`, not `%0d`.
+    let template: Vec<u8> = literal_bytes(format)
+        .into_iter()
+        .filter(|byte| *byte != 0)
+        .collect();
+    let mut text = Vec::new();
+    let mut input = template.iter().copied();
+    while let Some(byte) = input.next() {
+        if byte != b'%' {
+            text.push(byte);
+            continue;
+        }
+        let mut conversion = input.next()?;
+        if conversion == b'%' {
+            text.push(b'%');
+            continue;
+        }
+        // `%0d` prints no leading spaces or zeros (21.2.1.3).
+        let minimal = conversion == b'0';
+        if minimal {
+            conversion = input.next()?;
+        }
+        let value = values.next()?;
+        let modulus = BigUint::from(1u8) << value.width;
+        // Padded by hand: `format!` takes no field width above 65,535,
+        // and a value may be 65,536 bits wide.
+        let padded = |digits: String, width: usize, fill: u8| {
+            let mut bytes = vec![fill; width.saturating_sub(digits.len())];
+            bytes.extend(digits.into_bytes());
+            bytes
+        };
+        let radix_digits = |radix: u32, bits: usize| {
+            let width = if minimal {
+                0
+            } else {
+                value.width.div_ceil(bits)
+            };
+            padded(value.value.to_str_radix(radix), width, b'0')
+        };
+        match conversion.to_ascii_lowercase() {
+            b'd' => {
+                let negative =
+                    value.signed && value.width > 0 && value.value.bit(value.width as u64 - 1);
+                let digits = if negative {
+                    format!(
+                        "-{}",
+                        BigInt::from(modulus.clone()) - BigInt::from(value.value.clone())
+                    )
+                } else {
+                    value.value.to_string()
+                };
+                // The width of the largest value of the type, with its sign.
+                let width = if minimal {
+                    0
+                } else if value.signed {
+                    (modulus >> 1usize).to_string().len() + 1
+                } else {
+                    (modulus - 1u8).to_string().len()
+                };
+                text.extend(padded(digits, width, b' '));
+            }
+            b'h' | b'x' => text.extend(radix_digits(16, 4)),
+            b'o' => text.extend(radix_digits(8, 3)),
+            b'b' => text.extend(radix_digits(2, 1)),
+            b'c' => text.extend(value.value.to_bytes_le().first()),
+            b's' => {
+                // The characters of the value without its leading zero
+                // bytes (21.2.1.7), right-justified in the width of the
+                // value unless the field width is `0`, as other values are.
+                let bytes = literal_bytes(value);
+                let characters = &bytes[bytes
+                    .iter()
+                    .position(|byte| *byte != 0)
+                    .unwrap_or(bytes.len())..];
+                if !minimal {
+                    text.resize(text.len() + bytes.len() - characters.len(), b' ');
+                }
+                text.extend(characters);
+            }
+            _ => return None,
+        }
+        // The result holds at most 65,536 bits: stop as soon as the text
+        // cannot fit, without its NUL bytes, which the result drops.
+        if text.len() > MAX_FORMAT_BYTES {
+            text.retain(|byte| *byte != 0);
+            if text.len() > MAX_FORMAT_BYTES {
+                return None;
+            }
+        }
+    }
+    // Every value has a conversion (21.3.3), and the result is a string,
+    // which holds no NUL byte (6.16).
+    text.retain(|byte| *byte != 0);
+    if values.next().is_some() || text.len() > MAX_FORMAT_BYTES {
+        return None;
+    }
+    Some(IntegralLiteral {
+        // The empty string literal is one NUL byte (5.9).
+        width: (text.len() * 8).max(8),
+        signed: false,
+        value: BigUint::from_bytes_be(&text),
+        mask: BigUint::default(),
+    })
+}
+
 fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral> {
     #[cfg(test)]
     LITERAL_EVALUATIONS.with(|count| count.set(count.get() + 1));
@@ -1300,6 +1457,28 @@ fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral>
             let signing = if signed { "s" } else { "" };
             parse_integral_literal(&format!("{width}'{signing}d{value}"))
         }
+        // A constant string value, as `$typename` makes of its type name,
+        // is the packed value of its bytes (6.16).
+        ConstExpr::Function {
+            callee: Callee::String(StringOp::FromBits),
+            args,
+            ..
+        } => {
+            let [arg] = args.as_slice() else { return None };
+            packed_string_literal(&integral_literal_from_const_expr(arg)?)
+        }
+        // `$sformatf` of constants is a constant system function call (IEEE
+        // 1800-2023 11.2.1): the packed value of the string it makes.
+        ConstExpr::Function {
+            callee: Callee::String(StringOp::Format { .. }),
+            args,
+            ..
+        } => constant_format(
+            &args
+                .iter()
+                .map(integral_literal_from_const_expr)
+                .collect::<Option<Vec<_>>>()?,
+        ),
         ConstExpr::Function { .. } => None,
         ConstExpr::SelectRange {
             expr,
@@ -2196,6 +2375,41 @@ fn extension_for_leading_digit(ch: char) -> (bool, bool) {
 #[cfg(test)]
 mod literal_tests {
     use super::*;
+
+    #[test]
+    fn constant_formats_stop_at_the_result_budget() {
+        // Each conversion of a 65,536-bit value gives 65,536 digits, more
+        // than the result can hold: the call is not folded.
+        let format = |text: &str| IntegralLiteral {
+            width: text.len() * 8,
+            signed: false,
+            value: BigUint::from_bytes_be(text.as_bytes()),
+            mask: BigUint::default(),
+        };
+        let wide = IntegralLiteral {
+            width: 65_536,
+            signed: false,
+            value: (BigUint::from(1u8) << 65_536usize) - 1u8,
+            mask: BigUint::default(),
+        };
+        let mut operands = vec![format(&"%b".repeat(64))];
+        operands.extend(std::iter::repeat_n(wide.clone(), 64));
+        assert_eq!(constant_format(&operands), None);
+        // One such conversion alone is 65,536 digits, more than one byte
+        // per bit of the result, and is not folded either.
+        assert_eq!(constant_format(&[format("%b"), wide]), None);
+        // A result of the whole budget still folds.
+        let characters = IntegralLiteral {
+            width: 65_536,
+            signed: false,
+            value: BigUint::from_bytes_be(&[b'a'; MAX_FORMAT_BYTES]),
+            mask: BigUint::default(),
+        };
+        assert_eq!(
+            constant_format(&[format("%s"), characters]).map(|literal| literal.width),
+            Some(65_536)
+        );
+    }
 
     #[test]
     fn numeric_binary_operands_are_evaluated_once_before_type_context() {
