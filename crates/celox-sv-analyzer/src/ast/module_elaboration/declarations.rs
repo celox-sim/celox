@@ -195,6 +195,20 @@ impl ScopeElaboration<'_> {
                             crate::ir::DpiType::Chandle => {
                                 type_binding::builtin_type("chandle", None)
                             }
+                            crate::ir::DpiType::BitVector { width, signed }
+                            | crate::ir::DpiType::LogicVector { width, signed } => {
+                                Some(Type::resolved(
+                                    if argument.r#type().is_4state() {
+                                        TypeKind::Logic
+                                    } else {
+                                        TypeKind::Bit
+                                    },
+                                    signed,
+                                    None,
+                                    &[(width as i128 - 1, 0)],
+                                    &[],
+                                ))
+                            }
                             crate::ir::DpiType::Integer { width, signed } => {
                                 type_binding::builtin_type(
                                     match width {
@@ -224,13 +238,7 @@ impl ScopeElaboration<'_> {
                 import
                     .arguments()
                     .iter()
-                    .map(|argument| {
-                        if argument.is_output() {
-                            crate::procedural::ParamDirection::Output
-                        } else {
-                            crate::procedural::ParamDirection::Input
-                        }
-                    })
+                    .map(|argument| dpi_direction(argument.direction()))
                     .collect(),
             );
         }

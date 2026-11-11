@@ -111,7 +111,10 @@ impl FunctionReturnMetadata {
             DpiType::Integer { width: 64, .. } => Some("longint"),
             DpiType::String => Some("string"),
             DpiType::Chandle => Some("chandle"),
-            DpiType::Integer { .. } => None,
+            // Not a result type (IEEE 1800-2023 35.5.5).
+            DpiType::Integer { .. } | DpiType::BitVector { .. } | DpiType::LogicVector { .. } => {
+                None
+            }
         };
         let semantic_type = keyword
             .and_then(|name| type_binding::builtin_type(name, Some(ty.is_signed())))

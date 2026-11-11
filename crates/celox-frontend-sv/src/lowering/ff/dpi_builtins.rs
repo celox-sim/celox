@@ -129,7 +129,10 @@ impl Ff<'_, '_> {
 
     /// A string argument as a string: a string expression, or the bytes of
     /// an integral one such as a literal (IEEE 1800-2023 6.16).
-    fn string_argument(&mut self, arg: &sv::ir::Expr) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+    pub(super) fn string_argument(
+        &mut self,
+        arg: &sv::ir::Expr,
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
         let arg = self.hoist(arg)?;
         if self.m.expr_is_string(&arg) {
             return self.heap_operand(

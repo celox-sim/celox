@@ -18,6 +18,7 @@ mod containers;
 mod delays;
 mod dpi;
 mod dpi_builtins;
+mod dpi_calls;
 mod edge_process;
 mod events;
 mod expr;

@@ -689,17 +689,22 @@ fn function_argument_metadata(params: &[FunctionParam]) -> Arc<[FunctionArgument
         .collect()
 }
 
+/// The direction of a subroutine formal that a DPI-C argument has.
+fn dpi_direction(direction: crate::ir::DpiDirection) -> ParamDirection {
+    match direction {
+        crate::ir::DpiDirection::Input => ParamDirection::Input,
+        crate::ir::DpiDirection::Output => ParamDirection::Output,
+        crate::ir::DpiDirection::Inout => ParamDirection::Inout,
+    }
+}
+
 fn dpi_argument_metadata(import: &crate::ir::DpiImport) -> Arc<[FunctionArgumentMetadata]> {
     import
         .arguments()
         .iter()
         .map(|argument| FunctionArgumentMetadata {
             name: argument.name().to_string(),
-            direction: if argument.is_output() {
-                ParamDirection::Output
-            } else {
-                ParamDirection::Input
-            },
+            direction: dpi_direction(argument.direction()),
             has_default: false,
         })
         .collect()

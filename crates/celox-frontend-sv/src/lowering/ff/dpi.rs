@@ -7,7 +7,9 @@ impl Ff<'_, '_> {
     ///
     /// Each argument is converted to its C type: a two-state integer, whose
     /// unknown bits read as zero, or a `logic`, which keeps its unknown bit
-    /// in four-state simulation (IEEE 1800-2023 35.5.6).
+    /// in four-state simulation (IEEE 1800-2023 35.5.6). An import with an
+    /// argument C takes through a pointer, or with a string, is called by
+    /// [`Self::area_dpi_call`].
     pub(super) fn dpi_call(
         &mut self,
         import: &sv::ir::DpiImport,
@@ -26,6 +28,9 @@ impl Ff<'_, '_> {
             // Keeps a process whose only effect is the call (see `Externs::calls`).
             self.m.externs.calls += 1;
             return self.builtin_dpi_call(import, builtin, args, arg_order);
+        }
+        if import.uses_call_area() {
+            return self.area_dpi_call(import, args, arg_order);
         }
         let mut registers = vec![None; args.len()];
         let positions: Vec<_> = if arg_order.is_empty() {

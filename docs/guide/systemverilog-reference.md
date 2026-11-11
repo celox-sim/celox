@@ -290,7 +290,7 @@ blocks in programs. Two region deviations are listed under
   and container elements as `output` / `inout` actuals, and actuals whose
   element types differ from the formal's.
 - Strings <a id="strings"></a>: `atoreal` / `realtoa`; a string variable as
-  the format of `$value$plusargs`; string arguments of file I/O and DPI-C;
+  the format of `$value$plusargs`; string arguments of file I/O;
   string values in VPI, VCD output,
   and the TypeScript API; nonblocking character writes to fixed string
   arrays; method calls on whole string arrays or subarrays; array-valued
@@ -621,13 +621,24 @@ unresolved name fails the build with a `Dpi` error. Both methods are
 Supported subset; everything else is rejected:
 
 - `function` imports (not tasks, not `context`) declared in a module, in a
-  package or at compilation-unit scope, called from `always_ff` processes
-  and functions they call. Calls in combinational logic are rejected.
-- Up to 16 `input` arguments; no `output` or `inout` arguments.
-- Argument and result types `bit`, `logic` (as `svBit` / `svLogic`),
-  `byte`, `shortint`, `int`, `longint` (signed or unsigned), `chandle`,
-  and `void` results. Packed vectors (`svBitVecVal` / `svLogicVecVal`),
-  `integer`, `real`, and `string` are rejected.
+  package or at compilation-unit scope, called from procedural code:
+  `initial` and `always` processes (`always @*` included), `always_ff`, and
+  the subroutines they call. Calls in continuous assignments and
+  `always_comb` are rejected.
+- Up to 16 arguments, `input`, `output` or `inout`.
+- Argument types `bit`, `logic` (as `svBit` / `svLogic`), `byte`,
+  `shortint`, `int`, `longint` (signed or unsigned), `chandle`, `string`
+  (as `const char *`), packed arrays of `bit`, `logic` or `reg`, and
+  `integer` and `time` (as `svBitVecVal` / `svLogicVecVal` words); results
+  of the types before the packed arrays, or `void` (35.5.5). `real`,
+  `shortreal`, named types (typedefs, enumerations, structures), and
+  unpacked or open arrays are rejected.
+- An `output` or `inout` argument is a pointer to its C type, and to a
+  `const char *` for a `string`. A string or packed array passed to the
+  function is valid until it returns; a string it returns or writes to an
+  output is copied when it returns.
+- In two-state simulation, the unknown bits a function writes to a `logic`
+  argument read as zero.
 - `export "DPI-C"` declarations are accepted and checked (35.7) but no C
   code can call them, because only `context` imports may do so (35.5.3).
 - UVM's C library functions are provided by Celox without the `sv-dpi`

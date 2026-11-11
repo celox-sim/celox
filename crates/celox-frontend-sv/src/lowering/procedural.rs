@@ -284,7 +284,9 @@ impl<'a> ProcModule<'a> {
             sv::ir::DpiType::Bit => ExternType::Bit,
             sv::ir::DpiType::Logic => ExternType::Logic,
             sv::ir::DpiType::Integer { width, signed } => ExternType::Integer { width, signed },
-            sv::ir::DpiType::String => unreachable!("only a builtin passes a string"),
+            sv::ir::DpiType::String => ExternType::String,
+            sv::ir::DpiType::BitVector { width, .. } => ExternType::BitVector { width },
+            sv::ir::DpiType::LogicVector { width, .. } => ExternType::LogicVector { width },
             // A pointer, 64 bits on the supported hosts.
             sv::ir::DpiType::Chandle => ExternType::Integer {
                 width: 64,
@@ -300,6 +302,15 @@ impl<'a> ProcModule<'a> {
                     .arguments()
                     .iter()
                     .map(|argument| extern_type(argument.r#type()))
+                    .collect(),
+                directions: import
+                    .arguments()
+                    .iter()
+                    .map(|argument| match argument.direction() {
+                        sv::ir::DpiDirection::Input => ExternDirection::Input,
+                        sv::ir::DpiDirection::Output => ExternDirection::Output,
+                        sv::ir::DpiDirection::Inout => ExternDirection::Inout,
+                    })
                     .collect(),
             },
         };
