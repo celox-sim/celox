@@ -506,6 +506,20 @@ impl TieredBackend {
     /// [`TieredBackend::cancel_background_compilation`]); the Cranelift tier
     /// runs to completion once started.
     pub fn new(laid_out: &LaidOutProgram, options: &SimulatorOptions) -> Self {
+        Self::build(laid_out, None, options)
+    }
+
+    /// [`Self::new`] for a program the caller shares: the background
+    /// compiler keeps a reference to it instead of a copy of its own.
+    pub(crate) fn new_shared(laid_out: &Arc<LaidOutProgram>, options: &SimulatorOptions) -> Self {
+        Self::build(laid_out, Some(laid_out), options)
+    }
+
+    fn build(
+        laid_out: &LaidOutProgram,
+        shared: Option<&Arc<LaidOutProgram>>,
+        options: &SimulatorOptions,
+    ) -> Self {
         #[cfg(hotspot_jit)]
         if options.hotspot_jit
             && matches!(options.tier_promotion, crate::TierPromotion::Always)
@@ -525,7 +539,7 @@ impl TieredBackend {
                 if let Err(error) = interp.enable_hotspots(options) {
                     backend.promotion = Promotion::Failed(error);
                 } else {
-                    interp.prepare_hotspot_scheduler(laid_out);
+                    interp.prepare_hotspot_scheduler(laid_out, shared);
                 }
             }
             return backend;
@@ -554,7 +568,9 @@ impl TieredBackend {
                     let mut optimizing_options = options.clone();
                     optimizing_options.x86_options.baseline = false;
                     return Self::with_two_stage_compiler(
-                        laid_out,
+                        &shared
+                            .cloned()
+                            .unwrap_or_else(|| Arc::new(laid_out.clone())),
                         &baseline_options,
                         optimizing_options,
                         |laid_out, options, cancel| {
@@ -661,7 +677,7 @@ impl TieredBackend {
             });
             if let Phase::Interpreting(Some(interp)) = &mut backend.phase {
                 interp.enable_hotspots(options)?;
-                interp.prepare_hotspot_scheduler(laid_out);
+                interp.prepare_hotspot_scheduler(laid_out, None);
             }
             Ok(backend)
         } else {
@@ -743,7 +759,7 @@ impl TieredBackend {
             if let Err(error) = interp.enable_hotspots(options) {
                 tracing::warn!("failed to enable hotspot JIT on tiered backend: {error}");
             } else {
-                interp.prepare_hotspot_scheduler(laid_out);
+                interp.prepare_hotspot_scheduler(laid_out, None);
             }
         }
         let events = interp
@@ -857,7 +873,7 @@ impl TieredBackend {
     /// failed baseline leaves the interpreter as the permanent tier, and a
     /// failed or cancelled optimizing stage keeps the baseline code.
     pub(crate) fn with_two_stage_compiler<F>(
-        laid_out: &LaidOutProgram,
+        laid_out: &Arc<LaidOutProgram>,
         baseline_options: &SimulatorOptions,
         optimizing_options: SimulatorOptions,
         compile: F,
@@ -905,7 +921,7 @@ impl TieredBackend {
             if let Err(error) = interp.enable_hotspots(baseline_options) {
                 tracing::warn!("failed to enable hotspot JIT in two-stage tiered backend: {error}");
             } else {
-                interp.prepare_hotspot_scheduler(laid_out);
+                interp.prepare_hotspot_scheduler(laid_out, Some(laid_out));
             }
         }
         let events = interp
@@ -937,16 +953,12 @@ impl TieredBackend {
                     Some(receiver),
                 )
             };
-        let background_laid_out = laid_out.clone();
-        // The baseline image runs derived edges by walking their plans.
-        let baseline_laid_out = crate::derived_edge::without_units(laid_out);
-        // It settles before each domain rather than compiling a fused copy
-        // of the settle per domain into the scheduler.
-        let first_tier_laid_out = crate::scheduler::without_fused_domains(
-            baseline_laid_out.clone(),
-            !baseline_options.native_force_support
-                && baseline_options.signal_access.force_signals.is_empty(),
-        );
+        // The worker shares the program with whoever built it, and derives
+        // the reduced programs of its stages one at a time: each is a copy
+        // of the whole program, and a large design does not fit several.
+        let background_laid_out = Arc::clone(laid_out);
+        let wiring_clocks = !baseline_options.native_force_support
+            && baseline_options.signal_access.force_signals.is_empty();
         let worker_baseline_options = baseline_options.clone();
         // A failed spawn keeps the interpreter as the permanent tier with the
         // reason recorded, matching the single-stage background-failure policy.
@@ -960,6 +972,14 @@ impl TieredBackend {
                 }
                 let span = tracing::info_span!("celox.tiered.compile", target = "native");
                 span.in_scope(|| {
+                    // The baseline image runs derived edges by walking their
+                    // plans, and settles before each domain rather than
+                    // compiling a fused copy of the settle per domain into
+                    // the scheduler.
+                    let first_tier_laid_out = crate::scheduler::without_fused_domains(
+                        crate::derived_edge::without_units(&background_laid_out),
+                        wiring_clocks,
+                    );
                     let result = logged(&worker_log, TieredCompileKind::Baseline, || {
                         compile(
                             &first_tier_laid_out,
@@ -984,11 +1004,11 @@ impl TieredBackend {
                         Some(Err(mpsc::TryRecvError::Disconnected)) => return,
                         _ => false,
                     };
-                    let optimized = if defer_edges {
-                        &baseline_laid_out
-                    } else {
-                        &background_laid_out
-                    };
+                    // The core without the derived-edge units, while it is
+                    // being compiled.
+                    let core = defer_edges
+                        .then(|| crate::derived_edge::without_units(&background_laid_out));
+                    let optimized: &LaidOutProgram = core.as_ref().unwrap_or(&background_laid_out);
                     // Without derived edges there are no units to defer.
                     let kind = if defer_edges || derived_receiver.is_none() {
                         TieredCompileKind::Optimizing
@@ -1009,8 +1029,8 @@ impl TieredBackend {
                         return;
                     }
                     // Only the full program is needed for a late edge request.
-                    // Release the baseline/core IR copy before going idle.
-                    drop(baseline_laid_out);
+                    // Release the core IR copy before going idle.
+                    drop(core);
                     // This wait consumes no CPU. Cancellation and Drop close
                     // the sender before joining, including when no host ever
                     // uses a single-edge specialized unit.

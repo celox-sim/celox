@@ -749,10 +749,16 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             );
         }
 
-        let backend = crate::backend::TieredBackend::new(&laid_out, &options);
+        let laid_out = std::sync::Arc::new(laid_out);
+        let backend = crate::backend::TieredBackend::new_shared(&laid_out, &options);
+        // A backend that kept the program leaves only its runtime metadata
+        // to copy.
+        let runtime = match std::sync::Arc::try_unwrap(laid_out) {
+            Ok(laid_out) => laid_out.into_runtime(),
+            Err(shared) => shared.runtime().clone(),
+        };
 
-        let mut sim =
-            Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
+        let mut sim = Simulator::with_backend_and_program(backend, runtime, warnings);
         sim.components.set_injected(injected_components);
         sim.diagnostics = options.diagnostics.clone();
         sim.set_plusargs(options.plusargs.clone());

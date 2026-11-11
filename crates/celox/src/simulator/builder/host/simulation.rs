@@ -268,11 +268,11 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
         // units keep their typed shadow commits for the interpreter.
         // A Cranelift tier gets none.
         let wide_commits = crate::backend::tiered::native_is_default_target();
-        self.build_with_backend(
+        self.build_with_shared_backend(
             layout,
             defer_derived_edges,
             wide_commits,
-            |program, options| Ok(crate::backend::TieredBackend::new(program, options)),
+            |program, options| Ok(crate::backend::TieredBackend::new_shared(program, options)),
         )
     }
 
@@ -324,16 +324,37 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
     }
 
     pub(super) fn build_with_backend<B: crate::SimBackend>(
-        mut self,
+        self,
         layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
         defer_derived_edges: bool,
         wide_commits: bool,
         compile: impl Fn(&crate::ir::LaidOutProgram, &SimulatorOptions) -> Result<B, SimulatorError>,
     ) -> Result<crate::Simulation<B>, SimulatorError> {
+        self.build_with_shared_backend(
+            layout_mode,
+            defer_derived_edges,
+            wide_commits,
+            |program, options| compile(program, options),
+        )
+    }
+
+    /// [`Self::build_with_backend`] for a backend that may keep the program
+    /// it is built from, sharing it instead of copying it.
+    pub(super) fn build_with_shared_backend<B: crate::SimBackend>(
+        mut self,
+        layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
+        defer_derived_edges: bool,
+        wide_commits: bool,
+        compile: impl Fn(
+            &std::sync::Arc<crate::ir::LaidOutProgram>,
+            &SimulatorOptions,
+        ) -> Result<B, SimulatorError>,
+    ) -> Result<crate::Simulation<B>, SimulatorError> {
         self.options.emit_triggers = true;
         self.options.host_edges = false;
         let (laid_out, mut warnings, options, vcd_path, injected_components) =
             self.into_laid_out_program(layout_mode, defer_derived_edges, wide_commits)?;
+        let laid_out = std::sync::Arc::new(laid_out);
         let backend_start = options.diagnostics.phase_timing.then(crate::timing::now);
         let backend = compile(&laid_out, &options)
             .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
@@ -346,9 +367,15 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
             &options,
             &injected_components,
         )?;
+        // A backend that kept the program leaves only its runtime metadata
+        // to copy.
+        let runtime = match std::sync::Arc::try_unwrap(laid_out) {
+            Ok(laid_out) => laid_out.into_runtime(),
+            Err(shared) => shared.runtime().clone(),
+        };
         let mut simulation = Self::start_simulation(
             backend,
-            laid_out.into_runtime(),
+            runtime,
             warnings,
             &options,
             vcd_path,
