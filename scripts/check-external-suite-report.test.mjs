@@ -493,6 +493,10 @@ test("every retained baseline accepts only its existing failures", () => {
                 "unions::soft_overlay",
                 "unions::soft_signed_ports",
                 "unions::soft_wide_four_state",
+                "unions::unpacked_four_state",
+                "unions::unpacked_four_state_equality",
+                "unions::unpacked_overlay",
+                "unions::unpacked_whole_values",
                 "virtual_interfaces::unit_import_package_variables",
               ]
             : [
@@ -563,6 +567,7 @@ test("every retained baseline accepts only its existing failures", () => {
                 "tagged_unions::writable_task_arguments",
                 "timing::final_procedure_output_survives_program_completion",
                 "types::type_operator",
+                "unions::unpacked_overlay",
                 "unpacked_structs::reference_formal_handles_survive_heap_collections",
                 "unpacked_structs::reference_formals",
               ],

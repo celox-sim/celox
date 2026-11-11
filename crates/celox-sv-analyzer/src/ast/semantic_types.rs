@@ -166,6 +166,8 @@ pub(super) enum TyData {
     },
     /// An unpacked structure (7.2).
     UnpackedStruct(Decl),
+    /// An unpacked union (7.3).
+    UnpackedUnion(Decl),
     /// An unpacked array of `element` (7.4).
     Array {
         kind: ArrayKind,
@@ -223,7 +225,8 @@ impl TyTable {
     /// structure, not a packed array of them.
     pub fn member(&self, aggregate: TyId, name: &str) -> Option<TyId> {
         let members = match self.data(aggregate) {
-            TyData::UnpackedStruct(Decl::Aggregate { members, .. }) => members,
+            TyData::UnpackedStruct(Decl::Aggregate { members, .. })
+            | TyData::UnpackedUnion(Decl::Aggregate { members, .. }) => members,
             TyData::Packed(Packed {
                 element: PackedElement::Aggregate(Decl::Aggregate { members, .. }),
                 dims,

@@ -227,10 +227,11 @@ pub(in crate::ast) fn query_value(
     }
     // The 64 bits of a chandle are its storage, which `$bits` counts; they
     // are no packed dimension the array queries see (IEEE 1800-2023 6.14,
-    // 20.7).
+    // 20.7). Nor is the storage of an unpacked union, the width of its
+    // widest member (7.3).
     let bits = shape.clone();
     if let Some(shape) = &mut shape
-        && shape.chandle
+        && (shape.chandle || shape.unpacked_union)
     {
         shape.packed.clear();
     }

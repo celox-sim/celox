@@ -122,6 +122,11 @@ pub(super) fn with_dimensions(
     if matches!(base.kind(), TypeKind::Real | TypeKind::Shortreal) {
         return Err(unsupported("real dynamic container elements"));
     }
+    // An element read through a method is not classified as a whole
+    // union, which the checks of one need (7.3).
+    if base.unpacked_union {
+        return Err(unsupported("dynamic container of unpacked unions"));
+    }
     let shape = casts::expr_type_from_type(&tree.functions, &base, &context.const_env)
         .ok_or_else(|| unsupported("dynamic container element type"))?;
     let record = match base.unpacked_struct() {

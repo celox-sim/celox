@@ -1057,6 +1057,11 @@ pub(super) fn shared_class(
             if !ty.unpacked_ranges.is_empty() {
                 return Err(unsupported("class property with unpacked dimensions"));
             }
+            // A value read through a handle is not classified as a whole
+            // union, which the checks of one need (7.3).
+            if ty.unpacked_union {
+                return Err(unsupported("class property of unpacked union type"));
+            }
             if ty.container.is_some() && property.declaration.constant {
                 return Err(unsupported("const dynamic container class property"));
             }

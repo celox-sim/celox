@@ -900,3 +900,33 @@ simulation still requires a single root. Four reviewed expectations update:
 both state modes in a focused official invocation, with no other verdict
 changed among 172 cases of chapters 5, 20 and 22. Multi-root simulation
 cases (for example `20.4--printtimescale-hier`) remain unsupported.
+
+Unpacked unions (7.3) with integral members are supported: the members
+share one flat storage aligned at its least significant bits (the
+representation 7.3 leaves to the tool), so writing one member determines
+the low bits read through another, while whole-value integral uses stay
+rejected as they are for unpacked structures. Two reviewed expectations
+update: `unions/unpacked/basic` passes in both state modes in a focused
+official invocation, with no other verdict changed among 104 cases of
+chapter 7. The shared regressions cover member overlay in both
+directions, whole-union assignment and equality, `$bits`, fixed-array
+elements, and four-state members. Boundaries: members must be integral
+(a `real` or otherwise non-integral member, a member default, and tagged
+unpacked unions stay unsupported), assignment patterns for a union stay
+unsupported, a packed array of an unpacked union is rejected, and an
+uninitialized variable takes the storage default (all-x when any member
+is four-state) rather than always the first member's default. A whole
+union is read only where a place, formal or result of its type receives
+it, in an equality with a value of its type and as a branch of a
+conditional; a condition, an index, a count, an argument of a system
+subroutine, a pattern member and a concatenation or streaming target
+reject one. An unpacked union is no bit-stream type (6.24.3): `$cast`
+between one and a vector assigns nothing, and a streaming concatenation of
+one, which takes its first member (11.4.14.1), is unsupported, in either
+direction. A union is a variable, an element of a fixed-size array, a formal
+or a result: a class property, the interface of a class method, a module
+port, a member of an unpacked structure or of another union, an element of
+a dynamically sized container and a hierarchical reference of an unpacked
+union type are unsupported, since a value read through such a path is not
+checked against the union type. A signal of an interface is a variable of
+the scope that names it.

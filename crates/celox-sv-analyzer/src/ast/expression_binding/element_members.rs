@@ -13,7 +13,7 @@ pub(in crate::ast) struct ElementMember {
 }
 
 /// The member select `root` of an element of a fixed-size array
-/// variable of a structure or packed union type, such as `m[i].y`, if it is
+/// variable of a structure or union type, such as `m[i].y`, if it is
 /// one. The index selects take elements of the variable (IEEE 1800-2023
 /// 7.4.5) and the member selects then select from the element (7.2.1, 7.3.1),
 /// so the indices need not be constant, unlike those of a hierarchical name
@@ -76,7 +76,7 @@ pub(in crate::ast) fn element_member(
             dims,
             ..
         }) if dims.len() == packed_indices + 1 => {}
-        TyData::UnpackedStruct(_) if packed_indices == 0 => {}
+        TyData::UnpackedStruct(_) | TyData::UnpackedUnion(_) if packed_indices == 0 => {}
         _ => return None,
     }
     members.reverse();

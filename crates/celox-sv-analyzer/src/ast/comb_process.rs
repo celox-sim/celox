@@ -424,7 +424,8 @@ fn continuous_assignments(
                 dimensions,
             )? {
                 Some(rhs) => rhs,
-                None => expression_binding::expression(
+                None => expression_binding::assigned(
+                    assignment.left,
                     assignment.right,
                     tree.declarations(),
                     &lhs,

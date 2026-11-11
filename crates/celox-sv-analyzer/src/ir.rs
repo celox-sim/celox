@@ -927,6 +927,9 @@ pub struct Type {
     class: Option<String>,
     /// A `chandle`, held as 64 bits (IEEE 1800-2023 6.14).
     chandle: bool,
+    /// An unpacked union, held as the bits of its widest member (IEEE
+    /// 1800-2023 7.3).
+    unpacked_union: bool,
 }
 
 /// Shared metadata, allocated only for unpacked structure types. Ordinary
@@ -956,6 +959,12 @@ impl Type {
     /// this signal must keep (see [`crate::ast::Type::with_chandle`]).
     pub fn is_chandle(&self) -> bool {
         self.chandle
+    }
+
+    /// Whether the type is an unpacked union, whose whole value is no
+    /// vector although it is held as one (IEEE 1800-2023 7.3).
+    pub fn is_unpacked_union(&self) -> bool {
+        self.unpacked_union
     }
 
     /// How many leading packed dimensions select an element of a signed
@@ -1083,6 +1092,7 @@ impl Type {
             signed_element_depth: None,
             class: None,
             chandle: false,
+            unpacked_union: false,
         }
     }
 
@@ -1106,6 +1116,7 @@ impl Type {
         let class = r#type.class().map(str::to_owned);
         let signed_element_depth = r#type.signed_element_depth();
         let chandle = r#type.is_chandle();
+        let unpacked_union = r#type.is_unpacked_union();
         let (packed_ranges, unpacked_ranges, resolved_width) = convert_type(r#type, constants);
         Self {
             structure,
@@ -1119,6 +1130,7 @@ impl Type {
             signed_element_depth,
             class,
             chandle,
+            unpacked_union,
         }
     }
 }

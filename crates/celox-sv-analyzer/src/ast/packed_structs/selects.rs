@@ -97,6 +97,7 @@ fn member_dimensions(name: &str, r#type: &Type, dimensions: &PackedDimensions) -
             members: r#type.members.clone(),
             signed_element_depth: r#type.signed_element_depth,
             unpacked_struct: None,
+            unpacked_union: r#type.unpacked_union,
         }),
     );
     result

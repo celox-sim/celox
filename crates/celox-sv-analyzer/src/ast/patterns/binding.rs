@@ -252,6 +252,7 @@ fn select<'a>(
                 .and_then(|depth| depth.checked_sub(1))
                 .filter(|depth| *depth > 0),
             unpacked_struct: None,
+            unpacked_union: shape.unpacked_union,
         })));
         let (kind, bindings, fill) =
             extract_type_fill(tree, session, functions, kind, bindings, &sub, dims)?;
@@ -284,9 +285,14 @@ fn select<'a>(
     if !shape.members.is_empty() {
         let members = &shape.members;
         if members.iter().any(packed_structs::PackedMember::is_tagged)
+            || shape.unpacked_union
             || (members.len() > 1 && members.iter().all(|member| member.offset() == 0))
         {
-            return Err(unsupported("assignment pattern for a packed union"));
+            return Err(unsupported(if shape.unpacked_union {
+                "assignment pattern for an unpacked union"
+            } else {
+                "assignment pattern for a packed union"
+            }));
         }
         let values = match kind {
             NativeKind::List => {
@@ -390,6 +396,7 @@ fn select<'a>(
         members: Vec::new(),
         signed_element_depth: None,
         unpacked_struct: None,
+        unpacked_union: false,
     })));
     let items = indexed_items(
         kind,

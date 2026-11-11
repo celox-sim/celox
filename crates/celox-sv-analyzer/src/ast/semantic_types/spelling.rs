@@ -66,6 +66,7 @@ impl TyTable {
                 None => format!("virtual {}", spell_decl(interface)),
             },
             TyData::UnpackedStruct(decl) => format!("struct {}", spell_decl(decl)),
+            TyData::UnpackedUnion(decl) => format!("union {}", spell_decl(decl)),
             TyData::Array { .. } => self.spell(id),
         }
     }

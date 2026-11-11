@@ -1461,8 +1461,8 @@ chapter-7/unions/tagged/basic.sv	2state	fail
 chapter-7/unions/tagged/basic.sv	4state	fail
 chapter-7/unions/tagged/packed.sv	2state	pass
 chapter-7/unions/tagged/packed.sv	4state	pass
-chapter-7/unions/unpacked/basic.sv	2state	fail
-chapter-7/unions/unpacked/basic.sv	4state	fail
+chapter-7/unions/unpacked/basic.sv	2state	pass
+chapter-7/unions/unpacked/basic.sv	4state	pass
 chapter-8/8.10--static_methods.sv	2state	pass
 chapter-8/8.10--static_methods.sv	4state	pass
 chapter-8/8.11--this.sv	2state	pass

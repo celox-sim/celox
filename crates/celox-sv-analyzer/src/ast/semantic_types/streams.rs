@@ -59,6 +59,10 @@ impl TyTable {
                     self.spell(*element)
                 )),
             },
+            // An unpacked union is no bit-stream type (6.24.3); a streaming
+            // concatenation takes its first member (11.4.14.1), which the
+            // operand does not select here.
+            TyData::UnpackedUnion(_) => Err("a bit stream of an unpacked union".into()),
             TyData::UnpackedStruct(Decl::Aggregate { members, .. }) => {
                 if role == StreamRole::Target {
                     return Err("a bit stream into an unpacked structure".into());

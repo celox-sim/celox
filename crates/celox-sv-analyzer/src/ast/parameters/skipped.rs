@@ -426,9 +426,14 @@ fn pattern_items(
             .members
             .iter()
             .any(packed_structs::PackedMember::is_tagged)
+            || shape.unpacked_union
             || (shape.members.len() > 1 && shape.members.iter().all(|member| member.offset() == 0))
         {
-            return Err(unsupported("assignment pattern for a packed union"));
+            return Err(unsupported(if shape.unpacked_union {
+                "assignment pattern for an unpacked union"
+            } else {
+                "assignment pattern for a packed union"
+            }));
         }
         let mut values = Vec::new();
         match plan.kind {
@@ -574,10 +579,12 @@ fn pattern_items(
                     is_2state: shape.is_2state,
                     signed_element_depth: None,
                     unpacked_struct: None,
+                    unpacked_union: false,
                 }),
                 true,
             )
         };
+
     match plan.kind {
         NativeKind::List => {
             if plan.bindings.len() != count {

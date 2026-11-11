@@ -2663,6 +2663,9 @@ pub struct Type {
     virtual_interface: Option<Arc<virtual_interfaces::VirtualInterface>>,
     /// The members of an unpacked structure type (IEEE 1800-2023 7.2).
     unpacked_struct: Option<Arc<unpacked_structs::UnpackedStruct>>,
+    /// An unpacked union type (IEEE 1800-2023 7.3): its members share the
+    /// flat storage `members` lays out, but the whole value is no vector.
+    unpacked_union: bool,
     /// The typedef that names an enumeration, struct or union type, and how
     /// `$typename` spells the type where its structure does not tell.
     spelling: type_names::Spelling,
@@ -2697,6 +2700,7 @@ impl Type {
             virtual_interface: None,
             container: None,
             unpacked_struct: None,
+            unpacked_union: false,
             spelling: type_names::Spelling::default(),
             chandle: false,
         }
@@ -2717,6 +2721,7 @@ impl Type {
             virtual_interface: None,
             container: None,
             unpacked_struct: None,
+            unpacked_union: false,
             spelling: type_names::Spelling::default(),
             chandle: false,
         }
@@ -2833,6 +2838,12 @@ impl Type {
     /// Whether the type is a `chandle`.
     pub(crate) fn is_chandle(&self) -> bool {
         self.chandle
+    }
+
+    /// Whether the type is an unpacked union (see
+    /// [`crate::ir::Type::is_unpacked_union`]).
+    pub(crate) fn is_unpacked_union(&self) -> bool {
+        self.unpacked_union
     }
 
     /// The type, a `chandle` if `chandle` (see [`crate::ir::Type::is_chandle`]).

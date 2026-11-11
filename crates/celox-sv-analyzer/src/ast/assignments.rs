@@ -220,5 +220,6 @@ pub(super) fn union_member(
     };
     let members = &shape.members;
     Ok(members.iter().any(packed_structs::PackedMember::is_tagged)
+        || shape.unpacked_union
         || members.len() > 1 && members.iter().all(|member| member.offset() == 0))
 }

@@ -213,6 +213,12 @@ pub(in crate::ast) fn receiver(
     if shape.class.is_some() {
         return Err(unsupported("streaming concatenation into a class handle"));
     }
+    // An unpacked union is no bit-stream type (6.24.3).
+    if shape.unpacked_union {
+        return Err(unsupported(
+            "streaming concatenation into an unpacked union",
+        ));
+    }
     if shape.unpacked_struct.is_some() {
         return Err(unsupported(
             "streaming concatenation into an unpacked structure",
@@ -1039,6 +1045,14 @@ pub(in crate::ast) fn unpack(
         }
         let shape = dimensions::operand_shape(id, tree, session, dims)?
             .ok_or_else(|| unsupported("streaming concatenation unpack target"))?;
+        // An unpacked union is no bit-stream type (6.24.3), and a stream
+        // unpacks into its first member only (11.4.14.1), which is not
+        // selected here.
+        if shape.unpacked_union {
+            return Err(unsupported(
+                "unpacked union in the target of a streaming concatenation",
+            ));
+        }
         let dynamic = shape.container.is_some() || shape.string;
         if let Some(range) = range {
             let Some(container) = &shape.container else {

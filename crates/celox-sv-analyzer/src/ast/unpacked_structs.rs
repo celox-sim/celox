@@ -209,7 +209,10 @@ pub(in crate::ast) fn native_type(
         .into_iter()
         .map(|(name, ty, default)| {
             // A chandle is no packed array element (IEEE 1800-2023 6.14).
+            // A member of an unpacked union type is not classified as a
+            // whole union where it is read (see `native_union`).
             if ty.container.is_some()
+                || ty.unpacked_union
                 || (ty.chandle && ty.packed_ranges.len() > 1)
                 // Each event member would need its own synchronization
                 // object (IEEE 1800-2023 15.5).
@@ -656,9 +659,279 @@ pub(in crate::ast) fn check_value(
     })
 }
 
-/// Reject an operator applied to a whole unpacked structure value: only the
+/// The identity of an unpacked union type: its declaration and the types
+/// its members have there, which tell apart the elaborations of one
+/// declaration in parameterized or generated scopes (IEEE 1800-2023 6.22.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::ast) struct UnionIdentity {
+    owner: Arc<str>,
+    /// The name, kind, signedness and packed bounds of each member, and
+    /// the enumerated or packed aggregate type it is of.
+    members: Vec<(
+        String,
+        TypeKind,
+        bool,
+        Vec<[UnionBound; 2]>,
+        Option<Arc<enums::EnumDomain>>,
+        Option<Arc<str>>,
+    )>,
+}
+
+/// A packed bound of a union member: its value, or its spelling when it
+/// is no literal.
+type UnionBound = Result<i128, String>;
+
+impl UnionIdentity {
+    /// The identity of the unpacked union type of `shape`, if it is one.
+    pub(in crate::ast) fn of_shape(shape: &VariableDimensions) -> Option<Self> {
+        shape
+            .unpacked_union
+            .then(|| Self::of(&shape.members))
+            .flatten()
+    }
+
+    fn of_type(ty: &Type) -> Option<Self> {
+        ty.unpacked_union.then(|| Self::of(&ty.members)).flatten()
+    }
+
+    fn of(members: &[packed_structs::PackedMember]) -> Option<Self> {
+        Some(Self {
+            owner: members.first()?.owner().clone(),
+            members: members
+                .iter()
+                .map(|member| {
+                    let ty = member.r#type();
+                    // The same bound is spelled as a plain or as a typed
+                    // literal, by where the type was bound.
+                    let bound = |bound: &ConstExpr| match bound {
+                        ConstExpr::Literal(text) => typecheck::parse_integral_literal(text)
+                            .and_then(|literal| typecheck::integral_literal_as_i128(&literal, true))
+                            .ok_or_else(|| text.clone()),
+                        other => Err(format!("{other:?}")),
+                    };
+                    (
+                        member.name().to_string(),
+                        ty.kind,
+                        ty.is_signed,
+                        ty.packed_ranges
+                            .iter()
+                            .map(|range| [bound(&range.left), bound(&range.right)])
+                            .collect(),
+                        // Members of one shape are still of other types
+                        // where they are other enumerations or packed
+                        // aggregates (6.22.1).
+                        ty.enum_domain.clone(),
+                        ty.members.first().map(|member| member.owner().clone()),
+                    )
+                })
+                .collect(),
+        })
+    }
+}
+
+/// The values one binding of an expression may read as whole unpacked
+/// unions. An unpacked union is not integral (IEEE 1800-2023 7.3): a whole
+/// value of one is assigned to a destination of its type (a variable, a
+/// formal, a result), compared for equality with another value of its type
+/// and chosen by a conditional. The binder checks every value it reads
+/// against this list, as it does a chandle, so any other context, a
+/// condition, an index, a count, an argument of a system subroutine, a
+/// member of a pattern, rejects one without a check of its own.
+#[derive(Default)]
+pub(in crate::ast) struct UnionPermits {
+    /// The native expressions that may be whole unions.
+    granted: Vec<ExprId>,
+}
+
+impl UnionPermits {
+    /// Let `id` be a whole union if `granted`.
+    pub(in crate::ast) fn grant_if(&mut self, granted: bool, id: ExprId) {
+        if granted {
+            self.granted.push(id);
+        }
+    }
+
+    /// Check value `id`, which the binder reads for a destination of shape
+    /// `target`, returning whether it may be a whole union.
+    #[inline(never)]
+    pub(in crate::ast) fn check(
+        &mut self,
+        session: &mut Session,
+        id: ExprId,
+        target: Option<&VariableDimensions>,
+        tree: &AnalysisContext<'_>,
+        native: &celox_sv_syntax::Declarations,
+        dims: &PackedDimensions,
+    ) -> Converted<bool> {
+        // A type query reads no value (20.6).
+        let permitted = self.granted.contains(&id)
+            || target.is_some_and(|shape| shape.unpacked_union && shape.unpacked.is_empty())
+            || dims.type_query;
+        if !permitted
+            && matches!(
+                native.expression(id).kind,
+                ExprKind::Name(_)
+                    | ExprKind::Select { .. }
+                    | ExprKind::Member { .. }
+                    | ExprKind::Call { .. }
+            )
+            && native_union(id, native, tree, session, dims)?.is_some()
+        {
+            return Err(unsupported(format!(
+                "unpacked union value `{}` used as a value of another type",
+                native.token_text(native.expression(id).tokens).trim()
+            )));
+        }
+        Ok(permitted)
+    }
+
+    /// Grant the operands of an equality operator, which compares two
+    /// values of one union type ([`check_operands`] rejects any other).
+    pub(in crate::ast) fn binary(&mut self, operator: &str, left: ExprId, right: ExprId) {
+        if matches!(operator, "==" | "!=" | "===" | "!==") {
+            self.granted.extend([left, right]);
+        }
+    }
+}
+
+/// The identity of the unpacked union type of native expression `id`,
+/// judged before it is bound, or `None` when it is not a whole value of
+/// such a type. A member read is an integral value, not a whole union.
+/// Only dimension and type lookups are used, never binding: this runs for
+/// every bound expression, including on specialization paths where the
+/// fallbacks of [`native_struct`] would re-enter analysis.
+pub(in crate::ast) fn native_union(
+    id: ExprId,
+    native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    _session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<Option<UnionIdentity>> {
+    let owner_of_type = UnionIdentity::of_type;
+    let owner_of_shape = UnionIdentity::of_shape;
+    let id = expression_binding::ungroup(id, native);
+    if let Some((container, _)) = locators::record_iterator(id, native, dims) {
+        return Ok(owner_of_type(&container.element));
+    }
+    Ok(match &native.expression(id).kind {
+        // A signal of an interface named by a path is a variable too.
+        ExprKind::Member { .. }
+            if let Some(variable) =
+                expression_binding::interface_variable(id, native, tree, _session, dims) =>
+        {
+            dims.get(&variable)
+                .filter(|shape| shape.unpacked.is_empty())
+                .and_then(owner_of_shape)
+        }
+        ExprKind::Name(_) | ExprKind::Member { .. } => member_path(id, native)
+            .map(|mut parts| {
+                collapse(&mut parts, dims);
+                parts
+            })
+            .filter(|parts| parts.len() == 1)
+            .and_then(|parts| {
+                let shape = dims.get(&parts[0])?;
+                shape
+                    .unpacked
+                    .is_empty()
+                    .then(|| owner_of_shape(shape))
+                    .flatten()
+            }),
+        ExprKind::Select { .. } => {
+            let mut base = id;
+            let mut indices = 0;
+            while let ExprKind::Select {
+                expression,
+                dimension,
+            } = &native.expression(base).kind
+            {
+                if !matches!(dimension.kind, celox_sv_syntax::DimensionKind::Index(_)) {
+                    break;
+                }
+                indices += 1;
+                base = expression_binding::ungroup(*expression, native);
+            }
+            if indices == 0 {
+                None
+            } else if let Some(name) = expression_binding::native_name(tree, base, native)
+                && let Some(shape) = dims.get(&name)
+            {
+                if indices == shape.unpacked.len() && !shape.unpacked.is_empty() {
+                    owner_of_shape(shape)
+                } else if indices == 1
+                    && let Some(container) = &shape.container
+                {
+                    owner_of_type(&container.element)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        ExprKind::Conditional {
+            then_expression,
+            else_expression,
+            ..
+        } => {
+            let then_owner = native_union(*then_expression, native, tree, _session, dims)?;
+            let else_owner = native_union(*else_expression, native, tree, _session, dims)?;
+            then_owner.filter(|owner| else_owner.as_ref() == Some(owner))
+        }
+        ExprKind::Pattern {
+            target: Some(_), ..
+        } if std::ptr::eq(native, tree.declarations()) => patterns::typed_shape(id, tree, dims)?
+            .filter(|shape| shape.unpacked.is_empty())
+            .and_then(|shape| owner_of_shape(&shape)),
+        ExprKind::Call { expression, .. } => {
+            expression_binding::callable_name(tree, *expression, native)
+                .and_then(|name| dims.functions.get(&name))
+                .and_then(|function| function.return_type.as_ref())
+                .and_then(owner_of_type)
+        }
+        _ => None,
+    })
+}
+
+/// Check that `value` is a value of the unpacked union type `owner`, as
+/// [`check_value`] does for a structure.
+pub(in crate::ast) fn check_union_value(
+    owner: &UnionIdentity,
+    value: ExprId,
+    native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<()> {
+    let value = expression_binding::ungroup(value, native);
+    // An untyped pattern takes the target's type; pattern binding rejects
+    // a union pattern itself.
+    if matches!(
+        native.expression(value).kind,
+        ExprKind::Pattern { target: None, .. }
+    ) {
+        return Ok(());
+    }
+    if let ExprKind::Conditional {
+        then_expression,
+        else_expression,
+        ..
+    } = &native.expression(value).kind
+    {
+        check_union_value(owner, *then_expression, native, tree, session, dims)?;
+        return check_union_value(owner, *else_expression, native, tree, session, dims);
+    }
+    match native_union(value, native, tree, session, dims)? {
+        Some(actual) if actual == *owner => Ok(()),
+        _ => Err(unsupported(
+            "assignment to an unpacked union of a value that is not of its type",
+        )),
+    }
+}
+
+/// Reject an operator applied to a whole unpacked structure or union value: only the
 /// equality operators, the conditional operator and assignment take one
-/// (IEEE 1800-2023 7.2, 11.2.2).
+/// (IEEE 1800-2023 7.2, 7.3, 11.2.2).
 pub(in crate::ast) fn check_operands(
     id: ExprId,
     native: &celox_sv_syntax::Declarations,
@@ -674,6 +947,16 @@ pub(in crate::ast) fn check_operands(
             right,
         } => {
             if matches!(operator.as_str(), "==" | "!=" | "===" | "!==") {
+                let left_union = native_union(*left, native, tree, session, dims)?;
+                let right_union = native_union(*right, native, tree, session, dims)?;
+                if left_union.is_some() || right_union.is_some() {
+                    return match (left_union, right_union) {
+                        (Some(left), Some(right)) if left == right => Ok(()),
+                        _ => Err(unsupported(format!(
+                            "operator `{operator}` comparing an unpacked union with a value of another type"
+                        ))),
+                    };
+                }
                 let left_type = native_struct(*left, native, tree, session, dims)?;
                 let right_type = native_struct(*right, native, tree, session, dims)?;
                 return match (left_type, right_type) {
@@ -696,6 +979,11 @@ pub(in crate::ast) fn check_operands(
         if native_struct(operand, native, tree, session, dims)?.is_some() {
             return Err(unsupported(
                 "operator, select or cast applied to an unpacked structure",
+            ));
+        }
+        if native_union(operand, native, tree, session, dims)?.is_some() {
+            return Err(unsupported(
+                "operator, select or cast applied to an unpacked union",
             ));
         }
     }
