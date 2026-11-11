@@ -363,3 +363,41 @@ display_plusargs!(
 display_plusargs!(ordered_arguments_compiled, build, ORDERED, "3 1 5 7");
 #[cfg(target_arch = "x86_64")]
 display_plusargs!(ordered_arguments_native, build_native, ORDERED, "3 1 5 7");
+
+// A `string` destination takes the argument's text and keeps its value when
+// no argument matches (IEEE 1800-2023 21.6).
+macro_rules! string_destination_backend {
+    ($name:ident, $backend:ident) => {
+        #[test]
+        fn $name() {
+            let source = r#"
+                module Top(output logic ok);
+                  string greeting = "Hello World";
+                  string kept = "kept";
+                  initial begin
+                    ok = $value$plusargs("greeting=%s", greeting) == 1;
+                    ok &= greeting == "Howdy User";
+                    ok &= greeting.len() == 10;
+                    ok &= $value$plusargs("missing=%s", kept) == 0;
+                    ok &= kept == "kept";
+                  end
+                endmodule
+            "#;
+            let mut sim = celox::Simulation::from_sv_sources(
+                vec![(source, Path::new("plusargs_string.sv"))],
+                "Top",
+            )
+            .plusargs(["+greeting=Howdy User"])
+            .$backend()
+            .unwrap();
+            sim.run_until(0).unwrap();
+            let ok = sim.signal("ok");
+            assert_eq!(sim.get(ok), 1u8.into());
+        }
+    };
+}
+string_destination_backend!(string_destination_interpreter, build_interpreter);
+string_destination_backend!(string_destination_cranelift, build);
+#[cfg(target_arch = "x86_64")]
+string_destination_backend!(string_destination_native, build_native);
+string_destination_backend!(string_destination_wasm, build_wasm);

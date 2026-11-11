@@ -290,8 +290,9 @@ blocks in programs. Two region deviations are listed under
 - Container formals: function results of container type, class properties
   and container elements as `output` / `inout` actuals, and actuals whose
   element types differ from the formal's.
-- Strings <a id="strings"></a>: `atoreal` / `realtoa`; string arguments of
-  `$value$plusargs`, file I/O, and DPI-C; string values in VPI, VCD output,
+- Strings <a id="strings"></a>: `atoreal` / `realtoa`; a string variable as
+  the format of `$value$plusargs`; string arguments of file I/O and DPI-C;
+  string values in VPI, VCD output,
   and the TypeScript API; nonblocking character writes to fixed string
   arrays; method calls on whole string arrays or subarrays; array-valued
   string arguments or return values.
@@ -379,7 +380,8 @@ nonblocking action statements.
   `real` members, other aggregate function results, and containers of other
   aggregates. `%p` with a run-time format prints a string in quotes and any
   other value as `%0d`.
-- Plusargs: `real` conversions and dynamic strings in `$value$plusargs`.
+- Plusargs: `real` conversions and a string variable as the format of
+  `$value$plusargs`. A `string` destination takes the `%s` conversion only.
 
 ## Intentional deviations {#intentional-deviations}
 
