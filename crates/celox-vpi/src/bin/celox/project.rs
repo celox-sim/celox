@@ -631,11 +631,12 @@ impl Design {
             path.extension()
                 .is_some_and(|extension| extension == "sv" || extension == "v")
         };
+        // File lists name library and header files with any extension
+        // (`cells.vlib`); only a Veryl source makes the design a Veryl one.
         self.sources.iter().any(is_module_source)
-            && self.sources.iter().all(|path| {
-                path.extension().is_some_and(|extension| {
-                    matches!(extension.to_str(), Some("sv" | "v" | "svh" | "vh" | "h"))
-                })
+            && !self.sources.iter().any(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "veryl")
             })
     }
 
