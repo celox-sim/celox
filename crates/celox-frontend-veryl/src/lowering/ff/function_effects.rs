@@ -650,6 +650,335 @@ impl<'a> FfParser<'a> {
         Ok(())
     }
 
+    /// The runtime effects of an `if` statement of a function body on the path `active`.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_function_if_effects<A>(
+        &mut self,
+        statement: &IfStatement,
+        ret_id: Option<VarId>,
+        mut state: HashMap<VarId, Expression>,
+        mut active: FunctionPathCondition,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<(HashMap<VarId, Expression>, FunctionPathCondition), ParserError> {
+        let condition = if self.expression_needs_runtime_materialization(&statement.cond) {
+            self.materialize_function_runtime_expression(
+                &statement.cond,
+                &mut state,
+                &active,
+                targets,
+                domain,
+                convert,
+                sources,
+                ir_builder,
+            )?
+        } else {
+            self.substitute_function_expr(&statement.cond, &state)
+        };
+        let base = state.clone();
+        let true_active = Self::function_path_and(active.clone(), condition.clone());
+        let false_active = Self::function_path_and_not(active.clone(), condition.clone());
+        let (then_state, then_active) = self.emit_function_runtime_effects_in_path(
+            &statement.true_side,
+            ret_id,
+            &base,
+            true_active,
+            targets,
+            domain,
+            convert,
+            sources,
+            ir_builder,
+        )?;
+        let (else_state, else_active) = self.emit_function_runtime_effects_in_path(
+            &statement.false_side,
+            ret_id,
+            &base,
+            false_active,
+            targets,
+            domain,
+            convert,
+            sources,
+            ir_builder,
+        )?;
+        state = self.merge_expression_states(&condition, &base, &then_state, &else_state);
+        active = Self::function_path_or(then_active, else_active);
+        Ok((state, active))
+    }
+
+    /// The runtime effects of a `case` statement of a function body on the path `active`.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_function_case_effects<A>(
+        &mut self,
+        statement: &CaseStatement,
+        ret_id: Option<VarId>,
+        mut state: HashMap<VarId, Expression>,
+        mut active: FunctionPathCondition,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<(HashMap<VarId, Expression>, FunctionPathCondition), ParserError> {
+        let pattern_needs_eager_evaluation = statement.arms.iter().any(|arm| {
+            arm.patterns.iter().any(|pattern| match pattern {
+                CasePattern::Eq(expr) => self.expression_needs_eager_evaluation(expr),
+                CasePattern::Range { lo, hi, .. } => {
+                    self.expression_needs_eager_evaluation(lo)
+                        || self.expression_needs_eager_evaluation(hi)
+                }
+            })
+        });
+        if pattern_needs_eager_evaluation
+            || self.expression_needs_runtime_materialization(&statement.case_target)
+        {
+            self.materialize_function_runtime_expression(
+                &statement.case_target,
+                &mut state,
+                &active,
+                targets,
+                domain,
+                convert,
+                sources,
+                ir_builder,
+            )?;
+        }
+        let case_base = state.clone();
+        let mut remaining = active.clone();
+        let mut live_paths = FunctionPathCondition::Never;
+        let mut arm_states = Vec::with_capacity(statement.arms.len());
+        for arm in &statement.arms {
+            let last_effectful_pattern = arm.patterns.iter().rposition(|pattern| match pattern {
+                CasePattern::Eq(expr) => self.expression_needs_eager_evaluation(expr),
+                CasePattern::Range { lo, hi, .. } => {
+                    self.expression_needs_eager_evaluation(lo)
+                        || self.expression_needs_eager_evaluation(hi)
+                }
+            });
+            let mut pattern_remaining = remaining.clone();
+            let mut arm_active = FunctionPathCondition::Never;
+            let mut arm_condition = None;
+            for (pattern_index, pattern) in arm.patterns.iter().enumerate() {
+                let snapshot_for_later_effect =
+                    last_effectful_pattern.is_some_and(|last| pattern_index < last);
+                match pattern {
+                    CasePattern::Eq(expr) => {
+                        if snapshot_for_later_effect
+                            || self.expression_needs_runtime_materialization(expr)
+                        {
+                            self.materialize_function_runtime_expression(
+                                expr,
+                                &mut state,
+                                &pattern_remaining,
+                                targets,
+                                domain,
+                                convert,
+                                sources,
+                                ir_builder,
+                            )?;
+                        }
+                    }
+                    CasePattern::Range { lo, hi, .. } => {
+                        let hi_is_effectful = self.expression_needs_eager_evaluation(hi);
+                        if snapshot_for_later_effect
+                            || hi_is_effectful
+                            || self.expression_needs_runtime_materialization(lo)
+                        {
+                            self.materialize_function_runtime_expression(
+                                lo,
+                                &mut state,
+                                &pattern_remaining,
+                                targets,
+                                domain,
+                                convert,
+                                sources,
+                                ir_builder,
+                            )?;
+                        }
+                        if snapshot_for_later_effect
+                            || hi_is_effectful
+                            || self.expression_needs_assignment_snapshot(hi)
+                        {
+                            let lower_condition = self.substitute_function_expr(
+                                &Expression::Binary(
+                                    lo.clone(),
+                                    Op::LessEq,
+                                    statement.case_target.clone(),
+                                    Box::new(Comptime::create_unknown(TokenRange::default())),
+                                ),
+                                &state,
+                            );
+                            let upper_active = Self::function_path_and(
+                                pattern_remaining.clone(),
+                                Self::function_control_may_be_true(lower_condition),
+                            );
+                            self.materialize_function_runtime_expression(
+                                hi,
+                                &mut state,
+                                &upper_active,
+                                targets,
+                                domain,
+                                convert,
+                                sources,
+                                ir_builder,
+                            )?;
+                        }
+                    }
+                }
+                let pattern_base = state.clone();
+                let condition = self.substitute_function_expr(
+                    &case_arm_condition_expr(&statement.case_target, std::slice::from_ref(pattern)),
+                    &pattern_base,
+                );
+                let matched = Self::function_path_and(pattern_remaining.clone(), condition.clone());
+                arm_condition = Some(match arm_condition {
+                    None => condition.clone(),
+                    Some(previous) => Expression::Binary(
+                        Box::new(previous),
+                        Op::LogicOr,
+                        Box::new(condition.clone()),
+                        Box::new(Comptime::create_unknown(TokenRange::default())),
+                    ),
+                });
+                arm_active = Self::function_path_or(arm_active, matched);
+                pattern_remaining = Self::function_path_and_not(pattern_remaining, condition);
+            }
+            let base = state.clone();
+            let (_, arm_live) = self.emit_function_runtime_effects_in_path(
+                &arm.body, ret_id, &base, arm_active, targets, domain, convert, sources, ir_builder,
+            )?;
+            // The emitted state includes the case-selection guard,
+            // which can retain a self-reference for output formals.
+            // Recompute without that guard, but preserve the outer
+            // live-path condition from preceding returns. Case
+            // priority is applied once below.
+            let (arm_state, _) = self.apply_statements_to_function_state_in_path(
+                &arm.body,
+                ret_id,
+                &base,
+                active.clone(),
+            )?;
+            arm_states.push((
+                arm_condition.expect("Case arm must have at least one pattern"),
+                arm_state,
+            ));
+            live_paths = Self::function_path_or(live_paths, arm_live);
+            remaining = pattern_remaining;
+        }
+        let base = state.clone();
+        let (_, default_live) = self.emit_function_runtime_effects_in_path(
+            &statement.default,
+            ret_id,
+            &base,
+            remaining,
+            targets,
+            domain,
+            convert,
+            sources,
+            ir_builder,
+        )?;
+        let (default_state, _) = self.apply_statements_to_function_state_in_path(
+            &statement.default,
+            ret_id,
+            &base,
+            active.clone(),
+        )?;
+        state =
+            arm_states
+                .into_iter()
+                .rev()
+                .fold(default_state, |merged, (condition, arm_state)| {
+                    self.merge_expression_states(&condition, &case_base, &arm_state, &merged)
+                });
+        active = Self::function_path_or(live_paths, default_live);
+        Ok((state, active))
+    }
+
+    /// The runtime effects of a statement-form function call of a function body on the path
+    /// `active`.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_function_call_effects<A>(
+        &mut self,
+        statement: &Statement,
+        call: &veryl_analyzer::ir::FunctionCall,
+        mut state: HashMap<VarId, Expression>,
+        active: FunctionPathCondition,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<(HashMap<VarId, Expression>, FunctionPathCondition), ParserError> {
+        if call
+            .outputs
+            .values()
+            .flatten()
+            .any(|dst| self.assignment_destination_needs_eager_evaluation(dst))
+        {
+            return Err(ParserError::internal(
+                "effectful function call output destination in function body (calls needing it are lowered inline)",
+                format!("{statement}"),
+                Some(&call.comptime.token),
+            ));
+        }
+        if self.function_call_has_runtime_effect(call, &mut HashSet::default()) {
+            return Err(ParserError::internal(
+                "nested runtime effect in function body (calls needing it are lowered inline)",
+                format!("{statement}"),
+                Some(&call.comptime.token),
+            ));
+        }
+        let Some(function) = self.module.functions.get(&call.id) else {
+            return Err(ParserError::internal(
+                "function call",
+                format!("unknown function id: {:?}", call.id),
+                Some(&call.comptime.token),
+            ));
+        };
+        let ordered_inputs: Vec<_> = function
+            .args
+            .iter()
+            .flat_map(|arg| arg.members.iter().map(|(path, _, _)| path))
+            .filter_map(|path| function_call_arg(&call.inputs, path).cloned())
+            .collect();
+        let last_effectful = ordered_inputs
+            .iter()
+            .rposition(|expr| self.expression_needs_eager_evaluation(expr));
+        if let Some(last_effectful) = last_effectful {
+            for expr in &ordered_inputs[..=last_effectful] {
+                self.materialize_function_runtime_expression(
+                    expr, &mut state, &active, targets, domain, convert, sources, ir_builder,
+                )?;
+            }
+        }
+        let mut state_call = call.clone();
+        self.retain_direct_runtime_copyouts(&mut state_call, false);
+        let mut direct_call = call.clone();
+        self.retain_direct_runtime_copyouts(&mut direct_call, true);
+        let emitted_direct_call = direct_call.outputs.values().any(|dsts| !dsts.is_empty());
+        if emitted_direct_call {
+            self.emit_dynamic_nonlocal_statement_call(
+                &direct_call,
+                &mut state,
+                &active,
+                targets,
+                domain,
+                convert,
+                sources,
+                ir_builder,
+            )?;
+        }
+        let base = state.clone();
+        let mut transitioned = self.apply_function_call_to_state(&state_call, &base)?;
+        if emitted_direct_call {
+            self.mark_emitted_call_state(&state_call, &mut transitioned);
+        }
+        state = self.apply_state_transition_on_path(&active, &base, transitioned);
+        Ok((state, active))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn emit_function_runtime_effects_in_path<A>(
         &mut self,
@@ -726,238 +1055,16 @@ impl<'a> FfParser<'a> {
                 }
                 Statement::Null => {}
                 Statement::If(statement) => {
-                    let condition =
-                        if self.expression_needs_runtime_materialization(&statement.cond) {
-                            self.materialize_function_runtime_expression(
-                                &statement.cond,
-                                &mut state,
-                                &active,
-                                targets,
-                                domain,
-                                convert,
-                                sources,
-                                ir_builder,
-                            )?
-                        } else {
-                            self.substitute_function_expr(&statement.cond, &state)
-                        };
-                    let base = state.clone();
-                    let true_active = Self::function_path_and(active.clone(), condition.clone());
-                    let false_active =
-                        Self::function_path_and_not(active.clone(), condition.clone());
-                    let (then_state, then_active) = self.emit_function_runtime_effects_in_path(
-                        &statement.true_side,
-                        ret_id,
-                        &base,
-                        true_active,
-                        targets,
-                        domain,
-                        convert,
-                        sources,
+                    (state, active) = self.emit_function_if_effects(
+                        statement, ret_id, state, active, targets, domain, convert, sources,
                         ir_builder,
                     )?;
-                    let (else_state, else_active) = self.emit_function_runtime_effects_in_path(
-                        &statement.false_side,
-                        ret_id,
-                        &base,
-                        false_active,
-                        targets,
-                        domain,
-                        convert,
-                        sources,
-                        ir_builder,
-                    )?;
-                    state =
-                        self.merge_expression_states(&condition, &base, &then_state, &else_state);
-                    active = Self::function_path_or(then_active, else_active);
                 }
                 Statement::Case(statement) => {
-                    let pattern_needs_eager_evaluation = statement.arms.iter().any(|arm| {
-                        arm.patterns.iter().any(|pattern| match pattern {
-                            CasePattern::Eq(expr) => self.expression_needs_eager_evaluation(expr),
-                            CasePattern::Range { lo, hi, .. } => {
-                                self.expression_needs_eager_evaluation(lo)
-                                    || self.expression_needs_eager_evaluation(hi)
-                            }
-                        })
-                    });
-                    if pattern_needs_eager_evaluation
-                        || self.expression_needs_runtime_materialization(&statement.case_target)
-                    {
-                        self.materialize_function_runtime_expression(
-                            &statement.case_target,
-                            &mut state,
-                            &active,
-                            targets,
-                            domain,
-                            convert,
-                            sources,
-                            ir_builder,
-                        )?;
-                    }
-                    let case_base = state.clone();
-                    let mut remaining = active.clone();
-                    let mut live_paths = FunctionPathCondition::Never;
-                    let mut arm_states = Vec::with_capacity(statement.arms.len());
-                    for arm in &statement.arms {
-                        let last_effectful_pattern =
-                            arm.patterns.iter().rposition(|pattern| match pattern {
-                                CasePattern::Eq(expr) => {
-                                    self.expression_needs_eager_evaluation(expr)
-                                }
-                                CasePattern::Range { lo, hi, .. } => {
-                                    self.expression_needs_eager_evaluation(lo)
-                                        || self.expression_needs_eager_evaluation(hi)
-                                }
-                            });
-                        let mut pattern_remaining = remaining.clone();
-                        let mut arm_active = FunctionPathCondition::Never;
-                        let mut arm_condition = None;
-                        for (pattern_index, pattern) in arm.patterns.iter().enumerate() {
-                            let snapshot_for_later_effect =
-                                last_effectful_pattern.is_some_and(|last| pattern_index < last);
-                            match pattern {
-                                CasePattern::Eq(expr) => {
-                                    if snapshot_for_later_effect
-                                        || self.expression_needs_runtime_materialization(expr)
-                                    {
-                                        self.materialize_function_runtime_expression(
-                                            expr,
-                                            &mut state,
-                                            &pattern_remaining,
-                                            targets,
-                                            domain,
-                                            convert,
-                                            sources,
-                                            ir_builder,
-                                        )?;
-                                    }
-                                }
-                                CasePattern::Range { lo, hi, .. } => {
-                                    let hi_is_effectful =
-                                        self.expression_needs_eager_evaluation(hi);
-                                    if snapshot_for_later_effect
-                                        || hi_is_effectful
-                                        || self.expression_needs_runtime_materialization(lo)
-                                    {
-                                        self.materialize_function_runtime_expression(
-                                            lo,
-                                            &mut state,
-                                            &pattern_remaining,
-                                            targets,
-                                            domain,
-                                            convert,
-                                            sources,
-                                            ir_builder,
-                                        )?;
-                                    }
-                                    if snapshot_for_later_effect
-                                        || hi_is_effectful
-                                        || self.expression_needs_assignment_snapshot(hi)
-                                    {
-                                        let lower_condition = self.substitute_function_expr(
-                                            &Expression::Binary(
-                                                lo.clone(),
-                                                Op::LessEq,
-                                                statement.case_target.clone(),
-                                                Box::new(Comptime::create_unknown(
-                                                    TokenRange::default(),
-                                                )),
-                                            ),
-                                            &state,
-                                        );
-                                        let upper_active = Self::function_path_and(
-                                            pattern_remaining.clone(),
-                                            Self::function_control_may_be_true(lower_condition),
-                                        );
-                                        self.materialize_function_runtime_expression(
-                                            hi,
-                                            &mut state,
-                                            &upper_active,
-                                            targets,
-                                            domain,
-                                            convert,
-                                            sources,
-                                            ir_builder,
-                                        )?;
-                                    }
-                                }
-                            }
-                            let pattern_base = state.clone();
-                            let condition = self.substitute_function_expr(
-                                &case_arm_condition_expr(
-                                    &statement.case_target,
-                                    std::slice::from_ref(pattern),
-                                ),
-                                &pattern_base,
-                            );
-                            let matched = Self::function_path_and(
-                                pattern_remaining.clone(),
-                                condition.clone(),
-                            );
-                            arm_condition = Some(match arm_condition {
-                                None => condition.clone(),
-                                Some(previous) => Expression::Binary(
-                                    Box::new(previous),
-                                    Op::LogicOr,
-                                    Box::new(condition.clone()),
-                                    Box::new(Comptime::create_unknown(TokenRange::default())),
-                                ),
-                            });
-                            arm_active = Self::function_path_or(arm_active, matched);
-                            pattern_remaining =
-                                Self::function_path_and_not(pattern_remaining, condition);
-                        }
-                        let base = state.clone();
-                        let (_, arm_live) = self.emit_function_runtime_effects_in_path(
-                            &arm.body, ret_id, &base, arm_active, targets, domain, convert,
-                            sources, ir_builder,
-                        )?;
-                        // The emitted state includes the case-selection guard,
-                        // which can retain a self-reference for output formals.
-                        // Recompute without that guard, but preserve the outer
-                        // live-path condition from preceding returns. Case
-                        // priority is applied once below.
-                        let (arm_state, _) = self.apply_statements_to_function_state_in_path(
-                            &arm.body,
-                            ret_id,
-                            &base,
-                            active.clone(),
-                        )?;
-                        arm_states.push((
-                            arm_condition.expect("Case arm must have at least one pattern"),
-                            arm_state,
-                        ));
-                        live_paths = Self::function_path_or(live_paths, arm_live);
-                        remaining = pattern_remaining;
-                    }
-                    let base = state.clone();
-                    let (_, default_live) = self.emit_function_runtime_effects_in_path(
-                        &statement.default,
-                        ret_id,
-                        &base,
-                        remaining,
-                        targets,
-                        domain,
-                        convert,
-                        sources,
+                    (state, active) = self.emit_function_case_effects(
+                        statement, ret_id, state, active, targets, domain, convert, sources,
                         ir_builder,
                     )?;
-                    let (default_state, _) = self.apply_statements_to_function_state_in_path(
-                        &statement.default,
-                        ret_id,
-                        &base,
-                        active.clone(),
-                    )?;
-                    state = arm_states.into_iter().rev().fold(
-                        default_state,
-                        |merged, (condition, arm_state)| {
-                            self.merge_expression_states(
-                                &condition, &case_base, &arm_state, &merged,
-                            )
-                        },
-                    );
-                    active = Self::function_path_or(live_paths, default_live);
                 }
                 Statement::For(statement) => {
                     return Err(ParserError::internal(
@@ -967,73 +1074,10 @@ impl<'a> FfParser<'a> {
                     ));
                 }
                 Statement::FunctionCall(call) => {
-                    if call
-                        .outputs
-                        .values()
-                        .flatten()
-                        .any(|dst| self.assignment_destination_needs_eager_evaluation(dst))
-                    {
-                        return Err(ParserError::internal(
-                            "effectful function call output destination in function body (calls needing it are lowered inline)",
-                            format!("{statement}"),
-                            Some(&call.comptime.token),
-                        ));
-                    }
-                    if self.function_call_has_runtime_effect(call, &mut HashSet::default()) {
-                        return Err(ParserError::internal(
-                            "nested runtime effect in function body (calls needing it are lowered inline)",
-                            format!("{statement}"),
-                            Some(&call.comptime.token),
-                        ));
-                    }
-                    let Some(function) = self.module.functions.get(&call.id) else {
-                        return Err(ParserError::internal(
-                            "function call",
-                            format!("unknown function id: {:?}", call.id),
-                            Some(&call.comptime.token),
-                        ));
-                    };
-                    let ordered_inputs: Vec<_> = function
-                        .args
-                        .iter()
-                        .flat_map(|arg| arg.members.iter().map(|(path, _, _)| path))
-                        .filter_map(|path| function_call_arg(&call.inputs, path).cloned())
-                        .collect();
-                    let last_effectful = ordered_inputs
-                        .iter()
-                        .rposition(|expr| self.expression_needs_eager_evaluation(expr));
-                    if let Some(last_effectful) = last_effectful {
-                        for expr in &ordered_inputs[..=last_effectful] {
-                            self.materialize_function_runtime_expression(
-                                expr, &mut state, &active, targets, domain, convert, sources,
-                                ir_builder,
-                            )?;
-                        }
-                    }
-                    let mut state_call = call.clone();
-                    self.retain_direct_runtime_copyouts(&mut state_call, false);
-                    let mut direct_call = call.clone();
-                    self.retain_direct_runtime_copyouts(&mut direct_call, true);
-                    let emitted_direct_call =
-                        direct_call.outputs.values().any(|dsts| !dsts.is_empty());
-                    if emitted_direct_call {
-                        self.emit_dynamic_nonlocal_statement_call(
-                            &direct_call,
-                            &mut state,
-                            &active,
-                            targets,
-                            domain,
-                            convert,
-                            sources,
-                            ir_builder,
-                        )?;
-                    }
-                    let base = state.clone();
-                    let mut transitioned = self.apply_function_call_to_state(&state_call, &base)?;
-                    if emitted_direct_call {
-                        self.mark_emitted_call_state(&state_call, &mut transitioned);
-                    }
-                    state = self.apply_state_transition_on_path(&active, &base, transitioned);
+                    (state, active) = self.emit_function_call_effects(
+                        statement, call, state, active, targets, domain, convert, sources,
+                        ir_builder,
+                    )?;
                 }
                 Statement::IfReset(statement) => {
                     return Err(ParserError::illegal_context(
