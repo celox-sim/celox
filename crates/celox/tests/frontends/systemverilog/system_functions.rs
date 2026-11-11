@@ -3485,3 +3485,78 @@ fn bare(events: Vec<celox::RuntimeEvent>) -> Vec<celox::RuntimeEvent> {
         })
         .collect()
 }
+
+/// A file whose name is a `string` variable is read when the task executes
+/// (IEEE 1800-2023 21.4): the words it does not give keep their values, a
+/// shorter file is a warning, and a file that cannot be read ends the run.
+#[test]
+fn readmem_reads_a_file_named_at_run_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let hex = dir.path().join("words.hex");
+    std::fs::write(&hex, "12 34 5x").unwrap();
+    let bin = dir.path().join("words.bin");
+    std::fs::write(&bin, "1010_0101\n0000_1111").unwrap();
+    let source = format!(
+        r#"`timescale 1ns/1ns
+        module top;
+            logic [7:0] up [0:3];
+            logic [7:0] down [3:0];
+            string path;
+            initial begin
+                up[3] = 8'hee;
+                down[3] = 8'h11; down[0] = 8'h22;
+                if (!$value$plusargs("words=%s", path)) path = "{}";
+                $readmemh(path, up);
+                path = "{}";
+                $readmemb(path, down, 2, 1);
+                #1 $display("%h %h %h %h", up[0], up[1], up[2], up[3]);
+                $display("%h %h %h %h", down[3], down[2], down[1], down[0]);
+                $finish;
+            end
+        endmodule"#,
+        hex.display(),
+        bin.display()
+    );
+    for (four_state, third) in [(false, "50"), (true, "5x")] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(&source, Path::new("readmem_run.sv"))], "top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        sim.run_until(10).unwrap();
+        let mut lines = Vec::new();
+        let mut warnings = Vec::new();
+        for event in sim.drain_runtime_events() {
+            match event {
+                celox::RuntimeEvent::Display { message } => {
+                    lines.push(String::from_utf8_lossy(&message).into_owned())
+                }
+                celox::RuntimeEvent::Report(report) => {
+                    assert_eq!(report.severity, celox::Severity::Warning);
+                    warnings.push(String::from_utf8_lossy(&report.message).into_owned());
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            lines,
+            [format!("12 34 {third} ee"), "11 a5 0f 22".to_string()],
+            "four_state={four_state}"
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("$readmemh reading") && warnings[0].contains("words.hex"),
+            "{warnings:?}"
+        );
+    }
+    let missing = source.replace("words.bin", "missing.bin");
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(&missing, Path::new("readmem_run.sv"))], "top")
+            .build()
+            .unwrap();
+    let error = sim.run_until(10).unwrap_err().to_string();
+    assert!(
+        error.contains("$readmemb: failed to read") && error.contains("missing.bin"),
+        "{error}"
+    );
+}
