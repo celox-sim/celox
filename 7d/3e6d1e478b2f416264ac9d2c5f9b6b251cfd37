@@ -1,0 +1,1 @@
+Address Codex review on PR #3542: keep parsed generate index separate from escaped names containing '[', and report indexed instance-array defparam targets as instance arrays instead of unresolved.
