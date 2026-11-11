@@ -1,0 +1,1 @@
+Reworked as agreed with the coordinator: an indexed part-select of a member is exact (bits outside the member read X / are not written) through a select window carried on the lvalue; ascending and structure-typed members take the same path; the documented deviation is gone.
