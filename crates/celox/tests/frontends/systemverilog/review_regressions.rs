@@ -5899,18 +5899,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "defparam assignment",
-            r#"
-            module Child #(parameter W = 1) (output logic [W-1:0] y);
-                assign y = '0;
-            endmodule
-            module Top(output logic y);
-                Child child(.y(y));
-                defparam child.W = 8;
-            endmodule
-        "#,
-        ),
-        (
             "unsupported parameter data type",
             r#"
             module Top #(parameter chandle P = null) (output logic y);

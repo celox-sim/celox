@@ -1501,6 +1501,7 @@ fn hides(
                 BodyItemKind::PackageBinding(_) => import(item.tokens),
                 BodyItemKind::Modport(_) | BodyItemKind::Unconverted { .. } => spelled(item.tokens),
                 BodyItemKind::Assign(_)
+                | BodyItemKind::Defparam(_)
                 | BodyItemKind::LogicGate(_)
                 | BodyItemKind::Procedure(_)
                 | BodyItemKind::Time(_)

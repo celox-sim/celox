@@ -857,7 +857,6 @@ fn validate_scope(
                 "bind" => Some("bind directive"),
                 "interconnect" => Some("interconnect net declaration"),
                 "specify" => Some("specify block"),
-                "defparam" => Some("defparam assignment"),
                 "assert" | "assume" | "cover" | "restrict" => {
                     let mut tokens = native.tokens[item.tokens.start..item.tokens.end]
                         .iter()

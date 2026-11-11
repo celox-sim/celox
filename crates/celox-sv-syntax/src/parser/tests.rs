@@ -3754,3 +3754,58 @@ fn unconverted_type_declarations_record_their_names() {
         .collect::<Vec<_>>();
     assert_eq!(nettypes, ["wide", "alias_t"]);
 }
+
+#[test]
+fn defparam_keeps_each_hierarchical_name_and_value() {
+    let syntax = parse(
+        r#"
+        module M;
+          defparam a.P = 1, g[2].u.Q = 3 + 4;
+          if (1) begin : b
+            defparam $root.M.a.R = 5;
+          end
+        endmodule
+    "#,
+    );
+    let unit = &syntax.units[0];
+    let BodyItemKind::Defparam(assignments) = &syntax.body_item(unit.items[0]).kind else {
+        panic!("{:?}", syntax.body_item(unit.items[0]).kind)
+    };
+    let names = |assignment: &DefparamAssignment| {
+        assignment
+            .path
+            .iter()
+            .map(|segment| (segment.name.value().to_string(), segment.index.is_some()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(assignments.len(), 2);
+    assert!(!assignments[0].rooted);
+    assert_eq!(
+        names(&assignments[0]),
+        [("a".to_string(), false), ("P".to_string(), false)]
+    );
+    assert_eq!(
+        names(&assignments[1]),
+        [
+            ("g".to_string(), true),
+            ("u".to_string(), false),
+            ("Q".to_string(), false)
+        ]
+    );
+    assert!(matches!(
+        syntax.expression(assignments[1].value).kind,
+        ExprKind::Binary { .. }
+    ));
+    // In a generate block, and from `$root`.
+    let nested = syntax
+        .body_items
+        .iter()
+        .filter_map(|item| match &item.kind {
+            BodyItemKind::Defparam(assignments) => Some(assignments),
+            _ => None,
+        })
+        .nth(1)
+        .expect("the generate block has a defparam");
+    assert!(nested[0].rooted);
+    assert_eq!(names(&nested[0]).len(), 3);
+}

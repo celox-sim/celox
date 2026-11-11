@@ -14,7 +14,14 @@ pub(super) fn instances_from_scope(
     let active = generate::items(syntax_tree, session, const_env, &type_aliases)?;
     let mut instances = Vec::new();
     let mut views = generate::ScopeViews::new(packed_dimensions);
+    let mut defparams = Vec::new();
     for item in &active {
+        if let celox_sv_syntax::BodyItemKind::Defparam(assignments) =
+            &syntax_tree.declarations().body_item(item.id).kind
+        {
+            defparams.extend(assignments.iter().map(|assignment| (item, assignment)));
+            continue;
+        }
         let syntax_tree = &item.scoped(syntax_tree);
         let celox_sv_syntax::BodyItemKind::Instance(native) =
             syntax_tree.declarations().body_item(item.id).kind
@@ -60,7 +67,238 @@ pub(super) fn instances_from_scope(
         }
     }
     instances.retain(|instance| !type_aliases.contains_key(instance.module_name()));
+    // The last `defparam` of a parameter in the source text gives its value
+    // (IEEE 1800-2023 23.10.1).
+    defparams.sort_by_key(|(_, assignment)| assignment.tokens.start);
+    for (item, assignment) in defparams {
+        apply_defparam(
+            item,
+            assignment,
+            syntax_tree,
+            session,
+            &mut views,
+            &mut instances,
+        )?;
+    }
     Ok(instances)
+}
+
+/// Give the instance that `assignment` names the parameter value it assigns
+/// (IEEE 1800-2023 23.10.1). The value is evaluated in the scope of the
+/// `defparam` and takes precedence over a parameter assignment of the
+/// instantiation (23.10); the instance is one of this module, in the
+/// generate block of the `defparam` when it is in one.
+fn apply_defparam<'a>(
+    item: &'a generate::Item,
+    assignment: &celox_sv_syntax::DefparamAssignment,
+    syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    views: &mut generate::ScopeViews<'a>,
+    instances: &mut [Instance],
+) -> Converted<()> {
+    let scoped = item.scoped(syntax_tree);
+    let tree = &item.enter(&scoped);
+    let dimensions = views.dimensions(item);
+    let Some((parameter, scopes)) = assignment.path.split_last() else {
+        return Err(AnalyzerError::Parse("defparam without a target".into()));
+    };
+    let parameter_name = normalize_identifier(&parameter.name.spelling);
+    let spelled = || {
+        assignment
+            .path
+            .iter()
+            .map(|segment| segment.name.spelling.as_str())
+            .collect::<Vec<_>>()
+            .join(".")
+    };
+    if assignment.rooted {
+        return Err(unsupported(format!(
+            "defparam of the `$root` name `{}`",
+            spelled()
+        )));
+    }
+    if parameter.index.is_some() {
+        return Err(AnalyzerError::InvalidDefparam(format!(
+            "the target `{}` selects from a parameter",
+            spelled()
+        )));
+    }
+    // Keep each parsed index separate from its name: an escaped name may
+    // itself contain `[` (5.6.1), which is not an index.
+    let mut components = Vec::new();
+    for segment in scopes {
+        let component = normalize_identifier(&segment.name.spelling);
+        let index = match segment.index {
+            Some(index) => Some(
+                constant_binding::bind(index, tree, session, dimensions)?
+                    .and_then(|index| eval_ast_const_expr(&tree.functions, &index, &item.env))
+                    .ok_or_else(|| {
+                        unsupported(format!(
+                            "index of defparam target `{}` that is not constant",
+                            spelled()
+                        ))
+                    })?,
+            ),
+            None => None,
+        };
+        components.push((component, index));
+    }
+    // The name may start at the module itself (23.6).
+    let module = tree
+        .root_unit()
+        .ok()
+        .map(|unit| normalize_identifier(&unit.name.spelling));
+    if components.len() > 1 && module.as_deref() == Some(components[0].0.as_str()) {
+        components.remove(0);
+    }
+    if components.is_empty() {
+        return Err(unsupported(format!(
+            "defparam of `{}`, a parameter of its own scope",
+            spelled()
+        )));
+    }
+    // The scopes of the name are searched for from the scope of the
+    // `defparam` outward (23.8); an instance of the name ends the search.
+    let mut scope = Some(item.scope_name());
+    let mut target = None;
+    let mut below = false;
+    let mut array_element = false;
+    'search: while let Some(prefix) = scope {
+        for length in (1..=components.len()).rev() {
+            let name = generate::scoped_instance_name(prefix, &components[..length]);
+            if let Some(index) = instances.iter().position(|instance| instance.name == name) {
+                if length == components.len() {
+                    target = Some(index);
+                } else {
+                    below = true;
+                }
+                break 'search;
+            }
+            // An indexed name whose base is an instance array selects an
+            // element of that array, stored under the base name alone.
+            if components[length - 1].1.is_some() {
+                let mut base = components[..length].to_vec();
+                base[length - 1].1 = None;
+                let name = generate::scoped_instance_name(prefix, &base);
+                if instances
+                    .iter()
+                    .any(|instance| instance.name == name && instance.array_range.is_some())
+                {
+                    array_element = true;
+                    break 'search;
+                }
+            }
+        }
+        scope = if prefix.is_empty() {
+            None
+        } else {
+            Some(generate::parent_scope(prefix))
+        };
+    }
+    if array_element {
+        return Err(unsupported(format!(
+            "defparam of `{}`, a parameter of an instance array",
+            spelled()
+        )));
+    }
+    if below {
+        return Err(unsupported(format!(
+            "defparam of `{}`, a parameter below a child instance",
+            spelled()
+        )));
+    }
+    let Some(target) = target else {
+        return Err(unsupported(format!(
+            "defparam of `{}`, which names no module instance of this module",
+            spelled()
+        )));
+    };
+    let instance = &mut instances[target];
+    if instance.array_range.is_some() {
+        return Err(unsupported(format!(
+            "defparam of `{}`, a parameter of an instance array",
+            spelled()
+        )));
+    }
+    // A `defparam` in a generate block changes no parameter outside the
+    // block (23.10.1).
+    let own = item.scope_name();
+    if !own.is_empty()
+        && !instance
+            .name
+            .strip_prefix(own)
+            .is_some_and(|rest| rest.starts_with('.'))
+    {
+        return Err(AnalyzerError::InvalidDefparam(format!(
+            "the target `{}` is outside the generate block of the statement (IEEE 1800-2023 23.10.1)",
+            spelled()
+        )));
+    }
+    let mut value = parameter_override(
+        parameter_name.clone(),
+        assignment.value,
+        tree,
+        session,
+        dimensions,
+        false,
+    )?;
+    // A type parameter is not overridden by a `defparam` (6.20.3).
+    if value.bound_type.is_some() {
+        return Err(AnalyzerError::InvalidDefparam(format!(
+            "the target `{}` is assigned a data type (IEEE 1800-2023 6.20.3)",
+            spelled()
+        )));
+    }
+    resolve_override(&mut value, tree, session, &item.env, dimensions)?;
+    match instance
+        .parameter_overrides
+        .iter_mut()
+        .find(|existing| existing.name == parameter_name)
+    {
+        Some(existing) => *existing = value,
+        None => {
+            instance.parameter_names.push(parameter_name);
+            instance.parameter_overrides.push(value);
+        }
+    }
+    Ok(())
+}
+
+/// Make the value of an override a constant of the scope that gives it.
+fn resolve_override(
+    override_: &mut ParameterOverride,
+    syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    const_env: &ConstEnv,
+    packed_dimensions: &PackedDimensions,
+) -> Converted<()> {
+    let Some(value) = override_.value.take() else {
+        return Ok(());
+    };
+    let value = substitute_typed_parameter_literals(
+        value,
+        const_env,
+        &parameter_types_from_const_env(const_env),
+    );
+    let value = expr_to_index_const(
+        syntax_tree,
+        session,
+        substitute_expr_idents(
+            const_expr_to_expr(value),
+            &packed_dimensions.parameter_values,
+        ),
+        packed_dimensions,
+    )
+    .ok_or_else(|| {
+        AnalyzerError::Unsupported(format!(
+            "constant module parameter override `{}`",
+            override_.name
+        ))
+    })?;
+    override_.value = Some(substitute_const_expr_constants_preserving_enum_types(
+        value, const_env,
+    ));
+    Ok(())
 }
 
 fn instances_from_native_declaration(
@@ -86,31 +324,13 @@ fn instances_from_native_declaration(
         false,
     )?;
     for override_ in &mut parameter_overrides {
-        if let Some(value) = override_.value.take() {
-            let value = substitute_typed_parameter_literals(
-                value,
-                const_env,
-                &parameter_types_from_const_env(const_env),
-            );
-            let value = expr_to_index_const(
-                syntax_tree,
-                session,
-                substitute_expr_idents(
-                    const_expr_to_expr(value),
-                    &packed_dimensions.parameter_values,
-                ),
-                packed_dimensions,
-            )
-            .ok_or_else(|| {
-                AnalyzerError::Unsupported(format!(
-                    "constant module parameter override `{}`",
-                    override_.name
-                ))
-            })?;
-            override_.value = Some(substitute_const_expr_constants_preserving_enum_types(
-                value, const_env,
-            ));
-        }
+        resolve_override(
+            override_,
+            syntax_tree,
+            session,
+            const_env,
+            packed_dimensions,
+        )?;
     }
     let condition =
         condition.map(|condition| substitute_const_expr_constants(condition, const_env));

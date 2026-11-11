@@ -50,6 +50,47 @@ impl Parser<'_> {
         });
         Ok(id)
     }
+    /// `defparam a.b[1].P = value, ... ;` (IEEE 1800-2023 A.1.4, A.2.5).
+    pub(super) fn defparam(&mut self) -> Result<Vec<DefparamAssignment>> {
+        self.expect("defparam")?;
+        let mut assignments = Vec::new();
+        loop {
+            let start = self.at;
+            let rooted = self.peek() == "$root";
+            if rooted {
+                self.at += 1;
+                self.expect(".")?;
+            }
+            let mut path = Vec::new();
+            loop {
+                let name = self.name()?;
+                let index = if self.eat("[") {
+                    let index = self.expression(0)?;
+                    self.expect("]")?;
+                    Some(index)
+                } else {
+                    None
+                };
+                path.push(DefparamSegment { name, index });
+                if !self.eat(".") {
+                    break;
+                }
+            }
+            self.expect("=")?;
+            let value = self.parameter_expression()?;
+            assignments.push(DefparamAssignment {
+                rooted,
+                path,
+                value,
+                tokens: self.range(start),
+            });
+            if self.eat(";") {
+                break;
+            }
+            self.expect(",")?;
+        }
+        Ok(assignments)
+    }
     pub(super) fn drive_strength(&mut self) -> Result<Option<DriveStrength>> {
         Ok(if self.peek() == "(" && strength(self.nth(1)) {
             let start = self.at;

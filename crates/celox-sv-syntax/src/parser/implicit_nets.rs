@@ -258,7 +258,12 @@ impl Parser<'_> {
                 // declare names this pass does not know; any identifier in
                 // them counts as declared.
                 BodyItemKind::Unconverted { .. } => opaque.push(self.body_items[item.0].tokens),
-                BodyItemKind::Procedure(_) | BodyItemKind::Time(_) | BodyItemKind::Unit(_) => {}
+                // A `defparam` names a parameter of another scope: it
+                // declares nothing and its target is no net (6.10).
+                BodyItemKind::Defparam(_)
+                | BodyItemKind::Procedure(_)
+                | BodyItemKind::Time(_)
+                | BodyItemKind::Unit(_) => {}
             }
         }
         scope
