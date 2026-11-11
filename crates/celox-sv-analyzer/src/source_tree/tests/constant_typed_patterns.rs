@@ -48,6 +48,20 @@ fn initialized(pattern: BoundPattern, declaration: &str) -> Vec<i128> {
             &mut packages.design(),
         )
         .unwrap();
+    // A packed parameter has the pattern as its value; an unpacked array
+    // parameter is a variable that the pattern initializes.
+    if ir.modules()[0].initial_processes().is_empty() {
+        let parameter = ir.modules()[0]
+            .parameters()
+            .iter()
+            .find(|parameter| parameter.name() == "P")
+            .expect("the pattern gives a value parameter");
+        let Some(crate::ir::ConstExpr::Literal(text)) = parameter.value() else {
+            panic!("{:?}", parameter.value())
+        };
+        let literal = crate::typecheck::parse_integral_literal(text).unwrap();
+        return vec![crate::typecheck::integral_literal_as_i128(&literal, false).unwrap()];
+    }
     let crate::ir::Stmt::Assign { rhs, .. } = &ir.modules()[0].initial_processes()[0].body()[0]
     else {
         panic!()

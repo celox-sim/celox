@@ -443,8 +443,16 @@ pub(in crate::ast) fn cast_target_native(
             ty.kind() == TypeKind::Bit,
         )
     } else {
-        let value = super::bind_value(target, native, tree, session, dimensions, None)?;
-        let value = expr_to_const(session, value)
+        // The size is a constant expression (6.24.1), which may select a
+        // member of a structure parameter.
+        let value = match constant_binding::bind_in(target, native, tree, session, dimensions) {
+            Ok(Some(value)) => Some(value),
+            _ => {
+                let value = super::bind_value(target, native, tree, session, dimensions, None)?;
+                expr_to_const(session, value)
+            }
+        };
+        let value = value
             .and_then(|value| eval_ast_const_expr(&tree.functions, &value, &dimensions.const_env))
             .and_then(|value| usize::try_from(value).ok())
             .filter(|width| *width > 0)

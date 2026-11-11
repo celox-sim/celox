@@ -89,6 +89,39 @@ impl PackedMember {
     }
 }
 
+/// The members of a packed structure that a constant member select can
+/// name, with the members of their members: each with its path (`a.b`), the
+/// offset of its least significant bit in the structure and its type
+/// (IEEE 1800-2023 7.2.1). Void members and the members of tagged unions,
+/// whose select depends on the tag, are left out.
+pub(in crate::ast) fn constant_members(
+    functions: &const_functions::ConstantFunctions,
+    members: &[PackedMember],
+    const_env: &ConstEnv,
+) -> Vec<(String, usize, ExprType)> {
+    let mut found = Vec::new();
+    let mut pending = vec![(String::new(), 0usize, members)];
+    while let Some((prefix, base, members)) = pending.pop() {
+        for member in members {
+            if member.is_void || member.tag.is_some() {
+                continue;
+            }
+            let Some(offset) = base.checked_add(member.offset) else {
+                continue;
+            };
+            let Some(r#type) = expr_type_from_type(functions, &member.r#type, const_env) else {
+                continue;
+            };
+            let path = format!("{prefix}{}", member.name);
+            if member.r#type.packed_ranges.len() == 1 && !member.r#type.members.is_empty() {
+                pending.push((format!("{path}."), offset, &member.r#type.members));
+            }
+            found.push((path, offset, r#type));
+        }
+    }
+    found
+}
+
 /// IEEE 1800-2023 7.3.2: tag bits precede a right-justified payload.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(in crate::ast) struct TaggedMember {

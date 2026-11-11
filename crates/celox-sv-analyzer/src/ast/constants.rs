@@ -48,6 +48,13 @@ pub(super) fn bind_generate_parameter_with_types(
         parameter_types,
         parameter_literals,
     );
+    parameters::bind_generate_parameter_members(
+        &tree.functions,
+        const_env,
+        &parameter,
+        resolved,
+        resolved_literal.as_ref(),
+    );
     let literal = if let Some(value) = resolved {
         const_env.insert(parameter.name().to_string(), value);
         Some(Expr::Literal(if let Some(ty) = resolved_type {

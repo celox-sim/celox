@@ -38,38 +38,25 @@ fn analyze(pattern: BoundPattern, dimensions: &str) -> Result<crate::Ir, crate::
         &mut packages.design(),
     )
 }
+/// The left operands of the leaves `left - 2` of a pattern of bytes: the
+/// pattern is the value of the packed parameter, most significant element
+/// first.
 fn leaves(pattern: BoundPattern, dimensions: &str) -> Vec<i128> {
     let ir = analyze(pattern, dimensions).unwrap();
-    let statement = &ir.modules()[0].initial_processes()[0].body()[0];
-    let crate::ir::Stmt::Assign { rhs, .. } = statement else {
-        panic!("{statement:?}");
+    let parameter = ir.modules()[0]
+        .parameters()
+        .iter()
+        .find(|parameter| parameter.name() == "P")
+        .expect("the pattern gives a value parameter");
+    let Some(crate::ir::ConstExpr::Literal(text)) = parameter.value() else {
+        panic!("{:?}", parameter.value())
     };
-    let mut pending = vec![rhs];
-    let mut leaves = Vec::new();
-    while let Some(expr) = pending.pop() {
-        match expr {
-            crate::ir::Expr::Concat(parts) => pending.extend(parts.iter().rev()),
-            crate::ir::Expr::Resize { expr, width: 8, .. } => {
-                let crate::ir::Expr::Binary {
-                    left,
-                    op: crate::ir::BinaryOp::Sub,
-                    right,
-                } = expr.as_ref()
-                else {
-                    panic!("{expr:?}");
-                };
-                let (crate::ir::Expr::Literal(left), crate::ir::Expr::Literal(right)) =
-                    (left.as_ref(), right.as_ref())
-                else {
-                    panic!("{expr:?}");
-                };
-                assert_eq!(right, "2");
-                leaves.push(left.parse().unwrap());
-            }
-            _ => panic!("{expr:?}"),
-        }
-    }
-    leaves
+    let literal = crate::typecheck::parse_integral_literal(text).unwrap();
+    let value = u128::try_from(literal.value).unwrap();
+    (0..literal.width / 8)
+        .rev()
+        .map(|element| ((value >> (8 * element)) & 0xff) as i128 + 2)
+        .collect()
 }
 #[test]
 fn native_pattern_list_and_keyed_values_bind_in_the_caller() {

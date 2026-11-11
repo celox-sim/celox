@@ -82,22 +82,112 @@ pub(super) fn uses_signal_representation(
     Ok(true)
 }
 
+/// The value of a parameter of packed type that is given by an assignment
+/// pattern, its own or one its instantiation binds, when the pattern is a
+/// constant in `dims`: the literal of the pattern's value in the declared
+/// type (IEEE 1800-2023 6.20.2, 10.9). `None` leaves the parameter to the
+/// constant variable that holds a pattern which is not one here.
+pub(super) fn packed_pattern_value(
+    native: &celox_sv_syntax::Parameter,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Option<ConstExpr> {
+    let celox_sv_syntax::ParameterKind::Value { dimensions, .. } = &native.kind else {
+        return None;
+    };
+    if !dimensions.is_empty() {
+        return None;
+    }
+    let ty = declared_type(native, tree, session, &dims.const_env, &dims.type_aliases)
+        .ok()
+        .flatten()?;
+    let shape = procedural::dimensions_from_type(&ty);
+    if !shape.unpacked.is_empty()
+        || shape.packed.is_empty()
+        || shape.real
+        || shape.string
+        || shape.chandle
+        || shape.class.is_some()
+        || shape.container.is_some()
+        || shape.virtual_interface.is_some()
+        || shape.unpacked_struct.is_some()
+    {
+        return None;
+    }
+    let bound = scope::imported(tree)
+        .pattern_parameter_bindings
+        .get(&native.id)
+        .cloned();
+    let value = if let Some(bound) = bound {
+        bound.lower(tree, session, &shape, dims).ok()?
+    } else {
+        let root = parameters::ownership::default(native).filter(|id| {
+            matches!(
+                tree.declarations()
+                    .expression(expression_binding::ungroup(*id, tree.declarations()))
+                    .kind,
+                celox_sv_syntax::ExprKind::Pattern { .. }
+            )
+        })?;
+        patterns::native_expression(root, &shape, tree, session, dims)
+            .ok()
+            .flatten()?
+    };
+    let width = patterns::shape_width(&tree.functions, &shape, dims)?;
+    // The pattern's concatenation is self-determined in the declared type
+    // before any conversion at a receiving declaration (6.20.2).
+    let mut value = Expr::Resize {
+        expr: Box::new(value),
+        width,
+        signed: shape.signed,
+    };
+    if shape.is_2state {
+        value = Expr::Unary {
+            op: UnaryOp::ToTwoState,
+            expr: Box::new(value),
+        };
+    }
+    let literals = dims
+        .parameter_values
+        .iter()
+        .filter(|(name, _)| !dims.const_env.contains_key(*name))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    let value = substitute_expr_constants_with_parameter_literals(
+        tree,
+        session,
+        value,
+        &dims.const_env,
+        &literals,
+    );
+    match fold_const_integral_expr_preserving_mask(tree, session, value, &dims.const_env) {
+        Expr::Literal(text) => Some(ConstExpr::Literal(text)),
+        _ => None,
+    }
+}
+
 /// Array parameters declared directly in the selected native unit/scope.
+/// The names in `values` are value parameters already.
 pub(super) fn array_parameters_from_scope(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     const_env: &ConstEnv,
     type_aliases: &TypeAliases,
+    values: &[Parameter],
 ) -> Converted<Vec<ArrayParameter>> {
+    let values: HashSet<&str> = values.iter().map(Parameter::name).collect();
+    let is_array = |parameter: &&celox_sv_syntax::Parameter| {
+        matches!(parameter.kind, celox_sv_syntax::ParameterKind::Value { .. })
+            && !values.contains(instances::normalize_identifier(&parameter.name.spelling).as_str())
+    };
     let mut parameters = Vec::new();
     if let Ok(unit) = tree.root_unit() {
         let authored = unit
             .parameters
             .iter()
             .flatten()
-            .filter(|parameter| {
-                matches!(parameter.kind, celox_sv_syntax::ParameterKind::Value { .. })
-            })
+            .filter(is_array)
             .collect::<Vec<_>>();
         parameters.extend(array_parameters_from_declaration(
             &authored,
@@ -116,9 +206,7 @@ pub(super) fn array_parameters_from_scope(
                 .parameter_declaration(id)
                 .parameters
                 .iter()
-                .filter(|parameter| {
-                    matches!(parameter.kind, celox_sv_syntax::ParameterKind::Value { .. })
-                })
+                .filter(is_array)
                 .collect::<Vec<_>>();
             parameters.extend(array_parameters_from_declaration(
                 &authored,
