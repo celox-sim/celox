@@ -81,6 +81,8 @@ pub(in crate::lowering) fn system_task_kind(task: sv::ir::SystemTask) -> Option<
         | SystemTask::Timeformat
         | SystemTask::SetCoverageDbName
         | SystemTask::LoadCoverageDb
+        | SystemTask::AssertOn
+        | SystemTask::AssertOff
         | SystemTask::Exit
         | SystemTask::Vcd(_) => return None,
     })
