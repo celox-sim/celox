@@ -729,6 +729,17 @@ fn find_signal<'a>(
 
 /// `r#type` with the bounds it has in its specialization.
 fn resolved_type(module: &ElaboratedModule, r#type: &sv::ir::Type) -> Option<sv::ast::Type> {
+    // An associative or dynamic array or a queue is denoted by its handle;
+    // the name has the container type of the declaration.
+    if let Some(container) = r#type.container() {
+        return container.with_resolved_container_bounds(&|expr| {
+            sv::typecheck::eval_const_expr_with_types(
+                expr,
+                &module.constants,
+                &module.parameter_types,
+            )
+        });
+    }
     let kind = match r#type.kind() {
         sv::ir::TypeKind::Bit => sv::ast::TypeKind::Bit,
         sv::ir::TypeKind::Logic => sv::ast::TypeKind::Logic,

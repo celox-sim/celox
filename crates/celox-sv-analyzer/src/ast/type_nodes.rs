@@ -160,6 +160,46 @@ impl Type {
         self.kind == TypeKind::Chandle
     }
 
+    /// Whether the type is that of an associative or dynamic array or of a
+    /// queue: a heap handle with the type of the container it denotes.
+    pub(crate) fn is_container(&self) -> bool {
+        self.container.is_some()
+    }
+
+    /// This container type as a scope other than the one that declares it
+    /// names it (IEEE 1800-2023 23.6): the bounds of its index and element
+    /// types as `eval` gives them in the declaring scope. `None` if one has
+    /// no value there.
+    pub fn with_resolved_container_bounds(
+        &self,
+        eval: &dyn Fn(&crate::ir::ConstExpr) -> Option<i128>,
+    ) -> Option<Self> {
+        let literal = |value: i128| ConstExpr::Literal(value.to_string());
+        let mut resolved = self.clone();
+        for range in &mut resolved.packed_ranges {
+            let left = eval(&range.left().clone().into())?;
+            let right = eval(&range.right().clone().into())?;
+            *range = PackedRange::new(literal(left), literal(right));
+        }
+        for range in &mut resolved.unpacked_ranges {
+            let left = eval(&range.left().clone().into())?;
+            let right = eval(&range.right().clone().into())?;
+            *range = UnpackedRange::new(literal(left), literal(right));
+        }
+        if let Some(container) = &self.container {
+            resolved.container = Some(Arc::new(ContainerType {
+                key: match &container.key {
+                    Some(key) => Some(key.with_resolved_container_bounds(eval)?),
+                    None => None,
+                },
+                layout: container.layout,
+                element: container.element.with_resolved_container_bounds(eval)?,
+                record: container.record.clone(),
+            }));
+        }
+        Some(resolved)
+    }
+
     /// The type, a `chandle` if `chandle` (see [`crate::ir::Type::is_chandle`]):
     /// the bits of a chandle are two-state.
     pub fn with_chandle(mut self, chandle: bool) -> Self {

@@ -951,6 +951,9 @@ pub struct Type {
     class: Option<String>,
     /// A `chandle`, held as 64 bits (IEEE 1800-2023 6.14).
     chandle: bool,
+    /// The type of an associative or dynamic array or of a queue, whose
+    /// variable holds the handle of the container.
+    container: Option<std::sync::Arc<ast::Type>>,
 }
 
 /// Shared metadata, allocated only for unpacked structure types. Ordinary
@@ -980,6 +983,13 @@ impl Type {
     /// this signal must keep (see [`crate::ast::Type::with_chandle`]).
     pub fn is_chandle(&self) -> bool {
         self.chandle
+    }
+
+    /// The type of the container a variable of this type holds the handle
+    /// of, as its declaration gives it; analyses of names that denote the
+    /// variable from other scopes must keep it.
+    pub fn container(&self) -> Option<&ast::Type> {
+        self.container.as_deref()
     }
 
     /// How many leading packed dimensions select an element of a signed
@@ -1107,6 +1117,7 @@ impl Type {
             signed_element_depth: None,
             class: None,
             chandle: false,
+            container: None,
         }
     }
 
@@ -1130,6 +1141,18 @@ impl Type {
         let class = r#type.class().map(str::to_owned);
         let signed_element_depth = r#type.signed_element_depth();
         let chandle = r#type.is_chandle();
+        // The declaration's bounds, resolved where its constant functions
+        // are known: a name of the variable from another scope takes the
+        // type with these bounds.
+        let container = r#type.is_container().then(|| {
+            std::sync::Arc::new(
+                r#type
+                    .with_resolved_container_bounds(&|expr| {
+                        typecheck::eval_const_expr_in_env(expr, constants)
+                    })
+                    .unwrap_or_else(|| r#type.clone()),
+            )
+        });
         let (packed_ranges, unpacked_ranges, resolved_width) = convert_type(r#type, constants);
         Self {
             structure,
@@ -1143,6 +1166,7 @@ impl Type {
             signed_element_depth,
             class,
             chandle,
+            container,
         }
     }
 }

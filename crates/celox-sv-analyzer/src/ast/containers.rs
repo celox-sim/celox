@@ -230,6 +230,17 @@ pub(super) fn native_type(
     {
         return Ok(shape.container.clone());
     }
+    // A hierarchical name, or the name of a member of an interface, is
+    // bound to a local variable of the type of the object it denotes.
+    if matches!(native.expression(ungrouped).kind, ExprKind::Member { .. })
+        && let Some(name) = expression_binding::alias_name(tree, session, id, native, dims)
+        && let Some(shape) = scope::imported(tree)
+            .interface_members
+            .get(&name)
+            .and_then(|binding| dims.get(binding))
+    {
+        return Ok(shape.container.clone());
+    }
     if let Some((property, _)) =
         expression_binding::object_property(tree, session, id, native, dims)?
     {

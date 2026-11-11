@@ -149,7 +149,7 @@ pub(in crate::ast) fn operands(
 }
 
 /// A declared name, including constant indices within an instance path.
-fn alias_name(
+pub(in crate::ast) fn alias_name(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     id: ExprId,
