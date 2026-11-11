@@ -215,9 +215,6 @@ impl Parser<'_> {
     }
 
     fn statement_node(&mut self, header: Header, kind: StatementKind) -> Result<StatementId> {
-        if self.statements.len() >= 1_000_000 {
-            return Err(self.unsupported("native statement arena exceeds one million nodes"));
-        }
         let id = StatementId(self.statements.len());
         self.statements.push(Statement {
             label: header.label,
@@ -532,9 +529,6 @@ impl Parser<'_> {
             }
             _ => return Err(self.error("expected delay or event control")),
         };
-        if self.timing_controls.len() >= 1_000_000 {
-            return Err(self.unsupported("native timing control arena exceeds one million nodes"));
-        }
         let id = TimingControlId(self.timing_controls.len());
         self.timing_controls.push(TimingControl {
             kind,

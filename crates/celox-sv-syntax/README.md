@@ -45,7 +45,8 @@ no synthetic package source is manufactured or reparsed.
 
 Parsing, structural traversal, cloning and dropping use flat arenas and explicit
 stacks. Tests exercise 10,000 nested expression, type, statement, timing and
-generate constructs. Resource guards bound arena entries and pending worklists.
+generate constructs. Resource guards bound pending worklists; arenas grow with
+the source, whose tokens bound them.
 This syntax coverage does not imply equivalent depth through recursive semantic
 IR processing.
 
