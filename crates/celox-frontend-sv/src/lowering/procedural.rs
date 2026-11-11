@@ -304,6 +304,16 @@ impl<'a> ProcModule<'a> {
         self.variables.get(&id).is_some_and(|var| var.hidden)
     }
 
+    /// Whether `id` is the assertion control state that `$asserton` and
+    /// `$assertoff` assign (IEEE 1800-2023 20.11). A process checks it before
+    /// each assertion, but it is no expression of the process's source, so
+    /// it is not part of an implicit sensitivity (9.2.2.2.1, 9.4.2.2).
+    pub fn is_assertion_control(&self, id: SourceVarId) -> bool {
+        self.variables
+            .get(&id)
+            .is_some_and(|var| matches!(var.path.as_slice(), [name] if name == sv::ASSERTIONS_OFF))
+    }
+
     pub fn subroutine(&self, name: &str) -> Option<&sv::ir::Subroutine> {
         self.subroutines.get(name)
     }

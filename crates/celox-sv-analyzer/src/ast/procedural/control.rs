@@ -980,10 +980,13 @@ impl BodyBuilder<'_, '_, '_> {
                         &assertion,
                         celox_design::AssertionOutcome::Fail,
                     );
+                    // An `expect` statement is not an assertion the tasks
+                    // control (20.11).
                     if let Some(attempt) = expect {
                         output.extend(self.expect_statements(attempt, then_body, else_body));
                         continue;
                     }
+                    let controlled = self.controls_assertions();
                     if concurrent.is_some() {
                         // `timed_tasks::classify` checks the actions once
                         // every subroutine is known.
@@ -996,6 +999,11 @@ impl BodyBuilder<'_, '_, '_> {
                     // A sequence over cycles decides each step that an
                     // attempt reaches at this tick, the oldest attempt first.
                     if let Some(monitor) = stages {
+                        // Whether assertions are on for the attempt that
+                        // starts at this tick, read in the Observed region
+                        // before any action (4.4.2.5, 20.11; see
+                        // `sequence_stages`).
+                        output.extend(monitor.start);
                         let mut decisions = Vec::new();
                         // Older attempts first; steps at one offset in their
                         // order, a `##0` sequence's calls before its action.
@@ -1071,15 +1079,20 @@ impl BodyBuilder<'_, '_, '_> {
                         then_body,
                         else_body,
                     };
-                    if let Some(Some(disable)) = concurrent {
-                        output.push(Stmt::If {
+                    let decision = if let Some(Some(disable)) = concurrent {
+                        Stmt::If {
                             condition: disable,
                             then_body: Vec::new(),
                             else_body: vec![decision],
-                        });
+                        }
                     } else {
-                        output.push(decision);
-                    }
+                        decision
+                    };
+                    output.push(if controlled {
+                        assertion_control::checked(vec![decision])
+                    } else {
+                        decision
+                    });
                 }
                 Job::IfNext(state) => {
                     let StatementKind::Conditional {
@@ -1718,6 +1731,28 @@ impl BodyBuilder<'_, '_, '_> {
             });
             matches.push((matched, registers.len() - 1));
         }
+        // Whether assertions were on at the tick an attempt started, read
+        // once in the Observed region before any action of the tick runs
+        // (4.4.2.5): no new attempt starts while they are off, and one that
+        // started before `$assertoff` goes on with its pass or fail action
+        // (20.11), even when an action of this tick calls `$assertoff`.
+        let mut start = Vec::new();
+        let started = if self.controls_assertions() {
+            let on = self.declare("on@sequence", bit.clone());
+            start.push(Stmt::Assign {
+                lhs: LValue::Ident(on.clone()),
+                rhs: assertion_control::on(),
+                nonblocking: false,
+            });
+            registers.push(assertions::SequenceRegister {
+                now: Expr::Ident(on),
+                ty: bit.clone(),
+                chain: Vec::new(),
+            });
+            Some(registers.len() - 1)
+        } else {
+            None
+        };
         let count = steps.len();
         let mut stages = Vec::with_capacity(count);
         for (index, (antecedent, point, _, calls)) in steps.iter().enumerate() {
@@ -1746,6 +1781,21 @@ impl BodyBuilder<'_, '_, '_> {
                     },
                 });
             }
+            if let Some(started) = started {
+                let on = if point.at == 0 {
+                    registers[started].now.clone()
+                } else {
+                    Expr::Ident(self.sequence_register(&mut registers, started, point.at))
+                };
+                alive = Some(match alive {
+                    None => on,
+                    Some(previous) => Expr::Binary {
+                        left: Box::new(previous),
+                        op: BinaryOp::LogicAnd,
+                        right: Box::new(on),
+                    },
+                });
+            }
             stages.push(assertions::SequenceStage {
                 alive,
                 matched: matches[index].0.clone(),
@@ -1762,6 +1812,7 @@ impl BodyBuilder<'_, '_, '_> {
             stages,
             ticks: ticks.map(|ticks| (ticks, length)),
             updates,
+            start,
         })
     }
 
