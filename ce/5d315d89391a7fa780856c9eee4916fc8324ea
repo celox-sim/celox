@@ -1,0 +1,1 @@
+Rebase on master: element bit/part-select reads and $bits of element selects are supported in the merged tree, so the three whole-container rejection cases that covered them are dropped
