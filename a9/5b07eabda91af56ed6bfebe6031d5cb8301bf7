@@ -1,0 +1,1 @@
+Codex review of #3536: output and inout actuals are captured as places before later actuals (selectors evaluated once, inout read from the captured place); the integer test uses a one-word callback; adds output_actuals_are_captured_before_later_actuals.
