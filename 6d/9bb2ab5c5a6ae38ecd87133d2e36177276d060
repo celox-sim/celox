@@ -1,0 +1,1 @@
+Codex review of #3557: a constant %s now formats as the run-time formatter does (leading zero bytes dropped, right-justified in the width of the value unless the width is 0); the test compares the constant with the same call at run time.
