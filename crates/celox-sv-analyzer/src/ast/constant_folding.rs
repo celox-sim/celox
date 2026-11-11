@@ -475,6 +475,16 @@ fn constant_with_folded_selections_with_lookup(
             op: *op,
             right: Box::new(convert(session, right)?),
         }),
+        // The zero-divisor guard of a division or modulus (see
+        // `guard_zero_divisions`): constant evaluation gives one by zero
+        // unknown bits itself (IEEE 1800-2023 11.4.2).
+        Expr::Mux {
+            then_expr,
+            else_expr,
+            ..
+        } if matches!(&**then_expr, Expr::Literal(text) if text == crate::DIV_ZERO_UNKNOWN_LITERAL) => {
+            convert(session, else_expr)
+        }
         Expr::Mux {
             condition,
             then_expr,

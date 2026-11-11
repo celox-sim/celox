@@ -385,3 +385,56 @@ fn variables_of_generate_blocks_by_their_scope_names() {
         assert_eq!(lines, ["111111 011111"], "four-state {four_state}");
     }
 }
+
+/// A parameter initializer divides an operand that is folded with its type
+/// (a cast, a select, a concatenation) by another parameter (IEEE 1800-2023
+/// 11.4.2): the divisor's zero check is part of the constant.
+#[test]
+fn parameter_initializers_divide_typed_operands_by_parameters() {
+    let source = r#"`timescale 1ns/1ns
+module top #(parameter a_p = 16777216, parameter b_p = 3, parameter z_p = 0) ();
+  localparam longint unsigned cast_div_lp = (64'(a_p)*4)*b_p/b_p/4;
+  localparam cast_mod_lp = 64'(a_p) % b_p;
+  localparam cast_of_div_lp = 64'(a_p / b_p);
+  localparam [63:0] concat_lp = {a_p / b_p, a_p % b_p};
+  localparam select_lp = a_p[31:8] / b_p;
+  localparam logic [63:0] zero_lp = 64'(a_p) / z_p;
+  if (1) begin : g
+    localparam longint unsigned scoped_lp = 64'(a_p) / b_p;
+    logic [scoped_lp[3:0]-1:0] sized;
+    initial #1 $display("%0d %0d", scoped_lp, $bits(sized));
+  end
+  initial begin
+    #2 $display("%0d %0d %0d %h %0d %b", cast_div_lp, cast_mod_lp, cast_of_div_lp, concat_lp,
+                select_lp, zero_lp[3:0]);
+    $finish;
+  end
+endmodule"#;
+    // Icarus 13 and Verilator 5.054 print the four-state lines.
+    for (four_state, by_zero) in [(false, "0000"), (true, "xxxx")] {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("divide.sv"))], "top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "5592405 5".to_string(),
+                format!("16777216 1 5592405 0055555500000001 21845 {by_zero}")
+            ],
+            "four_state={four_state}"
+        );
+    }
+}
