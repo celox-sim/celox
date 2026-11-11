@@ -345,7 +345,7 @@ pub(crate) fn normalize_identifier(text: &str) -> String {
 /// Keep whole-array conditional arguments out of the scalar constant path.
 /// Traverse branch types iteratively, including branches a constant condition
 /// does not select. Array sizes and integral element types must agree.
-fn array_argument_shape(
+pub(super) fn array_argument_shape(
     root: celox_sv_syntax::ExprId,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
@@ -441,39 +441,8 @@ fn parameter_override(
         pending.extend(parameters::skipped::children(id, declarations));
     }
     if let Some(shape) = array_argument_shape(native, syntax_tree, session, packed_dimensions) {
-        // Aggregate conditional expressions require equivalent branch types
-        // (11.4.11). A known condition selects a whole array before element
-        // binding; treating it as a packed mux would use the wrong X merge rule.
-        let mut selected = root;
-        while let ExprKind::Conditional {
-            condition,
-            then_expression,
-            else_expression,
-        } = declarations.expression(selected).kind
-        {
-            let condition =
-                constant_binding::bind(condition, syntax_tree, session, packed_dimensions)?
-                    .and_then(|value| {
-                        eval_ast_const_expr(
-                            &syntax_tree.functions,
-                            &value,
-                            &packed_dimensions.const_env,
-                        )
-                    })
-                    .ok_or_else(|| {
-                        unsupported(
-                            "nonconstant or ambiguous condition in array parameter argument",
-                        )
-                    })?;
-            selected = expression_binding::ungroup(
-                if condition != 0 {
-                    then_expression
-                } else {
-                    else_expression
-                },
-                declarations,
-            );
-        }
+        let selected =
+            array_parameters::selected_branch(root, syntax_tree, session, packed_dimensions)?;
         let pattern = bound_patterns::from_array_parameter(
             selected,
             syntax_tree,
