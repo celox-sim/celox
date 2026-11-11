@@ -62,11 +62,13 @@ pub(super) fn connections(
         }
     } else {
         let mut wildcard = false;
+        let mut named = HashSet::default();
         for connection in &native.connections {
             match &connection.kind {
                 InstanceConnectionKind::Wildcard => wildcard = true,
                 InstanceConnectionKind::Named { name, value } => {
                     let formal = normalize_identifier(&name.spelling);
+                    named.insert(formal.clone());
                     if let Some(connections) =
                         binding.and_then(|binding| binding.connections.get(&formal))
                     {
@@ -101,23 +103,24 @@ pub(super) fn connections(
         }
         if wildcard {
             // `.*` implicitly connects each remaining port to a
-            // same-named signal of the instantiating scope; an explicit
-            // connection, including an empty one, takes its place
-            // (23.3.2.2).
+            // same-named signal or interface of the instantiating scope; an
+            // explicit connection, including an empty one, takes its place
+            // (23.3.2.4).
             let ports = interface
                 .map(|interface| interface.ports.as_slice())
                 .ok_or_else(|| unsupported("wildcard port connection"))?;
             for formal in ports {
-                if lowered
-                    .iter()
-                    .any(|connection| connection.formal() == formal)
+                if named.contains(formal)
+                    || lowered
+                        .iter()
+                        .any(|connection| connection.formal() == formal)
                 {
                     continue;
                 }
-                if binding
-                    .and_then(|binding| binding.connections.get(formal))
-                    .is_some()
+                if let Some(connections) =
+                    binding.and_then(|binding| binding.connections.get(formal))
                 {
+                    lowered.extend(connections.iter().cloned());
                     continue;
                 }
                 if dimensions.get(formal).is_some() {
