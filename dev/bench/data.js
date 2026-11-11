@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794414246424,
+  "lastUpdate": 1794417809218,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -448178,6 +448178,37 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-native-parallel-x86_64/heliodor_suite_smp_linux_boot_8hart_execution",
             "unit": "ms",
             "value": 10830893.120388
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "18e14ea76cd9ed46bd3dfc0a8365eb82858fe19d",
+          "message": "perf(sv): fuse flip-flops with delayed nonblocking assignments (#3441)",
+          "timestamp": "2026-11-10T09:36:03Z",
+          "url": "https://github.com/celox-sim/celox/commit/18e14ea76cd9ed46bd3dfc0a8365eb82858fe19d"
+        },
+        "date": 1794417809218,
+        "cpu": "AMD EPYC 9V74",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-veryl-cc-x86_64/heliodor_suite_66_smp_linux_boot_4hart_compilation",
+            "unit": "ms",
+            "value": 264236.189059
+          },
+          {
+            "name": "heliodor-veryl-cc-x86_64/heliodor_suite_66_smp_linux_boot_4hart_execution",
+            "unit": "ms",
+            "value": 3743850.300561
           }
         ]
       }
