@@ -556,6 +556,10 @@ pub enum LValue {
         signed: bool,
         array_slice_width: Option<ConstExpr>,
         array_slice_reversed: bool,
+        /// The bits of the variable a run-time select stays within: those of
+        /// the structure member it is written on (see
+        /// [`crate::ir::SelectWindow`]).
+        window: Option<crate::ir::SelectWindow>,
         /// Whether this selection names a two-state packed struct member.
         is_2state: bool,
     },

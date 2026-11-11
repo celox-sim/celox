@@ -3149,7 +3149,7 @@ fn flattens_unpacked_array_range_selections() {
     assert_eq!(eval_test_const_expr(msb), Some(15));
     assert_eq!(eval_test_const_expr(lsb), Some(0));
     assert_eq!(
-        array_slice_width.as_ref().map(eval_test_const_expr),
+        array_slice_width.as_deref().map(eval_test_const_expr),
         Some(Some(8))
     );
     assert!(*array_slice_reversed);

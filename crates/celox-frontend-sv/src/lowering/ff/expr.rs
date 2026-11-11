@@ -79,6 +79,7 @@ impl Ff<'_, '_> {
                 lsb,
                 array_slice_width,
                 array_slice_reversed,
+                window,
             } => keep_element_window(
                 lvalue,
                 sv::ir::LValue::Select {
@@ -87,6 +88,7 @@ impl Ff<'_, '_> {
                     lsb: substitute_overlay_const(lsb, &self.scope.overlay),
                     array_slice_width: array_slice_width.clone(),
                     array_slice_reversed: *array_slice_reversed,
+                    window: *window,
                 },
                 self.m.variables,
                 self.m.name_to_id,

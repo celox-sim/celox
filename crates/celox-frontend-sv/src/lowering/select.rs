@@ -145,6 +145,7 @@ pub(super) fn dynamic_packed_write(
         msb,
         lsb,
         array_slice_width: None,
+        window: member,
         ..
     } = lvalue
     else {
@@ -164,17 +165,22 @@ pub(super) fn dynamic_packed_write(
         true,
         false,
     )?;
-    let window = (!variable.is_unpacked_struct)
-        .then(|| unpacked_element_width(variable))
-        .flatten()
-        .and_then(|element_width| {
-            runtime_select_window(
-                lsb,
-                element_width,
-                variable.width,
-                constants,
-                parameter_types,
-            )
+    // A select of a structure member stays in the member's bits.
+    let window = member
+        .map(|member| BitAccess::new(member.lsb as usize, member.msb as usize))
+        .or_else(|| {
+            (!variable.is_unpacked_struct)
+                .then(|| unpacked_element_width(variable))
+                .flatten()
+                .and_then(|element_width| {
+                    runtime_select_window(
+                        lsb,
+                        element_width,
+                        variable.width,
+                        constants,
+                        parameter_types,
+                    )
+                })
         });
     (position.width <= variable.width).then_some(DynamicPackedWrite {
         select_width: position.width,

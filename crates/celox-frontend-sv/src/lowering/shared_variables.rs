@@ -207,13 +207,15 @@ fn rename_lvalue(lvalue: sv::ir::LValue, renames: &HashMap<String, String>) -> s
             lsb,
             array_slice_width,
             array_slice_reversed,
+            window,
         } => sv::ir::LValue::Select {
             name: renames.get(&name).cloned().unwrap_or(name),
             msb: ff::rename_const_idents(&msb, renames),
             lsb: ff::rename_const_idents(&lsb, renames),
             array_slice_width: array_slice_width
-                .map(|width| ff::rename_const_idents(&width, renames)),
+                .map(|width| Box::new(ff::rename_const_idents(&width, renames))),
             array_slice_reversed,
+            window,
         },
     }
 }
