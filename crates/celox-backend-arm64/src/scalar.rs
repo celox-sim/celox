@@ -31,6 +31,7 @@ mod arithmetic;
 mod blocks;
 mod control_flow;
 mod extern_call;
+mod floating;
 mod instruction;
 mod memory;
 mod operands;
