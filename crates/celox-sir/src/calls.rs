@@ -97,6 +97,117 @@ fn own_effects<A: Ord + Clone + Hash>(
     collected
 }
 
+/// The effects of each function `f`: its own, `own[f]`, and those of every
+/// function it reaches through the calls `callees`, the least fixpoint of
+/// growing each function's effects by its callees'. The functions of one
+/// strongly connected component of the call graph reach the same ones, so
+/// each component's effects are collected once, after those of the
+/// components it calls, which are complete then. A call of a function the
+/// program has not is no edge.
+fn reachable_effects<A: Ord + Clone>(
+    own: &[Collected<A>],
+    callees: &[Vec<usize>],
+) -> Vec<Collected<A>> {
+    let mut effects: Vec<Option<Collected<A>>> = vec![None; own.len()];
+    let mut component_of = vec![usize::MAX; own.len()];
+    // The component a component last absorbed, so that one absorbs another
+    // once however many of its members call it.
+    let mut absorbed: Vec<usize> = Vec::new();
+    for (index, component) in components(callees).into_iter().enumerate() {
+        for &function in &component {
+            component_of[function] = index;
+        }
+        absorbed.push(index);
+        let mut collected = Collected::default();
+        for &function in &component {
+            collected.absorb(&own[function]);
+        }
+        for &function in &component {
+            for &callee in &callees[function] {
+                let Some(&other) = component_of.get(callee) else {
+                    continue;
+                };
+                if absorbed[other] == index {
+                    continue;
+                }
+                absorbed[other] = index;
+                collected.absorb(
+                    effects[callee]
+                        .as_ref()
+                        .expect("a called component is collected before its callers"),
+                );
+            }
+        }
+        for &function in &component {
+            effects[function] = Some(collected.clone());
+        }
+    }
+    effects
+        .into_iter()
+        .map(|effects| effects.expect("every function is in a component"))
+        .collect()
+}
+
+/// The strongly connected components of the call graph `callees`, each
+/// after every component it calls (Tarjan's algorithm, on a stack of its
+/// own: a chain of calls may be deeper than the host stack).
+fn components(callees: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    let count = callees.len();
+    let mut index = vec![usize::MAX; count];
+    let mut low = vec![0; count];
+    let mut on_stack = vec![false; count];
+    let mut stack = Vec::new();
+    let mut next = 0;
+    let mut components = Vec::new();
+    for root in 0..count {
+        if index[root] != usize::MAX {
+            continue;
+        }
+        // Each frame is a function and the position of its next callee.
+        let mut frames = vec![(root, 0)];
+        index[root] = next;
+        low[root] = next;
+        next += 1;
+        stack.push(root);
+        on_stack[root] = true;
+        while let Some(&mut (function, ref mut position)) = frames.last_mut() {
+            if let Some(&callee) = callees[function].get(*position) {
+                *position += 1;
+                if callee >= count {
+                    continue;
+                }
+                if index[callee] == usize::MAX {
+                    index[callee] = next;
+                    low[callee] = next;
+                    next += 1;
+                    stack.push(callee);
+                    on_stack[callee] = true;
+                    frames.push((callee, 0));
+                } else if on_stack[callee] {
+                    low[function] = low[function].min(index[callee]);
+                }
+                continue;
+            }
+            frames.pop();
+            if let Some(&(caller, _)) = frames.last() {
+                low[caller] = low[caller].min(low[function]);
+            }
+            if low[function] == index[function] {
+                let mut component = Vec::new();
+                while let Some(member) = stack.pop() {
+                    on_stack[member] = false;
+                    component.push(member);
+                    if member == function {
+                        break;
+                    }
+                }
+                components.push(component);
+            }
+        }
+    }
+    components
+}
+
 impl<EventAddr, StateAddr: Ord + Clone + Hash> SirProgram<EventAddr, StateAddr> {
     /// The effects of a call of each function, by [`crate::FunctionId`].
     pub fn call_effects(&self) -> Vec<CallEffects<StateAddr>> {
@@ -113,25 +224,7 @@ impl<EventAddr, StateAddr: Ord + Clone + Hash> SirProgram<EventAddr, StateAddr> 
             .zip(&mut callees)
             .map(|(function, callees)| own_effects(&function.unit, &frame, callees))
             .collect();
-        // Grow each function's effects by its callees' until none changes;
-        // the sets only grow and are bounded, so this ends.
-        let mut effects = own.clone();
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for function in 0..effects.len() {
-                let mut grown = effects[function].clone();
-                for &callee in &callees[function] {
-                    if let Some(callee) = effects.get(callee) {
-                        grown.absorb(callee);
-                    }
-                }
-                if grown != effects[function] {
-                    effects[function] = grown;
-                    changed = true;
-                }
-            }
-        }
+        let effects = reachable_effects(&own, &callees);
         effects.into_iter().map(Collected::into_effects).collect()
     }
 
@@ -214,6 +307,87 @@ impl<EventAddr, StateAddr: Ord + Clone + Hash> SirProgram<EventAddr, StateAddr> 
 
 #[cfg(test)]
 mod tests {
+    /// The fixpoint [`super::reachable_effects`] computes, by growing every
+    /// function's effects by its callees' until none changes.
+    fn grown_until_fixed(
+        own: &[super::Collected<u32>],
+        callees: &[Vec<usize>],
+    ) -> Vec<super::Collected<u32>> {
+        let mut effects = own.to_vec();
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for function in 0..effects.len() {
+                let mut grown = effects[function].clone();
+                for &callee in &callees[function] {
+                    if let Some(callee) = effects.get(callee) {
+                        grown.absorb(callee);
+                    }
+                }
+                if grown != effects[function] {
+                    effects[function] = grown;
+                    changed = true;
+                }
+            }
+        }
+        effects
+    }
+
+    #[test]
+    fn reachable_effects_are_the_fixpoint_of_the_calls() {
+        // Call graphs with cycles, self calls, shared callees, chains and
+        // calls of functions the program has not.
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut random = |bound: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % bound as u64) as usize
+        };
+        for count in [1, 2, 3, 5, 8, 13, 40, 120] {
+            for _ in 0..20 {
+                let own: Vec<_> = (0..count)
+                    .map(|function| {
+                        let mut collected = super::Collected::default();
+                        for _ in 0..random(4) {
+                            collected.reads.insert(random(64) as u32);
+                        }
+                        if random(3) == 0 {
+                            collected.writes.insert(function as u32);
+                        }
+                        if random(7) == 0 {
+                            collected.triggers.insert(function as u32);
+                        }
+                        collected.kernel = random(11) == 0;
+                        collected.may_fail = random(13) == 0;
+                        collected
+                    })
+                    .collect();
+                let callees: Vec<Vec<usize>> = (0..count)
+                    .map(|_| (0..random(4)).map(|_| random(count + 1)).collect())
+                    .collect();
+                assert!(
+                    super::reachable_effects(&own, &callees) == grown_until_fixed(&own, &callees),
+                    "{callees:?}"
+                );
+            }
+        }
+        // A chain deeper than the host stack would allow a recursive walk.
+        let depth = 200_000;
+        let own: Vec<_> = (0..depth)
+            .map(|function| {
+                let mut collected = super::Collected::default();
+                if function == depth - 1 {
+                    collected.writes.insert(7);
+                }
+                collected
+            })
+            .collect();
+        let callees: Vec<Vec<usize>> = (0..depth).map(|function| vec![function + 1]).collect();
+        let effects = super::reachable_effects(&own, &callees);
+        assert!(effects.iter().all(|effects| effects.writes.contains(&7)));
+    }
+
     use crate::{
         BasicBlock, BlockId, CallEffects, ExecutionUnit, FrameLayout, FrameSlot, FunctionId,
         FunctionUnit, HashMap, RegisterId, RegisterType, SIRInstruction, SIROffset, SIRTerminator,
