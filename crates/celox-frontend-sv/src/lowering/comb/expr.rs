@@ -365,8 +365,12 @@ impl Comb<'_, '_> {
                 {
                     // A procedural observer still wakes on the original reads,
                     // even when a masked bit cannot affect the assigned value.
-                    self.effect_sensitivity.extend(sources.iter().copied());
-                    self.effect_sensitivity.extend(r_sources.iter().copied());
+                    self.events
+                        .effect_sensitivity
+                        .extend(sources.iter().copied());
+                    self.events
+                        .effect_sensitivity
+                        .extend(r_sources.iter().copied());
                     if let Some((masked, read_sources)) = self.masked_and_operand(store, left, r)? {
                         l = masked;
                         sources = read_sources;
@@ -555,9 +559,9 @@ impl Comb<'_, '_> {
         f: impl FnOnce(&mut Self, &mut Store) -> Result<T, sv::AnalyzerError>,
     ) -> Result<T, sv::AnalyzerError> {
         let mut taken = store.fork();
-        self.guards.push(guard.clone());
+        self.path.guards.push(guard.clone());
         let result = f(self, &mut taken);
-        self.guards.pop();
+        self.path.guards.pop();
         let result = result?;
         *store = self.merge(&guard, &taken, store)?;
         Ok(result)

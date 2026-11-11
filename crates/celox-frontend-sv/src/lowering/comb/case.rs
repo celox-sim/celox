@@ -210,11 +210,15 @@ impl Comb<'_, '_> {
                 if covered {
                     return self.exec_block(store, frames, &item.body);
                 }
-                self.facts.push((condition.0, true, condition.1.clone()));
+                self.path
+                    .facts
+                    .push((condition.0, true, condition.1.clone()));
                 let then_store = self.exec_block(store.fork(), frames, &item.body);
-                self.facts.pop();
+                self.path.facts.pop();
                 let then_store = then_store?;
-                self.facts.push((condition.0, false, condition.1.clone()));
+                self.path
+                    .facts
+                    .push((condition.0, false, condition.1.clone()));
                 let else_store = self.exec_case_chain(
                     store,
                     frames,
@@ -223,7 +227,7 @@ impl Comb<'_, '_> {
                     default,
                     rest_coverage,
                 );
-                self.facts.pop();
+                self.path.facts.pop();
                 let else_store = else_store?;
                 self.merge(condition, &then_store, &else_store)
             }

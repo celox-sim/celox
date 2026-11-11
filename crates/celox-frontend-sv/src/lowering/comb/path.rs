@@ -4,11 +4,21 @@
 
 use super::*;
 
+/// The conditions that hold on the current path.
+#[derive(Default)]
+pub(super) struct PathConditions {
+    /// Branch conditions known on the current path, with their values.
+    pub(super) facts: Vec<(NodeId, bool, Sources)>,
+    /// Other conditions that hold on the current path: no jump taken yet,
+    /// an unrolled iteration running, a short-circuit operand evaluated.
+    pub(super) guards: Vec<Value>,
+}
+
 impl Comb<'_, '_> {
     /// The value a condition is known to have on the current path, from an
     /// enclosing branch on the same or the complementary two-state condition.
     pub(super) fn known(&self, truth: NodeId) -> Option<bool> {
-        self.facts.iter().rev().find_map(|&(fact, value, _)| {
+        self.path.facts.iter().rev().find_map(|&(fact, value, _)| {
             if fact == truth {
                 Some(value)
             } else if self.complementary(fact, truth) {
@@ -106,7 +116,7 @@ impl Comb<'_, '_> {
     /// run unconditionally.
     pub(super) fn path_condition(&mut self) -> Result<Option<Value>, sv::AnalyzerError> {
         let mut terms: Vec<Value> = Vec::new();
-        for (truth, value, sources) in self.facts.clone() {
+        for (truth, value, sources) in self.path.facts.clone() {
             let node = if value {
                 truth
             } else {
@@ -114,7 +124,7 @@ impl Comb<'_, '_> {
             };
             terms.push((node, sources));
         }
-        terms.extend(self.guards.iter().cloned());
+        terms.extend(self.path.guards.iter().cloned());
         let mut result: Option<Value> = None;
         for (node, sources) in terms {
             if slt_bool(self.arena, &mut self.consts, node) == Some(true) {

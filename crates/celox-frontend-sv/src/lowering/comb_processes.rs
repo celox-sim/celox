@@ -137,7 +137,7 @@ pub(super) fn lower_comb_processes(
         // A process that latches falls back to Ff below.
         pm.attempt_calls();
         let mut comb = comb::Comb::new(&mut pm, &mut arena);
-        comb.site_base = sites.len() as u32;
+        comb.events.site_base = sites.len() as u32;
         comb.continuous = process.kind() == sv::ir::CombProcessKind::ContinuousAssign;
         let lowered = comb.lower_process(process.body());
         // The guarded unit accepts whatever the symbolic form refuses of an
@@ -163,8 +163,8 @@ pub(super) fn lower_comb_processes(
             Ok(paths)
                 if waits
                     && (process.kind() == sv::ir::CombProcessKind::AlwaysComb || symbolic_star)
-                    && comb.observers.is_empty()
-                    && comb.sites.is_empty() =>
+                    && comb.events.observers.is_empty()
+                    && comb.events.sites.is_empty() =>
             {
                 drop(comb);
                 let mut targets: Vec<_> = paths
@@ -222,7 +222,7 @@ pub(super) fn lower_comb_processes(
             }
             Err(error) => return Err(error),
         }
-        if comb.observers.iter().any(|observer| {
+        if comb.events.observers.iter().any(|observer| {
             observer
                 .sensitivity
                 .iter()
@@ -236,7 +236,7 @@ pub(super) fn lower_comb_processes(
                 comb.m
                     .implicit_reads(process.sensitivity_body(), include_functions),
             );
-            for observer in &mut comb.observers {
+            for observer in &mut comb.events.observers {
                 observer.sensitivity = observer
                     .sensitivity
                     .iter()
@@ -270,7 +270,7 @@ pub(super) fn lower_comb_processes(
         // counts its occurrences.
         let base = sites.len() as u32;
         let mut counters: Vec<(VarAtomBase<SourceVarId>, SourceVarId)> = Vec::new();
-        for mut observer in std::mem::take(&mut comb.observers) {
+        for mut observer in std::mem::take(&mut comb.events.observers) {
             observer.activation_group = base;
             for atom in &observer.sensitivity {
                 if !counters.iter().any(|(counted, _)| counted == atom) {
@@ -295,13 +295,13 @@ pub(super) fn lower_comb_processes(
                 .collect();
             // A deferred action waits in the queue of its process.
             if let Some(celox_design::DeferredSite::Action { queue, .. }) =
-                &mut comb.sites[(observer.site_id - base) as usize].deferred
+                &mut comb.events.sites[(observer.site_id - base) as usize].deferred
             {
                 *queue = base;
             }
             observers.push(observer);
         }
-        sites.append(&mut comb.sites);
+        sites.append(&mut comb.events.sites);
     }
     for (target, body) in port_assignments {
         pm.call_unit();

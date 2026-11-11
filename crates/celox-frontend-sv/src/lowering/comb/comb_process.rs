@@ -101,8 +101,8 @@ impl Comb<'_, '_> {
                 });
             }
         }
-        if !self.observers.is_empty() {
-            let mut sensitivity: Sources = std::mem::take(&mut self.effect_sensitivity);
+        if !self.events.observers.is_empty() {
+            let mut sensitivity: Sources = std::mem::take(&mut self.events.effect_sensitivity);
             for path in &paths {
                 sensitivity.extend(path.sources.iter().copied());
             }
@@ -110,7 +110,7 @@ impl Comb<'_, '_> {
                 .into_iter()
                 .filter(|atom| !self.m.is_hidden(atom.id))
                 .collect();
-            for observer in &mut self.observers {
+            for observer in &mut self.events.observers {
                 observer.sensitivity = sensitivity.clone();
                 observer.written_input_atoms = observer
                     .observed_inputs

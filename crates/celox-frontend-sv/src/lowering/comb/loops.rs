@@ -3,6 +3,19 @@
 
 use super::*;
 
+/// The run-time loop folds being executed.
+#[derive(Default)]
+pub(super) struct Folds {
+    /// The depth of run-time loop folds being executed.
+    pub(super) folding: usize,
+    /// The depth of loop bodies being executed only to find the state they
+    /// write; their runtime events are not recorded.
+    pub(super) probing: usize,
+    /// The runtime events of the innermost run-time loop being folded, in
+    /// statement order.
+    pub(super) loop_effects: Option<Vec<SLTForEffect>>,
+}
+
 impl Comb<'_, '_> {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn exec_loop(
@@ -57,7 +70,7 @@ impl Comb<'_, '_> {
         if let Some(canonical) = canonical
             && self.loop_needs_fold(&store, frames, &canonical, body)?
         {
-            self.folding += 1;
+            self.folds.folding += 1;
             let folded = self.fold_loop(
                 store,
                 frames,
@@ -67,7 +80,7 @@ impl Comb<'_, '_> {
                 break_flag,
                 continue_flag,
             );
-            self.folding -= 1;
+            self.folds.folding -= 1;
             return folded;
         }
 
@@ -166,11 +179,11 @@ impl Comb<'_, '_> {
             let mut iteration = store.fork();
             self.set_flag(&mut iteration, continue_flag, false)?;
             if let Some(guard) = &guard {
-                self.guards.push(guard.clone());
+                self.path.guards.push(guard.clone());
             }
             let executed = self.exec_block(iteration, &loop_frames, body);
             if guard.is_some() {
-                self.guards.pop();
+                self.path.guards.pop();
             }
             iteration = executed?;
             // `continue` ends only this iteration; the step still runs.
@@ -301,11 +314,11 @@ impl Comb<'_, '_> {
         // Only inspect the bounds: their runtime events belong to the
         // evaluation that follows.
         let mut probe = store.fork();
-        self.probing += 1;
+        self.folds.probing += 1;
         let bounds = self
             .eval(&mut probe, frames, &canonical.start, None)
             .and_then(|start| Ok((start, self.loop_end(&mut probe, frames, canonical)?)));
-        self.probing -= 1;
+        self.folds.probing -= 1;
         let ((start, _), (end, _)) = bounds?;
         let (Some((start, _)), Some((end, _))) = (
             slt_const(self.arena, &mut self.consts, start),
@@ -433,9 +446,9 @@ impl Comb<'_, '_> {
         self.set_flag(&mut probe, continue_flag, false)?;
         let saved_unrolled = self.unrolled;
         let first_temp = self.m.next_id;
-        self.probing += 1;
+        self.folds.probing += 1;
         let probe_after = self.exec_block(probe.fork(), loop_frames, body);
-        self.probing -= 1;
+        self.folds.probing -= 1;
         let probe_after = probe_after?;
         self.unrolled = saved_unrolled;
         let is_state = |id: &SourceVarId| {
@@ -460,10 +473,11 @@ impl Comb<'_, '_> {
         }
         self.set_flag(&mut iteration, break_flag, false)?;
         self.set_flag(&mut iteration, continue_flag, false)?;
-        let observer_start = self.observers.len();
-        let outer_effects = self.loop_effects.replace(Vec::new());
+        let observer_start = self.events.observers.len();
+        let outer_effects = self.folds.loop_effects.replace(Vec::new());
         let after = self.exec_block(iteration, loop_frames, body);
-        let effects = std::mem::replace(&mut self.loop_effects, outer_effects).unwrap_or_default();
+        let effects =
+            std::mem::replace(&mut self.folds.loop_effects, outer_effects).unwrap_or_default();
         let after = after?;
 
         let mut initials = Vec::with_capacity(carried.len());
@@ -518,7 +532,9 @@ impl Comb<'_, '_> {
         if !effects.is_empty() {
             // The events follow every value the iterations depend on, such
             // as the bounds, even when no output does.
-            self.effect_sensitivity.extend(sources.iter().copied());
+            self.events
+                .effect_sensitivity
+                .extend(sources.iter().copied());
             // A runner repeats the loop to emit its events, iteration by
             // iteration, with the loop-carried state of each iteration.
             let result = match carried.first() {
@@ -549,10 +565,11 @@ impl Comb<'_, '_> {
                 effects,
                 continue_cond,
             })?;
-            match &mut self.loop_effects {
+            match &mut self.folds.loop_effects {
                 Some(outer) => outer.push(SLTForEffect::Runner(runner)),
                 None => {
                     let observer = self
+                        .events
                         .observers
                         .get_mut(observer_start)
                         .ok_or_else(|| unsupported("runtime event of a run-time loop"))?;

@@ -3,6 +3,17 @@
 
 use super::*;
 
+/// Combinational runtime events, their sites, and the inputs their
+/// operands read.
+#[derive(Default)]
+pub(in crate::lowering) struct RuntimeEvents {
+    pub observers: Vec<CombObserver<SourceVarId>>,
+    pub sites: Vec<RuntimeEventSite>,
+    pub(super) effect_sensitivity: Sources,
+    /// The first module-wide site number of this process's runtime events.
+    pub site_base: u32,
+}
+
 impl Comb<'_, '_> {
     /// `$readmemh`/`$readmemb`: the words of the file, written as constants.
     pub(super) fn readmem(
@@ -179,11 +190,13 @@ impl Comb<'_, '_> {
         let guard = guard.map(|guard| self.capture(guard)).transpose()?;
         // The first pass over a run-time loop body only finds the state it
         // writes; the operands ran for their effects on that state.
-        if self.probing > 0 {
+        if self.folds.probing > 0 {
             return Ok(());
         }
-        self.effect_sensitivity.extend(observed.iter().copied());
-        let site_id = self.site_base + self.sites.len() as u32;
+        self.events
+            .effect_sensitivity
+            .extend(observed.iter().copied());
+        let site_id = self.events.site_base + self.events.sites.len() as u32;
         // The action of a deferred assertion waits in the queue of its
         // process, which lowering names by the process's activation group
         // (IEEE 1800-2023 16.4). A deferred `$fatal` ends the simulation
@@ -195,7 +208,7 @@ impl Comb<'_, '_> {
         let fatal = kind.is_fatal() && deferred.is_none();
         // Inside a run-time loop the event is emitted once per iteration by
         // the loop's runner (see `fold_loop`).
-        let captured_in_loop = if let Some(effects) = &mut self.loop_effects {
+        let captured_in_loop = if let Some(effects) = &mut self.folds.loop_effects {
             effects.push(SLTForEffect::Event {
                 site_id,
                 guard,
@@ -210,7 +223,7 @@ impl Comb<'_, '_> {
         } else {
             false
         };
-        self.sites.push(RuntimeEventSite {
+        self.events.sites.push(RuntimeEventSite {
             kind: event_kind,
             template,
             sizing: DisplaySizing::Ieee,
@@ -251,7 +264,7 @@ impl Comb<'_, '_> {
             let (node, _) = self.read(&observer_store, id, full(width))?;
             local_inputs.push((id, node));
         }
-        self.observers.push(CombObserver {
+        self.events.observers.push(CombObserver {
             site_id,
             activation_group: 0,
             guard,

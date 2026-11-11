@@ -3,6 +3,16 @@
 
 use super::*;
 
+/// The subroutine bodies being executed, innermost last: the calls being
+/// inlined.
+#[derive(Default)]
+pub(super) struct CallStack {
+    pub(super) active_calls: Vec<String>,
+    /// The subroutines whose calls are binding a default argument that
+    /// calls (see `CallStack::binding_defaults` of `Ff`).
+    pub(super) binding_defaults: Vec<String>,
+}
+
 impl Comb<'_, '_> {
     /// Inline a call of `name`. Returns the function result, if any.
     pub(super) fn call(
@@ -41,13 +51,18 @@ impl Comb<'_, '_> {
         if !subroutine.persistent_locals.is_empty() {
             return Err(unsupported("stateful function call"));
         }
-        self.m.record_call(&self.active_calls, name);
-        if self.active_calls.iter().any(|active| active == name) {
+        self.m.record_call(&self.call_stack.active_calls, name);
+        if self
+            .call_stack
+            .active_calls
+            .iter()
+            .any(|active| active == name)
+        {
             self.m
-                .record_argument_calls(&self.active_calls, &subroutine, args);
+                .record_argument_calls(&self.call_stack.active_calls, &subroutine, args);
             return Err(unsupported(format!("recursive call of `{name}`")));
         }
-        if self.active_calls.len() >= MAX_CALL_DEPTH {
+        if self.call_stack.active_calls.len() >= MAX_CALL_DEPTH {
             return Err(unsupported("subroutine call depth limit exceeded"));
         }
         if args.len() > subroutine.params.len() {
@@ -134,14 +149,19 @@ impl Comb<'_, '_> {
                 let defaulted = matches!(args.get(position), None | Some(None));
                 let actual = if self.m.calls(&actual) {
                     if defaulted {
-                        if self.binding_defaults.iter().any(|active| active == name) {
+                        if self
+                            .call_stack
+                            .binding_defaults
+                            .iter()
+                            .any(|active| active == name)
+                        {
                             return Err(unsupported(format!("recursive call of `{name}`")));
                         }
-                        self.binding_defaults.push(name.to_string());
+                        self.call_stack.binding_defaults.push(name.to_string());
                     }
                     let hoisted = self.hoist(store, frames, &actual);
                     if defaulted {
-                        self.binding_defaults.pop();
+                        self.call_stack.binding_defaults.pop();
                     }
                     hoisted?
                 } else {
@@ -215,9 +235,9 @@ impl Comb<'_, '_> {
             return_var: subroutine.return_var.clone(),
         });
         let nodes = self.arena.len();
-        self.active_calls.push(name.to_string());
+        self.call_stack.active_calls.push(name.to_string());
         let result = self.exec_block(store.fork(), &call_frames, &subroutine.body);
-        self.active_calls.pop();
+        self.call_stack.active_calls.pop();
         self.m.expanded_call(
             name,
             super::super::recursion::Expansion {

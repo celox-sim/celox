@@ -58,34 +58,18 @@ pub(super) struct Comb<'p, 'a> {
     pub arena: &'p mut SLTNodeArena<SourceVarId>,
     /// Constant values of `arena` nodes.
     consts: ConstCache,
-    active_calls: Vec<String>,
-    /// The subroutines whose calls are binding a default argument that
-    /// calls (see `CallStack::binding_defaults` of `Ff`).
-    binding_defaults: Vec<String>,
+    /// The subroutine bodies being executed.
+    call_stack: inline_calls::CallStack,
     unrolled: usize,
     /// Whether nonblocking assignments are allowed (they are not in
     /// combinational processes).
     allow_nonblocking: bool,
-    /// Branch conditions known on the current path, with their values.
-    facts: Vec<(NodeId, bool, Sources)>,
-    /// Other conditions that hold on the current path: no jump taken yet,
-    /// an unrolled iteration running, a short-circuit operand evaluated.
-    guards: Vec<Value>,
-    /// Combinational runtime events, their sites, and the inputs their
-    /// operands read.
-    pub observers: Vec<CombObserver<SourceVarId>>,
-    pub sites: Vec<RuntimeEventSite>,
-    effect_sensitivity: Sources,
-    /// The depth of run-time loop folds being executed.
-    folding: usize,
-    /// The depth of loop bodies being executed only to find the state they
-    /// write; their runtime events are not recorded.
-    probing: usize,
-    /// The runtime events of the innermost run-time loop being folded, in
-    /// statement order.
-    loop_effects: Option<Vec<SLTForEffect>>,
-    /// The first module-wide site number of this process's runtime events.
-    pub site_base: u32,
+    /// The conditions that hold on the current path.
+    path: path::PathConditions,
+    /// The runtime events of the process.
+    pub events: system_tasks::RuntimeEvents,
+    /// The run-time loop folds being executed.
+    folds: loops::Folds,
     /// Whether the process is a continuous assignment, which drives fixed bits.
     pub continuous: bool,
     /// Whether the process is an `initial` block, which defines initial state.
@@ -106,19 +90,12 @@ impl<'p, 'a> Comb<'p, 'a> {
             m,
             arena,
             consts: ConstCache::default(),
-            active_calls: Vec::new(),
-            binding_defaults: Vec::new(),
+            call_stack: inline_calls::CallStack::default(),
             unrolled: 0,
             allow_nonblocking: false,
-            facts: Vec::new(),
-            guards: Vec::new(),
-            observers: Vec::new(),
-            sites: Vec::new(),
-            effect_sensitivity: Sources::default(),
-            folding: 0,
-            probing: 0,
-            loop_effects: None,
-            site_base: 0,
+            path: path::PathConditions::default(),
+            events: system_tasks::RuntimeEvents::default(),
+            folds: loops::Folds::default(),
             continuous: false,
             initial: false,
         }

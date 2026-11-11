@@ -75,9 +75,9 @@ impl Comb<'_, '_> {
                         Some(false) => Ok(store),
                         Some(true) => self.exec_block(store, frames, &stmts[index + 1..]),
                         None => {
-                            self.guards.push(active.clone());
+                            self.path.guards.push(active.clone());
                             let rest = self.exec_block(store.fork(), frames, &stmts[index + 1..]);
-                            self.guards.pop();
+                            self.path.guards.pop();
                             self.merge(&active, &rest?, &store)
                         }
                     };
@@ -167,13 +167,13 @@ impl Comb<'_, '_> {
                     Some(true) => self.exec_block(store, frames, then_body),
                     Some(false) => self.exec_block(store, frames, else_body),
                     None => {
-                        self.facts.push((truth, true, sources.clone()));
+                        self.path.facts.push((truth, true, sources.clone()));
                         let then_store = self.exec_block(store.fork(), frames, then_body);
-                        self.facts.pop();
+                        self.path.facts.pop();
                         let then_store = then_store?;
-                        self.facts.push((truth, false, sources.clone()));
+                        self.path.facts.push((truth, false, sources.clone()));
                         let else_store = self.exec_block(store, frames, else_body);
-                        self.facts.pop();
+                        self.path.facts.pop();
                         let else_store = else_store?;
                         self.merge(&(truth, sources), &then_store, &else_store)
                     }
