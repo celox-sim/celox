@@ -326,6 +326,13 @@ fn compile_function_units(
     options: &SimulatorOptions,
     cancel: Option<&CompileCancel>,
 ) -> Result<Vec<CompiledNativeFunction>, SimulatorError> {
+    if sir.sir.functions.is_empty() {
+        return Ok(Vec::new());
+    }
+    // One layout serves every function in turn: each places the objects of
+    // its frame slots in it while it is compiled. A copy per function would
+    // copy the whole state's layout once per function.
+    let mut function_layout = layout.clone();
     sir.sir
         .functions
         .iter()
@@ -335,9 +342,16 @@ fn compile_function_units(
             function_options.function = Some(celox_sir::FunctionId(
                 u32::try_from(index).map_err(|_| codegen_message("too many function units"))?,
             ));
-            compile_unit_refs(
+            let frame = &function_options
+                .functions
+                .as_deref()
+                .ok_or_else(|| codegen_message("function units without their frames"))?
+                .frames[index];
+            let placed =
+                emit::place_frame_slots(&mut function_layout, frame).map_err(codegen_message)?;
+            let compiled = compile_unit_refs(
                 &[&function.unit],
-                layout,
+                &function_layout,
                 options.four_state,
                 &format!("function[{index}]"),
                 NativeMergeKind::Complete,
@@ -346,7 +360,9 @@ fn compile_function_units(
                 false,
                 &options.optimize_options.diagnostics,
                 cancel,
-            )
+            );
+            emit::remove_frame_slots(&mut function_layout, &placed);
+            compiled
         })
         .collect::<Result<Vec<_>, _>>()
 }
