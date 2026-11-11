@@ -323,9 +323,6 @@ impl Parser<'_> {
             body_tokens = self.range(body_start);
         }
         let id = SubroutineId(self.subroutines.len());
-        if self.subroutines.len() >= 1_000_000 {
-            return Err(self.unsupported("native subroutine arena exceeds one million nodes"));
-        }
         let authored_statements = self.body_membership(&items);
         self.subroutines.push(Subroutine {
             kind,

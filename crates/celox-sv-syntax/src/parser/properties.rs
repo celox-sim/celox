@@ -363,11 +363,6 @@ impl Parser<'_> {
                 _ => offset += 1,
             }
         }
-        if self.assertion_declarations.len() >= 1_000_000 {
-            return Err(
-                self.unsupported("native assertion-declaration arena exceeds one million entries")
-            );
-        }
         let lengths = (
             self.expressions.len(),
             self.types.len(),

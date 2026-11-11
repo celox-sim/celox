@@ -595,9 +595,6 @@ impl Parser<'_> {
                 }
                 frame.unit.tokens = self.range(frame.start);
                 if let Some(parent) = frames.last_mut() {
-                    if self.nested_units.len() >= 1_000_000 {
-                        return Err(self.unsupported("native unit arena exceeds one million nodes"));
-                    }
                     let id = UnitId(self.nested_units.len());
                     self.nested_units.push(frame.unit);
                     let start = frame.start;
