@@ -14,6 +14,7 @@ use dynasmrt::aarch64::Aarch64Relocation;
 use dynasmrt::{DynamicLabel, DynasmApi, DynasmError, DynasmLabelApi, VecAssembler, dynasm};
 
 use crate::allocation::{Assignment, CopyDestination, CopyOperation, CopySource, EdgeCopyPlan};
+pub use crate::function_unit::{place_frame_slots, remove_frame_slots};
 use crate::mir::{
     BaseReg, BlockId, BranchPredicate, CmpKind, MFunction, MInst, OpSize, PackedLaneCompareRhs,
     SPARSE_COMMIT_DESCRIPTOR_WORDS, VReg,
@@ -369,21 +370,19 @@ pub fn allocate_prepared_eu_with_functions(
     mut trace: Option<&mut NativeFunctionTrace>,
     is_cancelled: impl Fn() -> bool,
 ) -> Result<AllocatedFunction, ChainedEmitError> {
-    // A function unit's slots become state objects in its frame window.
-    let mut function_layout = None;
+    // A function unit's slots are state objects in its frame window, which
+    // the caller placed in `layout` (`place_frame_slots`).
     let mut window = None;
     let mut prepared = None;
     if let Some(function) = functions.and_then(|functions| functions.function) {
         let frame = &functions
             .expect("a function unit is compiled with the program's functions")
             .frames[function.0 as usize];
-        let (unit, unit_layout, unit_window) = crate::function_unit::prepare(sir_eu, layout, frame)
+        let (unit, unit_window) = crate::function_unit::prepare(sir_eu, layout, frame)
             .map_err(|message| ChainedEmitError::Emit(EmitError::Lowering(message)))?;
-        function_layout = Some(unit_layout);
         window = Some(unit_window);
         prepared = Some(unit);
     }
-    let layout = function_layout.as_ref().unwrap_or(layout);
     let sir_eu = prepared.as_ref().unwrap_or(sir_eu);
     let split = crate::function_unit::split_at_calls(sir_eu);
     let sir_eu = split.as_ref().unwrap_or(sir_eu);
