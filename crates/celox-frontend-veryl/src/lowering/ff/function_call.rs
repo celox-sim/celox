@@ -1,8 +1,22 @@
-use super::{Domain, FfParser};
+use super::{Domain, FfParser, FunctionArrayView};
 use crate::{HashMap, HashSet, ParserError, context_width::expression_signed, function_call_arg};
 use celox_design::VarAtomBase;
-use celox_sir::SIRBuilder;
+use celox_sir::{RegisterId, SIRBuilder};
 use veryl_analyzer::ir::{Expression, VarId};
+use veryl_parser::token_range::TokenRange;
+
+/// Bindings of the function calls being lowered symbolically, innermost last. An inline body
+/// hides all of them while it is lowered (`SymbolicCallFrames`).
+pub(super) struct CallFrames {
+    pub(super) function_arg_stack: Vec<HashMap<VarId, Expression>>,
+    pub(super) function_arg_value_stack: Vec<HashMap<VarId, RegisterId>>,
+    pub(super) function_expression_value_stack: Vec<HashMap<TokenRange, RegisterId>>,
+    pub(super) function_event_arg_state_stack: Vec<HashMap<TokenRange, HashMap<VarId, Expression>>>,
+    // Maps an active array formal to its call-specific register snapshot and
+    // the formal working region used for O(1) dynamic element loads.
+    pub(super) function_array_view_stack: Vec<HashMap<VarId, FunctionArrayView>>,
+    pub(super) function_array_view_enabled_stack: Vec<bool>,
+}
 
 impl<'a> FfParser<'a> {
     pub(super) fn parse_function_call_expr<A>(
@@ -69,7 +83,8 @@ impl<'a> FfParser<'a> {
                 bindings.insert(*arg_id, arg_expr);
             }
         }
-        self.function_expression_value_stack
+        self.frames
+            .function_expression_value_stack
             .push(HashMap::default());
         let materialized = match self.materialize_function_inputs(
             call,
@@ -83,7 +98,7 @@ impl<'a> FfParser<'a> {
         ) {
             Ok(materialized) => materialized,
             Err(err) => {
-                self.function_expression_value_stack.pop();
+                self.frames.function_expression_value_stack.pop();
                 return Err(err);
             }
         };
@@ -93,10 +108,12 @@ impl<'a> FfParser<'a> {
         }
         symbolic_bindings.retain(|var_id, _| self.module.variables[var_id].r#type.array.is_empty());
 
-        self.function_arg_stack.push(bindings);
-        self.function_arg_value_stack.push(materialized);
-        self.function_array_view_stack.push(HashMap::default());
-        self.function_array_view_enabled_stack.push(true);
+        self.frames.function_arg_stack.push(bindings);
+        self.frames.function_arg_value_stack.push(materialized);
+        self.frames
+            .function_array_view_stack
+            .push(HashMap::default());
+        self.frames.function_array_view_enabled_stack.push(true);
         let result = (|| {
             let runtime_state = if self
                 .statements_have_runtime_effect(&function_body.statements, &mut HashSet::default())
@@ -201,11 +218,11 @@ impl<'a> FfParser<'a> {
             self.stack.push_back(ret_reg);
             Ok(())
         })();
-        self.function_expression_value_stack.pop();
-        self.function_arg_value_stack.pop();
-        self.function_array_view_enabled_stack.pop();
-        let finished_views = self.function_array_view_stack.pop().unwrap();
-        self.function_arg_stack.pop();
+        self.frames.function_expression_value_stack.pop();
+        self.frames.function_arg_value_stack.pop();
+        self.frames.function_array_view_enabled_stack.pop();
+        let finished_views = self.frames.function_array_view_stack.pop().unwrap();
+        self.frames.function_arg_stack.pop();
         self.restore_active_function_array_views(&finished_views, convert, ir_builder)?;
         result
     }
@@ -284,7 +301,8 @@ impl<'a> FfParser<'a> {
                 bindings.insert(*arg_id, arg_expr);
             }
         }
-        self.function_expression_value_stack
+        self.frames
+            .function_expression_value_stack
             .push(HashMap::default());
         let materialized = match self.materialize_function_inputs(
             call,
@@ -298,7 +316,7 @@ impl<'a> FfParser<'a> {
         ) {
             Ok(materialized) => materialized,
             Err(err) => {
-                self.function_expression_value_stack.pop();
+                self.frames.function_expression_value_stack.pop();
                 return Err(err);
             }
         };
@@ -308,10 +326,12 @@ impl<'a> FfParser<'a> {
         }
         symbolic_bindings.retain(|var_id, _| self.module.variables[var_id].r#type.array.is_empty());
 
-        self.function_arg_stack.push(bindings);
-        self.function_arg_value_stack.push(materialized);
-        self.function_array_view_stack.push(HashMap::default());
-        self.function_array_view_enabled_stack.push(true);
+        self.frames.function_arg_stack.push(bindings);
+        self.frames.function_arg_value_stack.push(materialized);
+        self.frames
+            .function_array_view_stack
+            .push(HashMap::default());
+        self.frames.function_array_view_enabled_stack.push(true);
         let result = (|| {
             let runtime_state = if has_runtime_effect {
                 Some(self.emit_function_runtime_effects(
@@ -388,11 +408,11 @@ impl<'a> FfParser<'a> {
 
             Ok(())
         })();
-        self.function_expression_value_stack.pop();
-        self.function_arg_value_stack.pop();
-        self.function_array_view_enabled_stack.pop();
-        let finished_views = self.function_array_view_stack.pop().unwrap();
-        self.function_arg_stack.pop();
+        self.frames.function_expression_value_stack.pop();
+        self.frames.function_arg_value_stack.pop();
+        self.frames.function_array_view_enabled_stack.pop();
+        let finished_views = self.frames.function_array_view_stack.pop().unwrap();
+        self.frames.function_arg_stack.pop();
         self.restore_active_function_array_views(&finished_views, convert, ir_builder)?;
         result
     }

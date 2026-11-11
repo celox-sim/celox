@@ -223,10 +223,12 @@ impl<'a> FfParser<'a> {
                             .variables
                             .get(var_id)
                             .is_some_and(|variable| !variable.r#type.array.is_empty())
-                            && let Some(frame) =
-                                (0..self.function_arg_stack.len()).rev().find(|&frame| {
-                                    self.function_array_view_enabled_stack[frame]
-                                        && self.function_arg_stack[frame].contains_key(var_id)
+                            && let Some(frame) = (0..self.frames.function_arg_stack.len())
+                                .rev()
+                                .find(|&frame| {
+                                    self.frames.function_array_view_enabled_stack[frame]
+                                        && self.frames.function_arg_stack[frame]
+                                            .contains_key(var_id)
                                 })
                         {
                             let key = ArrayViewKey {
@@ -241,7 +243,9 @@ impl<'a> FfParser<'a> {
                                 candidates,
                                 candidate_indices,
                             );
-                            if let Some(bound_expr) = self.function_arg_stack[frame].get(var_id) {
+                            if let Some(bound_expr) =
+                                self.frames.function_arg_stack[frame].get(var_id)
+                            {
                                 self.collect_array_views_in_bound_expression(
                                     frame,
                                     *var_id,
@@ -436,10 +440,11 @@ impl<'a> FfParser<'a> {
             && select.0.is_empty()
             && select.1.is_none()
             && let Some(source_frame) = (0..frame).rev().find(|&source_frame| {
-                self.function_array_view_enabled_stack[source_frame]
-                    && self.function_arg_stack[source_frame].contains_key(bound_var_id)
+                self.frames.function_array_view_enabled_stack[source_frame]
+                    && self.frames.function_arg_stack[source_frame].contains_key(bound_var_id)
             })
-            && let Some(source_expr) = self.function_arg_stack[source_frame].get(bound_var_id)
+            && let Some(source_expr) =
+                self.frames.function_arg_stack[source_frame].get(bound_var_id)
         {
             let key = ArrayViewKey {
                 frame: source_frame,

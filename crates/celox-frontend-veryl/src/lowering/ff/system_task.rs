@@ -2,16 +2,27 @@
 
 use super::*;
 
+/// Runtime errors and event sites registered by the block, and how their ids are relocated
+/// into the ids of the whole design.
+pub(super) struct RuntimeSites {
+    pub(super) runtime_errors: HashMap<i64, RuntimeErrorInfo<VarId>>,
+    pub(super) runtime_event_sites: Vec<RuntimeEventSite>,
+    pub(super) next_runtime_error_code: i64,
+    pub(super) runtime_error_code_map: Option<HashMap<i64, i64>>,
+    pub(super) runtime_event_site_base: u32,
+}
+
 impl<'a> FfParser<'a> {
     pub(super) fn runtime_error(&mut self, message: impl Into<String>, signals: Vec<VarId>) -> i64 {
-        let local_code = self.next_runtime_error_code;
-        self.next_runtime_error_code += 1;
+        let local_code = self.runtime.next_runtime_error_code;
+        self.runtime.next_runtime_error_code += 1;
         let code = self
+            .runtime
             .runtime_error_code_map
             .as_ref()
             .and_then(|mapping| mapping.get(&local_code).copied())
             .unwrap_or(local_code);
-        self.runtime_errors.insert(
+        self.runtime.runtime_errors.insert(
             code,
             RuntimeErrorInfo {
                 message: message.into(),
@@ -75,10 +86,11 @@ impl<'a> FfParser<'a> {
             arg_is_handle: Vec::new(),
         };
         let id = self
+            .runtime
             .runtime_event_site_base
-            .checked_add(self.runtime_event_sites.len() as u32)
+            .checked_add(self.runtime.runtime_event_sites.len() as u32)
             .expect("runtime event site identifier overflow");
-        self.runtime_event_sites.push(site);
+        self.runtime.runtime_event_sites.push(site);
         id
     }
 
@@ -96,16 +108,18 @@ impl<'a> FfParser<'a> {
             .cloned();
         let has_state = state.is_some();
         if let Some(state) = state {
-            self.function_arg_stack.push(state);
-            self.function_array_view_stack.push(HashMap::default());
-            self.function_array_view_enabled_stack.push(false);
+            self.frames.function_arg_stack.push(state);
+            self.frames
+                .function_array_view_stack
+                .push(HashMap::default());
+            self.frames.function_array_view_enabled_stack.push(false);
         }
         let result =
             self.parse_expression(expr, targets, domain, convert, sources, ir_builder, None);
         if has_state {
-            self.function_array_view_enabled_stack.pop();
-            self.function_array_view_stack.pop();
-            self.function_arg_stack.pop();
+            self.frames.function_array_view_enabled_stack.pop();
+            self.frames.function_array_view_stack.pop();
+            self.frames.function_arg_stack.pop();
         }
         result
     }
@@ -395,12 +409,13 @@ impl<'a> FfParser<'a> {
             };
             ir_builder.emit(SIRInstruction::Imm(reg, value));
             let access = BitAccess::new(run.bit_offset, run.bit_offset + run.bit_width - 1);
-            let store_region = if self.sparse_write_vars.contains(&image.var_id) {
+            let store_region = if self.placement.sparse_write_vars.contains(&image.var_id) {
                 SPARSE_WORKING_REGION
             } else {
                 domain.region()
             };
             let direct_write = self
+                .placement
                 .direct_static_write_ranges
                 .get(&image.var_id)
                 .is_some_and(|ranges| {
@@ -424,11 +439,11 @@ impl<'a> FfParser<'a> {
                 Vec::new(),
                 Vec::new(),
             ));
-            let bits = self.defined_ranges.entry(image.var_id).or_default();
+            let bits = self.defined.defined_ranges.entry(image.var_id).or_default();
             for bit in access.lsb..=access.msb {
                 bits.insert(bit);
             }
-            self.dynamic_defined_vars.insert(image.var_id);
+            self.defined.dynamic_defined_vars.insert(image.var_id);
             targets.push(VarAtomBase::new(
                 convert(image.var_id, WORKING_REGION),
                 access.lsb,

@@ -2,6 +2,14 @@
 
 use super::*;
 
+/// Where the stores of this block are placed when they do not go to the region of the
+/// domain: set once by the caller before lowering, read by every store.
+pub(super) struct WritePlacement {
+    pub(super) sparse_write_vars: HashSet<VarId>,
+    pub(super) direct_static_write_ranges: HashMap<VarId, Vec<celox_design::BitAccess>>,
+    pub(super) direct_dynamic_write_vars: HashSet<VarId>,
+}
+
 impl<'a> FfParser<'a> {
     fn eval_type_select(
         &self,
@@ -762,14 +770,15 @@ impl<'a> FfParser<'a> {
             return Ok(());
         }
         let store_region = if matches!(domain, Domain::Ff)
-            && (!is_static || self.sparse_write_vars.contains(&dst.id))
+            && (!is_static || self.placement.sparse_write_vars.contains(&dst.id))
         {
             SPARSE_WORKING_REGION
         } else {
             domain.region()
         };
         let direct_write = if is_static {
-            self.direct_static_write_ranges
+            self.placement
+                .direct_static_write_ranges
                 .get(&dst.id)
                 .is_some_and(|ranges| {
                     ranges
@@ -777,7 +786,7 @@ impl<'a> FfParser<'a> {
                         .any(|range| range.lsb <= access.lsb && range.msb >= access.msb)
                 })
         } else {
-            self.direct_dynamic_write_vars.contains(&dst.id)
+            self.placement.direct_dynamic_write_vars.contains(&dst.id)
         };
         let store_region =
             if direct_write && matches!(store_region, WORKING_REGION | SPARSE_WORKING_REGION) {
@@ -796,14 +805,14 @@ impl<'a> FfParser<'a> {
 
         // Use conservative range from eval_var_select for tracking (covers all possible bits).
         if is_static {
-            let bits = self.defined_ranges.entry(dst.id).or_default();
+            let bits = self.defined.defined_ranges.entry(dst.id).or_default();
             for i in access.lsb..=access.msb {
                 bits.insert(i);
             }
         } else {
             self.dynamic_write_vars.insert(dst.id);
         }
-        self.dynamic_defined_vars.insert(dst.id);
+        self.defined.dynamic_defined_vars.insert(dst.id);
 
         if matches!(domain, Domain::Ff) {
             // This is a temporary hack since we don't know the clock yet.

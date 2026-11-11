@@ -288,25 +288,28 @@ impl<'a> FfParser<'a> {
             FunctionPathCondition::Never => return Ok(expr),
             FunctionPathCondition::Always => {
                 *state = evaluated_state;
-                self.function_arg_stack.push(state.clone());
-                self.function_array_view_stack.push(HashMap::default());
-                self.function_array_view_enabled_stack.push(false);
-                self.function_event_arg_state_stack
+                self.frames.function_arg_stack.push(state.clone());
+                self.frames
+                    .function_array_view_stack
+                    .push(HashMap::default());
+                self.frames.function_array_view_enabled_stack.push(false);
+                self.frames
+                    .function_event_arg_state_stack
                     .push(expression_states.clone());
                 let result = self
                     .parse_expression(&expr, targets, domain, convert, sources, ir_builder, None);
-                self.function_event_arg_state_stack.pop();
-                self.function_array_view_enabled_stack.pop();
-                self.function_array_view_stack.pop();
-                self.function_arg_stack.pop();
+                self.frames.function_event_arg_state_stack.pop();
+                self.frames.function_array_view_enabled_stack.pop();
+                self.frames.function_array_view_stack.pop();
+                self.frames.function_arg_stack.pop();
                 result?;
                 self.stack
                     .pop_back()
                     .expect("Function runtime expression evaluation failed")
             }
             FunctionPathCondition::Conditional(condition) => {
-                let pre_defined = self.defined_ranges.clone();
-                let pre_dynamic = self.dynamic_defined_vars.clone();
+                let pre_defined = self.defined.defined_ranges.clone();
+                let pre_dynamic = self.defined.dynamic_defined_vars.clone();
                 *state = self.merge_expression_states(
                     condition,
                     &guard_state,
@@ -340,17 +343,20 @@ impl<'a> FfParser<'a> {
                 });
 
                 ir_builder.switch_to_block(effect_block);
-                self.function_arg_stack.push(evaluated_state.clone());
-                self.function_array_view_stack.push(HashMap::default());
-                self.function_array_view_enabled_stack.push(false);
-                self.function_event_arg_state_stack
+                self.frames.function_arg_stack.push(evaluated_state.clone());
+                self.frames
+                    .function_array_view_stack
+                    .push(HashMap::default());
+                self.frames.function_array_view_enabled_stack.push(false);
+                self.frames
+                    .function_event_arg_state_stack
                     .push(expression_states.clone());
                 let parse_result = self
                     .parse_expression(&expr, targets, domain, convert, sources, ir_builder, None);
-                self.function_event_arg_state_stack.pop();
-                self.function_array_view_enabled_stack.pop();
-                self.function_array_view_stack.pop();
-                self.function_arg_stack.pop();
+                self.frames.function_event_arg_state_stack.pop();
+                self.frames.function_array_view_enabled_stack.pop();
+                self.frames.function_array_view_stack.pop();
+                self.frames.function_arg_stack.pop();
                 parse_result?;
                 let effect_value = self
                     .stack
@@ -359,9 +365,9 @@ impl<'a> FfParser<'a> {
                 let effect_value =
                     self.coerce_register_to_type(effect_value, &result_type, signed, ir_builder);
                 let effect_defined =
-                    std::mem::replace(&mut self.defined_ranges, pre_defined.clone());
+                    std::mem::replace(&mut self.defined.defined_ranges, pre_defined.clone());
                 let effect_dynamic =
-                    std::mem::replace(&mut self.dynamic_defined_vars, pre_dynamic.clone());
+                    std::mem::replace(&mut self.defined.dynamic_defined_vars, pre_dynamic.clone());
                 ir_builder.seal_block(SIRTerminator::Jump(merge_block, vec![effect_value]));
 
                 ir_builder.switch_to_block(skip_block);
@@ -369,13 +375,15 @@ impl<'a> FfParser<'a> {
                 ir_builder.emit(SIRInstruction::Imm(dummy, SIRValue::new(0u8)));
                 ir_builder.seal_block(SIRTerminator::Jump(merge_block, vec![dummy]));
                 ir_builder.switch_to_block(merge_block);
-                self.defined_ranges = self.intersect_defined_states(pre_defined, effect_defined);
-                self.dynamic_defined_vars =
+                self.defined.defined_ranges =
+                    self.intersect_defined_states(pre_defined, effect_defined);
+                self.defined.dynamic_defined_vars =
                     self.intersect_dynamic_vars(pre_dynamic, effect_dynamic);
                 result
             }
         };
-        self.function_expression_value_stack
+        self.frames
+            .function_expression_value_stack
             .last_mut()
             .expect("Function expression value scope is active")
             .insert(expr.token_range(), value);
@@ -399,8 +407,8 @@ impl<'a> FfParser<'a> {
         let guard_state = state.clone();
         let (call, next_state, arg_states) = self.prepare_system_function_call(call, state)?;
         *state = self.apply_state_transition_on_path(active, &guard_state, next_state);
-        let pre_defined = self.defined_ranges.clone();
-        let pre_dynamic = self.dynamic_defined_vars.clone();
+        let pre_defined = self.defined.defined_ranges.clone();
+        let pre_dynamic = self.defined.dynamic_defined_vars.clone();
         let merge_block = if let FunctionPathCondition::Conditional(condition) = active {
             let condition = self.parse_function_path_condition(
                 condition,
@@ -424,20 +432,23 @@ impl<'a> FfParser<'a> {
             None
         };
 
-        self.function_event_arg_state_stack.push(arg_states);
+        self.frames.function_event_arg_state_stack.push(arg_states);
         let result =
             self.parse_system_task_statement(&call, targets, domain, convert, sources, ir_builder);
-        self.function_event_arg_state_stack.pop();
+        self.frames.function_event_arg_state_stack.pop();
         result?;
 
         if let Some(merge_block) = merge_block {
-            let effect_defined = std::mem::replace(&mut self.defined_ranges, pre_defined.clone());
+            let effect_defined =
+                std::mem::replace(&mut self.defined.defined_ranges, pre_defined.clone());
             let effect_dynamic =
-                std::mem::replace(&mut self.dynamic_defined_vars, pre_dynamic.clone());
+                std::mem::replace(&mut self.defined.dynamic_defined_vars, pre_dynamic.clone());
             ir_builder.seal_block(SIRTerminator::Jump(merge_block, vec![]));
             ir_builder.switch_to_block(merge_block);
-            self.defined_ranges = self.intersect_defined_states(pre_defined, effect_defined);
-            self.dynamic_defined_vars = self.intersect_dynamic_vars(pre_dynamic, effect_dynamic);
+            self.defined.defined_ranges =
+                self.intersect_defined_states(pre_defined, effect_defined);
+            self.defined.dynamic_defined_vars =
+                self.intersect_dynamic_vars(pre_dynamic, effect_dynamic);
         }
         Ok(())
     }
@@ -494,8 +505,8 @@ impl<'a> FfParser<'a> {
             )?;
         }
 
-        let pre_defined = self.defined_ranges.clone();
-        let pre_dynamic = self.dynamic_defined_vars.clone();
+        let pre_defined = self.defined.defined_ranges.clone();
+        let pre_dynamic = self.defined.dynamic_defined_vars.clone();
         let merge_block = if let FunctionPathCondition::Conditional(condition) = active {
             let condition = self.parse_function_path_condition(
                 condition,
@@ -519,24 +530,28 @@ impl<'a> FfParser<'a> {
             None
         };
 
-        self.function_arg_stack.push(state.clone());
-        self.function_array_view_stack.push(HashMap::default());
-        self.function_array_view_enabled_stack.push(false);
+        self.frames.function_arg_stack.push(state.clone());
+        self.frames
+            .function_array_view_stack
+            .push(HashMap::default());
+        self.frames.function_array_view_enabled_stack.push(false);
         let result =
             self.parse_assign_statement(&assign, targets, domain, convert, sources, ir_builder);
-        self.function_array_view_enabled_stack.pop();
-        self.function_array_view_stack.pop();
-        self.function_arg_stack.pop();
+        self.frames.function_array_view_enabled_stack.pop();
+        self.frames.function_array_view_stack.pop();
+        self.frames.function_arg_stack.pop();
         result?;
 
         if let Some(merge_block) = merge_block {
-            let store_defined = std::mem::replace(&mut self.defined_ranges, pre_defined.clone());
+            let store_defined =
+                std::mem::replace(&mut self.defined.defined_ranges, pre_defined.clone());
             let store_dynamic =
-                std::mem::replace(&mut self.dynamic_defined_vars, pre_dynamic.clone());
+                std::mem::replace(&mut self.defined.dynamic_defined_vars, pre_dynamic.clone());
             ir_builder.seal_block(SIRTerminator::Jump(merge_block, vec![]));
             ir_builder.switch_to_block(merge_block);
-            self.defined_ranges = self.intersect_defined_states(pre_defined, store_defined);
-            self.dynamic_defined_vars = self.intersect_dynamic_vars(pre_dynamic, store_dynamic);
+            self.defined.defined_ranges = self.intersect_defined_states(pre_defined, store_defined);
+            self.defined.dynamic_defined_vars =
+                self.intersect_dynamic_vars(pre_dynamic, store_dynamic);
         }
         Ok(())
     }
@@ -584,8 +599,8 @@ impl<'a> FfParser<'a> {
             state.retain(|id, _| self.module.variables[id].affiliation == Affiliation::Function);
         }
 
-        let pre_defined = self.defined_ranges.clone();
-        let pre_dynamic = self.dynamic_defined_vars.clone();
+        let pre_defined = self.defined.defined_ranges.clone();
+        let pre_dynamic = self.defined.dynamic_defined_vars.clone();
         let merge_block = if let FunctionPathCondition::Conditional(condition) = active {
             let condition = self.parse_function_path_condition(
                 condition,
@@ -609,24 +624,28 @@ impl<'a> FfParser<'a> {
             None
         };
 
-        self.function_arg_stack.push(state.clone());
-        self.function_array_view_stack.push(HashMap::default());
-        self.function_array_view_enabled_stack.push(false);
+        self.frames.function_arg_stack.push(state.clone());
+        self.frames
+            .function_array_view_stack
+            .push(HashMap::default());
+        self.frames.function_array_view_enabled_stack.push(false);
         let result = self
             .parse_function_call_statement(&call, targets, domain, convert, sources, ir_builder);
-        self.function_array_view_enabled_stack.pop();
-        self.function_array_view_stack.pop();
-        self.function_arg_stack.pop();
+        self.frames.function_array_view_enabled_stack.pop();
+        self.frames.function_array_view_stack.pop();
+        self.frames.function_arg_stack.pop();
         result?;
 
         if let Some(merge_block) = merge_block {
-            let call_defined = std::mem::replace(&mut self.defined_ranges, pre_defined.clone());
+            let call_defined =
+                std::mem::replace(&mut self.defined.defined_ranges, pre_defined.clone());
             let call_dynamic =
-                std::mem::replace(&mut self.dynamic_defined_vars, pre_dynamic.clone());
+                std::mem::replace(&mut self.defined.dynamic_defined_vars, pre_dynamic.clone());
             ir_builder.seal_block(SIRTerminator::Jump(merge_block, vec![]));
             ir_builder.switch_to_block(merge_block);
-            self.defined_ranges = self.intersect_defined_states(pre_defined, call_defined);
-            self.dynamic_defined_vars = self.intersect_dynamic_vars(pre_dynamic, call_dynamic);
+            self.defined.defined_ranges = self.intersect_defined_states(pre_defined, call_defined);
+            self.defined.dynamic_defined_vars =
+                self.intersect_dynamic_vars(pre_dynamic, call_dynamic);
         }
         Ok(())
     }

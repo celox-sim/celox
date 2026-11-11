@@ -487,8 +487,8 @@ impl<'a> FfParser<'a> {
             ir_builder.seal_block(SIRTerminator::Jump(header_bb, vec![init_reg]));
         }
 
-        let pre_loop_defined = self.defined_ranges.clone();
-        let pre_loop_dynamic = self.dynamic_defined_vars.clone();
+        let pre_loop_defined = self.defined.defined_ranges.clone();
+        let pre_loop_dynamic = self.defined.dynamic_defined_vars.clone();
 
         if let (Some(precheck_bb), Some(empty_exit_check_bb), Some(range_error_bb)) =
             (precheck_bb, empty_exit_check_bb, range_error_bb)
@@ -783,26 +783,26 @@ impl<'a> FfParser<'a> {
         ir_builder.switch_to_block(body_bb);
         self.local_working_vars.insert(stmt.var_id);
 
-        let mut local_defined = self.defined_ranges.clone();
+        let mut local_defined = self.defined.defined_ranges.clone();
         local_defined.insert(stmt.var_id, (0..loop_width).collect());
-        let prev_defined = std::mem::replace(&mut self.defined_ranges, local_defined);
-        let mut local_dynamic = self.dynamic_defined_vars.clone();
+        let prev_defined = std::mem::replace(&mut self.defined.defined_ranges, local_defined);
+        let mut local_dynamic = self.defined.dynamic_defined_vars.clone();
         local_dynamic.insert(stmt.var_id);
-        let prev_dynamic = std::mem::replace(&mut self.dynamic_defined_vars, local_dynamic);
+        let prev_dynamic = std::mem::replace(&mut self.defined.dynamic_defined_vars, local_dynamic);
 
         self.loop_exit_blocks.push(exit_bb);
         let body_flow =
             self.parse_statement_list(&stmt.body, targets, domain, convert, sources, ir_builder)?;
         self.loop_exit_blocks.pop();
 
-        self.defined_ranges = prev_defined;
-        self.dynamic_defined_vars = prev_dynamic;
+        self.defined.defined_ranges = prev_defined;
+        self.defined.dynamic_defined_vars = prev_dynamic;
 
         if matches!(body_flow, ControlFlow::Break) {
             self.local_working_vars.remove(&stmt.var_id);
             ir_builder.switch_to_block(exit_bb);
-            self.defined_ranges = pre_loop_defined;
-            self.dynamic_defined_vars = pre_loop_dynamic;
+            self.defined.defined_ranges = pre_loop_defined;
+            self.defined.dynamic_defined_vars = pre_loop_dynamic;
             return Ok(());
         }
 
@@ -974,8 +974,8 @@ impl<'a> FfParser<'a> {
 
         self.local_working_vars.remove(&stmt.var_id);
         ir_builder.switch_to_block(exit_bb);
-        self.defined_ranges = pre_loop_defined;
-        self.dynamic_defined_vars = pre_loop_dynamic;
+        self.defined.defined_ranges = pre_loop_defined;
+        self.defined.dynamic_defined_vars = pre_loop_dynamic;
         Ok(())
     }
 

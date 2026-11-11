@@ -226,14 +226,16 @@ impl<'a> FfParser<'a> {
     }
 
     pub(super) fn get_bound_function_arg_expr(&self, var_id: VarId) -> Option<&Expression> {
-        self.function_arg_stack
+        self.frames
+            .function_arg_stack
             .iter()
             .rev()
             .find_map(|bindings| bindings.get(&var_id))
     }
 
     pub(super) fn get_bound_function_arg_value(&self, var_id: VarId) -> Option<&RegisterId> {
-        self.function_arg_value_stack
+        self.frames
+            .function_arg_value_stack
             .iter()
             .rev()
             .find_map(|bindings| bindings.get(&var_id))
@@ -243,7 +245,8 @@ impl<'a> FfParser<'a> {
         &self,
         token: TokenRange,
     ) -> Option<&RegisterId> {
-        self.function_expression_value_stack
+        self.frames
+            .function_expression_value_stack
             .iter()
             .rev()
             .find_map(|bindings| bindings.get(&token))
@@ -253,7 +256,8 @@ impl<'a> FfParser<'a> {
         &self,
         token: TokenRange,
     ) -> Option<&HashMap<VarId, Expression>> {
-        self.function_event_arg_state_stack
+        self.frames
+            .function_event_arg_state_stack
             .iter()
             .rev()
             .find_map(|states| states.get(&token))
@@ -314,7 +318,8 @@ impl<'a> FfParser<'a> {
             .stack
             .pop_back()
             .expect("Array literal item materialization failed");
-        self.function_expression_value_stack
+        self.frames
+            .function_expression_value_stack
             .last_mut()
             .expect("Function expression value scope is active")
             .insert(expr.token_range(), value);
@@ -503,11 +508,11 @@ impl<'a> FfParser<'a> {
     }
 
     pub(super) fn get_bound_function_array_view(&self, var_id: VarId) -> Option<VarId> {
-        for frame in (0..self.function_arg_stack.len()).rev() {
-            if self.function_array_view_enabled_stack[frame]
-                && self.function_arg_stack[frame].contains_key(&var_id)
+        for frame in (0..self.frames.function_arg_stack.len()).rev() {
+            if self.frames.function_array_view_enabled_stack[frame]
+                && self.frames.function_arg_stack[frame].contains_key(&var_id)
             {
-                return self.function_array_view_stack[frame]
+                return self.frames.function_array_view_stack[frame]
                     .get(&var_id)
                     .filter(|view| view.initialized.is_none())
                     .map(|view| view.backing_var_id);

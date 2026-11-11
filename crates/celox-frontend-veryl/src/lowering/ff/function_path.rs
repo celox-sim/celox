@@ -74,15 +74,17 @@ impl<'a> FfParser<'a> {
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<RegisterId, ParserError> {
-        self.function_arg_stack.push(state.clone());
-        self.function_array_view_stack.push(HashMap::default());
-        self.function_array_view_enabled_stack.push(false);
+        self.frames.function_arg_stack.push(state.clone());
+        self.frames
+            .function_array_view_stack
+            .push(HashMap::default());
+        self.frames.function_array_view_enabled_stack.push(false);
         let result = self.parse_expression(
             condition, targets, domain, convert, sources, ir_builder, None,
         );
-        self.function_array_view_enabled_stack.pop();
-        self.function_array_view_stack.pop();
-        self.function_arg_stack.pop();
+        self.frames.function_array_view_enabled_stack.pop();
+        self.frames.function_array_view_stack.pop();
+        self.frames.function_arg_stack.pop();
         result?;
         let condition = self
             .stack

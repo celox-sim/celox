@@ -40,7 +40,7 @@ impl<'a> FfParser<'a> {
         };
         let layout = self.array_view_layout(var_id)?;
 
-        let mut cached_elements = self.function_array_view_stack[frame]
+        let mut cached_elements = self.frames.function_array_view_stack[frame]
             .get(&var_id)
             .map(|view| view.cached_literal_items.clone())
             .unwrap_or_default();
@@ -70,7 +70,7 @@ impl<'a> FfParser<'a> {
                     let array_view_candidates = self.array_view_merge_candidates([selected_expr]);
                     let array_view_params =
                         self.alloc_array_view_merge_params(&array_view_candidates, ir_builder)?;
-                    let pre_array_views = self.function_array_view_stack.clone();
+                    let pre_array_views = self.frames.function_array_view_stack.clone();
                     let evaluate_block = ir_builder.new_block();
                     let merged_elements = cached
                         .elements
@@ -80,8 +80,8 @@ impl<'a> FfParser<'a> {
                     let mut merge_params = merged_elements.clone();
                     Self::append_array_view_merge_registers(&array_view_params, &mut merge_params);
                     let merge_block = ir_builder.new_block_with(merge_params);
-                    let pre_defined = self.defined_ranges.clone();
-                    let pre_dynamic = self.dynamic_defined_vars.clone();
+                    let pre_defined = self.defined.defined_ranges.clone();
+                    let pre_dynamic = self.defined.dynamic_defined_vars.clone();
                     let mut cached_args = cached.elements;
                     cached_args.extend(self.array_view_state_args(&array_view_params, ir_builder)?);
                     ir_builder.seal_block(SIRTerminator::Branch {
@@ -101,21 +101,23 @@ impl<'a> FfParser<'a> {
                         ir_builder,
                     )?;
                     let evaluated_defined =
-                        std::mem::replace(&mut self.defined_ranges, pre_defined.clone());
-                    let evaluated_dynamic =
-                        std::mem::replace(&mut self.dynamic_defined_vars, pre_dynamic.clone());
-                    let evaluated_array_views = self.function_array_view_stack.clone();
+                        std::mem::replace(&mut self.defined.defined_ranges, pre_defined.clone());
+                    let evaluated_dynamic = std::mem::replace(
+                        &mut self.defined.dynamic_defined_vars,
+                        pre_dynamic.clone(),
+                    );
+                    let evaluated_array_views = self.frames.function_array_view_stack.clone();
                     evaluated.extend(self.array_view_state_args(&array_view_params, ir_builder)?);
                     ir_builder.seal_block(SIRTerminator::Jump(merge_block, evaluated));
                     ir_builder.switch_to_block(merge_block);
-                    self.function_array_view_stack = pre_array_views.clone();
+                    self.frames.function_array_view_stack = pre_array_views.clone();
                     self.install_merged_array_views(
                         &array_view_params,
                         &[&pre_array_views, &evaluated_array_views],
                     );
-                    self.defined_ranges =
+                    self.defined.defined_ranges =
                         self.intersect_defined_states(pre_defined, evaluated_defined);
-                    self.dynamic_defined_vars =
+                    self.defined.dynamic_defined_vars =
                         self.intersect_dynamic_vars(pre_dynamic, evaluated_dynamic);
                     cached_elements.insert(
                         cache_key,
@@ -213,7 +215,7 @@ impl<'a> FfParser<'a> {
         frame: usize,
         var_id: VarId,
     ) -> Option<&[ArrayLiteralItem]> {
-        match self.function_arg_stack[frame].get(&var_id)? {
+        match self.frames.function_arg_stack[frame].get(&var_id)? {
             Expression::ArrayLiteral(items, _) => Some(items),
             Expression::Term(factor) => {
                 let Factor::Variable(bound_var_id, index, select, _) = factor.as_ref() else {
@@ -223,8 +225,8 @@ impl<'a> FfParser<'a> {
                     return None;
                 }
                 let source_frame = (0..frame).rev().find(|&source_frame| {
-                    self.function_array_view_enabled_stack[source_frame]
-                        && self.function_arg_stack[source_frame].contains_key(bound_var_id)
+                    self.frames.function_array_view_enabled_stack[source_frame]
+                        && self.frames.function_arg_stack[source_frame].contains_key(bound_var_id)
                 })?;
                 self.bound_array_literal_items_at(source_frame, *bound_var_id)
             }
@@ -433,13 +435,16 @@ impl<'a> FfParser<'a> {
         else {
             return Ok(false);
         };
-        let Some(frame) = (0..self.function_arg_stack.len()).rev().find(|&frame| {
-            self.function_array_view_enabled_stack[frame]
-                && self.function_arg_stack[frame].contains_key(&var_id)
-        }) else {
+        let Some(frame) = (0..self.frames.function_arg_stack.len())
+            .rev()
+            .find(|&frame| {
+                self.frames.function_array_view_enabled_stack[frame]
+                    && self.frames.function_arg_stack[frame].contains_key(&var_id)
+            })
+        else {
             return Ok(false);
         };
-        let cached = self.function_array_view_stack[frame]
+        let cached = self.frames.function_array_view_stack[frame]
             .get(&var_id)
             .and_then(|view| view.cached_literal_items.get(&selection.cache_key))
             .cloned();
@@ -449,7 +454,7 @@ impl<'a> FfParser<'a> {
                 let array_view_candidates = self.array_view_merge_candidates([selection.expr]);
                 let array_view_params =
                     self.alloc_array_view_merge_params(&array_view_candidates, ir_builder)?;
-                let pre_array_views = self.function_array_view_stack.clone();
+                let pre_array_views = self.frames.function_array_view_stack.clone();
                 let merge_elements = cached
                     .elements
                     .iter()
@@ -459,8 +464,8 @@ impl<'a> FfParser<'a> {
                 let mut merge_params = merge_elements.clone();
                 Self::append_array_view_merge_registers(&array_view_params, &mut merge_params);
                 let merge_block = ir_builder.new_block_with(merge_params);
-                let pre_defined = self.defined_ranges.clone();
-                let pre_dynamic = self.dynamic_defined_vars.clone();
+                let pre_defined = self.defined.defined_ranges.clone();
+                let pre_dynamic = self.defined.dynamic_defined_vars.clone();
                 let mut cached_args = cached.elements;
                 cached_args.extend(self.array_view_state_args(&array_view_params, ir_builder)?);
                 ir_builder.seal_block(SIRTerminator::Branch {
@@ -480,22 +485,23 @@ impl<'a> FfParser<'a> {
                     ir_builder,
                 )?;
                 let evaluated_defined =
-                    std::mem::replace(&mut self.defined_ranges, pre_defined.clone());
+                    std::mem::replace(&mut self.defined.defined_ranges, pre_defined.clone());
                 let evaluated_dynamic =
-                    std::mem::replace(&mut self.dynamic_defined_vars, pre_dynamic.clone());
-                let evaluated_array_views = self.function_array_view_stack.clone();
+                    std::mem::replace(&mut self.defined.dynamic_defined_vars, pre_dynamic.clone());
+                let evaluated_array_views = self.frames.function_array_view_stack.clone();
                 evaluated.extend(self.array_view_state_args(&array_view_params, ir_builder)?);
                 ir_builder.seal_block(SIRTerminator::Jump(merge_block, evaluated));
                 ir_builder.switch_to_block(merge_block);
-                self.function_array_view_stack = pre_array_views.clone();
+                self.frames.function_array_view_stack = pre_array_views.clone();
                 self.install_merged_array_views(
                     &array_view_params,
                     &[&pre_array_views, &evaluated_array_views],
                 );
-                self.defined_ranges = self.intersect_defined_states(pre_defined, evaluated_defined);
-                self.dynamic_defined_vars =
+                self.defined.defined_ranges =
+                    self.intersect_defined_states(pre_defined, evaluated_defined);
+                self.defined.dynamic_defined_vars =
                     self.intersect_dynamic_vars(pre_dynamic, evaluated_dynamic);
-                self.function_array_view_stack[frame]
+                self.frames.function_array_view_stack[frame]
                     .get_mut(&var_id)
                     .unwrap()
                     .cached_literal_items
@@ -510,7 +516,8 @@ impl<'a> FfParser<'a> {
             } else {
                 cached.elements
             }
-        } else if let Some((initialized, view_elements)) = self.function_array_view_stack[frame]
+        } else if let Some((initialized, view_elements)) = self.frames.function_array_view_stack
+            [frame]
             .get(&var_id)
             .and_then(|view| {
                 (!view.elements.is_empty()).then_some((view.initialized?, view.elements.clone()))
@@ -520,7 +527,7 @@ impl<'a> FfParser<'a> {
             let array_view_candidates = self.array_view_merge_candidates([selection.expr]);
             let array_view_params =
                 self.alloc_array_view_merge_params(&array_view_candidates, ir_builder)?;
-            let pre_array_views = self.function_array_view_stack.clone();
+            let pre_array_views = self.frames.function_array_view_stack.clone();
             let mut carried = vec![None; selection.element_count];
             for (linear_index, view_element) in view_elements
                 .iter()
@@ -559,8 +566,8 @@ impl<'a> FfParser<'a> {
             let mut merge_params = merge_elements.clone();
             Self::append_array_view_merge_registers(&array_view_params, &mut merge_params);
             let merge_block = ir_builder.new_block_with(merge_params);
-            let pre_defined = self.defined_ranges.clone();
-            let pre_dynamic = self.dynamic_defined_vars.clone();
+            let pre_defined = self.defined.defined_ranges.clone();
+            let pre_dynamic = self.defined.dynamic_defined_vars.clone();
             let mut carried_args = carried;
             carried_args.extend(self.array_view_state_args(&array_view_params, ir_builder)?);
             ir_builder.seal_block(SIRTerminator::Branch {
@@ -580,21 +587,23 @@ impl<'a> FfParser<'a> {
                 ir_builder,
             )?;
             let evaluated_defined =
-                std::mem::replace(&mut self.defined_ranges, pre_defined.clone());
+                std::mem::replace(&mut self.defined.defined_ranges, pre_defined.clone());
             let evaluated_dynamic =
-                std::mem::replace(&mut self.dynamic_defined_vars, pre_dynamic.clone());
-            let evaluated_array_views = self.function_array_view_stack.clone();
+                std::mem::replace(&mut self.defined.dynamic_defined_vars, pre_dynamic.clone());
+            let evaluated_array_views = self.frames.function_array_view_stack.clone();
             evaluated.extend(self.array_view_state_args(&array_view_params, ir_builder)?);
             ir_builder.seal_block(SIRTerminator::Jump(merge_block, evaluated));
             ir_builder.switch_to_block(merge_block);
-            self.function_array_view_stack = pre_array_views.clone();
+            self.frames.function_array_view_stack = pre_array_views.clone();
             self.install_merged_array_views(
                 &array_view_params,
                 &[&pre_array_views, &evaluated_array_views],
             );
-            self.defined_ranges = self.intersect_defined_states(pre_defined, evaluated_defined);
-            self.dynamic_defined_vars = self.intersect_dynamic_vars(pre_dynamic, evaluated_dynamic);
-            self.function_array_view_stack[frame]
+            self.defined.defined_ranges =
+                self.intersect_defined_states(pre_defined, evaluated_defined);
+            self.defined.dynamic_defined_vars =
+                self.intersect_dynamic_vars(pre_dynamic, evaluated_dynamic);
+            self.frames.function_array_view_stack[frame]
                 .get_mut(&var_id)
                 .unwrap()
                 .cached_literal_items
@@ -619,7 +628,7 @@ impl<'a> FfParser<'a> {
                 sources,
                 ir_builder,
             )?;
-            if let Some(view) = self.function_array_view_stack[frame].get_mut(&var_id) {
+            if let Some(view) = self.frames.function_array_view_stack[frame].get_mut(&var_id) {
                 view.cached_literal_items.insert(
                     selection.cache_key.clone(),
                     FunctionArrayLiteralItemCache {
@@ -630,7 +639,7 @@ impl<'a> FfParser<'a> {
             } else {
                 let initialized = ir_builder.alloc_bit(1, false);
                 ir_builder.emit(SIRInstruction::Imm(initialized, SIRValue::new(0u8)));
-                self.function_array_view_stack[frame].insert(
+                self.frames.function_array_view_stack[frame].insert(
                     var_id,
                     FunctionArrayView {
                         backing_var_id: var_id,

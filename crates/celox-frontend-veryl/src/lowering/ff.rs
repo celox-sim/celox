@@ -76,12 +76,16 @@ mod statement;
 mod system_function;
 mod system_task;
 mod width;
+use access::*;
 use array_view::*;
+use branch::*;
 pub(crate) use expression::expression_has_side_effect;
 #[cfg(test)]
 use for_loop::LoopBoundStatus;
+use function_call::*;
 use function_path::*;
 use guard::*;
+use system_task::*;
 
 pub enum Domain {
     Ff, // TODO: add clock
@@ -139,12 +143,9 @@ impl<A> Default for FfGroupParseResult<A> {
 pub struct FfParser<'a> {
     module: &'a Module,
     stack: VecDeque<RegisterId>,
-    defined_ranges: HashMap<VarId, BitSet>,
-    dynamic_defined_vars: HashSet<VarId>,
+    defined: Definedness,
     dynamic_write_vars: HashSet<VarId>,
-    sparse_write_vars: HashSet<VarId>,
-    direct_static_write_ranges: HashMap<VarId, Vec<celox_design::BitAccess>>,
-    direct_dynamic_write_vars: HashSet<VarId>,
+    placement: WritePlacement,
     local_working_vars: HashSet<VarId>,
     // Locals and formals of functions whose bodies are lowered inline. They
     // use blocking working-region storage that is private to the call and is
@@ -153,19 +154,8 @@ pub struct FfParser<'a> {
     local_let_values: HashMap<VarId, RegisterId>,
     loop_exit_blocks: Vec<BlockId>,
     reset: Option<FfReset>,
-    function_arg_stack: Vec<HashMap<VarId, Expression>>,
-    function_arg_value_stack: Vec<HashMap<VarId, RegisterId>>,
-    function_expression_value_stack: Vec<HashMap<TokenRange, RegisterId>>,
-    function_event_arg_state_stack: Vec<HashMap<TokenRange, HashMap<VarId, Expression>>>,
-    // Maps an active array formal to its call-specific register snapshot and
-    // the formal working region used for O(1) dynamic element loads.
-    function_array_view_stack: Vec<HashMap<VarId, FunctionArrayView>>,
-    function_array_view_enabled_stack: Vec<bool>,
-    runtime_errors: HashMap<i64, RuntimeErrorInfo<VarId>>,
-    runtime_event_sites: Vec<RuntimeEventSite>,
-    next_runtime_error_code: i64,
-    runtime_error_code_map: Option<HashMap<i64, i64>>,
-    runtime_event_site_base: u32,
+    frames: CallFrames,
+    runtime: RuntimeSites,
     config: BuildConfig,
 }
 
@@ -189,28 +179,36 @@ impl<'a> FfParser<'a> {
         Self {
             module,
             stack: VecDeque::new(),
-            defined_ranges: HashMap::default(),
-            dynamic_defined_vars: HashSet::default(),
+            defined: Definedness {
+                defined_ranges: HashMap::default(),
+                dynamic_defined_vars: HashSet::default(),
+            },
             dynamic_write_vars: HashSet::default(),
-            sparse_write_vars: HashSet::default(),
-            direct_static_write_ranges: HashMap::default(),
-            direct_dynamic_write_vars: HashSet::default(),
+            placement: WritePlacement {
+                sparse_write_vars: HashSet::default(),
+                direct_static_write_ranges: HashMap::default(),
+                direct_dynamic_write_vars: HashSet::default(),
+            },
             local_working_vars,
             inline_function_locals: HashSet::default(),
             local_let_values: HashMap::default(),
             loop_exit_blocks: Vec::new(),
             reset: None,
-            function_arg_stack: Vec::new(),
-            function_arg_value_stack: Vec::new(),
-            function_expression_value_stack: Vec::new(),
-            function_event_arg_state_stack: Vec::new(),
-            function_array_view_stack: Vec::new(),
-            function_array_view_enabled_stack: Vec::new(),
-            runtime_errors: HashMap::default(),
-            runtime_event_sites: Vec::new(),
-            next_runtime_error_code: 2000,
-            runtime_error_code_map: None,
-            runtime_event_site_base: 0,
+            frames: CallFrames {
+                function_arg_stack: Vec::new(),
+                function_arg_value_stack: Vec::new(),
+                function_expression_value_stack: Vec::new(),
+                function_event_arg_state_stack: Vec::new(),
+                function_array_view_stack: Vec::new(),
+                function_array_view_enabled_stack: Vec::new(),
+            },
+            runtime: RuntimeSites {
+                runtime_errors: HashMap::default(),
+                runtime_event_sites: Vec::new(),
+                next_runtime_error_code: 2000,
+                runtime_error_code_map: None,
+                runtime_event_site_base: 0,
+            },
             config,
         }
     }
@@ -220,8 +218,8 @@ impl<'a> FfParser<'a> {
         runtime_error_code_map: HashMap<i64, i64>,
         runtime_event_site_base: u32,
     ) -> Self {
-        self.runtime_error_code_map = Some(runtime_error_code_map);
-        self.runtime_event_site_base = runtime_event_site_base;
+        self.runtime.runtime_error_code_map = Some(runtime_error_code_map);
+        self.runtime.runtime_event_site_base = runtime_event_site_base;
         self
     }
 
@@ -230,22 +228,22 @@ impl<'a> FfParser<'a> {
         static_ranges: HashMap<VarId, Vec<celox_design::BitAccess>>,
         dynamic_vars: HashSet<VarId>,
     ) -> Self {
-        self.direct_static_write_ranges = static_ranges;
-        self.direct_dynamic_write_vars = dynamic_vars;
+        self.placement.direct_static_write_ranges = static_ranges;
+        self.placement.direct_dynamic_write_vars = dynamic_vars;
         self
     }
 
     pub fn with_sparse_write_vars(mut self, sparse_write_vars: HashSet<VarId>) -> Self {
-        self.sparse_write_vars = sparse_write_vars;
+        self.placement.sparse_write_vars = sparse_write_vars;
         self
     }
 
     pub fn runtime_errors(&self) -> &HashMap<i64, RuntimeErrorInfo<VarId>> {
-        &self.runtime_errors
+        &self.runtime.runtime_errors
     }
 
     pub fn runtime_event_sites(&self) -> &Vec<RuntimeEventSite> {
-        &self.runtime_event_sites
+        &self.runtime.runtime_event_sites
     }
 
     // expression / function-call lowering is split into submodules:
@@ -296,8 +294,8 @@ impl<'a> FfParser<'a> {
             return Ok(FfGroupParseResult::default());
         }
 
-        self.defined_ranges.clear();
-        self.dynamic_defined_vars.clear();
+        self.defined.defined_ranges.clear();
+        self.defined.dynamic_defined_vars.clear();
         self.dynamic_write_vars.clear();
         self.local_let_values.clear();
         let mut targets = Vec::new();

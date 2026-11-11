@@ -172,7 +172,7 @@ impl<'a> FfParser<'a> {
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<Option<FunctionArrayView>, ParserError> {
-        let Some(bound_expr) = self.function_arg_stack[frame].get(&var_id).cloned() else {
+        let Some(bound_expr) = self.frames.function_arg_stack[frame].get(&var_id).cloned() else {
             return Ok(None);
         };
 
@@ -192,8 +192,8 @@ impl<'a> FfParser<'a> {
                     return Ok(None);
                 }
                 let Some(source_frame) = (0..frame).rev().find(|&i| {
-                    self.function_array_view_enabled_stack[i]
-                        && self.function_arg_stack[i].contains_key(bound_var_id)
+                    self.frames.function_array_view_enabled_stack[i]
+                        && self.frames.function_arg_stack[i].contains_key(bound_var_id)
                 }) else {
                     return Ok(None);
                 };
@@ -247,21 +247,24 @@ impl<'a> FfParser<'a> {
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<Option<FunctionArrayView>, ParserError> {
-        if let Some(view) = self.function_array_view_stack[frame].get(&var_id).cloned() {
+        if let Some(view) = self.frames.function_array_view_stack[frame]
+            .get(&var_id)
+            .cloned()
+        {
             let Some(initialized) = view.initialized else {
                 return Ok(Some(view));
             };
 
-            let bound_expr = self.function_arg_stack[frame]
+            let bound_expr = self.frames.function_arg_stack[frame]
                 .get(&var_id)
                 .unwrap_or_else(|| unreachable!("an array view has a bound argument"))
                 .clone();
             let array_view_candidates = self.array_view_merge_candidates([&bound_expr]);
             let array_view_params =
                 self.alloc_array_view_merge_params(&array_view_candidates, ir_builder)?;
-            let pre_array_views = self.function_array_view_stack.clone();
-            let pre_defined = self.defined_ranges.clone();
-            let pre_dynamic = self.dynamic_defined_vars.clone();
+            let pre_array_views = self.frames.function_array_view_stack.clone();
+            let pre_defined = self.defined.defined_ranges.clone();
+            let pre_dynamic = self.defined.dynamic_defined_vars.clone();
             let initialize_block = ir_builder.new_block();
             let carried_elements = if view.elements.is_empty() {
                 let layout = self.array_view_layout(var_id)?;
@@ -307,21 +310,22 @@ impl<'a> FfParser<'a> {
                 unreachable!("a function array view has stable backing metadata");
             }
             let initialized_defined =
-                std::mem::replace(&mut self.defined_ranges, pre_defined.clone());
+                std::mem::replace(&mut self.defined.defined_ranges, pre_defined.clone());
             let initialized_dynamic =
-                std::mem::replace(&mut self.dynamic_defined_vars, pre_dynamic.clone());
-            let initialized_array_views = self.function_array_view_stack.clone();
+                std::mem::replace(&mut self.defined.dynamic_defined_vars, pre_dynamic.clone());
+            let initialized_array_views = self.frames.function_array_view_stack.clone();
             let mut initialized_args = initialized_view.elements;
             initialized_args.extend(self.array_view_state_args(&array_view_params, ir_builder)?);
             ir_builder.seal_block(SIRTerminator::Jump(merge_block, initialized_args));
             ir_builder.switch_to_block(merge_block);
-            self.function_array_view_stack = pre_array_views.clone();
+            self.frames.function_array_view_stack = pre_array_views.clone();
             self.install_merged_array_views(
                 &array_view_params,
                 &[&pre_array_views, &initialized_array_views],
             );
-            self.defined_ranges = self.intersect_defined_states(pre_defined, initialized_defined);
-            self.dynamic_defined_vars =
+            self.defined.defined_ranges =
+                self.intersect_defined_states(pre_defined, initialized_defined);
+            self.defined.dynamic_defined_vars =
                 self.intersect_dynamic_vars(pre_dynamic, initialized_dynamic);
             let cached_literal_items =
                 self.definite_array_literal_caches_from_view(frame, var_id, &merged_elements);
@@ -332,7 +336,7 @@ impl<'a> FfParser<'a> {
                 cached_literal_items,
                 initialized: None,
             };
-            self.function_array_view_stack[frame].insert(var_id, view.clone());
+            self.frames.function_array_view_stack[frame].insert(var_id, view.clone());
             return Ok(Some(view));
         }
 
@@ -340,7 +344,7 @@ impl<'a> FfParser<'a> {
             frame, var_id, targets, domain, convert, sources, ir_builder,
         )?;
         if let Some(view) = &view {
-            self.function_array_view_stack[frame].insert(var_id, view.clone());
+            self.frames.function_array_view_stack[frame].insert(var_id, view.clone());
         }
         Ok(view)
     }
@@ -355,7 +359,7 @@ impl<'a> FfParser<'a> {
             self.collect_array_views_for_expression(expr, &mut candidates, &mut candidate_indices);
         }
         candidates.retain(|candidate| {
-            self.function_array_view_stack[candidate.key.frame]
+            self.frames.function_array_view_stack[candidate.key.frame]
                 .get(&candidate.key.var_id)
                 .is_none_or(|view| view.initialized.is_some())
         });
@@ -373,7 +377,8 @@ impl<'a> FfParser<'a> {
                 let key = candidate.key;
                 let layout = self.array_view_layout(candidate.key.var_id)?;
                 let initialized = ir_builder.alloc_bit(1, false);
-                let existing_view = self.function_array_view_stack[key.frame].get(&key.var_id);
+                let existing_view =
+                    self.frames.function_array_view_stack[key.frame].get(&key.var_id);
                 let carries_view = candidate.needs_view
                     || existing_view.is_some_and(|view| !view.elements.is_empty());
                 let elements = (0..if carries_view {
@@ -447,7 +452,7 @@ impl<'a> FfParser<'a> {
         let mut args = Vec::new();
         for params in params {
             if let Some(view) =
-                self.function_array_view_stack[params.key.frame].get(&params.key.var_id)
+                self.frames.function_array_view_stack[params.key.frame].get(&params.key.var_id)
             {
                 let initialized = if let Some(initialized) = view.initialized {
                     initialized
@@ -489,7 +494,8 @@ impl<'a> FfParser<'a> {
                     args.push(element);
                 }
             }
-            let view = self.function_array_view_stack[params.key.frame].get(&params.key.var_id);
+            let view =
+                self.frames.function_array_view_stack[params.key.frame].get(&params.key.var_id);
             for cached_params in &params.cached_literal_items {
                 if let Some(cached) =
                     view.and_then(|view| view.cached_literal_items.get(&cached_params.cache_key))
@@ -574,7 +580,7 @@ impl<'a> FfParser<'a> {
                     )
                 })
                 .collect();
-            self.function_array_view_stack[params.key.frame].insert(
+            self.frames.function_array_view_stack[params.key.frame].insert(
                 params.key.var_id,
                 FunctionArrayView {
                     backing_var_id: first.backing_var_id,
@@ -599,6 +605,7 @@ impl<'a> FfParser<'a> {
             .map(|view| view.backing_var_id)
             .collect::<HashSet<_>>();
         let active_owned_backings = self
+            .frames
             .function_array_view_stack
             .iter()
             .flat_map(|frame| frame.values())
@@ -609,7 +616,7 @@ impl<'a> FfParser<'a> {
         // could overwrite it with a duplicate conditional placeholder.
         // Older callers must be restored first so that the nearest active
         // invocation is the final snapshot left in the shared formal region.
-        for frame in &self.function_array_view_stack {
+        for frame in &self.frames.function_array_view_stack {
             for view in frame.values() {
                 if !clobbered.contains(&view.backing_var_id)
                     || view.elements.is_empty()

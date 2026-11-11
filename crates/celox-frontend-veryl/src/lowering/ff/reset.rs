@@ -81,8 +81,8 @@ impl<'a> FfParser<'a> {
         let merge_bb = ir_builder.new_block();
 
         // --- Create snapshot ---
-        let pre_if_defined = self.defined_ranges.clone();
-        let pre_if_dynamic = self.dynamic_defined_vars.clone();
+        let pre_if_defined = self.defined.defined_ranges.clone();
+        let pre_if_dynamic = self.defined.dynamic_defined_vars.clone();
 
         // 2. Terminate current block with Branch
         ir_builder.seal_block(SIRTerminator::Branch {
@@ -95,8 +95,10 @@ impl<'a> FfParser<'a> {
         ir_builder.switch_to_block(then_bb);
         let then_flow =
             self.parse_statement_refs(true_side, targets, domain, convert, sources, ir_builder)?;
-        let then_defined = std::mem::replace(&mut self.defined_ranges, pre_if_defined.clone());
-        let then_dynamic = std::mem::replace(&mut self.dynamic_defined_vars, pre_if_dynamic);
+        let then_defined =
+            std::mem::replace(&mut self.defined.defined_ranges, pre_if_defined.clone());
+        let then_dynamic =
+            std::mem::replace(&mut self.defined.dynamic_defined_vars, pre_if_dynamic);
         if matches!(then_flow, ControlFlow::Continue) {
             ir_builder.seal_block(SIRTerminator::Jump(merge_bb, vec![]));
         }
@@ -105,8 +107,8 @@ impl<'a> FfParser<'a> {
         ir_builder.switch_to_block(else_bb);
         let else_flow =
             self.parse_statement_refs(false_side, targets, domain, convert, sources, ir_builder)?;
-        let else_defined = std::mem::take(&mut self.defined_ranges);
-        let else_dynamic = std::mem::take(&mut self.dynamic_defined_vars);
+        let else_defined = std::mem::take(&mut self.defined.defined_ranges);
+        let else_dynamic = std::mem::take(&mut self.defined.dynamic_defined_vars);
         if matches!(else_flow, ControlFlow::Continue) {
             ir_builder.seal_block(SIRTerminator::Jump(merge_bb, vec![]));
         }
@@ -114,20 +116,22 @@ impl<'a> FfParser<'a> {
         // 5. Merge logic (Intersection of defined states of both paths)
         match (then_flow, else_flow) {
             (ControlFlow::Continue, ControlFlow::Continue) => {
-                self.defined_ranges = self.intersect_defined_states(then_defined, else_defined);
-                self.dynamic_defined_vars = self.intersect_dynamic_vars(then_dynamic, else_dynamic);
+                self.defined.defined_ranges =
+                    self.intersect_defined_states(then_defined, else_defined);
+                self.defined.dynamic_defined_vars =
+                    self.intersect_dynamic_vars(then_dynamic, else_dynamic);
                 ir_builder.switch_to_block(merge_bb);
                 Ok(ControlFlow::Continue)
             }
             (ControlFlow::Continue, ControlFlow::Break) => {
-                self.defined_ranges = then_defined;
-                self.dynamic_defined_vars = then_dynamic;
+                self.defined.defined_ranges = then_defined;
+                self.defined.dynamic_defined_vars = then_dynamic;
                 ir_builder.switch_to_block(merge_bb);
                 Ok(ControlFlow::Continue)
             }
             (ControlFlow::Break, ControlFlow::Continue) => {
-                self.defined_ranges = else_defined;
-                self.dynamic_defined_vars = else_dynamic;
+                self.defined.defined_ranges = else_defined;
+                self.defined.dynamic_defined_vars = else_dynamic;
                 ir_builder.switch_to_block(merge_bb);
                 Ok(ControlFlow::Continue)
             }

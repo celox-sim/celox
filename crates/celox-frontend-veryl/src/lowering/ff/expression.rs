@@ -213,10 +213,14 @@ impl<'a> FfParser<'a> {
                     return Ok(());
                 }
 
-                if let Some(frame) = (0..self.function_arg_stack.len()).rev().find(|&frame| {
-                    self.function_array_view_enabled_stack[frame]
-                        && self.function_arg_stack[frame].contains_key(var_id)
-                }) {
+                if let Some(frame) =
+                    (0..self.frames.function_arg_stack.len())
+                        .rev()
+                        .find(|&frame| {
+                            self.frames.function_array_view_enabled_stack[frame]
+                                && self.frames.function_arg_stack[frame].contains_key(var_id)
+                        })
+                {
                     if self.array_access_needs_view(*var_id, var_index, var_select) {
                         self.ensure_function_array_view_at(
                             frame, *var_id, targets, domain, convert, sources, ir_builder,
@@ -526,9 +530,11 @@ impl<'a> FfParser<'a> {
             .cloned();
         let has_state = state.is_some();
         if let Some(state) = state {
-            self.function_arg_stack.push(state);
-            self.function_array_view_stack.push(HashMap::default());
-            self.function_array_view_enabled_stack.push(false);
+            self.frames.function_arg_stack.push(state);
+            self.frames
+                .function_array_view_stack
+                .push(HashMap::default());
+            self.frames.function_array_view_enabled_stack.push(false);
         }
         let result = self.parse_expression_in_context_inner(
             expr, targets, domain, convert, sources, ir_builder, context,
@@ -537,15 +543,16 @@ impl<'a> FfParser<'a> {
             && result.is_ok()
             && let Some(value) = self.stack.back().cloned()
         {
-            self.function_expression_value_stack
+            self.frames
+                .function_expression_value_stack
                 .last_mut()
                 .expect("Function expression value scope is active")
                 .insert(expr.token_range(), value);
         }
         if has_state {
-            self.function_array_view_enabled_stack.pop();
-            self.function_array_view_stack.pop();
-            self.function_arg_stack.pop();
+            self.frames.function_array_view_enabled_stack.pop();
+            self.frames.function_array_view_stack.pop();
+            self.frames.function_arg_stack.pop();
         }
         result
     }

@@ -241,11 +241,12 @@ module Top (
     for id in effect_ids {
         assert!(
             parser
+                .defined
                 .defined_ranges
                 .get(&id)
                 .is_none_or(|bits| bits.is_empty()),
             "conditional output argument must not be definitely defined: {id:?}"
         );
-        assert!(!parser.dynamic_defined_vars.contains(&id));
+        assert!(!parser.defined.dynamic_defined_vars.contains(&id));
     }
 }
