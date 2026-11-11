@@ -203,7 +203,8 @@ fn hierarchical_readmemh_preserves_four_state_and_sparse_addresses(sim) {
     assert_eq!(run_compiled_testbench(&mut sim, &testbench), TestResult::Pass);
     let (value, mask) = sim.get_four_state(sim.signal("words"));
     assert_eq!(mask, 0xf0f0ffu32.into());
-    assert_eq!(value & BigUint::from(0xffff00u32), 0xf00500u32.into());
+    // X is `(1, 1)` and Z is `(0, 1)`.
+    assert_eq!(value & BigUint::from(0xffff00u32), 0x00f500u32.into());
 }
 
 fn hierarchical_readmemh_honors_constant_branches_and_loops(sim) {

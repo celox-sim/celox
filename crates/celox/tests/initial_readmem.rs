@@ -75,8 +75,37 @@ fn test_initial_readmemh_supports_comments_address_and_xz(sim) {
     @build Simulator::builder(&code, "Top").four_state(true);
     assert_eq!(sim.get_four_state(sim.signal("out0")), (BigUint::from(0xaau32), BigUint::from(0u32)));
     assert_eq!(sim.get_four_state(sim.signal("out1")).1, BigUint::from(0xffu32));
-    assert_eq!(sim.get_four_state(sim.signal("out2")), (BigUint::from(0x05u32), BigUint::from(0xf0u32)));
-    assert_eq!(sim.get_four_state(sim.signal("out3")), (BigUint::from(0xf0u32), BigUint::from(0xf0u32)));
+    // X is `(1, 1)` and Z is `(0, 1)`.
+    assert_eq!(sim.get_four_state(sim.signal("out2")), (BigUint::from(0xf5u32), BigUint::from(0xf0u32)));
+    assert_eq!(sim.get_four_state(sim.signal("out3")), (BigUint::from(0x00u32), BigUint::from(0xf0u32)));
+}
+
+fn test_initial_readmemh_reads_x_and_z_as_zero_in_two_state(sim) {
+    @omit_veryl;
+    @setup {
+        let mem_path = temp_mem_file("readmemh_xz_two_state", "aa\n@2\nx5\nz3\n");
+        let code = format!(r#"
+            module Top (
+                out0: output logic<8>,
+                out2: output logic<8>,
+                out3: output logic<8>,
+            ) {{
+                #[allow(initial_assign)]
+                var mem: logic<8>[4];
+                initial {{
+                    $readmemh("{}", mem);
+                }}
+                assign out0 = mem[0];
+                assign out2 = mem[2];
+                assign out3 = mem[3];
+            }}
+        "#, mem_path);
+    }
+    // Two-state storage holds no X or Z: their bits are zero (6.11.2).
+    @build Simulator::builder(&code, "Top").four_state(false);
+    assert_eq!(sim.get(sim.signal("out0")), BigUint::from(0xaau32));
+    assert_eq!(sim.get(sim.signal("out2")), BigUint::from(0x05u32));
+    assert_eq!(sim.get(sim.signal("out3")), BigUint::from(0x03u32));
 }
 
 fn test_initial_readmemh_supports_const_if(sim) {

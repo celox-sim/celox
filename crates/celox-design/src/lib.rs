@@ -377,6 +377,27 @@ pub struct InitialStateWriteRun {
     pub mask_bytes: Vec<u8>,
 }
 
+impl InitialStateWriteRun {
+    /// The run as two-state storage takes it: a bit that is X or Z, whose
+    /// mask bit is set, becomes zero (IEEE 1800-2023 6.11.2).
+    pub fn two_state(&self) -> std::borrow::Cow<'_, Self> {
+        if self.mask_bytes.iter().all(|byte| *byte == 0) {
+            return std::borrow::Cow::Borrowed(self);
+        }
+        std::borrow::Cow::Owned(Self {
+            bit_offset: self.bit_offset,
+            bit_width: self.bit_width,
+            value_bytes: self
+                .value_bytes
+                .iter()
+                .zip(self.mask_bytes.iter().chain(std::iter::repeat(&0)))
+                .map(|(value, mask)| value & !mask)
+                .collect(),
+            mask_bytes: vec![0; self.mask_bytes.len()],
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InitialStateData {
     Packed {
