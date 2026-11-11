@@ -40,9 +40,6 @@ impl Parser<'_> {
                 kind: item,
                 tokens: self.range(item_start),
             });
-            if items.len() >= 1_000_000 {
-                return Err(self.unsupported("native package binding exceeds one million items"));
-            }
             if !self.eat(",") {
                 break;
             }
