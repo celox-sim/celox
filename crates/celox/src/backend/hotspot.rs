@@ -243,7 +243,14 @@ impl HotspotRuntime {
         })
     }
 
-    pub(crate) fn prepare_scheduler(&mut self, program: &crate::ir::LaidOutProgram) {
+    /// Keep `program` for the scheduler's stages, which are compiled in the
+    /// background: the reference `shared` of a caller that shares the
+    /// program, or else a copy.
+    pub(crate) fn prepare_scheduler(
+        &mut self,
+        program: &crate::ir::LaidOutProgram,
+        shared: Option<&Arc<crate::ir::LaidOutProgram>>,
+    ) {
         self.scheduler_index = program
             .runtime()
             .runtime_schema
@@ -251,7 +258,7 @@ impl HotspotRuntime {
             .as_ref()
             .and_then(|s| s.unit);
         if self.scheduler_index.is_some() {
-            let program = Arc::new(program.clone());
+            let program = shared.cloned().unwrap_or_else(|| Arc::new(program.clone()));
             self.scheduler_program = Some(Arc::clone(&program));
             self.scheduler = Some(SchedulerState::Pending(program));
         }
