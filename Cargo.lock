@@ -450,6 +450,7 @@ dependencies = [
  "libc",
  "libloading",
  "miette",
+ "mimalloc",
  "num-bigint",
  "num-traits",
  "postcard",
