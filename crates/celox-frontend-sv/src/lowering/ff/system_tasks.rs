@@ -214,14 +214,37 @@ impl Ff<'_, '_> {
                 .get(1)
                 .and_then(Option::as_ref)
                 .ok_or_else(|| unsupported("plusargs destination"))?;
+            // A string destination receives the argument's text (21.6); it
+            // is a heap handle, which the request replaces on a match.
+            let string_target = self.m.expr_is_string(expr);
             let (lvalues, captured, guards) = self.capture_system_actual(expr)?;
-            let width = self
-                .m
-                .comparison_width(expr, expr)
-                .ok_or_else(|| unsupported("integral plusargs destination"))?;
-            let (id, result) = self.host_hidden("plusargs_value", &captured, width, false, true)?;
+            let (id, result, width, value_kind) = if string_target {
+                let value = self.eval(&captured, None)?;
+                let width = celox_design::HANDLE_WIDTH;
+                let (id, name) = self.m.temp("plusargs_value", width, false, false);
+                self.m
+                    .variables
+                    .get_mut(&id)
+                    .expect("plusargs text result")
+                    .value_kind = celox_design::ValueKind::StrRef;
+                self.store(id, SIROffset::Static(0), width, value);
+                (
+                    id,
+                    Expr::Ident(name),
+                    width,
+                    celox_design::ValueKind::StrRef,
+                )
+            } else {
+                let width = self
+                    .m
+                    .comparison_width(expr, expr)
+                    .ok_or_else(|| unsupported("integral plusargs destination"))?;
+                let (id, result) =
+                    self.host_hidden("plusargs_value", &captured, width, false, true)?;
+                (id, result, width, celox_design::ValueKind::Bits)
+            };
             results.push(HostRequestValue {
-                value_kind: celox_design::ValueKind::Bits,
+                value_kind,
                 float_precision: None,
                 id,
                 width,

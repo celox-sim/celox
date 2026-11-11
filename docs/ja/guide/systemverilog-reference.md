@@ -225,8 +225,9 @@ region に関する逸脱2件は[意図的な逸脱](#intentional-deviations)に
   ロケータ部分集合以外の縮約・ロケータ `with` 式とイテレータ引数。
 - コンテナ仮引数: コンテナ型の関数結果、`output` / `inout` 実引数としての
   クラスプロパティやコンテナ要素、要素型が仮引数と異なる実引数。
-- 文字列 <a id="strings"></a>: `atoreal` / `realtoa`。`$value$plusargs`・ファイル I/O・
-  DPI-C の string 引数、VPI・VCD 出力・TypeScript API での string 値。
+- 文字列 <a id="strings"></a>: `atoreal` / `realtoa`。`$value$plusargs` の書式としての
+  string 変数、ファイル I/O・DPI-C の string 引数、VPI・VCD 出力・TypeScript API での
+  string 値。
   固定長文字列配列へのノンブロッキング文字書き込み。文字列配列全体や
   部分配列へのメソッド呼び出し。配列値の string 引数・戻り値。
 - 参照引数 <a id="reference-arguments"></a>（13.5.2）: `ref static`。動的配列・キュー・
@@ -295,7 +296,8 @@ sequence 内のインスタンス、複数サイクル sequence への `disable 
   `real` メンバを持つ構造体、その他の集約関数結果、他の集約のコンテナに対する
   `%p` は未対応です。実行時書式の `%p` は string を引用符付きで、それ以外を
   `%0d` として出力します。
-- plusargs: `$value$plusargs` の `real` 変換と動的文字列。
+- plusargs: `$value$plusargs` の `real` 変換と、書式としての string 変数。
+  `string` の出力先は `%s` 変換のみ受け付けます。
 
 ## 意図的な逸脱 {#intentional-deviations}
 
