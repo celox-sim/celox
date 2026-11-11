@@ -334,6 +334,23 @@ pub(super) fn parameter_signed_element_marker(name: &str) -> String {
     format!("__parameter::signed_element::{name}")
 }
 
+/// Present for a parameter of unpacked array type whose element constants
+/// are published; the payload is their count.
+pub(super) fn parameter_elements_marker(name: &str) -> String {
+    format!("__parameter::elements::{name}")
+}
+
+/// A fact about the published elements of the unpacked array parameter
+/// `name`: the `left` and `right` bounds of its dimension, the `type` of an
+/// element (its width shifted left by two, whether it is two-state in bit
+/// one, and its sign in bit zero), the value of the element at a storage
+/// position, the left one first, or the number of packed dimensions of an
+/// element (`packed`) and their bounds (`packed_{dimension}_{left,right}`,
+/// outermost first).
+pub(super) fn parameter_element_marker(name: &str, fact: impl std::fmt::Display) -> String {
+    format!("__parameter::element::{fact}::{name}")
+}
+
 /// Present for a parameter of packed structure type whose member constants
 /// are published; the payload is their count.
 pub(super) fn parameter_members_marker(name: &str) -> String {

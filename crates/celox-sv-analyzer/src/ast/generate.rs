@@ -998,6 +998,7 @@ impl<'a> Elaborator<'a, '_> {
                 ]
                 .into_iter()
                 .chain(parameters::member_keys(&name, &scope.env))
+                .chain(parameters::element_keys(&name, &scope.env))
                 {
                     scope.env.remove(&key);
                 }
@@ -1051,6 +1052,7 @@ impl<'a> Elaborator<'a, '_> {
                 ]
                 .into_iter()
                 .chain(parameters::member_keys(&name, &scope.env))
+                .chain(parameters::element_keys(&name, &scope.env))
                 {
                     scope.env.remove(&key);
                 }
@@ -1434,7 +1436,10 @@ impl<'a> Elaborator<'a, '_> {
                     enum_marker(&signal.name),
                     parameter_width_marker(&signal.name),
                     parameter_signed_marker(&signal.name),
-                ] {
+                ]
+                .into_iter()
+                .chain(parameters::element_keys(&signal.name, &scope.env))
+                {
                     scope.env.remove(&key);
                 }
                 scope.literals.remove(&signal.name);
@@ -1456,13 +1461,18 @@ impl<'a> Elaborator<'a, '_> {
 /// block hides: a query of the name reads the nearer declaration (IEEE
 /// 1800-2023 23.9).
 fn forget_variable(env: &mut SharedEnv, name: &str) {
+    // The elements of an outer array parameter of the name, too: a select
+    // of the name selects the bits of the nearer declaration.
     for key in [
         variable_bits_marker(name),
         variable_size_marker(name),
         variable_signed_marker(name),
         variable_unpacked_dimensions_marker(name),
         variable_dimensions_marker(name),
-    ] {
+    ]
+    .into_iter()
+    .chain(parameters::element_keys(name, env))
+    {
         env.remove(&key);
     }
 }

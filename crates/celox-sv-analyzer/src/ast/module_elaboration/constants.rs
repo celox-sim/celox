@@ -57,6 +57,11 @@ impl ScopeElaboration<'_> {
         ));
         self.type_aliases =
             type_aliases_from_scope_with_env(syntax_tree, session, &self.const_env)?.into();
+        // The elements of the array parameters are constants of the scope
+        // also for the declarations bound before the array parameters are
+        // collected again below: the parameters of the second pass, the
+        // enumeration members and the constant functions.
+        self.publish_array_elements(syntax_tree, session)?;
         self.enum_constants = enum_member_constants_from_scope(
             syntax_tree,
             session,
@@ -165,6 +170,17 @@ impl ScopeElaboration<'_> {
             &self.parameters,
         );
 
+        self.publish_array_elements(syntax_tree, session)?;
+        Ok(parameterized)
+    }
+
+    /// Publish the elements of the scope's array parameters whose value is
+    /// a constant as constants of the scope.
+    fn publish_array_elements(
+        &mut self,
+        syntax_tree: &AnalysisContext<'_>,
+        session: &mut Session,
+    ) -> Result<(), AnalyzerError> {
         self.array_parameters = array_parameters::array_parameters_from_scope(
             syntax_tree,
             session,
@@ -178,7 +194,79 @@ impl ScopeElaboration<'_> {
                 0,
             );
         }
-        Ok(parameterized)
+        // The elements of an array parameter whose value is a constant
+        // are constants of the scope, each array after those before it:
+        // an array may take its value from an earlier one. A type of the
+        // scope may size a member by such an element, and so may the
+        // element type of a later array parameter, whose elements a later
+        // round publishes, until a round publishes no new constant.
+        loop {
+            if self.array_parameters.is_empty() {
+                break;
+            }
+            let before = self.const_env.len();
+            let values = parameter_value_env_with_imported(
+                syntax_tree,
+                session,
+                &self.parameters,
+                &self.const_env,
+                self.imported,
+            );
+            let mut arrays: HashMap<String, Expr> = HashMap::default();
+            for process in &self.imported.initial_processes {
+                for statement in &process.body {
+                    if let Stmt::Assign {
+                        lhs: LValue::Ident(name),
+                        rhs,
+                        ..
+                    } = statement
+                    {
+                        arrays.insert(name.clone(), rhs.clone());
+                    }
+                }
+            }
+            // An array names the arrays before it and those of the
+            // packages the module uses by their shapes.
+            let mut shapes =
+                parameter_packed_dimensions_with_imported(&self.parameters, self.imported);
+            for signal in self.imported.signals.iter().chain(
+                self.array_parameters
+                    .iter()
+                    .map(|parameter| &parameter.signal),
+            ) {
+                shapes.insert(
+                    signal.name().to_string(),
+                    procedural::dimensions_from_type(signal.r#type()),
+                );
+            }
+            for parameter in &self.array_parameters {
+                let mut dims =
+                    PackedDimensions::new(shapes.clone(), &self.const_env, &self.type_aliases);
+                dims.parameter_values = values.clone().into();
+                dims.array_parameter_values = arrays.clone().into();
+                if let Some(elements) = parameter.constant_elements(syntax_tree, session, &dims) {
+                    for (key, value) in
+                        parameters::element_markers(parameter.signal.name(), &elements)
+                    {
+                        self.const_env.insert(key, value);
+                    }
+                    arrays.insert(parameter.signal.name().to_string(), elements.value);
+                }
+            }
+            if self.const_env.len() == before {
+                break;
+            }
+            self.type_aliases =
+                type_aliases_from_scope_with_env(syntax_tree, session, &self.const_env)?.into();
+            self.array_parameters = array_parameters::array_parameters_from_scope(
+                syntax_tree,
+                session,
+                &self.const_env,
+                &self.type_aliases,
+                &self.parameters,
+            )?;
+        }
+        Ok(())
     }
 
     /// Rejects the constructs the analysis would silently ignore. A parameter

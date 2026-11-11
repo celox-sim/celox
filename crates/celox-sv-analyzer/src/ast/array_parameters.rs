@@ -18,6 +18,158 @@ pub(super) struct ArrayParameter {
     bound: Option<BoundPattern>,
 }
 
+/// The elements of an unpacked array parameter whose value is a constant.
+pub(super) struct ConstantElements {
+    /// The bounds of the array's one dimension.
+    pub left: i128,
+    pub right: i128,
+    /// The width and sign of an element, and whether its type is two-state.
+    pub width: usize,
+    pub signed: bool,
+    pub two_state: bool,
+    /// The bounds of the packed dimensions of an element, outermost first,
+    /// which its constant selects take (one `[width-1:0]` for an integer
+    /// atom); none when they are not known, or for an element of a named
+    /// signed type, whose select is signed (IEEE 1800-2023 7.4.1).
+    pub packed: Vec<(i128, i128)>,
+    /// The whole value, as later array parameters of the scope read it.
+    pub value: Expr,
+    /// The elements in storage order, the left one first.
+    pub values: Vec<i128>,
+}
+
+/// The most elements of an array parameter that are published as constants
+/// of its scope.
+const MAX_CONSTANT_ELEMENTS: usize = 4096;
+
+/// The elements of the parameter `native` of a one-dimensional unpacked array
+/// type with packed integral elements, when its value (its own, or the one
+/// its instantiation binds) is a constant in `dims`. Elements wider than the
+/// numeric environment holds, or with unknown bits, leave the parameter to
+/// the variable that holds it.
+/// Also the shape of the variable that holds it, which a later array
+/// parameter that takes its value names.
+pub(super) fn constant_elements_and_shape(
+    native: &celox_sv_syntax::Parameter,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Option<(Option<ConstantElements>, VariableDimensions)> {
+    let parameter = array_parameters_from_declaration(
+        &[native],
+        tree,
+        session,
+        &dims.const_env,
+        &dims.type_aliases,
+        &mut |_| {},
+    )
+    .ok()?
+    .pop()?;
+    let shape = procedural::dimensions_from_type(parameter.signal.r#type());
+    Some((parameter.constant_elements(tree, session, dims), shape))
+}
+
+impl ArrayParameter {
+    /// The elements of the parameter when it is a one-dimensional array of
+    /// packed integral elements whose value is a constant in `dims` (see
+    /// [`constant_elements`]).
+    pub(super) fn constant_elements(
+        &self,
+        tree: &AnalysisContext<'_>,
+        session: &mut Session,
+        dims: &PackedDimensions,
+    ) -> Option<ConstantElements> {
+        let parameter = self;
+        let shape = procedural::dimensions_from_type(parameter.signal.r#type());
+        let [dimension] = shape.unpacked.as_slice() else {
+            return None;
+        };
+        if shape.real
+            || shape.string
+            || shape.chandle
+            || shape.class.is_some()
+            || shape.container.is_some()
+            || shape.virtual_interface.is_some()
+            || shape.unpacked_struct.is_some()
+        {
+            return None;
+        }
+        let bound =
+            |bound: &ConstExpr| eval_ast_const_expr(&tree.functions, bound, &dims.const_env);
+        let (left, right) = (bound(&dimension.left)?, bound(&dimension.right)?);
+        let count = usize::try_from(left.abs_diff(right))
+            .ok()?
+            .checked_add(1)
+            .filter(|count| *count <= MAX_CONSTANT_ELEMENTS)?;
+        let process = parameter.initial_process(tree, session, dims).ok()?;
+        let Some(Stmt::Assign { rhs, .. }) = process.body.into_iter().next() else {
+            return None;
+        };
+        let literals = dims
+            .parameter_values
+            .iter()
+            .filter(|(name, _)| !dims.const_env.contains_key(*name))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        let value = substitute_expr_constants_with_parameter_literals(
+            tree,
+            session,
+            rhs,
+            &dims.const_env,
+            &literals,
+        );
+        let Expr::Literal(text) =
+            fold_const_integral_expr_preserving_mask(tree, session, value, &dims.const_env)
+        else {
+            return None;
+        };
+        let literal = typecheck::parse_integral_literal(&text)?;
+        if literal.mask != num_bigint::BigUint::default() || literal.width % count != 0 {
+            return None;
+        }
+        let width = literal.width / count;
+        if width == 0 || width > 127 {
+            return None;
+        }
+        let window = (num_bigint::BigUint::from(1u8) << width) - 1u8;
+        let values = (0..count)
+            .map(|position| {
+                u128::try_from((&literal.value >> (position * width)) & &window)
+                    .ok()
+                    .map(|value| value as i128)
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let packed = if shape.signed_element_depth.is_some() {
+            Vec::new()
+        } else {
+            let mut packed = shape
+                .packed
+                .iter()
+                .map(|dimension| Some((bound(&dimension.left)?, bound(&dimension.right)?)))
+                .collect::<Option<Vec<_>>>()
+                .unwrap_or_default();
+            if packed.is_empty() {
+                packed.push((width as i128 - 1, 0));
+            }
+            if parameters::packed_width(&packed) == Some(width) {
+                packed
+            } else {
+                Vec::new()
+            }
+        };
+        Some(ConstantElements {
+            left,
+            right,
+            width,
+            packed,
+            signed: shape.signed,
+            two_state: shape.is_2state,
+            value: Expr::Literal(text),
+            values,
+        })
+    }
+}
+
 /// The value of the expression `root` as the value of the array parameter
 /// `name` of shape `shape`: a pattern, an expression that names an unpacked
 /// array, or a conditional of these whose condition is a constant. Every
