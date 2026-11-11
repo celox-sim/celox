@@ -9,6 +9,43 @@ pub(super) enum LoopBoundStatus {
     OutOfRange,
 }
 
+/// The widths, signedness and step of a `for` loop: fixed before any of its blocks is
+/// emitted and read by every step of the lowering.
+#[derive(Clone, Copy)]
+struct ForLoopShape {
+    loop_width: usize,
+    compare_width: usize,
+    math_width: usize,
+    loop_signed: bool,
+    comparison_signed: bool,
+    inclusive: bool,
+    widen_inclusive: bool,
+    reverse: bool,
+    step: usize,
+    stepped_op: Option<Op>,
+}
+
+/// The registers and blocks of a `for` loop that its lowering steps share.
+#[derive(Clone, Copy)]
+struct ForLoopFrame {
+    start_reg: RegisterId,
+    end_reg: RegisterId,
+    end_limit: RegisterId,
+    init_reg: RegisterId,
+    header_counter: RegisterId,
+    fitcheck_counter: RegisterId,
+    body_counter: RegisterId,
+    empty_exit_counter: RegisterId,
+    precheck_bb: Option<BlockId>,
+    reverse_precheck_bb: Option<BlockId>,
+    empty_exit_check_bb: Option<BlockId>,
+    header_bb: BlockId,
+    fitcheck_bb: BlockId,
+    body_bb: BlockId,
+    range_error_bb: Option<BlockId>,
+    exit_bb: BlockId,
+}
+
 impl<'a> FfParser<'a> {
     pub(super) fn loop_bound_status(
         bound: &ForBound,
@@ -286,6 +323,703 @@ impl<'a> FfParser<'a> {
         }
     }
 
+    /// The bounds, the direction and the step of a `for` range, and the values of its
+    /// constant bounds.
+    fn for_range_parts(
+        range: &ForRange,
+    ) -> (
+        &ForBound,
+        &ForBound,
+        bool,
+        usize,
+        bool,
+        Option<Op>,
+        Option<usize>,
+        Option<usize>,
+    ) {
+        match range {
+            ForRange::Forward {
+                start,
+                end,
+                inclusive,
+                step,
+            } => (
+                start,
+                end,
+                *inclusive,
+                *step,
+                false,
+                None,
+                Self::bound_const_value(start),
+                Self::bound_const_value(end),
+            ),
+            ForRange::Reverse {
+                start,
+                end,
+                inclusive,
+                step,
+            } => (
+                start,
+                end,
+                *inclusive,
+                *step,
+                true,
+                None,
+                Self::bound_const_value(start),
+                Self::bound_const_value(end),
+            ),
+            ForRange::Stepped {
+                start,
+                end,
+                inclusive,
+                step,
+                op,
+            } => (
+                start,
+                end,
+                *inclusive,
+                *step,
+                false,
+                Some(*op),
+                Self::bound_const_value(start),
+                Self::bound_const_value(end),
+            ),
+        }
+    }
+
+    /// The block that checks the end bound of a forward loop whose counter is wider than
+    /// the loop variable, and decides whether the loop runs at all.
+    fn emit_for_forward_precheck<A>(
+        &self,
+        shape: &ForLoopShape,
+        frame: &ForLoopFrame,
+        ir_builder: &mut SIRBuilder<A>,
+    ) {
+        let ForLoopShape {
+            loop_width,
+            compare_width,
+            loop_signed,
+            comparison_signed,
+            inclusive,
+            widen_inclusive,
+            ..
+        } = *shape;
+        let ForLoopFrame {
+            start_reg,
+            end_reg,
+            end_limit,
+            precheck_bb,
+            empty_exit_check_bb,
+            fitcheck_bb,
+            range_error_bb,
+            ..
+        } = *frame;
+        if let (Some(precheck_bb), Some(empty_exit_check_bb), Some(range_error_bb)) =
+            (precheck_bb, empty_exit_check_bb, range_error_bb)
+        {
+            ir_builder.switch_to_block(precheck_bb);
+            let end_allowed_reg = if compare_width > 64 {
+                Self::emit_loop_value_fits(
+                    ir_builder,
+                    end_reg,
+                    compare_width,
+                    loop_width,
+                    loop_signed,
+                    !inclusive,
+                )
+            } else {
+                let end_visible =
+                    self.cast_reg_width_ext(ir_builder, end_reg, loop_width, loop_signed);
+                let end_roundtrip =
+                    self.cast_reg_width_ext(ir_builder, end_visible, compare_width, loop_signed);
+                let end_fits_reg = ir_builder.alloc_bit(1, false);
+                ir_builder.emit(SIRInstruction::Binary(
+                    end_fits_reg,
+                    end_reg,
+                    BinaryOp::Eq,
+                    end_roundtrip,
+                ));
+                if !inclusive {
+                    let sentinel_reg = ir_builder.alloc_bit(compare_width, loop_signed);
+                    let sentinel_value = if loop_signed {
+                        1u64 << (loop_width - 1)
+                    } else {
+                        1u64 << loop_width
+                    };
+                    ir_builder.emit(SIRInstruction::Imm(
+                        sentinel_reg,
+                        SIRValue::new(sentinel_value),
+                    ));
+                    let end_is_sentinel_reg = ir_builder.alloc_bit(1, false);
+                    ir_builder.emit(SIRInstruction::Binary(
+                        end_is_sentinel_reg,
+                        end_reg,
+                        BinaryOp::Eq,
+                        sentinel_reg,
+                    ));
+                    let allowed_reg = ir_builder.alloc_bit(1, false);
+                    ir_builder.emit(SIRInstruction::Binary(
+                        allowed_reg,
+                        end_fits_reg,
+                        BinaryOp::LogicOr,
+                        end_is_sentinel_reg,
+                    ));
+                    allowed_reg
+                } else {
+                    end_fits_reg
+                }
+            };
+            let precheck_pass_bb = ir_builder.new_block();
+            ir_builder.seal_block(SIRTerminator::Branch {
+                cond: end_allowed_reg,
+                true_block: (precheck_pass_bb, vec![]),
+                false_block: (range_error_bb, vec![]),
+            });
+            ir_builder.switch_to_block(precheck_pass_bb);
+            let cond_reg = ir_builder.alloc_bit(1, false);
+            ir_builder.emit(SIRInstruction::Binary(
+                cond_reg,
+                start_reg,
+                if comparison_signed {
+                    if inclusive {
+                        BinaryOp::LeS
+                    } else {
+                        BinaryOp::LtS
+                    }
+                } else if inclusive && !widen_inclusive {
+                    BinaryOp::LeU
+                } else {
+                    BinaryOp::LtU
+                },
+                end_limit,
+            ));
+            // Keep the initial widened-range decision in the precheck block so
+            // we do not reuse the same block-param SSA value across multiple blocks.
+            ir_builder.seal_block(SIRTerminator::Branch {
+                cond: cond_reg,
+                true_block: (fitcheck_bb, vec![start_reg]),
+                false_block: (empty_exit_check_bb, vec![start_reg]),
+            });
+        }
+    }
+
+    /// The block that checks both bounds of a reverse loop whose counter is wider than the
+    /// loop variable.
+    fn emit_for_reverse_precheck<A>(
+        shape: &ForLoopShape,
+        frame: &ForLoopFrame,
+        ir_builder: &mut SIRBuilder<A>,
+    ) {
+        let ForLoopShape {
+            loop_width,
+            compare_width,
+            loop_signed,
+            inclusive,
+            ..
+        } = *shape;
+        let ForLoopFrame {
+            start_reg,
+            end_reg,
+            init_reg,
+            reverse_precheck_bb,
+            header_bb,
+            range_error_bb,
+            ..
+        } = *frame;
+        if let (Some(reverse_precheck_bb), Some(range_error_bb)) =
+            (reverse_precheck_bb, range_error_bb)
+        {
+            ir_builder.switch_to_block(reverse_precheck_bb);
+            let start_fits = Self::emit_loop_value_fits(
+                ir_builder,
+                start_reg,
+                compare_width,
+                loop_width,
+                loop_signed,
+                false,
+            );
+            let end_fits = Self::emit_loop_value_fits(
+                ir_builder,
+                end_reg,
+                compare_width,
+                loop_width,
+                loop_signed,
+                !inclusive,
+            );
+            let bounds_fit = ir_builder.alloc_bit(1, false);
+            ir_builder.emit(SIRInstruction::Binary(
+                bounds_fit,
+                start_fits,
+                BinaryOp::LogicAnd,
+                end_fits,
+            ));
+            ir_builder.seal_block(SIRTerminator::Branch {
+                cond: bounds_fit,
+                true_block: (header_bb, vec![init_reg]),
+                false_block: (range_error_bb, vec![]),
+            });
+        }
+    }
+
+    /// The loop header: compare the counter with the continuation bound.
+    fn emit_for_header<A>(
+        shape: &ForLoopShape,
+        frame: &ForLoopFrame,
+        ir_builder: &mut SIRBuilder<A>,
+    ) {
+        let ForLoopShape {
+            comparison_signed,
+            inclusive,
+            widen_inclusive,
+            reverse,
+            ..
+        } = *shape;
+        let ForLoopFrame {
+            start_reg,
+            end_limit,
+            header_counter,
+            empty_exit_check_bb,
+            header_bb,
+            fitcheck_bb,
+            exit_bb,
+            ..
+        } = *frame;
+        ir_builder.switch_to_block(header_bb);
+        if reverse {
+            let in_range = ir_builder.alloc_bit(1, false);
+            ir_builder.emit(SIRInstruction::Binary(
+                in_range,
+                header_counter,
+                if comparison_signed {
+                    BinaryOp::GeS
+                } else {
+                    BinaryOp::GeU
+                },
+                start_reg,
+            ));
+            ir_builder.seal_block(SIRTerminator::Branch {
+                cond: in_range,
+                true_block: (fitcheck_bb, vec![header_counter]),
+                false_block: empty_exit_check_bb
+                    .map_or((exit_bb, vec![]), |block| (block, vec![header_counter])),
+            });
+        } else {
+            let cond_reg = ir_builder.alloc_bit(1, false);
+            ir_builder.emit(SIRInstruction::Binary(
+                cond_reg,
+                header_counter,
+                if comparison_signed {
+                    if inclusive {
+                        BinaryOp::LeS
+                    } else {
+                        BinaryOp::LtS
+                    }
+                } else if inclusive && !widen_inclusive {
+                    BinaryOp::LeU
+                } else {
+                    BinaryOp::LtU
+                },
+                end_limit,
+            ));
+            ir_builder.seal_block(SIRTerminator::Branch {
+                cond: cond_reg,
+                true_block: (fitcheck_bb, vec![header_counter]),
+                false_block: (exit_bb, vec![]),
+            });
+        }
+    }
+
+    /// The block that checks, when the loop ends without another iteration, that the
+    /// counter and the start bound fit the loop variable.
+    fn emit_for_empty_exit_check<A>(
+        &self,
+        shape: &ForLoopShape,
+        frame: &ForLoopFrame,
+        ir_builder: &mut SIRBuilder<A>,
+    ) {
+        let ForLoopShape {
+            loop_width,
+            compare_width,
+            loop_signed,
+            ..
+        } = *shape;
+        let ForLoopFrame {
+            start_reg,
+            empty_exit_counter,
+            empty_exit_check_bb,
+            range_error_bb,
+            exit_bb,
+            ..
+        } = *frame;
+        if let (Some(empty_exit_check_bb), Some(range_error_bb)) =
+            (empty_exit_check_bb, range_error_bb)
+        {
+            ir_builder.switch_to_block(empty_exit_check_bb);
+            let empty_fits_reg = if compare_width > 64 {
+                Self::emit_loop_value_fits(
+                    ir_builder,
+                    empty_exit_counter,
+                    compare_width,
+                    loop_width,
+                    loop_signed,
+                    false,
+                )
+            } else {
+                let empty_visible = self.cast_reg_width_ext(
+                    ir_builder,
+                    empty_exit_counter,
+                    loop_width,
+                    loop_signed,
+                );
+                let empty_roundtrip =
+                    self.cast_reg_width_ext(ir_builder, empty_visible, compare_width, loop_signed);
+                let empty_fits_reg = ir_builder.alloc_bit(1, false);
+                ir_builder.emit(SIRInstruction::Binary(
+                    empty_fits_reg,
+                    empty_exit_counter,
+                    BinaryOp::Eq,
+                    empty_roundtrip,
+                ));
+                empty_fits_reg
+            };
+            let empty_start_fits_reg = if compare_width > 64 {
+                Self::emit_loop_value_fits(
+                    ir_builder,
+                    start_reg,
+                    compare_width,
+                    loop_width,
+                    loop_signed,
+                    false,
+                )
+            } else {
+                let empty_start_visible =
+                    self.cast_reg_width_ext(ir_builder, start_reg, loop_width, loop_signed);
+                let empty_start_roundtrip = self.cast_reg_width_ext(
+                    ir_builder,
+                    empty_start_visible,
+                    compare_width,
+                    loop_signed,
+                );
+                let empty_start_fits_reg = ir_builder.alloc_bit(1, false);
+                ir_builder.emit(SIRInstruction::Binary(
+                    empty_start_fits_reg,
+                    start_reg,
+                    BinaryOp::Eq,
+                    empty_start_roundtrip,
+                ));
+                empty_start_fits_reg
+            };
+            let empty_allowed_reg = ir_builder.alloc_bit(1, false);
+            ir_builder.emit(SIRInstruction::Binary(
+                empty_allowed_reg,
+                empty_fits_reg,
+                BinaryOp::LogicAnd,
+                empty_start_fits_reg,
+            ));
+            ir_builder.seal_block(SIRTerminator::Branch {
+                cond: empty_allowed_reg,
+                true_block: (exit_bb, vec![]),
+                false_block: (range_error_bb, vec![]),
+            });
+        }
+    }
+
+    /// The block that publishes the loop variable and checks that the counter fits it, and
+    /// the block of the range error.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_for_fitcheck<A>(
+        &mut self,
+        stmt: &ForStatement,
+        shape: &ForLoopShape,
+        frame: &ForLoopFrame,
+        range_message: String,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        ir_builder: &mut SIRBuilder<A>,
+    ) {
+        let ForLoopShape {
+            loop_width,
+            compare_width,
+            loop_signed,
+            ..
+        } = *shape;
+        let ForLoopFrame {
+            fitcheck_counter,
+            fitcheck_bb,
+            body_bb,
+            range_error_bb,
+            ..
+        } = *frame;
+        ir_builder.switch_to_block(fitcheck_bb);
+        let fitcheck_visible_reg =
+            self.cast_reg_width_ext(ir_builder, fitcheck_counter, loop_width, loop_signed);
+        // Publish the loop variable before entering the body block so the
+        // body itself stays a single widened block for native codegen.
+        ir_builder.emit(SIRInstruction::Store(
+            convert(stmt.var_id, domain.region()),
+            SIROffset::Static(0),
+            loop_width,
+            fitcheck_visible_reg,
+            Vec::new(),
+            Vec::new(),
+        ));
+        if let Some(range_error_bb) = range_error_bb {
+            let fits_loop_reg = if compare_width > 64 {
+                Self::emit_loop_value_fits(
+                    ir_builder,
+                    fitcheck_counter,
+                    compare_width,
+                    loop_width,
+                    loop_signed,
+                    false,
+                )
+            } else {
+                let visible_roundtrip = self.cast_reg_width_ext(
+                    ir_builder,
+                    fitcheck_visible_reg,
+                    compare_width,
+                    loop_signed,
+                );
+                let fits_loop_reg = ir_builder.alloc_bit(1, false);
+                ir_builder.emit(SIRInstruction::Binary(
+                    fits_loop_reg,
+                    fitcheck_counter,
+                    BinaryOp::Eq,
+                    visible_roundtrip,
+                ));
+                fits_loop_reg
+            };
+            ir_builder.seal_block(SIRTerminator::Branch {
+                cond: fits_loop_reg,
+                true_block: (body_bb, vec![fitcheck_counter]),
+                false_block: (range_error_bb, vec![]),
+            });
+        } else {
+            ir_builder.seal_block(SIRTerminator::Jump(body_bb, vec![fitcheck_counter]));
+        }
+        if let Some(range_error_bb) = range_error_bb {
+            ir_builder.switch_to_block(range_error_bb);
+            let error_code = self.runtime_error(range_message, vec![stmt.var_id]);
+            ir_builder.seal_block(SIRTerminator::Error(error_code));
+        }
+    }
+
+    /// The step of a forward loop after its body: compute the next counter, stop with a
+    /// runtime error when it does not progress, and continue or leave the loop.
+    fn emit_for_forward_step<A>(
+        &mut self,
+        stmt: &ForStatement,
+        shape: &ForLoopShape,
+        frame: &ForLoopFrame,
+        non_progress_message: String,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<(), ParserError> {
+        let ForLoopShape {
+            loop_width,
+            compare_width,
+            math_width,
+            loop_signed,
+            comparison_signed,
+            inclusive,
+            widen_inclusive,
+            step,
+            stepped_op,
+            ..
+        } = *shape;
+        let ForLoopFrame {
+            end_limit,
+            body_counter,
+            header_bb,
+            exit_bb,
+            ..
+        } = *frame;
+        let step_width = if matches!(stepped_op, Some(Op::BitOr | Op::BitXor)) {
+            loop_width
+        } else {
+            math_width
+        };
+        let current_step =
+            self.cast_reg_width_ext(ir_builder, body_counter, step_width, loop_signed);
+        let step_reg = ir_builder.alloc_bit(step_width, loop_signed);
+        let step_value = Self::truncate_usize_to_width(step, step_width);
+        ir_builder.emit(SIRInstruction::Imm(
+            step_reg,
+            SIRValue::new(step_value as u64),
+        ));
+        let next_step = ir_builder.alloc_bit(step_width, loop_signed);
+        let op = match stepped_op {
+            Some(Op::Mul) => BinaryOp::Mul,
+            Some(Op::LogicShiftL | Op::ArithShiftL) => BinaryOp::Shl,
+            Some(Op::BitOr) => BinaryOp::Or,
+            Some(Op::BitXor) => BinaryOp::Xor,
+            Some(Op::Add) | None => BinaryOp::Add,
+            Some(other) => {
+                self.local_working_vars.remove(&stmt.var_id);
+                return Err(ParserError::illegal_context(
+                    "for loop step operator in always_ff",
+                    format!("{other:?}"),
+                    Some(&stmt.token),
+                ));
+            }
+        };
+        ir_builder.emit(SIRInstruction::Binary(
+            next_step,
+            current_step,
+            op,
+            step_reg,
+        ));
+        let current_math =
+            self.cast_reg_width_ext(ir_builder, current_step, math_width, loop_signed);
+        // Compound assignment updates the fixed-width loop variable
+        // before the next comparison. Truncate to that visible width so
+        // overflow cannot be hidden by the widened comparison path.
+        let next_visible = self.cast_reg_width_ext(ir_builder, next_step, loop_width, loop_signed);
+        let next_reg = self.cast_reg_width_ext(ir_builder, next_visible, math_width, loop_signed);
+        let progress_reg = ir_builder.alloc_bit(1, false);
+        ir_builder.emit(SIRInstruction::Binary(
+            progress_reg,
+            next_reg,
+            BinaryOp::Ne,
+            current_math,
+        ));
+        let stall_bb = ir_builder.new_block();
+        let continue_bb = ir_builder.new_block();
+        ir_builder.seal_block(SIRTerminator::Branch {
+            cond: progress_reg,
+            true_block: (continue_bb, vec![]),
+            false_block: (stall_bb, vec![]),
+        });
+        ir_builder.switch_to_block(continue_bb);
+        let increasing_reg = ir_builder.alloc_bit(1, false);
+        ir_builder.emit(SIRInstruction::Binary(
+            increasing_reg,
+            next_reg,
+            if loop_signed {
+                BinaryOp::GtS
+            } else {
+                BinaryOp::GtU
+            },
+            current_math,
+        ));
+        let range_check_bb = ir_builder.new_block();
+        ir_builder.seal_block(SIRTerminator::Branch {
+            cond: increasing_reg,
+            true_block: (range_check_bb, vec![]),
+            false_block: (stall_bb, vec![]),
+        });
+        ir_builder.switch_to_block(range_check_bb);
+        let end_reg = self.cast_reg_width_ext(ir_builder, end_limit, math_width, loop_signed);
+        let in_range_reg = ir_builder.alloc_bit(1, false);
+        ir_builder.emit(SIRInstruction::Binary(
+            in_range_reg,
+            next_reg,
+            if comparison_signed {
+                if inclusive {
+                    BinaryOp::LeS
+                } else {
+                    BinaryOp::LtS
+                }
+            } else if inclusive && !widen_inclusive {
+                BinaryOp::LeU
+            } else {
+                BinaryOp::LtU
+            },
+            end_reg,
+        ));
+        let next_counter =
+            self.cast_reg_width_ext(ir_builder, next_reg, compare_width, loop_signed);
+        ir_builder.seal_block(SIRTerminator::Branch {
+            cond: in_range_reg,
+            true_block: (header_bb, vec![next_counter]),
+            false_block: (exit_bb, vec![]),
+        });
+        ir_builder.switch_to_block(stall_bb);
+        let error_code = self.runtime_error(non_progress_message, vec![stmt.var_id]);
+        ir_builder.seal_block(SIRTerminator::Error(error_code));
+        Ok(())
+    }
+
+    /// The step of a reverse loop after its body.
+    fn emit_for_reverse_step<A>(
+        &mut self,
+        stmt: &ForStatement,
+        shape: &ForLoopShape,
+        frame: &ForLoopFrame,
+        non_progress_message: String,
+        ir_builder: &mut SIRBuilder<A>,
+    ) {
+        let ForLoopShape {
+            loop_width,
+            compare_width,
+            math_width,
+            loop_signed,
+            comparison_signed,
+            step,
+            ..
+        } = *shape;
+        let ForLoopFrame {
+            start_reg,
+            body_counter,
+            header_bb,
+            exit_bb,
+            ..
+        } = *frame;
+        let current_math =
+            self.cast_reg_width_ext(ir_builder, body_counter, math_width, loop_signed);
+        let start_math = self.cast_reg_width_ext(ir_builder, start_reg, math_width, loop_signed);
+        let step_reg = ir_builder.alloc_bit(math_width, loop_signed);
+        ir_builder.emit(SIRInstruction::Imm(step_reg, SIRValue::new(step as u64)));
+        let next_raw = ir_builder.alloc_bit(math_width, loop_signed);
+        ir_builder.emit(SIRInstruction::Binary(
+            next_raw,
+            current_math,
+            BinaryOp::Sub,
+            step_reg,
+        ));
+        let next_visible = self.cast_reg_width_ext(ir_builder, next_raw, loop_width, loop_signed);
+        let next_reg = self.cast_reg_width_ext(ir_builder, next_visible, math_width, loop_signed);
+        let decreasing_reg = ir_builder.alloc_bit(1, false);
+        ir_builder.emit(SIRInstruction::Binary(
+            decreasing_reg,
+            next_reg,
+            if loop_signed {
+                BinaryOp::LtS
+            } else {
+                BinaryOp::LtU
+            },
+            current_math,
+        ));
+        let range_check_bb = ir_builder.new_block();
+        let stall_bb = ir_builder.new_block();
+        ir_builder.seal_block(SIRTerminator::Branch {
+            cond: decreasing_reg,
+            true_block: (range_check_bb, vec![]),
+            false_block: (stall_bb, vec![]),
+        });
+        ir_builder.switch_to_block(range_check_bb);
+        let in_range_reg = ir_builder.alloc_bit(1, false);
+        ir_builder.emit(SIRInstruction::Binary(
+            in_range_reg,
+            next_reg,
+            if comparison_signed {
+                BinaryOp::GeS
+            } else {
+                BinaryOp::GeU
+            },
+            start_math,
+        ));
+        let next_counter =
+            self.cast_reg_width_ext(ir_builder, next_reg, compare_width, loop_signed);
+        ir_builder.seal_block(SIRTerminator::Branch {
+            cond: in_range_reg,
+            true_block: (header_bb, vec![next_counter]),
+            false_block: (exit_bb, vec![]),
+        });
+        ir_builder.switch_to_block(stall_bb);
+        let error_code = self.runtime_error(non_progress_message, vec![stmt.var_id]);
+        ir_builder.seal_block(SIRTerminator::Error(error_code));
+    }
+
     pub(super) fn parse_for_statement<A>(
         &mut self,
         stmt: &ForStatement,
@@ -300,54 +1034,7 @@ impl<'a> FfParser<'a> {
         let loop_signed = stmt.var_type.signed;
 
         let (start_bound, end_bound, inclusive, step, reverse, stepped_op, start_const, end_const) =
-            match &stmt.range {
-                ForRange::Forward {
-                    start,
-                    end,
-                    inclusive,
-                    step,
-                } => (
-                    start,
-                    end,
-                    *inclusive,
-                    *step,
-                    false,
-                    None,
-                    Self::bound_const_value(start),
-                    Self::bound_const_value(end),
-                ),
-                ForRange::Reverse {
-                    start,
-                    end,
-                    inclusive,
-                    step,
-                } => (
-                    start,
-                    end,
-                    *inclusive,
-                    *step,
-                    true,
-                    None,
-                    Self::bound_const_value(start),
-                    Self::bound_const_value(end),
-                ),
-                ForRange::Stepped {
-                    start,
-                    end,
-                    inclusive,
-                    step,
-                    op,
-                } => (
-                    start,
-                    end,
-                    *inclusive,
-                    *step,
-                    false,
-                    Some(*op),
-                    Self::bound_const_value(start),
-                    Self::bound_const_value(end),
-                ),
-            };
+            Self::for_range_parts(&stmt.range);
         // The emitted int counter compares against the continuation bound's
         // type, which may be unsigned even when the counter is signed.
         let continuation_bound = if reverse { start_bound } else { end_bound };
@@ -487,299 +1174,53 @@ impl<'a> FfParser<'a> {
             ir_builder.seal_block(SIRTerminator::Jump(header_bb, vec![init_reg]));
         }
 
+        let shape = ForLoopShape {
+            loop_width,
+            compare_width,
+            math_width,
+            loop_signed,
+            comparison_signed,
+            inclusive,
+            widen_inclusive,
+            reverse,
+            step,
+            stepped_op,
+        };
+        let frame = ForLoopFrame {
+            start_reg,
+            end_reg,
+            end_limit,
+            init_reg,
+            header_counter,
+            fitcheck_counter,
+            body_counter,
+            empty_exit_counter,
+            precheck_bb,
+            reverse_precheck_bb,
+            empty_exit_check_bb,
+            header_bb,
+            fitcheck_bb,
+            body_bb,
+            range_error_bb,
+            exit_bb,
+        };
+
         let pre_loop_defined = self.defined.defined_ranges.clone();
         let pre_loop_dynamic = self.defined.dynamic_defined_vars.clone();
 
-        if let (Some(precheck_bb), Some(empty_exit_check_bb), Some(range_error_bb)) =
-            (precheck_bb, empty_exit_check_bb, range_error_bb)
-        {
-            ir_builder.switch_to_block(precheck_bb);
-            let end_allowed_reg = if compare_width > 64 {
-                Self::emit_loop_value_fits(
-                    ir_builder,
-                    end_reg,
-                    compare_width,
-                    loop_width,
-                    loop_signed,
-                    !inclusive,
-                )
-            } else {
-                let end_visible =
-                    self.cast_reg_width_ext(ir_builder, end_reg, loop_width, loop_signed);
-                let end_roundtrip =
-                    self.cast_reg_width_ext(ir_builder, end_visible, compare_width, loop_signed);
-                let end_fits_reg = ir_builder.alloc_bit(1, false);
-                ir_builder.emit(SIRInstruction::Binary(
-                    end_fits_reg,
-                    end_reg,
-                    BinaryOp::Eq,
-                    end_roundtrip,
-                ));
-                if !inclusive {
-                    let sentinel_reg = ir_builder.alloc_bit(compare_width, loop_signed);
-                    let sentinel_value = if loop_signed {
-                        1u64 << (loop_width - 1)
-                    } else {
-                        1u64 << loop_width
-                    };
-                    ir_builder.emit(SIRInstruction::Imm(
-                        sentinel_reg,
-                        SIRValue::new(sentinel_value),
-                    ));
-                    let end_is_sentinel_reg = ir_builder.alloc_bit(1, false);
-                    ir_builder.emit(SIRInstruction::Binary(
-                        end_is_sentinel_reg,
-                        end_reg,
-                        BinaryOp::Eq,
-                        sentinel_reg,
-                    ));
-                    let allowed_reg = ir_builder.alloc_bit(1, false);
-                    ir_builder.emit(SIRInstruction::Binary(
-                        allowed_reg,
-                        end_fits_reg,
-                        BinaryOp::LogicOr,
-                        end_is_sentinel_reg,
-                    ));
-                    allowed_reg
-                } else {
-                    end_fits_reg
-                }
-            };
-            let precheck_pass_bb = ir_builder.new_block();
-            ir_builder.seal_block(SIRTerminator::Branch {
-                cond: end_allowed_reg,
-                true_block: (precheck_pass_bb, vec![]),
-                false_block: (range_error_bb, vec![]),
-            });
-            ir_builder.switch_to_block(precheck_pass_bb);
-            let cond_reg = ir_builder.alloc_bit(1, false);
-            ir_builder.emit(SIRInstruction::Binary(
-                cond_reg,
-                start_reg,
-                if comparison_signed {
-                    if inclusive {
-                        BinaryOp::LeS
-                    } else {
-                        BinaryOp::LtS
-                    }
-                } else if inclusive && !widen_inclusive {
-                    BinaryOp::LeU
-                } else {
-                    BinaryOp::LtU
-                },
-                end_limit,
-            ));
-            // Keep the initial widened-range decision in the precheck block so
-            // we do not reuse the same block-param SSA value across multiple blocks.
-            ir_builder.seal_block(SIRTerminator::Branch {
-                cond: cond_reg,
-                true_block: (fitcheck_bb, vec![start_reg]),
-                false_block: (empty_exit_check_bb, vec![start_reg]),
-            });
-        }
-
-        if let (Some(reverse_precheck_bb), Some(range_error_bb)) =
-            (reverse_precheck_bb, range_error_bb)
-        {
-            ir_builder.switch_to_block(reverse_precheck_bb);
-            let start_fits = Self::emit_loop_value_fits(
-                ir_builder,
-                start_reg,
-                compare_width,
-                loop_width,
-                loop_signed,
-                false,
-            );
-            let end_fits = Self::emit_loop_value_fits(
-                ir_builder,
-                end_reg,
-                compare_width,
-                loop_width,
-                loop_signed,
-                !inclusive,
-            );
-            let bounds_fit = ir_builder.alloc_bit(1, false);
-            ir_builder.emit(SIRInstruction::Binary(
-                bounds_fit,
-                start_fits,
-                BinaryOp::LogicAnd,
-                end_fits,
-            ));
-            ir_builder.seal_block(SIRTerminator::Branch {
-                cond: bounds_fit,
-                true_block: (header_bb, vec![init_reg]),
-                false_block: (range_error_bb, vec![]),
-            });
-        }
-
-        ir_builder.switch_to_block(header_bb);
-        if reverse {
-            let in_range = ir_builder.alloc_bit(1, false);
-            ir_builder.emit(SIRInstruction::Binary(
-                in_range,
-                header_counter,
-                if comparison_signed {
-                    BinaryOp::GeS
-                } else {
-                    BinaryOp::GeU
-                },
-                start_reg,
-            ));
-            ir_builder.seal_block(SIRTerminator::Branch {
-                cond: in_range,
-                true_block: (fitcheck_bb, vec![header_counter]),
-                false_block: empty_exit_check_bb
-                    .map_or((exit_bb, vec![]), |block| (block, vec![header_counter])),
-            });
-        } else {
-            let cond_reg = ir_builder.alloc_bit(1, false);
-            ir_builder.emit(SIRInstruction::Binary(
-                cond_reg,
-                header_counter,
-                if comparison_signed {
-                    if inclusive {
-                        BinaryOp::LeS
-                    } else {
-                        BinaryOp::LtS
-                    }
-                } else if inclusive && !widen_inclusive {
-                    BinaryOp::LeU
-                } else {
-                    BinaryOp::LtU
-                },
-                end_limit,
-            ));
-            ir_builder.seal_block(SIRTerminator::Branch {
-                cond: cond_reg,
-                true_block: (fitcheck_bb, vec![header_counter]),
-                false_block: (exit_bb, vec![]),
-            });
-        }
-
-        if let (Some(empty_exit_check_bb), Some(range_error_bb)) =
-            (empty_exit_check_bb, range_error_bb)
-        {
-            ir_builder.switch_to_block(empty_exit_check_bb);
-            let empty_fits_reg = if compare_width > 64 {
-                Self::emit_loop_value_fits(
-                    ir_builder,
-                    empty_exit_counter,
-                    compare_width,
-                    loop_width,
-                    loop_signed,
-                    false,
-                )
-            } else {
-                let empty_visible = self.cast_reg_width_ext(
-                    ir_builder,
-                    empty_exit_counter,
-                    loop_width,
-                    loop_signed,
-                );
-                let empty_roundtrip =
-                    self.cast_reg_width_ext(ir_builder, empty_visible, compare_width, loop_signed);
-                let empty_fits_reg = ir_builder.alloc_bit(1, false);
-                ir_builder.emit(SIRInstruction::Binary(
-                    empty_fits_reg,
-                    empty_exit_counter,
-                    BinaryOp::Eq,
-                    empty_roundtrip,
-                ));
-                empty_fits_reg
-            };
-            let empty_start_fits_reg = if compare_width > 64 {
-                Self::emit_loop_value_fits(
-                    ir_builder,
-                    start_reg,
-                    compare_width,
-                    loop_width,
-                    loop_signed,
-                    false,
-                )
-            } else {
-                let empty_start_visible =
-                    self.cast_reg_width_ext(ir_builder, start_reg, loop_width, loop_signed);
-                let empty_start_roundtrip = self.cast_reg_width_ext(
-                    ir_builder,
-                    empty_start_visible,
-                    compare_width,
-                    loop_signed,
-                );
-                let empty_start_fits_reg = ir_builder.alloc_bit(1, false);
-                ir_builder.emit(SIRInstruction::Binary(
-                    empty_start_fits_reg,
-                    start_reg,
-                    BinaryOp::Eq,
-                    empty_start_roundtrip,
-                ));
-                empty_start_fits_reg
-            };
-            let empty_allowed_reg = ir_builder.alloc_bit(1, false);
-            ir_builder.emit(SIRInstruction::Binary(
-                empty_allowed_reg,
-                empty_fits_reg,
-                BinaryOp::LogicAnd,
-                empty_start_fits_reg,
-            ));
-            ir_builder.seal_block(SIRTerminator::Branch {
-                cond: empty_allowed_reg,
-                true_block: (exit_bb, vec![]),
-                false_block: (range_error_bb, vec![]),
-            });
-        }
-
-        ir_builder.switch_to_block(fitcheck_bb);
-        let fitcheck_visible_reg =
-            self.cast_reg_width_ext(ir_builder, fitcheck_counter, loop_width, loop_signed);
-        // Publish the loop variable before entering the body block so the
-        // body itself stays a single widened block for native codegen.
-        ir_builder.emit(SIRInstruction::Store(
-            convert(stmt.var_id, domain.region()),
-            SIROffset::Static(0),
-            loop_width,
-            fitcheck_visible_reg,
-            Vec::new(),
-            Vec::new(),
-        ));
-        if let Some(range_error_bb) = range_error_bb {
-            let fits_loop_reg = if compare_width > 64 {
-                Self::emit_loop_value_fits(
-                    ir_builder,
-                    fitcheck_counter,
-                    compare_width,
-                    loop_width,
-                    loop_signed,
-                    false,
-                )
-            } else {
-                let visible_roundtrip = self.cast_reg_width_ext(
-                    ir_builder,
-                    fitcheck_visible_reg,
-                    compare_width,
-                    loop_signed,
-                );
-                let fits_loop_reg = ir_builder.alloc_bit(1, false);
-                ir_builder.emit(SIRInstruction::Binary(
-                    fits_loop_reg,
-                    fitcheck_counter,
-                    BinaryOp::Eq,
-                    visible_roundtrip,
-                ));
-                fits_loop_reg
-            };
-            ir_builder.seal_block(SIRTerminator::Branch {
-                cond: fits_loop_reg,
-                true_block: (body_bb, vec![fitcheck_counter]),
-                false_block: (range_error_bb, vec![]),
-            });
-        } else {
-            ir_builder.seal_block(SIRTerminator::Jump(body_bb, vec![fitcheck_counter]));
-        }
-        if let Some(range_error_bb) = range_error_bb {
-            ir_builder.switch_to_block(range_error_bb);
-            let error_code = self.runtime_error(range_message, vec![stmt.var_id]);
-            ir_builder.seal_block(SIRTerminator::Error(error_code));
-        }
+        self.emit_for_forward_precheck(&shape, &frame, ir_builder);
+        Self::emit_for_reverse_precheck(&shape, &frame, ir_builder);
+        Self::emit_for_header(&shape, &frame, ir_builder);
+        self.emit_for_empty_exit_check(&shape, &frame, ir_builder);
+        self.emit_for_fitcheck(
+            stmt,
+            &shape,
+            &frame,
+            range_message,
+            domain,
+            convert,
+            ir_builder,
+        );
         ir_builder.switch_to_block(body_bb);
         self.local_working_vars.insert(stmt.var_id);
 
@@ -807,169 +1248,9 @@ impl<'a> FfParser<'a> {
         }
 
         if !reverse {
-            let step_width = if matches!(stepped_op, Some(Op::BitOr | Op::BitXor)) {
-                loop_width
-            } else {
-                math_width
-            };
-            let current_step =
-                self.cast_reg_width_ext(ir_builder, body_counter, step_width, loop_signed);
-            let step_reg = ir_builder.alloc_bit(step_width, loop_signed);
-            let step_value = Self::truncate_usize_to_width(step, step_width);
-            ir_builder.emit(SIRInstruction::Imm(
-                step_reg,
-                SIRValue::new(step_value as u64),
-            ));
-            let next_step = ir_builder.alloc_bit(step_width, loop_signed);
-            let op = match stepped_op {
-                Some(Op::Mul) => BinaryOp::Mul,
-                Some(Op::LogicShiftL | Op::ArithShiftL) => BinaryOp::Shl,
-                Some(Op::BitOr) => BinaryOp::Or,
-                Some(Op::BitXor) => BinaryOp::Xor,
-                Some(Op::Add) | None => BinaryOp::Add,
-                Some(other) => {
-                    self.local_working_vars.remove(&stmt.var_id);
-                    return Err(ParserError::illegal_context(
-                        "for loop step operator in always_ff",
-                        format!("{other:?}"),
-                        Some(&stmt.token),
-                    ));
-                }
-            };
-            ir_builder.emit(SIRInstruction::Binary(
-                next_step,
-                current_step,
-                op,
-                step_reg,
-            ));
-            let current_math =
-                self.cast_reg_width_ext(ir_builder, current_step, math_width, loop_signed);
-            // Compound assignment updates the fixed-width loop variable
-            // before the next comparison. Truncate to that visible width so
-            // overflow cannot be hidden by the widened comparison path.
-            let next_visible =
-                self.cast_reg_width_ext(ir_builder, next_step, loop_width, loop_signed);
-            let next_reg =
-                self.cast_reg_width_ext(ir_builder, next_visible, math_width, loop_signed);
-            let progress_reg = ir_builder.alloc_bit(1, false);
-            ir_builder.emit(SIRInstruction::Binary(
-                progress_reg,
-                next_reg,
-                BinaryOp::Ne,
-                current_math,
-            ));
-            let stall_bb = ir_builder.new_block();
-            let continue_bb = ir_builder.new_block();
-            ir_builder.seal_block(SIRTerminator::Branch {
-                cond: progress_reg,
-                true_block: (continue_bb, vec![]),
-                false_block: (stall_bb, vec![]),
-            });
-            ir_builder.switch_to_block(continue_bb);
-            let increasing_reg = ir_builder.alloc_bit(1, false);
-            ir_builder.emit(SIRInstruction::Binary(
-                increasing_reg,
-                next_reg,
-                if loop_signed {
-                    BinaryOp::GtS
-                } else {
-                    BinaryOp::GtU
-                },
-                current_math,
-            ));
-            let range_check_bb = ir_builder.new_block();
-            ir_builder.seal_block(SIRTerminator::Branch {
-                cond: increasing_reg,
-                true_block: (range_check_bb, vec![]),
-                false_block: (stall_bb, vec![]),
-            });
-            ir_builder.switch_to_block(range_check_bb);
-            let end_reg = self.cast_reg_width_ext(ir_builder, end_limit, math_width, loop_signed);
-            let in_range_reg = ir_builder.alloc_bit(1, false);
-            ir_builder.emit(SIRInstruction::Binary(
-                in_range_reg,
-                next_reg,
-                if comparison_signed {
-                    if inclusive {
-                        BinaryOp::LeS
-                    } else {
-                        BinaryOp::LtS
-                    }
-                } else if inclusive && !widen_inclusive {
-                    BinaryOp::LeU
-                } else {
-                    BinaryOp::LtU
-                },
-                end_reg,
-            ));
-            let next_counter =
-                self.cast_reg_width_ext(ir_builder, next_reg, compare_width, loop_signed);
-            ir_builder.seal_block(SIRTerminator::Branch {
-                cond: in_range_reg,
-                true_block: (header_bb, vec![next_counter]),
-                false_block: (exit_bb, vec![]),
-            });
-            ir_builder.switch_to_block(stall_bb);
-            let error_code = self.runtime_error(non_progress_message, vec![stmt.var_id]);
-            ir_builder.seal_block(SIRTerminator::Error(error_code));
+            self.emit_for_forward_step(stmt, &shape, &frame, non_progress_message, ir_builder)?;
         } else {
-            let current_math =
-                self.cast_reg_width_ext(ir_builder, body_counter, math_width, loop_signed);
-            let start_math =
-                self.cast_reg_width_ext(ir_builder, start_reg, math_width, loop_signed);
-            let step_reg = ir_builder.alloc_bit(math_width, loop_signed);
-            ir_builder.emit(SIRInstruction::Imm(step_reg, SIRValue::new(step as u64)));
-            let next_raw = ir_builder.alloc_bit(math_width, loop_signed);
-            ir_builder.emit(SIRInstruction::Binary(
-                next_raw,
-                current_math,
-                BinaryOp::Sub,
-                step_reg,
-            ));
-            let next_visible =
-                self.cast_reg_width_ext(ir_builder, next_raw, loop_width, loop_signed);
-            let next_reg =
-                self.cast_reg_width_ext(ir_builder, next_visible, math_width, loop_signed);
-            let decreasing_reg = ir_builder.alloc_bit(1, false);
-            ir_builder.emit(SIRInstruction::Binary(
-                decreasing_reg,
-                next_reg,
-                if loop_signed {
-                    BinaryOp::LtS
-                } else {
-                    BinaryOp::LtU
-                },
-                current_math,
-            ));
-            let range_check_bb = ir_builder.new_block();
-            let stall_bb = ir_builder.new_block();
-            ir_builder.seal_block(SIRTerminator::Branch {
-                cond: decreasing_reg,
-                true_block: (range_check_bb, vec![]),
-                false_block: (stall_bb, vec![]),
-            });
-            ir_builder.switch_to_block(range_check_bb);
-            let in_range_reg = ir_builder.alloc_bit(1, false);
-            ir_builder.emit(SIRInstruction::Binary(
-                in_range_reg,
-                next_reg,
-                if comparison_signed {
-                    BinaryOp::GeS
-                } else {
-                    BinaryOp::GeU
-                },
-                start_math,
-            ));
-            let next_counter =
-                self.cast_reg_width_ext(ir_builder, next_reg, compare_width, loop_signed);
-            ir_builder.seal_block(SIRTerminator::Branch {
-                cond: in_range_reg,
-                true_block: (header_bb, vec![next_counter]),
-                false_block: (exit_bb, vec![]),
-            });
-            ir_builder.switch_to_block(stall_bb);
-            let error_code = self.runtime_error(non_progress_message, vec![stmt.var_id]);
-            ir_builder.seal_block(SIRTerminator::Error(error_code));
+            self.emit_for_reverse_step(stmt, &shape, &frame, non_progress_message, ir_builder);
         }
 
         self.local_working_vars.remove(&stmt.var_id);
