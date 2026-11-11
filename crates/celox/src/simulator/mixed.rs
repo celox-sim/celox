@@ -59,9 +59,10 @@ impl EmittedNames {
 pub(super) fn component_names(
     sources: &[(&str, &std::path::Path)],
     names: EmittedNames,
+    first_modules: bool,
 ) -> Result<fxhash::FxHashSet<String>, ParserError> {
-    let mut used =
-        celox_frontend_sv::component_names(sources).map_err(crate::parser::sv_analysis_error)?;
+    let mut used = celox_frontend_sv::component_names(sources, first_modules)
+        .map_err(crate::parser::sv_analysis_error)?;
     for symbol in veryl_analyzer::symbol_table::get_all() {
         used.insert(symbol.token.text.to_string());
         used.insert(names.symbol(&symbol));
@@ -980,6 +981,7 @@ pub(super) fn sv_declaration_contracts(
     sources: &[(&str, &std::path::Path)],
     requests: &[celox_frontend_sv::SvModuleRequest],
     names: EmittedNames,
+    first_modules: bool,
 ) -> Result<String, ParserError> {
     use veryl_analyzer::{
         ir::{Component, Signature, TypeKind, VarKind},
@@ -987,10 +989,10 @@ pub(super) fn sv_declaration_contracts(
         symbol_table,
     };
     let mut source = String::new();
-    let referenced = celox_frontend_sv::component_references(sources)
+    let referenced = celox_frontend_sv::component_references(sources, first_modules)
         .map_err(crate::parser::sv_analysis_error)?;
-    let authored =
-        celox_frontend_sv::module_interfaces(sources).map_err(crate::parser::sv_analysis_error)?;
+    let authored = celox_frontend_sv::module_interfaces(sources, first_modules)
+        .map_err(crate::parser::sv_analysis_error)?;
     let mut needed_interfaces = referenced.clone();
     needed_interfaces.extend(requests.iter().flat_map(|request| {
         request
@@ -1374,11 +1376,12 @@ pub(crate) fn specialize_sv_instances(
     context: &mut veryl_analyzer::Context,
     used_names: &mut fxhash::FxHashSet<String>,
     names: EmittedNames,
+    first_modules: bool,
 ) -> Result<Vec<celox_frontend_sv::SvModuleRequest>, ParserError> {
     use veryl_analyzer::{ir::*, symbol::SymbolKind, symbol_table};
     use veryl_parser::resource_table;
-    let interfaces =
-        celox_frontend_sv::module_interfaces(sources).map_err(crate::parser::sv_analysis_error)?;
+    let interfaces = celox_frontend_sv::module_interfaces(sources, first_modules)
+        .map_err(crate::parser::sv_analysis_error)?;
     used_names.extend(
         ir.components
             .iter()
@@ -1977,7 +1980,7 @@ mod tests {
         let mut sibling = child.clone();
         sibling.name = resource_table::insert_str("__sv_logic_bus_0");
         module.declarations.push(Declaration::Inst(sibling));
-        let mut names = component_names(&sources, EmittedNames::new(&metadata)).unwrap();
+        let mut names = component_names(&sources, EmittedNames::new(&metadata), false).unwrap();
         let generated =
             attach_sv_interface_behavior(&mut ir, &signatures, &mut context, &mut names).unwrap();
         assert_eq!(generated.len(), 1);

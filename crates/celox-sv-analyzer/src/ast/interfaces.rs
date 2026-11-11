@@ -79,9 +79,18 @@ fn prototypes(
     if selected.is_some_and(HashSet::is_empty) {
         return Ok(Vec::new());
     }
+    // The declarations a `duplicate_module` diagnostic leaves out are not
+    // parsed for the interfaces either.
+    let mut declared = fxhash::FxHashSet::default();
     let files = sources
         .iter()
-        .map(|(code, path)| File::new(code, path))
+        .map(|(code, path)| {
+            if options.first_duplicate_module {
+                File::with_first_modules(code, path, &mut declared)
+            } else {
+                File::new(code, path)
+            }
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let declaration_warnings: Vec<_> = files
         .iter()
@@ -414,7 +423,26 @@ struct File<'a> {
 
 impl<'a> File<'a> {
     fn new(code: &'a str, path: &Path) -> Result<Self, AnalyzerError> {
-        let syntax_tree = crate::source_tree::parse_source(code, path)?;
+        Self::of_tree(code, path, crate::source_tree::parse_source(code, path)?)
+    }
+
+    /// The file without the later declarations of a module that `declared`
+    /// or an earlier one in it declares, as the sources are analyzed with
+    /// `first_duplicate_module`.
+    fn with_first_modules(
+        code: &'a str,
+        path: &Path,
+        declared: &mut fxhash::FxHashSet<String>,
+    ) -> Result<Self, AnalyzerError> {
+        let (tree, _) = crate::source_tree::parse_source_with_first_modules(code, path, declared)?;
+        Self::of_tree(code, path, tree)
+    }
+
+    fn of_tree(
+        code: &'a str,
+        path: &Path,
+        syntax_tree: crate::source_tree::SourceTree,
+    ) -> Result<Self, AnalyzerError> {
         let native = syntax_tree.declarations();
         let mut tokens = Vec::new();
         let mut identifiers = HashSet::default();
@@ -3184,9 +3212,27 @@ pub fn plan_interfaces_with_member_paths(
     sources: &[(&str, &Path)],
     bindings: &[(String, String, Vec<(String, String)>)],
 ) -> Converted<(NativeInterfacePlan, InterfaceMemberPaths)> {
+    plan_interfaces_of_first_modules(sources, bindings, false)
+}
+
+/// [`plan_interfaces_with_member_paths`], with only the first declaration
+/// of a module declared twice when `first_modules`
+/// ([`crate::AnalysisOptions::first_duplicate_module`]).
+pub fn plan_interfaces_of_first_modules(
+    sources: &[(&str, &Path)],
+    bindings: &[(String, String, Vec<(String, String)>)],
+    first_modules: bool,
+) -> Converted<(NativeInterfacePlan, InterfaceMemberPaths)> {
+    let mut declared = fxhash::FxHashSet::default();
     let files = sources
         .iter()
-        .map(|(code, path)| File::new(code, path))
+        .map(|(code, path)| {
+            if first_modules {
+                File::with_first_modules(code, path, &mut declared)
+            } else {
+                File::new(code, path)
+            }
+        })
         .collect::<Converted<Vec<_>>>()?;
     // Local interface instances are bound from their original declarations by
     // interface_binding. A structural plan is needed only for module interface

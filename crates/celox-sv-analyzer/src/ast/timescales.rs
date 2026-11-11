@@ -313,9 +313,19 @@ pub(crate) fn generated_source_declarations(
     roots: Option<&[&str]>,
     options: crate::AnalysisOptions,
 ) -> Converted<String> {
+    // The declarations a `duplicate_module` diagnostic leaves out declare
+    // no time units of the design.
+    let mut declared = fxhash::FxHashSet::default();
     let trees = sources
         .iter()
-        .map(|(code, path)| crate::source_tree::parse_source(code, path).map(|tree| (tree, *path)))
+        .map(|(code, path)| {
+            if options.first_duplicate_module {
+                crate::source_tree::parse_source_with_first_modules(code, path, &mut declared)
+                    .map(|(tree, _)| (tree, *path))
+            } else {
+                crate::source_tree::parse_source(code, path).map(|tree| (tree, *path))
+            }
+        })
         .collect::<Converted<Vec<_>>>()?;
     let mut scales = Timescales::collect_with_options(
         &trees

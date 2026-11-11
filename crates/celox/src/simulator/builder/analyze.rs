@@ -433,7 +433,14 @@ pub(super) fn analyze(
     } else if let Some(sv_sources) = sv_sources {
         (|| {
             let names = super::super::mixed::EmittedNames::new(&metadata);
-            let mut used_names = super::super::mixed::component_names(sv_sources, names)?;
+            // The checks before the SystemVerilog analysis see the modules it
+            // analyzes, the first of each name where `duplicate_module` allows
+            // later ones.
+            let first_modules = diagnostic_policy
+                .sv_options(sv_timescale, legacy_empty_reductions)
+                .first_duplicate_module;
+            let mut used_names =
+                super::super::mixed::component_names(sv_sources, names, first_modules)?;
             let behavior_sources = super::super::mixed::attach_sv_interface_behavior(
                 &mut ir,
                 &sv_interface_signatures,
@@ -452,6 +459,7 @@ pub(super) fn analyze(
                 &mut context,
                 &mut used_names,
                 names,
+                first_modules,
             )?;
             let declarations = super::super::mixed::sv_declaration_contracts(
                 &ir,
@@ -459,6 +467,7 @@ pub(super) fn analyze(
                 &joint_sources,
                 &requests,
                 names,
+                first_modules,
             )?;
             parser::parse_mixed(
                 &top,

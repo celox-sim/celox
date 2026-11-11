@@ -164,6 +164,137 @@ mod sv {
         assert_eq!(sim.get(sim.signal("y")), 9u8.into());
     }
 
+    // A module declared more than once is an error; relaxed, the first
+    // declaration is the module and the others are left out.
+    #[test]
+    fn duplicate_modules_use_the_first_declaration_when_relaxed() {
+        let first = "module Leaf(output logic [7:0] y); assign y = 8'd1; endmodule
+            module Top(output logic [7:0] y, z); Leaf a(y); Other b(z); endmodule";
+        let second = "module Leaf(output logic [7:0] y); assign y = 8'd2; endmodule
+            module Other(output logic [7:0] y); Leaf leaf(y); endmodule
+            module Leaf(output logic [7:0] y); assign y = 8'd3; endmodule";
+        let sources = || {
+            vec![
+                (first, Path::new("first.sv")),
+                (second, Path::new("second.sv")),
+            ]
+        };
+        let error = Simulator::from_sv_sources(sources(), "Top")
+            .build()
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("Duplicate module declaration: Leaf"),
+            "{error}"
+        );
+        for level in [DiagnosticLevel::Warn, DiagnosticLevel::Allow] {
+            let mut sim = Simulator::from_sv_sources(sources(), "Top")
+                .diagnostic_policy(policy("duplicate_module", level))
+                .build()
+                .unwrap();
+            let reported = sim
+                .warnings()
+                .iter()
+                .filter(|warning| {
+                    matches!(
+                        warning,
+                        celox::CompilationWarning::SystemVerilog(celox::SvFrontendWarning {
+                            kind: celox::SvFrontendWarningKind::DuplicateModule { name },
+                            ..
+                        }) if name == "Leaf"
+                    )
+                })
+                .count();
+            assert_eq!(reported, usize::from(level == DiagnosticLevel::Warn));
+            assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+            assert_eq!(sim.get(sim.signal("z")), 1u8.into());
+        }
+    }
+
+    // The first declaration is also the one whose interface ports are
+    // planned and whose `default_nettype` applies; the implicit net `u`
+    // the left-out declaration uses under `default_nettype none` is no
+    // error.
+    #[test]
+    fn duplicate_modules_keep_the_first_ports_and_net_type() {
+        let source = "`default_nettype wire
+            interface bus; logic v; endinterface
+            module Leaf(bus b, output logic y); assign t = b.v; assign y = t; endmodule
+            `default_nettype none
+            module Leaf(input wire logic x, output wire logic y); assign u = ~x; assign y = u; endmodule
+            `default_nettype wire
+            module \\Leaf (output logic y);
+              `default_nettype none
+              assign y = 1'b0;
+            endmodule
+            `default_nettype wire
+            module Top(input logic v, output logic y);
+              bus b();
+              assign b.v = v;
+              Leaf leaf(.b(b), .y(y));
+            endmodule";
+        let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("leaf.sv"))], "Top")
+            .diagnostic_policy(policy("duplicate_module", DiagnosticLevel::Allow))
+            .build()
+            .unwrap();
+        let v = sim.signal("v");
+        for value in [0u8, 1] {
+            sim.modify(|io| io.set(v, value)).unwrap();
+            assert_eq!(sim.get(sim.signal("y")), value.into());
+        }
+    }
+
+    /// A later declaration goes with the attribute instances in front of
+    /// it (IEEE 1800-2023 A.1.2), also as the last item of a source, and a
+    /// `macromodule` is the first declaration of its name as a `module` is,
+    /// with the implicit-net setting of its own place.
+    #[test]
+    fn later_declarations_go_with_their_attributes_after_macromodules() {
+        let source = "`default_nettype wire
+            macromodule Leaf(input logic a, output logic y); assign t = a; assign y = t; endmodule
+            `default_nettype none
+            module Top(input logic a, output logic y); Leaf leaf(.a(a), .y(y)); endmodule
+            (* keep = 1 *) (* note = \"second\" *)
+            module Leaf(input logic a, output logic y); assign y = ~a; endmodule";
+        let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("leaf.sv"))], "Top")
+            .diagnostic_policy(policy("duplicate_module", DiagnosticLevel::Allow))
+            .build()
+            .unwrap_or_else(|error| panic!("{error}"));
+        let a = sim.signal("a");
+        for value in [0u8, 1] {
+            sim.modify(|io| io.set(a, value)).unwrap();
+            assert_eq!(sim.get(sim.signal("y")), value.into());
+        }
+    }
+
+    /// The checks of a mixed Veryl and SystemVerilog design see the first
+    /// declaration too: a later one whose body its source's settings make
+    /// invalid is left out before any of them parse the source.
+    #[test]
+    fn mixed_designs_keep_the_first_declaration_of_a_module() {
+        let sv = "module Leaf(input logic [7:0] a, output logic [7:0] b); assign b = a + 8'd1; endmodule
+            `default_nettype none
+            module Leaf(input logic [7:0] a, output logic [7:0] b); assign t = a; assign b = t; endmodule
+            `default_nettype wire";
+        let veryl = r#"
+module Top (
+    y: output logic<8>,
+) {
+    var a: logic<8>;
+    assign a = 8'd7;
+    inst leaf: $sv::Leaf (a, b: y);
+}
+"#;
+        let mut sim = Simulator::builder(veryl, "Top")
+            .with_sv_sources(vec![(sv, Path::new("leaf.sv"))])
+            .diagnostic_policy(policy("duplicate_module", DiagnosticLevel::Allow))
+            .build()
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(sim.get(sim.signal("y")), 8u8.into());
+    }
+
     #[test]
     fn relaxed_timescales_still_reject_invalid_precision() {
         let source = "module Top; timeunit 1ps / 1ns; endmodule";

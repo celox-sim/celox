@@ -933,6 +933,9 @@ pub fn parse_mixed(
                         context,
                         used_names,
                         names,
+                        diagnostic_policy
+                            .sv_options(sv_timescale, legacy_empty_reductions)
+                            .first_duplicate_module,
                     )?;
                     let exported = celox_frontend_veryl::external_signatures(&specialized, config)?;
                     let signature = exported.modules.values().next().cloned().ok_or_else(|| {
