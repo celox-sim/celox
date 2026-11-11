@@ -6275,19 +6275,86 @@ fn sizes_unbased_shift_amounts_as_self_determined() {
     assert_eq!(sim.get(sim.signal("ff_y")), 2u8.into());
 }
 
+// A conditional expression is a select index like any other expression
+// (IEEE 1800-2023 11.5.1); an unknown condition merges its operands (11.4.11).
 #[test]
-fn rejects_unrepresentable_dynamic_selects_instead_of_dropping_them() {
-    let error = cranelift_build_error(
-        r#"
-        module Top(input logic [1:0] a, input logic sel, output logic y);
+fn conditional_expressions_are_select_indices() {
+    let source = r#"
+        module Top(
+            input logic clk, sel, input logic [1:0] a, i, j, input logic [15:0] w,
+            input logic [3:0][7:0] m,
+            output logic y, output logic [3:0] part, output logic [7:0] q, r,
+            output logic [3:0][7:0] written
+        );
             assign y = a[sel ? 1 : 0];
+            assign part = w[(sel ? i : j) * 4 +: 4];
+            always_comb r = m[sel ? 2'd3 : i];
+            always_ff @(posedge clk) begin
+                q <= m[sel ? i : j];
+                written[sel ? i : j] <= 8'h55;
+            end
         endmodule
-        "#,
-    );
-    assert!(
-        error.contains("select index `sel ? 1 : 0`"),
-        "unexpected error: {error}"
-    );
+    "#;
+    for four_state in [false, true] {
+        let mut sim =
+            Simulator::from_sv_sources(vec![(source, Path::new("conditional_index.sv"))], "Top")
+                .four_state(four_state)
+                .build_cranelift()
+                .unwrap();
+        let clk = sim.event("clk");
+        let signal = |name| sim.signal(name);
+        let (sel, a, i, j, w, m) = (
+            signal("sel"),
+            signal("a"),
+            signal("i"),
+            signal("j"),
+            signal("w"),
+            signal("m"),
+        );
+        let (y, part, q, r, written) = (
+            signal("y"),
+            signal("part"),
+            signal("q"),
+            signal("r"),
+            signal("written"),
+        );
+        sim.modify(|io| {
+            io.set(sel, 0u8);
+            io.set(a, 0b10u8);
+            io.set(i, 1u8);
+            io.set(j, 2u8);
+            io.set(w, 0xabcdu16);
+            io.set(m, 0x1312_1110u32);
+        })
+        .unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(y), 0u8.into());
+        assert_eq!(sim.get(part), 0xbu8.into());
+        assert_eq!(sim.get(r), 0x11u8.into());
+        assert_eq!(sim.get(q), 0x12u8.into());
+        macro_rules! element {
+            ($index:literal) => {
+                (sim.get(written) >> (8u32 * $index)) & BigUint::from(0xffu8)
+            };
+        }
+        assert_eq!(element!(2), 0x55u8.into());
+        sim.modify(|io| io.set(sel, 1u8)).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(y), 1u8.into());
+        assert_eq!(sim.get(part), 0xcu8.into());
+        assert_eq!(sim.get(r), 0x13u8.into());
+        assert_eq!(sim.get(q), 0x11u8.into());
+        assert_eq!(element!(1), 0x55u8.into());
+        if four_state {
+            sim.modify(|io| io.set_four_state(sel, 0u8.into(), 1u8.into()))
+                .unwrap();
+            sim.tick(clk).unwrap();
+            // Indices 1 and 0 differ, so the selected bit is unknown.
+            assert_eq!(sim.get_four_state(y).1, 1u8.into());
+            assert_eq!(sim.get_four_state(r).1, 0xffu8.into());
+            assert_eq!(sim.get_four_state(q).1, 0xffu8.into());
+        }
+    }
 }
 
 #[test]
