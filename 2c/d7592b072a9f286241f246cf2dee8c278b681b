@@ -1,1 +1,1 @@
-Rebase onto master after #3528 merged; resolve conflicts with the comb lowering and ast splits
+Use grouped comb.events fields after Comb state grouping on master
