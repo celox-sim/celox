@@ -74,42 +74,62 @@ impl Comb<'_, '_> {
         }
     }
 
-    /// Whether a value never holds unknown bits.
+    /// Whether a value never holds unknown bits: every operand it is
+    /// computed from is two-state. Operands are shared, so each node of the
+    /// expression graph is visited once.
     pub(super) fn two_state(&self, node: NodeId) -> bool {
         if !self.m.four_state {
             return true;
         }
-        match self.arena.get(node) {
-            SLTNode::Input {
-                variable, index, ..
-            } => {
-                index.is_empty()
-                    && self
-                        .m
-                        .variables
-                        .get(variable)
-                        .is_some_and(|var| !var.is_4state)
+        let mut seen = HashSet::default();
+        let mut pending = vec![node];
+        while let Some(node) = pending.pop() {
+            if !seen.insert(node) {
+                continue;
             }
-            SLTNode::Constant(_, mask, _, _) => mask.is_zero(),
-            SLTNode::Unary(UnaryOp::ToTwoState, _) => true,
-            SLTNode::Unary(_, inner)
-            | SLTNode::Slice { expr: inner, .. }
-            | SLTNode::Capture { expr: inner, .. } => self.two_state(*inner),
-            SLTNode::Binary(left, op, right) => {
-                !matches!(
-                    op,
-                    BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS
-                ) && self.two_state(*left)
-                    && self.two_state(*right)
+            match self.arena.get(node) {
+                SLTNode::Input {
+                    variable, index, ..
+                } => {
+                    if !index.is_empty()
+                        || !self
+                            .m
+                            .variables
+                            .get(variable)
+                            .is_some_and(|var| !var.is_4state)
+                    {
+                        return false;
+                    }
+                }
+                SLTNode::Constant(_, mask, _, _) => {
+                    if !mask.is_zero() {
+                        return false;
+                    }
+                }
+                SLTNode::Unary(UnaryOp::ToTwoState, _) => {}
+                SLTNode::Unary(_, inner)
+                | SLTNode::Slice { expr: inner, .. }
+                | SLTNode::Capture { expr: inner, .. } => pending.push(*inner),
+                SLTNode::Binary(left, op, right) => {
+                    // A division by zero is X.
+                    if matches!(
+                        op,
+                        BinaryOp::DivU | BinaryOp::DivS | BinaryOp::RemU | BinaryOp::RemS
+                    ) {
+                        return false;
+                    }
+                    pending.extend([*left, *right]);
+                }
+                SLTNode::Mux {
+                    cond,
+                    then_expr,
+                    else_expr,
+                } => pending.extend([*cond, *then_expr, *else_expr]),
+                SLTNode::Concat(parts) => pending.extend(parts.iter().map(|(part, _)| *part)),
+                _ => return false,
             }
-            SLTNode::Mux {
-                cond,
-                then_expr,
-                else_expr,
-            } => self.two_state(*cond) && self.two_state(*then_expr) && self.two_state(*else_expr),
-            SLTNode::Concat(parts) => parts.iter().all(|(part, _)| self.two_state(*part)),
-            _ => false,
         }
+        true
     }
 
     /// The condition under which the current statement runs, if it does not
