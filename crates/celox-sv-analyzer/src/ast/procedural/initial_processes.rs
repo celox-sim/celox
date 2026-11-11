@@ -255,11 +255,21 @@ pub(in crate::ast) fn initial_processes_from_scope(
         let construct = match procedure.kind {
             celox_sv_syntax::ProcedureKind::Initial => "initial",
             celox_sv_syntax::ProcedureKind::Final => "final",
+            // An `always_ff` that runs as a process keeps its restrictions
+            // (IEEE 1800-2023 9.2.2.4): see `timed_tasks::classify`, and
+            // the checks of its drivers.
+            celox_sv_syntax::ProcedureKind::AlwaysFf => "always_ff",
             _ => "always",
         };
         let repeats = match procedure.kind {
             celox_sv_syntax::ProcedureKind::Initial | celox_sv_syntax::ProcedureKind::Final => {
                 false
+            }
+            celox_sv_syntax::ProcedureKind::AlwaysFf
+                if validation::always_kind(procedure, tree.declarations())?
+                    == validation::AlwaysKind::Process =>
+            {
+                true
             }
             celox_sv_syntax::ProcedureKind::Always
                 if validation::always_kind(procedure, tree.declarations())?
@@ -284,6 +294,8 @@ pub(in crate::ast) fn initial_processes_from_scope(
             state,
             if is_final {
                 system_functions::Body::Final
+            } else if repeats {
+                system_functions::Body::Process
             } else {
                 system_functions::Body::Initial
             },

@@ -218,7 +218,7 @@ impl BodyBuilder<'_, '_, '_> {
             return Ok(());
         }
         match self.body {
-            system_functions::Body::Initial => Ok(()),
+            system_functions::Body::Initial | system_functions::Body::Process => Ok(()),
             system_functions::Body::Final => Err(AnalyzerError::TimingControlOutsideProcess {
                 construct,
                 context: "a final procedure",
