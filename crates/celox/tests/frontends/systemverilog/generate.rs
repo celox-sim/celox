@@ -526,3 +526,59 @@ endmodule"#;
         );
     }
 }
+
+/// A variable of a generate block whose type is a typedef that a parameter
+/// sizes connects to the ports of the instances of the block, whole and by
+/// member (IEEE 1800-2023 27.3, 23.3.2).
+#[test]
+fn generate_local_variables_of_parameter_sized_types_connect_to_instance_ports() {
+    let source = r#"`timescale 1ns/1ns
+module decoder #(parameter w_p = 5) (input [w_p-1:0] target_i);
+  initial #1 $display("%m %0d %h", $bits(target_i), target_i);
+endmodule
+module router #(parameter cw_p = 5) (input [15:0] data_i);
+  typedef struct packed { logic [2:0] len; logic [cw_p-1:0] cord; } hdr_s;
+  for (genvar i = 0; i < 2; i++) begin : in_ch
+    hdr_s hdr;
+    assign hdr = data_i[$bits(hdr_s)-1:0] + 8'(i);
+    decoder #(.w_p(cw_p)) member (.target_i(hdr.cord));
+    decoder #(.w_p($bits(hdr_s))) whole (.target_i(hdr));
+  end
+endmodule
+module top;
+  logic [15:0] data = 16'hbeef;
+  router r (.data_i(data));
+  initial #2 $finish;
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, Path::new("generate_local.sv"))],
+            "top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        sim.run_until(10).unwrap();
+        let mut lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        lines.sort();
+        assert_eq!(
+            lines,
+            [
+                "top.r.in_ch[0].member 5 0f",
+                "top.r.in_ch[0].whole 8 ef",
+                "top.r.in_ch[1].member 5 10",
+                "top.r.in_ch[1].whole 8 f0",
+            ],
+            "four_state={four_state}"
+        );
+    }
+}

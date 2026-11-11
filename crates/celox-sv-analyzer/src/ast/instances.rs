@@ -10,7 +10,9 @@ pub(super) fn instances_from_scope(
     packed_dimensions: &PackedDimensions,
     interfaces: &InterfaceLookup<'_>,
 ) -> Result<Vec<Instance>, AnalyzerError> {
-    let type_aliases = type_aliases_from_scope(syntax_tree, session)?;
+    // The types of the scope with its constants: a variable of a generate
+    // block may have a type whose shape a parameter gives.
+    let type_aliases = packed_dimensions.type_aliases.clone();
     let active = generate::items(syntax_tree, session, const_env, &type_aliases)?;
     let mut instances = Vec::new();
     let mut views = generate::ScopeViews::new(packed_dimensions);
