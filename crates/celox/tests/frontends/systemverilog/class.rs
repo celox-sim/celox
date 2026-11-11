@@ -2142,6 +2142,33 @@ fn a_specialization_asked_of_a_package_runs_with_the_classes_it_does_not_change(
 }
 
 #[test]
+fn a_specialization_asked_of_a_package_keeps_its_static_formals() {
+    // The formals of a static task of a package that suspends are package
+    // variables (IEEE 1800-2023 13.3.1, 13.3.2): every analysis of the
+    // package, including the one made again for `p::C#(5)`, names the
+    // same ones.
+    let source = "`timescale 1ns/1ns
+    package p;
+        int done;
+        task settle(int value); #1 done = value; endtask
+        class B; virtual function int f(); return 1; endfunction endclass
+        class C #(int N = 2) extends B;
+            virtual function int f(); return N; endfunction
+        endclass
+    endpackage
+    module Top(output int o, output int d);
+        p::C#(5) c;
+        initial begin c = new; o = c.f(); p::settle(7); d = p::done; end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("o")), 5u32.into());
+    assert_eq!(sim.get(sim.signal("d")), 7u32.into());
+}
+
+#[test]
 fn a_class_of_another_module_does_not_hide_a_package() {
     let source = "package P; typedef bit [2:0] T; endpackage
         module Other; class P; typedef int T; endclass endmodule
