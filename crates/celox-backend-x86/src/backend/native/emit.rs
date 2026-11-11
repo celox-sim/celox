@@ -20,8 +20,10 @@ mod folded_operands;
 mod instruction;
 mod memory;
 mod operands;
+mod packed_compare;
 mod pipeline;
 mod settle_layout;
+mod simd;
 
 use arithmetic::{
     BinOp, DivOp, ShiftOp, emit_and_imm, emit_and_memory_imm, emit_binop_memory, emit_binop_rr,
@@ -39,7 +41,7 @@ use diagnostics::{
 use folded_operands::{count_vreg_uses, try_emit_load_fold, try_emit_not_and_fold};
 use instruction::emit_inst;
 use memory::{
-    SparseDirtyWords, emit_direct_memcopy, emit_sparse_commit_worklist, emit_sparse_dirty_word,
+    emit_mem_copy, emit_mem_fill, emit_sparse_commit, emit_sparse_commit_worklist,
     emit_sparse_inline_commits,
 };
 use operands::{
@@ -47,9 +49,11 @@ use operands::{
     mem_operand_ptr_indexed, preg_to_reg8, preg_to_reg16, preg_to_reg32, preg_to_reg64, resolve,
     scratch_operand, x86_vec_to_xmm,
 };
+use packed_compare::{emit_packed_byte_affine_compare, emit_packed_lane_compare};
 pub use pipeline::{
     AllocatedFunction, allocate_owned_prepared_eu, emit_owned_prepared_eu, emit_prepared_eu,
 };
+use simd::emit_simd;
 
 use std::fmt;
 
