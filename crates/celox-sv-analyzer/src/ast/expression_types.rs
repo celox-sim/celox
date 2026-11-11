@@ -99,7 +99,12 @@ pub(super) fn type_of(
         }
         query.types.insert(id, ty);
     }
-    let ty = ty.ok_or_else(unknown)?;
+    let ty = ty.ok_or_else(|| {
+        unsupported(format!(
+            "semantic type of native expression `{}`",
+            native.token_text(native.expression(id).tokens).trim()
+        ))
+    })?;
     session
         .expression_types
         .insert(tree, id, native, dims, version, ty);
@@ -203,6 +208,14 @@ fn resolve(
         return binding.type_id(&mut session.types);
     }
     if let Some(name) = expression_binding::callable_name(tree, id, native)
+        && let Some(shape) = dims.get(&name)
+    {
+        return of_shape(session, shape);
+    }
+    // A member of an element of an array of interface instances or ports,
+    // such as `bus[0].data` (25.3).
+    if let Ok(Some(name)) =
+        expression_binding::interface_member_name(tree, session, id, native, dims)
         && let Some(shape) = dims.get(&name)
     {
         return of_shape(session, shape);
