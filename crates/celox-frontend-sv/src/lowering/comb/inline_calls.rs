@@ -212,7 +212,7 @@ impl Comb<'_, '_> {
             self.write(store, id, full(width), value)?;
         }
         for (formal, _, target) in &references {
-            self.m.name_to_id.insert(formal.clone(), *target);
+            self.m.bind_name(formal.clone(), *target);
         }
         let return_var = match &subroutine.return_var {
             Some(name) => {
@@ -246,7 +246,7 @@ impl Comb<'_, '_> {
             },
         );
         for (formal, original, _) in references {
-            self.m.name_to_id.insert(formal, original);
+            self.m.bind_name(formal, original);
         }
         *store = result?;
         // Copy the outputs back.

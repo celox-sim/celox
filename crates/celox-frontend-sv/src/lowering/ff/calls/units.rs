@@ -442,12 +442,7 @@ impl Ff<'_, '_> {
         let (body, shared) = self.share_forked(subroutine, body)?;
         let originals: Vec<(String, Option<SourceVarId>)> = renames
             .iter()
-            .map(|(formal, target)| {
-                (
-                    formal.clone(),
-                    self.m.name_to_id.insert(formal.clone(), *target),
-                )
-            })
+            .map(|(formal, target)| (formal.clone(), self.m.bind_name(formal.clone(), *target)))
             .collect();
         self.call_stack.active_calls.push(subroutine.name.clone());
         let falls = self.exec_block(&body);
@@ -456,9 +451,11 @@ impl Ff<'_, '_> {
             .truncate(self.call_stack.shared_boxes.len() - shared);
         for (formal, original) in originals {
             match original {
-                Some(id) => self.m.name_to_id.insert(formal, id),
-                None => self.m.name_to_id.remove(&formal),
-            };
+                Some(id) => {
+                    self.m.bind_name(formal, id);
+                }
+                None => self.m.unbind_name(&formal),
+            }
         }
         if falls? {
             self.jump(return_block);
@@ -547,7 +544,7 @@ impl Ff<'_, '_> {
         accessed.dedup();
         // The automatic storage of the subroutines inlined into the body:
         // each activation needs its own as much as the function's.
-        let automatic = self.m.automatic_storage();
+        self.m.check_storage_index();
         // The automatic arrays that stay module variables.
         let mut in_place = HashSet::default();
         for id in accessed {
@@ -559,7 +556,7 @@ impl Ff<'_, '_> {
                 continue;
             }
             let created = (start.0..end.0).contains(&id.0);
-            if !created && !automatic.contains(&id) {
+            if !created && !self.m.is_automatic_storage(id) {
                 continue;
             }
             let variable = self.m.var(id);
@@ -584,7 +581,6 @@ impl Ff<'_, '_> {
         // it). Not the other hidden ones the lowering keeps for a process,
         // nor what is observed: assembly instruments the stores into that,
         // which only the stores of the units the runtime runs can be.
-        let persistent = self.m.static_storage();
         let frame: HashMap<SourceVarId, (usize, SourceVarId, Option<usize>)> = slots
             .iter()
             .map(|slot| (slot.id, (slot.width, slot.address, slot.element_width)))
@@ -654,7 +650,7 @@ impl Ff<'_, '_> {
                     return Err(other("non-stable state access"));
                 } else if store {
                     if self.m.is_hidden(addr.var_id)
-                        && !persistent.contains(&addr.var_id)
+                        && !self.m.is_static_storage(addr.var_id)
                         && !staging.contains(&addr.var_id)
                         && !in_place.contains(&addr.var_id)
                         && !referents.contains(&addr.var_id)
