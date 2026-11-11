@@ -1,6 +1,1 @@
-Revision history for #3547:
-
-rev 2 (rebase) 2026-11-11 06:34 UTC
-rev 1 (initial) 2026-11-11 06:34 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":3547,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"e32884f257cde7aaa973b0bfeb3e03147738aabd","timestamp_iso":"2026-11-11T06:34:31Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"e32884f257cde7aaa973b0bfeb3e03147738aabd","new_sha":"07f9a97990dd9eb8421e4c454952a7c03bf6d62c","timestamp_iso":"2026-11-11T06:34:31Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/e32884f257cde7aaa973b0bfeb3e03147738aabd...07f9a97990dd9eb8421e4c454952a7c03bf6d62c"}]} -->
+Rebase onto master to resolve conflict with the ast.rs module split (#3551)
