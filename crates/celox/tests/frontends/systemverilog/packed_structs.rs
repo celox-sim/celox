@@ -703,3 +703,40 @@ endmodule"#;
         );
     }
 }
+
+// The index of a select of a structure member is an expression of the
+// scope, which can refer to the structure itself, as a sign extension
+// macro does with `x[$bits(x)-1]`.
+#[test]
+fn member_select_indices_refer_to_the_structure() {
+    let source = r#"
+        module Top(
+            input logic [11:0] value,
+            output logic top, at, output logic [6:0] rest, output logic [15:0] extended
+        );
+            typedef struct packed { logic [3:0] a; logic [7:0] imm; } word_t;
+            word_t s;
+            assign s = value;
+            assign top = s.imm[$bits(s.imm) - 1];
+            assign rest = s.imm[$bits(s.imm) - 2:0];
+            assign at = s.imm[s.a[2:0]];
+            assign extended = {{(16 - $bits(s.imm) + 1){s.imm[$bits(s.imm) - 1]}},
+                               s.imm[$bits(s.imm) - 2:0]};
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("member_index.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    let value = sim.signal("value");
+    // a = 5, imm = 8'ha5: bit 5 of imm is 1.
+    sim.modify(|io| io.set(value, 0x5a5u16)).unwrap();
+    assert_eq!(sim.get(sim.signal("top")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("rest")), 0x25u8.into());
+    assert_eq!(sim.get(sim.signal("at")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("extended")), 0xffa5u16.into());
+    // a = 6: bit 6 of imm is 0.
+    sim.modify(|io| io.set(value, 0x625u16)).unwrap();
+    assert_eq!(sim.get(sim.signal("top")), 0u8.into());
+    assert_eq!(sim.get(sim.signal("at")), 0u8.into());
+    assert_eq!(sim.get(sim.signal("extended")), 0x0025u16.into());
+}

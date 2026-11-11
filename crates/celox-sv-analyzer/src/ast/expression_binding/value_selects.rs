@@ -114,12 +114,15 @@ pub(in crate::ast) fn selection(
             tree,
             session,
             &scope,
+            &scope,
             false,
             false,
         )?,
         (_, false) => {
             packed_structs::select_member(tree, parts, None, &scope, |name, context, strict| {
-                direct::select_suffix(name, &suffix, native, tree, session, context, strict, false)
+                direct::select_suffix(
+                    name, &suffix, native, tree, session, &scope, context, strict, false,
+                )
             })?
         }
     };
