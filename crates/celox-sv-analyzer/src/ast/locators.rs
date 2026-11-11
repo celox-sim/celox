@@ -143,6 +143,8 @@ impl Array {
             signed: true,
             two_state: true,
             handle: None,
+            enum_values: None,
+            key_enum_values: None,
         };
         match self {
             Self::Container(container) if method.returns_index() => match container.layout.kind {
@@ -167,6 +169,8 @@ impl Array {
                     } else {
                         None
                     },
+                    enum_values: None,
+                    key_enum_values: None,
                 },
                 _ => int,
             },
@@ -382,6 +386,8 @@ fn array(
         width: width as u32,
         signed: shape.signed,
         two_state: shape.is_2state || handle.is_some(),
+        enum_values: None,
+        key_enum_values: None,
         handle,
     };
     Ok(Some(Array::Fixed {

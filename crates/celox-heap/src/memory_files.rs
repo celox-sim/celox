@@ -33,7 +33,8 @@ pub struct MemoryFileRange {
 /// The words a memory file load gives, and its messages.
 #[derive(Clone, Debug, Default)]
 pub struct MemoryFileWords {
-    /// The position of each word in the storage order of the array.
+    /// The position of each word in the storage order of the array, or the
+    /// index of the element of an associative array it stores.
     pub positions: Vec<u64>,
     /// The 64-bit chunks a word's plane takes.
     pub chunks: usize,

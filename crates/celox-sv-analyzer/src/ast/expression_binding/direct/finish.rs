@@ -77,7 +77,10 @@ pub(super) fn finish_value(
                 dimensions,
             )?
         }
-        Finish::StringCall(op) => strings::call(op, strings::operands(op, operands, dimensions)),
+        Finish::StringCall(op) => {
+            let args = strings::operands(op.clone(), operands, dimensions);
+            strings::call(op, args)
+        }
         Finish::Format {
             ticks_per_unit,
             ids,

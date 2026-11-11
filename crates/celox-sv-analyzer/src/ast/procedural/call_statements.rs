@@ -824,6 +824,41 @@ impl BodyBuilder<'_, '_, '_> {
                 {
                     return Ok(SystemTaskArg::Str(text.to_string()));
                 }
+                // An associative array is loaded by the stores of its
+                // elements (21.4.1).
+                if matches!(task, SystemTask::Readmem(_))
+                    && index == 1
+                    && let Some(store) =
+                        containers::memory_load(id, self.tree, self.session, &self.dims)?
+                {
+                    // Each word is stored through the destination, whose
+                    // selects must therefore choose the same array each time.
+                    let mut effectful = false;
+                    lifetimes::visit_calls(&store, &mut |callee, _| {
+                        effectful |= match callee {
+                            Callee::Subroutine(_) => true,
+                            Callee::Object(op) => !matches!(
+                                **op,
+                                system_functions::ObjectOp::Load(_)
+                                    | system_functions::ObjectOp::ClassOf
+                                    | system_functions::ObjectOp::Container {
+                                        op: system_functions::ContainerOp::Set
+                                            | system_functions::ContainerOp::Get
+                                            | system_functions::ContainerOp::Size
+                                            | system_functions::ContainerOp::Exists,
+                                        ..
+                                    }
+                            ),
+                            callee => callee.system().is_some_and(SystemFunction::is_effectful),
+                        }
+                    });
+                    if effects::has_updates(declarations, &[id]) || effectful {
+                        return Err(unsupported(format!(
+                            "`{task}` into an associative array selected with an effect"
+                        )));
+                    }
+                    return Ok(SystemTaskArg::Expr(store));
+                }
                 // Renamed below, once the types of the source names have
                 // chosen the conversions of the format.
                 let value = expression_binding::bind_value(

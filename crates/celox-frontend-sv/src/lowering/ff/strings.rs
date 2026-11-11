@@ -44,6 +44,9 @@ impl Ff<'_, '_> {
                 *arg = self.heap_operand(arg, context, None)?;
             }
         }
+        let (width, signed) = op.result_type();
+        let returns_string = op.returns_string();
+        let atoreal = op == StringOp::Atoreal;
         let result = match op {
             StringOp::Format { .. } => unreachable!("formatted above"),
             StringOp::Pattern(layout) => {
@@ -51,7 +54,7 @@ impl Ff<'_, '_> {
                 let code = match layout {
                     Some(layout) => ops::encode(
                         heap::PATTERN,
-                        self.container_parameter(layout)
+                        self.container_parameter(*layout)
                             | if layout.signed {
                                 heap::SIGNED_ELEMENTS
                             } else {
@@ -157,14 +160,13 @@ impl Ff<'_, '_> {
                 self.heap_call(ops::FREEZE, &[buffer])
             }
         };
-        let (width, signed) = op.result_type();
         let value = self.b.alloc_bit(width, false);
         self.b.emit(SIRInstruction::Slice(value, result, 0, width));
         let (temp, name) = self.m.temp("string", width, signed, false);
-        if op == StringOp::Atoreal {
+        if atoreal {
             self.m.variables.get_mut(&temp).unwrap().float = Some(celox_sir::FloatPrecision::F64);
         }
-        if op.returns_string() {
+        if returns_string {
             self.m.variables.get_mut(&temp).unwrap().value_kind = celox_design::ValueKind::StrRef;
         }
         self.store(temp, SIROffset::Static(0), width, value);
