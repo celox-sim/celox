@@ -55,11 +55,25 @@ pub(in crate::ast) struct Registry {
     generics: HashMap<String, String>,
     specializations: HashMap<String, Rc<specializations::Specialization>>,
     declarations: HashMap<String, Rc<DeclarationScope>>,
+    /// What the last analysis of each package lowered for its classes.
+    lowered: HashMap<String, Rc<crate::ast::procedural::Lowered>>,
 }
 
 impl Registry {
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+    /// Whether `name` is a package whose classes other scopes may ask
+    /// specializations of.
+    pub fn owns(&self, name: &str) -> bool {
+        self.owners.contains_key(name)
+    }
+    /// What the last analysis of package `name` lowered for its classes.
+    pub fn lowered(&self, name: &str) -> Option<Rc<crate::ast::procedural::Lowered>> {
+        self.lowered.get(name).cloned()
+    }
+    pub fn record_lowered(&mut self, name: String, lowered: crate::ast::procedural::Lowered) {
+        self.lowered.insert(name, Rc::new(lowered));
     }
     pub fn has_templates(&self) -> bool {
         !self.templates.is_empty()

@@ -2096,6 +2096,52 @@ fn compilation_unit_types_of_separate_files_specialize_package_classes_separatel
 }
 
 #[test]
+fn a_specialization_asked_of_a_package_runs_with_the_classes_it_does_not_change() {
+    // The package is analyzed again for `p::C#(5)`. The classes that the
+    // specialization does not change keep what their first analysis made:
+    // `D::g` reaches the new class through the dispatcher of `B::f`, and
+    // the static locals of `B::twice` and `K::tick` are the same variables
+    // (IEEE 1800-2023 8.20, 8.25).
+    let source = "`timescale 1ns/1ns
+    package p;
+        int count;
+        class B;
+            int x;
+            virtual function int f(); return x; endfunction
+            function int twice(); static int calls; calls++; return 2 * f() + calls; endfunction
+        endclass
+        class C #(int N = 2) extends B;
+            virtual function int f(); count++; return N + x; endfunction
+        endclass
+        class D;
+            B b;
+            function int g(); int local_value; local_value = b.twice(); return local_value; endfunction
+        endclass
+        class K;
+            static function int tick(); static int ticks; ticks++; return ticks; endfunction
+        endclass
+    endpackage
+    module Top(output int o, output int n, output int t);
+        p::C#(5) c;
+        p::D d;
+        initial begin
+            c = new; d = new; d.b = c; c.x = 1;
+            o = d.g();
+            o = o + d.g();
+            n = p::count;
+            t = p::K::tick() + p::K::tick();
+        end
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+        .build()
+        .unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("o")), 27u32.into());
+    assert_eq!(sim.get(sim.signal("n")), 2u32.into());
+    assert_eq!(sim.get(sim.signal("t")), 3u32.into());
+}
+
+#[test]
 fn a_class_of_another_module_does_not_hide_a_package() {
     let source = "package P; typedef bit [2:0] T; endpackage
         module Other; class P; typedef int T; endclass endmodule

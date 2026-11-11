@@ -983,6 +983,49 @@ mod tests {
     }
 
     #[test]
+    fn foreign_specializations_lower_only_the_classes_they_change() {
+        // A package analyzed again for a specialization that another scope
+        // asks for takes over the methods its last analysis lowered, but
+        // for the new classes and those they extend, whose dispatchers are
+        // over one class more (IEEE 1800-2023 8.20, 8.25).
+        use crate::ast::procedural::{CLASS_LOWERINGS, LOWER_EVERY_CLASS};
+        let source = |classes: usize| {
+            let others = (0..classes)
+                .map(|i| {
+                    format!(
+                        "class K{i}; int v; function int get(); return v + {i}; endfunction endclass\n"
+                    )
+                })
+                .collect::<String>();
+            format!(
+                "package p;
+                    class B; virtual function int f(); return 1; endfunction endclass
+                    class C #(int N = 2) extends B;
+                        virtual function int f(); return N; endfunction
+                    endclass
+                    {others}
+                endpackage
+                module Top(output int o);
+                    p::C#(5) c;
+                    initial begin c = new; o = c.f(); end
+                endmodule"
+            )
+        };
+        let lowerings = |classes: usize, every: bool| {
+            LOWER_EVERY_CLASS.with(|flag| flag.set(every));
+            CLASS_LOWERINGS.with(|count| count.set(0));
+            let ir = crate::analyze_source(&source(classes), std::path::Path::new("lowerings.sv"));
+            LOWER_EVERY_CLASS.with(|flag| flag.set(false));
+            ir.expect("the source analyzes");
+            CLASS_LOWERINGS.with(|count| count.get())
+        };
+        // Each class of the package once, and the classes the module's
+        // specialization changes once more, however many others there are.
+        assert_eq!(lowerings(12, false) - lowerings(2, false), 10);
+        assert!(lowerings(12, true) - lowerings(2, true) > 10);
+    }
+
+    #[test]
     fn foreign_specializations_analyze_a_plain_package_once_each() {
         // A scope that asks for a specialization of a class of the package
         // has the package analyzed for it: once, as the package itself is,

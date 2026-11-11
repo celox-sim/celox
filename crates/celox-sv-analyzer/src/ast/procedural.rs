@@ -81,6 +81,174 @@ pub(super) enum ClassMethods {
     None,
 }
 
+/// What a pass over the classes of a package lowered, which the next
+/// analysis of the package takes over for the classes that cannot have
+/// changed: a package is analyzed again for each scope that asks for
+/// specializations of its classes (IEEE 1800-2023 8.25).
+#[derive(Debug, Default)]
+pub(in crate::ast) struct Lowered {
+    /// By the names of the classes.
+    classes: HashMap<String, std::rc::Rc<LoweredClass>>,
+    /// The classes the pass saw, of the package and of its imports.
+    known: HashSet<String>,
+    /// The number after those of the locals the pass named.
+    pub counter: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Classes whose methods a pass over the classes of a scope lowered,
+    /// rather than took over from the last analysis.
+    pub(in crate::ast) static CLASS_LOWERINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Lower every class in every analysis, to compare with the analyses
+    /// that take classes over.
+    pub(in crate::ast) static LOWER_EVERY_CLASS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether a test asked for [`LOWER_EVERY_CLASS`].
+fn lower_every_class() -> bool {
+    #[cfg(test)]
+    return LOWER_EVERY_CLASS.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    false
+}
+
+/// What lowering the methods of one class made.
+struct LoweredClass {
+    methods: Converted<Vec<Subroutine>>,
+    locals: Vec<LocalVariable>,
+    statics: Vec<(String, Type)>,
+    explicit_statics: Vec<String>,
+    static_initializers: Vec<Stmt>,
+    inline_randomizations: Vec<classes::constraints::Inline>,
+}
+
+impl std::fmt::Debug for LoweredClass {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LoweredClass")
+            .field("methods", &self.methods.as_ref().map(Vec::len))
+            .finish_non_exhaustive()
+    }
+}
+
+/// Where the records of a pass stand before a class is lowered.
+struct Mark {
+    locals: usize,
+    statics: usize,
+    explicit_statics: HashSet<String>,
+    static_initializers: usize,
+    inline_randomizations: usize,
+}
+
+impl Mark {
+    fn of(session: &Session, state: &BodyState<'_>) -> Self {
+        Self {
+            locals: state.locals.len(),
+            statics: state.statics.len(),
+            explicit_statics: state.explicit_statics.clone(),
+            static_initializers: state.static_initializers.len(),
+            inline_randomizations: session.inline_randomizations.len(),
+        }
+    }
+}
+
+impl LoweredClass {
+    /// What lowering a class to `methods` recorded since `mark`.
+    fn since(
+        mark: Mark,
+        methods: Converted<Vec<Subroutine>>,
+        session: &Session,
+        state: &BodyState<'_>,
+    ) -> Self {
+        Self {
+            methods,
+            locals: state.locals[mark.locals..].to_vec(),
+            statics: state.statics[mark.statics..].to_vec(),
+            explicit_statics: state
+                .explicit_statics
+                .difference(&mark.explicit_statics)
+                .cloned()
+                .collect(),
+            static_initializers: state.static_initializers[mark.static_initializers..].to_vec(),
+            inline_randomizations: session.inline_randomizations[mark.inline_randomizations..]
+                .to_vec(),
+        }
+    }
+
+    /// Record again what lowering the class recorded.
+    fn replay(&self, session: &mut Session, state: &mut BodyState<'_>) {
+        state.locals.extend(self.locals.iter().cloned());
+        state.statics.extend(self.statics.iter().cloned());
+        state
+            .explicit_statics
+            .extend(self.explicit_statics.iter().cloned());
+        state
+            .static_initializers
+            .extend(self.static_initializers.iter().cloned());
+        session
+            .inline_randomizations
+            .extend(self.inline_randomizations.iter().cloned());
+    }
+}
+
+/// The package whose classes a pass over `tree` lowers for every scope
+/// that uses them, when it is one: the first analysis of a package that
+/// other scopes may ask for specializations.
+fn reused_package(
+    tree: &AnalysisContext<'_>,
+    session: &Session,
+    state: &BodyState<'_>,
+    symbolic_parameters: &HashSet<String>,
+    class_methods: ClassMethods,
+) -> Option<String> {
+    (class_methods == ClassMethods::All
+        && !state.constant_evaluation
+        && symbolic_parameters.is_empty()
+        && !lower_every_class())
+    .then_some(tree.package.as_deref())
+    .flatten()
+    .filter(|package| session.foreign.owns(package))
+    .map(str::to_owned)
+}
+
+/// The number the locals of the scope of `tree` are named from: after
+/// those of the classes its analysis may take over from the last one.
+pub(super) fn first_local(tree: &AnalysisContext<'_>, session: &Session) -> usize {
+    tree.package
+        .as_deref()
+        .and_then(|package| session.foreign.lowered(package))
+        .map_or(0, |lowered| lowered.counter)
+}
+
+/// The classes that a class which `previous` did not know is or extends:
+/// their dispatchers, casts and randomization are over classes that pass
+/// did not see (IEEE 1800-2023 8.20), so they are lowered again. None when
+/// a class cannot be made, whose bases are not known then.
+fn outdated_classes(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    const_env: &ConstEnv,
+    type_aliases: &TypeAliases,
+    previous: &Lowered,
+    known: &HashSet<String>,
+) -> Option<HashSet<String>> {
+    let mut outdated = HashSet::default();
+    let mut pending = known
+        .iter()
+        .filter(|name| !previous.known.contains(*name))
+        .cloned()
+        .collect::<Vec<_>>();
+    while let Some(name) = pending.pop() {
+        if !outdated.insert(name.clone()) {
+            continue;
+        }
+        let class = classes::class(tree, session, &name, const_env, type_aliases).ok()?;
+        pending.extend(class.base.iter().chain(&class.interfaces).cloned());
+    }
+    Some(outdated)
+}
+
 /// The statements and condition of a `for` loop header. A condition with
 /// increment or decrement operators is the `prologue` of each iteration
 /// instead (see [`BodyBuilder::loop_condition`]).
@@ -4277,6 +4445,30 @@ pub(super) fn subroutines_with_symbolic_parameters(
     let mut names = HashSet::default();
     let active = generate::subroutine_items(tree, session, const_env, module_type_aliases)?;
     let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
+    // What the last analysis of the package lowered for its classes, and
+    // what this pass lowers for the next.
+    let package = reused_package(tree, session, state, symbolic_parameters, class_methods);
+    let mut lowered = Lowered::default();
+    let mut previous = None;
+    if package.is_some() {
+        lowered.known = classes::visible_classes(tree, session)
+            .into_iter()
+            .collect();
+    }
+    if let Some(last) = package
+        .as_deref()
+        .and_then(|package| session.foreign.lowered(package))
+        && let Some(outdated) = outdated_classes(
+            tree,
+            session,
+            const_env,
+            module_type_aliases,
+            &last,
+            &lowered.known,
+        )
+    {
+        previous = Some((last, outdated));
+    }
     for item in &active {
         let tree = &item.scoped(tree);
         if item.is_parameter_declaration(tree.declarations()) {
@@ -4344,11 +4536,26 @@ pub(super) fn subroutines_with_symbolic_parameters(
             continue;
         }
         for class in classes::item_classes(item.id, tree, session) {
-            let (item_dimensions, literals) = views.get(item);
-            let tree = &item.enter(tree);
-            let type_aliases = item.type_aliases(module_type_aliases);
-            match (
-                lower_class(
+            let taken = previous
+                .as_ref()
+                .filter(|(_, outdated)| !outdated.contains(&class))
+                .and_then(|(last, _)| last.classes.get(&class))
+                .cloned();
+            let methods = if let Some(taken) = taken {
+                taken.replay(session, state);
+                let methods = taken.methods.clone();
+                lowered.classes.insert(class.clone(), taken);
+                methods
+            } else {
+                #[cfg(test)]
+                if class_methods == ClassMethods::All {
+                    CLASS_LOWERINGS.with(|count| count.set(count.get() + 1));
+                }
+                let mark = package.as_ref().map(|_| Mark::of(session, state));
+                let (item_dimensions, literals) = views.get(item);
+                let tree = &item.enter(tree);
+                let type_aliases = item.type_aliases(module_type_aliases);
+                let methods = lower_class(
                     &class,
                     tree,
                     session,
@@ -4359,9 +4566,21 @@ pub(super) fn subroutines_with_symbolic_parameters(
                     state,
                     item,
                     class_methods,
-                ),
-                rejected.as_deref_mut(),
-            ) {
+                );
+                if let Some(mark) = mark {
+                    lowered.classes.insert(
+                        class.clone(),
+                        std::rc::Rc::new(LoweredClass::since(
+                            mark,
+                            methods.clone(),
+                            session,
+                            state,
+                        )),
+                    );
+                }
+                methods
+            };
+            match (methods, rejected.as_deref_mut()) {
                 (Ok(methods), _) => {
                     names.extend(methods.iter().map(|method| method.name.clone()));
                     subroutines.extend(methods);
@@ -4372,6 +4591,10 @@ pub(super) fn subroutines_with_symbolic_parameters(
                 (Err(error), None) => return Err(error),
             }
         }
+    }
+    if let Some(package) = package {
+        lowered.counter = *state.counter;
+        session.foreign.record_lowered(package, lowered);
     }
     // A class of the scope, or of another package, that overrides a virtual
     // method of a class that another scope declares is reached through that
