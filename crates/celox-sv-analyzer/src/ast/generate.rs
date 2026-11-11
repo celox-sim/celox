@@ -995,7 +995,10 @@ impl<'a> Elaborator<'a, '_> {
                     variable_signed_marker(&name),
                     variable_unpacked_dimensions_marker(&name),
                     variable_dimensions_marker(&name),
-                ] {
+                ]
+                .into_iter()
+                .chain(parameters::member_keys(&name, &scope.env))
+                {
                     scope.env.remove(&key);
                 }
                 scope.literals.remove(&name);
@@ -1045,7 +1048,10 @@ impl<'a> Elaborator<'a, '_> {
                     variable_signed_marker(&name),
                     variable_unpacked_dimensions_marker(&name),
                     variable_dimensions_marker(&name),
-                ] {
+                ]
+                .into_iter()
+                .chain(parameters::member_keys(&name, &scope.env))
+                {
                     scope.env.remove(&key);
                 }
                 scope.literals.remove(&name);

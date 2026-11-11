@@ -48,7 +48,104 @@ pub(super) fn binding_keys(name: &str, env: &ConstEnv, packed_count: usize) -> V
             }
         }
     }
+    keys.extend(member_keys(name, env));
     keys
+}
+
+/// The keys of the member constants `env` holds for the packed structure
+/// parameter `name`. Only a binding with the count marker has any, so no
+/// other binding scans the environment.
+pub(super) fn member_keys(name: &str, env: &ConstEnv) -> Vec<String> {
+    let count = parameter_members_marker(name);
+    if !env.contains_key(&count) {
+        return Vec::new();
+    }
+    let mut keys = vec![count];
+    keys.extend(
+        env.keys()
+            .filter(|key| {
+                key.starts_with("__parameter::member::")
+                    && key.ends_with(name)
+                    && scope::split_marker(key).is_some_and(|(_, marked)| marked == name)
+            })
+            .cloned(),
+    );
+    keys
+}
+
+/// The typed literal of the member that `path` selects in the packed
+/// structure parameter `name`, when its constant is published.
+pub(super) fn member_literal(name: &str, path: &str, env: &ConstEnv) -> Option<String> {
+    let value = *env.get(&parameter_member_value_marker(name, path))?;
+    let r#type = *env.get(&parameter_member_type_marker(name, path))?;
+    let width = usize::try_from(r#type >> 1).ok()?;
+    Some(format_typed_parameter_literal(
+        value,
+        width,
+        r#type & 1 != 0,
+    ))
+}
+
+/// Publish the members of a parameter of packed structure type as constants:
+/// a member select of a parameter is a constant expression (IEEE 1800-2023
+/// 11.2.1, A.8.4 `constant_select`), of the member's declared width and sign
+/// (7.2.1). A member with unknown bits or wider than the numeric
+/// environment holds is left to the contexts that have the whole value.
+fn insert_parameter_member_markers(
+    functions: &const_functions::ConstantFunctions,
+    env: &mut ConstEnv,
+    parameter: &Parameter,
+    value: Option<i128>,
+    literal: Option<&Expr>,
+) {
+    if parameter.members.is_empty() || parameter.packed_ranges.len() != 1 {
+        return;
+    }
+    let (bits, unknown) = match (value, literal) {
+        (Some(value), _) => {
+            // The numeric environment holds a value wider than its 128 bits
+            // by those bits, which a negative one extends by its sign.
+            let mut bits = num_bigint::BigUint::from(value as u128);
+            if value < 0
+                && let Some(width) = parameter.declared_width().filter(|width| *width > 128)
+            {
+                bits |= ((num_bigint::BigUint::from(1u8) << (width - 128)) - 1u8) << 128;
+            }
+            (bits, num_bigint::BigUint::default())
+        }
+        (None, Some(Expr::Literal(text))) => {
+            let Some(literal) = typecheck::parse_integral_literal(text) else {
+                return;
+            };
+            (literal.value, literal.mask)
+        }
+        _ => return,
+    };
+    let name = parameter.name();
+    let mut count = 0i128;
+    for (path, offset, r#type) in
+        packed_structs::constant_members(functions, &parameter.members, env)
+    {
+        if r#type.width > 127 {
+            continue;
+        }
+        let window = (num_bigint::BigUint::from(1u8) << r#type.width) - 1u8;
+        if (&unknown >> offset) & &window != num_bigint::BigUint::default() {
+            continue;
+        }
+        let Ok(member) = u128::try_from((&bits >> offset) & &window) else {
+            continue;
+        };
+        env.insert(parameter_member_value_marker(name, &path), member as i128);
+        env.insert(
+            parameter_member_type_marker(name, &path),
+            ((r#type.width as i128) << 1) | i128::from(r#type.signed),
+        );
+        count += 1;
+    }
+    if count > 0 {
+        env.insert(parameter_members_marker(name), count);
+    }
 }
 
 pub(super) fn is_unbounded(value: &ConstExpr, env: &ConstEnv) -> bool {
@@ -331,6 +428,7 @@ impl<'a> ParameterEnvironment<'a> {
             keys.push(parameter_dimension_marker(name, index, "left"));
             keys.push(parameter_dimension_marker(name, index, "right"));
         }
+        keys.extend(member_keys(name, &self.values));
         for key in keys {
             if let Some(value) = self.values.get(&key) {
                 self.constants.insert(key, *value);
@@ -412,7 +510,7 @@ pub(super) fn parameters_from_native_with_environment(
         .unwrap_or_default();
     let parameter_is_2state = native_prefix.is_2state();
     for &native in authored {
-        // An unpacked array parameter is a constant variable, not a value.
+        let mut pattern_value = None;
         if array_parameters::uses_signal_representation(
             native,
             syntax_tree,
@@ -423,11 +521,39 @@ pub(super) fn parameters_from_native_with_environment(
             .pattern_parameter_bindings
             .contains_key(&native.id)
         {
-            let name = instances::normalize_identifier(&native.name.spelling);
-            let marker = unbounded_parameter_marker(&name);
-            environment.values.insert(marker.clone(), 0);
-            environment.constants.insert(marker, 0);
-            continue;
+            // A pattern of constants for a packed type gives a value like
+            // any other initializer (6.20.2, 10.9). Only an unpacked array
+            // parameter, or a pattern whose constants are not yet known,
+            // is a constant variable instead.
+            let imported = scope::imported(syntax_tree);
+            let mut context = PackedDimensions::new(
+                parameter_packed_dimensions_with_imported(parameters, &imported),
+                &environment.constants,
+                type_aliases,
+            );
+            context.parameter_values = parameter_value_env_with_imported(
+                syntax_tree,
+                session,
+                parameters,
+                &environment.constants,
+                &imported,
+            )
+            .into();
+            context.parameter_values.extend(
+                environment
+                    .literals
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.clone())),
+            );
+            pattern_value =
+                array_parameters::packed_pattern_value(native, syntax_tree, session, &context);
+            if pattern_value.is_none() {
+                let name = instances::normalize_identifier(&native.name.spelling);
+                let marker = unbounded_parameter_marker(&name);
+                environment.values.insert(marker.clone(), 0);
+                environment.constants.insert(marker, 0);
+                continue;
+            }
         }
         let name = instances::normalize_identifier(&native.name.spelling);
         // The declaration already binds its name while its initializer is
@@ -441,7 +567,9 @@ pub(super) fn parameters_from_native_with_environment(
         let replaced_pattern = !is_local
             && parameter_overrides.contains_key(&name)
             && array_parameters::is_array_parameter(native, syntax_tree.declarations());
-        let mut value = if replaced_pattern {
+        let mut value = if pattern_value.is_some() {
+            pattern_value
+        } else if replaced_pattern {
             parameter_overrides.get(&name).cloned()
         } else if ownership::default(native).is_some() {
             let imported = scope::imported(syntax_tree);
@@ -877,8 +1005,9 @@ pub(super) fn bind_parameter(
     if let Some(literal) = literal {
         // Shadow a numeric inherited binding with the four-state declaration.
         env.remove(parameter.name());
-        literals.insert(parameter.name().to_string(), literal);
         insert_parameter_dimension_markers(functions, env, parameter);
+        insert_parameter_member_markers(functions, env, parameter, None, Some(&literal));
+        literals.insert(parameter.name().to_string(), literal);
         return true;
     }
     let value = value.expect("a known value or a resolved literal was checked above");
@@ -888,7 +1017,23 @@ pub(super) fn bind_parameter(
         env.insert(local_parameter_marker(parameter.name()), value);
     }
     insert_parameter_dimension_markers(functions, env, parameter);
+    insert_parameter_member_markers(functions, env, parameter, Some(value), None);
     true
+}
+
+/// Publish the member constants of a generate-local parameter, replacing
+/// those of a binding of the name that it shadows.
+pub(super) fn bind_generate_parameter_members(
+    functions: &const_functions::ConstantFunctions,
+    env: &mut ConstEnv,
+    parameter: &Parameter,
+    value: Option<i128>,
+    literal: Option<&Expr>,
+) {
+    for key in member_keys(parameter.name(), env) {
+        env.remove(&key);
+    }
+    insert_parameter_member_markers(functions, env, parameter, value, literal);
 }
 
 /// Record packed bounds for parameter selects and array queries.
