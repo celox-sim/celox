@@ -1,0 +1,1 @@
+Address Codex review on PR #3557: cap constant operand widths before formatting a constant sformatf, and keep long string parameter literals when binding parameter overrides in the lowering.
