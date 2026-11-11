@@ -522,6 +522,115 @@ fn event_expressions_with_effects_are_rejected() {
     }
 }
 
+/// An `always_ff` whose event is not an edge of a variable (a member or a
+/// bit of one, an expression, `edge`) runs as a process, as a plain `always`
+/// of that shape does (IEEE 1800-2023 9.2.2.4, 9.4.2).
+#[test]
+fn always_ff_edges_of_expressions_run_as_processes() {
+    let source = r#"`timescale 1ns/1ns
+module top;
+  typedef struct packed { logic clk; logic op; } tag_s;
+  tag_s tag = '0;
+  logic [3:0] v = '0;
+  logic clk = 0, en = 0;
+  int member = 0, bit_select = 0, gated = 0, both = 0;
+  always_ff @(posedge tag.clk) member <= member + 1;
+  always_ff @(posedge v[1]) bit_select <= bit_select + 1;
+  always_ff @(posedge (clk & en)) gated <= gated + 1;
+  always_ff @(edge clk) both <= both + 1;
+  initial begin
+    #1 tag.clk = 1; v = 4'b0010; clk = 1;
+    #1 tag.op = 1; v = 4'b0011; clk = 0;
+    #1 tag.clk = 0; v = 4'b0001; en = 1;
+    #1 tag.clk = 1; v = 4'b0110; clk = 1;
+    #1 $display("%0d %0d %0d %0d", member, bit_select, gated, both);
+    $finish;
+  end
+endmodule"#;
+    for four_state in [false, true] {
+        let mut sim = celox::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("always_ff_edges.sv"))],
+            "top",
+        )
+        .four_state(four_state)
+        .build()
+        .unwrap();
+        sim.run_until(10).unwrap();
+        let lines: Vec<_> = sim
+            .drain_runtime_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                celox::RuntimeEvent::Display { message } => {
+                    Some(String::from_utf8_lossy(&message).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines, ["2 2 1 3"], "four_state={four_state}");
+    }
+}
+
+/// An `always_ff` that runs as a process keeps the rule for the variables
+/// it writes through a hierarchical name: the module that declares one may
+/// not write it too (IEEE 1800-2023 9.2.2.4).
+#[test]
+fn always_ff_run_as_a_process_is_the_only_writer_of_a_hierarchical_target() {
+    for (event, accepted) in [("posedge v[0]", false), ("v", false)] {
+        for keyword in ["always_ff", "always"] {
+            let source = format!(
+                "module child; logic q; initial q = 0; endmodule \
+                 module top; logic [1:0] v; child c (); {keyword} @({event}) c.q <= 1; endmodule"
+            );
+            let result = celox::Simulation::from_sv_sources(
+                vec![(&source, std::path::Path::new("foreign.sv"))],
+                "top",
+            )
+            .build();
+            // A plain `always` may share the variable with an `initial`.
+            let expected = accepted || keyword == "always";
+            match result {
+                Ok(_) => assert!(expected, "{keyword} @({event}): accepted"),
+                Err(error) => {
+                    let error = error.to_string();
+                    assert!(
+                        !expected && error.contains("an always_ff process"),
+                        "{keyword} @({event}): {error}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The module of an `always_ff` that runs as a process may not have a
+/// variable it writes written by another module either, also only once
+/// (IEEE 1800-2023 9.2.2.4); a plain `always` of that shape may share it.
+#[test]
+fn always_ff_run_as_a_process_excludes_hierarchical_writers() {
+    for keyword in ["always_ff", "always"] {
+        let source = format!(
+            "module child (input logic clk, input logic en); logic q; \
+             {keyword} @(posedge (clk & en)) q <= 1; endmodule \
+             module top; logic clk, en; child c (.clk(clk), .en(en)); initial c.q = 0; endmodule"
+        );
+        let result = celox::Simulation::from_sv_sources(
+            vec![(&source, std::path::Path::new("local_ff.sv"))],
+            "top",
+        )
+        .build();
+        match result {
+            Ok(_) => assert_eq!(keyword, "always", "{keyword}: accepted"),
+            Err(error) => {
+                let error = error.to_string();
+                assert!(
+                    keyword == "always_ff" && error.contains("an always_ff process"),
+                    "{keyword}: {error}"
+                );
+            }
+        }
+    }
+}
+
 /// Timing features Celox does not implement yet are rejected with a message
 /// naming the construct and its tracking issue, instead of being ignored.
 /// The comments name the issue that implements a feature when the message
@@ -559,12 +668,7 @@ fn unimplemented_timing_features_are_rejected() {
             "delayed continuous assignment",
             444,
         ),
-        // A plain `always` of these forms runs as a process.
-        (
-            "bit [3:0] v; int n; always_ff @(posedge v[0]) n <= n + 1;",
-            "always_ff event expression",
-            464,
-        ),
+        // A plain `always` of this form runs as a process.
         (
             "bit [3:0] v; int n; always_ff @(posedge v) n <= n + 1;",
             "multi-bit always_ff event signal",

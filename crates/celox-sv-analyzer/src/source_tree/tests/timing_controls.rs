@@ -115,15 +115,26 @@ fn native_timing_event_membership_and_delay_roles_are_authoritative() {
 fn native_timing_preserves_existing_restrictions_including_ff_iff_validation() {
     for (body, diagnostic) in [
         ("always_comb #1 q=d;", "delay control"),
-        ("always_ff @(edge clk) q<=d;", "always_ff event expression"),
+        // An `always_ff` whose event is not an edge of a variable runs as a
+        // process, and still has no timing control of its own (9.2.2.4).
         (
-            "always_ff @(posedge (clk+1)) q<=d;",
-            "always_ff event expression",
+            "always_ff @(edge clk) begin #1 q<=d; end",
+            "timing control in an always_comb or always_ff body",
+        ),
+        (
+            "always_ff @(posedge (clk&en)) begin @(posedge clk) q<=d; end",
+            "timing control in an always_comb or always_ff body",
         ),
     ] {
         let tree = parsed(body);
         let error = Source::from_syntax(&tree).unwrap_err();
         assert!(error.to_string().contains(diagnostic), "{body}: {error}");
+    }
+    for body in [
+        "always_ff @(edge clk) q<=d;",
+        "always_ff @(posedge (clk&en)) q<=d;",
+    ] {
+        assert!(Source::from_syntax(&parsed(body)).is_ok(), "{body}");
     }
     let tree = parsed("always_ff @(posedge clk iff en) q<=d;");
     let error = Source::from_syntax(&tree).unwrap_err();

@@ -173,12 +173,12 @@ blocks in programs. Two region deviations are listed under
   `always_latch` ([#431](https://github.com/celox-sim/celox/issues/431));
   use blocking assignments there.
 - `iff` qualifiers in `always_ff` event lists
-  ([#452](https://github.com/celox-sim/celox/issues/452)), `always_ff` edge
-  operands other than a plain signal
-  ([#464](https://github.com/celox-sim/celox/issues/464)), multi-bit edge
+  ([#452](https://github.com/celox-sim/celox/issues/452)), multi-bit edge
   signals in `always_ff`, and several `always_ff` edges without an
   asynchronous reset. The same shapes in a plain `always` run as timed
-  processes instead; see the [execution model](#celox-execution-model).
+  processes instead, as does an `always_ff` whose event is not `posedge` or
+  `negedge` of a variable (a member or a bit of one, an expression, `edge`);
+  see the [execution model](#celox-execution-model).
 - Intra-assignment timing: nonblocking intra-assignment event controls and
   nonconstant delays. Delayed nonblocking assignments
   (`lhs <= #constant rhs`, 10.4.2) accept only integral constant delays and

@@ -575,6 +575,16 @@ pub(super) fn validate_foreign_drivers(
                 for process in module.ff_processes().iter().filter(|p| p.is_always_ff()) {
                     procedural::written_names_with_calls(module, process.body(), &mut written);
                 }
+                // An `always_ff` that runs as a process is still one (IEEE
+                // 1800-2023 9.2.2.4).
+                for process in module.initial_processes().iter().filter(|process| {
+                    process.repeats()
+                        && process
+                            .site()
+                            .is_some_and(|site| site.construct == "always_ff")
+                }) {
+                    procedural::written_names_with_calls(module, process.body(), &mut written);
+                }
                 written
             })
             .contains(name);

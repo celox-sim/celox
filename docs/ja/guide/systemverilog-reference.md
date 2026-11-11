@@ -142,10 +142,11 @@ region に関する逸脱2件は[意図的な逸脱](#intentional-deviations)に
   `always_latch` 内のノンブロッキング代入
   （[#431](https://github.com/celox-sim/celox/issues/431)）。ブロッキング代入を使ってください。
 - `always_ff` のイベントリストの `iff`
-  （[#452](https://github.com/celox-sim/celox/issues/452)）、素の信号以外の
-  `always_ff` エッジ被演算子（[#464](https://github.com/celox-sim/celox/issues/464)）、
+  （[#452](https://github.com/celox-sim/celox/issues/452)）、
   `always_ff` の複数ビットエッジ信号、非同期リセットの無い複数エッジ。
-  素の `always` の同じ形は時間を持つプロセスとして実行します。[実行モデル](#celox-execution-model)を参照してください。
+  素の `always` の同じ形は時間を持つプロセスとして実行します。イベントが変数の
+  `posedge` / `negedge` でない `always_ff`（変数のメンバやビット、式、`edge`）も
+  同様にプロセスとして実行します。[実行モデル](#celox-execution-model)を参照してください。
 - 代入内タイミング: ノンブロッキング代入内イベント制御と、定数でない遅延。
   遅延ノンブロッキング代入（`lhs <= #constant rhs`、10.4.2）は整数定数遅延と
   時間リテラルのみ、`initial` と通常の `always` でのみ使えます。
