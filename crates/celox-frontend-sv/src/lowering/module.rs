@@ -577,9 +577,9 @@ fn lower_module_with_overrides(
         )?;
         (
             blocks,
-            std::mem::take(&mut pm.runtime_event_sites),
-            std::mem::take(&mut pm.runtime_errors),
-            std::mem::take(&mut pm.extern_functions),
+            std::mem::take(&mut pm.runtime.event_sites),
+            std::mem::take(&mut pm.runtime.errors),
+            std::mem::take(&mut pm.externs.functions),
         )
     };
     mark_ff_event_domains(&event_vars, &mut variables);
