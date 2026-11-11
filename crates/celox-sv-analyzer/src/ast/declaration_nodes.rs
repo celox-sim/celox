@@ -67,6 +67,18 @@ impl Parameter {
             typecheck::eval_const_expr_in_env(&value, &environment)?
         };
         if let Some(width) = self.declared_width {
+            // A number holds a value wider than 128 bits by its low 128
+            // bits, extended by their sign. An unsigned value with bit 127
+            // set is extended by zeros instead (IEEE 1800-2023 10.7), which
+            // only the literal of the declared width can hold; so is one
+            // whose sign is not known here, such as a function result.
+            if width > 128
+                && value < 0
+                && !infer_parameter_value_type(self.value()?, true, parameter_types)
+                    .is_some_and(|r#type| r#type.signed)
+            {
+                return None;
+            }
             value =
                 coerce_const_parameter_value(value, width, self.declared_signed.unwrap_or(false));
         }
