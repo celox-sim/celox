@@ -47,22 +47,31 @@ impl ProcModule<'_> {
             subroutines: _,
             constant_functions: _,
             dpi_imports: _,
-            extern_functions,
-            extern_calls,
+            externs:
+                Externs {
+                    functions: extern_functions,
+                    calls: extern_calls,
+                },
             four_state: _,
             program: _,
             forceable: _,
             created,
             temp_counter,
             capture_counter,
-            runtime_event_sites,
-            function_host_request_sites,
-            function_wait_sites,
-            function_nba_sites,
-            // Restored with `runtime_event_sites`.
-            unit_flush_site: _,
+            runtime:
+                RuntimeReports {
+                    event_sites: runtime_event_sites,
+                    errors: runtime_errors,
+                },
+            function_sites:
+                FunctionSites {
+                    host_request: function_host_request_sites,
+                    wait: function_wait_sites,
+                    nba: function_nba_sites,
+                    // Restored with `runtime_event_sites`.
+                    flush: _,
+                },
             box_changes,
-            runtime_errors,
             event_assignments,
             // Filled before any lowering.
             unpacked_bounds: _,
@@ -130,26 +139,29 @@ impl ProcModule<'_> {
         self.created.truncate(created);
         self.temp_counter = temp_counter;
         self.capture_counter = capture_counter;
-        self.runtime_event_sites.truncate(runtime_event_sites);
+        self.runtime.event_sites.truncate(runtime_event_sites);
         self.box_changes.truncate(box_changes);
         // A flush site made since then is gone with it.
         if self
-            .unit_flush_site
+            .function_sites
+            .flush
             .is_some_and(|site| site as usize >= runtime_event_sites)
         {
-            self.unit_flush_site = None;
+            self.function_sites.flush = None;
         }
-        self.function_host_request_sites
+        self.function_sites
+            .host_request
             .truncate(function_host_request_sites);
-        self.function_wait_sites.truncate(function_wait_sites);
+        self.function_sites.wait.truncate(function_wait_sites);
         self.event_assignments.truncate(event_assignments);
         self.activation_copies.truncate(activation_copies);
-        self.function_nba_sites.truncate(function_nba_sites);
+        self.function_sites.nba.truncate(function_nba_sites);
         // Codes are numbered from one in registration order.
-        self.runtime_errors
+        self.runtime
+            .errors
             .retain(|&code, _| code <= runtime_errors as i64);
-        self.extern_functions.truncate(extern_functions);
-        self.extern_calls = extern_calls;
+        self.externs.functions.truncate(extern_functions);
+        self.externs.calls = extern_calls;
         self.warnings.truncate(warnings);
         if let Some(out_of_line) = self.out_of_line() {
             out_of_line.truncate(functions);

@@ -183,8 +183,8 @@ impl Ff<'_, '_> {
         // A unit's site is one of the module's function sites, which the
         // kernels that call it list after their own.
         if self.kernel.is_none() {
-            let index = self.m.function_wait_sites.len() as u32;
-            self.m.function_wait_sites.push(WaitSite {
+            let index = self.m.function_sites.wait.len() as u32;
+            self.m.function_sites.wait.push(WaitSite {
                 process: 0,
                 terms,
                 gates,

@@ -23,8 +23,8 @@ impl Ff<'_, '_> {
             )));
         }
         if let Some(builtin) = import.builtin() {
-            // Keeps a process whose only effect is the call (see `extern_calls`).
-            self.m.extern_calls += 1;
+            // Keeps a process whose only effect is the call (see `Externs::calls`).
+            self.m.externs.calls += 1;
             return self.builtin_dpi_call(import, builtin, args, arg_order);
         }
         let mut registers = vec![None; args.len()];
@@ -89,7 +89,7 @@ impl Ff<'_, '_> {
             func,
             args: registers,
         });
-        self.m.extern_calls += 1;
+        self.m.externs.calls += 1;
         Ok(dst)
     }
 

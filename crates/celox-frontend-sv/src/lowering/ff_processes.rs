@@ -294,8 +294,8 @@ pub(super) fn lower_ff_processes(
         for reset in &trigger_set.resets {
             reset_clock_map.entry(*reset).or_insert(trigger_set.clock);
         }
-        let sites_before = pm.runtime_event_sites.len();
-        let extern_calls_before = pm.extern_calls;
+        let sites_before = pm.runtime.event_sites.len();
+        let extern_calls_before = pm.externs.calls;
         let clock = inferred_clock(pm, process);
         let ff::FfProcessUnits {
             eval: eval_only,
@@ -317,7 +317,7 @@ pub(super) fn lower_ff_processes(
         // A process without writes still runs for its runtime events and
         // extern calls.
         let has_effects =
-            pm.runtime_event_sites.len() > sites_before || pm.extern_calls > extern_calls_before;
+            pm.runtime.event_sites.len() > sites_before || pm.externs.calls > extern_calls_before;
         if trigger_set.resets.is_empty() && targets.is_empty() && !has_effects {
             continue;
         }

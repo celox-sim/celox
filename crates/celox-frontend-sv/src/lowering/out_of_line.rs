@@ -172,12 +172,12 @@ pub(super) struct ProcessState {
     pub forks: bool,
     /// Whether it makes a nonblocking assignment: a unit stages the value
     /// at one of the module's function NBA sites and suspends, as a kernel
-    /// does at its own (see `ProcModule::function_nba_sites`).
+    /// does at its own (see `FunctionSites::nba`).
     pub nbas: bool,
     /// Whether it waits, for an event control or a level wait: a unit
     /// suspends at one of the module's function wait sites, which every
     /// kernel that calls it lists after its own (see
-    /// `ProcModule::function_wait_sites`).
+    /// `FunctionSites::wait`).
     pub waits: bool,
     /// Whether it reads `e.triggered` (IEEE 1800-2023 15.5.3) or a process's
     /// `status()` (9.7), which a level wait's predicate reads as an

@@ -298,7 +298,7 @@ impl Ff<'_, '_> {
                 let code = self.m.runtime_error(format!(
                     "Non-progressing for loop in always_ff (loop variable `{source}`)"
                 ));
-                if let Some(info) = self.m.runtime_errors.get_mut(&code) {
+                if let Some(info) = self.m.runtime.errors.get_mut(&code) {
                     info.signals.push(*id);
                 }
                 self.b.seal_block(SIRTerminator::Error(code));

@@ -50,10 +50,8 @@ pub(super) struct ProcModule<'a> {
     pub constant_functions: sv::RuntimeConstantFunctions<'a>,
     /// DPI-C imports of the module, by SystemVerilog name.
     pub dpi_imports: HashMap<String, sv::ir::DpiImport>,
-    /// Extern functions the module calls, by local index.
-    pub extern_functions: Vec<ExternFunction>,
-    /// Number of extern calls lowered so far.
-    pub extern_calls: usize,
+    /// The extern functions the module calls.
+    pub externs: Externs,
     pub four_state: bool,
     /// The module is a program (IEEE 1800-2023 24.3): its kernels honour
     /// `$exit` (24.7).
@@ -63,31 +61,15 @@ pub(super) struct ProcModule<'a> {
     pub created: Vec<SourceVarId>,
     temp_counter: usize,
     capture_counter: u64,
-    /// Runtime event sites (`$display`, assertions, ...) of the module, by
-    /// local site number.
-    pub runtime_event_sites: Vec<RuntimeEventSite>,
-    /// The host request sites of the module's function units, which every
-    /// process of the module lists after its own (see
-    /// [`celox_design::SiteProcess`]), numbered per family.
-    pub function_host_request_sites: Vec<celox_design::HostRequestSite<SourceVarId>>,
-    /// The wait sites of the module's function units, which every process
-    /// that can suspend inside a call lists after its own; a unit suspends
-    /// with the number of the site among these, which the kernel's call
-    /// turns into one among its process's sites.
-    pub function_wait_sites: Vec<celox_design::WaitSite<SourceVarId>>,
-    /// The nonblocking assignment sites of the module's function units,
-    /// listed and numbered as [`Self::function_wait_sites`] are.
-    pub function_nba_sites: Vec<celox_design::NbaSite<SourceVarId>>,
-    /// The runtime event site of the flush points of the units' waits
-    /// (IEEE 1800-2023 16.4.2), made at the first.
-    pub unit_flush_site: Option<u32>,
+    /// What the module reports at run time.
+    pub runtime: RuntimeReports,
+    /// The sites of the module's function units.
+    pub function_sites: FunctionSites,
     /// The change counts of the boxes of the module's units, in the order
     /// they were made (see `Ff::box_changes`): module variables that any
     /// unit may bump. A box's field names its count by the count's id
     /// (`ChangeKey::Box`), apart from the counts of class properties.
     pub box_changes: Vec<SourceVarId>,
-    /// Runtime errors (fatal assertions) of the module, by local code.
-    pub runtime_errors: HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
     /// The continuous assignments `$event[k] = expr` of the event
     /// expressions the module's processes wait on, by target.
     pub event_assignments: Vec<(SourceVarId, Vec<sv::ir::Stmt>)>,
@@ -106,6 +88,45 @@ pub(super) struct ProcModule<'a> {
     /// innermost last: each name, the variable it named before the copy,
     /// and the copy it names while the activation is lowered.
     pub(super) activation_copies: Vec<(String, SourceVarId, SourceVarId)>,
+}
+
+/// The extern functions the module calls.
+#[derive(Default)]
+pub(super) struct Externs {
+    /// Extern functions the module calls, by local index.
+    pub functions: Vec<ExternFunction>,
+    /// Number of extern calls lowered so far.
+    pub calls: usize,
+}
+
+/// What the module reports at run time.
+#[derive(Default)]
+pub(super) struct RuntimeReports {
+    /// Runtime event sites (`$display`, assertions, ...) of the module, by
+    /// local site number.
+    pub event_sites: Vec<RuntimeEventSite>,
+    /// Runtime errors (fatal assertions) of the module, by local code.
+    pub errors: HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
+}
+
+/// The sites of the module's function units.
+#[derive(Default)]
+pub(super) struct FunctionSites {
+    /// The host request sites of the module's function units, which every
+    /// process of the module lists after its own (see
+    /// [`celox_design::SiteProcess`]), numbered per family.
+    pub host_request: Vec<celox_design::HostRequestSite<SourceVarId>>,
+    /// The wait sites of the module's function units, which every process
+    /// that can suspend inside a call lists after its own; a unit suspends
+    /// with the number of the site among these, which the kernel's call
+    /// turns into one among its process's sites.
+    pub wait: Vec<celox_design::WaitSite<SourceVarId>>,
+    /// The nonblocking assignment sites of the module's function units,
+    /// listed and numbered as [`Self::wait`] are.
+    pub nba: Vec<celox_design::NbaSite<SourceVarId>>,
+    /// The runtime event site of the flush points of the units' waits
+    /// (IEEE 1800-2023 16.4.2), made at the first.
+    pub flush: Option<u32>,
 }
 
 impl<'a> ProcModule<'a> {
@@ -187,20 +208,15 @@ impl<'a> ProcModule<'a> {
             subroutines,
             constant_functions: sv::RuntimeConstantFunctions::new(module, constants, four_state),
             dpi_imports,
-            extern_functions: Vec::new(),
-            extern_calls: 0,
+            externs: Externs::default(),
             four_state,
             program: module.is_program(),
             created: Vec::new(),
             temp_counter: 0,
             capture_counter: 0,
-            runtime_event_sites: Vec::new(),
-            function_host_request_sites: Vec::new(),
-            function_wait_sites: Vec::new(),
-            function_nba_sites: Vec::new(),
-            unit_flush_site: None,
+            runtime: RuntimeReports::default(),
+            function_sites: FunctionSites::default(),
             box_changes: Vec::new(),
-            runtime_errors: HashMap::default(),
             event_assignments: Vec::new(),
             unpacked_bounds,
             warnings,
@@ -217,14 +233,14 @@ impl<'a> ProcModule<'a> {
 
     /// Register a runtime event site and return its local number.
     pub fn event_site(&mut self, site: RuntimeEventSite) -> u32 {
-        self.runtime_event_sites.push(site);
-        (self.runtime_event_sites.len() - 1) as u32
+        self.runtime.event_sites.push(site);
+        (self.runtime.event_sites.len() - 1) as u32
     }
 
     /// Register a runtime error and return its local code.
     pub fn runtime_error(&mut self, message: String) -> i64 {
-        let code = self.runtime_errors.len() as i64 + 1;
-        self.runtime_errors.insert(
+        let code = self.runtime.errors.len() as i64 + 1;
+        self.runtime.errors.insert(
             code,
             RuntimeErrorInfo {
                 message,
@@ -288,12 +304,13 @@ impl<'a> ProcModule<'a> {
             },
         };
         let index = self
-            .extern_functions
+            .externs
+            .functions
             .iter()
             .position(|known| *known == function)
             .unwrap_or_else(|| {
-                self.extern_functions.push(function);
-                self.extern_functions.len() - 1
+                self.externs.functions.push(function);
+                self.externs.functions.len() - 1
             });
         u32::try_from(index).expect("extern function count fits u32")
     }

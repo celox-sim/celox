@@ -47,8 +47,8 @@ impl Ff<'_, '_> {
                 resume.staging.extend([slots.offset, slots.width]);
             }
         }
-        let index = self.m.function_nba_sites.len() as u64;
-        self.m.function_nba_sites.push(NbaSite {
+        let index = self.m.function_sites.nba.len() as u64;
+        self.m.function_sites.nba.push(NbaSite {
             delay,
             process: 0,
             target,
@@ -99,7 +99,7 @@ impl Ff<'_, '_> {
 
     /// Suspend the unit being lowered with the delay word `word` of a wait
     /// at one of the module's function wait sites (see
-    /// `ProcModule::function_wait_sites`); the open block afterwards is the
+    /// `FunctionSites::wait`); the open block afterwards is the
     /// resume point, whose value it returns.
     pub(in crate::lowering::ff) fn unit_wait(
         &mut self,
@@ -126,7 +126,7 @@ impl Ff<'_, '_> {
     /// a kernel's resume from a wait is. The site is the module's one for
     /// every unit; it flushes the queue of the process the unit runs in.
     pub(in crate::lowering::ff) fn unit_flush_point(&mut self) {
-        let site = match self.m.unit_flush_site {
+        let site = match self.m.function_sites.flush {
             Some(site) => site,
             None => {
                 let site = self.m.event_site(RuntimeEventSite {
@@ -144,7 +144,7 @@ impl Ff<'_, '_> {
                     arg_float_precision: Vec::new(),
                     arg_is_handle: Vec::new(),
                 });
-                self.m.unit_flush_site = Some(site);
+                self.m.function_sites.flush = Some(site);
                 site
             }
         };
@@ -290,11 +290,12 @@ impl Ff<'_, '_> {
         }
         let number = self
             .m
-            .function_host_request_sites
+            .function_sites
+            .host_request
             .iter()
             .filter(|known| known.kind == kind)
             .count() as u32;
-        self.m.function_host_request_sites.push(request);
+        self.m.function_sites.host_request.push(request);
         let status = self.b.alloc_bit(celox_design::PROCESS_STATUS_WIDTH, false);
         self.b.emit(SIRInstruction::Imm(
             status,

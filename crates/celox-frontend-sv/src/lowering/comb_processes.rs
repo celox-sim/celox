@@ -44,8 +44,8 @@ pub(super) fn lower_comb_processes(
         warnings,
     );
     pm.calls = calls;
-    pm.runtime_errors = std::mem::take(runtime_errors);
-    pm.extern_functions = std::mem::take(extern_functions);
+    pm.runtime.errors = std::mem::take(runtime_errors);
+    pm.externs.functions = std::mem::take(extern_functions);
     let random_seeds = process_random_seeds(module);
     let redundant = redundant_net_drivers(module);
     let watchable =
@@ -119,7 +119,7 @@ pub(super) fn lower_comb_processes(
             || (process.kind() != sv::ir::CombProcessKind::ContinuousAssign
                 && pm.calls_task(process.body()))
         {
-            pm.runtime_event_sites = std::mem::take(&mut sites);
+            pm.runtime.event_sites = std::mem::take(&mut sites);
             comb_blocks.extend(
                 ff::Ff::new(&mut pm, random_seeds[&(2, index)]).lower_comb_process(
                     process.body(),
@@ -131,7 +131,7 @@ pub(super) fn lower_comb_processes(
                     &mut arena,
                 )?,
             );
-            sites = std::mem::take(&mut pm.runtime_event_sites);
+            sites = std::mem::take(&mut pm.runtime.event_sites);
             continue;
         }
         // A process that latches falls back to Ff below.
@@ -205,7 +205,7 @@ pub(super) fn lower_comb_processes(
                 // executes once per implicit-sensitivity change, without
                 // interpreting held values as a combinational feedback loop.
                 drop(comb);
-                pm.runtime_event_sites = std::mem::take(&mut sites);
+                pm.runtime.event_sites = std::mem::take(&mut sites);
                 comb_blocks.extend(
                     ff::Ff::new(&mut pm, random_seeds[&(2, index)]).lower_comb_process(
                         process.body(),
@@ -217,7 +217,7 @@ pub(super) fn lower_comb_processes(
                         &mut arena,
                     )?,
                 );
-                sites = std::mem::take(&mut pm.runtime_event_sites);
+                sites = std::mem::take(&mut pm.runtime.event_sites);
                 continue;
             }
             Err(error) => return Err(error),
@@ -305,7 +305,7 @@ pub(super) fn lower_comb_processes(
     }
     for (target, body) in port_assignments {
         pm.call_unit();
-        pm.runtime_event_sites = std::mem::take(&mut sites);
+        pm.runtime.event_sites = std::mem::take(&mut sites);
         comb_blocks.extend(ff::Ff::new(&mut pm, 0).lower_comb_process(
             body,
             &[],
@@ -315,10 +315,10 @@ pub(super) fn lower_comb_processes(
             &[*target],
             &mut arena,
         )?);
-        sites = std::mem::take(&mut pm.runtime_event_sites);
+        sites = std::mem::take(&mut pm.runtime.event_sites);
     }
-    *runtime_errors = std::mem::take(&mut pm.runtime_errors);
-    *extern_functions = std::mem::take(&mut pm.extern_functions);
+    *runtime_errors = std::mem::take(&mut pm.runtime.errors);
+    *extern_functions = std::mem::take(&mut pm.externs.functions);
     let created = std::mem::take(&mut pm.created);
     Ok((comb_blocks, arena, created, observers, sites, alternatives))
 }
@@ -398,7 +398,7 @@ fn lower_comb_alternative(
             &mut scratch,
         );
     let alternative = match lowered {
-        Ok(paths) if pm.runtime_event_sites.len() == checkpoint.runtime_event_sites() => paths
+        Ok(paths) if pm.runtime.event_sites.len() == checkpoint.runtime_event_sites() => paths
             .first()
             .and_then(|path| match &path.target {
                 LogicPathTarget::Process { process, unit, .. } => Some((*process, unit)),

@@ -349,9 +349,9 @@ pub(super) fn lower_initial_processes(
         warnings,
     );
     pm.calls = calls;
-    pm.runtime_event_sites = std::mem::take(runtime_event_sites);
-    pm.runtime_errors = std::mem::take(runtime_errors);
-    pm.extern_functions = std::mem::take(extern_functions);
+    pm.runtime.event_sites = std::mem::take(runtime_event_sites);
+    pm.runtime.errors = std::mem::take(runtime_errors);
+    pm.externs.functions = std::mem::take(extern_functions);
     let mut wait_sites = Vec::new();
     let mut nba_sites = Vec::new();
     let mut nba_switches = Vec::new();
@@ -431,21 +431,22 @@ pub(super) fn lower_initial_processes(
         for (index, process) in processes.iter().enumerate() {
             if process.slots.call_top.is_some() {
                 // And its waits, after its own (see `Ff::function_wait_word`).
-                wait_sites.extend(pm.function_wait_sites.iter().map(|site| {
+                wait_sites.extend(pm.function_sites.wait.iter().map(|site| {
                     celox_design::WaitSite {
                         process: index,
                         ..site.clone()
                     }
                 }));
                 nba_sites.extend(
-                    pm.function_nba_sites
+                    pm.function_sites
+                        .nba
                         .iter()
                         .map(|site| celox_design::NbaSite {
                             process: index,
                             ..site.clone()
                         }),
                 );
-                host_request_sites.extend(pm.function_host_request_sites.iter().map(|site| {
+                host_request_sites.extend(pm.function_sites.host_request.iter().map(|site| {
                     celox_design::HostRequestSite {
                         process: celox_design::SiteProcess::function(index),
                         ..site.clone()
@@ -454,9 +455,9 @@ pub(super) fn lower_initial_processes(
             }
         }
     }
-    *runtime_event_sites = std::mem::take(&mut pm.runtime_event_sites);
-    *runtime_errors = std::mem::take(&mut pm.runtime_errors);
-    *extern_functions = std::mem::take(&mut pm.extern_functions);
+    *runtime_event_sites = std::mem::take(&mut pm.runtime.event_sites);
+    *runtime_errors = std::mem::take(&mut pm.runtime.errors);
+    *extern_functions = std::mem::take(&mut pm.externs.functions);
     Ok((
         values,
         declaration_values,
