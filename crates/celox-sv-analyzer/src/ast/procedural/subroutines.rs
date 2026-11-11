@@ -81,6 +81,28 @@ pub(in crate::ast) fn subroutine_param_declarations(
     )
 }
 
+/// The token that declares formal `source` of `native`, which keys it as a
+/// static variable (see `BodyBuilder::declare_static`); a formal a
+/// prototype names without declaring is keyed by the subroutine.
+fn formal_declaration(native: &celox_sv_syntax::Subroutine, source: &str) -> usize {
+    native
+        .ports
+        .iter()
+        .flatten()
+        .chain(
+            native
+                .port_declarations
+                .iter()
+                .flat_map(|group| &group.ports),
+        )
+        .find(|port| {
+            port.name
+                .as_ref()
+                .is_some_and(|name| instances::normalize_identifier(&name.spelling) == source)
+        })
+        .map_or(native.tokens.start, |port| port.tokens.start)
+}
+
 /// The argument names of every function and task in the active generate
 /// items, in declaration order, keyed by their (qualified) names.
 pub(in crate::ast) fn subroutine_argument_names(
@@ -815,7 +837,14 @@ pub(in crate::ast) fn lower_subroutine(
     for ((source, direction, r#type, _), default) in this.into_iter().chain(params).zip(defaults) {
         let name = match this_name.take() {
             Some(name) => name,
-            None => builder.declare(&source, r#type.clone()),
+            None if builder.automatic => builder.declare(&source, r#type.clone()),
+            // The formals of a static subroutine are static variables
+            // (IEEE 1800-2023 13.3.1), named as its static locals are, so
+            // that every analysis lowering it names the same ones.
+            None => {
+                let declaration = formal_declaration(native, &source);
+                builder.declare_static(&source, r#type.clone(), declaration)
+            }
         };
         if r#type.unpacked_struct().is_some() {
             aggregate_formals.push((lowered_params.len(), r#type.clone()));
@@ -838,9 +867,14 @@ pub(in crate::ast) fn lower_subroutine(
             leaves: Vec::new(),
         });
     }
-    let return_var = return_type
-        .as_ref()
-        .map(|r#type| builder.declare(&name, r#type.clone()));
+    // So is the result of a static function, declared with the function.
+    let return_var = return_type.as_ref().map(|r#type| {
+        if builder.automatic {
+            builder.declare(&name, r#type.clone())
+        } else {
+            builder.declare_static(&name, r#type.clone(), native.tokens.start)
+        }
+    });
     if let (Some(name), Some(ty)) = (&return_var, &return_type) {
         formal_types.insert(name.clone(), scoped_type(ty.clone(), declaration_env));
     }
