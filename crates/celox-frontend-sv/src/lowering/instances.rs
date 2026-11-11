@@ -38,6 +38,35 @@ pub(super) fn lower_instances(
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Result<Vec<LoweredSvInstance>, sv::AnalyzerError> {
+    // A string parameter longer than an `i128` has no entry in `constants`;
+    // keep its literal so a `$sformatf` override can still take its value.
+    // Resolve the parameters in declaration order, with the wider literals
+    // already kept substituted in, so a parameter that takes its value from
+    // an earlier one (`TAG = ID`) is kept as well.
+    let mut literals: HashMap<String, sv::ir::ConstExpr> = HashMap::default();
+    for parameter in module
+        .parameters()
+        .iter()
+        .chain(module.imported_parameters())
+    {
+        let Some(value) = parameter.value() else {
+            continue;
+        };
+        let value = substitute_parameter_literals(value.clone(), &literals);
+        let Some(literal) = sv::typecheck::eval_const_integral_literal_with_types(
+            &value,
+            constants,
+            parameter_types,
+        ) else {
+            continue;
+        };
+        if literal.width > 128 {
+            literals.insert(
+                parameter.name().to_string(),
+                sv::ir::ConstExpr::Literal(sv::typecheck::format_integral_literal_binary(&literal)),
+            );
+        }
+    }
     let mut instances = Vec::new();
     for instance in module.instances() {
         if let Some(condition) = instance.condition() {
@@ -85,6 +114,7 @@ pub(super) fn lower_instances(
                     instance,
                     constants,
                     parameter_types,
+                    &literals,
                 ),
                 port_connections: instance
                     .port_connections()
@@ -104,18 +134,100 @@ pub(super) fn lower_instances(
     Ok(instances)
 }
 
+/// `expr` with each identifier that `literals` holds replaced by its
+/// literal, as `substitute_typed_constants` does for the values that fit
+/// an `i128`.
+fn substitute_parameter_literals(
+    expr: sv::ir::ConstExpr,
+    literals: &HashMap<String, sv::ir::ConstExpr>,
+) -> sv::ir::ConstExpr {
+    let sub = |expr: sv::ir::ConstExpr| substitute_parameter_literals(expr, literals);
+    match expr {
+        sv::ir::ConstExpr::Ident(name) => literals
+            .get(&name)
+            .cloned()
+            .unwrap_or(sv::ir::ConstExpr::Ident(name)),
+        sv::ir::ConstExpr::Literal(_) => expr,
+        sv::ir::ConstExpr::SelectRange {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => sv::ir::ConstExpr::SelectRange {
+            expr: Box::new(sub(*expr)),
+            msb: Box::new(sub(*msb)),
+            lsb: Box::new(sub(*lsb)),
+            signed,
+        },
+        sv::ir::ConstExpr::Select { expr, bit } => sv::ir::ConstExpr::Select {
+            expr: Box::new(sub(*expr)),
+            bit: Box::new(sub(*bit)),
+        },
+        sv::ir::ConstExpr::Function { callee, args, site } => sv::ir::ConstExpr::Function {
+            callee,
+            args: args.into_iter().map(sub).collect(),
+            site,
+        },
+        sv::ir::ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => sv::ir::ConstExpr::Resize {
+            expr: Box::new(sub(*expr)),
+            width,
+            signed,
+        },
+        sv::ir::ConstExpr::Unary { op, expr } => sv::ir::ConstExpr::Unary {
+            op,
+            expr: Box::new(sub(*expr)),
+        },
+        sv::ir::ConstExpr::Binary { left, op, right } => sv::ir::ConstExpr::Binary {
+            left: Box::new(sub(*left)),
+            op,
+            right: Box::new(sub(*right)),
+        },
+        sv::ir::ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => sv::ir::ConstExpr::Mux {
+            condition: Box::new(sub(*condition)),
+            then_expr: Box::new(sub(*then_expr)),
+            else_expr: Box::new(sub(*else_expr)),
+        },
+    }
+}
+
 fn lower_parameter_overrides(
     instance: &sv::ir::Instance,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
+    literals: &HashMap<String, sv::ir::ConstExpr>,
 ) -> Vec<LoweredSvParameterOverride> {
     instance
         .parameter_overrides()
         .iter()
         .map(|parameter| {
             let value = parameter.value().cloned().map(|value| {
+                let value = substitute_parameter_literals(value, literals);
                 let value =
                     sv::typecheck::substitute_typed_constants(value, constants, parameter_types);
+                // `$sformatf` of constants is the string it makes (IEEE
+                // 1800-2023 11.2.1), which specializes the instance.
+                if let sv::ir::ConstExpr::Function {
+                    callee: sv::ir::Callee::String(sv::ir::StringOp::Format { .. }),
+                    ..
+                } = &value
+                    && let Some(literal) = sv::typecheck::eval_const_integral_literal_with_types(
+                        &value,
+                        constants,
+                        parameter_types,
+                    )
+                {
+                    return sv::ir::ConstExpr::Literal(
+                        sv::typecheck::format_integral_literal_binary(&literal),
+                    );
+                }
                 if const_expr_references_identifier(&value) {
                     sv::typecheck::eval_const_expr_with_types(&value, constants, parameter_types)
                         .map(const_expr_from_i128)

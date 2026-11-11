@@ -204,6 +204,14 @@ pub(in crate::ast) fn validate(
                             ));
                         }
                     }
+                } else if name == "$sformatf" {
+                    // A constant system function that is a string operation
+                    // (IEEE 1800-2023 11.2.1, 21.3.3).
+                    for argument in arguments {
+                        if let Some(value) = argument.value {
+                            jobs.push((value, query, None));
+                        }
+                    }
                 } else if name.starts_with('$') {
                     return Err(AnalyzerError::UnknownSystemTf { name });
                 } else {

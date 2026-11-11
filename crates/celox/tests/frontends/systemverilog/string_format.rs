@@ -347,3 +347,213 @@ fn check_rejected(declarations: &str, value: &str, expected: &str) {
     let error = error.to_string();
     assert!(error.contains(expected), "{declarations} {value}: {error}");
 }
+
+// `$sformatf` of constant expressions is a constant system function call
+// (IEEE 1800-2023 11.2.1): it gives parameters and parameter overrides
+// their values, here the instance names a design derives level by level.
+#[test]
+fn sformatf_of_constants_is_a_constant_expression() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module Leaf #(parameter string ID = "", parameter int N = 0) ();
+            localparam string TAG = $sformatf("%s#%0d", ID, N);
+            initial #1 $display("%s|%s", ID, TAG);
+        endmodule
+        module Mid #(parameter string ID = "") ();
+            Leaf #(.ID($sformatf("%s-alu", ID)), .N(1)) alu();
+            for (genvar i = 0; i < 2; ++i) begin : g
+                Leaf #(.ID($sformatf("%s-socket%0d", ID, i)), .N(i + 10)) socket();
+            end
+        endmodule
+        module Top;
+            localparam int WIDTH = 12;
+            localparam string NAME = $sformatf("gbar%0d", WIDTH);
+            localparam string RADIX = $sformatf(
+                "%h/%0h/%d/%0d/%b/%o/%c%%", 12'h02a, 12'h02a, 8'd7, -8'sd7, 4'd5, 6'd9, 8'h41);
+            // A value wider than its characters is right-justified in its
+            // width; a string holds no NUL byte.
+            localparam string PADDED = $sformatf("[%s][%0s][%c]", 24'h004142, 24'h004142, 8'd0);
+            Mid #(.ID("core0")) core();
+            Mid #(.ID(NAME)) bar();
+            string padded, unpadded;
+            logic [23:0] characters = 24'h004142;
+            initial begin
+                $display("%s", RADIX);
+                // The same calls at run time.
+                padded = $sformatf("[%s][%0s][%c]", characters, characters, 8'd0);
+                unpadded = PADDED;
+                $display("%s %0d", PADDED, padded == unpadded);
+            end
+        endmodule
+    "#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("constant.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    sim.run_until(10).unwrap();
+    let mut displayed: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => Some(String::from_utf8(message).unwrap()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(displayed.remove(0), "02a/2a/  7/-7/0101/11/A%");
+    assert_eq!(displayed.remove(0), "[ AB][AB][] 1");
+    // The instances display in no specified order.
+    displayed.sort();
+    assert_eq!(
+        displayed,
+        [
+            "core0-alu|core0-alu#1",
+            "core0-socket0|core0-socket0#10",
+            "core0-socket1|core0-socket1#11",
+            "gbar12-alu|gbar12-alu#1",
+            "gbar12-socket0|gbar12-socket0#10",
+            "gbar12-socket1|gbar12-socket1#11",
+        ]
+    );
+}
+
+// A string parameter longer than an `i128` (16 bytes) still gives a
+// constant `$sformatf` override its value.
+#[test]
+fn sformatf_overrides_use_long_string_parameters() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module Leaf #(parameter string ID = "") ();
+            initial #1 $display("%s", ID);
+        endmodule
+        module Mid #(parameter string ID = "") ();
+            Leaf #(.ID($sformatf("%s-alu-unit", ID))) alu();
+        endmodule
+        module Top;
+            Mid #(.ID("a-very-long-instance-name")) core();
+        endmodule
+    "#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("constant.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    sim.run_until(10).unwrap();
+    let displayed: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => Some(String::from_utf8(message).unwrap()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(displayed, ["a-very-long-instance-name-alu-unit"]);
+}
+
+// A NUL byte in the format value is removed before the directives are
+// parsed, as the runtime formatter removes it: `%\0d` is `%d`, with its
+// default field width, not `%0d`.
+#[test]
+fn sformatf_of_constants_ignores_nul_bytes_in_the_format() {
+    let source = r#"
+        module Leaf #(parameter string ID = "") ();
+            initial $display("[%s]", ID);
+        endmodule
+        module Top;
+            Leaf #(.ID($sformatf(24'h250064, 8'd7))) leaf();
+        endmodule
+    "#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("constant.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    sim.run_until(10).unwrap();
+    let displayed: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => Some(String::from_utf8(message).unwrap()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(displayed, ["[  7]"]);
+}
+
+// A string parameter that takes its value from an earlier wider string
+// parameter still gives a constant `$sformatf` override its value.
+#[test]
+fn sformatf_overrides_use_derived_long_string_parameters() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module Leaf #(parameter string ID = "") ();
+            initial #1 $display("%s", ID);
+        endmodule
+        module Mid #(parameter string ID = "",
+                     parameter string TAG = ID) ();
+            Leaf #(.ID($sformatf("%s-alu", TAG))) alu();
+        endmodule
+        module Top;
+            Mid #(.ID("a-very-long-instance-name")) core();
+        endmodule
+    "#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("constant.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    sim.run_until(10).unwrap();
+    let displayed: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => Some(String::from_utf8(message).unwrap()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(displayed, ["a-very-long-instance-name-alu"]);
+}
+
+// A constant string-valued query is a constant `%s` operand: the packed
+// bytes of `$typename(...)` format as the string it names.
+#[test]
+fn sformatf_of_constants_formats_a_typename_operand() {
+    let source = r#"
+        module Leaf #(parameter string ID = "") ();
+            initial $display("%s", ID);
+        endmodule
+        module Top;
+            Leaf #(.ID($sformatf("%s", $typename(byte unsigned)))) leaf();
+            initial $display("%s", $sformatf("%s", $typename(byte unsigned)));
+        endmodule
+    "#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("constant.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    sim.run_until(10).unwrap();
+    let displayed: Vec<_> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            celox::RuntimeEvent::Display { message } => Some(String::from_utf8(message).unwrap()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(displayed.len(), 2);
+    assert_eq!(displayed[0], displayed[1]);
+    assert!(displayed[0].contains("byte"), "{displayed:?}");
+}
+
+// A conversion of an operand too wide to fit the result is not folded;
+// it must decline without formatting the whole width first.
+#[test]
+fn sformatf_of_a_huge_operand_is_not_folded() {
+    let source = r#"
+        module Top;
+            localparam string NAME = $sformatf("%b", 100000000'b0);
+            initial #1 $display("%s", NAME);
+        endmodule
+    "#;
+    assert!(
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("constant.sv"))], "Top")
+            .build_cranelift()
+            .is_err()
+    );
+}
