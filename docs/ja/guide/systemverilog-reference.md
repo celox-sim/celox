@@ -63,7 +63,8 @@ Celox は IEEE Std 1800™-2023 が規定する SystemVerilog を実装します
   対応します（Clause 28）。ゲートの遅延・強度も未対応です
   （[#457](https://github.com/celox-sim/celox/issues/457)）。
 - 負の下限を持つインスタンス配列。
-- 階層参照 <a id="hierarchical-references"></a>: 継続代入でネットや変数を駆動する参照、
+- 階層参照 <a id="hierarchical-references"></a>: 継続代入でネットを駆動する参照、自モジュールも継続代入や
+  `always_comb` で駆動する変数を継続代入で駆動する参照、
   ポート接続内の参照、名前付きブロック・パラメータ・他スコープの
   構造体メンバ（packed 構造体変数のメンバを除く。packed 構造体配列の要素の
   メンバは拒否します）への参照、`real`・`string`（後述のホスト API 経由を除く）・
