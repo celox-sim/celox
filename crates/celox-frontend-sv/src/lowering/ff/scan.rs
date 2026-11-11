@@ -99,11 +99,12 @@ impl Ff<'_, '_> {
             destinations.push((lvalues, Expr::Ident(name), guards));
         }
         let site = self
-            .host_request_sites
+            .sites
+            .host_request
             .iter()
             .filter(|site| site.kind == HostRequestKind::Scan)
             .count() as u32;
-        self.host_request_sites.push(HostRequestSite {
+        self.sites.host_request.push(HostRequestSite {
             process: celox_design::SiteProcess::own(0),
             kind: HostRequestKind::Scan,
             operation: u32::from(function == sv::ir::SystemFunction::Fscanf),

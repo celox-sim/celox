@@ -62,7 +62,8 @@ impl Ff<'_, '_> {
             .expect("format result")
             .value_kind = ValueKind::StrRef;
         let site = self
-            .host_request_sites
+            .sites
+            .host_request
             .iter()
             .filter(|site| site.kind == HostRequestKind::Format)
             .count() as u32;
@@ -72,7 +73,7 @@ impl Ff<'_, '_> {
             Some(template) => (0, template),
             None => (1, ticks_per_unit.to_string()),
         };
-        self.host_request_sites.push(HostRequestSite {
+        self.sites.host_request.push(HostRequestSite {
             process: celox_design::SiteProcess::own(0),
             kind: HostRequestKind::Format,
             operation,
