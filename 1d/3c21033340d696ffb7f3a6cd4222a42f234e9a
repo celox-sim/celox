@@ -1,1 +1,6 @@
-Reworked as agreed with the coordinator: an indexed part-select of a member is exact (bits outside the member read X / are not written) through a select window carried on the lvalue; ascending and structure-typed members take the same path; the documented deviation is gone.
+Revision history for #3560:
+
+rev 2 (content) 2026-11-11 07:34 UTC — Reworked as agreed with the coordinator: an indexed part-select of a member is exact (bits outside the member read X / are not written) through a select window carried on the lvalue; ascending and structure-typed members take the same path; the documented deviation is gone.
+rev 1 (initial) 2026-11-11 07:34 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3560,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"d04966ba433d227a98a70ed7c05bf13c45cbbff1","timestamp_iso":"2026-11-11T07:34:25Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"d04966ba433d227a98a70ed7c05bf13c45cbbff1","new_sha":"1d3c21033340d696ffb7f3a6cd4222a42f234e9a","timestamp_iso":"2026-11-11T07:34:25Z","reason":"Reworked as agreed with the coordinator: an indexed part-select of a member is exact (bits outside the member read X / are not written) through a select window carried on the lvalue; ascending and structure-typed members take the same path; the documented deviation is gone.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/d04966ba433d227a98a70ed7c05bf13c45cbbff1...1d3c21033340d696ffb7f3a6cd4222a42f234e9a"}]} -->
