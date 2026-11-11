@@ -45,7 +45,7 @@ impl Ff<'_, '_> {
                 let mut operands = args.iter();
                 let mut next = || operands.next().ok_or_else(|| unsupported("stream operand"));
                 for item in &pack.items {
-                    stream = match *item {
+                    stream = match item {
                         StreamItem::Bits(arg) => {
                             // An operand keeps its self-determined type
                             // (11.4.14.1).
@@ -69,7 +69,7 @@ impl Ff<'_, '_> {
                             let range = match range {
                                 Some(form) => {
                                     let (first, second) = (next()?.clone(), next()?.clone());
-                                    parameter = heap::range_parameter(parameter, range_form(form));
+                                    parameter = heap::range_parameter(parameter, range_form(*form));
                                     self.stream_range(&first, &second)?
                                 }
                                 None => self.constant64(0),
@@ -82,7 +82,7 @@ impl Ff<'_, '_> {
                         StreamItem::WideContainer { width, four_state } => {
                             let container = self.handle(next()?)?;
                             let parameter =
-                                heap::wide_parameter(width, four_state && self.m.four_state);
+                                heap::wide_parameter(*width, *four_state && self.m.four_state);
                             self.heap_call(
                                 encode(heap::WIDE_CONTAINER, parameter),
                                 &[stream, container],
@@ -132,7 +132,7 @@ impl Ff<'_, '_> {
             StreamOp::ToContainer(layout) => {
                 let stream = self.integer_of_width(&args[0], 32, false)?;
                 let zero = self.constant64(0);
-                let parameter = self.container_parameter(*layout);
+                let parameter = self.container_parameter(layout);
                 let container = self.heap_call(encode(heap::TAKE_REST, parameter), &[stream, zero]);
                 self.heap_call(heap::FREE, &[stream]);
                 (container, 32, Some(celox_design::ValueKind::ObjRef))
@@ -152,7 +152,7 @@ impl Ff<'_, '_> {
             StreamOp::TakeRest { layout, reserve } => {
                 let stream = self.integer_of_width(&args[0], 32, false)?;
                 let reserve = self.constant64(u64::try_from(*reserve).unwrap_or(u64::MAX));
-                let parameter = self.container_parameter(*layout);
+                let parameter = self.container_parameter(layout);
                 (
                     self.heap_call(encode(heap::TAKE_REST, parameter), &[stream, reserve]),
                     32,
@@ -164,7 +164,7 @@ impl Ff<'_, '_> {
                 let container = self.handle(&args[1])?;
                 let range = self.stream_range(&args[2], &args[3])?;
                 let parameter =
-                    heap::range_parameter(self.container_parameter(*layout), range_form(*form));
+                    heap::range_parameter(self.container_parameter(layout), range_form(*form));
                 (
                     self.heap_call(
                         encode(heap::TAKE_RANGE, parameter),

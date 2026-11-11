@@ -129,7 +129,7 @@ fn check_fixed(shape: &VariableDimensions, table: &semantic_types::TyTable) -> C
 }
 
 /// What receives a stream.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(in crate::ast) enum Receiver {
     /// A fixed-size variable, which receives the stream aligned to its left.
     Fixed(StreamArg),
@@ -171,7 +171,7 @@ fn sizes_differ(width: usize, target: usize) -> AnalyzerError {
 /// The layout of a container that a stream can fill: a queue or dynamic
 /// array of integral or string elements.
 fn stream_container(container: &ContainerType) -> Converted<ContainerLayout> {
-    let layout = container.layout;
+    let layout = container.layout.clone();
     if chandles::type_holds_chandle(&container.element) {
         return Err(chandle());
     }
@@ -402,7 +402,7 @@ fn container_items(
     }
     Ok(vec![Item::Dynamic(
         StreamItem::Container {
-            layout: container.layout,
+            layout: container.layout.clone(),
             range: None,
         },
         vec![value],
@@ -440,7 +440,7 @@ fn operand(
         None => shape.as_ref().and_then(|shape| shape.container.clone()),
     };
     if let Some(container) = container {
-        let layout = container.layout;
+        let layout = container.layout.clone();
         if chandles::type_holds_chandle(&container.element) {
             return Err(chandle());
         }
@@ -828,7 +828,7 @@ fn element_reads(
                 table,
                 containers::call(
                     ContainerOp::Get,
-                    container.layout,
+                    container.layout.clone(),
                     vec![source.clone(), Expr::Literal(at.to_string())],
                 ),
             )
@@ -836,7 +836,7 @@ fn element_reads(
         .collect();
     Ok(Some(containers::call(
         ContainerOp::Fixed { count },
-        container.layout,
+        container.layout.clone(),
         vec![source, Expr::Concat(reads)],
     )))
 }

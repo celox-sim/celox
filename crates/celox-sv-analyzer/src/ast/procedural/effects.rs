@@ -891,7 +891,7 @@ impl BodyBuilder<'_, '_, '_> {
             rhs: Expr::Binary {
                 left: Box::new(containers::call(
                     ContainerOp::Size,
-                    container.layout,
+                    container.layout.clone(),
                     vec![Expr::Ident(saved.clone())],
                 )),
                 op: BinaryOp::Eq,

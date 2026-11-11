@@ -2970,7 +2970,7 @@ pub(in crate::ast) fn array(
     env: &ConstEnv,
 ) -> Converted<Array> {
     let container = property.array_storage().expect("an array property");
-    let layout = container.layout;
+    let layout = &container.layout.clone();
     let random = property.rand || property.randc;
     if random {
         if property.randc {

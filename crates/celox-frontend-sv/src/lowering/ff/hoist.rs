@@ -465,17 +465,19 @@ impl Ff<'_, '_> {
                 callee: sv::ir::Callee::String(op),
                 args,
                 ..
-            } => self.string_call(*op, args)?,
+            } => self.string_call(op.clone(), args)?,
             Expr::Call {
                 callee: sv::ir::Callee::Object(op),
                 args,
                 ..
             } => match &**op {
                 sv::ir::ObjectOp::Container { op, layout } => {
-                    self.container_call(*op, *layout, args)?
+                    self.container_call(*op, layout.clone(), args)?
                 }
-                sv::ir::ObjectOp::Locator(locator) => self.locator(*locator, args)?,
-                sv::ir::ObjectOp::Pattern(pattern) => self.aggregate_pattern(*pattern, args)?,
+                sv::ir::ObjectOp::Locator(locator) => self.locator(locator.clone(), args)?,
+                sv::ir::ObjectOp::Pattern(pattern) => {
+                    self.aggregate_pattern(pattern.clone(), args)?
+                }
                 sv::ir::ObjectOp::Concat(concat) => self.container_concat(concat, args)?,
                 sv::ir::ObjectOp::Stream(op) => self.stream_call(op, args)?,
                 sv::ir::ObjectOp::ScopeRandomize(program) => self.scope_randomize(program, args)?,
