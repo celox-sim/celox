@@ -33,6 +33,9 @@ struct Options {
     simvariants: Vec<String>,
     files: Vec<PathBuf>,
     source_encoding: celox_sv_analyzer::syntax::SourceEncoding,
+    /// Stop a simulation once its time reaches this (not an sv-tests
+    /// option): a window of a long run, for measuring it.
+    max_time: Option<u64>,
 }
 
 fn parse_options(args: &[String]) -> Result<Options, String> {
@@ -44,6 +47,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
     let mut simvariants = Vec::new();
     let mut files = Vec::new();
     let mut source_encoding = Default::default();
+    let mut max_time = None;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         if arg == "--" {
@@ -104,6 +108,13 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
             }
             "--include" => includes.push(value.into()),
             "--simvariant" => simvariants.push(value.clone()),
+            "--max-time" if max_time.is_none() => {
+                max_time = Some(
+                    value
+                        .parse()
+                        .map_err(|_| format!("invalid simulation time: {value}"))?,
+                );
+            }
             _ => return Err(format!("unknown, duplicate or invalid option: {arg}")),
         }
     }
@@ -119,6 +130,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         simvariants,
         files,
         source_encoding,
+        max_time,
     })
 }
 
@@ -274,7 +286,7 @@ fn run(options: &Options) -> Result<(), String> {
                     .plusargs(plusargs)
                     .build()
                     .map_err(|error| error.to_string())?;
-                simulate(sim)?;
+                simulate(sim, options.max_time)?;
             }
             Ok(())
         }
@@ -285,7 +297,9 @@ fn run(options: &Options) -> Result<(), String> {
 /// that issued a run-time error (`$error`, or a failed assertion's default
 /// action) still runs to its end, then fails, as a Verilator model does: the
 /// exit status of a simulation is tool-specific (IEEE 1800-2023 20.10).
-fn simulate(mut sim: celox::Simulation) -> Result<(), String> {
+/// With `max_time`, the run ends at that time without finishing: no event
+/// after it runs, and the errors reported before it still fail the run.
+fn simulate(mut sim: celox::Simulation, max_time: Option<u64>) -> Result<(), String> {
     use std::io::Write as _;
     let mut stdout = std::io::stdout().lock();
     let mut errors = 0usize;
@@ -328,29 +342,66 @@ fn simulate(mut sim: celox::Simulation) -> Result<(), String> {
         }
         fatal.map_or(Ok(()), Err)
     };
+    let start = std::time::Instant::now();
+    let mut steps = 0u64;
+    let mut last_report = start;
     let initial = sim.eval_comb().map_err(|error| error.to_string());
     output(&mut sim)?;
     initial?;
+    // Whether the run stopped at the end of the window.
+    let mut window = false;
     while !sim.is_finished() {
-        let step = sim.step().map_err(|error| error.to_string());
+        if last_report.elapsed() >= std::time::Duration::from_secs(30) {
+            report_simulation(&sim, start, steps, "progress");
+            last_report = std::time::Instant::now();
+        }
+        steps += 1;
+        // A window runs no event past its end: each step stops there.
+        let ended = match max_time {
+            Some(max_time) => sim
+                .run_until_bounded(max_time, 1)
+                .map(|reached| reached || sim.time() >= max_time),
+            None => sim.step().map(|step| step.is_none()),
+        }
+        .map_err(|error| error.to_string());
         output(&mut sim)?;
         // A batch run has no interactive mode to suspend into, so it ends at
         // `$stop`, as `vvp -n` does.
-        if step?.is_none() || sim.is_stopped() {
+        if sim.is_stopped() {
+            break;
+        }
+        if ended? {
+            window = max_time.is_some();
             break;
         }
     }
-    if !sim.is_stopped() {
+    if !window && !sim.is_stopped() {
         // Quiescence ends this batch run, but is not itself terminal for the
         // reusable Simulation API (a host can still supply new inputs).
         let finished = sim.finish().map_err(|error| error.to_string());
         output(&mut sim)?;
         finished?;
     }
+    report_simulation(&sim, start, steps, if window { "window" } else { "end" });
     match errors {
         0 => Ok(()),
         count => Err(format!("run-time errors reported: {count}")),
     }
+}
+
+/// Reports, as a `[simulation]` timing event (see [`PhaseTimingReport`]),
+/// how long the simulation ran, how far and what its scheduler did.
+fn report_simulation(sim: &celox::Simulation, start: std::time::Instant, steps: u64, at: &str) {
+    let stats = sim.scheduler_stats();
+    tracing::debug!(
+        "[simulation] {at} wall={:?} time={} steps={steps} compiled_slots={} compiled_runs={} reference_steps={} native_service_calls={}",
+        start.elapsed(),
+        sim.time(),
+        stats.compiled_slots,
+        stats.compiled_runs,
+        stats.reference_steps,
+        stats.native_service_calls,
+    );
 }
 
 /// Prints the compiler's timing events (`[phase-timing]`, `[sv-frontend]`,
@@ -393,6 +444,7 @@ impl tracing::Subscriber for PhaseTimingReport {
             "[analysis]",
             "[flatten]",
             "[elaboration]",
+            "[simulation]",
         ]
         .iter()
         .any(|prefix| message.0.starts_with(prefix))
