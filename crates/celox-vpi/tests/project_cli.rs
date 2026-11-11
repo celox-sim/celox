@@ -296,6 +296,31 @@ fn sv_projects_resolve_ordered_lists_includes_defines_and_targets() {
     );
 }
 
+// A file list names library sources by whatever extension the design uses;
+// only a Veryl source makes the design a Veryl one.
+#[cfg(feature = "systemverilog")]
+#[test]
+fn filelist_sources_of_any_extension_are_systemverilog() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(
+        root.path().join("cells.vlib"),
+        "module Cell(output logic [7:0] q); assign q = `RESULT; endmodule\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("tb.sv"),
+        "module Tb; logic [7:0] q; Cell u(q); initial #1 $display(\"q=%0d\", q); endmodule\n",
+    )
+    .unwrap();
+    fs::write(root.path().join("all.f"), "cells.vlib\ntb.sv\n").unwrap();
+    let output = invoke(
+        root.path(),
+        &["run", "-f", "all.f", "--top", "Tb", "-DRESULT=42"],
+    );
+    success(&output);
+    assert_eq!(output.stdout, b"q=42\n");
+}
+
 #[cfg(feature = "systemverilog")]
 #[test]
 fn standalone_filelists_and_cli_preprocessing_options_work_for_both_commands() {
