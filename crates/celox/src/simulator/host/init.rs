@@ -171,6 +171,22 @@ impl<B: SimBackend> Simulator<B> {
             .map_or(&[][..], |start| &query[start..]);
         let matched = if site.operation == 0 {
             self.plusargs.test(query)
+        } else if site.results[1].value_kind == celox_design::ValueKind::StrRef {
+            let text = self.plusargs.text(query).map_err(|message| {
+                celox_runtime::Halt::Error(crate::RuntimeErrorCode::Runtime {
+                    message,
+                    signals: Vec::new(),
+                })
+            })?;
+            match text {
+                Some(text) => {
+                    let text = text.to_vec();
+                    let handle = self.backend.heap_mut().intern(&text);
+                    self.backend.set(site.results[1].id, handle);
+                    true
+                }
+                None => false,
+            }
         } else {
             let target = site.results[1].id;
             match self
