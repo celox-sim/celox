@@ -962,6 +962,9 @@ pub(super) fn shared_class(
         const_env: scope_env.clone(),
         type_aliases: scope_aliases.clone(),
         class_base: Some(specializations::class_base(session, name, &outer)),
+        // The property types name the types visible in the class body.
+        type_declarations: specializations::lookup(session, name)
+            .map(|specialization| specialization.type_declarations.clone()),
         ..PackedDimensions::default()
     };
     let (env, aliases) = (&*scope_env, &*scope_aliases);

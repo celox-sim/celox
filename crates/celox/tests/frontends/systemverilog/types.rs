@@ -572,3 +572,57 @@ fn enumerated_variables_take_only_values_of_their_type() {
     assert_eq!(sim.get(sim.signal("second")), 2u32.into());
     assert_eq!(sim.get(sim.signal("third")), 1u32.into());
 }
+
+/// A compilation-unit typedef binds its target as a use does, so one that
+/// names what nothing declares makes the design illegal even when no module
+/// uses it (IEEE 1800-2023 3.12.1, 6.18); an unused unsupported declaration
+/// there does not stop the design.
+#[test]
+fn unused_compilation_unit_typedefs_of_undeclared_names_are_errors() {
+    for typedef in [
+        "typedef some_other_type myalias;",
+        "typedef missing_forward_typedef;",
+        "class C; typedef int T; endclass typedef C::Missing Alias;",
+    ] {
+        let source = format!("{typedef}\nmodule Top(output int y); assign y = 1; endmodule\n");
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), std::path::Path::new("unit.sv"))],
+            "Top",
+        )
+        .build()
+        .err()
+        .unwrap_or_else(|| panic!("{typedef} is accepted"))
+        .to_string();
+        assert!(error.contains("not declared"), "{typedef}: {error}");
+    }
+    // A virtual interface names an interface of any source (IEEE 1800-2023
+    // 25.9).
+    let source = "module Top(output int y); typedef virtual interface Missing vif_t; assign y = 1; endmodule\n";
+    let Err(error) =
+        celox::Simulation::from_sv_sources(vec![(source, std::path::Path::new("top.sv"))], "Top")
+            .build()
+    else {
+        panic!("a virtual interface of no interface is accepted");
+    };
+    let error = error.to_string();
+    assert!(
+        error.contains("Missing") && error.contains("not declared"),
+        "{error}"
+    );
+    let interface = "interface Bus; logic v; endinterface\n";
+    let top = "module Top(output int y); typedef virtual interface Bus vif_t; vif_t vif; assign y = 1; endmodule\n";
+    celox::Simulation::from_sv_sources(
+        vec![
+            (interface, std::path::Path::new("bus.sv")),
+            (top, std::path::Path::new("top.sv")),
+        ],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    let source =
+        "typedef union { int i; bit b; } u_t;\nmodule Top(output int y); assign y = 1; endmodule\n";
+    celox::Simulation::from_sv_sources(vec![(source, std::path::Path::new("unit.sv"))], "Top")
+        .build()
+        .unwrap();
+}

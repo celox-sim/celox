@@ -15,6 +15,9 @@ pub(super) fn ports_from_scope(
     let mut inherited_variable = false;
     let mut inherited_unresolved = false;
     let mut inherited_resolution = NetResolution::Wire;
+    // A port type names a type visible in the design element (IEEE
+    // 1800-2023 6.18, 23.2.2).
+    let declarations = types::scope_type_declarations(syntax_tree)?;
     for native in port_owners::scope(selected, syntax_tree)? {
         let direction = native
             .direction
@@ -32,12 +35,18 @@ pub(super) fn ports_from_scope(
                     celox_sv_syntax::DataTypeKind::Implicit
                 )
             });
-        let base =
-            match type_binding::port_type(native, syntax_tree, session, const_env, type_aliases)? {
-                Some(ty) => ty,
-                None if native.data_type.is_none() => inherited_type.clone(),
-                None => return Err(unsupported("unsupported port data type")),
-            };
+        let base = match type_binding::port_type(
+            native,
+            syntax_tree,
+            session,
+            const_env,
+            type_aliases,
+            &declarations,
+        )? {
+            Some(ty) => ty,
+            None if native.data_type.is_none() => inherited_type.clone(),
+            None => return Err(unsupported("unsupported port data type")),
+        };
         if !type_binding::declared_port_range_matches(
             native,
             &base,
@@ -333,6 +342,10 @@ pub(super) fn signals_from_scope_with_declaration_ranges(
     preserve_parameters: bool,
 ) -> Result<Vec<Signal>, AnalyzerError> {
     let mut signals = Vec::new();
+    // A variable or net type names a type visible in the design element or
+    // in its generate block, whose typedefs `item` binds (IEEE 1800-2023
+    // 6.18).
+    let declarations = types::scope_type_declarations(syntax_tree)?;
     for mut item in generate::items(syntax_tree, session, const_env, type_aliases)? {
         let syntax_tree = &item.scoped(syntax_tree);
         if preserve_parameters {
@@ -348,6 +361,7 @@ pub(super) fn signals_from_scope_with_declaration_ranges(
             syntax_tree,
             session,
             &item.type_aliases(type_aliases),
+            Some(&declarations),
             &item.env,
             None,
             &mut signals,
@@ -398,6 +412,7 @@ pub(super) fn signals_from_body_item(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     aliases: &TypeAliases,
+    declarations: Option<&Arc<types::TypeDeclarations>>,
     env: &ConstEnv,
     selected_name: Option<&str>,
     signals: &mut Vec<Signal>,
@@ -433,7 +448,15 @@ pub(super) fn signals_from_body_item(
                         celox_sv_syntax::DataTypeKind::Named(_)
                     )
                 {
-                    type_binding::alias_signals(value, tree, session, env, aliases, selected_name)?
+                    type_binding::alias_signals(
+                        value,
+                        tree,
+                        session,
+                        env,
+                        aliases,
+                        declarations,
+                        selected_name,
+                    )?
                 } else {
                     // A type operator names the variables declared before.
                     let scope = matches!(
@@ -447,6 +470,7 @@ pub(super) fn signals_from_body_item(
                         session,
                         env,
                         aliases,
+                        declarations,
                         selected_name,
                         scope.as_deref(),
                     )?
@@ -464,6 +488,7 @@ pub(super) fn signals_from_body_item(
             session,
             env,
             aliases,
+            declarations,
             selected_name,
         )?,
         BodyItemKind::Instance(id) => {

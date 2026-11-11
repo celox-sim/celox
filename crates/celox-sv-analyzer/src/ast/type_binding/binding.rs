@@ -215,9 +215,7 @@ fn bind_in_mode(
                                 let ty = super::super::classes::specializations::member_type(
                                     tree, session, &class, &member,
                                 )
-                                .ok_or_else(|| {
-                                    unsupported(format!("type `{member}` of class `{class}`"))
-                                })?;
+                                .ok_or_else(|| member_type_error(tree, session, &class, &member))?;
                                 values.push(types::enclose_aliased_packed_type(ty, ranges));
                                 continue;
                             }
@@ -231,9 +229,7 @@ fn bind_in_mode(
                             let ty = super::super::classes::specializations::member_type(
                                 tree, session, &class, &member,
                             )
-                            .ok_or_else(|| {
-                                unsupported(format!("type `{member}` of class `{class}`"))
-                            })?;
+                            .ok_or_else(|| member_type_error(tree, session, &class, &member))?;
                             values.push(types::enclose_aliased_packed_type(ty, ranges));
                             continue;
                         }
@@ -283,7 +279,13 @@ fn bind_in_mode(
                                     "specialization of parameterized class `{class}` outside the scope that declares it"
                                 )));
                             }
-                            return Ok(None);
+                            return unresolved_specialization(
+                                tree,
+                                session,
+                                context,
+                                path,
+                                use_site(native, tree, data),
+                            );
                         }
                         let name = match path.as_slice() {
                             [part] => normalize_identifier(&part.name.spelling),
@@ -312,7 +314,17 @@ fn bind_in_mode(
                                 values.push(class);
                                 continue;
                             }
-                            return Ok(None);
+                            // A name nothing visible declares is no type
+                            // (IEEE 1800-2023 6.18); one that names a
+                            // declaration the binder does not model, such as
+                            // a typedef it cannot bind yet, is not known.
+                            return unresolved_type_name(
+                                tree,
+                                context,
+                                &name,
+                                path,
+                                use_site(native, tree, data),
+                            );
                         };
                         values.push(types::enclose_aliased_packed_type(ty.clone(), ranges));
                     }
@@ -444,6 +456,8 @@ fn bind_in_mode(
                         arguments,
                         modport,
                     } => {
+                        // A virtual interface names an interface (IEEE
+                        // 1800-2023 25.9).
                         values.push(super::super::virtual_interfaces::bind_type(
                             session,
                             name,
@@ -609,6 +623,147 @@ fn bind_ranges(
         }
     }
     Ok(result)
+}
+
+/// The binding of type name `path`, normalized `name`, that the binder's
+/// scoped lookup does not resolve. A single or package-qualified name that
+/// no type visible in the scope declares is an error (IEEE 1800-2023 6.18); a declared type
+/// without a binding, such as a typedef whose constants are not known yet,
+/// has none yet. A type declared in the scope is visible after its
+/// declaration, at token `at` of the use. A context that does not record
+/// the types visible in its scope tells neither. A tail call, so that the binder's frame, which
+/// nested specializations multiply, keeps its size.
+#[cold]
+#[inline(never)]
+fn unresolved_type_name(
+    tree: &AnalysisContext<'_>,
+    context: &PackedDimensions,
+    name: &str,
+    path: &[celox_sv_syntax::TypeSegment],
+    at: usize,
+) -> Converted<Option<Type>> {
+    let Some(declarations) = &context.type_declarations else {
+        return Ok(None);
+    };
+    // `p::T` names a type of package `p`, which the record holds under that
+    // qualified name, or under `T` inside `p` itself (IEEE 1800-2023 26.3).
+    // `C::T` of a class `C` whose specialization is not known yet names
+    // a type of the class, which the record does not hold.
+    let spelled = match path {
+        [part] => part.name.value().to_owned(),
+        [package, member]
+            if {
+                let package = normalize_identifier(&package.name.spelling);
+                scope::imported(tree).package_scopes.contains(&package)
+                    && !types::declares_type(declarations, &package, at)
+            } =>
+        {
+            format!("{}::{}", package.name.value(), member.name.value())
+        }
+        _ => return Ok(None),
+    };
+    if types::declares_type(declarations, name, at) {
+        return Ok(None);
+    }
+    Err(AnalyzerError::UndeclaredIdentifier {
+        name: spelled,
+        context: "no type of this name is visible".into(),
+    })
+}
+
+/// The token of type `data` of `native`, where a declaration of the scope
+/// of `tree` must precede it, or past every token when `native` holds
+/// another source's declarations.
+fn use_site(
+    native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    data: &celox_sv_syntax::DataType,
+) -> usize {
+    if std::ptr::eq(native, tree.declarations()) {
+        data.tokens.start
+    } else {
+        usize::MAX
+    }
+}
+
+/// A specialization `C#(...)` no visible class matched: a single name that
+/// no visible typedef or class declares is undeclared (IEEE
+/// 1800-2023 6.18, 8.25).
+#[cold]
+#[inline(never)]
+fn unresolved_specialization(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    context: &PackedDimensions,
+    path: &[celox_sv_syntax::TypeSegment],
+    at: usize,
+) -> Converted<Option<Type>> {
+    if let [part] = path {
+        let name = normalize_identifier(&part.name.spelling);
+        if !context.type_aliases.contains_key(&name)
+            && super::super::classes::resolve(tree, session, &name).is_none()
+        {
+            return unresolved_type_name(tree, context, &name, path, at);
+        }
+    }
+    Ok(None)
+}
+
+/// The error of `C::member` when class `class` has no type `member`: an
+/// undeclared name when neither it nor a class it extends declares a
+/// typedef or type parameter of that name, and otherwise a type Celox does
+/// not support.
+#[cold]
+#[inline(never)]
+fn member_type_error(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    class: &str,
+    member: &str,
+) -> AnalyzerError {
+    use celox_sv_syntax::ParameterKind;
+    let native = tree.declarations();
+    let mut next = Some(class.to_owned());
+    let mut seen = HashSet::default();
+    while let Some(name) = next.take() {
+        if !seen.insert(name.clone()) {
+            break;
+        }
+        let Some(declaration) = super::super::classes::declaration(tree, session, &name) else {
+            return unsupported(format!("type `{member}` of class `{class}`"));
+        };
+        let declares =
+            declaration.type_aliases.iter().any(|&alias| {
+                normalize_identifier(&native.type_alias(alias).name.spelling) == member
+            }) || declaration
+                .parameter_ports
+                .iter()
+                .chain(&declaration.parameters)
+                .flat_map(|&id| &native.parameter_declaration(id).parameters)
+                .any(|parameter| {
+                    matches!(parameter.kind, ParameterKind::Type { .. })
+                        && normalize_identifier(&parameter.name.spelling) == member
+                });
+        if declares {
+            return unsupported(format!("type `{member}` of class `{class}`"));
+        }
+        next = declaration.base.as_ref().and_then(|base| {
+            match &native.data_type(base.data_type).kind {
+                celox_sv_syntax::DataTypeKind::Named(path) => path.last().and_then(|part| {
+                    super::super::classes::resolve(
+                        tree,
+                        session,
+                        &normalize_identifier(&part.name.spelling),
+                    )
+                }),
+                _ => None,
+            }
+        });
+    }
+    AnalyzerError::UndeclaredIdentifier {
+        name: member.to_owned(),
+        context: format!("class `{class}` declares no type of this name"),
+    }
 }
 
 /// The class that `scope` of a class-scoped type `C::T` names: inside a

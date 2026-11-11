@@ -7,6 +7,11 @@ pub(super) struct PackedDimensions {
     pub(super) variables: ScopedMap<VariableDimensions>,
     pub(super) const_env: SharedEnv,
     pub(super) type_aliases: SharedAliases,
+    /// The names of every type visible in the scope of a typedef being
+    /// bound, also those `type_aliases` has no binding for (yet), which tell
+    /// an undeclared name from a type not bound; `None` where the context
+    /// does not know all of them.
+    pub(super) type_declarations: Option<Arc<types::TypeDeclarations>>,
     pub(super) function_return_types: SharedMap<FunctionReturnMetadata>,
     pub(super) functions: Arc<HashMap<String, Function>>,
     pub(super) parameter_values: SharedMap<Expr>,
@@ -117,6 +122,7 @@ impl PackedDimensions {
             variables: variables.into(),
             const_env: const_env.to_shared(),
             type_aliases: type_aliases.to_shared(),
+            type_declarations: None,
             function_return_types: SharedMap::default(),
             functions: Arc::default(),
             parameter_values: SharedMap::default(),

@@ -1182,6 +1182,7 @@ fn local_declaration(
                     alias,
                     &context.const_env,
                     &context.type_aliases,
+                    None,
                     &mut EnumMemberConstants::default(),
                 )?
             {
@@ -1946,6 +1947,7 @@ fn query_published(
                 tree,
                 session,
                 &item.type_aliases(&context.type_aliases),
+                None,
                 &item.env,
                 Some(&declared),
                 &mut signals,

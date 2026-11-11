@@ -13,6 +13,11 @@ impl Source {
         parameter_overrides: &ConstEnv,
     ) -> Result<Self, AnalyzerError> {
         let packages = packages::Packages::analyze(&[(syntax_tree, Path::new(""))])?;
+        // An illegal compilation unit is an error also where no module uses
+        // it (IEEE 1800-2023 3.12.1).
+        if let Some(error) = packages.compilation_unit_illegality() {
+            return Err(error.clone());
+        }
         let session = &mut Session::with_packages(&packages, &mut packages.design());
         let context = AnalysisContext::unspecialized(syntax_tree);
         let syntax_tree = &context;
@@ -99,6 +104,11 @@ impl Source {
     ) -> Result<Self, AnalyzerError> {
         let index = module_index::ModuleIndex::new(syntax_tree)?;
         let packages = packages::Packages::analyze(&[(syntax_tree, Path::new(""))])?;
+        // An illegal compilation unit is an error also where no module uses
+        // it (IEEE 1800-2023 3.12.1).
+        if let Some(error) = packages.compilation_unit_illegality() {
+            return Err(error.clone());
+        }
         Self::from_indexed_syntax_module(
             syntax_tree,
             Path::new(""),

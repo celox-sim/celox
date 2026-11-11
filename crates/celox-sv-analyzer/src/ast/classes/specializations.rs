@@ -41,6 +41,8 @@ pub(in crate::ast) struct Specialization {
     pub bases: Vec<String>,
     /// The parameters of the port list, for `$typename`.
     pub arguments: Vec<type_names::ClassArgument>,
+    /// The types visible in the class body, which its property types name.
+    pub type_declarations: Arc<types::TypeDeclarations>,
 }
 
 /// The types that a scope inside the class declared as `own` sees from
@@ -966,6 +968,54 @@ fn bind_bases(
     Ok(bases)
 }
 
+/// The types visible in the body of class `declaration`, as a binding
+/// context records them: those of its scope, its own type parameters and
+/// typedefs, each after its declaration, and those of the classes it
+/// extends (IEEE 1800-2023 6.18, 8.13, 8.25). Of a class declared in
+/// another source, whose declarations this tree does not hold, the record
+/// has the types that source exports for it.
+fn class_type_declarations(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    declaration: &celox_sv_syntax::ClassDeclaration,
+    bases: &[String],
+) -> Converted<Arc<types::TypeDeclarations>> {
+    let native = tree.declarations();
+    let mut record = (*types::scope_type_declarations(tree)?).clone();
+    types::declare_class(native, declaration, true, &mut record);
+    let imported = scope::imported(tree);
+    let generics = bases
+        .iter()
+        .flat_map(|base| {
+            let lineage = lineage(session, base);
+            if lineage.is_empty() {
+                vec![base.clone()]
+            } else {
+                lineage
+                    .iter()
+                    .map(|specialization| specialization.generic.clone())
+                    .collect()
+            }
+        })
+        .collect::<Vec<_>>();
+    for generic in &generics {
+        match super::declaration(tree, session, generic) {
+            Some(base) => types::declare_class(native, base, false, &mut record),
+            None => {
+                for name in imported
+                    .class_member_types
+                    .get(generic)
+                    .into_iter()
+                    .flat_map(HashMap::keys)
+                {
+                    record.entry(name.clone()).or_insert(None);
+                }
+            }
+        }
+    }
+    Ok(Arc::new(record))
+}
+
 #[inline(never)]
 fn finish_specialization(
     tree: &AnalysisContext<'_>,
@@ -1024,6 +1074,7 @@ fn finish_specialization(
         }))
         .collect::<Vec<_>>();
     body.sort_by_key(|(start, _)| *start);
+    let declarations = class_type_declarations(tree, session, declaration, &bases)?;
     for (_, item) in body {
         match item {
             Ok(id) => {
@@ -1048,28 +1099,36 @@ fn finish_specialization(
                 // string values without an integral one it reads as their
                 // literals. A typedef that cannot be bound is left out; a
                 // use of it reports the type unknown.
+                // A name that no type visible in the class has is an error,
+                // also in a typedef no use binds (IEEE 1800-2023 6.18).
                 let mut context = PackedDimensions::new(HashMap::default(), &env, &aliases);
                 context.parameter_values = parameters.literals.clone().into();
                 context.constant_types = Arc::new(parameters.constant_types.clone());
-                let ty = type_binding::binding::bind_in(target, native, tree, session, &context)
-                    .ok()
-                    .flatten()
-                    .and_then(|ty| {
-                        // A typedef's unpacked dimensions may make it a
-                        // dynamic container (IEEE 1800-2023 7.5, 7.8, 7.10).
-                        let ty = match alias {
-                            Some(alias) => containers::with_dimensions(
-                                ty,
-                                &alias.dimensions,
-                                tree,
-                                session,
-                                &context,
-                            )
-                            .ok()?,
-                            None => ty,
-                        };
-                        type_parameters::resolve(&tree.functions, ty, &env)
-                    });
+                context.type_declarations = Some(declarations.clone());
+                let bound =
+                    match type_binding::binding::bind_in(target, native, tree, session, &context) {
+                        Ok(ty) => ty,
+                        Err(error @ AnalyzerError::UndeclaredIdentifier { .. }) => {
+                            return Err(error);
+                        }
+                        Err(_) => None,
+                    };
+                let ty = bound.and_then(|ty| {
+                    // A typedef's unpacked dimensions may make it a
+                    // dynamic container (IEEE 1800-2023 7.5, 7.8, 7.10).
+                    let ty = match alias {
+                        Some(alias) => containers::with_dimensions(
+                            ty,
+                            &alias.dimensions,
+                            tree,
+                            session,
+                            &context,
+                        )
+                        .ok()?,
+                        None => ty,
+                    };
+                    type_parameters::resolve(&tree.functions, ty, &env)
+                });
                 if let Some(mut ty) = ty {
                     let alias =
                         alias.map(|alias| instances::normalize_identifier(&alias.name.spelling));
@@ -1184,6 +1243,7 @@ fn finish_specialization(
             aliases,
             bases,
             arguments: parameters.arguments,
+            type_declarations: declarations,
         }),
     ));
     Ok(name)
@@ -1728,12 +1788,16 @@ pub(in crate::ast) fn spelling(ty: &Type) -> String {
 /// module name, and the default specialization of each parameterized
 /// interface class, which is checked even when nothing names it. A name
 /// inside a class is bound in each specialization of the class, until no
-/// new specialization appears.
+/// new specialization appears. The result is the first name that the scope's
+/// own class declarations or types name and no visible type has, which
+/// makes the scope illegal also where nothing uses the class (IEEE
+/// 1800-2023 6.18); a specialization that cannot be made otherwise reports
+/// why where it is used.
 pub(in crate::ast) fn collect(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     context: &PackedDimensions,
-) {
+) -> Option<AnalyzerError> {
     session.class_specializations_frozen = false;
     for (generic, arguments) in session.foreign_arguments.clone() {
         let pending = match prepare_bound(tree, session, &generic, arguments.clone(), context) {
@@ -1744,7 +1808,7 @@ pub(in crate::ast) fn collect(
             }
             Ok(Preparation::Deferred(error)) | Err(error) => {
                 session.foreign_error = Some(error);
-                return;
+                return None;
             }
         };
         session
@@ -1757,7 +1821,7 @@ pub(in crate::ast) fn collect(
             Ok(name) => session.foreign_names.push((generic, arguments, name)),
             Err(error) => {
                 session.foreign_error = Some(error);
-                return;
+                return None;
             }
         }
     }
@@ -2030,6 +2094,7 @@ pub(in crate::ast) fn collect(
     // specialization: each is made once, in the scope's context built once.
     let mut spelled = HashSet::<(String, String, String)>::default();
     let mut contexts = HashMap::<String, Option<PackedDimensions>>::default();
+    let mut undeclared = None;
     loop {
         let before = session.class_specializations.len();
         for (index, (scope, name, arguments, tokens)) in references.iter().enumerate() {
@@ -2043,9 +2108,13 @@ pub(in crate::ast) fn collect(
                                 None => Some(context),
                             };
                             // A specialization that cannot be made reports
-                            // why where it is used.
-                            if let Some(context) = context {
-                                let _ = specialize(tree, session, name, arguments, &context);
+                            // why where it is used, unless it names no
+                            // visible type.
+                            if let Some(context) = context
+                                && let Err(error @ AnalyzerError::UndeclaredIdentifier { .. }) =
+                                    specialize(tree, session, name, arguments, &context)
+                            {
+                                undeclared.get_or_insert(error);
                             }
                         }
                     }
@@ -2098,6 +2167,7 @@ pub(in crate::ast) fn collect(
             break;
         }
     }
+    undeclared
 }
 
 /// The source text of the parameter value assignment `arguments`.

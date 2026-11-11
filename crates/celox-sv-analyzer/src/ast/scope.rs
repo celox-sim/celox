@@ -24,6 +24,10 @@ pub(super) struct ScopeSymbols {
     pub parameter_values: HashMap<String, Expr>,
     pub parameters: Vec<Parameter>,
     pub type_aliases: TypeAliases,
+    /// The names of every type the scope declares, also those the binder
+    /// does not bind (yet), so that its importers tell a type that has no
+    /// binding from a name that no type has.
+    pub type_declarations: HashSet<String>,
     /// Bound type parameters, keyed by native declaration ownership.
     pub type_parameter_bindings: HashMap<celox_sv_syntax::ParameterId, Type>,
     pub pattern_parameter_bindings: HashMap<celox_sv_syntax::ParameterId, BoundPattern>,
@@ -165,6 +169,8 @@ impl ScopeSymbols {
         self.interface_declarations
             .extend(other.interface_declarations.iter().copied());
         extend_missing(&mut self.type_aliases, &other.type_aliases);
+        self.type_declarations
+            .extend(other.type_declarations.iter().cloned());
         extend_missing(
             &mut self.enum_constants.numbers,
             &other.enum_constants.numbers,
@@ -244,6 +250,9 @@ impl ScopeSymbols {
         self.const_env.extend(markers);
         alias_entry(&mut self.parameter_values, name, target);
         alias_entry(&mut self.type_aliases, name, target);
+        if self.type_declarations.contains(target) {
+            self.type_declarations.insert(name.to_string());
+        }
         alias_entry(&mut self.enum_constants.numbers, name, target);
         alias_entry(&mut self.enum_constants.exprs, name, target);
         alias_entry(&mut self.enum_constants.types, name, target);
@@ -315,6 +324,7 @@ impl ScopeSymbols {
         self.parameter_values.retain(|name, _| kept(name));
         self.parameters.retain(|parameter| kept(&parameter.name));
         self.type_aliases.retain(|name, _| kept(name));
+        self.type_declarations.retain(|name| kept(name));
         self.enum_constants.numbers.retain(|name, _| kept(name));
         self.enum_constants.exprs.retain(|name, _| kept(name));
         self.enum_constants.types.retain(|name, _| kept(name));
@@ -415,6 +425,7 @@ impl ScopeSymbols {
                 .iter()
                 .map(|(name, r#type)| (key(name), rename.r#type(r#type.clone())))
                 .collect(),
+            type_declarations: self.type_declarations.iter().map(key).collect(),
             enum_constants: EnumMemberConstants {
                 declarations: self
                     .enum_constants

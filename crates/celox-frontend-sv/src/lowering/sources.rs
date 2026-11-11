@@ -179,6 +179,9 @@ pub(super) fn analyze_sources_with_requests(
         None => sv::ParsedSource::analyze_packages_with_options(&parsed, None, analysis_options)?,
     };
     step("analyze_packages");
+    if let Some(error) = packages.compilation_unit_illegality() {
+        return Err(error.clone());
+    }
     packages.set_interface_plan(elaboration.clone());
     let packages = std::rc::Rc::new(packages);
     for (source, code, path) in &sources {

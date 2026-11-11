@@ -42,12 +42,15 @@ impl ScopeElaboration<'_> {
             return Err(AnalyzerError::Unsupported("ref port direction".to_string()));
         }
         // The static properties of each class specialization are variables
-        // of the module (IEEE 1800-2023 8.9, 8.25).
-        classes::specializations::collect(
+        // of the module (IEEE 1800-2023 8.9, 8.25). A class declaration
+        // that names no visible type is an error also when nothing uses it.
+        if let Some(error) = classes::specializations::collect(
             syntax_tree,
             session,
             &PackedDimensions::new(HashMap::default(), &self.const_env, &self.type_aliases),
-        );
+        ) {
+            return Err(error);
+        }
         self.signals =
             signals_from_scope(syntax_tree, session, &self.const_env, &self.type_aliases)?;
         self.signals.extend(
@@ -507,6 +510,10 @@ impl ScopeElaboration<'_> {
         self.packed_dimensions
             .bind_types(&mut session.types, &syntax_tree.functions);
         self.packed_dimensions.scope_types_complete = true;
+        // Every type visible in the scope, so that a use of a name no type
+        // has is an error (IEEE 1800-2023 6.18).
+        self.packed_dimensions.type_declarations =
+            Some(types::scope_type_declarations(syntax_tree)?);
         Ok(())
     }
 }
