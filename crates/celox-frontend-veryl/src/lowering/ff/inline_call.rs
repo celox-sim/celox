@@ -525,22 +525,22 @@ impl<'a> FfParser<'a> {
 
     fn take_symbolic_call_frames(&mut self) -> SymbolicCallFrames {
         SymbolicCallFrames {
-            args: std::mem::take(&mut self.function_arg_stack),
-            arg_values: std::mem::take(&mut self.function_arg_value_stack),
-            expression_values: std::mem::take(&mut self.function_expression_value_stack),
-            event_arg_states: std::mem::take(&mut self.function_event_arg_state_stack),
-            array_views: std::mem::take(&mut self.function_array_view_stack),
-            array_views_enabled: std::mem::take(&mut self.function_array_view_enabled_stack),
+            args: std::mem::take(&mut self.frames.function_arg_stack),
+            arg_values: std::mem::take(&mut self.frames.function_arg_value_stack),
+            expression_values: std::mem::take(&mut self.frames.function_expression_value_stack),
+            event_arg_states: std::mem::take(&mut self.frames.function_event_arg_state_stack),
+            array_views: std::mem::take(&mut self.frames.function_array_view_stack),
+            array_views_enabled: std::mem::take(&mut self.frames.function_array_view_enabled_stack),
         }
     }
 
     fn restore_symbolic_call_frames(&mut self, frames: SymbolicCallFrames) {
-        self.function_arg_stack = frames.args;
-        self.function_arg_value_stack = frames.arg_values;
-        self.function_expression_value_stack = frames.expression_values;
-        self.function_event_arg_state_stack = frames.event_arg_states;
-        self.function_array_view_stack = frames.array_views;
-        self.function_array_view_enabled_stack = frames.array_views_enabled;
+        self.frames.function_arg_stack = frames.args;
+        self.frames.function_arg_value_stack = frames.arg_values;
+        self.frames.function_expression_value_stack = frames.expression_values;
+        self.frames.function_event_arg_state_stack = frames.event_arg_states;
+        self.frames.function_array_view_stack = frames.array_views;
+        self.frames.function_array_view_enabled_stack = frames.array_views_enabled;
     }
 }
 
