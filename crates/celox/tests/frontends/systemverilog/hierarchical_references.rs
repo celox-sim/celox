@@ -66,7 +66,7 @@ sv_backends! {
     }
 }
 
-fn displayed(source: &str) -> Vec<String> {
+pub(super) fn displayed(source: &str) -> Vec<String> {
     let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("hier.sv"))], "Top")
         .build_cranelift()
         .unwrap();
