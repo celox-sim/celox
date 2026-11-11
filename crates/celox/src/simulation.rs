@@ -436,9 +436,8 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
         let slots = self.handle_slots();
         self.heap.process_roots.clear();
         for (signal, (value, _)) in values {
-            for &(offset, kind) in slots.iter().filter(|&&(offset, _)| {
-                offset >= signal.offset && offset < signal.offset + signal.width.div_ceil(8)
-            }) {
+            let end = signal.offset + signal.width.div_ceil(8);
+            for &(offset, kind) in slots_within(&slots, signal.offset, end) {
                 let bytes = (value >> ((offset - signal.offset) * 8)).to_bytes_le();
                 let mut raw = [0; celox_heap::HANDLE_BYTES];
                 let count = bytes.len().min(raw.len());
@@ -1730,5 +1729,56 @@ impl Simulation<crate::backend::TieredBackend> {
     /// Counts for incremental JIT execution, or `None` for whole-image tiering.
     pub fn hotspot_stats(&self) -> Option<crate::backend::HotspotStats> {
         self.simulator.hotspot_stats()
+    }
+}
+
+/// The handle slots of `slots`, which are sorted by offset, whose offsets lie
+/// in `start..end`: a range of them, found by bisection rather than by a scan
+/// of every slot for every value.
+fn slots_within(
+    slots: &[(usize, celox_heap::HandleKind)],
+    start: usize,
+    end: usize,
+) -> &[(usize, celox_heap::HandleKind)] {
+    let first = slots.partition_point(|&(offset, _)| offset < start);
+    let last = slots.partition_point(|&(offset, _)| offset < end);
+    &slots[first..last.max(first)]
+}
+
+#[cfg(test)]
+mod slots_within_tests {
+    use celox_heap::HandleKind;
+
+    #[test]
+    fn slots_within_are_those_a_scan_finds() {
+        // Sorted, gapped and adjacent offsets of both kinds; ranges inside,
+        // across, before, after and between them, and empty ones.
+        let slots: Vec<(usize, HandleKind)> = [0, 8, 16, 40, 48, 49, 100, 108]
+            .into_iter()
+            .enumerate()
+            .map(|(index, offset)| {
+                let kind = if index % 3 == 0 {
+                    HandleKind::String
+                } else {
+                    HandleKind::Object
+                };
+                (offset, kind)
+            })
+            .collect();
+        for start in 0..120 {
+            for end in 0..120 {
+                let scanned: Vec<_> = slots
+                    .iter()
+                    .filter(|&&(offset, _)| offset >= start && offset < end)
+                    .copied()
+                    .collect();
+                assert_eq!(
+                    super::slots_within(&slots, start, end),
+                    &scanned[..],
+                    "{start}..{end}"
+                );
+            }
+        }
+        assert!(super::slots_within(&[], 0, 8).is_empty());
     }
 }
