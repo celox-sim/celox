@@ -452,3 +452,64 @@ pub(super) fn lower_runtime_event_write(
         size: OpSize::S64,
     });
 }
+
+/// Lower `CombCaptureEvent`: end `mblock` with a branch on the site's enable
+/// flag to a new block that writes the event, and return the new block in
+/// which lowering continues.
+pub(super) fn lower_comb_capture_event(
+    ctx: &mut ISelContext,
+    blocks: &mut Vec<MBlock>,
+    mut mblock: MBlock,
+    next_extra_block_id: &mut usize,
+    site_id: &u32,
+    args: &[RegisterId],
+    fatal_error_code: &Option<i64>,
+    consume_enabled: &bool,
+) -> MBlock {
+    let (event_ptr, enabled) =
+        load_runtime_event_ptr_and_comb_capture_enabled(ctx, &mut mblock, *site_id);
+    let write_block_id = BlockId(*next_extra_block_id as u32);
+    *next_extra_block_id += 1;
+    let cont_block_id = BlockId(*next_extra_block_id as u32);
+    *next_extra_block_id += 1;
+
+    mblock.push(MInst::Branch {
+        cond: enabled,
+        true_bb: write_block_id,
+        false_bb: cont_block_id,
+    });
+    blocks.push(mblock);
+
+    let mut write_block = MBlock::new(write_block_id);
+    lower_runtime_event_write(ctx, &mut write_block, event_ptr, *site_id, args);
+    if *consume_enabled {
+        let enabled_ptr = ctx.alloc_vreg(SpillDesc::transient());
+        write_block.push(MInst::Load {
+            dst: enabled_ptr,
+            base: BaseReg::SimState,
+            offset: celox_state_layout::STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET as i32,
+            size: OpSize::S64,
+        });
+        let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+        write_block.push(MInst::LoadImm {
+            dst: zero,
+            value: 0,
+        });
+        write_block.push(MInst::StorePtr {
+            ptr: enabled_ptr,
+            offset: *site_id as i32,
+            src: zero,
+            size: OpSize::S8,
+        });
+    }
+    if let Some(code) = fatal_error_code {
+        write_block.push(MInst::ReturnError { code: *code });
+    } else {
+        write_block.push(MInst::Jump {
+            target: cont_block_id,
+        });
+    }
+    blocks.push(write_block);
+
+    MBlock::new(cont_block_id)
+}
