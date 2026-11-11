@@ -10,12 +10,12 @@
   "groups": {
     "imported": {
       "2state": {
-        "passed": 2680,
-        "failed": 762,
+        "passed": 2717,
+        "failed": 725,
         "skipped": 0,
         "executed": 3442,
         "upstream_input_issues": 0,
-        "pass_percent": 77.86,
+        "pass_percent": 78.94,
         "tags_passed": 4,
         "tags_tested": 8,
         "skipped_by_tag": {},
@@ -37,7 +37,7 @@
             "executed": 144
           },
           "ivtest": {
-            "passed": 1870,
+            "passed": 1878,
             "executed": 2546
           },
           "projf-explore": {
@@ -49,39 +49,39 @@
             "executed": 127
           },
           "yosys": {
-            "passed": 147,
+            "passed": 176,
             "executed": 216
           }
         },
         "by_execution_mode": {
           "elaboration": {
-            "pass": 497,
-            "fail": 79
+            "pass": 526,
+            "fail": 50
           },
           "parsing": {
             "pass": 313,
             "fail": 7
           },
           "simulation": {
-            "fail": 676,
-            "pass": 1870
+            "fail": 668,
+            "pass": 1878
           }
         },
         "by_failure_category": {
-          "compile_error": 88,
+          "compile_error": 90,
           "timeout": 1,
           "unclassified": 41,
           "unexpected_success": 72,
-          "unsupported": 560
+          "unsupported": 521
         }
       },
       "4state": {
-        "passed": 2680,
-        "failed": 762,
+        "passed": 2717,
+        "failed": 725,
         "skipped": 0,
         "executed": 3442,
         "upstream_input_issues": 0,
-        "pass_percent": 77.86,
+        "pass_percent": 78.94,
         "tags_passed": 4,
         "tags_tested": 8,
         "skipped_by_tag": {},
@@ -103,7 +103,7 @@
             "executed": 144
           },
           "ivtest": {
-            "passed": 1870,
+            "passed": 1878,
             "executed": 2546
           },
           "projf-explore": {
@@ -115,37 +115,37 @@
             "executed": 127
           },
           "yosys": {
-            "passed": 147,
+            "passed": 176,
             "executed": 216
           }
         },
         "by_execution_mode": {
           "elaboration": {
-            "pass": 497,
-            "fail": 79
+            "pass": 526,
+            "fail": 50
           },
           "parsing": {
             "pass": 313,
             "fail": 7
           },
           "simulation": {
-            "fail": 676,
-            "pass": 1870
+            "fail": 668,
+            "pass": 1878
           }
         },
         "by_failure_category": {
-          "compile_error": 88,
+          "compile_error": 90,
           "timeout": 1,
           "unclassified": 41,
           "unexpected_success": 72,
-          "unsupported": 560
+          "unsupported": 521
         }
       }
     }
   },
   "cases": [],
   "driver_profile": "release",
-  "measured_at": "2026-11-10T13:09:39.433219+00:00",
-  "celox_revision": "14139d5fefd4fe5a53701fdda0c3127e3e0b5055",
-  "run_url": "https://github.com/celox-sim/celox/actions/runs/42818653534"
+  "measured_at": "2026-11-11T12:59:06.795939+00:00",
+  "celox_revision": "5db2026321494ecf1cfbcb3e965fbf1c23498696",
+  "run_url": "https://github.com/celox-sim/celox/actions/runs/43016209478"
 }
