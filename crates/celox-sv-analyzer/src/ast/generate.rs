@@ -1262,6 +1262,7 @@ impl<'a> Elaborator<'a, '_> {
         if let Some((genvar, value)) = index {
             declared.insert(genvar.to_string());
             scope.constant_types.remove(genvar);
+            forget_variable(&mut scope.env, genvar);
             // The implicit localparam in each loop body (IEEE 1800-2023 27.4)
             // must override inherited literals during expression substitution.
             // Mark it as a bounded value parameter for queries such as $isunbounded.
@@ -1331,6 +1332,7 @@ impl<'a> Elaborator<'a, '_> {
                         "duplicate generate-local declaration `{name}`"
                     )));
                 }
+                forget_variable(&mut scope.env, &name);
                 let ty = aliases
                     .get(&name)
                     .ok_or_else(|| {
@@ -1370,6 +1372,7 @@ impl<'a> Elaborator<'a, '_> {
                         "duplicate generate-local declaration `{name}`"
                     )));
                 }
+                forget_variable(&mut scope.env, &name);
                 scope.env.insert(name.clone(), number);
                 insert_parameter_type_markers(&mut scope.env, &name, enums.types[&name]);
                 scope.env.insert(enum_marker(&name), 1);
@@ -1438,6 +1441,21 @@ impl<'a> Elaborator<'a, '_> {
             }
         }
         Ok(scope)
+    }
+}
+
+/// Forget the markers of an outer variable `name` that a declaration of the
+/// block hides: a query of the name reads the nearer declaration (IEEE
+/// 1800-2023 23.9).
+fn forget_variable(env: &mut SharedEnv, name: &str) {
+    for key in [
+        variable_bits_marker(name),
+        variable_size_marker(name),
+        variable_signed_marker(name),
+        variable_unpacked_dimensions_marker(name),
+        variable_dimensions_marker(name),
+    ] {
+        env.remove(&key);
     }
 }
 

@@ -106,6 +106,61 @@ fn bound_type_operand(
     }
 }
 
+/// The declared shape of operand `root` of a data query when it names a
+/// variable of the generate block around it that the block has already
+/// declared in `context` (its markers say so) and nothing nearer replaces
+/// ([`discovery::nearest_block_variable`]). The shape is that of the
+/// declaration's type, bound in the type table in the environment of the
+/// block, so the query reads the declaration without discovering the other
+/// declarations of the scope. The markers keep only the variable's ranges,
+/// not its type.
+fn block_variable_operand(
+    root: ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    context: &PackedDimensions,
+) -> Converted<Option<(String, VariableDimensions)>> {
+    let native = tree.declarations();
+    let root = expression_binding::ungroup(root, native);
+    let ExprKind::Name(name) = &native.expression(root).kind else {
+        return Ok(None);
+    };
+    let name = instances::normalize_identifier(&name.spelling);
+    if context.class_scope.is_some()
+        || context.class_base.is_some()
+        || !context
+            .const_env
+            .contains_key(&variable_dimensions_marker(&name))
+    {
+        return Ok(None);
+    }
+    let Some(declaration) =
+        discovery::nearest_block_variable(tree, native.expression(root).tokens, &name)?
+    else {
+        return Ok(None);
+    };
+    let mut signals = Vec::new();
+    signals_from_body_item(
+        declaration,
+        tree,
+        session,
+        &context.type_aliases,
+        &context.const_env,
+        Some(&name),
+        &mut signals,
+    )?;
+    let Some(signal) = signals.iter().find(|signal| signal.name() == name) else {
+        return Ok(None);
+    };
+    let shape = procedural::bound_dimensions_from_type(
+        signal.r#type(),
+        &tree.functions,
+        &mut session.types,
+        &context.const_env,
+    );
+    Ok(Some((name, shape)))
+}
+
 /// The context that the operand `root` of a query is bound in: `context`
 /// with the declarations of the scope that the operand may name.
 pub(in crate::ast) fn query_context_for_operand(
@@ -194,14 +249,23 @@ pub(in crate::ast) fn query_value(
         return Err(unsupported(format!("arguments of `{}`", name.spelling)));
     }
     let argument = arguments[0].value.unwrap();
-    // The dimension number is bound in the context of the operand.
-    let context = operand_context(
-        argument,
-        arguments.get(1).and_then(|argument| argument.value),
-        tree,
-        session,
-        context,
-    )?;
+    let dimension = arguments.get(1).and_then(|argument| argument.value);
+    // The dimension number is bound in the context of the operand. A
+    // literal one names nothing that the scope declares.
+    let declared = if !context.scope_types_complete
+        && dimension.is_none_or(|dimension| literal_operand(dimension, native))
+    {
+        block_variable_operand(argument, tree, session, context)?
+    } else {
+        None
+    };
+    let context = if let Some((name, shape)) = declared {
+        let mut query = query_context(context);
+        query.insert(name, shape);
+        query
+    } else {
+        operand_context(argument, dimension, tree, session, context)?
+    };
     reject_unbounded(argument, function, tree, &context)?;
     if function == SystemFunction::Size
         && let Some(value) = interface_array_size(
