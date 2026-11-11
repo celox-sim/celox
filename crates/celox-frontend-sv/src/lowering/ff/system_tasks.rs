@@ -319,6 +319,12 @@ impl Ff<'_, '_> {
             return self.file_task(task, args);
         }
         if let sv::ir::SystemTask::Readmem(format) = task {
+            // A file whose name is known only when the task executes is
+            // read then, by the host.
+            if !constant_file_name(args.first()) {
+                self.readmem_request(format, args)?;
+                return Ok(true);
+            }
             let mut addresses = [None, None];
             for (slot, arg) in addresses.iter_mut().zip(args.iter().skip(2)) {
                 let sv::ir::SystemTaskArg::Expr(expr) = arg else {
