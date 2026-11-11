@@ -1,0 +1,316 @@
+//! Analysis of the modules of one source.
+
+use super::*;
+
+impl Source {
+    pub(crate) fn from_syntax(syntax_tree: &SyntaxTree) -> Result<Self, AnalyzerError> {
+        Self::from_syntax_with_module_parameter_overrides(syntax_tree, "", &ConstEnv::default())
+    }
+
+    pub(crate) fn from_syntax_with_module_parameter_overrides(
+        syntax_tree: &SyntaxTree,
+        module_name: &str,
+        parameter_overrides: &ConstEnv,
+    ) -> Result<Self, AnalyzerError> {
+        let packages = packages::Packages::analyze(&[(syntax_tree, Path::new(""))])?;
+        let session = &mut Session::with_packages(&packages, &mut packages.design());
+        let context = AnalysisContext::unspecialized(syntax_tree);
+        let syntax_tree = &context;
+        let parameter_overrides = parameter_overrides
+            .iter()
+            .map(|(name, value)| (name.clone(), const_expr_from_i128(*value)))
+            .collect();
+        let interfaces = Self::module_interfaces_from_syntax(syntax_tree)?;
+        let timed = AnalysisContext {
+            timescale: timescales::for_tree(packages.timescales.clone(), syntax_tree)?,
+            ..syntax_tree.clone()
+        };
+        let syntax_tree = &timed;
+        let mut modules = Vec::new();
+        for handle in syntax_tree.root_scopes()? {
+            let scoped = syntax_tree.scoped(handle)?;
+            let scoped_context = timed.child(&scoped, &parameter_overrides);
+            let syntax_tree = &scoped_context;
+            let unit = syntax_tree.root_unit()?;
+            if !unit.kind.is_module_like() {
+                continue;
+            }
+            match unit.port_style {
+                celox_sv_syntax::PortStyle::Ansi => {
+                    let imported = imports::imported_symbols(
+                        syntax_tree,
+                        &packages,
+                        packages.unit(Path::new("")),
+                    )?;
+                    modules.push(
+                        Module::from_scope_with_parameter_overrides(
+                            syntax_tree,
+                            session,
+                            module_name,
+                            &parameter_overrides,
+                            &InterfaceLookup {
+                                local: &interfaces,
+                                extra: &ModuleInterfaces::default(),
+                            },
+                            Arc::new(imported),
+                        )
+                        .map_err(|error| error.with_warnings(session.diagnostics.clone()))?,
+                    );
+                }
+                celox_sv_syntax::PortStyle::NonAnsi => {
+                    return Err(AnalyzerError::Unsupported(
+                        "non-ANSI port expressions".to_string(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        Ok(Self {
+            modules,
+            diagnostics: session.diagnostics.clone(),
+        })
+    }
+
+    pub(crate) fn from_syntax_module_with_parameter_overrides(
+        syntax_tree: &SyntaxTree,
+        module_name: &str,
+        parameter_overrides: &ConstEnv,
+    ) -> Result<Self, AnalyzerError> {
+        let parameter_overrides = parameter_overrides
+            .iter()
+            .map(|(name, value)| (name.clone(), const_expr_from_i128(*value)))
+            .collect();
+        Self::from_syntax_module_with_parameter_expr_overrides(
+            syntax_tree,
+            module_name,
+            &parameter_overrides,
+            &ModuleInterfaces::default(),
+        )
+    }
+
+    /// `extra_interfaces` describes modules declared in other sources; the
+    /// modules of `syntax_tree` are always known.
+    pub(crate) fn from_syntax_module_with_parameter_expr_overrides(
+        syntax_tree: &SyntaxTree,
+        module_name: &str,
+        parameter_overrides: &HashMap<String, ConstExpr>,
+        extra_interfaces: &ModuleInterfaces,
+    ) -> Result<Self, AnalyzerError> {
+        let index = module_index::ModuleIndex::new(syntax_tree)?;
+        let packages = packages::Packages::analyze(&[(syntax_tree, Path::new(""))])?;
+        Self::from_indexed_syntax_module(
+            syntax_tree,
+            Path::new(""),
+            &index,
+            module_name,
+            ModuleParameterBindings {
+                declarations_only: false,
+                values: parameter_overrides,
+                types: &[],
+                patterns: &[],
+                hierarchical: &[],
+            },
+            extra_interfaces,
+            &packages,
+            &mut packages.design(),
+        )
+    }
+
+    /// `packages` are the packages the module may use, from any source, and
+    /// the compilation units of the sources; `path` names the source of
+    /// `syntax_tree`.
+    pub(crate) fn from_indexed_syntax_module(
+        syntax_tree: &SyntaxTree,
+        path: &Path,
+        index: &module_index::ModuleIndex,
+        module_name: &str,
+        bindings: ModuleParameterBindings<'_>,
+        extra_interfaces: &ModuleInterfaces,
+        packages: &packages::Packages,
+        design: &mut packages::Design,
+    ) -> Result<Self, AnalyzerError> {
+        let mut session = Session::with_packages(packages, design);
+        let source = Self::from_indexed_syntax_module_in(
+            syntax_tree,
+            path,
+            index,
+            module_name,
+            bindings,
+            extra_interfaces,
+            packages,
+            &mut session,
+        );
+        session.restore(design);
+        source
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn from_indexed_syntax_module_in(
+        syntax_tree: &SyntaxTree,
+        path: &Path,
+        index: &module_index::ModuleIndex,
+        module_name: &str,
+        bindings: ModuleParameterBindings<'_>,
+        extra_interfaces: &ModuleInterfaces,
+        packages: &packages::Packages,
+        session: &mut Session,
+    ) -> Result<Self, AnalyzerError> {
+        let context = AnalysisContext::unspecialized(syntax_tree);
+        let syntax_tree = &context;
+        let timed = AnalysisContext {
+            timescale: timescales::for_tree(packages.timescales.clone(), syntax_tree)?,
+            ..syntax_tree.clone()
+        };
+        let interfaces = InterfaceLookup {
+            local: &index.interfaces,
+            extra: extra_interfaces,
+        };
+        let mut modules = Vec::new();
+        let interface_plan = packages.interface_plan.modules.get(module_name);
+        let original_name = interface_plan.map_or(module_name, |plan| plan.original.as_str());
+        for scope_tree in index.scopes(original_name) {
+            let scope_context = timed.child(scope_tree, bindings.values);
+            let syntax_tree = &scope_context;
+            match syntax_tree.root_unit()?.port_style {
+                celox_sv_syntax::PortStyle::Ansi => {
+                    let mut imported =
+                        imports::imported_symbols(syntax_tree, packages, packages.unit(path))?;
+                    imported.declarations_only = bindings.declarations_only;
+                    let own_types = bindings
+                        .types
+                        .iter()
+                        .filter(|(name, _)| {
+                            !interface_plan.is_some_and(|plan| {
+                                plan.ports
+                                    .iter()
+                                    .any(|port| name.starts_with(&format!("{}$", port.name)))
+                            })
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    imported.type_parameter_bindings =
+                        type_parameters::bind(syntax_tree, &own_types)?;
+                    imported.pattern_parameter_bindings =
+                        type_parameters::bind_patterns(syntax_tree, bindings.patterns)?;
+                    // A hierarchical name reads and writes the local signal
+                    // bound to the other instance's object.
+                    for signal in bindings.hierarchical {
+                        for path in &signal.paths {
+                            imported
+                                .interface_members
+                                .insert(path.clone(), signal.name.clone());
+                        }
+                        if signal.local {
+                            imported.local_aliases.extend(signal.paths.iter().cloned());
+                            continue;
+                        }
+                        imported.state_signals.push(Signal {
+                            is_const: false,
+                            name: signal.name.clone(),
+                            r#type: signal.r#type.clone(),
+                            is_net: signal.is_net,
+                            unresolved_net: false,
+                            net_drive: NetDrive::None,
+                            package_variable: None,
+                            hierarchical: signal.paths.first().cloned(),
+                        });
+                    }
+                    if let Some(mut module) = interface_binding::analyze_module(
+                        syntax_tree,
+                        session,
+                        path,
+                        packages,
+                        interface_binding::Bindings {
+                            values: bindings.values,
+                            types: bindings.types,
+                            export_symbols: false,
+                            plan: interface_plan,
+                        },
+                        &interfaces,
+                        imported.clone(),
+                    )
+                    .map_err(|error| error.with_warnings(session.diagnostics.clone()))?
+                    {
+                        module.name = module_name.to_string();
+                        modules.push(module);
+                        continue;
+                    }
+                    modules.push(
+                        Module::from_scope_with_parameter_overrides(
+                            syntax_tree,
+                            session,
+                            module_name,
+                            bindings.values,
+                            &interfaces,
+                            Arc::new(imported),
+                        )
+                        .map_err(|error| error.with_warnings(session.diagnostics.clone()))?,
+                    );
+                }
+                celox_sv_syntax::PortStyle::NonAnsi if syntax_tree.root_name()? == module_name => {
+                    return Err(AnalyzerError::Unsupported(
+                        "non-ANSI port expressions".to_string(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        Ok(Self {
+            modules,
+            diagnostics: session.diagnostics.clone(),
+        })
+    }
+
+    pub(crate) fn module_names_from_syntax(
+        syntax_tree: &SyntaxTree,
+    ) -> Result<Vec<String>, AnalyzerError> {
+        let mut names = Vec::new();
+        for handle in syntax_tree.root_scopes()? {
+            let scoped = syntax_tree.scoped(handle)?;
+            let syntax_tree = &scoped;
+            let unit = syntax_tree.root_unit()?;
+            if unit.kind.is_module_like() && unit.port_style != celox_sv_syntax::PortStyle::Wildcard
+            {
+                names.push(syntax_tree.root_name()?);
+            }
+        }
+        Ok(names)
+    }
+
+    /// The positional interface of every ANSI module declared in `syntax_tree`.
+    pub(crate) fn module_interfaces_from_syntax(
+        syntax_tree: &SyntaxTree,
+    ) -> Result<ModuleInterfaces, AnalyzerError> {
+        let mut interfaces = ModuleInterfaces::default();
+        for handle in syntax_tree.root_scopes()? {
+            let scoped = syntax_tree.scoped(handle)?;
+            let syntax_tree = &scoped;
+            let unit = syntax_tree.root_unit()?;
+            if unit.kind.is_module_like() && unit.port_style == celox_sv_syntax::PortStyle::Ansi {
+                let name = syntax_tree.root_name()?;
+                let context = AnalysisContext::unspecialized(syntax_tree);
+                interfaces.insert(name, module_interface_from_scope(&context)?);
+            }
+        }
+        Ok(interfaces)
+    }
+
+    pub fn modules(&self) -> &[Module] {
+        &self.modules
+    }
+
+    /// The modules, to analyze them from their own bodies.
+    pub(crate) fn into_modules(self) -> Vec<Module> {
+        self.modules
+    }
+
+    pub(crate) fn warnings(&self) -> Vec<warnings::AnalyzerWarning> {
+        let mut warnings = self.diagnostics.clone();
+        // A program's functions run in its threads, where `$exit` applies.
+        for module in self.modules.iter().filter(|module| !module.program) {
+            warnings::append(&mut warnings, module.constant_functions.warnings());
+        }
+        warnings
+    }
+}
