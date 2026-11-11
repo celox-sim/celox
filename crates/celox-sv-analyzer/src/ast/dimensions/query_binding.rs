@@ -1008,6 +1008,19 @@ pub(in crate::ast) fn shape(
                         expression,
                         dimension,
                     } => {
+                        // An element of a dynamic array, a queue or an
+                        // associative array has the element type of the
+                        // container, whatever the index, which a query
+                        // does not evaluate (IEEE 1800-2023 20.6.2, 20.7).
+                        if matches!(
+                            dimension.kind,
+                            DimensionKind::Index(_) | DimensionKind::Queue(None)
+                        ) && let Some(container) =
+                            containers::native_type(*expression, native, tree, session, context)?
+                        {
+                            values.push(procedural::dimensions_from_type(&container.element));
+                            continue;
+                        }
                         match dimension.kind {
                             DimensionKind::Index(index) => jobs.push(Job::Index(index)),
                             DimensionKind::Range { left, right } => {

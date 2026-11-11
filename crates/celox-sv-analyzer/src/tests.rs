@@ -8347,7 +8347,6 @@ fn wide_container_elements_reject_whole_container_operations() {
             "ix = q.unique_index();",
             "elements wider than 64 bits requires a with",
         ),
-        ("ix[0] = $bits(q[0][99]);", "query selection"),
         ("q[0][3] = 1'b1;", "requires a compatible container"),
     ] {
         let source = format!(
