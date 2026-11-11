@@ -191,6 +191,67 @@ fn names_resolve_below_instances_with_interface_ports() {
     assert_eq!(displayed(source), ["4 1"]);
 }
 
+// An upward name finds its scope from instances at different depths (IEEE
+// 1800-2023 23.8): when that scope is one instance of the design, every
+// instance of the module denotes the same object.
+#[test]
+fn upward_names_from_instances_at_different_depths_denote_one_object() {
+    let design = |cores: &str| {
+        format!(
+            r#"
+            `timescale 1ns/1ns
+            module Probe(output logic [7:0] value, output logic odd);
+                assign value = Core.counter;
+                assign odd = Core.counter[0];
+            endmodule
+            module Leaf(output logic [7:0] value);
+                logic odd;
+                Probe probe(value, odd);
+            endmodule
+            module Mid(output logic [7:0] near, far);
+                logic odd;
+                Probe probe(near, odd);
+                Leaf leaf(far);
+            endmodule
+            module Core(input logic clk, output logic [23:0] seen);
+                logic [7:0] counter = 8'd5;
+                logic [7:0] direct, near, far, below;
+                logic odd;
+                always @(posedge clk) counter <= counter + 8'd3;
+                Probe probe(direct, odd);
+                Mid mid(near, far);
+                Leaf leaf(below);
+                assign seen = {{direct, near, far}} ^ {{16'd0, below}} ^ {{23'd0, odd}};
+            endmodule
+            module Top;
+                logic clk = 0;
+                logic [23:0] seen{cores};
+                initial begin
+                    #1 $display("%h", seen);
+                    clk = 1;
+                    #1 $display("%h", seen);
+                end
+            endmodule
+        "#
+        )
+    };
+    // 5 and then 8 in each of the three bytes; the fourth probe and the
+    // parity cancel in the low byte but for the parity bit.
+    assert_eq!(
+        displayed(&design("; Core core(clk, seen)")),
+        ["050501", "080800"]
+    );
+    // From two cores the name denotes two objects, one for each.
+    let error = build_error(&design(", other; Core a(clk, seen), b(clk, other)"));
+    assert!(
+        error.contains(
+            "upward hierarchical reference `Core.counter` that denotes different objects in \
+             instances of module"
+        ),
+        "{error}"
+    );
+}
+
 // A forced signal that is the target of a hierarchical name stays forceable
 // in the specialization the name resolution makes.
 #[test]
