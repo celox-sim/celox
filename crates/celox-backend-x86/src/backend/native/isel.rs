@@ -7,7 +7,8 @@
 //! Instruction dispatch lives in `instruction`, with one function per instruction
 //! kind in `mux`, `load`, `store`, `commit`, `binary`, `unary`, `concat`, and
 //! `slice`; operand lowering is grouped into `memory`, `concat`, `wide`,
-//! `wide_binary`, `wide_unary`, `bit_count`, and `four_state`.
+//! `wide_binary`, `wide_binary_mask`, `wide_unary`, `bit_count`, and
+//! `four_state`.
 //! Runtime event writes and capture notifications live in `runtime_events`.
 
 mod binary;
@@ -34,14 +35,15 @@ mod transpose;
 mod unary;
 mod wide;
 mod wide_binary;
+mod wide_binary_mask;
 mod wide_unary;
 
 use bit_count::{lower_narrow_bit_count, lower_wide_bit_count};
 use concat::{lower_flat_concat_to_chunks, match_guarded_cmp_select_cond};
 use four_state::{
     finish_shift_value, get_wide_mask_chunks, lower_binary_mask, lower_four_state_mux_chunk,
-    lower_mux_condition_state, lower_slice_mask, lower_unary_mask, lower_wide_binary_mask,
-    lower_wide_to_two_state, lower_wide_unary_mask, normalize_wide_value,
+    lower_mux_condition_state, lower_slice_mask, lower_unary_mask, lower_wide_to_two_state,
+    lower_wide_unary_mask, normalize_wide_value,
 };
 use instruction::lower_instruction;
 use memory::{
@@ -60,6 +62,7 @@ use runtime_events::{
 };
 use wide::{ShiftDir, lower_wide_runtime_shift_chunks, wide_reduce_or};
 use wide_binary::lower_wide_binary;
+use wide_binary_mask::lower_wide_binary_mask;
 use wide_unary::{lower_planes, lower_wide_extract, lower_wide_unary};
 
 use super::mir::*;
