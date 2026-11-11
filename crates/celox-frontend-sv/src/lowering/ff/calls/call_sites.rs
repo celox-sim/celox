@@ -142,11 +142,11 @@ impl Ff<'_, '_> {
             // subroutines, which the process does not own, and none that
             // assembly instruments, which it does in the process's own
             // stores only (comb-observer captures).
-            let persistent = self.m.static_storage();
+            self.m.check_storage_index();
             if touched.is_some_and(|(_, writes)| {
                 writes
                     .iter()
-                    .any(|id| !persistent.contains(id) || self.m.is_observed(*id))
+                    .any(|id| !self.m.is_static_storage(*id) || self.m.is_observed(*id))
             }) {
                 self.record_outcome(
                     name,

@@ -241,7 +241,7 @@ impl Ff<'_, '_> {
                     self.element_widths.insert(stable(copy), width);
                     self.element_widths.insert(working(copy), width);
                 }
-                self.m.name_to_id.insert(name.clone(), copy);
+                self.m.bind_name(name.clone(), copy);
                 self.m
                     .activation_copies
                     .push((name.clone(), original, copy));
@@ -477,7 +477,7 @@ impl Ff<'_, '_> {
                 // and writes are those of the actual, also across suspensions of a
                 // task and through any other name of it (IEEE 1800-2023 13.5.2).
                 for (formal, _, target) in &references {
-                    self.m.name_to_id.insert(formal.clone(), *target);
+                    self.m.bind_name(formal.clone(), *target);
                 }
                 if let Some(return_var) = &subroutine.return_var {
                     let id = self
@@ -525,7 +525,7 @@ impl Ff<'_, '_> {
                 );
                 self.scope.functions.pop();
                 for (formal, original, _) in references {
-                    self.m.name_to_id.insert(formal, original);
+                    self.m.bind_name(formal, original);
                 }
                 if falls? {
                     self.jump(return_block);
@@ -565,7 +565,7 @@ impl Ff<'_, '_> {
             }),
         };
         for (name, original) in activation {
-            self.m.name_to_id.insert(name, original);
+            self.m.bind_name(name, original);
         }
         self.m.activation_copies.truncate(copies_before);
         Ok(result)

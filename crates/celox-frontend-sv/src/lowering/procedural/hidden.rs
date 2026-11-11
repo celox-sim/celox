@@ -120,7 +120,7 @@ impl ProcModule<'_> {
                 activation_scratch: false,
             },
         );
-        self.name_to_id.insert(name, id);
+        self.bind_name(name, id);
         self.created.push(id);
         id
     }
@@ -175,7 +175,7 @@ impl ProcModule<'_> {
         }
         let shadow = next_var_id(&mut self.next_id);
         self.variables.insert(shadow, variable);
-        self.name_to_id.insert(name.clone(), shadow);
+        self.bind_name(name.clone(), shadow);
         self.created.push(shadow);
         (shadow, name)
     }
@@ -254,7 +254,7 @@ impl ProcModule<'_> {
                 ..variable
             },
         );
-        self.name_to_id.insert(name.clone(), id);
+        self.bind_name(name.clone(), id);
         (id, name)
     }
 
