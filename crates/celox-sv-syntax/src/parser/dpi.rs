@@ -126,9 +126,6 @@ impl Parser<'_> {
             }
         }
         self.expect(";")?;
-        if self.dpi_declarations.len() >= 1_000_000 {
-            return Err(self.unsupported("native DPI arena exceeds one million declarations"));
-        }
         let id = DpiId(self.dpi_declarations.len());
         self.dpi_declarations.push(DpiDeclaration {
             import,

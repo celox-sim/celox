@@ -377,6 +377,21 @@ fn deep_and_long_expressions_parse_clone_and_drop_on_the_default_stack() {
     assert!(Declarations::parse(&invalid, Path::new("deep-invalid.sv")).is_err());
 }
 
+// Arenas grow with the source: a compilation unit of a large design holds
+// millions of expression nodes, and ids past any fixed count stay valid.
+#[test]
+fn expression_arena_grows_with_the_source() {
+    let terms = 600_000;
+    let syntax = parse(&format!(
+        "module M; int x; initial x = {}; initial x = 42; endmodule",
+        vec!["1"; terms].join("+")
+    ));
+    assert!(syntax.expressions.len() > 1_000_000);
+    let last = ExprId(syntax.expressions.len() - 1);
+    let range = syntax.expression(last).tokens;
+    assert!(range.start < range.end);
+}
+
 #[test]
 fn mintypmax_is_structural_and_keeps_semantic_rejection_downstream() {
     let syntax = parse("module M #(parameter A=1:2:3, B=(4:5:6)); endmodule");
