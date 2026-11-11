@@ -5573,7 +5573,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         (
             "multiple net drivers for `y`",
             r#"
-            module Top(output wire y);
+            module Top(output uwire y);
                 assign y = 1'b0;
                 assign y = 1'b1;
             endmodule
@@ -9041,6 +9041,8 @@ fn masked_reads_preserve_observer_sensitivity_and_real_self_dependencies() {
     }
 }
 
+// Distinct drivers of a `wire` resolve (`sv_net_resolution.rs`); an unresolved
+// net, a variable and a driver that is not a plain value keep their identity.
 #[test]
 fn net_alias_coalescing_retains_distinct_and_variable_drivers() {
     for (source, diagnostic) in [
@@ -9057,14 +9059,6 @@ fn net_alias_coalescing_retains_distinct_and_variable_drivers() {
             "multiple variable drivers",
         ),
         (
-            "module Top(output wire y); assign y=1'b0; assign y=1'b0; assign y=1'b1; endmodule",
-            "multiple net drivers",
-        ),
-        (
-            "module Top(input logic a, output wire y); assign y=a; assign y=1'b1; endmodule",
-            "multiple net drivers",
-        ),
-        (
             "module Top(input logic a, output uwire y); assign y=a; assign y=a; endmodule",
             "multiple net drivers",
         ),
@@ -9079,10 +9073,6 @@ fn net_alias_coalescing_retains_distinct_and_variable_drivers() {
         (
             "module Top(input logic a, output logic y); assign y=a; assign y=a; endmodule",
             "multiple variable drivers",
-        ),
-        (
-            "module Top(input logic a,b, output wire y); assign y=a; assign y=a; assign y=b; endmodule",
-            "multiple net drivers",
         ),
         (
             "module Top(output wire [31:0] y); assign y=$random; assign y=$random; endmodule",

@@ -86,6 +86,32 @@ pub(super) fn lower_comb_processes(
             })
         })
     };
+    // The nets that several continuous assignments drive on common bits get
+    // one definition, the resolution of their drivers.
+    let resolved_nets = if continuous_targets_repeat(module) {
+        net_resolution::ResolvedNets::of(
+            module,
+            &ModuleDrivers::new(module, constants, parameter_types),
+            four_state,
+        )
+    } else {
+        net_resolution::ResolvedNets::default()
+    };
+    let resolved_ids: HashMap<SourceVarId, &str> = resolved_nets
+        .names()
+        .filter_map(|name| Some((pm.id(name)?, name)))
+        .collect();
+    let mut net_drivers: HashMap<SourceVarId, Vec<LogicPath<SourceVarId>>> = HashMap::default();
+    let driver_error = |process: &sv::ir::CombProcess| {
+        let mut names = HashSet::default();
+        procedural::written_names_with_calls(module, process.body(), &mut names);
+        let mut names: Vec<_> = names
+            .into_iter()
+            .filter(|name| resolved_nets.net(name).is_some())
+            .collect();
+        names.sort_unstable();
+        net_resolution::multiple_drivers(names.first().map_or("", |name| name.as_str()))
+    };
     for (index, process) in module.comb_processes().iter().enumerate() {
         if redundant.contains(&index) {
             continue;
@@ -102,6 +128,7 @@ pub(super) fn lower_comb_processes(
                 continue;
             }
         }
+        let net_driver = resolved_nets.drives(index);
         pm.call_unit();
         // A wildcard control waits for its first source event even when
         // every output is assigned. A symbolic combinational definition
@@ -119,6 +146,9 @@ pub(super) fn lower_comb_processes(
             || (process.kind() != sv::ir::CombProcessKind::ContinuousAssign
                 && pm.calls_task(process.body()))
         {
+            if net_driver {
+                return Err(driver_error(process));
+            }
             pm.runtime.event_sites = std::mem::take(&mut sites);
             comb_blocks.extend(
                 ff::Ff::new(&mut pm, random_seeds[&(2, index)]).lower_comb_process(
@@ -156,6 +186,30 @@ pub(super) fn lower_comb_processes(
                             ))
             );
         comb.m.end_attempt_calls(!fallback);
+        if net_driver {
+            // A driver of a resolved net contributes its value to the net's
+            // one definition instead of defining the bits itself.
+            let paths = lowered.map_err(|_| driver_error(process))?;
+            if !comb.events.observers.is_empty() || !comb.events.sites.is_empty() {
+                return Err(driver_error(process));
+            }
+            drop(comb);
+            for path in paths {
+                let target = match &path.target {
+                    LogicPathTarget::Var(target) => Some(target.id),
+                    _ => None,
+                };
+                let net = target.filter(|id| resolved_ids.contains_key(id));
+                match net {
+                    Some(id) if net_resolution::joinable(&path) => {
+                        net_drivers.entry(id).or_default().push(path)
+                    }
+                    Some(_) => return Err(driver_error(process)),
+                    None => comb_blocks.push(path),
+                }
+            }
+            continue;
+        }
         match lowered {
             // In a design with a wait, a variable the process stores twice
             // may be watched, so it also gets its imperative alternative.
@@ -302,6 +356,22 @@ pub(super) fn lower_comb_processes(
             observers.push(observer);
         }
         sites.append(&mut comb.events.sites);
+    }
+    let mut resolved_ids: Vec<_> = resolved_ids.into_iter().collect();
+    resolved_ids.sort_unstable_by_key(|(_, name)| *name);
+    for (id, name) in resolved_ids {
+        let Some(drivers) = net_drivers.remove(&id) else {
+            continue;
+        };
+        let resolution = resolved_nets.net(name).expect("a resolved net");
+        comb_blocks.extend(net_resolution::join(
+            &mut arena,
+            id,
+            resolution,
+            drivers,
+            four_state,
+            !pm.var(id).is_4state,
+        )?);
     }
     for (target, body) in port_assignments {
         pm.call_unit();

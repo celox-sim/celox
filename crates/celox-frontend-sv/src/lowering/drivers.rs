@@ -321,6 +321,31 @@ pub(super) struct DriverWrite {
     pub(super) element: Option<(i128, i128)>,
 }
 
+/// Whether two continuous assignments of `module` assign the same name, the
+/// cheap precondition of a net with several drivers.
+pub(super) fn continuous_targets_repeat(module: &sv::ir::Module) -> bool {
+    let mut seen = HashSet::default();
+    module
+        .comb_processes()
+        .iter()
+        .filter(|process| process.kind() == sv::ir::CombProcessKind::ContinuousAssign)
+        .any(|process| {
+            let mut names = HashSet::default();
+            for statement in process.body() {
+                match statement {
+                    sv::ir::Stmt::Assign { lhs, .. } => {
+                        names.insert(lhs.name());
+                    }
+                    sv::ir::Stmt::AssignConcat { parts, .. } => {
+                        names.extend(parts.iter().map(sv::ir::LValue::name));
+                    }
+                    _ => {}
+                }
+            }
+            names.into_iter().any(|name| !seen.insert(name))
+        })
+}
+
 /// Repeated zero-delay aliases or identical literal drivers of a declared net
 /// have one effective value (IEEE 1800-2023 6.6.1, 10.3.1). Keep the authored
 /// process indices so removing a driver does not renumber the random streams

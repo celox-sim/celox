@@ -499,6 +499,7 @@ impl ScopeSymbols {
                         port.is_net,
                     )
                     .with_unresolved_net(port.unresolved_net)
+                    .with_net_resolution(port.net_resolution)
                     .with_default(port.default.clone().map(|value| rename.const_expr(value)))
                 })
                 .collect(),

@@ -14,6 +14,7 @@ pub(super) fn ports_from_scope(
     let mut inherited_type = Type::implicit();
     let mut inherited_variable = false;
     let mut inherited_unresolved = false;
+    let mut inherited_resolution = NetResolution::Wire;
     for native in port_owners::scope(selected, syntax_tree)? {
         let direction = native
             .direction
@@ -147,6 +148,13 @@ pub(super) fn ports_from_scope(
         } else {
             inherited_unresolved
         };
+        inherited_resolution = if let Some(net_type) = &native.net_type {
+            NetResolution::of(net_type)
+        } else if native.direction.is_some() || variable {
+            NetResolution::Wire
+        } else {
+            inherited_resolution
+        };
         let mut port = Port::new(
             native_port_name(native)?,
             direction,
@@ -154,6 +162,7 @@ pub(super) fn ports_from_scope(
             !explicit && !variable,
         )
         .with_unresolved_net(inherited_unresolved)
+        .with_net_resolution(inherited_resolution)
         .with_default(default);
         port.randomizable = variable && direction != PortDirection::Input;
         ports.push(port);

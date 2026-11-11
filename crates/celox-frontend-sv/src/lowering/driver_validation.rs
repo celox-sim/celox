@@ -52,6 +52,7 @@ pub(super) fn resolve_inout_drivers(
 pub(super) fn validate_specialized_instance_net_drivers(
     module_ids: &HashMap<LoweredSvModuleKey, ModuleId>,
     modules: &HashMap<ModuleId, LoweredSvModule>,
+    four_state: bool,
 ) -> Result<(), sv::AnalyzerError> {
     for module in modules.values() {
         let drivers =
@@ -179,9 +180,19 @@ pub(super) fn validate_specialized_instance_net_drivers(
                     .filter(|port| port.is_net())
                     .map(|port| port.name()),
             );
+        let resolved_nets = if continuous_targets_repeat(&module.source) {
+            net_resolution::ResolvedNets::of(&module.source, &drivers, four_state)
+        } else {
+            net_resolution::ResolvedNets::default()
+        };
         for signal_name in net_names {
             let child_driver_ranges = child_output_driver_ranges(module, &children, signal_name);
-            validate_net_driver_ranges(&drivers, signal_name, &child_driver_ranges)?;
+            validate_net_driver_ranges(
+                &drivers,
+                signal_name,
+                &child_driver_ranges,
+                resolved_nets.net(signal_name).is_some(),
+            )?;
         }
 
         let variable_names = module
@@ -360,6 +371,7 @@ fn validate_net_driver_ranges(
     drivers: &ModuleDrivers,
     signal_name: &str,
     child_driver_ranges: &[(usize, Option<(i128, i128)>)],
+    resolved: bool,
 ) -> Result<(), sv::AnalyzerError> {
     let local_drivers = drivers.local(signal_name);
     let overlapping_local_drivers = local_drivers.iter().enumerate().any(|(index, left)| {
@@ -375,14 +387,13 @@ fn validate_net_driver_ranges(
     // Each concatenation operand is a continuous driver, even when two
     // operands occur in the same authored assignment.
     let overlapping_continuous = driver_ranges_overlap(&drivers.continuous(signal_name));
+    // The continuous assignments of a resolved net are joined into one
+    // definition; a driver below an instance still needs bits of its own.
     if driver_ranges_overlap(child_driver_ranges)
         || child_local_overlap
-        || overlapping_local_drivers
-        || overlapping_continuous
+        || (!resolved && (overlapping_local_drivers || overlapping_continuous))
     {
-        return Err(sv::AnalyzerError::Unsupported(format!(
-            "multiple net drivers for `{signal_name}`"
-        )));
+        return Err(net_resolution::multiple_drivers(signal_name));
     }
     Ok(())
 }

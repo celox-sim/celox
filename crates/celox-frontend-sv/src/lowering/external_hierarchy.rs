@@ -472,7 +472,7 @@ fn prepare_external_hierarchy_collecting(
         })
         .collect::<Result<HashMap<_, _>, FrontendError>>()?;
     resolve_inout_drivers(&module_ids, &mut lowered_modules);
-    validate_specialized_instance_net_drivers(&module_ids, &lowered_modules)?;
+    validate_specialized_instance_net_drivers(&module_ids, &lowered_modules, four_state)?;
     let mut modules = HashMap::default();
     for (key, &module_id) in &module_ids {
         let lowered = &lowered_modules[&module_id];

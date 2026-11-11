@@ -211,6 +211,7 @@ impl Source {
                             r#type: signal.r#type.clone(),
                             is_net: signal.is_net,
                             unresolved_net: false,
+                            net_resolution: NetResolution::Wire,
                             net_drive: NetDrive::None,
                             package_variable: None,
                             hierarchical: signal.paths.first().cloned(),
