@@ -28,6 +28,23 @@ macro_rules! report {
     ($enabled:expr, $($args:tt)*) => { if $enabled { println!($($args)*); } };
 }
 
+#[path = "runner/backends.rs"]
+mod backends;
+#[cfg(any(
+    target_arch = "x86_64",
+    feature = "arm64-codegen",
+    target_arch = "aarch64"
+))]
+#[path = "runner/dump_ir.rs"]
+mod dump_ir;
+use backends::*;
+#[cfg(any(
+    target_arch = "x86_64",
+    feature = "arm64-codegen",
+    target_arch = "aarch64"
+))]
+use dump_ir::*;
+
 #[derive(Args, Default)]
 pub(super) struct ExecutionArgs {
     /// Defaults to `tiered`, or to `native` when an option needs native code
@@ -311,153 +328,8 @@ pub(super) fn run(
     design: super::project::Design,
     max_steps: u64,
 ) -> Result<(), RunError> {
-    let backend = cli.backend();
-    let force_signals = !design.signal_access.force_signals.is_empty();
-    let hotspot_jit = cli
-        .use_hotspot(force_signals)
-        .map_err(|message| RunError::InvalidConfiguration { message })?;
-    cli.report_jit(force_signals, hotspot_jit);
-    let mut opts = Options {
-        report: cli.report,
-        hotspot_jit,
-        require_compiled: cli.require_compiled,
-        project: design.project_root.clone().unwrap_or_else(|| {
-            design
-                .sources
-                .first()
-                .cloned()
-                .unwrap_or_else(|| PathBuf::from("."))
-        }),
-        test: design.top.clone(),
-        opt_level: design.opt_level.unwrap_or(OptLevel::O2),
-        backend,
-        four_state: design.four_state.unwrap_or(false),
-        dump_settle_plan: cli.dump_settle_plan,
-        settle_profile: cli.settle_profile,
-        vcd: cli.vcd,
-        fst: cli.fst,
-        compile_only: cli.compile_only,
-        native_image_output: cli.native_image_output,
-        native_image_input: cli.native_image_input,
-        build_cache_dir: cli.build_cache_dir,
-        tick_limit: (!cli.unlimited).then_some(max_steps),
-        dump_ir_dir: cli.dump_ir_dir,
-        dump_ir_and_run: cli.dump_ir_and_run,
-        native_profile_blocks: cli.native_profile_blocks,
-        pass_overrides: cli.pass_overrides,
-        native_memory_width: cli.native_memory_width.unwrap_or({
-            if cfg!(any(
-                feature = "x86_64-codegen",
-                all(target_arch = "x86_64", not(feature = "arm64-codegen"))
-            )) {
-                128
-            } else {
-                64
-            }
-        }),
-        x86_slp: cli
-            .x86_slp
-            .map(|value| matches!(value, OnOff::On))
-            .unwrap_or(cfg!(any(
-                feature = "x86_64-codegen",
-                all(target_arch = "x86_64", not(feature = "arm64-codegen"))
-            ))),
-        threads: cli.threads,
-        always_partition: cli.always_partition,
-        design,
-    };
-    if opts.require_compiled && opts.backend != Backend::Tiered {
-        return Err(RunError::InvalidConfiguration {
-            message: "--require-compiled requires --backend tiered",
-        });
-    }
-    if opts.build_cache_dir.is_some()
-        && (!matches!(opts.backend, Backend::Native)
-            || opts.native_image_input.is_some()
-            || opts.dump_ir_dir.is_some())
-    {
-        return Err(RunError::InvalidConfiguration {
-            message: "--build-cache-dir requires --backend native and cannot be combined with --native-image-input or --dump-ir-dir",
-        });
-    }
-    if opts.native_image_output.is_some() && !opts.compile_only {
-        return Err(RunError::InvalidConfiguration {
-            message: "--native-image-output requires --compile-only",
-        });
-    }
-    if opts.compile_only && matches!(opts.backend, Backend::Interpreter | Backend::Tiered) {
-        return Err(RunError::InvalidConfiguration {
-            message: "--compile-only requires a compiled backend",
-        });
-    }
-    if opts.native_image_input.is_some() && opts.compile_only {
-        return Err(RunError::InvalidConfiguration {
-            message: "--native-image-input cannot be used with --compile-only",
-        });
-    }
-    if opts.native_image_input.is_some() && opts.native_image_output.is_some() {
-        return Err(RunError::InvalidConfiguration {
-            message: "--native-image-input and --native-image-output are mutually exclusive",
-        });
-    }
-    if (opts.native_image_input.is_some() || opts.native_image_output.is_some())
-        && !matches!(opts.backend, Backend::Native)
-    {
-        return Err(RunError::InvalidConfiguration {
-            message: "native image options require --backend native",
-        });
-    }
-    if opts.native_image_input.is_some() && opts.dump_ir_dir.is_some() {
-        return Err(RunError::InvalidConfiguration {
-            message: "--native-image-input cannot be combined with --dump-ir-dir",
-        });
-    }
-    if !opts.native_profile_blocks.is_empty() && opts.dump_ir_dir.is_none() {
-        return Err(RunError::InvalidConfiguration {
-            message: "--native-profile-block requires --dump-ir-dir",
-        });
-    }
-    if opts.dump_ir_and_run && opts.dump_ir_dir.is_none() {
-        return Err(RunError::InvalidConfiguration {
-            message: "--dump-ir-and-run requires --dump-ir-dir",
-        });
-    }
-    if opts.settle_profile.is_some() && opts.dump_ir_dir.is_some() && !opts.dump_ir_and_run {
-        return Err(RunError::InvalidConfiguration {
-            message: "--settle-profile with --dump-ir-dir requires --dump-ir-and-run",
-        });
-    }
-    #[cfg(any(
-        all(target_arch = "x86_64", feature = "arm64-codegen"),
-        all(target_arch = "aarch64", feature = "x86_64-codegen")
-    ))]
-    if opts.dump_ir_and_run {
-        return Err(RunError::InvalidConfiguration {
-            message: "--dump-ir-and-run is unavailable during cross-codegen",
-        });
-    }
-    #[cfg(all(target_arch = "x86_64", feature = "arm64-codegen"))]
-    if matches!(opts.backend, Backend::Native) && !opts.compile_only {
-        return Err(RunError::InvalidConfiguration {
-            message: "AArch64 cross-codegen requires --compile-only on an x86-64 host",
-        });
-    }
-    #[cfg(all(target_arch = "aarch64", feature = "x86_64-codegen"))]
-    if matches!(opts.backend, Backend::Native) && !opts.compile_only {
-        return Err(RunError::InvalidConfiguration {
-            message: "x86-64 cross-codegen requires --compile-only on an AArch64 host",
-        });
-    }
-    #[cfg(not(any(
-        target_arch = "x86_64",
-        feature = "arm64-codegen",
-        target_arch = "aarch64"
-    )))]
-    if matches!(opts.backend, Backend::Native) {
-        return Err(RunError::InvalidConfiguration {
-            message: "the custom native backend is unavailable on this target",
-        });
-    }
+    let mut opts = resolve_options(cli, design, max_steps)?;
+    validate_options(&opts)?;
     #[cfg(any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
@@ -470,29 +342,7 @@ pub(super) fn run(
         ),
         allow(unused_mut)
     )]
-    let mut native_image = match &opts.native_image_input {
-        Some(path) => {
-            let mut image = celox::NativeProgramImage::from_container_bytes(&fs::read(path)?)?;
-            // Relative images need the current project root, but not its sources.
-            // Existing standalone images with absolute paths remain loadable.
-            let root = if let Ok(metadata_path) = Metadata::search_from(&opts.project) {
-                fs::canonicalize(metadata_path)?
-                    .parent()
-                    .unwrap()
-                    .to_path_buf()
-            } else if opts.project.is_absolute() {
-                opts.project.clone()
-            } else {
-                std::env::current_dir()?.join(&opts.project)
-            };
-            image.try_map_paths(|path| {
-                Ok::<_, std::io::Error>(build_cache::bind_path(path, &root))
-            })?;
-            opts.four_state = image.four_state();
-            Some(image)
-        }
-        None => None,
-    };
+    let mut native_image = load_native_image(&mut opts)?;
     #[cfg(not(any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
@@ -620,14 +470,14 @@ pub(super) fn run(
     for block in &opts.native_profile_blocks {
         builder = builder.trace_native_profile_block(&block.function, block.block, block.samples);
     }
-    for (enable, pass) in opts.pass_overrides {
+    for (enable, pass) in std::mem::take(&mut opts.pass_overrides) {
         builder = if enable {
             builder.enable_pass(pass)
         } else {
             builder.disable_pass(pass)
         };
     }
-    if let Some(output_dir) = opts.dump_ir_dir {
+    if let Some(output_dir) = opts.dump_ir_dir.take() {
         if !matches!(opts.backend, Backend::Native) {
             return Err(RunError::InvalidConfiguration {
                 message: "--dump-ir-dir is only supported with --backend native",
@@ -645,240 +495,7 @@ pub(super) fn run(
             target_arch = "aarch64"
         ))]
         {
-            fs::create_dir_all(&output_dir)?;
-            let (compiled, mut trace) = builder
-                .trace_pre_optimized_sir()
-                .trace_post_optimized_sir()
-                .trace_settle_plan()
-                .trace_mir()
-                .compile_native_with_trace()?;
-            if let Some(output_path) = &opts.native_image_output {
-                if let Some(parent) = output_path
-                    .parent()
-                    .filter(|path| !path.as_os_str().is_empty())
-                {
-                    fs::create_dir_all(parent)?;
-                }
-                build_cache::write_relative_image(
-                    compiled.program_image(),
-                    &project_root,
-                    output_path,
-                )?;
-                report!(
-                    opts.report,
-                    "CELOX_NATIVE_IMAGE test={} mode=generated path={}",
-                    opts.test,
-                    output_path.display()
-                );
-            }
-            let compile_elapsed = total_start.elapsed();
-            let pre_sir_path = output_dir.join("pre_optimized.sir");
-            let sir_path = output_dir.join("post_optimized.sir");
-            let pre_optimized_sir = trace.format_pre_optimized_sir();
-            let sir = trace.format_post_optimized_sir();
-            if let Some(pre_optimized_sir) = &pre_optimized_sir {
-                fs::write(&pre_sir_path, pre_optimized_sir)?;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "wrote pre-optimized SIR ({} bytes) to {}",
-                    pre_optimized_sir.len(),
-                    pre_sir_path.display()
-                );
-            }
-            if let Some(sir) = &sir {
-                fs::write(&sir_path, sir)?;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "wrote post-optimized SIR ({} bytes) to {}",
-                    sir.len(),
-                    sir_path.display()
-                );
-            }
-            let _pre_optimized_sir = pre_optimized_sir.ok_or(RunError::MissingTrace {
-                artifact: "pre-optimized SIR",
-            })?;
-            let _sir = sir.ok_or(RunError::MissingTrace {
-                artifact: "post-optimized SIR",
-            })?;
-            let native_sir = trace
-                .native_optimized_sir
-                .take()
-                .ok_or(RunError::MissingTrace {
-                    artifact: "native optimized SIR",
-                })?;
-            let mir = trace
-                .mir
-                .take()
-                .ok_or(RunError::MissingTrace { artifact: "MIR" })?;
-            let reactive_graph =
-                trace
-                    .reactive_event_graph
-                    .take()
-                    .ok_or(RunError::MissingTrace {
-                        artifact: "reactive event graph",
-                    })?;
-            let state_layout = trace
-                .native_state_layout
-                .take()
-                .ok_or(RunError::MissingTrace {
-                    artifact: "native state-layout analysis",
-                })?;
-            if let Some(plan) = trace.settle_plan.take() {
-                let plan_path = output_dir.join("settle_plan.txt");
-                fs::write(&plan_path, &plan)?;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "wrote settle plan ({} bytes) to {}",
-                    plan.len(),
-                    plan_path.display()
-                );
-            }
-            let native_sir_path = output_dir.join("native_optimized.sir");
-            let mir_path = output_dir.join("mir.txt");
-            let reactive_graph_path = output_dir.join("reactive_event_graph.txt");
-            let state_layout_path = output_dir.join("native_state_layout.txt");
-            fs::write(&native_sir_path, &native_sir)?;
-            fs::write(&mir_path, &mir)?;
-            fs::write(&reactive_graph_path, &reactive_graph)?;
-            fs::write(&state_layout_path, &state_layout)?;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "wrote native optimized SIR ({} bytes) to {}",
-                native_sir.len(),
-                native_sir_path.display()
-            );
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "wrote full native MIR ({} bytes) to {}",
-                mir.len(),
-                mir_path.display()
-            );
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "wrote reactive event graph ({} bytes) to {}",
-                reactive_graph.len(),
-                reactive_graph_path.display()
-            );
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "wrote native state-layout analysis ({} bytes) to {}",
-                state_layout.len(),
-                state_layout_path.display()
-            );
-            // The trace owns complete SIR programs and the formatted dumps are
-            // hundreds of MiB on Heliodor. They are not part of the generated JIT
-            // state; release them before timing that exact Simulator instance.
-            drop((
-                _pre_optimized_sir,
-                _sir,
-                native_sir,
-                mir,
-                reactive_graph,
-                state_layout,
-                trace,
-            ));
-            if opts.dump_ir_and_run {
-                let mut sim = compiled.initialize()?;
-                let testbench =
-                    compile_initial_testbench(&sim).ok_or(RunError::MissingInitialBlock)?;
-                #[cfg(any(
-                    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-                    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-                ))]
-                if opts.report {
-                    sim.start_native_execution_timing();
-                }
-                let execute_cpu_start = process_cpu_time();
-                let execute_start = Instant::now();
-                let (result, ticks, tick_limit_reached) = if let Some(limit) = opts.tick_limit {
-                    let limited =
-                        run_compiled_testbench_with_tick_limit(&mut sim, &testbench, limit);
-                    (limited.result, limited.ticks, limited.tick_limit_reached)
-                } else {
-                    (run_compiled_testbench(&mut sim, &testbench), 0, false)
-                };
-                sim.flush_vcd()?;
-                write_settle_profile(
-                    opts.settle_profile.as_deref(),
-                    sim.layout(),
-                    sim.settle_profile(),
-                )?;
-                #[cfg(any(
-                    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-                    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-                ))]
-                let jit_execute_elapsed = sim
-                    .finish_native_execution_timing()
-                    .map(|timing| timing.elapsed());
-                #[cfg(not(any(
-                    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-                    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-                )))]
-                let jit_execute_elapsed = None;
-                let execute_elapsed = execute_start.elapsed();
-                let execute_cpu_elapsed = process_cpu_time()
-                    .zip(execute_cpu_start)
-                    .map(|(end, start)| end.saturating_sub(start));
-                print_celox_timing(
-                    opts.report,
-                    &opts.test,
-                    compile_elapsed,
-                    execute_elapsed,
-                    jit_execute_elapsed,
-                    execute_cpu_elapsed,
-                );
-                if opts.tick_limit.is_some() {
-                    report!(
-                        opts.report,
-                        "CELOX_TEST_TICK_LIMIT test={} ticks={} reached={}",
-                        opts.test,
-                        ticks,
-                        tick_limit_reached
-                    );
-                }
-                let elapsed = total_start.elapsed();
-                return match result {
-                    TestResult::Pass if tick_limit_reached => {
-                        report!(
-                            opts.report,
-                            "CELOX_TEST_RESULT test={} status=tick-limit elapsed_ns={}",
-                            opts.test,
-                            elapsed.as_nanos()
-                        );
-                        Err(RunError::TestFailed {
-                            message: format!(
-                                "simulation reached --max-steps {} testbench ticks before completion",
-                                opts.tick_limit.unwrap()
-                            ),
-                        })
-                    }
-                    TestResult::Pass => {
-                        report!(
-                            opts.report,
-                            "CELOX_TEST_RESULT test={} status=pass elapsed_ns={}",
-                            opts.test,
-                            elapsed.as_nanos()
-                        );
-                        Ok(())
-                    }
-                    TestResult::Fail(message) => {
-                        report!(
-                            opts.report,
-                            "CELOX_TEST_RESULT test={} status=fail elapsed_ns={}",
-                            opts.test,
-                            elapsed.as_nanos()
-                        );
-                        Err(RunError::TestFailed { message })
-                    }
-                };
-            }
-            report!(
-                opts.report,
-                "CELOX_TEST_RESULT test={} status=trace-only elapsed_ns={}",
-                opts.test,
-                total_start.elapsed().as_nanos()
-            );
-            return Ok(());
+            return dump_native_ir(&opts, builder, output_dir, &project_root, total_start);
         }
     }
     if opts.compile_only {
@@ -890,41 +507,13 @@ pub(super) fn run(
                 target_arch = "aarch64"
             ))]
             Backend::Native => {
-                let image = if let Some(image) = native_image.take() {
-                    image
-                } else if let Some(cache) = &build_cache {
-                    let (compiled, dependencies) =
-                        celox_frontend_veryl::capture_file_dependencies(|collector| {
-                            builder
-                                .file_dependency_collector(collector.clone())
-                                .compile_native()
-                        });
-                    let compiled = compiled?;
-                    super::report_warnings(compiled.warnings())
-                        .map_err(|message| RunError::TestFailed { message })?;
-                    cache.store(compiled.program_image(), &dependencies);
-                    compiled.into_program_image()
-                } else {
-                    let compiled = builder.compile_native()?;
-                    super::report_warnings(compiled.warnings())
-                        .map_err(|message| RunError::TestFailed { message })?;
-                    compiled.into_program_image()
-                };
-                if let Some(output_path) = &opts.native_image_output {
-                    if let Some(parent) = output_path
-                        .parent()
-                        .filter(|path| !path.as_os_str().is_empty())
-                    {
-                        fs::create_dir_all(parent)?;
-                    }
-                    build_cache::write_relative_image(&image, &project_root, output_path)?;
-                    report!(
-                        opts.report,
-                        "CELOX_NATIVE_IMAGE test={} mode=generated path={}",
-                        opts.test,
-                        output_path.display()
-                    );
-                }
+                compile_native_image(
+                    &opts,
+                    builder,
+                    &mut native_image,
+                    &build_cache,
+                    &project_root,
+                )?;
             }
             #[cfg(not(any(
                 target_arch = "x86_64",
@@ -965,6 +554,291 @@ pub(super) fn run(
 
     let compile_start = total_start;
     let mut generated_code_exercised = false;
+    let outcome = match opts.backend {
+        #[cfg(any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        ))]
+        Backend::Native => run_native(
+            &opts,
+            builder,
+            &mut native_image,
+            &build_cache,
+            compile_start,
+        )?,
+        #[cfg(not(any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )))]
+        Backend::Native => unreachable!("native backend availability checked above"),
+        #[cfg(feature = "cranelift")]
+        Backend::Cranelift => run_cranelift(&opts, builder, compile_start)?,
+        Backend::Interpreter => run_interpreter(&opts, builder, compile_start)?,
+        #[cfg(feature = "wasm-runtime")]
+        Backend::Wasm => run_wasm(&opts, builder, compile_start)?,
+        Backend::Tiered => {
+            run_tiered(&opts, builder, compile_start, &mut generated_code_exercised)?
+        }
+    };
+    report_outcome(&opts, outcome, generated_code_exercised, total_start)
+}
+
+/// The options of a run: the command line's, with the defaults the design
+/// and the target decide.
+fn resolve_options(
+    cli: ExecutionArgs,
+    design: super::project::Design,
+    max_steps: u64,
+) -> Result<Options, RunError> {
+    let backend = cli.backend();
+    let force_signals = !design.signal_access.force_signals.is_empty();
+    let hotspot_jit = cli
+        .use_hotspot(force_signals)
+        .map_err(|message| RunError::InvalidConfiguration { message })?;
+    cli.report_jit(force_signals, hotspot_jit);
+    Ok(Options {
+        report: cli.report,
+        hotspot_jit,
+        require_compiled: cli.require_compiled,
+        project: design.project_root.clone().unwrap_or_else(|| {
+            design
+                .sources
+                .first()
+                .cloned()
+                .unwrap_or_else(|| PathBuf::from("."))
+        }),
+        test: design.top.clone(),
+        opt_level: design.opt_level.unwrap_or(OptLevel::O2),
+        backend,
+        four_state: design.four_state.unwrap_or(false),
+        dump_settle_plan: cli.dump_settle_plan,
+        settle_profile: cli.settle_profile,
+        vcd: cli.vcd,
+        fst: cli.fst,
+        compile_only: cli.compile_only,
+        native_image_output: cli.native_image_output,
+        native_image_input: cli.native_image_input,
+        build_cache_dir: cli.build_cache_dir,
+        tick_limit: (!cli.unlimited).then_some(max_steps),
+        dump_ir_dir: cli.dump_ir_dir,
+        dump_ir_and_run: cli.dump_ir_and_run,
+        native_profile_blocks: cli.native_profile_blocks,
+        pass_overrides: cli.pass_overrides,
+        native_memory_width: cli.native_memory_width.unwrap_or({
+            if cfg!(any(
+                feature = "x86_64-codegen",
+                all(target_arch = "x86_64", not(feature = "arm64-codegen"))
+            )) {
+                128
+            } else {
+                64
+            }
+        }),
+        x86_slp: cli
+            .x86_slp
+            .map(|value| matches!(value, OnOff::On))
+            .unwrap_or(cfg!(any(
+                feature = "x86_64-codegen",
+                all(target_arch = "x86_64", not(feature = "arm64-codegen"))
+            ))),
+        threads: cli.threads,
+        always_partition: cli.always_partition,
+        design,
+    })
+}
+
+/// Reject the combinations of options that cannot run.
+fn validate_options(opts: &Options) -> Result<(), RunError> {
+    if opts.require_compiled && opts.backend != Backend::Tiered {
+        return Err(RunError::InvalidConfiguration {
+            message: "--require-compiled requires --backend tiered",
+        });
+    }
+    if opts.build_cache_dir.is_some()
+        && (!matches!(opts.backend, Backend::Native)
+            || opts.native_image_input.is_some()
+            || opts.dump_ir_dir.is_some())
+    {
+        return Err(RunError::InvalidConfiguration {
+            message: "--build-cache-dir requires --backend native and cannot be combined with --native-image-input or --dump-ir-dir",
+        });
+    }
+    if opts.native_image_output.is_some() && !opts.compile_only {
+        return Err(RunError::InvalidConfiguration {
+            message: "--native-image-output requires --compile-only",
+        });
+    }
+    if opts.compile_only && matches!(opts.backend, Backend::Interpreter | Backend::Tiered) {
+        return Err(RunError::InvalidConfiguration {
+            message: "--compile-only requires a compiled backend",
+        });
+    }
+    if opts.native_image_input.is_some() && opts.compile_only {
+        return Err(RunError::InvalidConfiguration {
+            message: "--native-image-input cannot be used with --compile-only",
+        });
+    }
+    if opts.native_image_input.is_some() && opts.native_image_output.is_some() {
+        return Err(RunError::InvalidConfiguration {
+            message: "--native-image-input and --native-image-output are mutually exclusive",
+        });
+    }
+    if (opts.native_image_input.is_some() || opts.native_image_output.is_some())
+        && !matches!(opts.backend, Backend::Native)
+    {
+        return Err(RunError::InvalidConfiguration {
+            message: "native image options require --backend native",
+        });
+    }
+    if opts.native_image_input.is_some() && opts.dump_ir_dir.is_some() {
+        return Err(RunError::InvalidConfiguration {
+            message: "--native-image-input cannot be combined with --dump-ir-dir",
+        });
+    }
+    if !opts.native_profile_blocks.is_empty() && opts.dump_ir_dir.is_none() {
+        return Err(RunError::InvalidConfiguration {
+            message: "--native-profile-block requires --dump-ir-dir",
+        });
+    }
+    if opts.dump_ir_and_run && opts.dump_ir_dir.is_none() {
+        return Err(RunError::InvalidConfiguration {
+            message: "--dump-ir-and-run requires --dump-ir-dir",
+        });
+    }
+    if opts.settle_profile.is_some() && opts.dump_ir_dir.is_some() && !opts.dump_ir_and_run {
+        return Err(RunError::InvalidConfiguration {
+            message: "--settle-profile with --dump-ir-dir requires --dump-ir-and-run",
+        });
+    }
+    #[cfg(any(
+        all(target_arch = "x86_64", feature = "arm64-codegen"),
+        all(target_arch = "aarch64", feature = "x86_64-codegen")
+    ))]
+    if opts.dump_ir_and_run {
+        return Err(RunError::InvalidConfiguration {
+            message: "--dump-ir-and-run is unavailable during cross-codegen",
+        });
+    }
+    #[cfg(all(target_arch = "x86_64", feature = "arm64-codegen"))]
+    if matches!(opts.backend, Backend::Native) && !opts.compile_only {
+        return Err(RunError::InvalidConfiguration {
+            message: "AArch64 cross-codegen requires --compile-only on an x86-64 host",
+        });
+    }
+    #[cfg(all(target_arch = "aarch64", feature = "x86_64-codegen"))]
+    if matches!(opts.backend, Backend::Native) && !opts.compile_only {
+        return Err(RunError::InvalidConfiguration {
+            message: "x86-64 cross-codegen requires --compile-only on an AArch64 host",
+        });
+    }
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        feature = "arm64-codegen",
+        target_arch = "aarch64"
+    )))]
+    if matches!(opts.backend, Backend::Native) {
+        return Err(RunError::InvalidConfiguration {
+            message: "the custom native backend is unavailable on this target",
+        });
+    }
+    Ok(())
+}
+
+/// The native image `--native-image-input` names, bound to the project
+/// root; the image decides whether the run is four-state.
+#[cfg(any(
+    target_arch = "x86_64",
+    feature = "arm64-codegen",
+    target_arch = "aarch64"
+))]
+fn load_native_image(opts: &mut Options) -> Result<Option<celox::NativeProgramImage>, RunError> {
+    let native_image = match &opts.native_image_input {
+        Some(path) => {
+            let mut image = celox::NativeProgramImage::from_container_bytes(&fs::read(path)?)?;
+            // Relative images need the current project root, but not its sources.
+            // Existing standalone images with absolute paths remain loadable.
+            let root = if let Ok(metadata_path) = Metadata::search_from(&opts.project) {
+                fs::canonicalize(metadata_path)?
+                    .parent()
+                    .unwrap()
+                    .to_path_buf()
+            } else if opts.project.is_absolute() {
+                opts.project.clone()
+            } else {
+                std::env::current_dir()?.join(&opts.project)
+            };
+            image.try_map_paths(|path| {
+                Ok::<_, std::io::Error>(build_cache::bind_path(path, &root))
+            })?;
+            opts.four_state = image.four_state();
+            Some(image)
+        }
+        None => None,
+    };
+    Ok(native_image)
+}
+
+/// `--compile-only` on the native backend: the image the run was given, the
+/// build cache holds or the compiler produces, written where
+/// `--native-image-output` names.
+#[cfg(any(
+    target_arch = "x86_64",
+    feature = "arm64-codegen",
+    target_arch = "aarch64"
+))]
+fn compile_native_image(
+    opts: &Options,
+    builder: celox::SimulatorBuilder<'_, Simulator>,
+    native_image: &mut Option<celox::NativeProgramImage>,
+    build_cache: &Option<build_cache::BuildCache>,
+    project_root: &Path,
+) -> Result<(), RunError> {
+    let image = if let Some(image) = native_image.take() {
+        image
+    } else if let Some(cache) = build_cache {
+        let (compiled, dependencies) =
+            celox_frontend_veryl::capture_file_dependencies(|collector| {
+                builder
+                    .file_dependency_collector(collector.clone())
+                    .compile_native()
+            });
+        let compiled = compiled?;
+        super::report_warnings(compiled.warnings())
+            .map_err(|message| RunError::TestFailed { message })?;
+        cache.store(compiled.program_image(), &dependencies);
+        compiled.into_program_image()
+    } else {
+        let compiled = builder.compile_native()?;
+        super::report_warnings(compiled.warnings())
+            .map_err(|message| RunError::TestFailed { message })?;
+        compiled.into_program_image()
+    };
+    if let Some(output_path) = &opts.native_image_output {
+        if let Some(parent) = output_path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent)?;
+        }
+        build_cache::write_relative_image(&image, project_root, output_path)?;
+        report!(
+            opts.report,
+            "CELOX_NATIVE_IMAGE test={} mode=generated path={}",
+            opts.test,
+            output_path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Report the timing and the result of a run, and turn the result into the
+/// runner's.
+fn report_outcome(
+    opts: &Options,
+    outcome: Outcome,
+    generated_code_exercised: bool,
+    total_start: Instant,
+) -> Result<(), RunError> {
     let (
         result,
         ticks,
@@ -976,250 +850,7 @@ pub(super) fn run(
         tiered_stats,
         tiered_promotion_error,
         tiered_timing,
-    ) = match opts.backend {
-        #[cfg(any(
-            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-        ))]
-        Backend::Native => {
-            let mut sim = if let Some(image) = native_image.take() {
-                if let Some(image_path) = &opts.native_image_input {
-                    report!(
-                        opts.report,
-                        "CELOX_NATIVE_IMAGE test={} mode=loaded path={}",
-                        opts.test,
-                        image_path.display()
-                    );
-                }
-                builder.build_native_from_image(image)?
-            } else if let Some(cache) = &build_cache {
-                let (compiled, dependencies) =
-                    celox_frontend_veryl::capture_file_dependencies(|collector| {
-                        builder
-                            .file_dependency_collector(collector.clone())
-                            .compile_native()
-                    });
-                let compiled = compiled?;
-                cache.store(compiled.program_image(), &dependencies);
-                compiled.initialize()?
-            } else {
-                builder.build_native()?
-            };
-            super::report_warnings(sim.warnings())
-                .map_err(|message| RunError::TestFailed { message })?;
-            let testbench = compile_initial_testbench(&sim).ok_or(RunError::MissingInitialBlock)?;
-            let compile_elapsed = compile_start.elapsed();
-            if opts.report {
-                sim.start_native_execution_timing();
-            }
-            let execute_cpu_start = process_cpu_time();
-            let execute_start = Instant::now();
-            let (result, ticks, tick_limit_reached) = if let Some(limit) = opts.tick_limit {
-                let limited = run_compiled_testbench_with_tick_limit(&mut sim, &testbench, limit);
-                (limited.result, limited.ticks, limited.tick_limit_reached)
-            } else {
-                (run_compiled_testbench(&mut sim, &testbench), 0, false)
-            };
-            sim.flush_vcd()?;
-            write_settle_profile(
-                opts.settle_profile.as_deref(),
-                sim.layout(),
-                sim.settle_profile(),
-            )?;
-            let jit_execute_elapsed = sim
-                .finish_native_execution_timing()
-                .map(|timing| timing.elapsed());
-            (
-                result,
-                ticks,
-                tick_limit_reached,
-                compile_elapsed,
-                execute_start.elapsed(),
-                jit_execute_elapsed,
-                process_cpu_time()
-                    .zip(execute_cpu_start)
-                    .map(|(end, start)| end.saturating_sub(start)),
-                None,
-                None,
-                None,
-            )
-        }
-        #[cfg(not(any(
-            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-        )))]
-        Backend::Native => unreachable!("native backend availability checked above"),
-        #[cfg(feature = "cranelift")]
-        Backend::Cranelift => {
-            let mut sim = builder.build_cranelift()?;
-            super::report_warnings(sim.warnings())
-                .map_err(|message| RunError::TestFailed { message })?;
-            let testbench = compile_initial_testbench(&sim).ok_or(RunError::MissingInitialBlock)?;
-            let compile_elapsed = compile_start.elapsed();
-            let execute_cpu_start = process_cpu_time();
-            let execute_start = Instant::now();
-            let (result, ticks, tick_limit_reached) = if let Some(limit) = opts.tick_limit {
-                let limited = run_compiled_testbench_with_tick_limit(&mut sim, &testbench, limit);
-                (limited.result, limited.ticks, limited.tick_limit_reached)
-            } else {
-                (run_compiled_testbench(&mut sim, &testbench), 0, false)
-            };
-            sim.flush_vcd()?;
-            write_settle_profile(
-                opts.settle_profile.as_deref(),
-                sim.layout(),
-                sim.settle_profile(),
-            )?;
-            (
-                result,
-                ticks,
-                tick_limit_reached,
-                compile_elapsed,
-                execute_start.elapsed(),
-                None,
-                process_cpu_time()
-                    .zip(execute_cpu_start)
-                    .map(|(end, start)| end.saturating_sub(start)),
-                None,
-                None,
-                None,
-            )
-        }
-        Backend::Interpreter => {
-            let mut sim = builder.build_interpreter()?;
-            super::report_warnings(sim.warnings())
-                .map_err(|message| RunError::TestFailed { message })?;
-            let testbench = compile_initial_testbench(&sim).ok_or(RunError::MissingInitialBlock)?;
-            let compile_elapsed = compile_start.elapsed();
-            let execute_cpu_start = process_cpu_time();
-            let execute_start = Instant::now();
-            let (result, ticks, tick_limit_reached) = if let Some(limit) = opts.tick_limit {
-                let limited = run_compiled_testbench_with_tick_limit(&mut sim, &testbench, limit);
-                (limited.result, limited.ticks, limited.tick_limit_reached)
-            } else {
-                (run_compiled_testbench(&mut sim, &testbench), 0, false)
-            };
-            sim.flush_vcd()?;
-            write_settle_profile(
-                opts.settle_profile.as_deref(),
-                sim.layout(),
-                sim.settle_profile(),
-            )?;
-            (
-                result,
-                ticks,
-                tick_limit_reached,
-                compile_elapsed,
-                execute_start.elapsed(),
-                None,
-                process_cpu_time()
-                    .zip(execute_cpu_start)
-                    .map(|(end, start)| end.saturating_sub(start)),
-                None,
-                None,
-                None,
-            )
-        }
-        #[cfg(feature = "wasm-runtime")]
-        Backend::Wasm => {
-            let mut sim = builder.build_wasm()?;
-            super::report_warnings(sim.warnings())
-                .map_err(|message| RunError::TestFailed { message })?;
-            let testbench = compile_initial_testbench(&sim).ok_or(RunError::MissingInitialBlock)?;
-            let compile_elapsed = compile_start.elapsed();
-            let execute_cpu_start = process_cpu_time();
-            let execute_start = Instant::now();
-            let (result, ticks, tick_limit_reached) = if let Some(limit) = opts.tick_limit {
-                let limited = run_compiled_testbench_with_tick_limit(&mut sim, &testbench, limit);
-                (limited.result, limited.ticks, limited.tick_limit_reached)
-            } else {
-                (run_compiled_testbench(&mut sim, &testbench), 0, false)
-            };
-            sim.flush_vcd()?;
-            write_settle_profile(
-                opts.settle_profile.as_deref(),
-                sim.layout(),
-                sim.settle_profile(),
-            )?;
-            (
-                result,
-                ticks,
-                tick_limit_reached,
-                compile_elapsed,
-                execute_start.elapsed(),
-                None,
-                process_cpu_time()
-                    .zip(execute_cpu_start)
-                    .map(|(end, start)| end.saturating_sub(start)),
-                None,
-                None,
-                None,
-            )
-        }
-        Backend::Tiered => {
-            let mut sim = builder.build_tiered()?;
-            super::report_warnings(sim.warnings())
-                .map_err(|message| RunError::TestFailed { message })?;
-            let testbench = compile_initial_testbench(&sim).ok_or(RunError::MissingInitialBlock)?;
-            // `build_tiered` returns after constructing the interpreter and
-            // starting code generation. The execution interval therefore
-            // includes the background compile and promotion, which is the
-            // end-to-end latency tiered execution is intended to improve.
-            let compile_elapsed = compile_start.elapsed();
-            if opts.report {
-                sim.start_tiered_execution_timing();
-            }
-            let execute_cpu_start = process_cpu_time();
-            let execute_start = Instant::now();
-            let (result, ticks, tick_limit_reached) = if let Some(limit) = opts.tick_limit {
-                let limited = run_compiled_testbench_with_tick_limit(&mut sim, &testbench, limit);
-                (limited.result, limited.ticks, limited.tick_limit_reached)
-            } else {
-                (run_compiled_testbench(&mut sim, &testbench), 0, false)
-            };
-            let execute_elapsed = execute_start.elapsed();
-            sim.flush_vcd()?;
-            write_settle_profile(
-                opts.settle_profile.as_deref(),
-                sim.layout(),
-                sim.settle_profile(),
-            )?;
-            let timing = sim.finish_tiered_execution_timing();
-            let stats = sim.tiered_execution_stats();
-            generated_code_exercised = stats.tier == TieredExecutionTier::Compiled
-                && stats.promotion == TieredPromotionStatus::Promoted
-                && stats.compiled_evaluations > 0
-                && timing
-                    .and_then(TieredExecutionTiming::promotion_elapsed)
-                    .is_some();
-            #[cfg(any(
-                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-            ))]
-            if let Some(hotspot) = sim.hotspot_stats() {
-                generated_code_exercised =
-                    hotspot.compiled_calls > 0 || hotspot.compiled_block_calls > 0;
-                if opts.report {
-                    print_hotspot_stats(&opts.test, &hotspot);
-                }
-            }
-            let promotion_error = sim.promotion_error().map(ToString::to_string);
-            (
-                result,
-                ticks,
-                tick_limit_reached,
-                compile_elapsed,
-                execute_elapsed,
-                None,
-                process_cpu_time()
-                    .zip(execute_cpu_start)
-                    .map(|(end, start)| end.saturating_sub(start)),
-                Some(stats),
-                promotion_error,
-                timing,
-            )
-        }
-    };
+    ) = outcome;
     let elapsed = total_start.elapsed();
     print_celox_timing(
         opts.report,
