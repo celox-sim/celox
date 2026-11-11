@@ -170,6 +170,42 @@ fn comments_strings_continuations_and_macro_operators() {
         "\"left side: \\\"right side\\\"\""
     );
     assert_eq!(words("`define M(x) x``+\n`M(foo) 1"), "foo + 1");
+    // A defined macro that ends at `` is expanded before the join; a
+    // name without a definition is still being built.
+    assert_eq!(
+        words("`define P generic\n`define J(p, n) p``_``n\n`define N(n) `J(`P, n)\n`N(and2)"),
+        "generic_and2"
+    );
+    assert_eq!(
+        words("`define P a b\n`define J(n) `P``_``n\n`J(c)"),
+        "a b_c"
+    );
+    assert_eq!(words("`define P_x 7\n`define J(n) `P_``n\n`J(x)"), "7");
+    assert_eq!(words("`define E\n`define J(n) `E``n\n`J(c) d"), "c d");
+    // The operator can build the delimiters of a block comment.
+    assert_eq!(
+        words("`define C(x) /``* pragma `\"x`\" *``/ always @(x)\n`C(clk) begin end"),
+        "always @ ( clk ) begin end"
+    );
+    assert!(
+        Preprocessor::default()
+            .preprocess("`define C /``* open\n`C", "bad.sv")
+            .is_err()
+    );
+    // And the delimiter of a one-line comment, which runs to the end of its
+    // line: the newline of a continued definition, or the line of the usage.
+    assert_eq!(
+        words("`define L(x) wire x; /``/ note x \\\n wire x``_n;\n`L(a) wire b;"),
+        "wire a ; wire a_n ; wire b ;"
+    );
+    assert_eq!(
+        words("`define L(x) wire x; /``/ note x\n`L(a) hidden;\nwire b;"),
+        "wire a ; wire b ;"
+    );
+    assert_eq!(
+        words("`define I(x) x /``/ inner\n`define O(x) `I(x) + 1\n`O(a)\nb"),
+        "a b"
+    );
     assert_eq!(
         words("`define S \"continued\\\nstring\"\n`S"),
         "\"continuedstring\""
