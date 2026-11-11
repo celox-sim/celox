@@ -1,0 +1,1 @@
+Rebase onto the module split of master (#3531 and others): re-apply the record into packed_dimensions.rs, module_elaboration, source.rs, procedural/locals.rs and lowering/sources.rs
