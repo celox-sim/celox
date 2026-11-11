@@ -267,6 +267,14 @@ def case_group(path):
     return case_metadata(path).get("results_group") or "main"
 
 
+def library_cases(root, tests):
+    """The tests that tools/runner compiles with a conf/runners/libs.json
+    library (UVM), which it attaches when the library's name is a tag."""
+    libraries = set(json.loads((root / "conf/runners/libs.json").read_text()))
+    return {test for test in tests
+            if libraries & set(case_metadata(root / "tests" / test).get("tags", "").split())}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("sv_tests", type=Path, help="pinned sv-tests checkout root")
@@ -283,6 +291,9 @@ def main(argv=None):
                              "case's own :timeout: (default: the case's)")
     parser.add_argument("--shard", type=shard,
                         help="INDEX/COUNT: run and compare only that shard of the tests and expectations")
+    parser.add_argument("--exclude-library-cases", action="store_true",
+                        help="leave out the tests compiled with a libs.json library (UVM); "
+                             "their expectations are neither compared nor replaced")
     options = parser.parse_args(argv)
     if options.group and options.expected:
         parser.error("--group cannot be combined with --expected")
@@ -309,9 +320,10 @@ def main(argv=None):
             tests = [test for test in tests if case_group(root / "tests" / test) == options.group]
         if not tests:
             raise ValueError("sv-tests checkout contains no .sv tests")
+        excluded = library_cases(root, tests) if options.exclude_library_cases else set()
         # Expected tests that the corpus lost belong to a shard too, so that
         # exactly one shard reports them missing.
-        members = shard_members(set(tests) | {test for test, _ in expected}, options.shard)
+        members = shard_members((set(tests) | {test for test, _ in expected}) - excluded, options.shard)
         tests = [test for test in tests if test in members]
         expected = {key: value for key, value in expected.items() if key[0] in members}
         requested = len(tests) * len(modes)

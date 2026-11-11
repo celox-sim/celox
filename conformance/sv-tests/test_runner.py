@@ -248,6 +248,34 @@ sys.exit(code)
             with self.assertRaises(runner.argparse.ArgumentTypeError):
                 runner.shard(value)
 
+    def test_library_cases_are_excluded_from_running_comparison_and_update(self):
+        (self.root / "third_party/lib").mkdir(parents=True)
+        (self.root / "third_party/lib/pkg.sv").write_text("package pkg; endpackage")
+        (self.root / "conf/runners/libs.json").write_text(json.dumps({
+            "lib": {"files": ["lib/pkg.sv"], "incdirs": ["lib"]},
+        }))
+        (self.tests / "plain.sv").write_text("/*\n:tags: fixture\n:description: fixture\n*/")
+        # The runner attaches a library only for a tag equal to its name.
+        (self.tests / "library.sv").write_text("/*\n:tags: fixture lib\n:description: fixture\n*/")
+        (self.tests / "prefix.sv").write_text("/*\n:tags: fixture lib-x\n:description: fixture\n*/")
+        self.assertEqual(runner.library_cases(self.root, ["plain.sv", "library.sv", "prefix.sv"]),
+                         {"library.sv"})
+        expected = self.root / "expected.tsv"
+        stale = {("library.sv", mode): "fail" for mode in runner.MODES}
+        runner.write_expected(expected, {
+            **stale, **{(name, mode): "pass" for name in ("plain.sv", "prefix.sv") for mode in runner.MODES},
+        })
+        args = [str(self.root), "--driver", str(self.driver), "--out-dir", str(self.out),
+                "--expected", str(expected), "--report", str(self.root / "report.tsv")]
+        self.assertEqual(runner.main(args + ["--exclude-library-cases"]), 0)
+        self.assertFalse((self.out / "2state/library.sv").exists())
+        self.assertEqual(runner.main(args), 1)
+        runner.write_expected(expected, stale)
+        self.assertEqual(runner.main(args + ["--exclude-library-cases", "--update"]), 0)
+        self.assertEqual(runner.read_expected(expected), {
+            **stale, **{(name, mode): "pass" for name in ("plain.sv", "prefix.sv") for mode in runner.MODES},
+        })
+
     def test_parallel_collection_is_deterministic_and_isolated(self):
         self.case(":type: simulation\n", "// OUTPUT: :assert: True")
         for name, mode, body in [
