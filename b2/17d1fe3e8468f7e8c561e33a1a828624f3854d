@@ -1,1 +1,6 @@
-Review: validate every arm of a conditional array value; the comment no longer names constant function calls, which are not supported yet
+Revision history for #3571:
+
+rev 2 (content) 2026-11-11 08:33 UTC — Review: validate every arm of a conditional array value; the comment no longer names constant function calls, which are not supported yet
+rev 1 (initial) 2026-11-11 08:33 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":3571,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"2092e49699c851378cec314c4811eaab0ed36eae","timestamp_iso":"2026-11-11T08:33:23Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"2092e49699c851378cec314c4811eaab0ed36eae","new_sha":"b217d1fe3e8468f7e8c561e33a1a828624f3854d","timestamp_iso":"2026-11-11T08:33:23Z","reason":"Review: validate every arm of a conditional array value; the comment no longer names constant function calls, which are not supported yet","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/2092e49699c851378cec314c4811eaab0ed36eae...b217d1fe3e8468f7e8c561e33a1a828624f3854d"}]} -->
