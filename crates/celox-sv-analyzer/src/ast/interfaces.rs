@@ -2349,6 +2349,7 @@ fn connections(
             .collect());
     }
     let mut connections = Vec::new();
+    let mut wildcard = None;
     for connection in &instance.connections {
         match &connection.kind {
             InstanceConnectionKind::Named { name, value } => {
@@ -2362,19 +2363,32 @@ fn connections(
                 connections.push((formal, actual));
             }
             InstanceConnectionKind::Wildcard if !strict => {}
-            InstanceConnectionKind::Wildcard => {
-                return Err(unsupported("wildcard port connection"));
-            }
+            InstanceConnectionKind::Wildcard => wildcard = Some(file.span(connection.tokens)?),
             _ => return Err(unsupported("mixed named and positional port connections")),
         }
     }
     if strict {
         for port in &module.ports {
-            if port.interface.is_some()
-                && !connections.iter().any(|(formal, _)| formal == &port.name)
-            {
-                connections.push((port.name.clone(), Connection::Explicit(None)));
+            let Some(interface) = &port.interface else {
+                continue;
+            };
+            if connections.iter().any(|(formal, _)| formal == &port.name) {
+                continue;
             }
+            // `.*` connects each port left unnamed as `.name` does
+            // (IEEE 1800-2023 23.3.2.4); an implicit connection cannot bind
+            // a generic interface port (25.3.3).
+            let actual = match wildcard {
+                Some(_) if interface.interface.is_none() => {
+                    return Err(unsupported(format!(
+                        "wildcard connection of generic interface port `{}`",
+                        port.name
+                    )));
+                }
+                Some(span) => Connection::Implicit(span),
+                None => Connection::Explicit(None),
+            };
+            connections.push((port.name.clone(), actual));
         }
     }
     Ok(connections)

@@ -648,26 +648,37 @@ fn connection_expression(
     interface: Option<&ModuleInterface>,
 ) -> Converted<Option<celox_sv_syntax::ExprId>> {
     use celox_sv_syntax::{ConnectionValue, InstanceConnectionKind};
-    let found = if instance
-        .connections
-        .iter()
-        .any(|connection| matches!(connection.kind, InstanceConnectionKind::Named { .. }))
-    {
-        instance
+    let found = if instance.connections.iter().any(|connection| {
+        matches!(
+            connection.kind,
+            InstanceConnectionKind::Named { .. } | InstanceConnectionKind::Wildcard
+        )
+    }) {
+        let named = instance
             .connections
             .iter()
             .find_map(|connection| match &connection.kind {
                 InstanceConnectionKind::Named { name, value }
                     if instances::normalize_identifier(&name.spelling) == formal =>
                 {
-                    match value {
+                    Some(match value {
                         ConnectionValue::Expression(root) => Some(Some(*root)),
                         ConnectionValue::Implicit => Some(None),
                         ConnectionValue::Empty => None,
-                    }
+                    })
                 }
                 _ => None,
-            })
+            });
+        // `.*` connects a port no connection names as `.name` does
+        // (IEEE 1800-2023 23.3.2.4); `.name()` still leaves it open.
+        match named {
+            Some(connection) => connection,
+            None => instance
+                .connections
+                .iter()
+                .any(|connection| matches!(connection.kind, InstanceConnectionKind::Wildcard))
+                .then_some(None),
+        }
     } else {
         interface
             .and_then(|interface| interface.ports.iter().position(|name| name == formal))
