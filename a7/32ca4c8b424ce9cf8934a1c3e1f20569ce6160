@@ -1,1 +1,1 @@
-Rebase onto master after #3535 merged; resolve conflicts with the ast.rs and reference-doc splits
+Use grouped externs.calls after ProcModule state grouping on master
