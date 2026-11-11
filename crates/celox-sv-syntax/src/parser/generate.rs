@@ -62,9 +62,6 @@ impl Builder {
         start: usize,
         kind: BodyItemKind,
     ) -> Result<BodyItemId> {
-        if parser.body_items.len() >= 1_000_000 {
-            return Err(parser.unsupported("native body-item arena exceeds one million entries"));
-        }
         if let BodyItemKind::Unconverted { category, .. } = &kind {
             parser.validate_gate_boundary(category, parser.range(start))?;
         }

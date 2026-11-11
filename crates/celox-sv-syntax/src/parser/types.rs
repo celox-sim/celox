@@ -110,9 +110,6 @@ impl Parser<'_> {
             .data_type())
     }
     pub(super) fn implicit_type(&mut self) -> Result<TypeId> {
-        if self.types.len() >= 1_000_000 {
-            return Err(self.unsupported("native type arena exceeds one million nodes"));
-        }
         let id = TypeId(self.types.len());
         self.types.push(DataType {
             kind: DataTypeKind::Implicit,
@@ -339,9 +336,6 @@ impl Parser<'_> {
                     if !vector && !atom && signed.is_some() {
                         return Err(self.error("signing requires an integer datatype"));
                     }
-                }
-                if self.types.len() >= 1_000_000 {
-                    return Err(self.unsupported("native type arena exceeds one million nodes"));
                 }
                 let id = TypeId(self.types.len());
                 self.types.push(DataType {

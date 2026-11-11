@@ -460,11 +460,6 @@ impl Parser<'_> {
     }
 
     pub(super) fn node(&mut self, start: usize, kind: ExprKind) -> Result<ExprId> {
-        // A million arena nodes is tens of MiB of structural data before token
-        // strings/source storage, rather than an ordinary expression-depth limit.
-        if self.expressions.len() >= 1_000_000 {
-            return Err(self.unsupported("native expression arena exceeds one million nodes"));
-        }
         let id = ExprId(self.expressions.len());
         self.expressions.push(Expr {
             kind,
