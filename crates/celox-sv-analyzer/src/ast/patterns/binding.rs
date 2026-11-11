@@ -496,10 +496,15 @@ pub(in crate::ast) fn bind_native(
         Broadcast(usize),
     }
     let owned = typed_shape(root, tree, dims)?;
-    let shape = owned
-        .as_ref()
-        .or(shape)
-        .ok_or_else(|| unsupported("assignment pattern without target shape"))?;
+    let shape = owned.as_ref().or(shape).ok_or_else(|| {
+        // The pattern itself tells which of a design's many it is.
+        let mut text = native.token_text(native.expression(root).tokens);
+        if let Some((end, _)) = text.char_indices().nth(80) {
+            text.truncate(end);
+            text.push_str("...");
+        }
+        unsupported(format!("assignment pattern without target shape: `{text}`"))
+    })?;
     let mut jobs = vec![Job::Pattern(root, Shape::Borrowed(shape))];
     let mut values = Vec::new();
     while let Some(job) = jobs.pop() {
