@@ -671,6 +671,12 @@ impl Flow<'_> {
                 self.read(rhs, written)?;
                 self.write(lhs, *nonblocking, written).map(Exits::next)
             }
+            // Neither names a local (see `BodyBuilder::procedural_assign`).
+            Stmt::ProceduralAssign { rhs, .. } => {
+                self.read(rhs, written)?;
+                Ok(Exits::next(written))
+            }
+            Stmt::Deassign { .. } => Ok(Exits::next(written)),
             Stmt::AssignConcat {
                 parts,
                 rhs,
@@ -979,7 +985,9 @@ impl Flow<'_> {
 /// The expressions of `stmt` itself, not of the statements it contains.
 pub(super) fn stmt_exprs(stmt: &Stmt) -> Vec<&Expr> {
     match stmt {
-        Stmt::Assign { rhs, .. } | Stmt::AssignConcat { rhs, .. } => vec![rhs],
+        Stmt::Assign { rhs, .. }
+        | Stmt::AssignConcat { rhs, .. }
+        | Stmt::ProceduralAssign { rhs, .. } => vec![rhs],
         Stmt::If { condition, .. } => vec![condition],
         Stmt::Case {
             selector, items, ..
@@ -1032,6 +1040,7 @@ pub(super) fn stmt_exprs(stmt: &Stmt) -> Vec<&Expr> {
         | Stmt::Break
         | Stmt::Continue
         | Stmt::Block { .. }
+        | Stmt::Deassign { .. }
         | Stmt::DisableBlock(_) => Vec::new(),
     }
 }

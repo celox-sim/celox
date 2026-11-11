@@ -1891,6 +1891,8 @@ impl<'a> Frame<'a> {
             | Stmt::WaitFork
             | Stmt::DisableFork
             | Stmt::AssignConcat { .. }
+            | Stmt::ProceduralAssign { .. }
+            | Stmt::Deassign { .. }
             | Stmt::Call { .. } => return None,
         }
         Some(Flow::Next)

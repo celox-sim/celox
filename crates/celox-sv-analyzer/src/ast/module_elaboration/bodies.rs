@@ -103,6 +103,16 @@ impl ScopeElaboration<'_> {
             &mut self.comb_processes,
             &mut self.initial_processes,
         )?;
+        procedural_assigns::lower(
+            &self.packed_dimensions,
+            &self.ports,
+            &mut self.signals,
+            &self.comb_processes,
+            &mut self.ff_processes,
+            &mut self.initial_processes,
+            &mut self.subroutines,
+            &self.subroutine_directions,
+        )?;
         let (inline_subroutines, inline_randomizations) =
             procedural::randomization::inline_subroutines(
                 syntax_tree,

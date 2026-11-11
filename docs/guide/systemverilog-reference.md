@@ -176,9 +176,23 @@ blocks in programs. Two region deviations are listed under
 
 ### Processes, timing, and control flow {#timing-controls}
 
-- Procedural continuous assignments (`assign` / `deassign`, `force` /
-  `release` as procedural statements) and the `disable` statement, except
-  `disable fork`.
+- Procedural `force` / `release` statements, and the `disable` statement,
+  except `disable fork`.
+- Procedural continuous assignments (`assign` / `deassign`, IEEE 1800-2023
+  10.6.1) outside `initial` and `always` procedures: in a subroutine, a
+  `final` procedure, or an `always_comb`, `always_latch` or `always_ff`
+  procedure. An `always` procedure with one runs as a process. The target is
+  a whole packed integral variable of the module: a concatenation, a `real`,
+  `string`, handle or unpacked variable, and a variable of a procedural
+  block are rejected, as are an expression with side effects or with a call
+  of a subroutine or a system function, an expression that reads a variable
+  of a procedural block, and a target that an `always @*` procedure also
+  assigns.
+- While an `assign` is active, a write to its variable other than by a
+  plain assignment statement (an output argument, a concatenation target, a
+  delayed nonblocking assignment, a hierarchical name in another module) is
+  overridden in the time step it happens, not suppressed: a process that
+  waits on the variable can see the written value.
 - Nonblocking assignments inside `always_comb`
   ([#453](https://github.com/celox-sim/celox/issues/453)) and inside
   `always_latch` ([#431](https://github.com/celox-sim/celox/issues/431));
