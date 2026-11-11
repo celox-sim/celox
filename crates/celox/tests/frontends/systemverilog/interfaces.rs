@@ -158,6 +158,106 @@ sv_backends! {
     }
 }
 
+// `.*` connects each port no connection names as `.name` does (IEEE
+// 1800-2023 23.3.2.4), on a module with interface ports as on any other:
+// beside interface ports connected by name, and the interface ports
+// themselves.
+sv_backends! {
+    fn wildcard_connections_beside_named_interface_ports(sim) {
+        @setup {
+            let source = r#"
+    interface Bus;
+      logic [7:0] wdata, rdata;
+      modport src(output wdata, input rdata);
+    endinterface
+    module Leaf(input logic [7:0] din, output logic [7:0] dout, Bus.src port);
+      assign port.wdata = din;
+      assign dout = port.rdata;
+    endmodule
+    module Top(input logic [7:0] din, output logic [7:0] dout);
+      Bus bus();
+      assign bus.rdata = bus.wdata + 8'd1;
+      Leaf leaf(.port(bus), .*);
+    endmodule
+  "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("wildcard_beside_interface.sv"))], "Top");
+        let din = sim.signal("din");
+        let dout = sim.signal("dout");
+        for value in [0u8, 0x21, 0xff] {
+            sim.modify(|io| io.set(din, value)).unwrap();
+            assert_eq!(u64::try_from(sim.get(dout)).unwrap(), u64::from(value.wrapping_add(1)));
+        }
+    }
+    fn wildcard_connections_bind_interface_ports(sim) {
+        @setup {
+            let source = r#"
+    interface Bus;
+      logic [7:0] data;
+      modport writer(output data);
+      modport reader(input data);
+    endinterface
+    module Writer(Bus.writer bus, input logic [7:0] x);
+      assign bus.data = x;
+    endmodule
+    module Reader(Bus.reader bus, output logic [7:0] y, output logic [7:0] z);
+      assign y = bus.data;
+      assign z = ~bus.data;
+    endmodule
+    module Top(input logic [7:0] x, output logic [7:0] y, output logic [7:0] inverted);
+      Bus bus();
+      Writer w(.*);
+      if (1) begin : inner
+        Reader r(.z(inverted), .*);
+      end
+    endmodule
+  "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("wildcard_interface.sv"))], "Top");
+        let x = sim.signal("x");
+        let y = sim.signal("y");
+        let inverted = sim.signal("inverted");
+        for value in [0u8, 0x41, 0xff] {
+            sim.modify(|io| io.set(x, value)).unwrap();
+            assert_eq!(u64::try_from(sim.get(y)).unwrap(), u64::from(value));
+            assert_eq!(u64::try_from(sim.get(inverted)).unwrap(), u64::from(!value));
+        }
+    }
+}
+
+#[test]
+fn wildcard_connections_need_an_interface_of_the_port_name() {
+    // An interface port cannot stay unconnected (23.3.3.4), `.name()` does
+    // not fall back to the wildcard, and an implicit connection cannot bind a
+    // generic interface port (25.3.3).
+    let interface = "interface Bus; logic [7:0] data; endinterface\n";
+    for (child, instance) in [
+        (
+            "module Child(Bus port); endmodule",
+            "Bus other(); Child child(.*);",
+        ),
+        (
+            "module Child(Bus bus); endmodule",
+            "Bus bus(); Child child(.bus(), .*);",
+        ),
+        (
+            "module Child(interface bus); endmodule",
+            "Bus bus(); Child child(.*);",
+        ),
+    ] {
+        let source = format!("{interface}{child}\nmodule Top; {instance} endmodule");
+        assert!(
+            Simulator::from_sv_sources(
+                vec![(source.as_str(), Path::new("wildcard_rejections.sv"))],
+                "Top"
+            )
+            .build_cranelift()
+            .is_err(),
+            "{source}"
+        );
+    }
+}
+
 // Interface objects are not IEEE 20.7 data arrays. This opt-in compatibility
 // behavior belongs to Celox's harness rather than the portable language suite.
 sv_backends! {

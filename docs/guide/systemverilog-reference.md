@@ -44,9 +44,9 @@ constructs without a dedicated issue point to the frontend roadmap,
   ([#1953](https://github.com/celox-sim/celox/issues/1953)) (plain non-ANSI
   ports — a header of port names with body declarations — are supported),
   `ref` ports ([#427](https://github.com/celox-sim/celox/issues/427)),
-  wildcard `.*` connections
-  ([#442](https://github.com/celox-sim/celox/issues/442)), and ANSI port
-  default values.
+  wildcard `.*` connections to a module defined outside the SystemVerilog
+  sources ([#442](https://github.com/celox-sim/celox/issues/442)), and ANSI
+  port default values.
 - Nets with several drivers, including tri-state buses, and `inout` ports of
   the top module. An `inout` below the top is supported only with one
   continuous driver on either side, such as `assign io = oe ? d : 'z;`.

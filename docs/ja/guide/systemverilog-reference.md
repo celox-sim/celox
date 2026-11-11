@@ -37,7 +37,8 @@ Celox は IEEE Std 1800™-2023 が規定する SystemVerilog を実装します
 - ポートとインスタンス: `module m({a, b}, c[3:0], .p(d))` のような non-ANSI ポート式
   （[#1953](https://github.com/celox-sim/celox/issues/1953)。ポート名のヘッダと
   本体の宣言による素の non-ANSI ポートは対応）、`ref` ポート
-  （[#427](https://github.com/celox-sim/celox/issues/427)）、ワイルドカード `.*` 接続
+  （[#427](https://github.com/celox-sim/celox/issues/427)）、SystemVerilog ソースの外で
+  定義されたモジュールへのワイルドカード `.*` 接続
   （[#442](https://github.com/celox-sim/celox/issues/442)）、ANSI ポートの既定値。
 - 複数ドライバのネット（トライステートバスを含む）と、トップモジュールの `inout` ポート。
   トップより下の `inout` は、`assign io = oe ? d : 'z;` のように両側とも
