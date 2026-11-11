@@ -32,6 +32,7 @@ mod case;
 mod casts;
 mod classes;
 pub(crate) use classes::ClassIndex;
+mod assertion_control;
 mod comb_process;
 mod continuous_delays;
 mod events;

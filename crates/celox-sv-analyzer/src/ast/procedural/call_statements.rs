@@ -712,6 +712,28 @@ impl BodyBuilder<'_, '_, '_> {
                     )?)],
                 }]);
             }
+            system_functions::SystemCall::Task(
+                task @ (SystemTask::AssertOn | SystemTask::AssertOff),
+            ) => {
+                // A constant function ignores its system task calls
+                // (13.4.3).
+                if self.dims.constant_function_bodies {
+                    return Ok(Vec::new());
+                }
+                if !arguments.is_empty() {
+                    return Err(unsupported(format!(
+                        "`{}` with a level or a list of scopes or assertions",
+                        task.name()
+                    )));
+                }
+                if !self.controls_assertions() {
+                    return Err(unsupported(format!(
+                        "`{}` in a package or a compilation-unit scope",
+                        task.name()
+                    )));
+                }
+                return Ok(vec![assertion_control::set(task == SystemTask::AssertOff)]);
+            }
             // The coverage database tasks name a database Celox does not
             // keep: with no coverage data they have no effect (40.3.2.7)
             // but that of evaluating the name.

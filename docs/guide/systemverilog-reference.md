@@ -335,6 +335,16 @@ blocks in programs. Two region deviations are listed under
 - Deferred immediate assertions (`assert #0`, `assert final`, …): an action
   must be one display or severity task call; a user subroutine, or more
   than one statement, is rejected.
+- Assertion control tasks (IEEE 1800-2023 20.11) other than `$asserton` and
+  `$assertoff` without arguments, which stop and restart the checking of
+  every assertion of the design: `$assertkill`, `$assertcontrol`, the
+  action control tasks (`$assertpasson`, …), and a level or a list of
+  scopes or assertions as arguments. `$asserton` and `$assertoff` are
+  rejected in a package or at compilation-unit scope; assertions in the
+  subroutines of a package and in classes declared there are not
+  controlled. An `always_comb` or `always_latch` that calls them is
+  rejected when any procedure other than an `initial` or edge-controlled
+  one calls them too.
 - Sampled values <a id="sampled-values"></a>: `$past`, `$rose`, `$fell`, `$stable`,
   and `$changed` with an explicit clocking event argument, without a clock
   to infer, nested (`$past($past(a))`), or with operands that read an
