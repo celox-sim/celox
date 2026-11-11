@@ -4,34 +4,39 @@
 //! Handles arbitrary widths: narrow (≤64-bit) and wide (>64-bit, chunk-based).
 //!
 //! This module owns execution-unit planning and the shared lowering context.
-//! Instruction dispatch lives in `instruction`; operand lowering is grouped into
-//! `memory`, `concat`, `wide`, `wide_unary`, `bit_count`, and `four_state`.
+//! Instruction dispatch lives in `instruction`, with one function per instruction
+//! kind in `mux`, `load`, `store`, `commit`, `binary`, `unary`, `concat`, and
+//! `slice`; operand lowering is grouped into `memory`, `concat`, `wide`,
+//! `wide_unary`, `bit_count`, and `four_state`.
 //! Runtime event writes and capture notifications live in `runtime_events`.
 
+mod binary;
 mod bit_count;
 mod call;
+mod commit;
 mod concat;
 mod dynamic_load_cache;
 mod extern_call;
 mod four_state;
 mod instruction;
+mod load;
 mod memory;
+mod mux;
 mod packed_bit_store;
 mod packed_state;
 mod runtime_events;
 mod slice;
 mod sparse;
+mod store;
 mod strided;
 mod target_policy;
 mod transpose;
+mod unary;
 mod wide;
 mod wide_unary;
 
 use bit_count::{lower_narrow_bit_count, lower_wide_bit_count};
-use concat::{
-    lower_flat_concat_to_chunks, match_guarded_cmp_select_cond, try_lower_concat_of_muxes,
-    try_lower_repeated_msb_concat,
-};
+use concat::{lower_flat_concat_to_chunks, match_guarded_cmp_select_cond};
 use four_state::{
     finish_shift_value, get_wide_mask_chunks, lower_binary_mask, lower_four_state_mux_chunk,
     lower_mux_condition_state, lower_slice_mask, lower_unary_mask, lower_wide_binary_mask,
