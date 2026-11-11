@@ -93,14 +93,14 @@ impl<B: SimBackend> Simulator<B> {
     }
 
     pub(crate) fn strobe_calls(&self) -> Vec<StrobeCall> {
-        if !self.postponed_output {
+        if !self.slot_end.postponed_output {
             return Vec::new();
         }
         self.pending_host_events.lock().unwrap().strobes.clone()
     }
 
     pub(crate) fn restore_strobe_calls(&mut self, calls: &[StrobeCall]) {
-        if !self.postponed_output {
+        if !self.slot_end.postponed_output {
             return;
         }
         self.pending_host_events.lock().unwrap().strobes = calls.to_vec();
@@ -118,7 +118,7 @@ impl<B: SimBackend> Simulator<B> {
     }
 
     pub(crate) fn run_strobes(&mut self, timestamp: u64) -> Result<(), Halt> {
-        if !self.postponed_output || self.frozen {
+        if !self.slot_end.postponed_output || self.frozen {
             return Ok(());
         }
         let calls = std::mem::take(&mut self.pending_host_events.lock().unwrap().strobes);

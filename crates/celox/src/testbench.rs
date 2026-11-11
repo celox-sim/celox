@@ -191,7 +191,7 @@ fn private_testbench_range<B: SimBackend>(sim: &Simulator<B>, offset: usize, len
     if !sim.components.is_empty() || sim.schedule.timed {
         return false;
     }
-    let ranges = sim.testbench_hardware_ranges.get_or_init(|| {
+    let ranges = sim.heap.testbench_hardware_ranges.get_or_init(|| {
         let layout = sim.backend.layout();
         let mut ranges: Vec<_> = sim
             .program
@@ -1196,9 +1196,9 @@ fn exec_testbench<B: SimBackend>(
     }
     // Suspended processes keep their temporaries outside state memory, so
     // only the scheduler loop collects, with those temporaries as roots.
-    let blocked = std::mem::replace(&mut sim.heap_safepoints_blocked, true);
+    let blocked = std::mem::replace(&mut sim.heap.safepoints_blocked, true);
     let result = exec_processes(sim, testbench, ctx, &blocks);
-    sim.heap_safepoints_blocked = blocked;
+    sim.heap.safepoints_blocked = blocked;
     result
 }
 

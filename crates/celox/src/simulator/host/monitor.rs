@@ -33,13 +33,13 @@ impl MonitorState {
 
 impl<B: SimBackend> Simulator<B> {
     pub(crate) fn monitor_state(&self) -> MonitorState {
-        if !self.postponed_output {
+        if !self.slot_end.postponed_output {
             return MonitorState::default();
         }
         self.pending_host_events.lock().unwrap().monitors.clone()
     }
     pub(crate) fn restore_monitor_state(&mut self, state: &MonitorState) {
-        if !self.postponed_output {
+        if !self.slot_end.postponed_output {
             return;
         }
         self.pending_host_events.lock().unwrap().monitors = state.clone();

@@ -211,8 +211,8 @@ impl<B: SimBackend> UnitExecutor for Simulator<B> {
     }
 
     fn set_compiled_host_budgets(&mut self, rounds: u64, returns: u64) {
-        self.native_host_return_budget = returns;
-        self.native_host_round_budget = rounds;
+        self.native.return_budget = returns;
+        self.native.round_budget = rounds;
     }
 
     fn compiled_host_inputs(&self) -> bool {
@@ -250,21 +250,21 @@ impl<B: SimBackend> UnitExecutor for Simulator<B> {
         ready: Vec<celox_runtime::NbaUpdate>,
         delayed: Vec<(u64, celox_runtime::NbaUpdate)>,
     ) -> Result<(), celox_runtime::SimulatorErrorCode> {
-        self.native_nba_queue.extend(ready);
-        self.native_delayed_nbas.extend(delayed);
+        self.native.nba_queue.extend(ready);
+        self.native.delayed_nbas.extend(delayed);
         Ok(())
     }
 
     fn take_compiled_delayed_nbas(&mut self) -> Vec<(u64, celox_runtime::NbaUpdate)> {
-        self.native_delayed_nbas.drain(..).collect()
+        self.native.delayed_nbas.drain(..).collect()
     }
 
     fn has_compiled_nbas(&self) -> bool {
-        !self.native_nba_queue.is_empty() || !self.native_delayed_nbas.is_empty()
+        !self.native.nba_queue.is_empty() || !self.native.delayed_nbas.is_empty()
     }
 
     fn take_compiled_nbas(&mut self) -> Vec<celox_runtime::NbaUpdate> {
-        self.native_nba_queue.drain(..).collect()
+        self.native.nba_queue.drain(..).collect()
     }
 
     fn host_request(
@@ -363,18 +363,18 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
     }
 
     fn take_slot_writes(&mut self) -> bool {
-        std::mem::take(&mut self.slot_writes)
+        std::mem::take(&mut self.observation.writes)
     }
 
     #[inline]
     fn observes_updates(&self) -> bool {
-        self.observes_updates && !self.frozen
+        self.observation.observes_updates && !self.frozen
     }
 
     fn after_update(&mut self, timestamp: u64) -> Result<bool, Halt> {
         // The value change points of the kernels since the last update
         // point: the observer may have written there, or asked to finish.
-        let changed = std::mem::take(&mut self.value_changed);
+        let changed = std::mem::take(&mut self.observation.value_changed);
         if changed & 4 != 0 {
             return Err(Halt::Finish);
         }
@@ -393,7 +393,7 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
         // A scheduler generated without update points cannot show the
         // host each update.
         if self.frozen
-            || (self.observes_updates
+            || (self.observation.observes_updates
                 && !self
                     .program
                     .runtime_schema
@@ -408,9 +408,9 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
         // Waveforms record, the heap collects, deferred assertions mature
         // and a slot observer looks at every slot boundary.
         let vcd = &self.sv_vcd;
-        if self.postponed_output
-            || self.deferred_assertions
-            || self.slot_observer.is_some()
+        if self.slot_end.postponed_output
+            || self.slot_end.deferred_assertions
+            || self.observation.observer.is_some()
             || self.vcd_writer.is_some()
             || vcd.path.is_some()
             || vcd.started.is_some()
@@ -434,7 +434,7 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
 
     fn retain_process_values(&mut self, values: &[(SignalRef, celox_runtime::timing::Value)]) {
         let slots = self.handle_slots();
-        self.process_heap_roots.clear();
+        self.heap.process_roots.clear();
         for (signal, (value, _)) in values {
             for &(offset, kind) in slots.iter().filter(|&&(offset, _)| {
                 offset >= signal.offset && offset < signal.offset + signal.width.div_ceil(8)
@@ -443,7 +443,7 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
                 let mut raw = [0; celox_heap::HANDLE_BYTES];
                 let count = bytes.len().min(raw.len());
                 raw[..count].copy_from_slice(&bytes[..count]);
-                self.process_heap_roots.push(celox_heap::Root {
+                self.heap.process_roots.push(celox_heap::Root {
                     kind,
                     handle: celox_heap::Handle::from_le_bytes(raw),
                 });
@@ -463,7 +463,7 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
                 };
                 let mut raw = [0; celox_heap::HANDLE_BYTES];
                 raw.copy_from_slice(&saved.stack[offset..offset + celox_heap::HANDLE_BYTES]);
-                self.process_heap_roots.push(celox_heap::Root {
+                self.heap.process_roots.push(celox_heap::Root {
                     kind,
                     handle: celox_heap::Handle::from_le_bytes(raw),
                 });
@@ -514,7 +514,7 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
         self.try_dump_unless_rewound(timestamp)
             .map_err(|error| Halt::Error(vcd_dump_runtime_error(error)))?;
         if !self.frozen {
-            self.slot_writes |= self.show_slot(timestamp, |observer, io, time| {
+            self.observation.writes |= self.show_slot(timestamp, |observer, io, time| {
                 observer.end_of_slot(io, time)
             })?;
         }
@@ -530,7 +530,7 @@ impl<B: SimBackend> Simulator<B> {
         time: u64,
         show: impl FnOnce(&mut dyn SlotObserver<B>, &mut crate::SlotIo<'_, B>, u64),
     ) -> Result<bool, Halt> {
-        let Some(observer) = self.slot_observer.as_deref_mut() else {
+        let Some(observer) = self.observation.observer.as_deref_mut() else {
             return Ok(false);
         };
         let mut io = crate::SlotIo::new(crate::IOContext {
@@ -933,8 +933,8 @@ impl<B: SimBackend> Simulation<B> {
     /// simulation stops checking: the shadow does not see the observer's
     /// writes.
     pub fn observe_slots(&mut self, observer: Box<dyn SlotObserver<B>>, signals: &[SignalRef]) {
-        self.simulator.observes_updates = observer.observes_updates();
-        self.simulator.slot_observer = Some(observer);
+        self.simulator.observation.observes_updates = observer.observes_updates();
+        self.simulator.observation.observer = Some(observer);
         let signals = self.reference_observed(signals);
         self.state.set_observed_signals(signals.iter().copied());
         if self.shadow.take().is_some() {
@@ -951,7 +951,7 @@ impl<B: SimBackend> Simulation<B> {
     /// The observed signals whose changes keep slots in the reference loop:
     /// none when the compiled scheduler shows the observer every update.
     fn reference_observed<'a>(&self, signals: &'a [SignalRef]) -> &'a [SignalRef] {
-        let shown = self.simulator.observes_updates
+        let shown = self.simulator.observation.observes_updates
             && self
                 .simulator
                 .program
@@ -966,8 +966,8 @@ impl<B: SimBackend> Simulation<B> {
     /// [`Self::observe_slots`], and return it.
     pub fn stop_observing_slots(&mut self) -> Option<Box<dyn SlotObserver<B>>> {
         self.state.set_observed_signals([]);
-        self.simulator.observes_updates = false;
-        self.simulator.slot_observer.take()
+        self.simulator.observation.observes_updates = false;
+        self.simulator.observation.observer.take()
     }
 
     /// Register a clock signal and its period, enqueuing the first edge.
@@ -1022,7 +1022,7 @@ impl<B: SimBackend> Simulation<B> {
     /// run at that time.
     #[inline]
     fn end_idle_slot(&mut self, end_time: u64) -> Result<(), RuntimeErrorCode> {
-        if (!self.simulator.host_slot_work && !self.simulator.timestamped_reports)
+        if (!self.simulator.slot_end.work && !self.simulator.timestamped_reports)
             || end_time <= self.state.time()
             || self.state.next_event_time() == Some(self.state.time())
         {
@@ -1151,7 +1151,7 @@ impl<B: SimBackend> Simulation<B> {
         // The run leaves the time or ends at it: the slot is over, and the
         // deferred actions waiting from any settle at that time mature
         // before the reports are watched.
-        let mature = self.simulator.deferred_assertions
+        let mature = self.simulator.slot_end.deferred_assertions
             && self.state.next_event_time() != Some(self.state.time());
         if !self.simulator.dirty && !mature {
             return Ok(());
@@ -1485,7 +1485,7 @@ impl<B: SimBackend> Simulation<B> {
         // the initial settle of combinational logic belongs to time zero.
         // A fatal action is drained as a fatal report.
         if !self.state.is_finished()
-            && self.simulator.deferred_assertions
+            && self.simulator.slot_end.deferred_assertions
             && self.state.next_event_time() != Some(self.state.time())
         {
             if let Err(error) = self.simulator.mature_deferred_assertions() {
