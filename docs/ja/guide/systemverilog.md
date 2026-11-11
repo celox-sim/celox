@@ -78,8 +78,8 @@ Veryl と混在する階層では `Simulation::from_sources(veryl).with_sv_sourc
   スカラ部分集合を超えるクラスのランダム化と制約。
 - `bind`、checker、covergroup、clocking ブロック、`specify` ブロック、UDP、
   `defparam`、手続き的な `force` / `release`、`disable fork` 以外の `disable`。
-- `always_comb` と `always_latch` 内のノンブロッキング代入、複数ドライバ、
-  トライステートバス、`always_ff` の `iff`。
+- `always_comb` と `always_latch` 内のノンブロッキング代入、複数モジュールに
+  またがるネットのドライバ（モジュール間のトライステートバス）、`always_ff` の `iff`。
 - `ref` ポート、non-ANSI ポート式、遅延・強度付きゲートプリミティブ、
   interface の一部の機能。
 - `always_comb` の推論ラッチ。`inferred_latch = "warn"` または `"allow"` を

@@ -137,6 +137,7 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                     port.is_net(),
                 )
                 .with_unresolved_net(port.is_unresolved_net())
+                .with_net_resolution(port.net_resolution())
                 .with_default(port.default().cloned().map(Into::into))
                 .with_pattern_target(port.r#type().pattern_target(
                     &ast::const_functions::Environment {
@@ -157,6 +158,7 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                         port.is_net(),
                     )
                     .with_unresolved_net(port.is_unresolved_net())
+                    .with_net_resolution(port.net_resolution())
                 })
             })
             .collect::<Vec<_>>();
@@ -176,7 +178,8 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                         ast::ir_type(session, &tree.functions, ty, &type_env),
                         port.is_net(),
                     )
-                    .with_unresolved_net(port.is_unresolved_net()),
+                    .with_unresolved_net(port.is_unresolved_net())
+                    .with_net_resolution(port.net_resolution()),
                 );
             }
         }
@@ -191,6 +194,7 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                     signal.is_net(),
                 )
                 .with_unresolved_net(signal.is_unresolved_net())
+                .with_net_resolution(signal.net_resolution())
                 .with_package_variable(signal.package_variable())
                 .with_hierarchical(signal.hierarchical())
             })

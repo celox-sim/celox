@@ -85,8 +85,9 @@ The areas most likely to require changes when porting a design are:
 - `bind`, checkers, covergroups, clocking blocks, `specify` blocks, UDPs,
   `defparam`, procedural `force` / `release`, and `disable` (other than
   `disable fork`).
-- Nonblocking assignments in `always_comb` and `always_latch`, multiple net
-  drivers and tri-state buses, and `iff` in `always_ff`.
+- Nonblocking assignments in `always_comb` and `always_latch`, net drivers
+  in several modules (tri-state buses across modules), and `iff` in
+  `always_ff`.
 - `ref` ports, non-ANSI port expressions, gate primitives with delays or
   strengths, and several interface features.
 - Inferred latches in `always_comb`, which are an error unless

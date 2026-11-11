@@ -197,6 +197,7 @@ impl Signal {
             r#type,
             is_net: false,
             unresolved_net: false,
+            net_resolution: NetResolution::Wire,
             net_drive: NetDrive::None,
             is_const: false,
             package_variable: None,
@@ -210,6 +211,7 @@ impl Signal {
             r#type,
             is_net: true,
             unresolved_net: false,
+            net_resolution: NetResolution::Wire,
             net_drive: NetDrive::None,
             is_const: false,
             package_variable: None,
@@ -268,6 +270,16 @@ impl Signal {
         self.net_drive = drive;
         self
     }
+
+    /// How several drivers of the net combine (6.6).
+    pub(crate) fn net_resolution(&self) -> NetResolution {
+        self.net_resolution
+    }
+
+    pub(crate) fn with_net_resolution(mut self, resolution: NetResolution) -> Self {
+        self.net_resolution = resolution;
+        self
+    }
 }
 
 impl Port {
@@ -279,6 +291,7 @@ impl Port {
             randomizable: !is_net,
             is_net,
             unresolved_net: false,
+            net_resolution: NetResolution::Wire,
             default: None,
         }
     }
@@ -306,6 +319,16 @@ impl Port {
 
     pub(crate) fn with_unresolved_net(mut self, unresolved: bool) -> Self {
         self.unresolved_net = unresolved;
+        self
+    }
+
+    /// How several drivers of the net combine (6.6).
+    pub(crate) fn net_resolution(&self) -> NetResolution {
+        self.net_resolution
+    }
+
+    pub(crate) fn with_net_resolution(mut self, resolution: NetResolution) -> Self {
+        self.net_resolution = resolution;
         self
     }
 

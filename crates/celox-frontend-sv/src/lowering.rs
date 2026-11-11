@@ -56,6 +56,7 @@ mod instances;
 mod interfaces;
 mod masked;
 mod module;
+mod net_resolution;
 mod operators;
 mod out_of_line;
 mod packages;
