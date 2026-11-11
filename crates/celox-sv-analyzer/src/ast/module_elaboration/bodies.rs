@@ -103,6 +103,17 @@ impl ScopeElaboration<'_> {
             &mut self.comb_processes,
             &mut self.initial_processes,
         )?;
+        // Every module of a design with assertion control tasks shares
+        // their state; the subroutines of a package do not check it.
+        if session.controls_assertions
+            && syntax_tree.package.is_none()
+            && !self
+                .signals
+                .iter()
+                .any(|signal| signal.name() == assertion_control::OFF)
+        {
+            self.signals.push(assertion_control::signal());
+        }
         procedural_assigns::lower(
             &self.packed_dimensions,
             &self.ports,

@@ -131,12 +131,17 @@ fn lower_module_with_overrides(
     };
     let shared_process_variables = shared_process_variables.as_ref();
     // The rewrite visits the edge processes in order, once each.
+    let assertion_control = module
+        .signals()
+        .iter()
+        .any(|signal| signal.name() == sv::ASSERTIONS_OFF);
     let fallbacks = module
         .ff_processes()
         .iter()
         .map(|process| {
             runs_as_process(&module, process, &constants, &parameter_types)
                 || shares_foreign_variable(&module, process, foreign_writes)
+                || (assertion_control && controls_assertions(&module, process))
         })
         .collect::<Vec<_>>();
     if fallbacks.contains(&true) {

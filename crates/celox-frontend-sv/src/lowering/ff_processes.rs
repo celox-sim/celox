@@ -438,6 +438,18 @@ pub(super) fn runs_as_process(
                 || writes_other_instance()))
 }
 
+/// Whether edge procedure `process` sets the assertion control state with
+/// `$assertoff` or `$asserton`, also through a task it calls. The tasks set
+/// it as they execute (IEEE 1800-2023 20.11), and other procedures, also of
+/// the same edge, may set it too: it is no register of the procedure, so
+/// the procedure runs as a process waiting on its events. Only modules that
+/// have the state (`assertion_control`) are asked.
+pub(super) fn controls_assertions(module: &sv::ir::Module, process: &sv::ir::FfProcess) -> bool {
+    let mut written = HashSet::default();
+    procedural::written_names_with_calls(module, process.body(), &mut written);
+    written.contains(sv::ASSERTIONS_OFF)
+}
+
 /// Whether plain `always` edge procedure `process` writes a variable that
 /// repeating processes of other modules write through hierarchical names
 /// (`foreign_writes`), other than by nonblocking assignments to a memory.

@@ -69,6 +69,8 @@ macro_rules! sv_backends {
 mod array_locators;
 #[path = "frontends/systemverilog/array_parameters.rs"]
 mod array_parameters;
+#[path = "frontends/systemverilog/assertion_control.rs"]
+mod assertion_control;
 #[path = "frontends/systemverilog/binary_file_io.rs"]
 mod binary_file_io;
 #[path = "frontends/systemverilog/class.rs"]

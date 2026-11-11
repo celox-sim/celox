@@ -243,6 +243,11 @@ pub struct PackageBinding {
     /// [`SymbolicRtl::packages`].
     pub package: ModuleId,
     pub var_id: SourceVarId,
+    /// The variable is simulator state that the design's tasks set, such
+    /// as the assertion control state of `$assertoff` (IEEE 1800-2023
+    /// 20.11), rather than a variable of the design: any process may write
+    /// it, so its drivers are not checked.
+    pub simulator_state: bool,
 }
 
 impl SimModule {
