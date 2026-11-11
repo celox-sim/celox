@@ -42,7 +42,12 @@ pub(super) fn unsupported(construct: impl Into<String>) -> sv::AnalyzerError {
 /// The variables and subroutines of the module being lowered.
 pub(super) struct ProcModule<'a> {
     pub variables: &'a mut HashMap<SourceVarId, SvVariable>,
+    /// The variable each name denotes. Rebind a name through
+    /// [`Self::bind_name`], which keeps the storage index up to date.
     pub name_to_id: &'a mut HashMap<String, SourceVarId>,
+    /// The storage of the subroutines by variable (see
+    /// [`Self::is_static_storage`]), once a query asks for it.
+    pub(super) storage: Option<out_of_line::StorageIndex>,
     pub next_id: SourceVarId,
     pub constants: &'a HashMap<String, i128>,
     pub parameter_types: &'a HashMap<String, (usize, bool)>,
@@ -202,6 +207,7 @@ impl<'a> ProcModule<'a> {
             forceable,
             variables,
             name_to_id,
+            storage: None,
             next_id,
             constants,
             parameter_types,

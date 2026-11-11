@@ -641,6 +641,88 @@ fn static_names(subroutine: &sv::ir::Subroutine) -> Vec<&String> {
     own
 }
 
+/// The storage of a module's subroutines by variable: for each variable,
+/// how many of the names of their automatic storage ([`automatic_names`])
+/// and of their static storage ([`static_names`]) denote it. The names are
+/// fixed with the subroutines; what they denote changes as calls are
+/// inlined, which [`ProcModule::bind_name`] follows, so a query costs a
+/// lookup rather than a walk of every subroutine.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct StorageIndex {
+    automatic_names: HashSet<String>,
+    static_names: HashSet<String>,
+    pub(super) automatic: HashMap<SourceVarId, usize>,
+    pub(super) persistent: HashMap<SourceVarId, usize>,
+}
+
+impl StorageIndex {
+    pub(super) fn new(
+        subroutines: &HashMap<String, sv::ir::Subroutine>,
+        name_to_id: &HashMap<String, SourceVarId>,
+    ) -> Self {
+        let automatic_names: HashSet<String> = subroutines
+            .values()
+            .flat_map(automatic_names)
+            .cloned()
+            .collect();
+        let static_names: HashSet<String> = subroutines
+            .values()
+            .flat_map(static_names)
+            .cloned()
+            .collect();
+        let count = |names: &HashSet<String>| {
+            let mut counts = HashMap::<SourceVarId, usize>::default();
+            for id in names.iter().filter_map(|name| name_to_id.get(name)) {
+                *counts.entry(*id).or_default() += 1;
+            }
+            counts
+        };
+        Self {
+            automatic: count(&automatic_names),
+            persistent: count(&static_names),
+            automatic_names,
+            static_names,
+        }
+    }
+
+    /// Follow name `name` from denoting `old` to denoting `new`.
+    pub(super) fn rebind(
+        &mut self,
+        name: &str,
+        old: Option<SourceVarId>,
+        new: Option<SourceVarId>,
+    ) {
+        for (names, counts) in [
+            (&self.automatic_names, &mut self.automatic),
+            (&self.static_names, &mut self.persistent),
+        ] {
+            if !names.contains(name) {
+                continue;
+            }
+            if let Some(old) = old
+                && let Some(count) = counts.get_mut(&old)
+            {
+                *count -= 1;
+                if *count == 0 {
+                    counts.remove(&old);
+                }
+            }
+            if let Some(new) = new {
+                *counts.entry(new).or_default() += 1;
+            }
+        }
+    }
+
+    /// Whether the index is what [`Self::new`] builds now.
+    pub(super) fn is_current(
+        &self,
+        subroutines: &HashMap<String, sv::ir::Subroutine>,
+        name_to_id: &HashMap<String, SourceVarId>,
+    ) -> bool {
+        *self == Self::new(subroutines, name_to_id)
+    }
+}
+
 /// The functions of `module` a unit of it calls, directly or through other
 /// functions, in `module.functions` with the calls renumbered: a function
 /// lowered for a call that then stayed inlined (from an `always_ff`

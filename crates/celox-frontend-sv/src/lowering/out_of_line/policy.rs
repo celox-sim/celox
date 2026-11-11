@@ -10,9 +10,6 @@ impl ProcModule<'_> {
         self.calls.as_deref_mut()?.out_of_line.as_mut()
     }
 
-    /// The automatic storage of the module's subroutines (see
-    /// [`automatic_names`]). Such a variable is a temporary of each inline
-    /// expansion, which a function unit keeps in its frame.
     /// The declared variable that `id` stands for: `id` itself, or the
     /// variable an inlined activation copied it from, through every
     /// activation of a recursion. A function's frame has slots for the
@@ -40,35 +37,80 @@ impl ProcModule<'_> {
             .iter()
             .map(|(name, _, _)| (name.clone(), self.name_to_id[name]))
             .collect();
-        for (name, original, _) in self.activation_copies.iter().rev() {
-            self.name_to_id.insert(name.clone(), *original);
+        let originals: Vec<(String, SourceVarId)> = self
+            .activation_copies
+            .iter()
+            .rev()
+            .map(|(name, original, _)| (name.clone(), *original))
+            .collect();
+        for (name, original) in originals {
+            self.bind_name(name, original);
         }
         current
     }
 
     pub(in crate::lowering) fn restore_names(&mut self, names: Vec<(String, SourceVarId)>) {
         for (name, id) in names {
-            self.name_to_id.insert(name, id);
+            self.bind_name(name, id);
         }
     }
 
-    pub(in crate::lowering) fn automatic_storage(&self) -> HashSet<SourceVarId> {
-        self.subroutines
-            .values()
-            .flat_map(automatic_names)
-            .filter_map(|name| self.id(name))
-            .collect()
+    /// Make `name` denote `id`, as an inlined activation or a `ref` formal
+    /// does for the duration of a call, keeping the storage index (see
+    /// [`Self::is_static_storage`]) up to date. Returns what `name` denoted.
+    pub(in crate::lowering) fn bind_name(
+        &mut self,
+        name: String,
+        id: SourceVarId,
+    ) -> Option<SourceVarId> {
+        let old = self.name_to_id.insert(name.clone(), id);
+        if let Some(storage) = &mut self.storage {
+            storage.rebind(&name, old, Some(id));
+        }
+        old
     }
 
-    /// The static storage of the module's subroutines: what they declare,
-    /// formals and results included, that is not automatic. It is shared by
-    /// every call, inlined or not, recursive ones included.
-    pub(in crate::lowering) fn static_storage(&self) -> HashSet<SourceVarId> {
-        self.subroutines
-            .values()
-            .flat_map(static_names)
-            .filter_map(|name| self.id(name))
-            .collect()
+    /// Make `name` denote nothing, as [`Self::bind_name`] does.
+    pub(in crate::lowering) fn unbind_name(&mut self, name: &str) {
+        let old = self.name_to_id.remove(name);
+        if let Some(storage) = &mut self.storage {
+            storage.rebind(name, old, None);
+        }
+    }
+
+    fn storage(&mut self) -> &StorageIndex {
+        if self.storage.is_none() {
+            self.storage = Some(StorageIndex::new(&self.subroutines, &*self.name_to_id));
+        }
+        self.storage.as_ref().expect("built above")
+    }
+
+    /// Check, in a debug build, that every name was rebound through
+    /// [`Self::bind_name`], so the storage index is what the names denote.
+    pub(in crate::lowering) fn check_storage_index(&mut self) {
+        if cfg!(debug_assertions) {
+            self.storage();
+            let storage = self.storage.as_ref().expect("built above");
+            assert!(
+                storage.is_current(&self.subroutines, &*self.name_to_id),
+                "a name was rebound without `bind_name`"
+            );
+        }
+    }
+
+    /// Whether `id` is automatic storage of one of the module's subroutines
+    /// (see [`automatic_names`]). Such a variable is a temporary of each
+    /// inline expansion, which a function unit keeps in its frame.
+    pub(in crate::lowering) fn is_automatic_storage(&mut self, id: SourceVarId) -> bool {
+        self.storage().automatic.contains_key(&id)
+    }
+
+    /// Whether `id` is static storage of one of the module's subroutines:
+    /// what they declare, formals and results included, that is not
+    /// automatic. It is shared by every call, inlined or not, recursive ones
+    /// included.
+    pub(in crate::lowering) fn is_static_storage(&mut self, id: SourceVarId) -> bool {
+        self.storage().persistent.contains_key(&id)
     }
 
     /// Whether assembly may instrument the stores into `id` (see
