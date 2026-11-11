@@ -1,0 +1,1 @@
+Review: validate every arm of a conditional array value; the comment no longer names constant function calls, which are not supported yet
