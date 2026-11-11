@@ -132,6 +132,14 @@ pub(super) fn lower(
             .iter()
             .any(|signal| signal.name() == name && signal.unresolved_net)
             || target.is_some_and(|port| port.unresolved_net);
+        // The drivers move to the raw net, which resolves them as the
+        // declared net does (6.6).
+        let resolution = signals
+            .iter()
+            .find(|signal| signal.name() == name)
+            .map(|signal| signal.net_resolution)
+            .or_else(|| target.map(|port| port.net_resolution))
+            .unwrap_or_default();
         // The frontend addresses a one-dimensional packed vector with its
         // declared indices; multidimensional packed values use flat offsets.
         let range = match ty.packed_ranges.as_slice() {
@@ -150,7 +158,11 @@ pub(super) fn lower(
             }
             None => None,
         };
-        signals.push(Signal::new_net(raw.clone(), ty).with_unresolved_net(unresolved));
+        signals.push(
+            Signal::new_net(raw.clone(), ty)
+                .with_unresolved_net(unresolved)
+                .with_net_resolution(resolution),
+        );
         dimensions.insert(raw.clone(), shape.clone());
         dimensions
             .expression_signedness

@@ -254,6 +254,7 @@ impl ModuleBinding<'_> {
                         r#type: port.r#type.clone(),
                         is_net: port.is_net,
                         unresolved_net: port.unresolved_net,
+                        net_resolution: port.net_resolution,
                         net_drive: NetDrive::None,
                         is_const: false,
                         package_variable: None,

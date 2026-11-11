@@ -256,6 +256,7 @@ pub(super) fn net_signals(
         signals.push(
             Signal::new_net(name, ty)
                 .with_unresolved_net(declaration.net_type == "uwire")
+                .with_net_resolution(NetResolution::of(&declaration.net_type))
                 .with_net_drive(drive),
         );
     }

@@ -16,7 +16,7 @@ pub(super) fn expr_for_state_mode(
     }
 }
 
-fn needs_state_mode_rewrite(expr: &sv::ir::Expr, four_state: bool) -> bool {
+pub(super) fn needs_state_mode_rewrite(expr: &sv::ir::Expr, four_state: bool) -> bool {
     use sv::ir::Expr;
     let needs = |expr| needs_state_mode_rewrite(expr, four_state);
     match expr {

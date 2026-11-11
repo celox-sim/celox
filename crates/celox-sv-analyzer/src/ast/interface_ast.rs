@@ -157,7 +157,8 @@ pub(super) fn signature(
                     rename.r#type(port.r#type.clone()),
                     port.is_net,
                 )
-                .with_unresolved_net(port.unresolved_net));
+                .with_unresolved_net(port.unresolved_net)
+                .with_net_resolution(port.net_resolution));
             }
             let signal = declarations
                 .iter()
@@ -169,7 +170,8 @@ pub(super) fn signature(
                 rename.r#type(signal.r#type.clone()),
                 signal.is_net,
             )
-            .with_unresolved_net(signal.unresolved_net))
+            .with_unresolved_net(signal.unresolved_net)
+            .with_net_resolution(signal.net_resolution))
         })
         .collect::<Converted<_>>()?;
     module
