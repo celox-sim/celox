@@ -87,8 +87,8 @@ The areas most likely to require changes when porting a design are:
   `disable fork`).
 - Nonblocking assignments in `always_comb` and `always_latch`, multiple net
   drivers and tri-state buses, and `iff` in `always_ff`.
-- Wildcard `.*` connections, `ref` ports, non-ANSI port expressions, gate
-  primitives with delays or strengths, and several interface features.
+- `ref` ports, non-ANSI port expressions, gate primitives with delays or
+  strengths, and several interface features.
 - Inferred latches in `always_comb`, which are an error unless
   `inferred_latch = "warn"` or `"allow"` is set.
 
