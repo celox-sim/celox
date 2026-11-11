@@ -134,9 +134,11 @@ blocks in programs. Two region deviations are listed under
   structures with unpacked array members, packed arrays of enumerations or
   of signed typedefs, classes with non-integral value parameters, and
   operands other than names and data types, such as `$typename(a + b)`.
-- Constant parameters of aggregate type (unpacked arrays, packed structs
-  given by a pattern) hold their value from the start of the simulation and
-  cannot be used where an elaboration-time constant is required.
+- Parameters of unpacked array type hold their value from the start of the
+  simulation and cannot be used where an elaboration-time constant is
+  required. A member of a packed-structure parameter is such a constant
+  unless it is wider than 127 bits or has X or Z bits: then it cannot size
+  a declaration, select a generate construct or override a parameter.
 
 ### Unpacked structures {#unpacked-structures}
 

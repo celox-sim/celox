@@ -1680,3 +1680,50 @@ fn body_parameters_are_local_where_the_lrm_makes_them_so() {
         );
     }
 }
+
+/// The member constants of a structure parameter are keyed by its name
+/// last, as its other markers are, so that an import or a hiding name
+/// takes or drops them with the parameter.
+#[test]
+fn member_constants_follow_their_parameter() {
+    let mut env = ConstEnv::default();
+    env.insert(parameter_members_marker("pkg::cfg"), 1);
+    env.insert(parameter_member_value_marker("pkg::cfg", "a.b"), 5);
+    env.insert(
+        parameter_member_type_marker("pkg::cfg", "a.b"),
+        (4 << 1) | 1,
+    );
+    env.insert(parameter_members_marker("other"), 1);
+    env.insert(parameter_member_value_marker("other", "a.b"), 9);
+    env.insert(parameter_member_type_marker("other", "a.b"), 8 << 1);
+    let mut keys = member_keys("pkg::cfg", &env);
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "__parameter::member::type::a.b::pkg::cfg",
+            "__parameter::member::value::a.b::pkg::cfg",
+            "__parameter::members::pkg::cfg",
+        ]
+    );
+    assert!(binding_keys("pkg::cfg", &env, 0).contains(&keys[1]));
+    // A name without the count marker has none, also one that ends alike.
+    assert!(member_keys("cfg", &env).is_empty());
+    assert_eq!(
+        scope::split_marker(&keys[1]),
+        Some(("__parameter::member::value::a.b::", "pkg::cfg"))
+    );
+    assert_eq!(
+        scope::split_marker(&keys[2]),
+        Some(("__parameter::members::", "pkg::cfg"))
+    );
+    assert_eq!(
+        member_literal("pkg::cfg", "a.b", &env).as_deref(),
+        Some("4'sd5")
+    );
+    assert_eq!(
+        member_literal("other", "a.b", &env).as_deref(),
+        Some("8'd9")
+    );
+    assert_eq!(member_literal("other", "a", &env), None);
+}
