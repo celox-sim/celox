@@ -17,11 +17,14 @@ mod diagnostics;
 mod extern_call;
 mod floating;
 mod folded_operands;
+mod frame;
 mod instruction;
 mod memory;
 mod operands;
+mod packed_compare;
 mod pipeline;
 mod settle_layout;
+mod simd;
 
 use arithmetic::{
     BinOp, DivOp, ShiftOp, emit_and_imm, emit_and_memory_imm, emit_binop_memory, emit_binop_rr,
@@ -37,9 +40,10 @@ use diagnostics::{
     mir_inst_count,
 };
 use folded_operands::{count_vreg_uses, try_emit_load_fold, try_emit_not_and_fold};
+use frame::{emit_epilogue, emit_prologue};
 use instruction::emit_inst;
 use memory::{
-    SparseDirtyWords, emit_direct_memcopy, emit_sparse_commit_worklist, emit_sparse_dirty_word,
+    emit_mem_copy, emit_mem_fill, emit_sparse_commit, emit_sparse_commit_worklist,
     emit_sparse_inline_commits,
 };
 use operands::{
@@ -47,9 +51,11 @@ use operands::{
     mem_operand_ptr_indexed, preg_to_reg8, preg_to_reg16, preg_to_reg32, preg_to_reg64, resolve,
     scratch_operand, x86_vec_to_xmm,
 };
+use packed_compare::{emit_packed_byte_affine_compare, emit_packed_lane_compare};
 pub use pipeline::{
     AllocatedFunction, allocate_owned_prepared_eu, emit_owned_prepared_eu, emit_prepared_eu,
 };
+use simd::emit_simd;
 
 use std::fmt;
 
@@ -1366,104 +1372,15 @@ fn emit_planned_with_callees(
         .transpose()?;
 
     // ── Prologue ──
-    {
-        if let Some(save_offset) = arena.loop_xmm15_save {
-            asm.movdqu(xmmword_ptr(rdi + save_offset), xmm15)?;
-        }
-        // The GPR allocator does not own vector registers. Preserve the used
-        // callee-saved GPRs outside that file. GS mode additionally preserves
-        // the caller's segment base; fallback mode borrows the saved R15.
-        match (tick_loop, state_base) {
-            (true, StateBaseStrategy::Fs) => {
-                asm.rdfsbase(rax)?;
-                asm.mov(
-                    qword_ptr(rdi + arena.loop_segment_save.expect("loop segment save")),
-                    rax,
-                )?;
-            }
-            (true, StateBaseStrategy::Gs) => {
-                asm.rdgsbase(rax)?;
-                asm.mov(
-                    qword_ptr(rdi + arena.loop_segment_save.expect("loop segment save")),
-                    rax,
-                )?;
-            }
-            (true, StateBaseStrategy::R15) => {}
-            (false, StateBaseStrategy::Fs) => {
-                asm.rdfsbase(rax)?;
-                asm.movq(xmm15, rax)?;
-            }
-            (false, StateBaseStrategy::Gs) => {
-                asm.rdgsbase(rax)?;
-                asm.movq(xmm15, rax)?;
-            }
-            (false, StateBaseStrategy::R15) => {}
-        }
-        if let Some(base) = arena.loop_gpr_save_base {
-            for (index, &reg) in arena.callee_saved.iter().enumerate() {
-                asm.mov(
-                    qword_ptr(rdi + base + i32::try_from(index * 8).unwrap()),
-                    preg_to_reg64(reg),
-                )?;
-            }
-        } else {
-            for (index, &reg) in arena.callee_saved.iter().enumerate() {
-                asm.movq(saved_gpr_xmm(index), preg_to_reg64(reg))?;
-            }
-        }
-        match state_base {
-            StateBaseStrategy::Fs => asm.wrfsbase(rdi)?,
-            StateBaseStrategy::Gs => asm.wrgsbase(rdi)?,
-            StateBaseStrategy::R15 => asm.mov(r15, rdi)?,
-        }
-        if let Some((_, register)) = context.frame {
-            // A function unit takes its frame's address after the state
-            // pointer. RSP is a multiple of 16 below the arena.
-            asm.mov(register, rsi)?;
-            asm.sub(rsp, stack_arena)?;
-        }
-        if tick_loop {
-            let mut count_ready = asm.create_label();
-            asm.mov(
-                rax,
-                qword_ptr(mem_operand(
-                    &context,
-                    BaseReg::SimState,
-                    STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET as i32,
-                )),
-            )?;
-            asm.test(rax, rax)?;
-            asm.jne(count_ready)?;
-            asm.mov(eax, 1u32)?;
-            asm.set_label(&mut count_ready)?;
-            // XMM15 is invisible to GPR allocation. Its low qword carries the
-            // tick count.
-            asm.movq(xmm15, rax)?;
-            // Keep the internal count-ready label distinct from the first MIR
-            // block label when runtime-event initialization is absent.
-            asm.nop()?;
-
-            if check_runtime_events {
-                asm.mov(
-                    rax,
-                    qword_ptr(mem_operand(
-                        &context,
-                        BaseReg::SimState,
-                        STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET as i32,
-                    )),
-                )?;
-                asm.mov(rax, qword_ptr(rax))?;
-                asm.mov(
-                    qword_ptr(mem_operand(
-                        &context,
-                        BaseReg::SimState,
-                        STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET as i32,
-                    )),
-                    rax,
-                )?;
-            }
-        }
-    }
+    emit_prologue(
+        &mut asm,
+        &arena,
+        context,
+        state_base,
+        stack_arena,
+        tick_loop,
+        check_runtime_events,
+    )?;
 
     // ── Blocks ──
     let mut previous_canonical_label = None;
@@ -1714,82 +1631,16 @@ fn emit_planned_with_callees(
     }
 
     // ── Epilogue ──
-    if let Some(label) = &mut tick_loop_success_label {
-        asm.set_label(label)?;
-        asm.xor(eax, eax)?;
-    }
-    asm.set_label(&mut epilogue_label)?;
-    if tick_loop {
-        asm.movq(r10, xmm15)?;
-        asm.mov(
-            qword_ptr(mem_operand(
-                &context,
-                BaseReg::SimState,
-                STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET as i32,
-            )),
-            r10,
-        )?;
-    }
-    if let Some(save_offset) = arena.loop_xmm15_save {
-        asm.movdqu(
-            xmm15,
-            xmmword_ptr(mem_operand(&context, BaseReg::SimState, save_offset)),
-        )?;
-    }
-    if let Some(base) = arena.loop_gpr_save_base {
-        for (index, &reg) in arena.callee_saved.iter().enumerate() {
-            asm.mov(
-                preg_to_reg64(reg),
-                qword_ptr(mem_operand(
-                    &context,
-                    BaseReg::SimState,
-                    base + i32::try_from(index * 8).unwrap(),
-                )),
-            )?;
-        }
-    } else {
-        for (index, &reg) in arena.callee_saved.iter().enumerate().rev() {
-            asm.movq(preg_to_reg64(reg), saved_gpr_xmm(index))?;
-        }
-    }
-    match (tick_loop, state_base) {
-        (true, StateBaseStrategy::Fs) => {
-            asm.mov(
-                r11,
-                qword_ptr(mem_operand(
-                    &context,
-                    BaseReg::SimState,
-                    arena.loop_segment_save.expect("loop segment save"),
-                )),
-            )?;
-            asm.wrfsbase(r11)?;
-        }
-        (true, StateBaseStrategy::Gs) => {
-            asm.mov(
-                r11,
-                qword_ptr(mem_operand(
-                    &context,
-                    BaseReg::SimState,
-                    arena.loop_segment_save.expect("loop segment save"),
-                )),
-            )?;
-            asm.wrgsbase(r11)?;
-        }
-        (true, StateBaseStrategy::R15) => {}
-        (false, StateBaseStrategy::Fs) => {
-            asm.movq(r11, xmm15)?;
-            asm.wrfsbase(r11)?;
-        }
-        (false, StateBaseStrategy::Gs) => {
-            asm.movq(r11, xmm15)?;
-            asm.wrgsbase(r11)?;
-        }
-        (false, StateBaseStrategy::R15) => {}
-    }
-    if context.frame.is_some() {
-        asm.add(rsp, stack_arena)?;
-    }
-    asm.ret()?;
+    emit_epilogue(
+        &mut asm,
+        &arena,
+        context,
+        state_base,
+        stack_arena,
+        tick_loop,
+        &mut tick_loop_success_label,
+        &mut epilogue_label,
+    )?;
     if call_trap_used {
         // A broken call-stack contract is a defect of the producer, not a
         // simulation error: stop as Cranelift's trap does.
