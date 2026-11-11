@@ -8,7 +8,7 @@
 //! Instruction dispatch lives in `instruction`, with one function per instruction
 //! kind in `mux`, `load`, `store`, `commit`, `binary`, `unary`, `concat`, and
 //! `slice`; operand lowering is grouped into `memory`, `concat`, `wide`,
-//! `wide_unary`, `bit_count`, and `four_state`.
+//! `wide_binary`, `wide_unary`, `bit_count`, and `four_state`.
 //! Runtime event writes and capture notifications live in `runtime_events`.
 
 mod binary;
@@ -31,6 +31,7 @@ mod store;
 mod strided;
 mod unary;
 mod wide;
+mod wide_binary;
 mod wide_unary;
 
 use bit_count::{lower_narrow_bit_count, lower_wide_bit_count};
@@ -54,7 +55,8 @@ use runtime_events::{
     emit_enable_comb_capture_sites_if_regs_changed, load_runtime_event_ptr,
     load_runtime_event_ptr_and_comb_capture_enabled, lower_runtime_event_write,
 };
-use wide::{ShiftDir, lower_wide_binary, lower_wide_runtime_shift_chunks, wide_reduce_or};
+use wide::{ShiftDir, lower_wide_runtime_shift_chunks, wide_reduce_or};
+use wide_binary::lower_wide_binary;
 use wide_unary::{lower_planes, lower_wide_extract, lower_wide_unary};
 
 use super::mir::*;
