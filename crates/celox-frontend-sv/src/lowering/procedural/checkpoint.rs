@@ -41,6 +41,8 @@ impl ProcModule<'_> {
             // Restored through `next_id`.
             variables: _,
             name_to_id: _,
+            // Follows `name_to_id` (see `bind_name`).
+            storage: _,
             next_id,
             constants: _,
             parameter_types: _,
@@ -132,7 +134,8 @@ impl ProcModule<'_> {
             if let Some(name) = variable.path.first()
                 && self.name_to_id.get(name) == Some(&SourceVarId(id))
             {
-                self.name_to_id.remove(name);
+                let name = name.clone();
+                self.unbind_name(&name);
             }
         }
         self.next_id = next_id;
