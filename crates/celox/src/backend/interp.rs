@@ -1833,9 +1833,13 @@ impl InterpBackend {
     }
 
     #[cfg(hotspot_jit)]
-    pub(crate) fn prepare_hotspot_scheduler(&mut self, program: &LaidOutProgram) {
+    pub(crate) fn prepare_hotspot_scheduler(
+        &mut self,
+        program: &LaidOutProgram,
+        shared: Option<&Arc<LaidOutProgram>>,
+    ) {
         if let Some(runtime) = &mut self.hotspots {
-            runtime.prepare_scheduler(program);
+            runtime.prepare_scheduler(program, shared);
         }
     }
 

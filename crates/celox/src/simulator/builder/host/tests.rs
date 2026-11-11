@@ -171,7 +171,7 @@ endmodule"#;
     .unwrap();
     for rejected in [false, true] {
         let mut runtime = HotspotRuntime::new(program.layout(), &options).unwrap();
-        runtime.prepare_scheduler(&program);
+        runtime.prepare_scheduler(&program, None);
         assert!(runtime.holds_scheduler_program_for_test());
         runtime.finish_scheduler_for_test(program.layout(), rejected);
         let mut memory =
@@ -217,7 +217,7 @@ endmodule"#;
     for large in [false, true] {
         for cancel_before_publication in [false, true] {
             let mut runtime = HotspotRuntime::new(program.layout(), &options).unwrap();
-            runtime.prepare_scheduler(&program);
+            runtime.prepare_scheduler(&program, None);
             let mut memory =
                 vec![0; program.layout().merged_total_size.div_ceil(8) + SCRATCH_BYTES / 8];
             // Never execute a group against uninitialized simulation state.

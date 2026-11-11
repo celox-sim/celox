@@ -957,7 +957,7 @@ fn build_gated_two_stage(
     let worker_upgrade_gate = upgrade_gate.0.clone();
     let (baseline_ready_sender, baseline_ready_receiver) = mpsc::channel();
     sim.backend = TieredBackend::with_two_stage_compiler(
-        &laid_out,
+        &Arc::new(laid_out),
         &baseline_options,
         optimizing_options,
         move |laid_out, options, cancel| {
@@ -1024,7 +1024,7 @@ fn build_lazy_derived_test(
     let worker_gates = gates.each_ref().map(|gate| gate.0.clone());
     let (stages, receiver) = mpsc::channel();
     sim.backend = TieredBackend::with_two_stage_compiler(
-        &laid_out,
+        &Arc::new(laid_out),
         &baseline_options,
         optimizing_options,
         move |program, options, cancel| {
