@@ -1333,6 +1333,72 @@ pub(in crate::ast) fn hides_scope_item(
     hides(tree, target, wanted, Hidden::ScopeItem)
 }
 
+/// The declaration of the variable that name `wanted` at `target` denotes,
+/// when the nearest declaration of the name is a variable or a net of the
+/// generate block immediately around `target`: none when the name is a
+/// formal, the result or a local of the subroutine or the statements around
+/// it, when the block declares the name as anything else as well (an
+/// enumeration member, a parameter, a type, a genvar, an import), or when
+/// the declaration is further out, where the declarations between may give
+/// the names of its type another meaning (IEEE 1800-2023 23.9). A method
+/// declared outside its class sees the members of the class, which the
+/// syntax around it does not tell (8.24).
+pub(in crate::ast) fn nearest_block_variable(
+    tree: &AnalysisContext<'_>,
+    target: TokenRange,
+    wanted: &str,
+) -> Converted<Option<BodyItemId>> {
+    if hides(tree, target, wanted, Hidden::MarkedVariable)? {
+        return Ok(None);
+    }
+    let native = tree.declarations();
+    let owners = owners(tree, target)?;
+    // The items of the scope itself are no block's.
+    let [_, .., frame] = owners.frames.as_slice() else {
+        return Ok(None);
+    };
+    let named = |declared: &celox_sv_syntax::Name| name(declared) == wanted;
+    let mut variable = None;
+    for id in direct(frame, tree)? {
+        let item = native.body_item(id);
+        let declares = match &item.kind {
+            BodyItemKind::Loop { variable, .. } => named(variable),
+            // An import may declare any name (26.3).
+            BodyItemKind::PackageBinding(_) => true,
+            BodyItemKind::Modport(_) | BodyItemKind::Unconverted { .. } => native.tokens
+                [item.tokens.range()]
+            .iter()
+            .any(|token| instances::normalize_identifier(&token.text) == wanted),
+            _ => imports::item_names(id, tree).contains(wanted),
+        };
+        if !declares {
+            continue;
+        }
+        let declared_variable = match &item.kind {
+            BodyItemKind::Data(data) => match native.data_declaration(*data) {
+                celox_sv_syntax::DataDeclaration::Variables(value)
+                | celox_sv_syntax::DataDeclaration::Constructed(value) => {
+                    value.variables.iter().any(|variable| named(&variable.name))
+                }
+                celox_sv_syntax::DataDeclaration::Unconverted(_) => false,
+            },
+            BodyItemKind::Net(net) => native
+                .net_declaration(*net)
+                .variables
+                .iter()
+                .any(|variable| named(&variable.name)),
+            _ => false,
+        };
+        // An enumeration member the type of the declaration declares is
+        // no variable either.
+        if !declared_variable || variable.is_some() {
+            return Ok(None);
+        }
+        variable = Some(id);
+    }
+    Ok(variable)
+}
+
 /// What the declarations around a name may hide.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Hidden {
@@ -1340,6 +1406,8 @@ enum Hidden {
     TypeName,
     /// An item of the scope itself: [`hides_scope_item`].
     ScopeItem,
+    /// A variable of a generate block: [`nearest_block_variable`].
+    MarkedVariable,
 }
 
 fn hides(
@@ -1363,12 +1431,12 @@ fn hides(
         )
     };
     let parameter = |parameter: &celox_sv_syntax::Parameter| match &parameter.kind {
-        ParameterKind::Type { .. } => hidden == Hidden::ScopeItem && named(&parameter.name),
+        ParameterKind::Type { .. } => hidden != Hidden::TypeName && named(&parameter.name),
         ParameterKind::Value { data_type, .. } => named(&parameter.name) || member(*data_type),
     };
     // An import may declare any name (26.3): the one it spells, or any
     // through a wildcard.
-    let import = |tokens: TokenRange| hidden == Hidden::ScopeItem || spelled(tokens);
+    let import = |tokens: TokenRange| hidden != Hidden::TypeName || spelled(tokens);
     if hidden == Hidden::TypeName
         && let Ok(unit) = tree.root_unit()
         && (unit.parameters.iter().flatten().any(parameter)
@@ -1386,7 +1454,13 @@ fn hides(
         return Ok(true);
     }
     let owners = owners(tree, target)?;
-    for (depth, frame) in owners.frames.iter().enumerate() {
+    // The items of the scope and of its blocks replace no marker.
+    let frames: &[Vec<BodyItemId>] = if hidden == Hidden::MarkedVariable {
+        &[]
+    } else {
+        &owners.frames
+    };
+    for (depth, frame) in frames.iter().enumerate() {
         // The items of the scope itself hide none of them.
         if hidden == Hidden::ScopeItem && depth == 0 {
             continue;
@@ -1443,8 +1517,11 @@ fn hides(
     }
     if let Some(id) = owners.subroutine {
         let subroutine = native.subroutine(id);
+        if hidden == Hidden::MarkedVariable && !subroutine.scope.is_empty() {
+            return Ok(true);
+        }
         // In its body, the name of a function is also its result (13.4.1).
-        if hidden == Hidden::ScopeItem && named(&subroutine.name) {
+        if hidden != Hidden::TypeName && named(&subroutine.name) {
             return Ok(true);
         }
         let ports = subroutine.ports.as_deref().into_iter().flatten().chain(
@@ -1907,6 +1984,9 @@ fn publish_enum_constants(
     )? && let DataTypeKind::Enum { items, .. } = &tree.declarations().data_type(id).kind
     {
         for member in items {
+            // The member hides a variable of an outer scope (IEEE 1800-2023
+            // 23.9).
+            context.remove(&name(&member.name));
             Arc::make_mut(&mut context.constant_types).insert(name(&member.name), binding.clone());
         }
     }

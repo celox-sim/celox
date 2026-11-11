@@ -180,6 +180,140 @@ sv_backends! {
     }
 }
 
+// A data query of a variable reads the declaration nearest to it (IEEE
+// 1800-2023 20.6.2, 23.9), whichever binding evaluates it: a parameter of
+// the module, a generate block that declares the name again or not, a
+// function with a formal or a local of that name, a method of a class with
+// a property of that name, and a block or loop of a procedure.
+#[test]
+fn data_queries_read_the_nearest_declaration() {
+    let source = r#"
+        `timescale 1ns/1ns
+        package pk;
+            class K;
+                bit [4:0] s;
+                function int size(); return $bits(s); endfunction
+                extern function int later();
+            endclass
+            function int K::later(); return $bits(s); endfunction
+        endpackage
+        module Top;
+            import pk::*;
+            logic [15:0] s;
+            logic [6:0] v;
+            typedef struct packed { logic [2:0] a; logic [8:0] b; } pair_t;
+            pair_t q;
+            localparam int P = $bits(s);
+            function automatic int formal(logic [2:0] s); return $bits(s); endfunction
+            function automatic int local_s(); logic [1:0] s; return $bits(s); endfunction
+            function automatic int outer(); return $bits(s); endfunction
+            if (1) begin : g
+                wire [$bits(s)-1:0] a;
+                wire [$bits(v)-1:0] b;
+                wire [$bits(q)-1:0] c;
+            end
+            if (1) begin : h
+                logic [8:0] s;
+                pair_t near;
+                wire [$bits(s)-1:0] a;
+                wire [$bits(near)-1:0] b;
+                if (1) begin : inner
+                    wire [$bits(s)-1:0] a;
+                    wire [formal(0)+local_s()+outer():0] c;
+                end
+            end
+            logic [7:0] lane_widths;
+            for (genvar i = 0; i < 2; ++i) begin : lanes
+                logic [i + 2:0] lane;
+                wire [$bits(lane)-1:0] a;
+                assign lane_widths[4*i +: 4] = $bits(a);
+            end
+            initial begin
+                K k;
+                k = new;
+                #1;
+                $display("%0d %0d %0d %0d %0d", P, formal(0), local_s(), outer(), $bits(s));
+                $display("%0d %0d %0d", $bits(g.a), $bits(g.b), $bits(g.c));
+                $display("%0d %0d %0d %0d", $bits(h.a), $bits(h.b), $bits(h.inner.a), $bits(h.inner.c));
+                $display("%h", lane_widths);
+                $display("%0d %0d", k.size(), k.later());
+                begin : blk
+                    logic [11:0] s;
+                    $display("%0d", $bits(s));
+                end
+                for (int i = 0; i < 1; i++) begin
+                    logic [12:0] v;
+                    $display("%0d", $bits(v));
+                end
+                $finish;
+            end
+        endmodule
+    "#;
+    assert_eq!(
+        hierarchical_references::displayed(source),
+        [
+            "16 3 2 16 16",
+            "16 7 12",
+            "9 12 9 22",
+            "43",
+            "5 5",
+            "12",
+            "13"
+        ]
+    );
+}
+
+// A data query of a variable of a generate block reads the type the
+// variable is declared with: a real, a shortreal or a chandle has no
+// dimensions and a queue is sized when the query runs (IEEE 1800-2023 20.7),
+// and an enumeration member of a nested block hides the variable (23.9).
+#[test]
+fn data_queries_read_the_declared_types_of_generate_variables() {
+    let source = r#"
+        `timescale 1ns/1ns
+        module Top;
+            if (1) begin : g
+                real r;
+                shortreal sr;
+                chandle h;
+                int q[$];
+                logic [7:0] A;
+                localparam int DR = $dimensions(r);
+                localparam int DS = $dimensions(sr);
+                localparam int DH = $dimensions(h);
+                localparam int BR = $bits(r);
+                localparam int BS = $bits(sr);
+                localparam int BA = $bits(A);
+                wire [$dimensions(r):0] dr;
+                wire [$dimensions(h):0] dh;
+                if (1) begin : inner
+                    typedef enum {A, B} e_t;
+                    localparam int W = $bits(A);
+                    wire [$bits(A)-1:0] w;
+                    initial begin
+                        #2;
+                        $display("%0d %0d", W, $bits(w));
+                    end
+                end
+                initial begin
+                    #1;
+                    q.push_back(1);
+                    q.push_back(2);
+                    q.push_back(3);
+                    $display("%0d %0d %0d %0d %0d %0d", DR, DS, DH, BR, BS, BA);
+                    $display("%0d %0d %0d", $bits(dr), $bits(dh), $size(q));
+                    #2;
+                    $finish;
+                end
+            end
+        endmodule
+    "#;
+    assert_eq!(
+        hierarchical_references::displayed(source),
+        ["0 0 0 64 32 8", "1 1 3", "32 32"]
+    );
+}
+
 #[test]
 fn generate_function_call_preserves_definition_site_bindings() {
     let source = r#"
