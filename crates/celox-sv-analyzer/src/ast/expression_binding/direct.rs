@@ -17,6 +17,27 @@ pub(in crate::ast) fn ungroup(mut id: ExprId, native: &Declarations) -> ExprId {
     id
 }
 
+/// Whether `root` is an assignment pattern without a type, or passes its
+/// assignment-like context on to one: a parenthesized expression and the
+/// second and third operands of a conditional are in the context of the
+/// expression itself (IEEE 1800-2023 10.8).
+pub(in crate::ast) fn reaches_untyped_pattern(root: ExprId, native: &Declarations) -> bool {
+    let mut pending = vec![root];
+    while let Some(id) = pending.pop() {
+        match &native.expression(id).kind {
+            ExprKind::Group(inner) => pending.push(*inner),
+            ExprKind::Conditional {
+                then_expression,
+                else_expression,
+                ..
+            } => pending.extend([*then_expression, *else_expression]),
+            ExprKind::Pattern { target: None, .. } => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 pub(in crate::ast) fn call_name(
     tree: &AnalysisContext<'_>,
     id: ExprId,
