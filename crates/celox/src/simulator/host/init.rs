@@ -241,6 +241,13 @@ impl<B: SimBackend> Simulator<B> {
             if run.bit_width == 0 {
                 continue;
             }
+            // Two-state storage has no mask plane to hold an X or a Z.
+            let run = if write_mask {
+                std::borrow::Cow::Borrowed(run)
+            } else {
+                run.two_state()
+            };
+            let run = &*run;
             if signal.array_layout.is_some() {
                 write_initial_run_to_plane(mem, signal, false, run, &run.value_bytes);
                 if write_mask {
